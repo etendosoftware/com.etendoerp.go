@@ -1,0 +1,23 @@
+post:
+  operationId: scanProduct
+  summary: Scan a product
+  description: Looks up a product by barcode/search key in the given warehouse
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          $ref: '../components/schemas/ProductScanRequest.yaml'
+  responses:
+    '200':
+      description: Product scan result
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas/ProductScanResponse.yaml'
+    '400':
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas/ErrorResponse.yaml'

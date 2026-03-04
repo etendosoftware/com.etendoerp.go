@@ -1,0 +1,34 @@
+get:
+  operationId: listBusinessPartners
+  summary: List business partners
+  description: Returns all business partners
+  responses:
+    '200':
+      description: List of business partners
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas/BusinessPartnerListResponse.yaml'
+post:
+  operationId: createBusinessPartner
+  summary: Create a business partner
+  description: Creates a new business partner
+  requestBody:
+    required: true
+    content:
+      application/json:
+        schema:
+          $ref: '../components/schemas/BusinessPartner.yaml'
+  responses:
+    '201':
+      description: Business partner created
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas/BusinessPartner.yaml'
+    '400':
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: '../components/schemas/ErrorResponse.yaml'
