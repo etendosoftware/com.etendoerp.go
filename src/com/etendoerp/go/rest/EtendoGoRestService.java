@@ -1,4 +1,4 @@
-package com.etendoerp.etendogo.rest;
+package com.etendoerp.go.rest;
 
 import java.io.IOException;
 

@@ -1,4 +1,4 @@
-package com.etendoerp.etendogo.rest;
+package com.etendoerp.go.rest;
 
 import java.util.Collections;
 import java.util.List;
@@ -22,11 +22,11 @@ public class EtendoGoOpenAPIDoc implements OpenAPIEndpoint {
 
   private static final List<String> TAG = Collections.singletonList("EtendoGo");
   private static final String APPLICATION_JSON = "application/json";
-  private static final String BASE_PATH = "/sws/etendogo";
+  private static final String BASE_PATH = "/sws/go";
 
   @Override
   public boolean isValid(String tag) {
-    return StringUtils.equalsIgnoreCase(tag, "etendogo");
+    return StringUtils.equalsIgnoreCase(tag, "go");
   }
 
   @Override
@@ -45,7 +45,7 @@ public class EtendoGoOpenAPIDoc implements OpenAPIEndpoint {
     operation.setSummary("Test GET endpoint");
     operation.setDescription("Returns a dummy response to verify the service is running.");
     operation.setTags(TAG);
-    operation.setOperationId("etendogoGet");
+    operation.setOperationId("goGet");
     operation.responses(buildDummyResponses());
 
     var pathItem = getOrCreatePathItem(openAPI, BASE_PATH);
@@ -57,7 +57,7 @@ public class EtendoGoOpenAPIDoc implements OpenAPIEndpoint {
     operation.setSummary("Test POST endpoint");
     operation.setDescription("Accepts a JSON body and returns a dummy response.");
     operation.setTags(TAG);
-    operation.setOperationId("etendogoPost");
+    operation.setOperationId("goPost");
     operation.responses(buildDummyResponses());
 
     var pathItem = getOrCreatePathItem(openAPI, BASE_PATH);
@@ -69,7 +69,7 @@ public class EtendoGoOpenAPIDoc implements OpenAPIEndpoint {
     operation.setSummary("Test PUT endpoint");
     operation.setDescription("Accepts a JSON body and returns a dummy response.");
     operation.setTags(TAG);
-    operation.setOperationId("etendogoPut");
+    operation.setOperationId("goPut");
     operation.responses(buildDummyResponses());
 
     var pathItem = getOrCreatePathItem(openAPI, BASE_PATH);
@@ -81,7 +81,7 @@ public class EtendoGoOpenAPIDoc implements OpenAPIEndpoint {
     operation.setSummary("Test DELETE endpoint");
     operation.setDescription("Returns a dummy response confirming deletion.");
     operation.setTags(TAG);
-    operation.setOperationId("etendogoDelete");
+    operation.setOperationId("goDelete");
     operation.responses(buildDummyResponses());
 
     var pathItem = getOrCreatePathItem(openAPI, BASE_PATH);
