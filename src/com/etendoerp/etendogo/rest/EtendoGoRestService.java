@@ -26,54 +26,34 @@ public class EtendoGoRestService {
   }
 
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    dispatch("GET", request, response);
+    sendDummy(response, "GET", getSubPath(request));
   }
 
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    dispatch("POST", request, response);
+    sendDummy(response, "POST", getSubPath(request));
   }
 
   public void doPut(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    dispatch("PUT", request, response);
+    sendDummy(response, "PUT", getSubPath(request));
   }
 
   public void doDelete(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    dispatch("DELETE", request, response);
+    sendDummy(response, "DELETE", getSubPath(request));
   }
 
-  private void dispatch(String method, HttpServletRequest request, HttpServletResponse response) throws IOException {
-    String subPath = getSubPath(request);
+  private void sendDummy(HttpServletResponse response, String method, String path) throws IOException {
     try {
-      HandlerRegistry.getInstance().findHandler(method, subPath)
-          .ifPresentOrElse(
-              handler -> {
-                try {
-                  handler.handle(request, response);
-                } catch (IOException e) {
-                  throw new RuntimeException(e);
-                }
-              },
-              () -> {
-                try {
-                  response.sendError(HttpServletResponse.SC_NOT_FOUND);
-                } catch (IOException e) {
-                  throw new RuntimeException(e);
-                }
-              }
-          );
-    } catch (RuntimeException e) {
-      Throwable cause = e.getCause() != null ? e.getCause() : e;
-      log4j.error("Error during {} request: {}", method, cause.getMessage(), cause);
-      try {
-        response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
-        response.setContentType(APPLICATION_JSON_CHARSET_UTF_8);
-        JSONObject errorJson = new JSONObject();
-        errorJson.put("error", cause.getMessage());
-        response.getWriter().write(errorJson.toString());
-      } catch (Exception ioException) {
-        log4j.error(ioException);
-        response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ioException.getMessage());
-      }
+      response.setStatus(HttpServletResponse.SC_OK);
+      response.setContentType(APPLICATION_JSON_CHARSET_UTF_8);
+      JSONObject json = new JSONObject();
+      json.put("status", "ok");
+      json.put("method", method);
+      json.put("path", path);
+      json.put("message", "EtendoGo dummy response - service is running");
+      response.getWriter().write(json.toString());
+    } catch (Exception e) {
+      log4j.error("Error sending dummy response: {}", e.getMessage(), e);
+      response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
     }
   }
 

@@ -1,6 +1,5 @@
 plugins {
     id 'java'
-    id 'org.openapi.generator' version '7.2.0'
 }
 
 sourceSets {
@@ -9,73 +8,10 @@ sourceSets {
             srcDirs 'etendo-resources'
         }
     }
-    test {
-        java {
-            srcDirs 'src-test/src'
-        }
-    }
-}
-
-openApiGenerate {
-    generatorName = 'java'
-    inputSpec = "${projectDir}/openapi-contracts/index.yaml"
-    outputDir = "${projectDir}/build/openapi-tmp"
-    modelPackage = 'com.etendoerp.etendogo.rest.contract.model'
-    generateApiTests = false
-    generateModelTests = false
-    generateApiDocumentation = false
-    generateModelDocumentation = false
-    configOptions = [
-        library           : 'native',
-        dateLibrary       : 'java8',
-        serializationLibrary: 'jackson',
-        openApiNullable   : 'false',
-        useJakartaEe      : 'false',
-    ]
-    globalProperties = [
-        models: '',
-        supportingFiles: '',
-    ]
-}
-
-task copyGeneratedModels {
-    dependsOn tasks.openApiGenerate
-    doLast {
-        def srcDir = file("${projectDir}/build/openapi-tmp/src/main/java/com/etendoerp/etendogo/rest/contract/model")
-        def destDir = file("${projectDir}/src/com/etendoerp/etendogo/rest/contract/model")
-        destDir.mkdirs()
-        copy {
-            from(srcDir) {
-                exclude 'AbstractOpenApiSchema.java'
-            }
-            into destDir
-        }
-        // Clean up temp dir
-        delete "${projectDir}/build/openapi-tmp"
-    }
-}
-
-compileJava.dependsOn tasks.copyGeneratedModels
-
-rootProject.tasks.matching { it.name == 'generate.entities' }.configureEach {
-    it.dependsOn tasks.copyGeneratedModels
-}
-
-repositories {
-    mavenCentral()
 }
 
 dependencies {
-    compileOnly 'com.fasterxml.jackson.core:jackson-databind:2.13.2.2'
-    compileOnly 'com.fasterxml.jackson.core:jackson-annotations:2.13.2'
-    compileOnly 'com.google.code.findbugs:jsr305:3.0.2'
-
-    testImplementation 'io.swagger.parser.v3:swagger-parser:2.1.13'
-    testImplementation 'junit:junit:4.13.2'
-    testImplementation 'com.fasterxml.jackson.core:jackson-databind:2.13.2.2'
-    testImplementation 'com.fasterxml.jackson.core:jackson-annotations:2.13.2'
-}
-
-test {
-    useJUnit()
+    compileOnly('com.etendoerp:openapi:[2.5.0,)')
+    compileOnly 'io.swagger.core.v3:swagger-models:2.1.13'
+    compileOnly 'org.apache.commons:commons-lang3:3.12.0'
 }
