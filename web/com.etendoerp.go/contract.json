@@ -1,0 +1,97 @@
+{
+  "version": "0.1.0",
+  "generatedAt": "2026-03-05T00:00:00.000Z",
+  "checksum": "fixture-dev-only",
+  "frontendContract": {
+    "window": { "id": "143", "name": "Sales Order", "primaryEntity": "order", "category": "sales" },
+    "entities": {
+      "order": {
+        "fields": [
+          { "name": "documentNo", "column": "DocumentNo", "type": "string", "tsType": "string", "visibility": "readOnly", "required": true, "grid": true, "form": true },
+          { "name": "businessPartner", "column": "C_BPartner_ID", "type": "string", "tsType": "string", "visibility": "editable", "required": true, "grid": true, "form": true },
+          { "name": "orderDate", "column": "DateOrdered", "type": "date", "tsType": "string", "visibility": "editable", "required": true, "grid": true, "form": true },
+          { "name": "warehouse", "column": "M_Warehouse_ID", "type": "string", "tsType": "string", "visibility": "editable", "required": true, "grid": false, "form": true },
+          { "name": "currency", "column": "C_Currency_ID", "type": "string", "tsType": "string", "visibility": "readOnly", "required": true, "grid": true, "form": true },
+          { "name": "paymentTerms", "column": "C_PaymentTerm_ID", "type": "string", "tsType": "string", "visibility": "editable", "required": false, "grid": false, "form": true },
+          { "name": "description", "column": "Description", "type": "string", "tsType": "string", "visibility": "editable", "required": false, "grid": false, "form": true },
+          { "name": "totalLines", "column": "TotalLines", "type": "amount", "tsType": "number", "visibility": "readOnly", "required": false, "grid": true, "form": true },
+          { "name": "grandTotal", "column": "GrandTotal", "type": "amount", "tsType": "number", "visibility": "readOnly", "required": false, "grid": true, "form": true },
+          { "name": "docStatus", "column": "DocStatus", "type": "string", "tsType": "string", "visibility": "readOnly", "required": true, "grid": true, "form": true },
+          { "name": "deliveryLocation", "column": "DeliveryLocation", "type": "string", "tsType": "string", "visibility": "editable", "required": false, "grid": false, "form": true },
+          { "name": "invoiceAddress", "column": "BillTo_ID", "type": "string", "tsType": "string", "visibility": "editable", "required": false, "grid": false, "form": true }
+        ],
+        "searchableFields": ["documentNo", "businessPartner", "docStatus"],
+        "computedFields": []
+      },
+      "orderLine": {
+        "fields": [
+          { "name": "lineNo", "column": "Line", "type": "integer", "tsType": "number", "visibility": "readOnly", "required": true, "grid": true, "form": true },
+          { "name": "product", "column": "M_Product_ID", "type": "string", "tsType": "string", "visibility": "editable", "required": true, "grid": true, "form": true },
+          { "name": "quantity", "column": "QtyOrdered", "type": "number", "tsType": "number", "visibility": "editable", "required": true, "grid": true, "form": true },
+          { "name": "unitPrice", "column": "PriceActual", "type": "amount", "tsType": "number", "visibility": "editable", "required": true, "grid": true, "form": true },
+          { "name": "discount", "column": "Discount", "type": "number", "tsType": "number", "visibility": "editable", "required": false, "grid": true, "form": true },
+          { "name": "lineNetAmount", "column": "LineNetAmt", "type": "amount", "tsType": "number", "visibility": "readOnly", "required": false, "grid": true, "form": true },
+          { "name": "tax", "column": "C_Tax_ID", "type": "string", "tsType": "string", "visibility": "editable", "required": false, "grid": true, "form": true },
+          { "name": "description", "column": "Description", "type": "string", "tsType": "string", "visibility": "editable", "required": false, "grid": false, "form": true }
+        ],
+        "searchableFields": ["product"],
+        "computedFields": []
+      }
+    }
+  },
+  "backendContract": {
+    "window": { "id": "143", "name": "Sales Order", "primaryEntity": "order", "category": "sales" },
+    "entities": {
+      "order": {
+        "fields": [
+          { "name": "documentNo", "column": "DocumentNo", "type": "string", "visibility": "readOnly", "required": true },
+          { "name": "businessPartner", "column": "C_BPartner_ID", "type": "string", "visibility": "editable", "required": true },
+          { "name": "orderDate", "column": "DateOrdered", "type": "date", "visibility": "editable", "required": true },
+          { "name": "warehouse", "column": "M_Warehouse_ID", "type": "string", "visibility": "editable", "required": true },
+          { "name": "currency", "column": "C_Currency_ID", "type": "string", "visibility": "readOnly", "required": true },
+          { "name": "paymentTerms", "column": "C_PaymentTerm_ID", "type": "string", "visibility": "editable", "required": false },
+          { "name": "description", "column": "Description", "type": "string", "visibility": "editable", "required": false },
+          { "name": "totalLines", "column": "TotalLines", "type": "amount", "visibility": "readOnly", "required": false },
+          { "name": "grandTotal", "column": "GrandTotal", "type": "amount", "visibility": "readOnly", "required": false },
+          { "name": "docStatus", "column": "DocStatus", "type": "string", "visibility": "readOnly", "required": true },
+          { "name": "deliveryLocation", "column": "DeliveryLocation", "type": "string", "visibility": "editable", "required": false },
+          { "name": "invoiceAddress", "column": "BillTo_ID", "type": "string", "visibility": "editable", "required": false },
+          { "name": "adClientId", "column": "AD_Client_ID", "type": "id", "visibility": "system", "required": true },
+          { "name": "adOrgId", "column": "AD_Org_ID", "type": "id", "visibility": "system", "required": true },
+          { "name": "created", "column": "Created", "type": "datetime", "visibility": "system", "required": true },
+          { "name": "updated", "column": "Updated", "type": "datetime", "visibility": "system", "required": true }
+        ]
+      },
+      "orderLine": {
+        "fields": [
+          { "name": "lineNo", "column": "Line", "type": "integer", "visibility": "readOnly", "required": true },
+          { "name": "product", "column": "M_Product_ID", "type": "string", "visibility": "editable", "required": true },
+          { "name": "quantity", "column": "QtyOrdered", "type": "number", "visibility": "editable", "required": true },
+          { "name": "unitPrice", "column": "PriceActual", "type": "amount", "visibility": "editable", "required": true },
+          { "name": "discount", "column": "Discount", "type": "number", "visibility": "editable", "required": false },
+          { "name": "lineNetAmount", "column": "LineNetAmt", "type": "amount", "visibility": "readOnly", "required": false },
+          { "name": "tax", "column": "C_Tax_ID", "type": "string", "visibility": "editable", "required": false },
+          { "name": "description", "column": "Description", "type": "string", "visibility": "editable", "required": false },
+          { "name": "adClientId", "column": "AD_Client_ID", "type": "id", "visibility": "system", "required": true },
+          { "name": "adOrgId", "column": "AD_Org_ID", "type": "id", "visibility": "system", "required": true }
+        ]
+      }
+    },
+    "endpoints": [
+      { "method": "GET", "path": "/order", "entity": "order", "supportedFilters": ["documentNo", "businessPartner", "docStatus"] },
+      { "method": "GET", "path": "/order/:id", "entity": "order", "supportedFilters": [] },
+      { "method": "POST", "path": "/order", "entity": "order", "supportedFilters": [] },
+      { "method": "PUT", "path": "/order/:id", "entity": "order", "supportedFilters": [] },
+      { "method": "DELETE", "path": "/order/:id", "entity": "order", "supportedFilters": [] },
+      { "method": "GET", "path": "/orderLine", "entity": "orderLine", "supportedFilters": ["product"] },
+      { "method": "GET", "path": "/orderLine/:id", "entity": "orderLine", "supportedFilters": [] },
+      { "method": "POST", "path": "/orderLine", "entity": "orderLine", "supportedFilters": [] },
+      { "method": "PUT", "path": "/orderLine/:id", "entity": "orderLine", "supportedFilters": [] },
+      { "method": "DELETE", "path": "/orderLine/:id", "entity": "orderLine", "supportedFilters": [] }
+    ],
+    "processEndpoints": [
+      { "name": "completeOrder", "method": "POST", "path": "/process/completeOrder", "entity": "order", "preconditions": ["Order must have at least one line", "Order status must be DR or IP"], "steps": 6 },
+      { "name": "voidOrder", "method": "POST", "path": "/process/voidOrder", "entity": "order", "preconditions": ["Order status must be CO"], "steps": 4 }
+    ]
+  }
+}
