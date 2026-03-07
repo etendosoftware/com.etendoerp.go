@@ -1,0 +1,118 @@
+package com.etendoerp.go.schemaforge;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+
+import org.junit.Before;
+import org.junit.Test;
+
+/**
+ * Unit tests for {@link NeoServlet} path parsing logic.
+ * Tests the parsePath method which extracts specName, entityName, and recordId from the URL.
+ */
+public class NeoServletPathTest {
+
+  private NeoServlet servlet;
+
+  @Before
+  public void setUp() {
+    servlet = new NeoServlet();
+  }
+
+  @Test
+  public void testParsePathSpecAndEntity() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Product");
+
+    assertEquals("mySpec", info.specName);
+    assertEquals("Product", info.entityName);
+    assertNull(info.recordId);
+  }
+
+  @Test
+  public void testParsePathWithRecordId() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Product/ABC123");
+
+    assertEquals("mySpec", info.specName);
+    assertEquals("Product", info.entityName);
+    assertEquals("ABC123", info.recordId);
+  }
+
+  @Test
+  public void testParsePathWithUuidRecordId() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/sales/Order/550e8400-e29b-41d4-a716-446655440000");
+
+    assertEquals("sales", info.specName);
+    assertEquals("Order", info.entityName);
+    assertEquals("550e8400-e29b-41d4-a716-446655440000", info.recordId);
+  }
+
+  @Test
+  public void testParsePathWithoutLeadingSlash() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("mySpec/Product");
+
+    assertEquals("mySpec", info.specName);
+    assertEquals("Product", info.entityName);
+    assertNull(info.recordId);
+  }
+
+  @Test
+  public void testParsePathExtraSegmentsIgnored() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/spec/entity/id/extra/stuff");
+
+    assertEquals("spec", info.specName);
+    assertEquals("entity", info.entityName);
+    assertEquals("id", info.recordId);
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testParsePathNull() {
+    servlet.parsePath(null);
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testParsePathEmpty() {
+    servlet.parsePath("");
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testParsePathOnlySpec() {
+    servlet.parsePath("/mySpec");
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void testParsePathSlashOnly() {
+    servlet.parsePath("/");
+  }
+
+  @Test
+  public void testParsePathWithSpecialCharacters() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/my-spec/my_entity");
+
+    assertEquals("my-spec", info.specName);
+    assertEquals("my_entity", info.entityName);
+  }
+
+  @Test
+  public void testParsePathCaseSensitive() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/MySpec/MyEntity");
+
+    assertEquals("MySpec", info.specName);
+    assertEquals("MyEntity", info.entityName);
+  }
+
+  @Test
+  public void testNeoPathInfoFields() {
+    NeoServlet.NeoPathInfo info = new NeoServlet.NeoPathInfo("s", "e", "r");
+
+    assertEquals("s", info.specName);
+    assertEquals("e", info.entityName);
+    assertEquals("r", info.recordId);
+  }
+
+  @Test
+  public void testNeoPathInfoNullRecordId() {
+    NeoServlet.NeoPathInfo info = new NeoServlet.NeoPathInfo("s", "e", null);
+
+    assertNull(info.recordId);
+  }
+}
