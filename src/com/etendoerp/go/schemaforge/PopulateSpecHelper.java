@@ -14,6 +14,8 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.ui.Process;
+import org.openbravo.model.ad.ui.ProcessParameter;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.common.enterprise.Organization;
@@ -22,10 +24,16 @@ import org.openbravo.model.common.enterprise.Organization;
  * Shared logic for populating ETGO_SF_Entity and ETGO_SF_Field records
  * from an ETGO_SF_Spec. Used by both PopulateSpecProcess and the
  * SFPopulateSpec webhook handler.
+ *
+ * Supports two spec types:
+ * - "W" (Window): iterates AD_Tab -> AD_Column (original behavior)
+ * - "P" (Process): iterates AD_Process_Para
  */
 public class PopulateSpecHelper {
 
   private static final Logger log = LogManager.getLogger(PopulateSpecHelper.class);
+
+  private static final String SPEC_TYPE_PROCESS = "P";
 
   private static final Set<String> SYSTEM_COLUMNS = new HashSet<>(Arrays.asList(
       "AD_CLIENT_ID", "AD_ORG_ID", "ISACTIVE",
@@ -64,16 +72,31 @@ public class PopulateSpecHelper {
       throw new IllegalArgumentException("Spec not found: " + specId);
     }
 
+    String specType = (String) spec.get("specType");
+
+    if (SPEC_TYPE_PROCESS.equals(specType)) {
+      return populateProcess(spec, specId, excludeSystemColumns, includeAllMethods);
+    }
+    return populateWindow(spec, specId, excludeSystemColumns, includeAllMethods);
+  }
+
+  /**
+   * Populate entities and fields for a Window-type spec.
+   * Iterates AD_Tab -> AD_Column for the linked AD_Window.
+   */
+  @SuppressWarnings("unchecked")
+  private static int[] populateWindow(BaseOBObject spec, String specId,
+      boolean excludeSystemColumns, boolean includeAllMethods) {
+
     Window window = (Window) spec.get("window");
     if (window == null) {
-      throw new IllegalArgumentException("Spec has no linked AD_Window");
+      throw new IllegalArgumentException("Window spec has no linked AD_Window");
     }
 
     BaseOBObject specModule = (BaseOBObject) spec.get("module");
     Client specClient = (Client) spec.get("client");
     Organization specOrg = (Organization) spec.get("organization");
 
-    // Delete existing entities (and their fields via cascade or manual delete)
     deleteExistingChildren(specId);
 
     // Find all tabs in the window, ordered by SeqNo
@@ -116,7 +139,6 @@ public class PopulateSpecHelper {
 
       long seqNo = 10;
       for (Column col : columns) {
-        // Skip system columns if requested
         if (excludeSystemColumns
             && SYSTEM_COLUMNS.contains(col.getDBColumnName().toUpperCase())) {
           continue;
@@ -137,15 +159,90 @@ public class PopulateSpecHelper {
         seqNo += 10;
       }
 
-      // Flush periodically to avoid large in-memory batch
       if (entityCount % 10 == 0) {
         OBDal.getInstance().flush();
       }
     }
 
     OBDal.getInstance().flush();
-    log.info("Populated spec {}: {} entities, {} fields", specId, entityCount, fieldCount);
+    log.info("Populated window spec {}: {} entities, {} fields", specId, entityCount, fieldCount);
     return new int[] { entityCount, fieldCount };
+  }
+
+  /**
+   * Populate entities and fields for a Process-type spec.
+   * Creates one entity for the process and one field per AD_Process_Para.
+   * Process specs are POST-only (no GET/PUT/PATCH/DELETE).
+   * Since there is no AD_Column for process parameters, the column FK is left null
+   * and the parameter name is stored in the javaQualifier field.
+   */
+  @SuppressWarnings("unchecked")
+  private static int[] populateProcess(BaseOBObject spec, String specId,
+      boolean excludeSystemColumns, boolean includeAllMethods) {
+
+    Process process = (Process) spec.get("process");
+    if (process == null) {
+      throw new IllegalArgumentException("Process spec has no linked AD_Process");
+    }
+
+    BaseOBObject specModule = (BaseOBObject) spec.get("module");
+    Client specClient = (Client) spec.get("client");
+    Organization specOrg = (Organization) spec.get("organization");
+
+    deleteExistingChildren(specId);
+
+    // Create a single entity for the process (no tab — process specs have no tabs)
+    BaseOBObject entity = (BaseOBObject) OBProvider.getInstance().get("ETGO_SF_Entity");
+    entity.set("name", process.getName());
+    entity.set("etgoSfSpec", spec);
+    // tab is null for process specs
+    entity.set("module", specModule);
+    entity.set("client", specClient);
+    entity.set("organization", specOrg);
+    entity.set("active", true);
+    entity.set("included", true);
+    // Processes are POST-only
+    entity.set("get", false);
+    entity.set("getbyid", false);
+    entity.set("post", true);
+    entity.set("put", false);
+    entity.set("patch", false);
+    entity.set("delete", false);
+    entity.set("sequenceNumber", 10L);
+    OBDal.getInstance().save(entity);
+
+    // Create fields from process parameters
+    List<ProcessParameter> params = process.getADProcessParameterList();
+    int fieldCount = 0;
+
+    for (ProcessParameter param : params) {
+      if (!param.isActive()) {
+        continue;
+      }
+
+      BaseOBObject field = (BaseOBObject) OBProvider.getInstance().get("ETGO_SF_Field");
+      field.set("etgoSfEntity", entity);
+      // column is null for process specs — no AD_Column exists for process parameters
+      field.set("module", specModule);
+      field.set("client", specClient);
+      field.set("organization", specOrg);
+      field.set("active", true);
+      field.set("included", true);
+      field.set("readOnly", false);
+      field.set("sequenceNumber", param.getSequenceNumber());
+      // Store the parameter name in javaQualifier since there is no NAME column on ETGO_SF_Field
+      field.set("javaQualifier", param.getDBColumnName());
+      // Store the parameter's default value if present
+      if (param.getDefaultValue() != null) {
+        field.set("defaultValue", param.getDefaultValue());
+      }
+      OBDal.getInstance().save(field);
+      fieldCount++;
+    }
+
+    OBDal.getInstance().flush();
+    log.info("Populated process spec {}: 1 entity, {} fields", specId, fieldCount);
+    return new int[] { 1, fieldCount };
   }
 
   /**

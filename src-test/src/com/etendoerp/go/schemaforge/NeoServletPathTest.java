@@ -149,4 +149,68 @@ public class NeoServletPathTest {
     assertFalse(info.isSelector);
     assertEquals("ABC123", info.recordId);
   }
+
+  @Test
+  public void testParsePathActionList() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/REC123/action");
+
+    assertEquals("mySpec", info.specName);
+    assertEquals("Order", info.entityName);
+    assertEquals("REC123", info.recordId);
+    assertTrue(info.isAction);
+    assertNull(info.actionName);
+    assertFalse(info.isSelector);
+  }
+
+  @Test
+  public void testParsePathActionWithColumnName() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/REC123/action/DocAction");
+
+    assertEquals("mySpec", info.specName);
+    assertEquals("Order", info.entityName);
+    assertEquals("REC123", info.recordId);
+    assertTrue(info.isAction);
+    assertEquals("DocAction", info.actionName);
+    assertFalse(info.isSelector);
+  }
+
+  @Test
+  public void testParsePathActionWithUuidRecordId() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath(
+        "/sales/Invoice/550e8400-e29b-41d4-a716-446655440000/action/Posted");
+
+    assertEquals("sales", info.specName);
+    assertEquals("Invoice", info.entityName);
+    assertEquals("550e8400-e29b-41d4-a716-446655440000", info.recordId);
+    assertTrue(info.isAction);
+    assertEquals("Posted", info.actionName);
+  }
+
+  @Test
+  public void testParsePathNonActionSubPath() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/spec/entity/id/other");
+
+    assertEquals("spec", info.specName);
+    assertEquals("entity", info.entityName);
+    assertEquals("id", info.recordId);
+    assertFalse(info.isAction);
+    assertNull(info.actionName);
+  }
+
+  @Test
+  public void testNeoPathInfoDefaultActionFields() {
+    NeoServlet.NeoPathInfo info = new NeoServlet.NeoPathInfo("s", "e", "r");
+
+    assertFalse(info.isAction);
+    assertNull(info.actionName);
+  }
+
+  @Test
+  public void testNeoPathInfoSelectorConstructorDefaultActionFields() {
+    NeoServlet.NeoPathInfo info = new NeoServlet.NeoPathInfo("s", "e", null, true, "field");
+
+    assertTrue(info.isSelector);
+    assertFalse(info.isAction);
+    assertNull(info.actionName);
+  }
 }

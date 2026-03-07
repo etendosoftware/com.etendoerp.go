@@ -14,19 +14,29 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.http.entity.ContentType;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.weld.WeldUtils;
+import org.openbravo.client.application.ApplicationUtils;
+import org.openbravo.client.kernel.KernelUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.ad.ui.Window;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.etendorx.services.DataSourceServlet;
+import com.etendoerp.etendorx.services.wrapper.EtendoRequestWrapper;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -35,7 +45,9 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * Mapped to /sws/neo/* via AD_SERVLET registration.
  * Uses JWT authentication via SecureWebServices (same as EtendoGo).
  *
- * URL pattern: /sws/neo/{specName}/{entityName}[/{id}]
+ * URL pattern:
+ *   Window specs: /sws/neo/{specName}/{entityName}[/{id}]
+ *   Process specs: /sws/neo/{specName}  (POST only)
  *
  * Resolves Spec/Entity/Field records (ETGO_SF_Spec, ETGO_SF_Entity, ETGO_SF_Field)
  * which point directly to AD_Window, AD_Tab, and AD_Column.
@@ -111,6 +123,61 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
 
+      // Handle process specs (specType = "P")
+      String specType = (String) spec.get("specType");
+      if ("P".equals(specType)) {
+        // Check process access
+        Process adProcessForAccess = resolveProcess(spec);
+        if (adProcessForAccess != null && !hasProcessAccess(adProcessForAccess.getId())) {
+          sendError(response, HttpServletResponse.SC_FORBIDDEN,
+              "Access denied to process for current role");
+          return;
+        }
+
+        if ("GET".equals(method)) {
+          // Describe process: return parameter metadata
+          if (adProcessForAccess == null) {
+            sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+                "Process spec has no linked AD_Process");
+            return;
+          }
+          writeResponse(response, NeoProcessService.describeProcess(adProcessForAccess));
+          return;
+        }
+        if (!"POST".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Process specs only support GET (describe) and POST (execute)");
+          return;
+        }
+        handleProcessSpec(spec, request, response);
+        return;
+      }
+
+      // Check window access
+      Object windowRef = spec.get("window");
+      if (windowRef != null) {
+        String windowId;
+        if (windowRef instanceof Window) {
+          windowId = ((Window) windowRef).getId();
+        } else if (windowRef instanceof BaseOBObject) {
+          windowId = (String) ((BaseOBObject) windowRef).getId();
+        } else {
+          windowId = windowRef.toString();
+        }
+        if (!hasWindowAccess(windowId)) {
+          sendError(response, HttpServletResponse.SC_FORBIDDEN,
+              "Access denied to window for current role");
+          return;
+        }
+      }
+
+      // For window specs, entityName is required
+      if (pathInfo.entityName == null) {
+        sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+            "Entity name is required for window specs: /{specName}/{entityName}[/{id}]");
+        return;
+      }
+
       // Handle selector requests
       if (pathInfo.isSelector) {
         if (!"GET".equals(method)) {
@@ -119,6 +186,17 @@ public class NeoServlet extends HttpBaseServlet {
           return;
         }
         handleSelector(response, (String) spec.getId(), pathInfo, request);
+        return;
+      }
+
+      // Handle action requests (button processes)
+      if (pathInfo.isAction) {
+        if (!"POST".equals(method) && !"GET".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Actions support GET (list) and POST (execute)");
+          return;
+        }
+        handleButtonAction(response, spec, pathInfo, method, request);
         return;
       }
 
@@ -225,29 +303,43 @@ public class NeoServlet extends HttpBaseServlet {
   /**
    * Parse the path into spec name, entity name, and optional record ID or selector info.
    * Expected formats:
-   *   /{specName}/{entityName}[/{id}]
+   *   /{specName}                              (process specs, POST only)
+   *   /{specName}/{entityName}[/{id}]          (window specs)
    *   /{specName}/{entityName}/selectors[/{columnName}]
+   *   /{specName}/{entityName}/{recordId}/action[/{columnName}]
    */
   NeoPathInfo parsePath(String pathInfo) {
     if (pathInfo == null || pathInfo.isEmpty()) {
-      throw new IllegalArgumentException("Path is required: /{specName}/{entityName}[/{id}]");
+      throw new IllegalArgumentException("Path is required: /{specName}[/{entityName}[/{id}]]");
     }
 
     String path = pathInfo.startsWith("/") ? pathInfo.substring(1) : pathInfo;
     String[] parts = path.split("/");
 
-    if (parts.length < 2) {
+    if (parts.length < 1 || parts[0].isEmpty()) {
       throw new IllegalArgumentException(
-          "Invalid path. Expected: /{specName}/{entityName}[/{id}], got: " + pathInfo);
+          "Invalid path. Expected at least a spec name, got: " + pathInfo);
     }
 
     String specName = parts[0];
+
+    // Single segment: spec-only path (for process specs)
+    if (parts.length == 1) {
+      return new NeoPathInfo(specName, null, null);
+    }
+
     String entityName = parts[1];
 
     // Check for /selectors sub-path
     if (parts.length >= 3 && "selectors".equals(parts[2])) {
       String selectorField = parts.length >= 4 ? parts[3] : null;
       return new NeoPathInfo(specName, entityName, null, true, selectorField);
+    }
+
+    // Check for /{spec}/{entity}/{recordId}/action[/{columnName}]
+    if (parts.length >= 4 && "action".equals(parts[3])) {
+      String actionName = parts.length >= 5 ? parts[4] : null;
+      return new NeoPathInfo(specName, entityName, parts[2], false, null, true, actionName);
     }
 
     String recordId = parts.length >= 3 ? parts[2] : null;
@@ -384,19 +476,22 @@ public class NeoServlet extends HttpBaseServlet {
         path += "/" + context.getRecordId();
       }
 
+      // Wrap request with tab filters (where clause and parent entity filtering)
+      HttpServletRequest wrappedRequest = wrapWithTabFilters(request, context);
+
       switch (context.getHttpMethod()) {
         case "GET":
-          dsServlet.doGet(path, request, response);
+          dsServlet.doGet(path, wrappedRequest, response);
           return null;
         case "POST":
-          dsServlet.doPost(path, request, response);
+          dsServlet.doPost(path, wrappedRequest, response);
           return null;
         case "PUT":
         case "PATCH":
-          dsServlet.doPut(path, request, response);
+          dsServlet.doPut(path, wrappedRequest, response);
           return null;
         case "DELETE":
-          dsServlet.doDelete(path, request, response);
+          dsServlet.doDelete(path, wrappedRequest, response);
           return null;
         default:
           return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
@@ -405,6 +500,152 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    }
+  }
+
+  /**
+   * Wraps the original request to inject tab-level filtering parameters that
+   * the internal DataSourceServlet expects:
+   * <ul>
+   *   <li>{@code tabId} and {@code windowId} - enables the DataSourceServlet to
+   *       automatically apply the tab's HQL where clause.</li>
+   *   <li>{@code whereAndFilterClause} - adds parent entity filtering for child tabs
+   *       (tabLevel > 0) when a {@code parentId} query parameter is provided.</li>
+   * </ul>
+   *
+   * @param original the original HTTP request
+   * @param context  the NeoContext with tab and query param information
+   * @return a wrapped request with additional parameters, or the original if no tab is available
+   */
+  HttpServletRequest wrapWithTabFilters(HttpServletRequest original, NeoContext context) {
+    Tab adTab = context.getAdTab();
+    if (adTab == null) {
+      return original;
+    }
+
+    Map<String, String[]> extraParams = new HashMap<>();
+
+    // Always pass tabId and windowId so the internal DataSourceServlet can resolve
+    // the tab's HQL where clause and apply window-level security
+    extraParams.put("tabId", new String[]{ adTab.getId() });
+    if (adTab.getWindow() != null) {
+      extraParams.put("windowId", new String[]{ adTab.getWindow().getId() });
+    }
+
+    // For child tabs (tabLevel > 0), apply parent entity filtering
+    // when the caller provides a parentId query parameter
+    String parentId = context.getQueryParams() != null
+        ? context.getQueryParams().get("parentId")
+        : null;
+
+    if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0
+        && !adTab.isDisableParentKeyProperty()) {
+      String parentWhereClause = buildParentWhereClause(adTab, parentId);
+      if (parentWhereClause != null) {
+        extraParams.put("whereAndFilterClause", new String[]{ parentWhereClause });
+        log.debug("Applied parent filter for tab '{}': {}", adTab.getName(), parentWhereClause);
+      }
+    }
+
+    try {
+      return new EtendoRequestWrapper(original, original.getRequestURI(), "", extraParams);
+    } catch (IOException e) {
+      log.warn("Could not create request wrapper, using original request: {}", e.getMessage());
+      return original;
+    }
+  }
+
+  /**
+   * Builds an HQL where clause fragment that filters a child tab's records
+   * by the parent record ID.
+   *
+   * Uses {@link KernelUtils#getParentTab(Tab)} to find the parent tab, then
+   * {@link ApplicationUtils#getParentProperty(Tab, Tab)} to determine the
+   * FK property name that links child to parent.
+   *
+   * @param childTab the child tab (tabLevel > 0)
+   * @param parentId the parent record ID to filter by
+   * @return an HQL clause like {@code e.salesOrder.id='ABC123'}, or null if
+   *         the parent relationship cannot be determined
+   */
+  String buildParentWhereClause(Tab childTab, String parentId) {
+    try {
+      Tab parentTab = KernelUtils.getInstance().getParentTab(childTab);
+      if (parentTab == null) {
+        log.debug("No parent tab found for tab '{}' (tabLevel={})",
+            childTab.getName(), childTab.getTabLevel());
+        return null;
+      }
+
+      String parentProperty = ApplicationUtils.getParentProperty(childTab, parentTab);
+      if (StringUtils.isBlank(parentProperty)) {
+        log.warn("Could not determine parent property for tab '{}' -> parent tab '{}'",
+            childTab.getName(), parentTab.getName());
+        return null;
+      }
+
+      // Determine if the parent property is a primitive (e.g. ID column) or an entity reference
+      Entity childEntity = ModelProvider.getInstance()
+          .getEntityByTableId(childTab.getTable().getId());
+      Property prop = childEntity.getProperty(parentProperty);
+
+      if (prop != null && !prop.isPrimitive()) {
+        // Entity reference: filter by e.parentProp.id = 'parentId'
+        return "e." + parentProperty + ".id='" + parentId + "'";
+      } else {
+        // Primitive (rare): filter by e.parentProp = 'parentId'
+        return "e." + parentProperty + "='" + parentId + "'";
+      }
+    } catch (Exception e) {
+      log.error("Error building parent where clause for tab '{}': {}",
+          childTab.getName(), e.getMessage(), e);
+      return null;
+    }
+  }
+
+  /**
+   * Resolve the AD_Process linked to a process-type spec.
+   */
+  private Process resolveProcess(BaseOBObject spec) {
+    Object processRef = spec.get("process");
+    if (processRef instanceof Process) {
+      return (Process) processRef;
+    }
+    if (processRef instanceof BaseOBObject) {
+      String processId = (String) ((BaseOBObject) processRef).getId();
+      return OBDal.getInstance().get(Process.class, processId);
+    }
+    return null;
+  }
+
+  /**
+   * Handle a process-type spec POST. Reads the request body as JSON
+   * and delegates to NeoProcessService.
+   */
+  private void handleProcessSpec(BaseOBObject spec, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    try {
+      Process adProcess = resolveProcess(spec);
+      if (adProcess == null) {
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Process spec has no linked AD_Process");
+        return;
+      }
+
+      // Read request body
+      JSONObject requestBody = null;
+      String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+      if (StringUtils.isNotBlank(bodyStr)) {
+        requestBody = new JSONObject(bodyStr);
+      }
+
+      // Delegate to NeoProcessService
+      NeoResponse result = NeoProcessService.executeProcess(adProcess, requestBody);
+      writeResponse(response, result);
+    } catch (Exception e) {
+      log.error("Error executing process spec '{}': {}", spec.get("name"), e.getMessage(), e);
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Process execution error: " + e.getMessage());
     }
   }
 
@@ -425,6 +666,189 @@ public class NeoServlet extends HttpBaseServlet {
       response.setContentType(ContentType.APPLICATION_JSON.getMimeType());
       response.setCharacterEncoding(StandardCharsets.UTF_8.name());
       response.getWriter().write(neoResponse.getBody().toString());
+    }
+  }
+
+  /**
+   * Handle button action requests.
+   * GET with no actionName: list available button actions for the entity.
+   * POST with actionName: execute the button process for a specific record.
+   */
+  @SuppressWarnings("unchecked")
+  private void handleButtonAction(HttpServletResponse response, BaseOBObject spec,
+      NeoPathInfo pathInfo, String method, HttpServletRequest request) throws IOException {
+    try {
+      String specId = (String) spec.getId();
+
+      // Find the entity
+      BaseOBObject entity = findEntity(specId, pathInfo.entityName);
+      if (entity == null) {
+        sendError(response, HttpServletResponse.SC_NOT_FOUND,
+            "Entity not found in spec: " + pathInfo.entityName);
+        return;
+      }
+
+      String entityId = (String) entity.getId();
+
+      if ("GET".equals(method) && pathInfo.actionName == null) {
+        // List available button actions
+        OBCriteria<BaseOBObject> fieldCriteria = OBDal.getInstance()
+            .createCriteria("ETGO_SF_Field");
+        fieldCriteria.add(Restrictions.eq("etgoSfEntity.id", entityId));
+        fieldCriteria.add(Restrictions.eq("included", true));
+        fieldCriteria.add(Restrictions.eq("active", true));
+        List<BaseOBObject> fields = fieldCriteria.list();
+
+        JSONArray actions = new JSONArray();
+        for (BaseOBObject field : fields) {
+          Object colRef = field.get("column");
+          Column column = null;
+          if (colRef instanceof Column) {
+            column = (Column) colRef;
+          } else if (colRef instanceof BaseOBObject) {
+            column = OBDal.getInstance().get(Column.class, (String) ((BaseOBObject) colRef).getId());
+          }
+          if (column == null) {
+            continue;
+          }
+
+          // Check if column reference is Button (AD_Reference_ID = '28')
+          if (column.getReference() == null
+              || !"28".equals((String) column.getReference().getId())) {
+            continue;
+          }
+
+          // Check if column has a process linked
+          Process classicProcess = column.getProcess();
+          Object obuiappProcess = column.get("oBUIAPPProcess");
+
+          if (classicProcess == null && obuiappProcess == null) {
+            continue;
+          }
+
+          JSONObject actionObj = new JSONObject();
+          actionObj.put("columnName", column.getDBColumnName());
+          if (obuiappProcess != null) {
+            actionObj.put("processType", "OBUIAPP");
+            BaseOBObject obuiProc = (BaseOBObject) obuiappProcess;
+            Object procName = obuiProc.get("name");
+            actionObj.put("processName", procName != null ? procName.toString() : "");
+          } else {
+            actionObj.put("processType", "Classic");
+            actionObj.put("processName",
+                classicProcess.getName() != null ? classicProcess.getName() : "");
+          }
+          actions.put(actionObj);
+        }
+
+        JSONObject responseBody = new JSONObject();
+        responseBody.put("actions", actions);
+        writeResponse(response, NeoResponse.ok(responseBody));
+        return;
+      }
+
+      if ("POST".equals(method) && pathInfo.actionName != null) {
+        // Execute button action
+        OBCriteria<BaseOBObject> fieldCriteria = OBDal.getInstance()
+            .createCriteria("ETGO_SF_Field");
+        fieldCriteria.add(Restrictions.eq("etgoSfEntity.id", entityId));
+        fieldCriteria.add(Restrictions.eq("included", true));
+        fieldCriteria.add(Restrictions.eq("active", true));
+        List<BaseOBObject> fields = fieldCriteria.list();
+
+        Column targetColumn = null;
+        for (BaseOBObject field : fields) {
+          Object colRef = field.get("column");
+          Column column = null;
+          if (colRef instanceof Column) {
+            column = (Column) colRef;
+          } else if (colRef instanceof BaseOBObject) {
+            column = OBDal.getInstance().get(Column.class,
+                (String) ((BaseOBObject) colRef).getId());
+          }
+          if (column != null && pathInfo.actionName.equals(column.getDBColumnName())) {
+            targetColumn = column;
+            break;
+          }
+        }
+
+        if (targetColumn == null) {
+          sendError(response, HttpServletResponse.SC_NOT_FOUND,
+              "Action not found: " + pathInfo.actionName);
+          return;
+        }
+
+        // Check reference is Button
+        if (targetColumn.getReference() == null
+            || !"28".equals((String) targetColumn.getReference().getId())) {
+          sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+              "Field is not a button: " + pathInfo.actionName);
+          return;
+        }
+
+        // Resolve process: prefer OBUIAPP, fall back to classic
+        Process adProcess = null;
+        Object obuiappProcess = targetColumn.get("oBUIAPPProcess");
+        if (obuiappProcess instanceof BaseOBObject) {
+          // OBUIAPP processes are a different class, but NeoProcessService expects
+          // org.openbravo.model.ad.ui.Process. Look up the classic process ID from OBUIAPP.
+          // Actually, check if there's a classic process first.
+          adProcess = targetColumn.getProcess();
+        }
+        if (adProcess == null && obuiappProcess == null) {
+          adProcess = targetColumn.getProcess();
+        }
+        if (adProcess == null && obuiappProcess == null) {
+          sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+              "No process linked to button: " + pathInfo.actionName);
+          return;
+        }
+
+        // If we only have OBUIAPP and no classic process, try to get the classic process
+        if (adProcess == null) {
+          adProcess = targetColumn.getProcess();
+        }
+        if (adProcess == null) {
+          sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+              "Button process not supported (OBUIAPP-only process without classic fallback): "
+                  + pathInfo.actionName);
+          return;
+        }
+
+        // Check process access before executing
+        if (!hasProcessAccess(adProcess.getId())) {
+          sendError(response, HttpServletResponse.SC_FORBIDDEN,
+              "Access denied to process for current role");
+          return;
+        }
+
+        // Read request body
+        JSONObject params = null;
+        String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        if (StringUtils.isNotBlank(bodyStr)) {
+          params = new JSONObject(bodyStr);
+        } else {
+          params = new JSONObject();
+        }
+        params.put("recordId", pathInfo.recordId);
+
+        NeoResponse result = NeoProcessService.executeProcess(adProcess, params);
+        writeResponse(response, result);
+        return;
+      }
+
+      // Invalid combination (e.g., GET with actionName, POST without actionName)
+      if ("GET".equals(method) && pathInfo.actionName != null) {
+        sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+            "Use POST to execute an action, GET is only for listing actions");
+      } else {
+        sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+            "POST requires an action name: /{spec}/{entity}/{recordId}/action/{columnName}");
+      }
+    } catch (Exception e) {
+      log.error("Error handling button action: {}", e.getMessage(), e);
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Action error: " + e.getMessage());
     }
   }
 
@@ -458,6 +882,34 @@ public class NeoServlet extends HttpBaseServlet {
     }
   }
 
+  /**
+   * Check if the current role has access to the given window.
+   */
+  @SuppressWarnings("unchecked")
+  private boolean hasWindowAccess(String windowId) {
+    String roleId = OBContext.getOBContext().getRole().getId();
+    OBCriteria<BaseOBObject> criteria = OBDal.getInstance().createCriteria("ADWindowAccess");
+    criteria.add(Restrictions.eq("window.id", windowId));
+    criteria.add(Restrictions.eq("role.id", roleId));
+    criteria.add(Restrictions.eq("active", true));
+    criteria.setMaxResults(1);
+    return !criteria.list().isEmpty();
+  }
+
+  /**
+   * Check if the current role has access to the given process.
+   */
+  @SuppressWarnings("unchecked")
+  private boolean hasProcessAccess(String processId) {
+    String roleId = OBContext.getOBContext().getRole().getId();
+    OBCriteria<BaseOBObject> criteria = OBDal.getInstance().createCriteria("ADProcessAccess");
+    criteria.add(Restrictions.eq("process.id", processId));
+    criteria.add(Restrictions.eq("role.id", roleId));
+    criteria.add(Restrictions.eq("active", true));
+    criteria.setMaxResults(1);
+    return !criteria.list().isEmpty();
+  }
+
   private void sendError(HttpServletResponse response, int status, String message)
       throws IOException {
     NeoResponse errorResponse = NeoResponse.error(status, message);
@@ -473,18 +925,28 @@ public class NeoServlet extends HttpBaseServlet {
     final String recordId;
     final boolean isSelector;
     final String selectorField;
+    final boolean isAction;
+    final String actionName;
 
     NeoPathInfo(String specName, String entityName, String recordId) {
-      this(specName, entityName, recordId, false, null);
+      this(specName, entityName, recordId, false, null, false, null);
     }
 
     NeoPathInfo(String specName, String entityName, String recordId,
         boolean isSelector, String selectorField) {
+      this(specName, entityName, recordId, isSelector, selectorField, false, null);
+    }
+
+    NeoPathInfo(String specName, String entityName, String recordId,
+        boolean isSelector, String selectorField,
+        boolean isAction, String actionName) {
       this.specName = specName;
       this.entityName = entityName;
       this.recordId = recordId;
       this.isSelector = isSelector;
       this.selectorField = selectorField;
+      this.isAction = isAction;
+      this.actionName = actionName;
     }
   }
 }

@@ -41,7 +41,7 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="AD_WINDOW_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+      <column name="AD_WINDOW_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
@@ -53,11 +53,22 @@
         <default><![CDATA[N]]></default>
         <onCreateDefault/>
       </column>
+      <column name="SPEC_TYPE" primaryKey="false" required="true" type="VARCHAR" size="60" autoIncrement="false">
+        <default><![CDATA[W]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_PROCESS_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_WINDOW" name="ETGO_SF_SPEC_WIN_FK">
         <reference local="AD_WINDOW_ID" foreign="AD_WINDOW_ID"/>
       </foreign-key>
       <foreign-key foreignTable="AD_MODULE" name="ETGO_SF_SPEC_MOD_FK">
         <reference local="AD_MODULE_ID" foreign="AD_MODULE_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_PROCESS" name="ETGO_SF_SPEC_PROC_FK">
+        <reference local="AD_PROCESS_ID" foreign="AD_PROCESS_ID"/>
       </foreign-key>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_SF_SPEC_CLI_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
