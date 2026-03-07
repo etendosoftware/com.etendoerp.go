@@ -111,6 +111,17 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
 
+      // Handle selector requests
+      if (pathInfo.isSelector) {
+        if (!"GET".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Selectors only support GET");
+          return;
+        }
+        handleSelector(response, (String) spec.getId(), pathInfo, request);
+        return;
+      }
+
       // Find the entity within this spec
       BaseOBObject entity = findEntity((String) spec.getId(), pathInfo.entityName);
       if (entity == null) {
@@ -212,8 +223,10 @@ public class NeoServlet extends HttpBaseServlet {
   }
 
   /**
-   * Parse the path into spec name, entity name, and optional record ID.
-   * Expected format: /{specName}/{entityName}[/{id}]
+   * Parse the path into spec name, entity name, and optional record ID or selector info.
+   * Expected formats:
+   *   /{specName}/{entityName}[/{id}]
+   *   /{specName}/{entityName}/selectors[/{columnName}]
    */
   NeoPathInfo parsePath(String pathInfo) {
     if (pathInfo == null || pathInfo.isEmpty()) {
@@ -230,8 +243,14 @@ public class NeoServlet extends HttpBaseServlet {
 
     String specName = parts[0];
     String entityName = parts[1];
-    String recordId = parts.length >= 3 ? parts[2] : null;
 
+    // Check for /selectors sub-path
+    if (parts.length >= 3 && "selectors".equals(parts[2])) {
+      String selectorField = parts.length >= 4 ? parts[3] : null;
+      return new NeoPathInfo(specName, entityName, null, true, selectorField);
+    }
+
+    String recordId = parts.length >= 3 ? parts[2] : null;
     return new NeoPathInfo(specName, entityName, recordId);
   }
 
@@ -409,6 +428,36 @@ public class NeoServlet extends HttpBaseServlet {
     }
   }
 
+  private void handleSelector(HttpServletResponse response, String specId,
+      NeoPathInfo pathInfo, HttpServletRequest request) throws IOException {
+    NeoResponse selectorResponse;
+    if (pathInfo.selectorField == null) {
+      // List all available selectors
+      selectorResponse = NeoSelectorService.listSelectors(specId, pathInfo.entityName);
+    } else {
+      // Query a specific selector
+      String search = request.getParameter("q");
+      int limit = parseIntParam(request, "limit", 20);
+      int offset = parseIntParam(request, "offset", 0);
+      selectorResponse = NeoSelectorService.querySelector(
+          specId, pathInfo.entityName, pathInfo.selectorField,
+          search, limit, offset);
+    }
+    writeResponse(response, selectorResponse);
+  }
+
+  private int parseIntParam(HttpServletRequest request, String name, int defaultValue) {
+    String val = request.getParameter(name);
+    if (val == null) {
+      return defaultValue;
+    }
+    try {
+      return Integer.parseInt(val);
+    } catch (NumberFormatException e) {
+      return defaultValue;
+    }
+  }
+
   private void sendError(HttpServletResponse response, int status, String message)
       throws IOException {
     NeoResponse errorResponse = NeoResponse.error(status, message);
@@ -422,11 +471,20 @@ public class NeoServlet extends HttpBaseServlet {
     final String specName;
     final String entityName;
     final String recordId;
+    final boolean isSelector;
+    final String selectorField;
 
     NeoPathInfo(String specName, String entityName, String recordId) {
+      this(specName, entityName, recordId, false, null);
+    }
+
+    NeoPathInfo(String specName, String entityName, String recordId,
+        boolean isSelector, String selectorField) {
       this.specName = specName;
       this.entityName = entityName;
       this.recordId = recordId;
+      this.isSelector = isSelector;
+      this.selectorField = selectorField;
     }
   }
 }

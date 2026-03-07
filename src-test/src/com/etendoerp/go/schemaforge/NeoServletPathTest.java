@@ -1,7 +1,9 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -114,5 +116,37 @@ public class NeoServletPathTest {
     NeoServlet.NeoPathInfo info = new NeoServlet.NeoPathInfo("s", "e", null);
 
     assertNull(info.recordId);
+  }
+
+  @Test
+  public void testParsePathSelectorsList() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Product/selectors");
+
+    assertEquals("mySpec", info.specName);
+    assertEquals("Product", info.entityName);
+    assertTrue(info.isSelector);
+    assertNull(info.selectorField);
+    assertNull(info.recordId);
+  }
+
+  @Test
+  public void testParsePathSelectorField() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Product/selectors/C_BPartner_ID");
+
+    assertEquals("mySpec", info.specName);
+    assertEquals("Product", info.entityName);
+    assertTrue(info.isSelector);
+    assertEquals("C_BPartner_ID", info.selectorField);
+    assertNull(info.recordId);
+  }
+
+  @Test
+  public void testParsePathRecordIdNotSelector() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Product/ABC123");
+
+    assertEquals("mySpec", info.specName);
+    assertEquals("Product", info.entityName);
+    assertFalse(info.isSelector);
+    assertEquals("ABC123", info.recordId);
   }
 }

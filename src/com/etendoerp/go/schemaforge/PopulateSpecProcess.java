@@ -1,22 +1,10 @@
 package com.etendoerp.go.schemaforge;
 
-import java.util.Arrays;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Set;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.hibernate.criterion.Restrictions;
-import org.openbravo.base.provider.OBProvider;
-import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
-import org.openbravo.model.ad.structure.Column;
-import org.openbravo.model.ad.ui.Tab;
-import org.openbravo.model.ad.ui.Window;
 import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.service.db.DalBaseProcess;
 
@@ -29,11 +17,6 @@ import org.openbravo.service.db.DalBaseProcess;
 public class PopulateSpecProcess extends DalBaseProcess {
 
   private static final Logger log = LogManager.getLogger(PopulateSpecProcess.class);
-
-  private static final Set<String> SYSTEM_COLUMNS = new HashSet<>(Arrays.asList(
-      "AD_CLIENT_ID", "AD_ORG_ID", "ISACTIVE",
-      "CREATED", "CREATEDBY", "UPDATED", "UPDATEDBY"
-  ));
 
   @Override
   public void doExecute(ProcessBundle bundle) throws Exception {

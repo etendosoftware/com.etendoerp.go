@@ -1,8 +1,9 @@
 package com.etendoerp.go.schemaforge.webhooks;
 
+import java.util.Map;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
@@ -10,40 +11,40 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.module.Module;
 import org.openbravo.model.ad.ui.Tab;
 
-import com.smf.webhookevents.process.WebhookHandler;
+import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
- * Webhook handler to create or update an ETGO_SF_Entity record.
+ * Webhook to create or update an ETGO_SF_Entity record.
  *
  * Required params: SpecID, TabID, ModuleID
  * Optional params: Name, IsIncluded, IsGet, IsGetbyid, IsPost, IsPut, IsPatch, IsDelete,
  *                  JavaQualifier, EntityID (for update), SeqNo
  */
-public class SFUpsertEntity extends WebhookHandler {
+public class SFUpsertEntity extends BaseWebhookService {
 
   private static final Logger log = LogManager.getLogger(SFUpsertEntity.class);
 
   @Override
-  public void execute(JSONObject jsonContent) throws Exception {
+  public void get(Map<String, String> parameter, Map<String, String> responseVars) {
     OBContext.setAdminMode();
     try {
-      String entityId = jsonContent.optString("EntityID", null);
-      String specId = jsonContent.getString("SpecID");
-      String tabId = jsonContent.getString("TabID");
-      String moduleId = jsonContent.getString("ModuleID");
+      String entityId = parameter.get("EntityID");
+      String specId = parameter.get("SpecID");
+      String tabId = parameter.get("TabID");
+      String moduleId = parameter.get("ModuleID");
 
       BaseOBObject entity;
       if (entityId != null && !entityId.isEmpty()) {
         entity = OBDal.getInstance().get("ETGO_SF_Entity", entityId);
         if (entity == null) {
-          throw new IllegalArgumentException("Entity not found: " + entityId);
+          responseVars.put("error", "Entity not found: " + entityId);
+          return;
         }
       } else {
         entity = (BaseOBObject) OBProvider.getInstance().get("ETGO_SF_Entity");
         entity.set("client", OBContext.getOBContext().getCurrentClient());
         entity.set("organization", OBContext.getOBContext().getCurrentOrganization());
         entity.set("active", true);
-        // Set defaults for new records
         entity.set("included", true);
         entity.set("get", false);
         entity.set("getbyid", false);
@@ -53,64 +54,67 @@ public class SFUpsertEntity extends WebhookHandler {
         entity.set("delete", false);
       }
 
-      // Set required FK references
       BaseOBObject spec = OBDal.getInstance().get("ETGO_SF_Spec", specId);
       if (spec == null) {
-        throw new IllegalArgumentException("Spec not found: " + specId);
+        responseVars.put("error", "Spec not found: " + specId);
+        return;
       }
       entity.set("etgoSfSpec", spec);
 
       Tab tab = OBDal.getInstance().get(Tab.class, tabId);
       if (tab == null) {
-        throw new IllegalArgumentException("Tab not found: " + tabId);
+        responseVars.put("error", "Tab not found: " + tabId);
+        return;
       }
       entity.set("tab", tab);
 
       Module module = OBDal.getInstance().get(Module.class, moduleId);
       if (module == null) {
-        throw new IllegalArgumentException("Module not found: " + moduleId);
+        responseVars.put("error", "Module not found: " + moduleId);
+        return;
       }
       entity.set("module", module);
 
-      // Optional fields
-      if (jsonContent.has("Name")) {
-        entity.set("name", jsonContent.getString("Name"));
+      if (parameter.containsKey("Name")) {
+        entity.set("name", parameter.get("Name"));
       } else if (entityId == null || entityId.isEmpty()) {
-        // Default name from tab for new records
         entity.set("name", tab.getName());
       }
 
-      setYesNoIfPresent(entity, jsonContent, "IsIncluded", "included");
-      setYesNoIfPresent(entity, jsonContent, "IsGet", "get");
-      setYesNoIfPresent(entity, jsonContent, "IsGetbyid", "getbyid");
-      setYesNoIfPresent(entity, jsonContent, "IsPost", "post");
-      setYesNoIfPresent(entity, jsonContent, "IsPut", "put");
-      setYesNoIfPresent(entity, jsonContent, "IsPatch", "patch");
-      setYesNoIfPresent(entity, jsonContent, "IsDelete", "delete");
+      setYesNoIfPresent(entity, parameter, "IsIncluded", "included");
+      setYesNoIfPresent(entity, parameter, "IsGet", "get");
+      setYesNoIfPresent(entity, parameter, "IsGetbyid", "getbyid");
+      setYesNoIfPresent(entity, parameter, "IsPost", "post");
+      setYesNoIfPresent(entity, parameter, "IsPut", "put");
+      setYesNoIfPresent(entity, parameter, "IsPatch", "patch");
+      setYesNoIfPresent(entity, parameter, "IsDelete", "delete");
 
-      if (jsonContent.has("JavaQualifier")) {
-        entity.set("javaQualifier", jsonContent.getString("JavaQualifier"));
+      if (parameter.containsKey("JavaQualifier")) {
+        entity.set("javaQualifier", parameter.get("JavaQualifier"));
       }
-      if (jsonContent.has("SeqNo")) {
-        entity.set("sequenceNumber", (long) jsonContent.getInt("SeqNo"));
+      if (parameter.containsKey("SeqNo")) {
+        entity.set("sequenceNumber", Long.parseLong(parameter.get("SeqNo")));
       }
 
       OBDal.getInstance().save(entity);
       OBDal.getInstance().flush();
 
       log.info("Upserted ETGO_SF_Entity: id={}", entity.getId());
-      jsonContent.put("EntityID", entity.getId());
+      responseVars.put("message", "Entity upserted with ID: " + entity.getId());
+      responseVars.put("EntityID", (String) entity.getId());
 
+    } catch (Exception e) {
+      log.error("Error in SFUpsertEntity", e);
+      responseVars.put("error", e.getMessage());
     } finally {
       OBContext.restorePreviousMode();
     }
   }
 
-  private void setYesNoIfPresent(BaseOBObject obj, JSONObject json,
-      String jsonKey, String dalProperty) throws Exception {
-    if (json.has(jsonKey)) {
-      String val = json.getString(jsonKey);
-      obj.set(dalProperty, "Y".equalsIgnoreCase(val));
+  private void setYesNoIfPresent(BaseOBObject obj, Map<String, String> params,
+      String paramKey, String dalProperty) {
+    if (params.containsKey(paramKey)) {
+      obj.set(dalProperty, "Y".equalsIgnoreCase(params.get(paramKey)));
     }
   }
 }
