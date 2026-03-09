@@ -2,10 +2,13 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -16,6 +19,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.base.exception.OBException;
@@ -115,6 +119,17 @@ public class NeoServlet extends HttpBaseServlet {
     try {
       OBContext.setAdminMode();
 
+      // Discovery mode: list all specs
+      if (pathInfo.specName == null) {
+        if (!"GET".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Discovery endpoint only supports GET");
+          return;
+        }
+        handleDiscovery(response);
+        return;
+      }
+
       // Find the spec
       BaseOBObject spec = findSpec(pathInfo.specName);
       if (spec == null) {
@@ -171,10 +186,14 @@ public class NeoServlet extends HttpBaseServlet {
         }
       }
 
-      // For window specs, entityName is required
+      // For window specs without entityName, return spec metadata
       if (pathInfo.entityName == null) {
-        sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Entity name is required for window specs: /{specName}/{entityName}[/{id}]");
+        if (!"GET".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Spec describe only supports GET");
+          return;
+        }
+        handleSpecDescribe(response, spec);
         return;
       }
 
@@ -309,16 +328,16 @@ public class NeoServlet extends HttpBaseServlet {
    *   /{specName}/{entityName}/{recordId}/action[/{columnName}]
    */
   NeoPathInfo parsePath(String pathInfo) {
-    if (pathInfo == null || pathInfo.isEmpty()) {
-      throw new IllegalArgumentException("Path is required: /{specName}[/{entityName}[/{id}]]");
+    // Discovery mode: no path or root path
+    if (pathInfo == null || pathInfo.isEmpty() || "/".equals(pathInfo)) {
+      return new NeoPathInfo(null, null, null);
     }
 
     String path = pathInfo.startsWith("/") ? pathInfo.substring(1) : pathInfo;
     String[] parts = path.split("/");
 
     if (parts.length < 1 || parts[0].isEmpty()) {
-      throw new IllegalArgumentException(
-          "Invalid path. Expected at least a spec name, got: " + pathInfo);
+      return new NeoPathInfo(null, null, null);
     }
 
     String specName = parts[0];
@@ -908,6 +927,272 @@ public class NeoServlet extends HttpBaseServlet {
     criteria.add(Restrictions.eq("active", true));
     criteria.setMaxResults(1);
     return !criteria.list().isEmpty();
+  }
+
+  // ── Discovery endpoints ──────────────────────────────────────────────
+
+  /**
+   * Handle GET /sws/neo/ — list all active specs the current user can access.
+   */
+  @SuppressWarnings("unchecked")
+  private void handleDiscovery(HttpServletResponse response) throws IOException {
+    try {
+      OBCriteria<BaseOBObject> specCriteria = OBDal.getInstance().createCriteria("ETGO_SF_Spec");
+      specCriteria.add(Restrictions.eq("active", true));
+      specCriteria.addOrder(Order.asc("name"));
+      List<BaseOBObject> allSpecs = specCriteria.list();
+
+      JSONArray specsArray = new JSONArray();
+      for (BaseOBObject spec : allSpecs) {
+        String specType = (String) spec.get("specType");
+        String specName = (String) spec.get("name");
+
+        // Check access
+        if ("W".equals(specType)) {
+          String windowId = resolveObjectId(spec.get("window"));
+          if (windowId != null && !hasWindowAccess(windowId)) {
+            continue;
+          }
+        } else if ("P".equals(specType)) {
+          Process adProcess = resolveProcess(spec);
+          if (adProcess != null && !hasProcessAccess(adProcess.getId())) {
+            continue;
+          }
+        }
+
+        JSONObject specObj = new JSONObject();
+        specObj.put("name", specName);
+        specObj.put("type", specType);
+
+        // For window specs, include entities with methods
+        if ("W".equals(specType)) {
+          specObj.put("entities", buildEntitySummaryArray((String) spec.getId()));
+        }
+
+        specsArray.put(specObj);
+      }
+
+      JSONObject result = new JSONObject();
+      result.put("specs", specsArray);
+      writeResponse(response, NeoResponse.ok(result));
+    } catch (Exception e) {
+      log.error("Error in discovery endpoint: {}", e.getMessage(), e);
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Discovery error: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Handle GET /sws/neo/{specName} — describe a window spec with entities and fields.
+   */
+  @SuppressWarnings("unchecked")
+  private void handleSpecDescribe(HttpServletResponse response, BaseOBObject spec)
+      throws IOException {
+    try {
+      String specId = (String) spec.getId();
+      String specType = (String) spec.get("specType");
+
+      JSONObject result = new JSONObject();
+      result.put("name", spec.get("name"));
+      result.put("type", specType);
+
+      // Query entities for this spec
+      OBCriteria<BaseOBObject> entityCriteria = OBDal.getInstance()
+          .createCriteria("ETGO_SF_Entity");
+      entityCriteria.add(Restrictions.eq("etgoSfSpec.id", specId));
+      entityCriteria.add(Restrictions.eq("active", true));
+      entityCriteria.add(Restrictions.eq("included", true));
+      entityCriteria.addOrder(Order.asc("sequenceNumber"));
+      List<BaseOBObject> entities = entityCriteria.list();
+
+      JSONArray entitiesArray = new JSONArray();
+      for (BaseOBObject entity : entities) {
+        JSONObject entityObj = new JSONObject();
+        entityObj.put("name", entity.get("name"));
+        entityObj.put("methods", buildMethodsArray(entity));
+
+        // Resolve tab level
+        Tab adTab = getAdTab(entity);
+        if (adTab != null) {
+          entityObj.put("tabLevel", adTab.getTabLevel());
+        }
+
+        // Build fields array
+        entityObj.put("fields", buildFieldsArray((String) entity.getId()));
+        entitiesArray.put(entityObj);
+      }
+
+      result.put("entities", entitiesArray);
+      writeResponse(response, NeoResponse.ok(result));
+    } catch (Exception e) {
+      log.error("Error describing spec '{}': {}", spec.get("name"), e.getMessage(), e);
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Spec describe error: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Build a summary of entities for the discovery endpoint (name + methods only).
+   */
+  @SuppressWarnings("unchecked")
+  private JSONArray buildEntitySummaryArray(String specId) throws Exception {
+    OBCriteria<BaseOBObject> criteria = OBDal.getInstance().createCriteria("ETGO_SF_Entity");
+    criteria.add(Restrictions.eq("etgoSfSpec.id", specId));
+    criteria.add(Restrictions.eq("active", true));
+    criteria.add(Restrictions.eq("included", true));
+    criteria.addOrder(Order.asc("sequenceNumber"));
+    List<BaseOBObject> entities = criteria.list();
+
+    JSONArray arr = new JSONArray();
+    for (BaseOBObject entity : entities) {
+      JSONObject obj = new JSONObject();
+      obj.put("name", entity.get("name"));
+      obj.put("methods", buildMethodsArray(entity));
+      arr.put(obj);
+    }
+    return arr;
+  }
+
+  /**
+   * Build a JSON array of enabled HTTP methods for an entity.
+   */
+  private JSONArray buildMethodsArray(BaseOBObject entity) {
+    JSONArray methods = new JSONArray();
+    if (Boolean.TRUE.equals(entity.get("get")) || Boolean.TRUE.equals(entity.get("getbyid"))) {
+      methods.put("GET");
+    }
+    if (Boolean.TRUE.equals(entity.get("post"))) {
+      methods.put("POST");
+    }
+    if (Boolean.TRUE.equals(entity.get("put"))) {
+      methods.put("PUT");
+    }
+    if (Boolean.TRUE.equals(entity.get("patch"))) {
+      methods.put("PATCH");
+    }
+    if (Boolean.TRUE.equals(entity.get("delete"))) {
+      methods.put("DELETE");
+    }
+    return methods;
+  }
+
+  /**
+   * Build the fields array for a given entity, resolving AD_Column metadata.
+   */
+  @SuppressWarnings("unchecked")
+  private JSONArray buildFieldsArray(String entityId) throws Exception {
+    OBCriteria<BaseOBObject> criteria = OBDal.getInstance().createCriteria("ETGO_SF_Field");
+    criteria.add(Restrictions.eq("etgoSfEntity.id", entityId));
+    criteria.add(Restrictions.eq("active", true));
+    criteria.add(Restrictions.eq("included", true));
+    criteria.addOrder(Order.asc("sequenceNumber"));
+    List<BaseOBObject> fields = criteria.list();
+
+    JSONArray arr = new JSONArray();
+    for (BaseOBObject field : fields) {
+      Column column = resolveColumn(field.get("column"));
+      if (column == null) {
+        continue;
+      }
+
+      String refId = column.getReference() != null
+          ? (String) column.getReference().getId() : null;
+
+      JSONObject fieldObj = new JSONObject();
+      fieldObj.put("name", column.getDBColumnName());
+      fieldObj.put("label", column.getName());
+      fieldObj.put("columnType", mapReferenceToType(refId));
+      fieldObj.put("readOnly", Boolean.TRUE.equals(field.get("readOnly")));
+      fieldObj.put("required", column.isMandatory());
+
+      boolean hasSelector = isSelectorReference(refId);
+      fieldObj.put("hasSelector", hasSelector);
+      if (hasSelector) {
+        fieldObj.put("selectorType", mapSelectorType(refId));
+      }
+
+      arr.put(fieldObj);
+    }
+    return arr;
+  }
+
+  /**
+   * Resolve a column reference (may be Column or BaseOBObject proxy).
+   */
+  private Column resolveColumn(Object colRef) {
+    if (colRef instanceof Column) {
+      return (Column) colRef;
+    }
+    if (colRef instanceof BaseOBObject) {
+      return OBDal.getInstance().get(Column.class, (String) ((BaseOBObject) colRef).getId());
+    }
+    return null;
+  }
+
+  /**
+   * Resolve the ID from an object reference (Window, Process, etc.).
+   */
+  private String resolveObjectId(Object ref) {
+    if (ref == null) {
+      return null;
+    }
+    if (ref instanceof BaseOBObject) {
+      return (String) ((BaseOBObject) ref).getId();
+    }
+    return ref.toString();
+  }
+
+  private static final Set<String> SELECTOR_REFS = new HashSet<>();
+  static {
+    SELECTOR_REFS.add("19"); // TableDir
+    SELECTOR_REFS.add("18"); // Table
+    SELECTOR_REFS.add("30"); // Search
+    SELECTOR_REFS.add("95E2A8B50A254B2AAE6774B8C2F28120"); // OBUISEL
+  }
+
+  private boolean isSelectorReference(String refId) {
+    return refId != null && SELECTOR_REFS.contains(refId);
+  }
+
+  private String mapSelectorType(String refId) {
+    if (refId == null) return null;
+    switch (refId) {
+      case "19": return "TableDir";
+      case "18": return "Table";
+      case "30": return "Search";
+      case "95E2A8B50A254B2AAE6774B8C2F28120": return "OBUISEL";
+      default: return null;
+    }
+  }
+
+  /**
+   * Map AD_Reference_ID to a simple type name for the discovery API.
+   */
+  private String mapReferenceToType(String refId) {
+    if (refId == null) return "string";
+    switch (refId) {
+      case "10": case "14": case "34": // String, Text, Memo
+        return "string";
+      case "11": case "22": case "29": case "12": // Integer, Number, Quantity, Amount
+      case "800008": case "800019": // GeneralQuantity, Price
+        return "number";
+      case "20": // YesNo
+        return "boolean";
+      case "15": // Date
+        return "date";
+      case "16": // DateTime
+        return "datetime";
+      case "24": // Time
+        return "time";
+      case "28": // Button
+        return "button";
+      case "17": // List
+        return "list";
+      case "13": // ID
+        return "id";
+      default:
+        return "string";
+    }
   }
 
   private void sendError(HttpServletResponse response, int status, String message)

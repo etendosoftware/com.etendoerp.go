@@ -67,7 +67,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
 
       // Query all active specs
       OBCriteria<BaseOBObject> specCriteria = OBDal.getInstance().createCriteria("ETGO_SF_Spec");
-      specCriteria.add(Restrictions.eq("active", true));
+      specCriteria.add(Restrictions.eq("isActive", true));
       List<BaseOBObject> specs = specCriteria.list();
 
       for (BaseOBObject spec : specs) {
@@ -84,6 +84,9 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
           addWindowPaths(openAPI, spec, specName);
         }
       }
+
+      // Discovery endpoints
+      addDiscoveryEndpoints(openAPI);
 
       log.info("NeoOpenAPIEndpoint: registered NEO endpoints for {} specs", specs.size());
 
@@ -138,9 +141,9 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
 
     // Query active, included entities for this spec
     OBCriteria<BaseOBObject> entityCriteria = OBDal.getInstance().createCriteria("ETGO_SF_Entity");
-    entityCriteria.add(Restrictions.eq("etgoSfSpec.id", specId));
-    entityCriteria.add(Restrictions.eq("active", true));
-    entityCriteria.add(Restrictions.eq("included", true));
+    entityCriteria.add(Restrictions.eq("eTGOSFSpec.id", specId));
+    entityCriteria.add(Restrictions.eq("isActive", true));
+    entityCriteria.add(Restrictions.eq("isIncluded", true));
     List<BaseOBObject> entities = entityCriteria.list();
 
     for (BaseOBObject entity : entities) {
@@ -166,7 +169,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
 
     boolean isGet = Boolean.TRUE.equals(entity.get("get"));
     boolean isPost = Boolean.TRUE.equals(entity.get("post"));
-    boolean isGetById = Boolean.TRUE.equals(entity.get("getbyid"));
+    boolean isGetById = Boolean.TRUE.equals(entity.get("getByID"));
     boolean isPut = Boolean.TRUE.equals(entity.get("put"));
     boolean isPatch = Boolean.TRUE.equals(entity.get("patch"));
     boolean isDelete = Boolean.TRUE.equals(entity.get("delete"));
@@ -376,6 +379,94 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         .addApiResponse("404", new ApiResponse().description("Action not found")));
     actionExecItem.post(execActionOp);
     openAPI.getPaths().addPathItem(actionExecPath, actionExecItem);
+  }
+
+  /**
+   * Add discovery endpoints: GET /sws/neo/ and GET /sws/neo/{specName}.
+   */
+  private void addDiscoveryEndpoints(OpenAPI openAPI) {
+    // GET /sws/neo/ — list all active specs
+    String rootPath = BASE_PATH;
+    PathItem rootItem = getOrCreatePathItem(openAPI, rootPath);
+
+    Operation listSpecsOp = createOperation(
+        "List all NEO specs",
+        "Returns all active specs the current user can access, "
+            + "including their entities and enabled HTTP methods.");
+
+    ObjectSchema specSchema = new ObjectSchema();
+    specSchema.addProperties("name", new Schema<String>().type("string")
+        .description("Spec name"));
+    specSchema.addProperties("type", new Schema<String>().type("string")
+        .description("Spec type: W (window) or P (process)"));
+
+    ObjectSchema entitySummarySchema = new ObjectSchema();
+    entitySummarySchema.addProperties("name", new Schema<String>().type("string")
+        .description("Entity name"));
+    entitySummarySchema.addProperties("methods", new ArraySchema()
+        .items(new Schema<String>().type("string"))
+        .description("Enabled HTTP methods (GET, POST, PUT, PATCH, DELETE)"));
+    specSchema.addProperties("entities", new ArraySchema()
+        .items(entitySummarySchema)
+        .description("Entities under this spec (window specs only)"));
+
+    ObjectSchema discoveryResponseSchema = new ObjectSchema();
+    discoveryResponseSchema.addProperties("specs", new ArraySchema().items(specSchema));
+
+    listSpecsOp.responses(new ApiResponses()
+        .addApiResponse("200", createJsonResponse("List of all specs", discoveryResponseSchema))
+        .addApiResponse("401", new ApiResponse().description("Unauthorized")));
+    rootItem.get(listSpecsOp);
+    openAPI.getPaths().addPathItem(rootPath, rootItem);
+
+    // GET /sws/neo/{specName} — describe a spec with entities and fields
+    String specDescribePath = BASE_PATH + "{specName}";
+    PathItem specDescribeItem = getOrCreatePathItem(openAPI, specDescribePath);
+
+    Operation describeSpecOp = createOperation(
+        "Describe a NEO spec",
+        "Returns detailed metadata for a spec, including entities, fields, "
+            + "types, selectors, and enabled methods.");
+    describeSpecOp.addParametersItem(new Parameter()
+        .in("path")
+        .name("specName")
+        .required(true)
+        .schema(new Schema<String>().type("string"))
+        .description("Name of the spec to describe"));
+
+    ObjectSchema fieldSchema = new ObjectSchema();
+    fieldSchema.addProperties("name", new Schema<String>().type("string")
+        .description("DB column name"));
+    fieldSchema.addProperties("label", new Schema<String>().type("string")
+        .description("Human-readable label"));
+    fieldSchema.addProperties("columnType", new Schema<String>().type("string")
+        .description("Type: string, number, boolean, date, datetime, list, id, button"));
+    fieldSchema.addProperties("readOnly", new Schema<Boolean>().type("boolean"));
+    fieldSchema.addProperties("required", new Schema<Boolean>().type("boolean"));
+    fieldSchema.addProperties("hasSelector", new Schema<Boolean>().type("boolean")
+        .description("Whether this field has an FK selector"));
+    fieldSchema.addProperties("selectorType", new Schema<String>().type("string")
+        .description("Selector type: TableDir, Table, Search, OBUISEL"));
+
+    ObjectSchema entityDetailSchema = new ObjectSchema();
+    entityDetailSchema.addProperties("name", new Schema<String>().type("string"));
+    entityDetailSchema.addProperties("tabLevel", new Schema<Integer>().type("integer")
+        .description("Tab hierarchy level (0 = header, 1+ = child)"));
+    entityDetailSchema.addProperties("methods", new ArraySchema()
+        .items(new Schema<String>().type("string")));
+    entityDetailSchema.addProperties("fields", new ArraySchema().items(fieldSchema));
+
+    ObjectSchema specDetailSchema = new ObjectSchema();
+    specDetailSchema.addProperties("name", new Schema<String>().type("string"));
+    specDetailSchema.addProperties("type", new Schema<String>().type("string"));
+    specDetailSchema.addProperties("entities", new ArraySchema().items(entityDetailSchema));
+
+    describeSpecOp.responses(new ApiResponses()
+        .addApiResponse("200", createJsonResponse("Spec metadata", specDetailSchema))
+        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
+        .addApiResponse("404", new ApiResponse().description("Spec not found")));
+    specDescribeItem.get(describeSpecOp);
+    openAPI.getPaths().addPathItem(specDescribePath, specDescribeItem);
   }
 
   // ---------------------------------------------------------------------------
