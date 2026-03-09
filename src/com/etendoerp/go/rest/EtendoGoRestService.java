@@ -9,11 +9,16 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 
+/**
+ * Routes incoming requests to the appropriate {@link RequestHandler}
+ * via the {@link HandlerRegistry}.
+ */
 public class EtendoGoRestService {
   private static final Logger log4j = LogManager.getLogger(EtendoGoRestService.class);
   private static final String APPLICATION_JSON_CHARSET_UTF_8 = "application/json;charset=UTF-8";
 
   private static EtendoGoRestService instance;
+  private final HandlerRegistry registry = HandlerRegistry.getInstance();
 
   private EtendoGoRestService() {
   }
@@ -26,42 +31,70 @@ public class EtendoGoRestService {
   }
 
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    sendDummy(response, "GET", getSubPath(request));
+    dispatch(request, response, "GET");
   }
 
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    sendDummy(response, "POST", getSubPath(request));
+    dispatch(request, response, "POST");
   }
 
   public void doPut(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    sendDummy(response, "PUT", getSubPath(request));
+    dispatch(request, response, "PUT");
   }
 
   public void doDelete(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    sendDummy(response, "DELETE", getSubPath(request));
+    dispatch(request, response, "DELETE");
   }
 
-  private void sendDummy(HttpServletResponse response, String method, String path) throws IOException {
+  private void dispatch(HttpServletRequest request, HttpServletResponse response, String method) throws IOException {
+    String pathInfo = request.getPathInfo();
+    if (pathInfo == null) {
+      pathInfo = "/";
+    }
+
+    RequestHandler handler = registry.findHandler(pathInfo);
+    if (handler == null) {
+      sendNotFound(response, method, pathInfo);
+      return;
+    }
+
+    String subPath = registry.getSubPath(pathInfo, handler);
     try {
-      response.setStatus(HttpServletResponse.SC_OK);
-      response.setContentType(APPLICATION_JSON_CHARSET_UTF_8);
-      JSONObject json = new JSONObject();
-      json.put("status", "ok");
-      json.put("method", method);
-      json.put("path", path);
-      json.put("message", "EtendoGo dummy response - service is running");
-      response.getWriter().write(json.toString());
+      switch (method) {
+        case "GET":
+          handler.doGet(request, response, subPath);
+          break;
+        case "POST":
+          handler.doPost(request, response, subPath);
+          break;
+        case "PUT":
+          handler.doPut(request, response, subPath);
+          break;
+        case "DELETE":
+          handler.doDelete(request, response, subPath);
+          break;
+        default:
+          response.sendError(HttpServletResponse.SC_METHOD_NOT_ALLOWED);
+      }
     } catch (Exception e) {
-      log4j.error("Error sending dummy response: {}", e.getMessage(), e);
+      log4j.error("Error dispatching {} {}: {}", method, pathInfo, e.getMessage(), e);
       response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
     }
   }
 
-  private String getSubPath(HttpServletRequest request) {
-    String pathInfo = request.getPathInfo();
-    if (pathInfo == null) {
-      return "/";
+  private void sendNotFound(HttpServletResponse response, String method, String path) throws IOException {
+    try {
+      response.setStatus(HttpServletResponse.SC_NOT_FOUND);
+      response.setContentType(APPLICATION_JSON_CHARSET_UTF_8);
+      JSONObject json = new JSONObject();
+      json.put("status", "error");
+      json.put("method", method);
+      json.put("path", path);
+      json.put("message", "No handler found for path");
+      response.getWriter().write(json.toString());
+    } catch (Exception e) {
+      log4j.error("Error sending not-found response: {}", e.getMessage(), e);
+      response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
     }
-    return pathInfo;
   }
 }
