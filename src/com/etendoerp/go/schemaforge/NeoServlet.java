@@ -33,6 +33,8 @@ import org.openbravo.client.kernel.KernelUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.ProcessAccess;
+import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
@@ -41,6 +43,9 @@ import org.openbravo.model.ad.ui.Window;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.etendorx.services.DataSourceServlet;
 import com.etendoerp.etendorx.services.wrapper.EtendoRequestWrapper;
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFField;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -131,7 +136,7 @@ public class NeoServlet extends HttpBaseServlet {
       }
 
       // Find the spec
-      BaseOBObject spec = findSpec(pathInfo.specName);
+      SFSpec spec = findSpec(pathInfo.specName);
       if (spec == null) {
         sendError(response, HttpServletResponse.SC_NOT_FOUND,
             "Spec not found: " + pathInfo.specName);
@@ -139,7 +144,7 @@ public class NeoServlet extends HttpBaseServlet {
       }
 
       // Handle process specs (specType = "P")
-      String specType = (String) spec.get("specType");
+      String specType = (String) spec.get(SFSpec.PROPERTY_SPECTYPE);
       if ("P".equals(specType)) {
         // Check process access
         Process adProcessForAccess = resolveProcess(spec);
@@ -169,7 +174,7 @@ public class NeoServlet extends HttpBaseServlet {
       }
 
       // Check window access
-      Object windowRef = spec.get("window");
+      Object windowRef = spec.get(SFSpec.PROPERTY_ADWINDOW);
       if (windowRef != null) {
         String windowId;
         if (windowRef instanceof Window) {
@@ -204,7 +209,7 @@ public class NeoServlet extends HttpBaseServlet {
               "Selectors only support GET");
           return;
         }
-        handleSelector(response, (String) spec.getId(), pathInfo, request);
+        handleSelector(response, spec.getId(), pathInfo, request);
         return;
       }
 
@@ -220,7 +225,7 @@ public class NeoServlet extends HttpBaseServlet {
       }
 
       // Find the entity within this spec
-      BaseOBObject entity = findEntity((String) spec.getId(), pathInfo.entityName);
+      SFEntity entity = findEntity(spec.getId(), pathInfo.entityName);
       if (entity == null) {
         sendError(response, HttpServletResponse.SC_NOT_FOUND,
             "Entity not found in spec: " + pathInfo.entityName);
@@ -274,7 +279,7 @@ public class NeoServlet extends HttpBaseServlet {
       }
 
       // 4. Check for hooks via Java_Qualifier on entity
-      String javaQualifier = (String) entity.get("javaQualifier");
+      String javaQualifier = (String) entity.get(SFEntity.PROPERTY_JAVAQUALIFIER);
 
       NeoResponse neoResponse;
       if (StringUtils.isNotBlank(javaQualifier)) {
@@ -304,11 +309,11 @@ public class NeoServlet extends HttpBaseServlet {
     String token = authHeader.substring(7);
     DecodedJWT decodedToken = SecureWebServicesUtils.decodeToken(token);
 
-    String userId = decodedToken.getClaim("ad_user_id").asString();
-    String roleId = decodedToken.getClaim("ad_role_id").asString();
-    String orgId = decodedToken.getClaim("ad_org_id").asString();
-    String warehouseId = decodedToken.getClaim("m_warehouse_id").asString();
-    String clientId = decodedToken.getClaim("ad_client_id").asString();
+    String userId = decodedToken.getClaim("user").asString();
+    String roleId = decodedToken.getClaim("role").asString();
+    String orgId = decodedToken.getClaim("organization").asString();
+    String warehouseId = decodedToken.getClaim("warehouse").asString();
+    String clientId = decodedToken.getClaim("client").asString();
 
     if (StringUtils.isAnyBlank(userId, roleId, orgId, clientId)) {
       throw new OBException("Invalid token: missing required claims");
@@ -368,47 +373,45 @@ public class NeoServlet extends HttpBaseServlet {
   /**
    * Find an active ETGO_SF_Spec by name.
    */
-  @SuppressWarnings("unchecked")
-  private BaseOBObject findSpec(String specName) {
-    OBCriteria<BaseOBObject> criteria = OBDal.getInstance().createCriteria("ETGO_SF_Spec");
-    criteria.add(Restrictions.eq("name", specName));
-    criteria.add(Restrictions.eq("active", true));
+  private SFSpec findSpec(String specName) {
+    OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
+    criteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, specName));
+    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
     criteria.setMaxResults(1);
-    List<BaseOBObject> results = criteria.list();
+    List<SFSpec> results = criteria.list();
     return results.isEmpty() ? null : results.get(0);
   }
 
   /**
    * Find an active, included ETGO_SF_Entity by parent spec ID and entity name.
    */
-  @SuppressWarnings("unchecked")
-  private BaseOBObject findEntity(String specId, String entityName) {
-    OBCriteria<BaseOBObject> criteria = OBDal.getInstance().createCriteria("ETGO_SF_Entity");
-    criteria.add(Restrictions.eq("etgoSfSpec.id", specId));
-    criteria.add(Restrictions.eq("name", entityName));
-    criteria.add(Restrictions.eq("active", true));
-    criteria.add(Restrictions.eq("included", true));
+  private SFEntity findEntity(String specId, String entityName) {
+    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_NAME, entityName));
+    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
     criteria.setMaxResults(1);
-    List<BaseOBObject> results = criteria.list();
+    List<SFEntity> results = criteria.list();
     return results.isEmpty() ? null : results.get(0);
   }
 
   /**
    * Check if the given HTTP method is enabled on the entity.
    */
-  private boolean isMethodEnabled(BaseOBObject entity, String method) {
+  private boolean isMethodEnabled(SFEntity entity, String method) {
     switch (method) {
       case "GET":
-        return Boolean.TRUE.equals(entity.get("get"))
-            || Boolean.TRUE.equals(entity.get("getbyid"));
+        return Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_GET))
+            || Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_GETBYID));
       case "POST":
-        return Boolean.TRUE.equals(entity.get("post"));
+        return Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_POST));
       case "PUT":
-        return Boolean.TRUE.equals(entity.get("put"));
+        return Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_PUT));
       case "PATCH":
-        return Boolean.TRUE.equals(entity.get("patch"));
+        return Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_PATCH));
       case "DELETE":
-        return Boolean.TRUE.equals(entity.get("delete"));
+        return Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_DELETE));
       default:
         return false;
     }
@@ -417,9 +420,9 @@ public class NeoServlet extends HttpBaseServlet {
   /**
    * Get the AD_Tab linked to the entity.
    */
-  private Tab getAdTab(BaseOBObject entity) {
+  private Tab getAdTab(SFEntity entity) {
     try {
-      Object tabRef = entity.get("aDTabID");
+      Object tabRef = entity.get(SFEntity.PROPERTY_ADTAB);
       if (tabRef instanceof Tab) {
         return (Tab) tabRef;
       }
@@ -625,8 +628,8 @@ public class NeoServlet extends HttpBaseServlet {
   /**
    * Resolve the AD_Process linked to a process-type spec.
    */
-  private Process resolveProcess(BaseOBObject spec) {
-    Object processRef = spec.get("process");
+  private Process resolveProcess(SFSpec spec) {
+    Object processRef = spec.get(SFSpec.PROPERTY_PROCESS);
     if (processRef instanceof Process) {
       return (Process) processRef;
     }
@@ -641,7 +644,7 @@ public class NeoServlet extends HttpBaseServlet {
    * Handle a process-type spec POST. Reads the request body as JSON
    * and delegates to NeoProcessService.
    */
-  private void handleProcessSpec(BaseOBObject spec, HttpServletRequest request,
+  private void handleProcessSpec(SFSpec spec, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     try {
       Process adProcess = resolveProcess(spec);
@@ -662,7 +665,7 @@ public class NeoServlet extends HttpBaseServlet {
       NeoResponse result = NeoProcessService.executeProcess(adProcess, requestBody);
       writeResponse(response, result);
     } catch (Exception e) {
-      log.error("Error executing process spec '{}': {}", spec.get("name"), e.getMessage(), e);
+      log.error("Error executing process spec '{}': {}", spec.get(SFSpec.PROPERTY_NAME), e.getMessage(), e);
       sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Process execution error: " + e.getMessage());
     }
@@ -693,34 +696,33 @@ public class NeoServlet extends HttpBaseServlet {
    * GET with no actionName: list available button actions for the entity.
    * POST with actionName: execute the button process for a specific record.
    */
-  @SuppressWarnings("unchecked")
-  private void handleButtonAction(HttpServletResponse response, BaseOBObject spec,
+  private void handleButtonAction(HttpServletResponse response, SFSpec spec,
       NeoPathInfo pathInfo, String method, HttpServletRequest request) throws IOException {
     try {
-      String specId = (String) spec.getId();
+      String specId = spec.getId();
 
       // Find the entity
-      BaseOBObject entity = findEntity(specId, pathInfo.entityName);
+      SFEntity entity = findEntity(specId, pathInfo.entityName);
       if (entity == null) {
         sendError(response, HttpServletResponse.SC_NOT_FOUND,
             "Entity not found in spec: " + pathInfo.entityName);
         return;
       }
 
-      String entityId = (String) entity.getId();
+      String entityId = entity.getId();
 
       if ("GET".equals(method) && pathInfo.actionName == null) {
         // List available button actions
-        OBCriteria<BaseOBObject> fieldCriteria = OBDal.getInstance()
-            .createCriteria("ETGO_SF_Field");
-        fieldCriteria.add(Restrictions.eq("etgoSfEntity.id", entityId));
-        fieldCriteria.add(Restrictions.eq("included", true));
-        fieldCriteria.add(Restrictions.eq("active", true));
-        List<BaseOBObject> fields = fieldCriteria.list();
+        OBCriteria<SFField> fieldCriteria = OBDal.getInstance()
+            .createCriteria(SFField.class);
+        fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
+        fieldCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
+        fieldCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+        List<SFField> fields = fieldCriteria.list();
 
         JSONArray actions = new JSONArray();
-        for (BaseOBObject field : fields) {
-          Object colRef = field.get("column");
+        for (SFField field : fields) {
+          Object colRef = field.get(SFField.PROPERTY_ADCOLUMN);
           Column column = null;
           if (colRef instanceof Column) {
             column = (Column) colRef;
@@ -768,16 +770,16 @@ public class NeoServlet extends HttpBaseServlet {
 
       if ("POST".equals(method) && pathInfo.actionName != null) {
         // Execute button action
-        OBCriteria<BaseOBObject> fieldCriteria = OBDal.getInstance()
-            .createCriteria("ETGO_SF_Field");
-        fieldCriteria.add(Restrictions.eq("etgoSfEntity.id", entityId));
-        fieldCriteria.add(Restrictions.eq("included", true));
-        fieldCriteria.add(Restrictions.eq("active", true));
-        List<BaseOBObject> fields = fieldCriteria.list();
+        OBCriteria<SFField> fieldCriteria = OBDal.getInstance()
+            .createCriteria(SFField.class);
+        fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
+        fieldCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
+        fieldCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+        List<SFField> fields = fieldCriteria.list();
 
         Column targetColumn = null;
-        for (BaseOBObject field : fields) {
-          Object colRef = field.get("column");
+        for (SFField field : fields) {
+          Object colRef = field.get(SFField.PROPERTY_ADCOLUMN);
           Column column = null;
           if (colRef instanceof Column) {
             column = (Column) colRef;
@@ -904,13 +906,15 @@ public class NeoServlet extends HttpBaseServlet {
   /**
    * Check if the current role has access to the given window.
    */
-  @SuppressWarnings("unchecked")
   private boolean hasWindowAccess(String windowId) {
     String roleId = OBContext.getOBContext().getRole().getId();
-    OBCriteria<BaseOBObject> criteria = OBDal.getInstance().createCriteria("ADWindowAccess");
-    criteria.add(Restrictions.eq("window.id", windowId));
-    criteria.add(Restrictions.eq("role.id", roleId));
-    criteria.add(Restrictions.eq("active", true));
+    if ("0".equals(roleId)) {
+      return true;
+    }
+    OBCriteria<WindowAccess> criteria = OBDal.getInstance().createCriteria(WindowAccess.class);
+    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_WINDOW + ".id", windowId));
+    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ROLE + ".id", roleId));
+    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ACTIVE, true));
     criteria.setMaxResults(1);
     return !criteria.list().isEmpty();
   }
@@ -918,13 +922,15 @@ public class NeoServlet extends HttpBaseServlet {
   /**
    * Check if the current role has access to the given process.
    */
-  @SuppressWarnings("unchecked")
   private boolean hasProcessAccess(String processId) {
     String roleId = OBContext.getOBContext().getRole().getId();
-    OBCriteria<BaseOBObject> criteria = OBDal.getInstance().createCriteria("ADProcessAccess");
-    criteria.add(Restrictions.eq("process.id", processId));
-    criteria.add(Restrictions.eq("role.id", roleId));
-    criteria.add(Restrictions.eq("active", true));
+    if ("0".equals(roleId)) {
+      return true;
+    }
+    OBCriteria<ProcessAccess> criteria = OBDal.getInstance().createCriteria(ProcessAccess.class);
+    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_PROCESS + ".id", processId));
+    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ROLE + ".id", roleId));
+    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ACTIVE, true));
     criteria.setMaxResults(1);
     return !criteria.list().isEmpty();
   }
@@ -934,22 +940,20 @@ public class NeoServlet extends HttpBaseServlet {
   /**
    * Handle GET /sws/neo/ — list all active specs the current user can access.
    */
-  @SuppressWarnings("unchecked")
   private void handleDiscovery(HttpServletResponse response) throws IOException {
     try {
-      OBCriteria<BaseOBObject> specCriteria = OBDal.getInstance().createCriteria("ETGO_SF_Spec");
-      specCriteria.add(Restrictions.eq("active", true));
-      specCriteria.addOrder(Order.asc("name"));
-      List<BaseOBObject> allSpecs = specCriteria.list();
+      OBCriteria<SFSpec> specCriteria = OBDal.getInstance().createCriteria(SFSpec.class);
+      specCriteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
+      List<SFSpec> allSpecs = specCriteria.list();
 
       JSONArray specsArray = new JSONArray();
-      for (BaseOBObject spec : allSpecs) {
-        String specType = (String) spec.get("specType");
-        String specName = (String) spec.get("name");
+      for (SFSpec spec : allSpecs) {
+        String specType = (String) spec.get(SFSpec.PROPERTY_SPECTYPE);
+        String specName = (String) spec.get(SFSpec.PROPERTY_NAME);
 
         // Check access
         if ("W".equals(specType)) {
-          String windowId = resolveObjectId(spec.get("window"));
+          String windowId = resolveObjectId(spec.get(SFSpec.PROPERTY_ADWINDOW));
           if (windowId != null && !hasWindowAccess(windowId)) {
             continue;
           }
@@ -964,20 +968,20 @@ public class NeoServlet extends HttpBaseServlet {
         specObj.put("id", spec.getId());
         specObj.put("name", specName);
         specObj.put("type", specType);
-        specObj.put("description", spec.get("description"));
+        specObj.put("description", spec.get(SFSpec.PROPERTY_DESCRIPTION));
 
         // Include window/process IDs for management
         if ("W".equals(specType)) {
-          String windowId = resolveObjectId(spec.get("window"));
+          String windowId = resolveObjectId(spec.get(SFSpec.PROPERTY_ADWINDOW));
           if (windowId != null) specObj.put("windowId", windowId);
-          specObj.put("entities", buildEntitySummaryArray((String) spec.getId()));
+          specObj.put("entities", buildEntitySummaryArray(spec.getId()));
         } else if ("P".equals(specType)) {
           Process adProcess = resolveProcess(spec);
           if (adProcess != null) specObj.put("processId", adProcess.getId());
         }
 
         // Module ID
-        String moduleId = resolveObjectId(spec.get("module"));
+        String moduleId = resolveObjectId(spec.get(SFSpec.PROPERTY_ADMODULE));
         if (moduleId != null) specObj.put("moduleId", moduleId);
 
         specsArray.put(specObj);
@@ -996,35 +1000,34 @@ public class NeoServlet extends HttpBaseServlet {
   /**
    * Handle GET /sws/neo/{specName} — describe a window spec with entities and fields.
    */
-  @SuppressWarnings("unchecked")
-  private void handleSpecDescribe(HttpServletResponse response, BaseOBObject spec)
+  private void handleSpecDescribe(HttpServletResponse response, SFSpec spec)
       throws IOException {
     try {
-      String specId = (String) spec.getId();
-      String specType = (String) spec.get("specType");
+      String specId = spec.getId();
+      String specType = (String) spec.get(SFSpec.PROPERTY_SPECTYPE);
 
       JSONObject result = new JSONObject();
       result.put("id", spec.getId());
-      result.put("name", spec.get("name"));
+      result.put("name", spec.get(SFSpec.PROPERTY_NAME));
       result.put("type", specType);
-      result.put("description", spec.get("description"));
-      String moduleId = resolveObjectId(spec.get("module"));
+      result.put("description", spec.get(SFSpec.PROPERTY_DESCRIPTION));
+      String moduleId = resolveObjectId(spec.get(SFSpec.PROPERTY_ADMODULE));
       if (moduleId != null) result.put("moduleId", moduleId);
 
       // Query entities for this spec
-      OBCriteria<BaseOBObject> entityCriteria = OBDal.getInstance()
-          .createCriteria("ETGO_SF_Entity");
-      entityCriteria.add(Restrictions.eq("etgoSfSpec.id", specId));
-      entityCriteria.add(Restrictions.eq("active", true));
-      entityCriteria.add(Restrictions.eq("included", true));
-      entityCriteria.addOrder(Order.asc("sequenceNumber"));
-      List<BaseOBObject> entities = entityCriteria.list();
+      OBCriteria<SFEntity> entityCriteria = OBDal.getInstance()
+          .createCriteria(SFEntity.class);
+      entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
+      entityCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+      entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
+      entityCriteria.addOrder(Order.asc(SFEntity.PROPERTY_SEQNO));
+      List<SFEntity> entities = entityCriteria.list();
 
       JSONArray entitiesArray = new JSONArray();
-      for (BaseOBObject entity : entities) {
+      for (SFEntity entity : entities) {
         JSONObject entityObj = new JSONObject();
         entityObj.put("id", entity.getId());
-        entityObj.put("name", entity.get("name"));
+        entityObj.put("name", entity.get(SFEntity.PROPERTY_NAME));
         entityObj.put("methods", buildMethodsArray(entity));
 
         // Resolve tab and include metadata
@@ -1035,22 +1038,22 @@ public class NeoServlet extends HttpBaseServlet {
         }
 
         // Method flags for editing
-        entityObj.put("isGet", Boolean.TRUE.equals(entity.get("get")));
-        entityObj.put("isGetbyid", Boolean.TRUE.equals(entity.get("getbyid")));
-        entityObj.put("isPost", Boolean.TRUE.equals(entity.get("post")));
-        entityObj.put("isPut", Boolean.TRUE.equals(entity.get("put")));
-        entityObj.put("isPatch", Boolean.TRUE.equals(entity.get("patch")));
-        entityObj.put("isDelete", Boolean.TRUE.equals(entity.get("delete")));
+        entityObj.put("isGet", Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_GET)));
+        entityObj.put("isGetbyid", Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_GETBYID)));
+        entityObj.put("isPost", Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_POST)));
+        entityObj.put("isPut", Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_PUT)));
+        entityObj.put("isPatch", Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_PATCH)));
+        entityObj.put("isDelete", Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_DELETE)));
 
         // Build fields array
-        entityObj.put("fields", buildFieldsArray((String) entity.getId()));
+        entityObj.put("fields", buildFieldsArray(entity.getId()));
         entitiesArray.put(entityObj);
       }
 
       result.put("entities", entitiesArray);
       writeResponse(response, NeoResponse.ok(result));
     } catch (Exception e) {
-      log.error("Error describing spec '{}': {}", spec.get("name"), e.getMessage(), e);
+      log.error("Error describing spec '{}': {}", spec.get(SFSpec.PROPERTY_NAME), e.getMessage(), e);
       sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Spec describe error: " + e.getMessage());
     }
@@ -1059,19 +1062,18 @@ public class NeoServlet extends HttpBaseServlet {
   /**
    * Build a summary of entities for the discovery endpoint (name + methods only).
    */
-  @SuppressWarnings("unchecked")
   private JSONArray buildEntitySummaryArray(String specId) throws Exception {
-    OBCriteria<BaseOBObject> criteria = OBDal.getInstance().createCriteria("ETGO_SF_Entity");
-    criteria.add(Restrictions.eq("etgoSfSpec.id", specId));
-    criteria.add(Restrictions.eq("active", true));
-    criteria.add(Restrictions.eq("included", true));
-    criteria.addOrder(Order.asc("sequenceNumber"));
-    List<BaseOBObject> entities = criteria.list();
+    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
+    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
+    criteria.addOrder(Order.asc(SFEntity.PROPERTY_SEQNO));
+    List<SFEntity> entities = criteria.list();
 
     JSONArray arr = new JSONArray();
-    for (BaseOBObject entity : entities) {
+    for (SFEntity entity : entities) {
       JSONObject obj = new JSONObject();
-      obj.put("name", entity.get("name"));
+      obj.put("name", entity.get(SFEntity.PROPERTY_NAME));
       obj.put("methods", buildMethodsArray(entity));
       arr.put(obj);
     }
@@ -1081,21 +1083,21 @@ public class NeoServlet extends HttpBaseServlet {
   /**
    * Build a JSON array of enabled HTTP methods for an entity.
    */
-  private JSONArray buildMethodsArray(BaseOBObject entity) {
+  private JSONArray buildMethodsArray(SFEntity entity) {
     JSONArray methods = new JSONArray();
-    if (Boolean.TRUE.equals(entity.get("get")) || Boolean.TRUE.equals(entity.get("getbyid"))) {
+    if (Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_GET)) || Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_GETBYID))) {
       methods.put("GET");
     }
-    if (Boolean.TRUE.equals(entity.get("post"))) {
+    if (Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_POST))) {
       methods.put("POST");
     }
-    if (Boolean.TRUE.equals(entity.get("put"))) {
+    if (Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_PUT))) {
       methods.put("PUT");
     }
-    if (Boolean.TRUE.equals(entity.get("patch"))) {
+    if (Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_PATCH))) {
       methods.put("PATCH");
     }
-    if (Boolean.TRUE.equals(entity.get("delete"))) {
+    if (Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_DELETE))) {
       methods.put("DELETE");
     }
     return methods;
@@ -1104,18 +1106,17 @@ public class NeoServlet extends HttpBaseServlet {
   /**
    * Build the fields array for a given entity, resolving AD_Column metadata.
    */
-  @SuppressWarnings("unchecked")
   private JSONArray buildFieldsArray(String entityId) throws Exception {
-    OBCriteria<BaseOBObject> criteria = OBDal.getInstance().createCriteria("ETGO_SF_Field");
-    criteria.add(Restrictions.eq("etgoSfEntity.id", entityId));
-    criteria.add(Restrictions.eq("active", true));
-    criteria.add(Restrictions.eq("included", true));
-    criteria.addOrder(Order.asc("sequenceNumber"));
-    List<BaseOBObject> fields = criteria.list();
+    OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
+    criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
+    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
+    criteria.addOrder(Order.asc(SFEntity.PROPERTY_SEQNO));
+    List<SFField> fields = criteria.list();
 
     JSONArray arr = new JSONArray();
-    for (BaseOBObject field : fields) {
-      Column column = resolveColumn(field.get("column"));
+    for (SFField field : fields) {
+      Column column = resolveColumn(field.get(SFField.PROPERTY_ADCOLUMN));
       if (column == null) {
         continue;
       }
@@ -1129,8 +1130,8 @@ public class NeoServlet extends HttpBaseServlet {
       fieldObj.put("name", column.getDBColumnName());
       fieldObj.put("label", column.getName());
       fieldObj.put("columnType", mapReferenceToType(refId));
-      fieldObj.put("readOnly", Boolean.TRUE.equals(field.get("readOnly")));
-      fieldObj.put("included", Boolean.TRUE.equals(field.get("included")));
+      fieldObj.put("readOnly", Boolean.TRUE.equals(field.get(SFField.PROPERTY_ISREADONLY)));
+      fieldObj.put("included", Boolean.TRUE.equals(field.get(SFField.PROPERTY_ISINCLUDED)));
       fieldObj.put("required", column.isMandatory());
 
       boolean hasSelector = isSelectorReference(refId);

@@ -1,6 +1,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.Arrays;
+import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -10,8 +11,10 @@ import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Process;
@@ -42,6 +45,15 @@ public class PopulateSpecHelper {
 
   private PopulateSpecHelper() {
     // utility class
+  }
+
+  private static void setAuditFields(BaseOBObject obj) {
+    User currentUser = OBContext.getOBContext().getUser();
+    Date now = new Date();
+    obj.set("createdBy", currentUser);
+    obj.set("updatedBy", currentUser);
+    obj.set("created", now);
+    obj.set("updated", now);
   }
 
   /**
@@ -88,12 +100,12 @@ public class PopulateSpecHelper {
   private static int[] populateWindow(BaseOBObject spec, String specId,
       boolean excludeSystemColumns, boolean includeAllMethods) {
 
-    Window window = (Window) spec.get("window");
+    Window window = (Window) spec.get("aDWindow");
     if (window == null) {
       throw new IllegalArgumentException("Window spec has no linked AD_Window");
     }
 
-    BaseOBObject specModule = (BaseOBObject) spec.get("module");
+    BaseOBObject specModule = (BaseOBObject) spec.get("aDModule");
     Client specClient = (Client) spec.get("client");
     Organization specOrg = (Organization) spec.get("organization");
 
@@ -113,20 +125,21 @@ public class PopulateSpecHelper {
       // Create entity record
       BaseOBObject entity = (BaseOBObject) OBProvider.getInstance().get("ETGO_SF_Entity");
       entity.set("name", tab.getName());
-      entity.set("etgoSfSpec", spec);
-      entity.set("tab", tab);
-      entity.set("module", specModule);
+      entity.set("eTGOSFSpec", spec);
+      entity.set("aDTab", tab);
+      entity.set("aDModule", specModule);
       entity.set("client", specClient);
       entity.set("organization", specOrg);
-      entity.set("active", true);
-      entity.set("included", true);
+      entity.set("isActive", true);
+      entity.set("isIncluded", true);
       entity.set("get", includeAllMethods);
-      entity.set("getbyid", includeAllMethods);
+      entity.set("getByID", includeAllMethods);
       entity.set("post", includeAllMethods);
       entity.set("put", includeAllMethods);
       entity.set("patch", includeAllMethods);
       entity.set("delete", includeAllMethods);
-      entity.set("sequenceNumber", tab.getSequenceNumber());
+      entity.set("seqNo", tab.getSequenceNumber());
+      setAuditFields(entity);
       OBDal.getInstance().save(entity);
       entityCount++;
 
@@ -145,15 +158,16 @@ public class PopulateSpecHelper {
         }
 
         BaseOBObject field = (BaseOBObject) OBProvider.getInstance().get("ETGO_SF_Field");
-        field.set("etgoSfEntity", entity);
-        field.set("column", col);
-        field.set("module", specModule);
+        field.set("eTGOSFEntity", entity);
+        field.set("aDColumn", col);
+        field.set("aDModule", specModule);
         field.set("client", specClient);
         field.set("organization", specOrg);
-        field.set("active", true);
-        field.set("included", true);
-        field.set("readOnly", false);
-        field.set("sequenceNumber", seqNo);
+        field.set("isActive", true);
+        field.set("isIncluded", true);
+        field.set("isReadOnly", false);
+        field.set("seqNo", seqNo);
+        setAuditFields(field);
         OBDal.getInstance().save(field);
         fieldCount++;
         seqNo += 10;
@@ -185,7 +199,7 @@ public class PopulateSpecHelper {
       throw new IllegalArgumentException("Process spec has no linked AD_Process");
     }
 
-    BaseOBObject specModule = (BaseOBObject) spec.get("module");
+    BaseOBObject specModule = (BaseOBObject) spec.get("aDModule");
     Client specClient = (Client) spec.get("client");
     Organization specOrg = (Organization) spec.get("organization");
 
@@ -194,21 +208,22 @@ public class PopulateSpecHelper {
     // Create a single entity for the process (no tab — process specs have no tabs)
     BaseOBObject entity = (BaseOBObject) OBProvider.getInstance().get("ETGO_SF_Entity");
     entity.set("name", process.getName());
-    entity.set("etgoSfSpec", spec);
+    entity.set("eTGOSFSpec", spec);
     // tab is null for process specs
-    entity.set("module", specModule);
+    entity.set("aDModule", specModule);
     entity.set("client", specClient);
     entity.set("organization", specOrg);
-    entity.set("active", true);
-    entity.set("included", true);
+    entity.set("isActive", true);
+    entity.set("isIncluded", true);
     // Processes are POST-only
     entity.set("get", false);
-    entity.set("getbyid", false);
+    entity.set("getByID", false);
     entity.set("post", true);
     entity.set("put", false);
     entity.set("patch", false);
     entity.set("delete", false);
-    entity.set("sequenceNumber", 10L);
+    entity.set("seqNo", 10L);
+    setAuditFields(entity);
     OBDal.getInstance().save(entity);
 
     // Create fields from process parameters
@@ -221,21 +236,22 @@ public class PopulateSpecHelper {
       }
 
       BaseOBObject field = (BaseOBObject) OBProvider.getInstance().get("ETGO_SF_Field");
-      field.set("etgoSfEntity", entity);
+      field.set("eTGOSFEntity", entity);
       // column is null for process specs — no AD_Column exists for process parameters
-      field.set("module", specModule);
+      field.set("aDModule", specModule);
       field.set("client", specClient);
       field.set("organization", specOrg);
-      field.set("active", true);
-      field.set("included", true);
-      field.set("readOnly", false);
-      field.set("sequenceNumber", param.getSequenceNumber());
+      field.set("isActive", true);
+      field.set("isIncluded", true);
+      field.set("isReadOnly", false);
+      field.set("seqNo", param.getSequenceNumber());
       // Store the parameter name in javaQualifier since there is no NAME column on ETGO_SF_Field
       field.set("javaQualifier", param.getDBColumnName());
       // Store the parameter's default value if present
       if (param.getDefaultValue() != null) {
         field.set("defaultValue", param.getDefaultValue());
       }
+      setAuditFields(field);
       OBDal.getInstance().save(field);
       fieldCount++;
     }
@@ -254,14 +270,14 @@ public class PopulateSpecHelper {
     // Find existing entities for this spec
     OBCriteria<BaseOBObject> entityCriteria = OBDal.getInstance()
         .createCriteria("ETGO_SF_Entity");
-    entityCriteria.add(Restrictions.eq("etgoSfSpec.id", specId));
+    entityCriteria.add(Restrictions.eq("eTGOSFSpec.id", specId));
     List<BaseOBObject> existingEntities = entityCriteria.list();
 
     for (BaseOBObject entity : existingEntities) {
       // Delete child fields first
       OBCriteria<BaseOBObject> fieldCriteria = OBDal.getInstance()
           .createCriteria("ETGO_SF_Field");
-      fieldCriteria.add(Restrictions.eq("etgoSfEntity.id", entity.getId()));
+      fieldCriteria.add(Restrictions.eq("eTGOSFEntity.id", entity.getId()));
       List<BaseOBObject> existingFields = fieldCriteria.list();
       for (BaseOBObject field : existingFields) {
         OBDal.getInstance().remove(field);

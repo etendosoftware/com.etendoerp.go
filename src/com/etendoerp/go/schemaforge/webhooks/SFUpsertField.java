@@ -1,16 +1,17 @@
 package com.etendoerp.go.schemaforge.webhooks;
 
+import java.util.Date;
 import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.openbravo.base.provider.OBProvider;
-import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.module.Module;
 
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
@@ -33,57 +34,62 @@ public class SFUpsertField extends BaseWebhookService {
       String columnId = parameter.get("ColumnID");
       String moduleId = parameter.get("ModuleID");
 
-      BaseOBObject field;
+      SFField field;
       if (fieldId != null && !fieldId.isEmpty()) {
-        field = OBDal.getInstance().get("ETGO_SF_Field", fieldId);
+        field = OBDal.getInstance().get(SFField.class, fieldId);
         if (field == null) {
           responseVars.put("error", "Field not found: " + fieldId);
           return;
         }
       } else {
-        field = (BaseOBObject) OBProvider.getInstance().get("ETGO_SF_Field");
-        field.set("client", OBContext.getOBContext().getCurrentClient());
-        field.set("organization", OBContext.getOBContext().getCurrentOrganization());
-        field.set("active", true);
-        field.set("included", true);
-        field.set("readOnly", false);
+        field = new SFField();
+        field.setNewOBObject(true);
+        field.setClient(OBContext.getOBContext().getCurrentClient());
+        field.setOrganization(OBContext.getOBContext().getCurrentOrganization());
+        field.setActive(true);
+        field.setCreatedBy(OBContext.getOBContext().getUser());
+        field.setUpdatedBy(OBContext.getOBContext().getUser());
+        field.setCreated(new Date());
+        field.setUpdated(new Date());
+        field.setIncluded(true);
+        field.setReadOnly(false);
       }
 
-      BaseOBObject entity = OBDal.getInstance().get("ETGO_SF_Entity", entityId);
+      SFEntity entity = OBDal.getInstance().get(SFEntity.class, entityId);
       if (entity == null) {
         responseVars.put("error", "Entity not found: " + entityId);
         return;
       }
-      field.set("etgoSfEntity", entity);
+      field.setETGOSFEntity(entity);
 
       Column column = OBDal.getInstance().get(Column.class, columnId);
       if (column == null) {
         responseVars.put("error", "Column not found: " + columnId);
         return;
       }
-      field.set("column", column);
+      field.setADColumn(column);
 
       Module module = OBDal.getInstance().get(Module.class, moduleId);
       if (module == null) {
         responseVars.put("error", "Module not found: " + moduleId);
         return;
       }
-      field.set("module", module);
+      field.setADModule(module);
 
       if (parameter.containsKey("IsIncluded")) {
-        field.set("included", "Y".equalsIgnoreCase(parameter.get("IsIncluded")));
+        field.setIncluded("Y".equalsIgnoreCase(parameter.get("IsIncluded")));
       }
       if (parameter.containsKey("IsReadOnly")) {
-        field.set("readOnly", "Y".equalsIgnoreCase(parameter.get("IsReadOnly")));
+        field.setReadOnly("Y".equalsIgnoreCase(parameter.get("IsReadOnly")));
       }
       if (parameter.containsKey("DefaultValue")) {
-        field.set("defaultValue", parameter.get("DefaultValue"));
+        field.setDefaultValue(parameter.get("DefaultValue"));
       }
       if (parameter.containsKey("JavaQualifier")) {
-        field.set("javaQualifier", parameter.get("JavaQualifier"));
+        field.setJavaQualifier(parameter.get("JavaQualifier"));
       }
       if (parameter.containsKey("SeqNo")) {
-        field.set("sequenceNumber", Long.parseLong(parameter.get("SeqNo")));
+        field.setSeqNo(Long.valueOf(parameter.get("SeqNo")));
       }
 
       OBDal.getInstance().save(field);
@@ -91,7 +97,7 @@ public class SFUpsertField extends BaseWebhookService {
 
       log.info("Upserted ETGO_SF_Field: id={}", field.getId());
       responseVars.put("message", "Field upserted with ID: " + field.getId());
-      responseVars.put("FieldID", (String) field.getId());
+      responseVars.put("FieldID", field.getId());
 
     } catch (Exception e) {
       log.error("Error in SFUpsertField", e);

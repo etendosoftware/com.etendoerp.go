@@ -1,17 +1,18 @@
 package com.etendoerp.go.schemaforge.webhooks;
 
+import java.util.Date;
 import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.provider.OBProvider;
-import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.module.Module;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
@@ -30,6 +31,13 @@ public class SFUpsertSpec extends BaseWebhookService {
   public void get(Map<String, String> parameter, Map<String, String> responseVars) {
     OBContext.setAdminMode();
     try {
+      OBContext ctx = OBContext.getOBContext();
+      log.info("SFUpsertSpec session info: user={}, client={} ({}), org={} ({}), role={} ({})",
+        ctx.getUser().getId(),
+        ctx.getCurrentClient().getId(), ctx.getCurrentClient().getName(),
+        ctx.getCurrentOrganization().getId(), ctx.getCurrentOrganization().getName(),
+        ctx.getRole().getId(), ctx.getRole().getName());
+
       String specId = parameter.get("SpecID");
       String name = parameter.get("Name");
       String windowId = parameter.get("WindowID");
@@ -41,31 +49,34 @@ public class SFUpsertSpec extends BaseWebhookService {
         specType = "W";
       }
 
-      // Validate spec type
       if (!"W".equals(specType) && !"P".equals(specType)) {
         responseVars.put("error", "Invalid SpecType: " + specType + ". Must be W or P.");
         return;
       }
 
-      BaseOBObject spec;
+      SFSpec spec;
       if (specId != null && !specId.isEmpty()) {
-        spec = OBDal.getInstance().get("ETGO_SF_Spec", specId);
+        spec = OBDal.getInstance().get(SFSpec.class, specId);
         if (spec == null) {
           responseVars.put("error", "Spec not found: " + specId);
           return;
         }
       } else {
-        spec = (BaseOBObject) OBProvider.getInstance().get("ETGO_SF_Spec");
-        spec.set("client", OBContext.getOBContext().getCurrentClient());
-        spec.set("organization", OBContext.getOBContext().getCurrentOrganization());
-        spec.set("active", true);
+        spec =  OBProvider.getInstance().get(SFSpec.class);
+        spec.setNewOBObject(true);
+        spec.setClient(OBContext.getOBContext().getCurrentClient());
+        spec.setOrganization(OBContext.getOBContext().getCurrentOrganization());
+        spec.setActive(true);
+        spec.setCreatedBy(OBContext.getOBContext().getUser());
+        spec.setUpdatedBy(OBContext.getOBContext().getUser());
+        spec.setCreated(new Date());
+        spec.setUpdated(new Date());
       }
 
-      spec.set("name", name);
-      spec.set("specType", specType);
+      spec.setName(name);
+      spec.setSpecType(specType);
 
       if ("P".equals(specType)) {
-        // Process spec: ProcessID is required, window is cleared
         if (processId == null || processId.isEmpty()) {
           responseVars.put("error", "ProcessID is required when SpecType is P");
           return;
@@ -75,10 +86,9 @@ public class SFUpsertSpec extends BaseWebhookService {
           responseVars.put("error", "Process not found: " + processId);
           return;
         }
-        spec.set("process", process);
-        spec.set("window", null);
+        spec.setProcess(process);
+        spec.setADWindow(null);
       } else {
-        // Window spec: WindowID is required, process is cleared
         if (windowId == null || windowId.isEmpty()) {
           responseVars.put("error", "WindowID is required when SpecType is W");
           return;
@@ -88,8 +98,8 @@ public class SFUpsertSpec extends BaseWebhookService {
           responseVars.put("error", "Window not found: " + windowId);
           return;
         }
-        spec.set("window", window);
-        spec.set("process", null);
+        spec.setADWindow(window);
+        spec.setProcess(null);
       }
 
       Module module = OBDal.getInstance().get(Module.class, moduleId);
@@ -97,10 +107,10 @@ public class SFUpsertSpec extends BaseWebhookService {
         responseVars.put("error", "Module not found: " + moduleId);
         return;
       }
-      spec.set("module", module);
+      spec.setADModule(module);
 
       if (description != null && !description.isEmpty()) {
-        spec.set("description", description);
+        spec.setDescription(description);
       }
 
       OBDal.getInstance().save(spec);
@@ -109,7 +119,7 @@ public class SFUpsertSpec extends BaseWebhookService {
       String typeLabel = "P".equals(specType) ? "Process" : "Window";
       log.info("Upserted ETGO_SF_Spec ({}): id={}, name={}", typeLabel, spec.getId(), name);
       responseVars.put("message", typeLabel + " Spec upserted with ID: " + spec.getId());
-      responseVars.put("SpecID", (String) spec.getId());
+      responseVars.put("SpecID", spec.getId());
       responseVars.put("SpecType", specType);
 
     } catch (Exception e) {
