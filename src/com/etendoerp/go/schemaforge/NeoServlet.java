@@ -961,13 +961,24 @@ public class NeoServlet extends HttpBaseServlet {
         }
 
         JSONObject specObj = new JSONObject();
+        specObj.put("id", spec.getId());
         specObj.put("name", specName);
         specObj.put("type", specType);
+        specObj.put("description", spec.get("description"));
 
-        // For window specs, include entities with methods
+        // Include window/process IDs for management
         if ("W".equals(specType)) {
+          String windowId = resolveObjectId(spec.get("window"));
+          if (windowId != null) specObj.put("windowId", windowId);
           specObj.put("entities", buildEntitySummaryArray((String) spec.getId()));
+        } else if ("P".equals(specType)) {
+          Process adProcess = resolveProcess(spec);
+          if (adProcess != null) specObj.put("processId", adProcess.getId());
         }
+
+        // Module ID
+        String moduleId = resolveObjectId(spec.get("module"));
+        if (moduleId != null) specObj.put("moduleId", moduleId);
 
         specsArray.put(specObj);
       }
@@ -993,8 +1004,12 @@ public class NeoServlet extends HttpBaseServlet {
       String specType = (String) spec.get("specType");
 
       JSONObject result = new JSONObject();
+      result.put("id", spec.getId());
       result.put("name", spec.get("name"));
       result.put("type", specType);
+      result.put("description", spec.get("description"));
+      String moduleId = resolveObjectId(spec.get("module"));
+      if (moduleId != null) result.put("moduleId", moduleId);
 
       // Query entities for this spec
       OBCriteria<BaseOBObject> entityCriteria = OBDal.getInstance()
@@ -1008,14 +1023,24 @@ public class NeoServlet extends HttpBaseServlet {
       JSONArray entitiesArray = new JSONArray();
       for (BaseOBObject entity : entities) {
         JSONObject entityObj = new JSONObject();
+        entityObj.put("id", entity.getId());
         entityObj.put("name", entity.get("name"));
         entityObj.put("methods", buildMethodsArray(entity));
 
-        // Resolve tab level
+        // Resolve tab and include metadata
         Tab adTab = getAdTab(entity);
         if (adTab != null) {
           entityObj.put("tabLevel", adTab.getTabLevel());
+          entityObj.put("tabId", adTab.getId());
         }
+
+        // Method flags for editing
+        entityObj.put("isGet", Boolean.TRUE.equals(entity.get("get")));
+        entityObj.put("isGetbyid", Boolean.TRUE.equals(entity.get("getbyid")));
+        entityObj.put("isPost", Boolean.TRUE.equals(entity.get("post")));
+        entityObj.put("isPut", Boolean.TRUE.equals(entity.get("put")));
+        entityObj.put("isPatch", Boolean.TRUE.equals(entity.get("patch")));
+        entityObj.put("isDelete", Boolean.TRUE.equals(entity.get("delete")));
 
         // Build fields array
         entityObj.put("fields", buildFieldsArray((String) entity.getId()));
@@ -1099,10 +1124,13 @@ public class NeoServlet extends HttpBaseServlet {
           ? (String) column.getReference().getId() : null;
 
       JSONObject fieldObj = new JSONObject();
+      fieldObj.put("id", field.getId());
+      fieldObj.put("columnId", column.getId());
       fieldObj.put("name", column.getDBColumnName());
       fieldObj.put("label", column.getName());
       fieldObj.put("columnType", mapReferenceToType(refId));
       fieldObj.put("readOnly", Boolean.TRUE.equals(field.get("readOnly")));
+      fieldObj.put("included", Boolean.TRUE.equals(field.get("included")));
       fieldObj.put("required", column.isMandatory());
 
       boolean hasSelector = isSelectorReference(refId);
