@@ -2,6 +2,9 @@ package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -103,6 +106,24 @@ public class NeoSelectorService {
         }
         item.put("targetEntity", meta.entityName);
         item.put("displayProperty", meta.displayProperty);
+
+        // Include selectorParams from validation rule
+        org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
+        if (valRule != null && StringUtils.isNotBlank(valRule.getValidationCode())) {
+          JSONArray params = new JSONArray();
+          Matcher m = VALIDATION_PARAM.matcher(valRule.getValidationCode());
+          java.util.Set<String> seen = new java.util.HashSet<>();
+          while (m.find()) {
+            String param = m.group(1);
+            if (seen.add(param)) {
+              params.put(param);
+            }
+          }
+          if (params.length() > 0) {
+            item.put("selectorParams", params);
+          }
+        }
+
         selectors.put(item);
       }
 
@@ -129,7 +150,8 @@ public class NeoSelectorService {
    */
   @SuppressWarnings("unchecked")
   public static NeoResponse querySelector(String specId, String entityName,
-      String columnName, String search, int limit, int offset) {
+      String columnName, String search, int limit, int offset,
+      Map<String, String> contextParams) {
     try {
       if (limit <= 0) {
         limit = DEFAULT_LIMIT;
@@ -173,11 +195,14 @@ public class NeoSelectorService {
             "Could not resolve target for: " + columnName);
       }
 
+      // Resolve validation rule filter from context params
+      String validationFilter = resolveValidationFilter(column, meta.entityName, contextParams);
+
       // Build and execute query
       if (meta.isRich) {
-        return executeRichQuery(meta, search, limit, offset);
+        return executeRichQuery(meta, search, limit, offset, validationFilter);
       }
-      return executeQuery(meta, search, limit, offset);
+      return executeQuery(meta, search, limit, offset, validationFilter);
 
     } catch (Exception e) {
       log.error("Error querying selector {}/{}", entityName, columnName, e);
@@ -189,13 +214,21 @@ public class NeoSelectorService {
    * Execute the paginated query against the target entity (simple selectors).
    */
   private static NeoResponse executeQuery(SelectorMeta meta,
-      String search, int limit, int offset) throws Exception {
+      String search, int limit, int offset, String validationFilter) throws Exception {
 
     StringBuilder hql = new StringBuilder();
 
     // Apply where clause from AD_Ref_Table if present
     if (StringUtils.isNotBlank(meta.whereClause)) {
       hql.append(meta.whereClause);
+    }
+
+    // Apply validation rule filter (resolved from context params)
+    if (StringUtils.isNotBlank(validationFilter)) {
+      if (hql.length() > 0) {
+        hql.append(" AND ");
+      }
+      hql.append(validationFilter);
     }
 
     // Search filter on display property
@@ -255,7 +288,7 @@ public class NeoSelectorService {
    * Execute a rich (OBUISEL) selector query with multi-column response.
    */
   private static NeoResponse executeRichQuery(SelectorMeta meta,
-      String search, int limit, int offset) throws Exception {
+      String search, int limit, int offset, String validationFilter) throws Exception {
 
     if (meta.isCustomQuery) {
       return NeoResponse.error(400,
@@ -268,6 +301,14 @@ public class NeoSelectorService {
     if (StringUtils.isNotBlank(meta.whereClause)) {
       String resolved = resolveObuiselParams(meta.whereClause);
       hql.append(resolved);
+    }
+
+    // Apply validation rule filter (resolved from context params)
+    if (StringUtils.isNotBlank(validationFilter)) {
+      if (hql.length() > 0) {
+        hql.append(" AND ");
+      }
+      hql.append(validationFilter);
     }
 
     // Search filter: OR across all searchable properties
@@ -754,6 +795,105 @@ public class NeoSelectorService {
       return "searchKey";
     }
     return "id";
+  }
+
+  private static final Pattern VALIDATION_PARAM = Pattern.compile("@(\\w+)@");
+
+  /**
+   * Resolve the column's validation rule into an HQL filter using context params.
+   *
+   * Validation rules are SQL-style clauses like:
+   *   C_BPartner_Location.C_BPartner_ID=@C_BPartner_ID@ AND C_BPartner_Location.IsShipTo='Y'
+   *
+   * This method:
+   * 1. Replaces @Param@ placeholders with actual values from contextParams
+   * 2. Converts TABLE.COLUMN references to DAL property paths (e.property)
+   * 3. Returns null if no validation rule or required params are missing
+   */
+  private static String resolveValidationFilter(Column column, String targetEntityName,
+      Map<String, String> contextParams) {
+    org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
+    if (valRule == null || StringUtils.isBlank(valRule.getValidationCode())) {
+      return null;
+    }
+    if (contextParams == null || contextParams.isEmpty()) {
+      return null;
+    }
+
+    String code = valRule.getValidationCode();
+
+    // Check that all required @Param@ have values in contextParams
+    Matcher paramMatcher = VALIDATION_PARAM.matcher(code);
+    boolean hasAllParams = true;
+    while (paramMatcher.find()) {
+      String paramName = paramMatcher.group(1);
+      if (!contextParams.containsKey(paramName)) {
+        hasAllParams = false;
+        break;
+      }
+    }
+    if (!hasAllParams) {
+      return null;
+    }
+
+    // Replace @Param@ with sanitized values
+    StringBuffer resolved = new StringBuffer();
+    paramMatcher = VALIDATION_PARAM.matcher(code);
+    while (paramMatcher.find()) {
+      String paramName = paramMatcher.group(1);
+      String value = contextParams.get(paramName).replace("'", "''");
+      paramMatcher.appendReplacement(resolved, "'" + value + "'");
+    }
+    paramMatcher.appendTail(resolved);
+
+    // Convert SQL TABLE.COLUMN references to HQL e.property paths
+    String hqlFilter = convertSqlToHql(resolved.toString(), targetEntityName);
+    return hqlFilter;
+  }
+
+  /**
+   * Convert a SQL-style validation clause to HQL.
+   * Replaces TABLE.COLUMN with e.dalProperty, handling FK columns (_ID → .id).
+   *
+   * Example: "C_BPartner_Location.C_BPartner_ID='abc'" → "e.businessPartner.id='abc'"
+   */
+  private static String convertSqlToHql(String sqlClause, String targetEntityName) {
+    try {
+      Entity targetEntity = ModelProvider.getInstance().getEntity(targetEntityName);
+      if (targetEntity == null) {
+        return sqlClause;
+      }
+
+      String tableName = targetEntity.getTableName();
+
+      // Replace TABLE.COLUMN patterns with e.property
+      Pattern tableColPattern = Pattern.compile(
+          Pattern.quote(tableName) + "\\.(\\w+)", Pattern.CASE_INSENSITIVE);
+      Matcher m = tableColPattern.matcher(sqlClause);
+
+      StringBuffer result = new StringBuffer();
+      while (m.find()) {
+        String dbColName = m.group(1);
+        Property prop = targetEntity.getPropertyByColumnName(dbColName);
+        if (prop != null) {
+          String replacement;
+          if (!prop.isPrimitive() && prop.getTargetEntity() != null) {
+            // FK property: TABLE.FK_ID → e.property.id
+            replacement = "e." + prop.getName() + ".id";
+          } else {
+            replacement = "e." + prop.getName();
+          }
+          m.appendReplacement(result, replacement);
+        } else {
+          m.appendReplacement(result, "e." + dbColName);
+        }
+      }
+      m.appendTail(result);
+      return result.toString();
+    } catch (Exception e) {
+      log.warn("Could not convert SQL to HQL for entity {}: {}", targetEntityName, e.getMessage());
+      return sqlClause;
+    }
   }
 
   /**

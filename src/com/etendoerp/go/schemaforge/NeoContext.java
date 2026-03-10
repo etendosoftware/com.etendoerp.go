@@ -6,6 +6,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.ui.Tab;
 
+import com.etendoerp.go.schemaforge.data.SFEntity;
+
 /**
  * Context object for NEO Headless requests.
  * Carries all relevant information for hook handlers.
@@ -19,6 +21,7 @@ public class NeoContext {
   private final JSONObject requestBody;
   private final Map<String, String> queryParams;
   private final Tab adTab;
+  private final SFEntity sfEntity;
   private final OBContext obContext;
   private NeoResponse previousResult;
 
@@ -30,6 +33,7 @@ public class NeoContext {
     this.requestBody = builder.requestBody;
     this.queryParams = builder.queryParams;
     this.adTab = builder.adTab;
+    this.sfEntity = builder.sfEntity;
     this.obContext = builder.obContext;
     this.previousResult = builder.previousResult;
   }
@@ -62,6 +66,10 @@ public class NeoContext {
     return adTab;
   }
 
+  public SFEntity getSfEntity() {
+    return sfEntity;
+  }
+
   public OBContext getObContext() {
     return obContext;
   }
@@ -92,6 +100,7 @@ public class NeoContext {
     private JSONObject requestBody;
     private Map<String, String> queryParams;
     private Tab adTab;
+    private SFEntity sfEntity;
     private OBContext obContext;
     private NeoResponse previousResult;
 
@@ -127,6 +136,11 @@ public class NeoContext {
 
     public Builder adTab(Tab adTab) {
       this.adTab = adTab;
+      return this;
+    }
+
+    public Builder sfEntity(SFEntity sfEntity) {
+      this.sfEntity = sfEntity;
       return this;
     }
 

@@ -305,7 +305,10 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
 
     Operation querySelectorOp = createOperation(
         "Query " + entityName + " selector values",
-        "Queries possible values for a specific FK selector column.");
+        "Queries possible values for a specific FK selector column. "
+            + "Selectors may accept context parameters to filter results based on "
+            + "dependent fields (e.g., ?C_BPartner_ID=xyz to filter locations by BP). "
+            + "Use the describe endpoint to discover which selectorParams each field requires.");
     querySelectorOp.addParametersItem(new Parameter()
         .in("path")
         .name("columnName")
@@ -446,6 +449,10 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         .description("Whether this field has an FK selector"));
     fieldSchema.addProperties("selectorType", new Schema<String>().type("string")
         .description("Selector type: TableDir, Table, Search, OBUISEL"));
+    fieldSchema.addProperties("selectorParams", new ArraySchema()
+        .items(new Schema<String>().type("string"))
+        .description("Column names that must be passed as query params to filter this selector "
+            + "(e.g., C_BPartner_ID). Derived from the column's validation rule."));
 
     ObjectSchema entityDetailSchema = new ObjectSchema();
     entityDetailSchema.addProperties("name", new Schema<String>().type("string"));

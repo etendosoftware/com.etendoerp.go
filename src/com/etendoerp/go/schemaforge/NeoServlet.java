@@ -9,6 +9,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -245,6 +247,7 @@ public class NeoServlet extends HttpBaseServlet {
           .recordId(pathInfo.recordId)
           .queryParams(queryParams)
           .adTab(adTab)
+          .sfEntity(entity)
           .obContext(OBContext.getOBContext())
           .build();
 
@@ -261,6 +264,7 @@ public class NeoServlet extends HttpBaseServlet {
                 .requestBody(new JSONObject(bodyStr))
                 .queryParams(neoContext.getQueryParams())
                 .adTab(neoContext.getAdTab())
+                .sfEntity(neoContext.getSfEntity())
                 .obContext(neoContext.getObContext())
                 .build();
           }
@@ -481,6 +485,10 @@ public class NeoServlet extends HttpBaseServlet {
       String dalEntityName = adTab.getTable().getName();
       DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
 
+      // Build field filter from ETGO_SF_FIELD configuration (cached for this request)
+      NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(
+          context.getSfEntity(), dalEntityName);
+
       Map<String, String> params = new HashMap<>();
       params.put(JsonConstants.ENTITYNAME, dalEntityName);
       params.put(JsonConstants.TAB_PARAMETER, adTab.getId());
@@ -537,13 +545,19 @@ public class NeoServlet extends HttpBaseServlet {
         case "GET":
           result = jsonService.fetch(params);
           break;
-        case "POST":
-          result = jsonService.add(params, context.getRequestBody().toString());
+        case "POST": {
+          // Filter out non-included and read-only fields from request body
+          JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
+          result = jsonService.add(params, filteredBody != null ? filteredBody.toString() : "{}");
           break;
+        }
         case "PUT":
-        case "PATCH":
-          result = jsonService.update(params, context.getRequestBody().toString());
+        case "PATCH": {
+          // Filter out non-included and read-only fields from request body
+          JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
+          result = jsonService.update(params, filteredBody != null ? filteredBody.toString() : "{}");
           break;
+        }
         case "DELETE":
           result = jsonService.remove(params);
           break;
@@ -552,7 +566,14 @@ public class NeoServlet extends HttpBaseServlet {
               "Unsupported method: " + context.getHttpMethod());
       }
 
-      return NeoResponse.ok(new JSONObject(result));
+      JSONObject responseJson = new JSONObject(result);
+
+      // Filter GET response to only include configured fields
+      if ("GET".equals(context.getHttpMethod())) {
+        fieldFilter.filterGetResponse(responseJson);
+      }
+
+      return NeoResponse.ok(responseJson);
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
@@ -834,9 +855,21 @@ public class NeoServlet extends HttpBaseServlet {
       String search = request.getParameter("q");
       int limit = parseIntParam(request, "limit", 20);
       int offset = parseIntParam(request, "offset", 0);
+
+      // Collect context params (all query params except q, limit, offset)
+      Map<String, String> contextParams = new HashMap<>();
+      Enumeration<String> paramNames = request.getParameterNames();
+      while (paramNames.hasMoreElements()) {
+        String paramName = paramNames.nextElement();
+        if (!"q".equals(paramName) && !"limit".equals(paramName)
+            && !"offset".equals(paramName)) {
+          contextParams.put(paramName, request.getParameter(paramName));
+        }
+      }
+
       selectorResponse = NeoSelectorService.querySelector(
           specId, pathInfo.entityName, pathInfo.selectorField,
-          search, limit, offset);
+          search, limit, offset, contextParams);
     }
     writeResponse(response, selectorResponse);
   }
@@ -1087,6 +1120,11 @@ public class NeoServlet extends HttpBaseServlet {
       fieldObj.put("hasSelector", hasSelector);
       if (hasSelector) {
         fieldObj.put("selectorType", mapSelectorType(refId));
+        // Extract dependent params from column's validation rule
+        JSONArray selectorParams = extractValidationParams(column);
+        if (selectorParams.length() > 0) {
+          fieldObj.put("selectorParams", selectorParams);
+        }
       }
 
       arr.put(fieldObj);
@@ -1104,6 +1142,30 @@ public class NeoServlet extends HttpBaseServlet {
 
   private boolean isSelectorReference(String refId) {
     return refId != null && SELECTOR_REFS.contains(refId);
+  }
+
+  private static final Pattern VALIDATION_PARAM_PATTERN = Pattern.compile("@(\\w+)@");
+
+  /**
+   * Extract parameter names from a column's validation rule.
+   * Validation rules use @ColumnName@ as placeholders for dependent fields.
+   */
+  private JSONArray extractValidationParams(Column column) {
+    JSONArray params = new JSONArray();
+    org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
+    if (valRule == null || valRule.getValidationCode() == null) {
+      return params;
+    }
+    Set<String> seen = new HashSet<>();
+    Matcher m = VALIDATION_PARAM_PATTERN.matcher(valRule.getValidationCode());
+    while (m.find()) {
+      String param = m.group(1);
+      if (!seen.contains(param)) {
+        params.put(param);
+        seen.add(param);
+      }
+    }
+    return params;
   }
 
   private String mapSelectorType(String refId) {
