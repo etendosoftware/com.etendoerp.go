@@ -49,7 +49,7 @@ public class SFUpsertField extends BaseWebhookService {
         field.setActive(true);
         field.setCreatedBy(OBContext.getOBContext().getUser());
         field.setUpdatedBy(OBContext.getOBContext().getUser());
-        field.setCreated(new Date());
+        field.setCreationDate(new Date());
         field.setUpdated(new Date());
         field.setIncluded(true);
         field.setReadOnly(false);

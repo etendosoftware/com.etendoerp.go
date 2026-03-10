@@ -61,21 +61,21 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="SEQNO" primaryKey="false" required="false" type="INTEGER" autoIncrement="false">
+      <column name="SEQNO" primaryKey="false" required="false" type="DECIMAL" size="10,0" autoIncrement="false">
         <default><![CDATA[10]]></default>
         <onCreateDefault/>
       </column>
-      <foreign-key foreignTable="ETGO_SF_ENTITY" name="ETGO_SF_FLD_ENT_FK">
-        <reference local="ETGO_SF_ENTITY_ID" foreign="ETGO_SF_ENTITY_ID"/>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_SF_FLD_CLI_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
       <foreign-key foreignTable="AD_COLUMN" name="ETGO_SF_FLD_COL_FK">
         <reference local="AD_COLUMN_ID" foreign="AD_COLUMN_ID"/>
       </foreign-key>
+      <foreign-key foreignTable="ETGO_SF_ENTITY" name="ETGO_SF_FLD_ENT_FK">
+        <reference local="ETGO_SF_ENTITY_ID" foreign="ETGO_SF_ENTITY_ID"/>
+      </foreign-key>
       <foreign-key foreignTable="AD_MODULE" name="ETGO_SF_FLD_MOD_FK">
         <reference local="AD_MODULE_ID" foreign="AD_MODULE_ID"/>
-      </foreign-key>
-      <foreign-key foreignTable="AD_CLIENT" name="ETGO_SF_FLD_CLI_FK">
-        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
       <foreign-key foreignTable="AD_ORG" name="ETGO_SF_FLD_ORG_FK">
         <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>

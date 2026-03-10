@@ -81,32 +81,32 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="SEQNO" primaryKey="false" required="false" type="INTEGER" autoIncrement="false">
+      <column name="SEQNO" primaryKey="false" required="false" type="DECIMAL" size="10,0" autoIncrement="false">
         <default><![CDATA[10]]></default>
         <onCreateDefault/>
       </column>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_SF_ENT_CLI_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_MODULE" name="ETGO_SF_ENT_MOD_FK">
+        <reference local="AD_MODULE_ID" foreign="AD_MODULE_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_SF_ENT_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
       <foreign-key foreignTable="ETGO_SF_SPEC" name="ETGO_SF_ENT_SPEC_FK">
         <reference local="ETGO_SF_SPEC_ID" foreign="ETGO_SF_SPEC_ID"/>
       </foreign-key>
       <foreign-key foreignTable="AD_TAB" name="ETGO_SF_ENT_TAB_FK">
         <reference local="AD_TAB_ID" foreign="AD_TAB_ID"/>
       </foreign-key>
-      <foreign-key foreignTable="AD_MODULE" name="ETGO_SF_ENT_MOD_FK">
-        <reference local="AD_MODULE_ID" foreign="AD_MODULE_ID"/>
-      </foreign-key>
-      <foreign-key foreignTable="AD_CLIENT" name="ETGO_SF_ENT_CLI_FK">
-        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
-      </foreign-key>
-      <foreign-key foreignTable="AD_ORG" name="ETGO_SF_ENT_ORG_FK">
-        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
-      </foreign-key>
       <check name="ETGO_SF_ENT_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
-      <check name="ETGO_SF_ENT_ISINCL"><![CDATA[ISINCLUDED IN ('Y', 'N')]]></check>
+      <check name="ETGO_SF_ENT_ISDEL"><![CDATA[ISDELETE IN ('Y', 'N')]]></check>
       <check name="ETGO_SF_ENT_ISGET"><![CDATA[ISGET IN ('Y', 'N')]]></check>
       <check name="ETGO_SF_ENT_ISGETBI"><![CDATA[ISGETBYID IN ('Y', 'N')]]></check>
+      <check name="ETGO_SF_ENT_ISINCL"><![CDATA[ISINCLUDED IN ('Y', 'N')]]></check>
+      <check name="ETGO_SF_ENT_ISPATCH"><![CDATA[ISPATCH IN ('Y', 'N')]]></check>
       <check name="ETGO_SF_ENT_ISPOST"><![CDATA[ISPOST IN ('Y', 'N')]]></check>
       <check name="ETGO_SF_ENT_ISPUT"><![CDATA[ISPUT IN ('Y', 'N')]]></check>
-      <check name="ETGO_SF_ENT_ISPATCH"><![CDATA[ISPATCH IN ('Y', 'N')]]></check>
-      <check name="ETGO_SF_ENT_ISDEL"><![CDATA[ISDELETE IN ('Y', 'N')]]></check>
     </table>
   </database>

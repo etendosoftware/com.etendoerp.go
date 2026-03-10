@@ -23,6 +23,9 @@ import org.openbravo.model.ad.domain.ReferencedTable;
 import org.openbravo.userinterface.selector.Selector;
 import org.openbravo.userinterface.selector.SelectorField;
 
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFField;
+
 /**
  * Generic dynamic selector service for FK fields.
  *
@@ -56,22 +59,22 @@ public class NeoSelectorService {
   public static NeoResponse listSelectors(String specId, String entityName) {
     try {
       // Find the entity record
-      BaseOBObject entity = findEntity(specId, entityName);
+      SFEntity entity = findEntity(specId, entityName);
       if (entity == null) {
         return NeoResponse.error(404, "Entity not found: " + entityName);
       }
 
       // Find all included fields for this entity
-      OBCriteria<BaseOBObject> fieldCrit = OBDal.getInstance().createCriteria("ETGO_SF_Field");
-      fieldCrit.add(Restrictions.eq("etgoSfEntity.id", entity.getId()));
-      fieldCrit.add(Restrictions.eq("active", true));
-      fieldCrit.add(Restrictions.eq("included", true));
-      fieldCrit.addOrderBy("sequenceNumber", true);
-      List<BaseOBObject> fields = fieldCrit.list();
+      OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
+      fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entity.getId()));
+      fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
+      fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
+      fieldCrit.addOrderBy(SFField.PROPERTY_SEQNO, true);
+      List<SFField> fields = fieldCrit.list();
 
       JSONArray selectors = new JSONArray();
-      for (BaseOBObject field : fields) {
-        Column column = resolveColumn(field);
+      for (SFField field : fields) {
+        Column column = field.getADColumn();
         if (column == null) {
           continue;
         }
@@ -139,20 +142,19 @@ public class NeoSelectorService {
       }
 
       // Find the entity
-      BaseOBObject entity = findEntity(specId, entityName);
+      SFEntity entity = findEntity(specId, entityName);
       if (entity == null) {
         return NeoResponse.error(404, "Entity not found: " + entityName);
       }
 
       // Find the specific field by column name
-      BaseOBObject sfField = findFieldByColumnName(
-          (String) entity.getId(), columnName);
+      SFField sfField = findFieldByColumnName(entity.getId(), columnName);
       if (sfField == null) {
         return NeoResponse.error(404,
             "Field not found or not included: " + columnName);
       }
 
-      Column column = resolveColumn(sfField);
+      Column column = sfField.getADColumn();
       if (column == null) {
         return NeoResponse.error(500,
             "Could not resolve AD_Column for field: " + columnName);
@@ -205,7 +207,8 @@ public class NeoSelectorService {
           .append(") LIKE :search");
     }
 
-    String whereStr = hql.length() > 0 ? hql.toString() : null;
+    // Prefix with alias "as e" so OBQuery registers the entity alias
+    String whereStr = hql.length() > 0 ? "as e where " + hql.toString() : "as e";
 
     // Count query
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
@@ -218,7 +221,7 @@ public class NeoSelectorService {
 
     // Data query with ordering and pagination
     String orderBy = " ORDER BY e." + meta.displayProperty;
-    String dataWhere = whereStr != null ? whereStr + orderBy : orderBy;
+    String dataWhere = whereStr + orderBy;
 
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance()
         .createQuery(meta.entityName, dataWhere);
@@ -284,7 +287,8 @@ public class NeoSelectorService {
       hql.append(")");
     }
 
-    String whereStr = hql.length() > 0 ? hql.toString() : null;
+    // Prefix with alias "as e" so OBQuery registers the entity alias
+    String whereStr = hql.length() > 0 ? "as e where " + hql.toString() : "as e";
 
     // Count query
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
@@ -297,7 +301,7 @@ public class NeoSelectorService {
 
     // Data query with ordering and pagination
     String orderBy = " ORDER BY e." + meta.displayProperty;
-    String dataWhere = whereStr != null ? whereStr + orderBy : orderBy;
+    String dataWhere = whereStr + orderBy;
 
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance()
         .createQuery(meta.entityName, dataWhere);
@@ -396,49 +400,30 @@ public class NeoSelectorService {
 
   // ---- Resolution helpers ----
 
-  @SuppressWarnings("unchecked")
-  private static BaseOBObject findEntity(String specId, String entityName) {
-    OBCriteria<BaseOBObject> criteria = OBDal.getInstance()
-        .createCriteria("ETGO_SF_Entity");
-    criteria.add(Restrictions.eq("etgoSfSpec.id", specId));
-    criteria.add(Restrictions.eq("name", entityName));
-    criteria.add(Restrictions.eq("active", true));
-    criteria.add(Restrictions.eq("included", true));
+  private static SFEntity findEntity(String specId, String entityName) {
+    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_NAME, entityName));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
     criteria.setMaxResults(1);
-    List<BaseOBObject> results = criteria.list();
+    List<SFEntity> results = criteria.list();
     return results.isEmpty() ? null : results.get(0);
   }
 
-  @SuppressWarnings("unchecked")
-  private static BaseOBObject findFieldByColumnName(String entityId,
+  private static SFField findFieldByColumnName(String entityId,
       String columnName) {
-    OBCriteria<BaseOBObject> criteria = OBDal.getInstance()
-        .createCriteria("ETGO_SF_Field");
-    criteria.add(Restrictions.eq("etgoSfEntity.id", entityId));
-    criteria.add(Restrictions.eq("active", true));
-    criteria.add(Restrictions.eq("included", true));
-    criteria.createAlias("column", "col");
-    criteria.add(Restrictions.eq("col.dBColumnName", columnName));
+    OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
+    criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
+    criteria.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
+    criteria.createAlias(SFField.PROPERTY_ADCOLUMN, "col");
+    criteria.add(Restrictions.eq("col." + Column.PROPERTY_DBCOLUMNNAME, columnName));
     criteria.setMaxResults(1);
-    List<BaseOBObject> results = criteria.list();
+    List<SFField> results = criteria.list();
     return results.isEmpty() ? null : results.get(0);
   }
 
-  private static Column resolveColumn(BaseOBObject sfField) {
-    try {
-      Object colRef = sfField.get("column");
-      if (colRef instanceof Column) {
-        return (Column) colRef;
-      }
-      if (colRef instanceof BaseOBObject) {
-        String colId = (String) ((BaseOBObject) colRef).getId();
-        return OBDal.getInstance().get(Column.class, colId);
-      }
-    } catch (Exception e) {
-      log.warn("Could not resolve column from field: {}", e.getMessage());
-    }
-    return null;
-  }
 
   /**
    * Get the base reference ID (18, 19, or 30) checking parent references.

@@ -49,7 +49,7 @@ public class SFUpsertEntity extends BaseWebhookService {
         entity.setActive(true);
         entity.setCreatedBy(OBContext.getOBContext().getUser());
         entity.setUpdatedBy(OBContext.getOBContext().getUser());
-        entity.setCreated(new Date());
+        entity.setCreationDate(new Date());
         entity.setUpdated(new Date());
         entity.setIncluded(true);
         entity.setGet(false);

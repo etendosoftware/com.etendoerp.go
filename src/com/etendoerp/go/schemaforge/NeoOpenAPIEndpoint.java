@@ -6,11 +6,12 @@ import java.util.List;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
-import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.openapi.model.OpenAPIEndpoint;
 
 import io.swagger.v3.oas.models.OpenAPI;
@@ -47,7 +48,6 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
   }
 
   @Override
-  @SuppressWarnings("unchecked")
   public void add(OpenAPI openAPI) {
     try {
       OBContext.setAdminMode();
@@ -66,13 +66,13 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
           .description("NEO Headless 2.0 endpoints for SchemaForge specs"));
 
       // Query all active specs
-      OBCriteria<BaseOBObject> specCriteria = OBDal.getInstance().createCriteria("ETGO_SF_Spec");
-      specCriteria.add(Restrictions.eq("isActive", true));
-      List<BaseOBObject> specs = specCriteria.list();
+      OBCriteria<SFSpec> specCriteria = OBDal.getInstance().createCriteria(SFSpec.class);
+      specCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+      List<SFSpec> specs = specCriteria.list();
 
-      for (BaseOBObject spec : specs) {
-        String specName = (String) spec.get("name");
-        String specType = (String) spec.get("specType");
+      for (SFSpec spec : specs) {
+        String specName = spec.getName();
+        String specType = spec.getSpecType();
 
         if (specName == null) {
           continue;
@@ -135,19 +135,18 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
   /**
    * Add OpenAPI paths for a window-type spec, iterating its included entities.
    */
-  @SuppressWarnings("unchecked")
-  private void addWindowPaths(OpenAPI openAPI, BaseOBObject spec, String specName) {
-    String specId = (String) spec.getId();
+  private void addWindowPaths(OpenAPI openAPI, SFSpec spec, String specName) {
+    String specId = spec.getId();
 
     // Query active, included entities for this spec
-    OBCriteria<BaseOBObject> entityCriteria = OBDal.getInstance().createCriteria("ETGO_SF_Entity");
-    entityCriteria.add(Restrictions.eq("eTGOSFSpec.id", specId));
-    entityCriteria.add(Restrictions.eq("isActive", true));
-    entityCriteria.add(Restrictions.eq("isIncluded", true));
-    List<BaseOBObject> entities = entityCriteria.list();
+    OBCriteria<SFEntity> entityCriteria = OBDal.getInstance().createCriteria(SFEntity.class);
+    entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
+    entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
+    entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
+    List<SFEntity> entities = entityCriteria.list();
 
-    for (BaseOBObject entity : entities) {
-      String entityName = (String) entity.get("name");
+    for (SFEntity entity : entities) {
+      String entityName = entity.getName();
       if (entityName == null) {
         continue;
       }
@@ -162,17 +161,17 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
    * Add CRUD paths (GET list, GET by ID, POST, PUT, PATCH, DELETE) based on entity flags.
    */
   private void addCrudPaths(OpenAPI openAPI, String specName, String entityName,
-      BaseOBObject entity) {
+      SFEntity entity) {
 
     String listPath = BASE_PATH + specName + "/" + entityName;
     String itemPath = BASE_PATH + specName + "/" + entityName + "/{id}";
 
-    boolean isGet = Boolean.TRUE.equals(entity.get("get"));
-    boolean isPost = Boolean.TRUE.equals(entity.get("post"));
-    boolean isGetById = Boolean.TRUE.equals(entity.get("getByID"));
-    boolean isPut = Boolean.TRUE.equals(entity.get("put"));
-    boolean isPatch = Boolean.TRUE.equals(entity.get("patch"));
-    boolean isDelete = Boolean.TRUE.equals(entity.get("delete"));
+    boolean isGet = Boolean.TRUE.equals(entity.isGet());
+    boolean isPost = Boolean.TRUE.equals(entity.isPost());
+    boolean isGetById = Boolean.TRUE.equals(entity.isGetByID());
+    boolean isPut = Boolean.TRUE.equals(entity.isPut());
+    boolean isPatch = Boolean.TRUE.equals(entity.isPatch());
+    boolean isDelete = Boolean.TRUE.equals(entity.isDelete());
 
     // List path (GET list, POST create)
     if (isGet || isPost) {

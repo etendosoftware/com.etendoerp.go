@@ -26,7 +26,6 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
-import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.client.application.ApplicationUtils;
 import org.openbravo.client.kernel.KernelUtils;
@@ -38,11 +37,12 @@ import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.ad.module.Module;
 import org.openbravo.model.ad.ui.Window;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
-import com.etendoerp.etendorx.services.DataSourceServlet;
-import com.etendoerp.etendorx.services.wrapper.EtendoRequestWrapper;
+import org.openbravo.service.json.DefaultJsonDataService;
+import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -144,7 +144,7 @@ public class NeoServlet extends HttpBaseServlet {
       }
 
       // Handle process specs (specType = "P")
-      String specType = (String) spec.get(SFSpec.PROPERTY_SPECTYPE);
+      String specType = spec.getSpecType();
       if ("P".equals(specType)) {
         // Check process access
         Process adProcessForAccess = resolveProcess(spec);
@@ -174,17 +174,9 @@ public class NeoServlet extends HttpBaseServlet {
       }
 
       // Check window access
-      Object windowRef = spec.get(SFSpec.PROPERTY_ADWINDOW);
-      if (windowRef != null) {
-        String windowId;
-        if (windowRef instanceof Window) {
-          windowId = ((Window) windowRef).getId();
-        } else if (windowRef instanceof BaseOBObject) {
-          windowId = (String) ((BaseOBObject) windowRef).getId();
-        } else {
-          windowId = windowRef.toString();
-        }
-        if (!hasWindowAccess(windowId)) {
+      Window window = spec.getADWindow();
+      if (window != null) {
+        if (!hasWindowAccess(window.getId())) {
           sendError(response, HttpServletResponse.SC_FORBIDDEN,
               "Access denied to window for current role");
           return;
@@ -279,7 +271,7 @@ public class NeoServlet extends HttpBaseServlet {
       }
 
       // 4. Check for hooks via Java_Qualifier on entity
-      String javaQualifier = (String) entity.get(SFEntity.PROPERTY_JAVAQUALIFIER);
+      String javaQualifier = entity.getJavaQualifier();
 
       NeoResponse neoResponse;
       if (StringUtils.isNotBlank(javaQualifier)) {
@@ -288,7 +280,7 @@ public class NeoServlet extends HttpBaseServlet {
         neoResponse = handleDefault(neoContext, request, response);
       }
 
-      // 5. Write response (null means DataSourceServlet already wrote it)
+      // 5. Write response
       if (neoResponse != null) {
         writeResponse(response, neoResponse);
       }
@@ -402,16 +394,16 @@ public class NeoServlet extends HttpBaseServlet {
   private boolean isMethodEnabled(SFEntity entity, String method) {
     switch (method) {
       case "GET":
-        return Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_GET))
-            || Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_GETBYID));
+        return Boolean.TRUE.equals(entity.isGet())
+            || Boolean.TRUE.equals(entity.isGetByID());
       case "POST":
-        return Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_POST));
+        return Boolean.TRUE.equals(entity.isPost());
       case "PUT":
-        return Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_PUT));
+        return Boolean.TRUE.equals(entity.isPut());
       case "PATCH":
-        return Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_PATCH));
+        return Boolean.TRUE.equals(entity.isPatch());
       case "DELETE":
-        return Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_DELETE));
+        return Boolean.TRUE.equals(entity.isDelete());
       default:
         return false;
     }
@@ -421,19 +413,7 @@ public class NeoServlet extends HttpBaseServlet {
    * Get the AD_Tab linked to the entity.
    */
   private Tab getAdTab(SFEntity entity) {
-    try {
-      Object tabRef = entity.get(SFEntity.PROPERTY_ADTAB);
-      if (tabRef instanceof Tab) {
-        return (Tab) tabRef;
-      }
-      if (tabRef instanceof BaseOBObject) {
-        String tabId = (String) ((BaseOBObject) tabRef).getId();
-        return OBDal.getInstance().get(Tab.class, tabId);
-      }
-    } catch (Exception e) {
-      log.warn("Could not resolve AD_Tab from entity: {}", e.getMessage());
-    }
-    return null;
+    return entity.getADTab();
   }
 
   private Map<String, String> extractQueryParams(HttpServletRequest request) {
@@ -492,33 +472,87 @@ public class NeoServlet extends HttpBaseServlet {
   private NeoResponse handleDefault(NeoContext context, HttpServletRequest request,
       HttpServletResponse response) {
     try {
-      DataSourceServlet dsServlet = new DataSourceServlet();
-      String path = "/" + context.getEntityName();
-      if (context.getRecordId() != null) {
-        path += "/" + context.getRecordId();
+      Tab adTab = context.getAdTab();
+      if (adTab == null) {
+        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "No AD_Tab linked to entity: " + context.getEntityName());
       }
 
-      // Wrap request with tab filters (where clause and parent entity filtering)
-      HttpServletRequest wrappedRequest = wrapWithTabFilters(request, context);
+      String dalEntityName = adTab.getTable().getName();
+      DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
 
+      Map<String, String> params = new HashMap<>();
+      params.put(JsonConstants.ENTITYNAME, dalEntityName);
+      params.put(JsonConstants.TAB_PARAMETER, adTab.getId());
+      params.put(JsonConstants.WINDOW_ID, adTab.getWindow().getId());
+      params.put(JsonConstants.NO_ACTIVE_FILTER, "true");
+
+      if (context.getRecordId() != null) {
+        params.put(JsonConstants.ID, context.getRecordId());
+      }
+
+      // Copy query params (filters, pagination, sorting)
+      if (context.getQueryParams() != null) {
+        for (Map.Entry<String, String> entry : context.getQueryParams().entrySet()) {
+          params.put(entry.getKey(), entry.getValue());
+        }
+      }
+
+      // Build where clause: tab's own HQL + parent filter for child tabs
+      StringBuilder whereClause = new StringBuilder();
+
+      String tabWhere = adTab.getHqlwhereclause();
+      if (StringUtils.isNotBlank(tabWhere)) {
+        whereClause.append("(").append(tabWhere).append(")");
+      }
+
+      String parentId = context.getQueryParams() != null
+          ? context.getQueryParams().get("parentId")
+          : null;
+      if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
+        String parentFilter = buildParentWhereClause(adTab, parentId);
+        if (StringUtils.isNotBlank(parentFilter)) {
+          if (whereClause.length() > 0) {
+            whereClause.append(" and ");
+          }
+          whereClause.append("(").append(parentFilter).append(")");
+        }
+      }
+
+      if (whereClause.length() > 0) {
+        params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause.toString());
+        params.put(JsonConstants.USE_ALIAS, "true");
+      }
+
+      // Set pagination defaults if not provided
+      if (!params.containsKey(JsonConstants.STARTROW_PARAMETER)) {
+        params.put(JsonConstants.STARTROW_PARAMETER, "0");
+      }
+      if (!params.containsKey(JsonConstants.ENDROW_PARAMETER)) {
+        params.put(JsonConstants.ENDROW_PARAMETER, "100");
+      }
+
+      String result;
       switch (context.getHttpMethod()) {
         case "GET":
-          dsServlet.doGet(path, wrappedRequest, response);
-          return null;
+          result = jsonService.fetch(params);
+          break;
         case "POST":
-          dsServlet.doPost(path, wrappedRequest, response);
-          return null;
+          result = jsonService.add(params, context.getRequestBody().toString());
+          break;
         case "PUT":
         case "PATCH":
-          dsServlet.doPut(path, wrappedRequest, response);
-          return null;
+          result = jsonService.update(params, context.getRequestBody().toString());
+          break;
         case "DELETE":
-          dsServlet.doDelete(path, wrappedRequest, response);
-          return null;
+          result = jsonService.remove(params);
+          break;
         default:
           return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
               "Unsupported method: " + context.getHttpMethod());
       }
+
+      return NeoResponse.ok(new JSONObject(result));
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
@@ -526,97 +560,33 @@ public class NeoServlet extends HttpBaseServlet {
   }
 
   /**
-   * Wraps the original request to inject tab-level filtering parameters that
-   * the internal DataSourceServlet expects:
-   * <ul>
-   *   <li>{@code tabId} and {@code windowId} - enables the DataSourceServlet to
-   *       automatically apply the tab's HQL where clause.</li>
-   *   <li>{@code whereAndFilterClause} - adds parent entity filtering for child tabs
-   *       (tabLevel > 0) when a {@code parentId} query parameter is provided.</li>
-   * </ul>
-   *
-   * @param original the original HTTP request
-   * @param context  the NeoContext with tab and query param information
-   * @return a wrapped request with additional parameters, or the original if no tab is available
+   * Build the tab-level where clause, including the tab's own HQL filter
+   * and parent entity filtering for child tabs when parentId is provided.
    */
-  HttpServletRequest wrapWithTabFilters(HttpServletRequest original, NeoContext context) {
-    Tab adTab = context.getAdTab();
-    if (adTab == null) {
-      return original;
-    }
-
-    Map<String, String[]> extraParams = new HashMap<>();
-
-    // Always pass tabId and windowId so the internal DataSourceServlet can resolve
-    // the tab's HQL where clause and apply window-level security
-    extraParams.put("tabId", new String[]{ adTab.getId() });
-    if (adTab.getWindow() != null) {
-      extraParams.put("windowId", new String[]{ adTab.getWindow().getId() });
-    }
-
-    // For child tabs (tabLevel > 0), apply parent entity filtering
-    // when the caller provides a parentId query parameter
-    String parentId = context.getQueryParams() != null
-        ? context.getQueryParams().get("parentId")
-        : null;
-
-    if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0
-        && !adTab.isDisableParentKeyProperty()) {
-      String parentWhereClause = buildParentWhereClause(adTab, parentId);
-      if (parentWhereClause != null) {
-        extraParams.put("whereAndFilterClause", new String[]{ parentWhereClause });
-        log.debug("Applied parent filter for tab '{}': {}", adTab.getName(), parentWhereClause);
-      }
-    }
-
-    try {
-      return new EtendoRequestWrapper(original, original.getRequestURI(), "", extraParams);
-    } catch (IOException e) {
-      log.warn("Could not create request wrapper, using original request: {}", e.getMessage());
-      return original;
-    }
-  }
-
   /**
    * Builds an HQL where clause fragment that filters a child tab's records
    * by the parent record ID.
-   *
-   * Uses {@link KernelUtils#getParentTab(Tab)} to find the parent tab, then
-   * {@link ApplicationUtils#getParentProperty(Tab, Tab)} to determine the
-   * FK property name that links child to parent.
-   *
-   * @param childTab the child tab (tabLevel > 0)
-   * @param parentId the parent record ID to filter by
-   * @return an HQL clause like {@code e.salesOrder.id='ABC123'}, or null if
-   *         the parent relationship cannot be determined
    */
-  String buildParentWhereClause(Tab childTab, String parentId) {
+  private String buildParentWhereClause(Tab childTab, String parentId) {
     try {
       Tab parentTab = KernelUtils.getInstance().getParentTab(childTab);
       if (parentTab == null) {
-        log.debug("No parent tab found for tab '{}' (tabLevel={})",
-            childTab.getName(), childTab.getTabLevel());
         return null;
       }
 
       String parentProperty = ApplicationUtils.getParentProperty(childTab, parentTab);
       if (StringUtils.isBlank(parentProperty)) {
-        log.warn("Could not determine parent property for tab '{}' -> parent tab '{}'",
-            childTab.getName(), parentTab.getName());
         return null;
       }
 
-      // Determine if the parent property is a primitive (e.g. ID column) or an entity reference
       Entity childEntity = ModelProvider.getInstance()
           .getEntityByTableId(childTab.getTable().getId());
       Property prop = childEntity.getProperty(parentProperty);
 
       if (prop != null && !prop.isPrimitive()) {
-        // Entity reference: filter by e.parentProp.id = 'parentId'
-        return "e." + parentProperty + ".id='" + parentId + "'";
+        return "e." + parentProperty + ".id='" + parentId.replace("'", "''") + "'";
       } else {
-        // Primitive (rare): filter by e.parentProp = 'parentId'
-        return "e." + parentProperty + "='" + parentId + "'";
+        return "e." + parentProperty + "='" + parentId.replace("'", "''") + "'";
       }
     } catch (Exception e) {
       log.error("Error building parent where clause for tab '{}': {}",
@@ -629,15 +599,7 @@ public class NeoServlet extends HttpBaseServlet {
    * Resolve the AD_Process linked to a process-type spec.
    */
   private Process resolveProcess(SFSpec spec) {
-    Object processRef = spec.get(SFSpec.PROPERTY_PROCESS);
-    if (processRef instanceof Process) {
-      return (Process) processRef;
-    }
-    if (processRef instanceof BaseOBObject) {
-      String processId = (String) ((BaseOBObject) processRef).getId();
-      return OBDal.getInstance().get(Process.class, processId);
-    }
-    return null;
+    return spec.getProcess();
   }
 
   /**
@@ -665,7 +627,7 @@ public class NeoServlet extends HttpBaseServlet {
       NeoResponse result = NeoProcessService.executeProcess(adProcess, requestBody);
       writeResponse(response, result);
     } catch (Exception e) {
-      log.error("Error executing process spec '{}': {}", spec.get(SFSpec.PROPERTY_NAME), e.getMessage(), e);
+      log.error("Error executing process spec '{}': {}", spec.getName(), e.getMessage(), e);
       sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Process execution error: " + e.getMessage());
     }
@@ -722,13 +684,7 @@ public class NeoServlet extends HttpBaseServlet {
 
         JSONArray actions = new JSONArray();
         for (SFField field : fields) {
-          Object colRef = field.get(SFField.PROPERTY_ADCOLUMN);
-          Column column = null;
-          if (colRef instanceof Column) {
-            column = (Column) colRef;
-          } else if (colRef instanceof BaseOBObject) {
-            column = OBDal.getInstance().get(Column.class, (String) ((BaseOBObject) colRef).getId());
-          }
+          Column column = field.getADColumn();
           if (column == null) {
             continue;
           }
@@ -741,7 +697,7 @@ public class NeoServlet extends HttpBaseServlet {
 
           // Check if column has a process linked
           Process classicProcess = column.getProcess();
-          Object obuiappProcess = column.get("oBUIAPPProcess");
+          Object obuiappProcess = column.getOBUIAPPProcess();
 
           if (classicProcess == null && obuiappProcess == null) {
             continue;
@@ -751,9 +707,10 @@ public class NeoServlet extends HttpBaseServlet {
           actionObj.put("columnName", column.getDBColumnName());
           if (obuiappProcess != null) {
             actionObj.put("processType", "OBUIAPP");
-            BaseOBObject obuiProc = (BaseOBObject) obuiappProcess;
-            Object procName = obuiProc.get("name");
-            actionObj.put("processName", procName != null ? procName.toString() : "");
+            org.openbravo.client.application.Process obuiProc =
+                (org.openbravo.client.application.Process) obuiappProcess;
+            String procName = obuiProc.getName();
+            actionObj.put("processName", procName != null ? procName : "");
           } else {
             actionObj.put("processType", "Classic");
             actionObj.put("processName",
@@ -779,14 +736,7 @@ public class NeoServlet extends HttpBaseServlet {
 
         Column targetColumn = null;
         for (SFField field : fields) {
-          Object colRef = field.get(SFField.PROPERTY_ADCOLUMN);
-          Column column = null;
-          if (colRef instanceof Column) {
-            column = (Column) colRef;
-          } else if (colRef instanceof BaseOBObject) {
-            column = OBDal.getInstance().get(Column.class,
-                (String) ((BaseOBObject) colRef).getId());
-          }
+          Column column = field.getADColumn();
           if (column != null && pathInfo.actionName.equals(column.getDBColumnName())) {
             targetColumn = column;
             break;
@@ -809,8 +759,8 @@ public class NeoServlet extends HttpBaseServlet {
 
         // Resolve process: prefer OBUIAPP, fall back to classic
         Process adProcess = null;
-        Object obuiappProcess = targetColumn.get("oBUIAPPProcess");
-        if (obuiappProcess instanceof BaseOBObject) {
+        org.openbravo.client.application.Process obuiappProcess = targetColumn.getOBUIAPPProcess();
+        if (obuiappProcess != null) {
           // OBUIAPP processes are a different class, but NeoProcessService expects
           // org.openbravo.model.ad.ui.Process. Look up the classic process ID from OBUIAPP.
           // Actually, check if there's a classic process first.
@@ -948,13 +898,13 @@ public class NeoServlet extends HttpBaseServlet {
 
       JSONArray specsArray = new JSONArray();
       for (SFSpec spec : allSpecs) {
-        String specType = (String) spec.get(SFSpec.PROPERTY_SPECTYPE);
-        String specName = (String) spec.get(SFSpec.PROPERTY_NAME);
+        String specType = spec.getSpecType();
+        String specName = spec.getName();
 
         // Check access
+        Window specWindow = spec.getADWindow();
         if ("W".equals(specType)) {
-          String windowId = resolveObjectId(spec.get(SFSpec.PROPERTY_ADWINDOW));
-          if (windowId != null && !hasWindowAccess(windowId)) {
+          if (specWindow != null && !hasWindowAccess(specWindow.getId())) {
             continue;
           }
         } else if ("P".equals(specType)) {
@@ -968,12 +918,11 @@ public class NeoServlet extends HttpBaseServlet {
         specObj.put("id", spec.getId());
         specObj.put("name", specName);
         specObj.put("type", specType);
-        specObj.put("description", spec.get(SFSpec.PROPERTY_DESCRIPTION));
+        specObj.put("description", spec.getDescription());
 
         // Include window/process IDs for management
         if ("W".equals(specType)) {
-          String windowId = resolveObjectId(spec.get(SFSpec.PROPERTY_ADWINDOW));
-          if (windowId != null) specObj.put("windowId", windowId);
+          if (specWindow != null) specObj.put("windowId", specWindow.getId());
           specObj.put("entities", buildEntitySummaryArray(spec.getId()));
         } else if ("P".equals(specType)) {
           Process adProcess = resolveProcess(spec);
@@ -981,8 +930,8 @@ public class NeoServlet extends HttpBaseServlet {
         }
 
         // Module ID
-        String moduleId = resolveObjectId(spec.get(SFSpec.PROPERTY_ADMODULE));
-        if (moduleId != null) specObj.put("moduleId", moduleId);
+        Module specModule = spec.getADModule();
+        if (specModule != null) specObj.put("moduleId", specModule.getId());
 
         specsArray.put(specObj);
       }
@@ -1004,21 +953,21 @@ public class NeoServlet extends HttpBaseServlet {
       throws IOException {
     try {
       String specId = spec.getId();
-      String specType = (String) spec.get(SFSpec.PROPERTY_SPECTYPE);
+      String specType = spec.getSpecType();
 
       JSONObject result = new JSONObject();
       result.put("id", spec.getId());
-      result.put("name", spec.get(SFSpec.PROPERTY_NAME));
+      result.put("name", spec.getName());
       result.put("type", specType);
-      result.put("description", spec.get(SFSpec.PROPERTY_DESCRIPTION));
-      String moduleId = resolveObjectId(spec.get(SFSpec.PROPERTY_ADMODULE));
-      if (moduleId != null) result.put("moduleId", moduleId);
+      result.put("description", spec.getDescription());
+      Module specModule = spec.getADModule();
+      if (specModule != null) result.put("moduleId", specModule.getId());
 
       // Query entities for this spec
       OBCriteria<SFEntity> entityCriteria = OBDal.getInstance()
           .createCriteria(SFEntity.class);
       entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
-      entityCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+      entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
       entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
       entityCriteria.addOrder(Order.asc(SFEntity.PROPERTY_SEQNO));
       List<SFEntity> entities = entityCriteria.list();
@@ -1027,7 +976,7 @@ public class NeoServlet extends HttpBaseServlet {
       for (SFEntity entity : entities) {
         JSONObject entityObj = new JSONObject();
         entityObj.put("id", entity.getId());
-        entityObj.put("name", entity.get(SFEntity.PROPERTY_NAME));
+        entityObj.put("name", entity.getName());
         entityObj.put("methods", buildMethodsArray(entity));
 
         // Resolve tab and include metadata
@@ -1038,12 +987,12 @@ public class NeoServlet extends HttpBaseServlet {
         }
 
         // Method flags for editing
-        entityObj.put("isGet", Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_GET)));
-        entityObj.put("isGetbyid", Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_GETBYID)));
-        entityObj.put("isPost", Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_POST)));
-        entityObj.put("isPut", Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_PUT)));
-        entityObj.put("isPatch", Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_PATCH)));
-        entityObj.put("isDelete", Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_DELETE)));
+        entityObj.put("isGet", Boolean.TRUE.equals(entity.isGet()));
+        entityObj.put("isGetbyid", Boolean.TRUE.equals(entity.isGetByID()));
+        entityObj.put("isPost", Boolean.TRUE.equals(entity.isPost()));
+        entityObj.put("isPut", Boolean.TRUE.equals(entity.isPut()));
+        entityObj.put("isPatch", Boolean.TRUE.equals(entity.isPatch()));
+        entityObj.put("isDelete", Boolean.TRUE.equals(entity.isDelete()));
 
         // Build fields array
         entityObj.put("fields", buildFieldsArray(entity.getId()));
@@ -1053,7 +1002,7 @@ public class NeoServlet extends HttpBaseServlet {
       result.put("entities", entitiesArray);
       writeResponse(response, NeoResponse.ok(result));
     } catch (Exception e) {
-      log.error("Error describing spec '{}': {}", spec.get(SFSpec.PROPERTY_NAME), e.getMessage(), e);
+      log.error("Error describing spec '{}': {}", spec.getName(), e.getMessage(), e);
       sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Spec describe error: " + e.getMessage());
     }
@@ -1073,7 +1022,7 @@ public class NeoServlet extends HttpBaseServlet {
     JSONArray arr = new JSONArray();
     for (SFEntity entity : entities) {
       JSONObject obj = new JSONObject();
-      obj.put("name", entity.get(SFEntity.PROPERTY_NAME));
+      obj.put("name", entity.getName());
       obj.put("methods", buildMethodsArray(entity));
       arr.put(obj);
     }
@@ -1085,19 +1034,19 @@ public class NeoServlet extends HttpBaseServlet {
    */
   private JSONArray buildMethodsArray(SFEntity entity) {
     JSONArray methods = new JSONArray();
-    if (Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_GET)) || Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_GETBYID))) {
+    if (Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID())) {
       methods.put("GET");
     }
-    if (Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_POST))) {
+    if (Boolean.TRUE.equals(entity.isPost())) {
       methods.put("POST");
     }
-    if (Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_PUT))) {
+    if (Boolean.TRUE.equals(entity.isPut())) {
       methods.put("PUT");
     }
-    if (Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_PATCH))) {
+    if (Boolean.TRUE.equals(entity.isPatch())) {
       methods.put("PATCH");
     }
-    if (Boolean.TRUE.equals(entity.get(SFEntity.PROPERTY_DELETE))) {
+    if (Boolean.TRUE.equals(entity.isDelete())) {
       methods.put("DELETE");
     }
     return methods;
@@ -1116,7 +1065,7 @@ public class NeoServlet extends HttpBaseServlet {
 
     JSONArray arr = new JSONArray();
     for (SFField field : fields) {
-      Column column = resolveColumn(field.get(SFField.PROPERTY_ADCOLUMN));
+      Column column = field.getADColumn();
       if (column == null) {
         continue;
       }
@@ -1130,8 +1079,8 @@ public class NeoServlet extends HttpBaseServlet {
       fieldObj.put("name", column.getDBColumnName());
       fieldObj.put("label", column.getName());
       fieldObj.put("columnType", mapReferenceToType(refId));
-      fieldObj.put("readOnly", Boolean.TRUE.equals(field.get(SFField.PROPERTY_ISREADONLY)));
-      fieldObj.put("included", Boolean.TRUE.equals(field.get(SFField.PROPERTY_ISINCLUDED)));
+      fieldObj.put("readOnly", Boolean.TRUE.equals(field.isReadOnly()));
+      fieldObj.put("included", Boolean.TRUE.equals(field.isIncluded()));
       fieldObj.put("required", column.isMandatory());
 
       boolean hasSelector = isSelectorReference(refId);
@@ -1143,32 +1092,6 @@ public class NeoServlet extends HttpBaseServlet {
       arr.put(fieldObj);
     }
     return arr;
-  }
-
-  /**
-   * Resolve a column reference (may be Column or BaseOBObject proxy).
-   */
-  private Column resolveColumn(Object colRef) {
-    if (colRef instanceof Column) {
-      return (Column) colRef;
-    }
-    if (colRef instanceof BaseOBObject) {
-      return OBDal.getInstance().get(Column.class, (String) ((BaseOBObject) colRef).getId());
-    }
-    return null;
-  }
-
-  /**
-   * Resolve the ID from an object reference (Window, Process, etc.).
-   */
-  private String resolveObjectId(Object ref) {
-    if (ref == null) {
-      return null;
-    }
-    if (ref instanceof BaseOBObject) {
-      return (String) ((BaseOBObject) ref).getId();
-    }
-    return ref.toString();
   }
 
   private static final Set<String> SELECTOR_REFS = new HashSet<>();

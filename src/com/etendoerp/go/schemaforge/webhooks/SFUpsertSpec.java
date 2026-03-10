@@ -1,12 +1,15 @@
 package com.etendoerp.go.schemaforge.webhooks;
 
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.module.Module;
 import org.openbravo.model.ad.ui.Process;
@@ -62,6 +65,16 @@ public class SFUpsertSpec extends BaseWebhookService {
           return;
         }
       } else {
+        // Check for duplicate name
+        OBCriteria<SFSpec> dupCriteria = OBDal.getInstance().createCriteria(SFSpec.class);
+        dupCriteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, name));
+        dupCriteria.setMaxResults(1);
+        List<SFSpec> existing = dupCriteria.list();
+        if (!existing.isEmpty()) {
+          responseVars.put("error", "A spec with name '" + name + "' already exists (ID: " + existing.get(0).getId() + ")");
+          return;
+        }
+
         spec =  OBProvider.getInstance().get(SFSpec.class);
         spec.setNewOBObject(true);
         spec.setClient(OBContext.getOBContext().getCurrentClient());
@@ -69,7 +82,7 @@ public class SFUpsertSpec extends BaseWebhookService {
         spec.setActive(true);
         spec.setCreatedBy(OBContext.getOBContext().getUser());
         spec.setUpdatedBy(OBContext.getOBContext().getUser());
-        spec.setCreated(new Date());
+        spec.setCreationDate(new Date());
         spec.setUpdated(new Date());
       }
 
