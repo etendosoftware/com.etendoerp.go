@@ -491,8 +491,8 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
             + "Keys are property names (camelCase) as returned by GET responses.")
         .additionalProperties(new Schema<>());
 
-    Schema<?> requestSchema = new ObjectSchema()
-        .addProperty("fieldValues", fieldValuesSchema);
+    ObjectSchema requestSchema = new ObjectSchema();
+    requestSchema.addProperties("fieldValues", fieldValuesSchema);
 
     RequestBody requestBody = new RequestBody()
         .required(false)
@@ -512,9 +512,9 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
             + "Fields without readOnlyLogic are omitted (default editable).")
         .additionalProperties(new BooleanSchema());
 
-    Schema<?> responseSchema = new ObjectSchema()
-        .addProperty("visibility", visibilityMapSchema)
-        .addProperty("readOnly", readOnlyMapSchema);
+    ObjectSchema responseSchema = new ObjectSchema();
+    responseSchema.addProperties("visibility", visibilityMapSchema);
+    responseSchema.addProperties("readOnly", readOnlyMapSchema);
 
     // Operation
     Operation evalOp = createOperation(
