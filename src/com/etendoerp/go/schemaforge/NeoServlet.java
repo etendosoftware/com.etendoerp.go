@@ -1372,8 +1372,8 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.warn("Failed to evaluate expression: {} for field: {}",
           expression, field != null ? field.getName() : "tab-level", e);
-      // Safe defaults: show the field (true for display), lock it (true for readOnly)
-      return isReadOnlyLogic;
+      // Safe defaults: true for both — show the field (visible) and lock it (read-only)
+      return true;
     }
   }
 
