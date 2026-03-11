@@ -213,4 +213,39 @@ public class NeoServletPathTest {
     assertFalse(info.isAction);
     assertNull(info.actionName);
   }
+
+  @Test
+  public void testParsePathEvaluateDisplay() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/evaluate-display");
+
+    assertEquals("mySpec", info.specName);
+    assertEquals("Order", info.entityName);
+    assertTrue(info.isEvaluateDisplay);
+    assertNull(info.recordId);
+    assertFalse(info.isSelector);
+    assertFalse(info.isAction);
+  }
+
+  @Test
+  public void testParsePathEvaluateDisplayNotConfusedWithRecordId() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/evaluate-display");
+
+    assertNull(info.recordId);
+    assertTrue(info.isEvaluateDisplay);
+  }
+
+  @Test
+  public void testParsePathRegularRecordIdNotEvaluateDisplay() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/ABC123");
+
+    assertEquals("ABC123", info.recordId);
+    assertFalse(info.isEvaluateDisplay);
+  }
+
+  @Test
+  public void testNeoPathInfoDefaultEvaluateDisplayFalse() {
+    NeoServlet.NeoPathInfo info = new NeoServlet.NeoPathInfo("s", "e", "r");
+
+    assertFalse(info.isEvaluateDisplay);
+  }
 }

@@ -19,6 +19,7 @@ import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
 import io.swagger.v3.oas.models.Paths;
 import io.swagger.v3.oas.models.media.ArraySchema;
+import io.swagger.v3.oas.models.media.BooleanSchema;
 import io.swagger.v3.oas.models.media.Content;
 import io.swagger.v3.oas.models.media.MediaType;
 import io.swagger.v3.oas.models.media.ObjectSchema;
@@ -154,6 +155,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
       addCrudPaths(openAPI, specName, entityName, entity);
       addSelectorPaths(openAPI, specName, entityName);
       addActionPaths(openAPI, specName, entityName);
+      addEvaluateDisplayPaths(openAPI, specName, entityName);
     }
   }
 
@@ -473,6 +475,67 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         .addApiResponse("404", new ApiResponse().description("Spec not found")));
     specDescribeItem.get(describeSpecOp);
     openAPI.getPaths().addPathItem(specDescribePath, specDescribeItem);
+  }
+
+  /**
+   * Register /evaluate-display endpoint in OpenAPI for each entity.
+   * Called from addWindowPaths() alongside addSelectorPaths() and addActionPaths().
+   */
+  private void addEvaluateDisplayPaths(OpenAPI openAPI, String specName, String entityName) {
+    String path = BASE_PATH + specName + "/" + entityName + "/evaluate-display";
+    PathItem pathItem = getOrCreatePathItem(openAPI, path);
+
+    // Request body schema
+    Schema<?> fieldValuesSchema = new ObjectSchema()
+        .description("Current field values from the form. "
+            + "Keys are property names (camelCase) as returned by GET responses.")
+        .additionalProperties(new Schema<>());
+
+    Schema<?> requestSchema = new ObjectSchema()
+        .addProperty("fieldValues", fieldValuesSchema);
+
+    RequestBody requestBody = new RequestBody()
+        .required(false)
+        .description("Field values for expression evaluation. "
+            + "Empty body evaluates using only session/preference context.")
+        .content(new Content().addMediaType("application/json",
+            new MediaType().schema(requestSchema)));
+
+    // Response schema
+    Schema<?> visibilityMapSchema = new ObjectSchema()
+        .description("Display logic results. true = visible, false = hidden. "
+            + "Fields without displayLogic are omitted (default visible).")
+        .additionalProperties(new BooleanSchema());
+
+    Schema<?> readOnlyMapSchema = new ObjectSchema()
+        .description("ReadOnly logic results. true = read-only, false = editable. "
+            + "Fields without readOnlyLogic are omitted (default editable).")
+        .additionalProperties(new BooleanSchema());
+
+    Schema<?> responseSchema = new ObjectSchema()
+        .addProperty("visibility", visibilityMapSchema)
+        .addProperty("readOnly", readOnlyMapSchema);
+
+    // Operation
+    Operation evalOp = createOperation(
+        "Evaluate display logic for " + entityName,
+        "Evaluates all displayLogic and readOnlyLogic expressions for the fields "
+            + "of this entity. Uses the raw AD expressions with full server-side "
+            + "variable resolution (session context, preferences, accounting "
+            + "dimensions, auxiliary inputs). Returns a map of field visibility "
+            + "and read-only states.");
+
+    evalOp.setRequestBody(requestBody);
+    evalOp.responses(new ApiResponses()
+        .addApiResponse("200", createJsonResponse(
+            "Evaluated display logic for all fields", responseSchema))
+        .addApiResponse("400", new ApiResponse().description("Invalid request body"))
+        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
+        .addApiResponse("404", new ApiResponse().description("Spec or entity not found"))
+        .addApiResponse("405", new ApiResponse().description("Method not allowed")));
+
+    pathItem.post(evalOp);
+    openAPI.getPaths().addPathItem(path, pathItem);
   }
 
   // ---------------------------------------------------------------------------
