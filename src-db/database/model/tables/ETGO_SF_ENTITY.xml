@@ -100,6 +100,10 @@
       <foreign-key foreignTable="AD_TAB" name="ETGO_SF_ENT_TAB_FK">
         <reference local="AD_TAB_ID" foreign="AD_TAB_ID"/>
       </foreign-key>
+      <unique name="ETGO_SF_ENTITY_SPEC_NAME_UQ">
+        <unique-column name="ETGO_SF_SPEC_ID"/>
+        <unique-column name="NAME"/>
+      </unique>
       <check name="ETGO_SF_ENT_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_SF_ENT_ISDEL"><![CDATA[ISDELETE IN ('Y', 'N')]]></check>
       <check name="ETGO_SF_ENT_ISGET"><![CDATA[ISGET IN ('Y', 'N')]]></check>
