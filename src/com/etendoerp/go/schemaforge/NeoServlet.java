@@ -1,6 +1,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Enumeration;
@@ -192,6 +193,33 @@ public class NeoServlet extends HttpBaseServlet {
           return;
         }
         handleProcessSpec(spec, request, response);
+        return;
+      }
+
+      // Handle report specs (specType = "R")
+      if ("R".equals(specType)) {
+        Process adReportProcess = resolveProcess(spec);
+        if (adReportProcess != null && !hasProcessAccess(adReportProcess.getId())) {
+          sendError(response, HttpServletResponse.SC_FORBIDDEN,
+              "Access denied to report for current role");
+          return;
+        }
+
+        if ("GET".equals(method)) {
+          if (adReportProcess == null) {
+            sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+                "Report spec has no linked AD_Process");
+            return;
+          }
+          writeResponse(response, NeoReportService.describeReport(adReportProcess));
+          return;
+        }
+        if (!"POST".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Report specs support GET (describe) and POST (generateReport)");
+          return;
+        }
+        handleReportSpec(spec, request, response);
         return;
       }
 
@@ -690,6 +718,56 @@ public class NeoServlet extends HttpBaseServlet {
     }
   }
 
+  /**
+   * Handle a report-type spec POST. Reads the request body for exportType and params,
+   * resolves report metadata, sets response headers, then streams the report output.
+   */
+  private void handleReportSpec(SFSpec spec, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    try {
+      Process adProcess = resolveProcess(spec);
+      if (adProcess == null) {
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Report spec has no linked AD_Process");
+        return;
+      }
+
+      // Read request body
+      String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+      JSONObject body = StringUtils.isNotBlank(bodyStr)
+          ? new JSONObject(bodyStr) : new JSONObject();
+      String exportType = body.optString("exportType", "PDF");
+      JSONObject params = body.optJSONObject("params");
+      if (params == null) {
+        params = new JSONObject();
+      }
+
+      // Resolve metadata first (filename, content type)
+      NeoReportService.ReportMetadata meta =
+          NeoReportService.resolveReportMetadata(adProcess, exportType);
+
+      // Set response headers BEFORE writing to output stream
+      response.setStatus(HttpServletResponse.SC_OK);
+      response.setContentType(meta.getContentType());
+      response.setHeader("Content-Disposition",
+          "attachment; filename=\"" + meta.getFilename() + "\"");
+
+      // Generate report directly to response output stream
+      OutputStream out = response.getOutputStream();
+      NeoReportService.generateReport(adProcess, params, exportType, out);
+      out.flush();
+
+    } catch (Exception e) {
+      log.error("Error generating report for spec '{}': {}",
+          spec.getName(), e.getMessage(), e);
+      // Only send error if response not already committed
+      if (!response.isCommitted()) {
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Report generation failed: " + e.getMessage());
+      }
+    }
+  }
+
   private void writeResponse(HttpServletResponse response, NeoResponse neoResponse)
       throws IOException {
     if (neoResponse == null) {
@@ -976,7 +1054,7 @@ public class NeoServlet extends HttpBaseServlet {
           if (specWindow != null && !hasWindowAccess(specWindow.getId())) {
             continue;
           }
-        } else if ("P".equals(specType)) {
+        } else if ("P".equals(specType) || "R".equals(specType)) {
           Process adProcess = resolveProcess(spec);
           if (adProcess != null && !hasProcessAccess(adProcess.getId())) {
             continue;
@@ -993,9 +1071,10 @@ public class NeoServlet extends HttpBaseServlet {
         if ("W".equals(specType)) {
           if (specWindow != null) specObj.put("windowId", specWindow.getId());
           specObj.put("entities", buildEntitySummaryArray(spec.getId()));
-        } else if ("P".equals(specType)) {
+        } else if ("P".equals(specType) || "R".equals(specType)) {
           Process adProcess = resolveProcess(spec);
           if (adProcess != null) specObj.put("processId", adProcess.getId());
+          if ("R".equals(specType)) specObj.put("isReport", true);
         }
 
         // Module ID

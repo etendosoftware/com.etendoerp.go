@@ -19,11 +19,13 @@ import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
 import io.swagger.v3.oas.models.Paths;
 import io.swagger.v3.oas.models.media.ArraySchema;
+import io.swagger.v3.oas.models.media.BinarySchema;
 import io.swagger.v3.oas.models.media.BooleanSchema;
 import io.swagger.v3.oas.models.media.Content;
 import io.swagger.v3.oas.models.media.MediaType;
 import io.swagger.v3.oas.models.media.ObjectSchema;
 import io.swagger.v3.oas.models.media.Schema;
+import io.swagger.v3.oas.models.media.StringSchema;
 import io.swagger.v3.oas.models.parameters.Parameter;
 import io.swagger.v3.oas.models.parameters.RequestBody;
 import io.swagger.v3.oas.models.responses.ApiResponse;
@@ -83,6 +85,8 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
           addProcessPaths(openAPI, specName);
         } else if ("W".equals(specType)) {
           addWindowPaths(openAPI, spec, specName);
+        } else if ("R".equals(specType)) {
+          addReportPaths(openAPI, specName);
         }
       }
 
@@ -129,6 +133,83 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         .addApiResponse("401", new ApiResponse().description("Unauthorized"))
         .addApiResponse("500", new ApiResponse().description("Internal server error")));
     pathItem.post(executeOp);
+
+    openAPI.getPaths().addPathItem(path, pathItem);
+  }
+
+  /**
+   * Add OpenAPI paths for a report-type spec.
+   * GET describes the report (parameters + supported formats).
+   * POST generates the report binary.
+   */
+  private void addReportPaths(OpenAPI openAPI, String specName) {
+    String path = BASE_PATH + specName;
+
+    PathItem pathItem = getOrCreatePathItem(openAPI, path);
+
+    // GET - describe report
+    Operation describeOp = createOperation(
+        "Describe report " + specName,
+        "Returns metadata about the report parameters, supported export formats, "
+            + "and configuration.");
+    ObjectSchema describeResponseSchema = new ObjectSchema();
+    describeResponseSchema.setDescription("Report metadata with parameter definitions and supported formats");
+    describeResponseSchema.addProperties("isReport", new BooleanSchema().description("Always true for report specs"));
+    describeResponseSchema.addProperties("supportedFormats", new ArraySchema()
+        .items(new StringSchema())
+        .description("Available export formats: PDF, XLS, XLSX, HTML, CSV"));
+    describeOp.responses(new ApiResponses()
+        .addApiResponse("200", createJsonResponse("Report metadata", describeResponseSchema))
+        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
+        .addApiResponse("404", new ApiResponse().description("Spec not found")));
+    pathItem.get(describeOp);
+
+    // POST - generate report
+    Operation generateOp = createOperation(
+        "Generate report " + specName,
+        "Generates the report with the provided parameters and export type. "
+            + "Returns the report as a binary file download.");
+
+    // Request body schema
+    ObjectSchema requestSchema = new ObjectSchema();
+    StringSchema exportTypeSchema = new StringSchema();
+    exportTypeSchema.addEnumItem("PDF");
+    exportTypeSchema.addEnumItem("XLS");
+    exportTypeSchema.addEnumItem("XLSX");
+    exportTypeSchema.addEnumItem("HTML");
+    exportTypeSchema.addEnumItem("CSV");
+    exportTypeSchema.setDefault("PDF");
+    exportTypeSchema.setDescription("Export format for the report");
+    requestSchema.addProperties("exportType", exportTypeSchema);
+    requestSchema.addProperties("params", new ObjectSchema()
+        .description("Report parameters keyed by DB column name"));
+
+    generateOp.setRequestBody(new RequestBody()
+        .description("Report generation request")
+        .required(true)
+        .content(new Content()
+            .addMediaType("application/json",
+                new MediaType().schema(requestSchema))));
+
+    // Response: binary file with multiple possible content types
+    Content responseContent = new Content();
+    BinarySchema binarySchema = new BinarySchema();
+    responseContent.addMediaType("application/pdf", new MediaType().schema(binarySchema));
+    responseContent.addMediaType("application/vnd.ms-excel", new MediaType().schema(binarySchema));
+    responseContent.addMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        new MediaType().schema(binarySchema));
+    responseContent.addMediaType("text/html", new MediaType().schema(binarySchema));
+    responseContent.addMediaType("text/csv", new MediaType().schema(binarySchema));
+
+    generateOp.responses(new ApiResponses()
+        .addApiResponse("200", new ApiResponse()
+            .description("Report file download")
+            .content(responseContent))
+        .addApiResponse("400", new ApiResponse().description("Bad request (invalid parameters)"))
+        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
+        .addApiResponse("404", new ApiResponse().description("Spec not found"))
+        .addApiResponse("500", new ApiResponse().description("Report generation failed")));
+    pathItem.post(generateOp);
 
     openAPI.getPaths().addPathItem(path, pathItem);
   }
@@ -402,7 +483,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     specSchema.addProperties("name", new Schema<String>().type("string")
         .description("Spec name"));
     specSchema.addProperties("type", new Schema<String>().type("string")
-        .description("Spec type: W (window) or P (process)"));
+        .description("Spec type: W (window), P (process), or R (report)"));
 
     ObjectSchema entitySummarySchema = new ObjectSchema();
     entitySummarySchema.addProperties("name", new Schema<String>().type("string")
