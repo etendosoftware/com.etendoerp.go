@@ -249,6 +249,17 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
 
+      // Handle callout requests
+      if (pathInfo.isCallout) {
+        if (!"POST".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Callout endpoint only supports POST");
+          return;
+        }
+        handleCallout(response, spec, pathInfo, request);
+        return;
+      }
+
       // Find the entity within this spec
       SFEntity entity = findEntity(spec.getId(), pathInfo.entityName);
       if (entity == null) {
@@ -385,6 +396,11 @@ public class NeoServlet extends HttpBaseServlet {
     if (parts.length >= 3 && "selectors".equals(parts[2])) {
       String selectorField = parts.length >= 4 ? parts[3] : null;
       return new NeoPathInfo(specName, entityName, null, true, selectorField);
+    }
+
+    // Check for /callout sub-path
+    if (parts.length >= 3 && "callout".equals(parts[2])) {
+      return new NeoPathInfo(specName, entityName, null, false, null, false, null, false, true);
     }
 
     // Check for /evaluate-display sub-path
@@ -1435,6 +1451,75 @@ public class NeoServlet extends HttpBaseServlet {
     return column.getDBColumnName();
   }
 
+  /**
+   * Handle callout execution requests.
+   * POST /sws/neo/{specName}/{entityName}/callout
+   * Delegates to NeoCalloutService for callout resolution, execution, and response transformation.
+   */
+  private void handleCallout(HttpServletResponse response, SFSpec spec,
+      NeoPathInfo pathInfo, HttpServletRequest request) throws IOException {
+    try {
+      // Find entity
+      SFEntity sfEntity = findEntity(spec.getId(), pathInfo.entityName);
+      if (sfEntity == null) {
+        sendError(response, HttpServletResponse.SC_NOT_FOUND,
+            "Entity not found: " + pathInfo.entityName);
+        return;
+      }
+
+      Tab tab = sfEntity.getADTab();
+      if (tab == null) {
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Entity has no linked AD_Tab: " + pathInfo.entityName);
+        return;
+      }
+
+      // Parse request body
+      String bodyStr = new String(
+          request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+      if (StringUtils.isBlank(bodyStr)) {
+        sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+            "Request body is required for callout execution");
+        return;
+      }
+
+      JSONObject requestBody;
+      try {
+        requestBody = new JSONObject(bodyStr);
+      } catch (Exception e) {
+        sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+            "Invalid JSON body: " + e.getMessage());
+        return;
+      }
+
+      if (!requestBody.has("field")) {
+        sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+            "Missing required field: 'field'");
+        return;
+      }
+
+      // Build context
+      NeoContext neoContext = NeoContext.builder()
+          .specName(pathInfo.specName)
+          .entityName(pathInfo.entityName)
+          .httpMethod("POST")
+          .requestBody(requestBody)
+          .adTab(tab)
+          .sfEntity(sfEntity)
+          .obContext(OBContext.getOBContext())
+          .build();
+
+      // Delegate to callout service
+      NeoResponse result = NeoCalloutService.executeCallout(neoContext, requestBody);
+      writeResponse(response, result);
+    } catch (Exception e) {
+      log.error("Error handling callout for {}/{}: {}",
+          pathInfo.specName, pathInfo.entityName, e.getMessage(), e);
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Callout error: " + e.getMessage());
+    }
+  }
+
   private void sendError(HttpServletResponse response, int status, String message)
       throws IOException {
     NeoResponse errorResponse = NeoResponse.error(status, message);
@@ -1453,26 +1538,35 @@ public class NeoServlet extends HttpBaseServlet {
     final boolean isAction;
     final String actionName;
     final boolean isEvaluateDisplay;
+    final boolean isCallout;
 
     NeoPathInfo(String specName, String entityName, String recordId) {
-      this(specName, entityName, recordId, false, null, false, null, false);
+      this(specName, entityName, recordId, false, null, false, null, false, false);
     }
 
     NeoPathInfo(String specName, String entityName, String recordId,
         boolean isSelector, String selectorField) {
-      this(specName, entityName, recordId, isSelector, selectorField, false, null, false);
+      this(specName, entityName, recordId, isSelector, selectorField, false, null, false, false);
     }
 
     NeoPathInfo(String specName, String entityName, String recordId,
         boolean isSelector, String selectorField,
         boolean isAction, String actionName) {
       this(specName, entityName, recordId, isSelector, selectorField,
-          isAction, actionName, false);
+          isAction, actionName, false, false);
     }
 
     NeoPathInfo(String specName, String entityName, String recordId,
         boolean isSelector, String selectorField,
         boolean isAction, String actionName, boolean isEvaluateDisplay) {
+      this(specName, entityName, recordId, isSelector, selectorField,
+          isAction, actionName, isEvaluateDisplay, false);
+    }
+
+    NeoPathInfo(String specName, String entityName, String recordId,
+        boolean isSelector, String selectorField,
+        boolean isAction, String actionName, boolean isEvaluateDisplay,
+        boolean isCallout) {
       this.specName = specName;
       this.entityName = entityName;
       this.recordId = recordId;
@@ -1481,6 +1575,7 @@ public class NeoServlet extends HttpBaseServlet {
       this.isAction = isAction;
       this.actionName = actionName;
       this.isEvaluateDisplay = isEvaluateDisplay;
+      this.isCallout = isCallout;
     }
   }
 }
