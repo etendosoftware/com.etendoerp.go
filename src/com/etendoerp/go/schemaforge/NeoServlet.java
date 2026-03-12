@@ -1,6 +1,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Enumeration;
@@ -43,6 +44,9 @@ import org.openbravo.model.ad.module.Module;
 import org.openbravo.model.ad.ui.Window;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
+import org.openbravo.base.expression.OBScriptEngine;
+import org.openbravo.client.application.DynamicExpressionParser;
+import org.openbravo.model.ad.ui.Field;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -67,6 +71,23 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 public class NeoServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
+
+  /**
+   * Minimal shim for SmartClient functions used by DynamicExpressionParser output.
+   * DynamicExpressionParser generates JS like:
+   *   OB.Utilities.getValue(currentValues, 'documentStatus') === 'CO'
+   *   OB.Utilities.Date.JSToOB(OB.Utilities.getValue(currentValues,'orderDate'), OB.Format.date)
+   *
+   * These functions don't exist in a bare Rhino context. The shim provides:
+   *   - getValue(obj, key) -> obj[key] (null-safe property accessor)
+   *   - Date.JSToOB(value, format) -> value (pass-through; display logic only compares strings)
+   *   - OB.Format.date -> empty string (unused by pass-through JSToOB)
+   */
+  private static final String OB_UTILITIES_SHIM =
+      "var OB = { Utilities: { "
+      + "getValue: function(obj, key) { return obj != null ? obj[key] : null; }, "
+      + "Date: { JSToOB: function(v) { return v; } } }, "
+      + "Format: { date: '' } };";
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -175,6 +196,33 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
 
+      // Handle report specs (specType = "R")
+      if ("R".equals(specType)) {
+        Process adReportProcess = resolveProcess(spec);
+        if (adReportProcess != null && !hasProcessAccess(adReportProcess.getId())) {
+          sendError(response, HttpServletResponse.SC_FORBIDDEN,
+              "Access denied to report for current role");
+          return;
+        }
+
+        if ("GET".equals(method)) {
+          if (adReportProcess == null) {
+            sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+                "Report spec has no linked AD_Process");
+            return;
+          }
+          writeResponse(response, NeoReportService.describeReport(adReportProcess));
+          return;
+        }
+        if (!"POST".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Report specs support GET (describe) and POST (generateReport)");
+          return;
+        }
+        handleReportSpec(spec, request, response);
+        return;
+      }
+
       // Check window access
       Window window = spec.getADWindow();
       if (window != null) {
@@ -215,6 +263,17 @@ public class NeoServlet extends HttpBaseServlet {
           return;
         }
         handleButtonAction(response, spec, pathInfo, method, request);
+        return;
+      }
+
+      // Handle evaluate-display requests
+      if (pathInfo.isEvaluateDisplay) {
+        if (!"POST".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Method not allowed. Use POST.");
+          return;
+        }
+        handleEvaluateDisplay(response, spec, pathInfo, request);
         return;
       }
 
@@ -354,6 +413,11 @@ public class NeoServlet extends HttpBaseServlet {
     if (parts.length >= 3 && "selectors".equals(parts[2])) {
       String selectorField = parts.length >= 4 ? parts[3] : null;
       return new NeoPathInfo(specName, entityName, null, true, selectorField);
+    }
+
+    // Check for /evaluate-display sub-path
+    if (parts.length >= 3 && "evaluate-display".equals(parts[2])) {
+      return new NeoPathInfo(specName, entityName, null, false, null, false, null, true);
     }
 
     // Check for /{spec}/{entity}/{recordId}/action[/{columnName}]
@@ -654,6 +718,56 @@ public class NeoServlet extends HttpBaseServlet {
     }
   }
 
+  /**
+   * Handle a report-type spec POST. Reads the request body for exportType and params,
+   * resolves report metadata, sets response headers, then streams the report output.
+   */
+  private void handleReportSpec(SFSpec spec, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    try {
+      Process adProcess = resolveProcess(spec);
+      if (adProcess == null) {
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Report spec has no linked AD_Process");
+        return;
+      }
+
+      // Read request body
+      String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+      JSONObject body = StringUtils.isNotBlank(bodyStr)
+          ? new JSONObject(bodyStr) : new JSONObject();
+      String exportType = body.optString("exportType", "PDF");
+      JSONObject params = body.optJSONObject("params");
+      if (params == null) {
+        params = new JSONObject();
+      }
+
+      // Resolve metadata first (filename, content type)
+      NeoReportService.ReportMetadata meta =
+          NeoReportService.resolveReportMetadata(adProcess, exportType);
+
+      // Set response headers BEFORE writing to output stream
+      response.setStatus(HttpServletResponse.SC_OK);
+      response.setContentType(meta.getContentType());
+      response.setHeader("Content-Disposition",
+          "attachment; filename=\"" + meta.getFilename() + "\"");
+
+      // Generate report directly to response output stream
+      OutputStream out = response.getOutputStream();
+      NeoReportService.generateReport(adProcess, params, exportType, out);
+      out.flush();
+
+    } catch (Exception e) {
+      log.error("Error generating report for spec '{}': {}",
+          spec.getName(), e.getMessage(), e);
+      // Only send error if response not already committed
+      if (!response.isCommitted()) {
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Report generation failed: " + e.getMessage());
+      }
+    }
+  }
+
   private void writeResponse(HttpServletResponse response, NeoResponse neoResponse)
       throws IOException {
     if (neoResponse == null) {
@@ -940,7 +1054,7 @@ public class NeoServlet extends HttpBaseServlet {
           if (specWindow != null && !hasWindowAccess(specWindow.getId())) {
             continue;
           }
-        } else if ("P".equals(specType)) {
+        } else if ("P".equals(specType) || "R".equals(specType)) {
           Process adProcess = resolveProcess(spec);
           if (adProcess != null && !hasProcessAccess(adProcess.getId())) {
             continue;
@@ -957,9 +1071,10 @@ public class NeoServlet extends HttpBaseServlet {
         if ("W".equals(specType)) {
           if (specWindow != null) specObj.put("windowId", specWindow.getId());
           specObj.put("entities", buildEntitySummaryArray(spec.getId()));
-        } else if ("P".equals(specType)) {
+        } else if ("P".equals(specType) || "R".equals(specType)) {
           Process adProcess = resolveProcess(spec);
           if (adProcess != null) specObj.put("processId", adProcess.getId());
+          if ("R".equals(specType)) specObj.put("isReport", true);
         }
 
         // Module ID
@@ -1209,6 +1324,196 @@ public class NeoServlet extends HttpBaseServlet {
     }
   }
 
+  /**
+   * Evaluates displayLogic and readOnlyLogic expressions for all fields of a tab.
+   * Uses Etendo's DynamicExpressionParser to resolve session variables, preferences,
+   * accounting dimensions, auxiliary inputs, and server-expanded macros.
+   * Injects an OB.Utilities shim so the SmartClient-dependent JS output can be
+   * evaluated by bare Rhino/OBScriptEngine.
+   *
+   * POST /sws/neo/{specName}/{entityName}/evaluate-display
+   */
+  private void handleEvaluateDisplay(HttpServletResponse response, SFSpec spec,
+      NeoPathInfo pathInfo, HttpServletRequest request) throws IOException {
+    try {
+      // Find entity
+      SFEntity sfEntity = findEntity(spec.getId(), pathInfo.entityName);
+      if (sfEntity == null) {
+        sendError(response, HttpServletResponse.SC_NOT_FOUND,
+            "Entity not found: " + pathInfo.entityName);
+        return;
+      }
+
+      Tab tab = sfEntity.getADTab();
+      if (tab == null) {
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Entity has no linked AD_Tab: " + pathInfo.entityName);
+        return;
+      }
+
+      // Parse request body
+      JSONObject fieldValues = new JSONObject();
+      try {
+        String body = new String(
+            request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        if (body != null && !body.trim().isEmpty()) {
+          JSONObject bodyJson = new JSONObject(body);
+          if (bodyJson.has("fieldValues")) {
+            fieldValues = bodyJson.getJSONObject("fieldValues");
+          }
+        }
+      } catch (Exception e) {
+        sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid request body");
+        return;
+      }
+
+      // Build evaluation context
+      Map<String, Object> evalContext = buildEvalContext(fieldValues);
+
+      // Evaluate all fields
+      JSONObject visibility = new JSONObject();
+      JSONObject readOnly = new JSONObject();
+
+      List<Field> fields = tab.getADFieldList();
+      for (Field field : fields) {
+        if (!field.isActive()) {
+          continue;
+        }
+
+        String propertyName = getPropertyName(field);
+
+        // Evaluate displayLogic
+        String displayLogic = field.getDisplayLogic();
+        if (displayLogic != null && !displayLogic.trim().isEmpty()) {
+          boolean isVisible = evaluateExpression(displayLogic, tab, field, evalContext, false);
+          visibility.put(propertyName, isVisible);
+        }
+
+        // Evaluate readOnlyLogic from the column
+        Column column = field.getColumn();
+        if (column != null) {
+          String readOnlyLogic = column.getReadOnlyLogic();
+          if (readOnlyLogic != null && !readOnlyLogic.trim().isEmpty()) {
+            boolean isReadOnly = evaluateExpression(readOnlyLogic, tab, field, evalContext, true);
+            readOnly.put(propertyName, isReadOnly);
+          }
+        }
+      }
+
+      // Build response
+      JSONObject result = new JSONObject();
+      result.put("visibility", visibility);
+      result.put("readOnly", readOnly);
+
+      writeResponse(response,
+          NeoResponse.ok(result));
+
+    } catch (Exception e) {
+      log.error("Error evaluating display logic for {}/{}", pathInfo.specName,
+          pathInfo.entityName, e);
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Error evaluating display logic: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Evaluates a single display logic or readOnly logic expression.
+   * 4-step pipeline: preprocess -> parse -> shim -> eval.
+   *
+   * @param expression   the raw AD expression
+   * @param tab          the AD_Tab for context resolution
+   * @param field        the AD_Field for field-type detection (may be null for tab-level)
+   * @param evalContext  the evaluation context with field values and session data
+   * @param isReadOnlyLogic true if evaluating readOnlyLogic (affects safe default on failure)
+   * @return evaluation result; on failure: true for display (show), true for readOnly (lock)
+   */
+  private boolean evaluateExpression(String expression, Tab tab, Field field,
+      Map<String, Object> evalContext, boolean isReadOnlyLogic) {
+    try {
+      // Step 1: Replace system preferences and macros (static, pre-parser)
+      String preprocessed = DynamicExpressionParser
+          .replaceSystemPreferencesInDisplayLogic(expression);
+
+      // Step 2: Parse expression -- resolves session vars, auxiliary inputs,
+      // field references, accounting dimensions
+      DynamicExpressionParser parser =
+          new DynamicExpressionParser(preprocessed, tab, field);
+      String jsExpr = parser.getJSExpression();
+
+      // Step 3: Prepend OB.Utilities shim so Rhino can evaluate
+      // SmartClient-dependent code (OB.Utilities.getValue, OB.Utilities.Date.JSToOB)
+      String fullScript = OB_UTILITIES_SHIM + "\n" + jsExpr;
+
+      // Step 4: Evaluate using Rhino (sandboxed)
+      Object result = OBScriptEngine.getInstance().eval(fullScript, evalContext);
+      return Boolean.TRUE.equals(result);
+
+    } catch (Exception e) {
+      log.warn("Failed to evaluate expression: {} for field: {}",
+          expression, field != null ? field.getName() : "tab-level", e);
+      // Safe defaults: true for both — show the field (visible) and lock it (read-only)
+      return true;
+    }
+  }
+
+  /**
+   * Builds the evaluation context from request field values and session data.
+   * Field values are stored both as top-level entries (for context.xxx references)
+   * and under "currentValues" key (for OB.Utilities.getValue(currentValues, 'xxx')).
+   */
+  private Map<String, Object> buildEvalContext(JSONObject fieldValues) {
+    Map<String, Object> ctx = new HashMap<>();
+
+    // Convert fieldValues to a Map that Rhino can access as "currentValues"
+    Map<String, Object> currentValues = new HashMap<>();
+    @SuppressWarnings("unchecked")
+    java.util.Iterator<String> keys = fieldValues.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      Object value = fieldValues.opt(key);
+      currentValues.put(key, value == JSONObject.NULL ? null : value);
+    }
+    ctx.put("currentValues", currentValues);
+
+    // Also add field values at top level for auxiliary inputs and session vars
+    // that resolve to context.xxx (not OB.Utilities.getValue)
+    ctx.putAll(currentValues);
+
+    // Add session context
+    OBContext obCtx = OBContext.getOBContext();
+    ctx.put("AD_Org_ID", obCtx.getCurrentOrganization().getId());
+    ctx.put("AD_Client_ID", obCtx.getCurrentClient().getId());
+    ctx.put("AD_Role_ID", obCtx.getRole().getId());
+    ctx.put("AD_User_ID", obCtx.getUser().getId());
+
+    return ctx;
+  }
+
+  /**
+   * Maps a Field to its DAL property name, matching NeoFieldFilter conventions.
+   * Uses ModelProvider to resolve Column -> Entity -> Property -> name.
+   *
+   * Examples:
+   *   C_BPARTNER_ID  -> businessPartner
+   *   DOCSTATUS      -> documentStatus
+   *   GRANDTOTAL     -> grandTotalAmount
+   */
+  private String getPropertyName(Field field) {
+    Column column = field.getColumn();
+    if (column == null) {
+      return field.getName();
+    }
+    Entity dalEntity = ModelProvider.getInstance()
+        .getEntityByTableId(column.getTable().getId());
+    if (dalEntity != null) {
+      Property prop = dalEntity.getPropertyByColumnName(column.getDBColumnName());
+      if (prop != null) {
+        return prop.getName();
+      }
+    }
+    return column.getDBColumnName();
+  }
+
   private void sendError(HttpServletResponse response, int status, String message)
       throws IOException {
     NeoResponse errorResponse = NeoResponse.error(status, message);
@@ -1226,19 +1531,27 @@ public class NeoServlet extends HttpBaseServlet {
     final String selectorField;
     final boolean isAction;
     final String actionName;
+    final boolean isEvaluateDisplay;
 
     NeoPathInfo(String specName, String entityName, String recordId) {
-      this(specName, entityName, recordId, false, null, false, null);
+      this(specName, entityName, recordId, false, null, false, null, false);
     }
 
     NeoPathInfo(String specName, String entityName, String recordId,
         boolean isSelector, String selectorField) {
-      this(specName, entityName, recordId, isSelector, selectorField, false, null);
+      this(specName, entityName, recordId, isSelector, selectorField, false, null, false);
     }
 
     NeoPathInfo(String specName, String entityName, String recordId,
         boolean isSelector, String selectorField,
         boolean isAction, String actionName) {
+      this(specName, entityName, recordId, isSelector, selectorField,
+          isAction, actionName, false);
+    }
+
+    NeoPathInfo(String specName, String entityName, String recordId,
+        boolean isSelector, String selectorField,
+        boolean isAction, String actionName, boolean isEvaluateDisplay) {
       this.specName = specName;
       this.entityName = entityName;
       this.recordId = recordId;
@@ -1246,6 +1559,7 @@ public class NeoServlet extends HttpBaseServlet {
       this.selectorField = selectorField;
       this.isAction = isAction;
       this.actionName = actionName;
+      this.isEvaluateDisplay = isEvaluateDisplay;
     }
   }
 }
