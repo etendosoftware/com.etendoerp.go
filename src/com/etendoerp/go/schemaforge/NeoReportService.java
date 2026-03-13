@@ -96,7 +96,7 @@ public class NeoReportService {
         // Resolve template path
         String sourcePath = OBPropertiesProvider.getInstance()
             .getOpenbravoProperties().getProperty("source.path");
-        String templatePath = sourcePath + "/" + process.getJasperReport();
+        String templatePath = sourcePath + "/" + process.getJRTemplateName();
 
         // Map JSON params to Java types based on AD_Process_Para definitions
         Map<String, Object> jasperParams = mapParameters(process, params);
@@ -162,10 +162,10 @@ public class NeoReportService {
       throw new OBException(
           "Process '" + process.getName() + "' is not a report (AD_Process.IsReport is not 'Y')");
     }
-    if (StringUtils.isBlank(process.getJasperReport())) {
+    if (StringUtils.isBlank(process.getJRTemplateName())) {
       throw new OBException(
           "Process '" + process.getName()
-              + "' has no Jasper template configured (AD_Process.JasperReport is null)");
+              + "' has no Jasper template configured (AD_Process.JRName is null)");
     }
   }
 
