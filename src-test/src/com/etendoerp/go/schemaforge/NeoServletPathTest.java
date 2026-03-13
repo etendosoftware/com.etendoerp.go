@@ -248,4 +248,54 @@ public class NeoServletPathTest {
 
     assertFalse(info.isEvaluateDisplay);
   }
+
+  // ── Callout path tests ─────────────────────────────────────────────
+
+  @Test
+  public void testParsePathCallout() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/callout");
+
+    assertEquals("mySpec", info.specName);
+    assertEquals("Order", info.entityName);
+    assertTrue(info.isCallout);
+    assertNull(info.recordId);
+    assertFalse(info.isSelector);
+    assertFalse(info.isAction);
+    assertFalse(info.isEvaluateDisplay);
+  }
+
+  @Test
+  public void testParsePathCalloutNotConfusedWithRecordId() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/callout");
+
+    assertNull(info.recordId);
+    assertTrue(info.isCallout);
+  }
+
+  @Test
+  public void testParsePathRegularRecordIdNotCallout() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/ABC123");
+
+    assertEquals("ABC123", info.recordId);
+    assertFalse(info.isCallout);
+  }
+
+  @Test
+  public void testNeoPathInfoDefaultCalloutFalse() {
+    NeoServlet.NeoPathInfo info = new NeoServlet.NeoPathInfo("s", "e", "r");
+
+    assertFalse(info.isCallout);
+  }
+
+  @Test
+  public void testParsePathCalloutDistinctFromSelectors() {
+    NeoServlet.NeoPathInfo calloutInfo = servlet.parsePath("/spec/entity/callout");
+    NeoServlet.NeoPathInfo selectorInfo = servlet.parsePath("/spec/entity/selectors");
+
+    assertTrue(calloutInfo.isCallout);
+    assertFalse(calloutInfo.isSelector);
+
+    assertFalse(selectorInfo.isCallout);
+    assertTrue(selectorInfo.isSelector);
+  }
 }
