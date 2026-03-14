@@ -51,7 +51,7 @@ Key components:
 | `NeoHandler` | 22 | CDI hook interface. Return `NeoResponse` or `null` to fall through. |
 | `NeoContext` | 147 | Immutable request context (builder pattern). Carries spec, entity, method, body, tab, OBContext. |
 | `NeoResponse` | 65 | Response wrapper with static builders: `ok()`, `created()`, `noContent()`, `error()`. |
-| `NeoSelectorService` | 825 | FK dropdown resolution and querying (TableDir, Table, Search, OBUISEL). |
+| `NeoSelectorService` | -- | FK dropdown resolution and querying (TableDir, Table, Search, OBUISEL). Supports custom HQL selectors. |
 | `NeoProcessService` | 564 | Process execution (OBUIAPP, Classic). Parameter validation. Process metadata. |
 | `PopulateSpecHelper` | 273 | Auto-populates entities and fields from AD metadata. |
 | `PopulateSpecProcess` | 55 | AD_Process (button) wrapper around PopulateSpecHelper. |
@@ -282,7 +282,7 @@ Response (rich OBUISEL selector):
 2. **TableDir (ref 19)** -- column name convention: `{TableName}_ID` resolves to target table.
 3. **Table (ref 18) / Search (ref 30)** -- resolved via `AD_Ref_Table` (target table, key column, display column, optional HQL where clause).
 
-OBUISEL selectors with custom HQL queries return `400 "Custom HQL selectors not supported yet"`.
+OBUISEL selectors with custom HQL queries are fully supported. The service uses `Session.createQuery()` to execute the custom HQL with org security filtering, validation rules, search across searchable properties, and pagination.
 
 The service resolves `@param@` placeholders in OBUISEL HQL where clauses: `@AD_Org_ID@`, `@AD_Client_ID@`, `@AD_User_ID@`, `@AD_Role_ID@`.
 
@@ -589,4 +589,4 @@ Tests are located in `src-test/src/com/etendoerp/go/schemaforge/`.
 
 **Callout endpoints.** Etendo callouts (field-change triggers) are not exposed through the API. A callout endpoint would allow clients to request server-side field recalculations when a field value changes.
 
-**Custom HQL selectors.** OBUISEL selectors with `isCustomQuery = true` (7 selectors: BP, On hand warehouse, Org, ProductSimple, Report Template, among others) return a `400` error. Supporting these requires parsing and executing arbitrary HQL with proper parameter binding.
+**Custom HQL selectors.** OBUISEL selectors with `isCustomQuery = true` are fully supported. The `executeCustomHqlQuery()` method handles custom HQL with org filtering, validation rules, search across searchable properties, and pagination.
