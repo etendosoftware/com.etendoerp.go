@@ -180,7 +180,14 @@ public class NeoFieldFilter {
     }
 
     try {
-      filterRecord(requestBody, writableFields);
+      // Defensive: if client sends {"data": {...}}, unwrap before filtering.
+      // NeoServlet will re-wrap with the proper SmartClient envelope.
+      JSONObject bodyToFilter = requestBody;
+      if (requestBody.has("data") && requestBody.optJSONObject("data") != null) {
+        bodyToFilter = requestBody.getJSONObject("data");
+      }
+      filterRecord(bodyToFilter, writableFields);
+      return bodyToFilter;
     } catch (Exception e) {
       log.error("Error filtering write request: {}", e.getMessage(), e);
     }
