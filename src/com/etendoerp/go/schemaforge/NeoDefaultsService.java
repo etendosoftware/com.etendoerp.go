@@ -239,34 +239,28 @@ public class NeoDefaultsService {
    */
   private static String resolveSQLDefault(String defaultExpr, VariablesSecureApp vars,
       DalConnectionProvider conn, String windowId, Column adColumn) {
-    PreparedStatement ps = null;
     try {
       ArrayList<String> params = new ArrayList<>();
       String sql = parseSQLExpression(defaultExpr, params);
 
-      ps = OBDal.getInstance().getConnection(false).prepareStatement(sql);
-      int paramIndex = 1;
-      for (String parameter : params) {
-        String value = Utility.getContext(conn, vars, parameter, windowId);
-        ps.setObject(paramIndex++, value);
-      }
+      try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
+        int paramIndex = 1;
+        for (String parameter : params) {
+          String value = Utility.getContext(conn, vars, parameter, windowId);
+          ps.setObject(paramIndex++, value);
+        }
 
-      ResultSet rs = ps.executeQuery();
-      if (rs.next()) {
-        return rs.getString(1);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            return rs.getString(1);
+          }
+        }
       }
       return null;
     } catch (Exception e) {
       log.debug("Could not resolve SQL default for column {}: {}",
           adColumn.getDBColumnName(), e.getMessage());
       return null;
-    } finally {
-      if (ps != null) {
-        try {
-          ps.close();
-        } catch (Exception ignored) {
-        }
-      }
     }
   }
 
