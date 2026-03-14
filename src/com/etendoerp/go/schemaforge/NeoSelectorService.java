@@ -290,11 +290,12 @@ public class NeoSelectorService {
   private static NeoResponse executeRichQuery(SelectorMeta meta,
       String search, int limit, int offset, String validationFilter) throws Exception {
 
-    if (meta.isCustomQuery) {
-      return NeoResponse.error(400,
-          "Custom HQL selectors not supported yet");
+    if (meta.isCustomQuery && StringUtils.isNotBlank(meta.customHql)) {
+      return executeCustomHqlQuery(meta, search, limit, offset, validationFilter);
     }
+    // Custom query flag set but no HQL defined: fall through to standard query
 
+    String alias = "e";
     StringBuilder hql = new StringBuilder();
 
     // Apply where clause from OBUISEL_Selector with @param@ substitution
@@ -322,14 +323,16 @@ public class NeoSelectorService {
           hql.append(" OR ");
         }
         String prop = meta.searchableProperties.get(i);
-        hql.append("lower(COALESCE(cast(e.").append(prop)
-            .append(" as string), '')) LIKE :search");
+        hql.append("lower(COALESCE(cast(").append(alias).append(".")
+            .append(prop).append(" as string), '')) LIKE :search");
       }
       hql.append(")");
     }
 
     // Prefix with alias "as e" so OBQuery registers the entity alias
-    String whereStr = hql.length() > 0 ? "as e where " + hql.toString() : "as e";
+    String whereStr = hql.length() > 0
+        ? "as " + alias + " where " + hql.toString()
+        : "as " + alias;
 
     // Count query
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
@@ -341,7 +344,7 @@ public class NeoSelectorService {
     int totalCount = countQuery.count();
 
     // Data query with ordering and pagination
-    String orderBy = " ORDER BY e." + meta.displayProperty;
+    String orderBy = " ORDER BY " + alias + "." + meta.displayProperty;
     String dataWhere = whereStr + orderBy;
 
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance()
@@ -373,6 +376,126 @@ public class NeoSelectorService {
       item.put("label", bob.getIdentifier());
 
       // Add all grid fields
+      for (RichFieldMeta fieldMeta : meta.gridFields) {
+        Object value = resolvePropertyValue(bob, fieldMeta.property, entityDef);
+        item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
+      }
+      items.put(item);
+    }
+
+    JSONObject result = new JSONObject();
+    result.put("items", items);
+    result.put("columns", columns);
+    result.put("totalCount", totalCount);
+    result.put("limit", limit);
+    result.put("offset", offset);
+    result.put("hasMore", (offset + limit) < totalCount);
+    return NeoResponse.ok(result);
+  }
+
+  /**
+   * Execute a custom HQL selector query using the full HQL from the Selector definition.
+   * Custom HQL selectors define their own FROM clause (e.g., "FROM Product AS p WHERE ...").
+   * We append additional filters and use Session.createQuery for the full HQL.
+   */
+  @SuppressWarnings("unchecked")
+  private static NeoResponse executeCustomHqlQuery(SelectorMeta meta,
+      String search, int limit, int offset, String validationFilter) throws Exception {
+
+    String alias = meta.entityAlias;
+    StringBuilder baseHql = new StringBuilder(meta.customHql);
+
+    // Check if HQL already has WHERE
+    boolean hasWhere = meta.customHql.toUpperCase().contains(" WHERE ");
+
+    // Apply where clause from OBUISEL_Selector config with @param@ substitution
+    if (StringUtils.isNotBlank(meta.whereClause)) {
+      String resolved = resolveObuiselParams(meta.whereClause);
+      baseHql.append(hasWhere ? " AND " : " WHERE ");
+      baseHql.append(resolved);
+      hasWhere = true;
+    }
+
+    // Apply validation rule filter (resolved from context params)
+    if (StringUtils.isNotBlank(validationFilter)) {
+      baseHql.append(hasWhere ? " AND " : " WHERE ");
+      baseHql.append(validationFilter);
+      hasWhere = true;
+    }
+
+    // Apply readable organizations filter
+    OBContext ctx = OBContext.getOBContext();
+    String[] readableOrgs = ctx.getReadableOrganizations();
+    if (readableOrgs != null && readableOrgs.length > 0) {
+      baseHql.append(hasWhere ? " AND " : " WHERE ");
+      baseHql.append(alias).append(".organization.id IN (");
+      for (int i = 0; i < readableOrgs.length; i++) {
+        if (i > 0) {
+          baseHql.append(", ");
+        }
+        baseHql.append("'").append(readableOrgs[i]).append("'");
+      }
+      baseHql.append(")");
+      hasWhere = true;
+    }
+
+    // Search filter across searchable properties
+    boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
+    if (hasSearch) {
+      baseHql.append(hasWhere ? " AND " : " WHERE ");
+      baseHql.append("(");
+      for (int i = 0; i < meta.searchableProperties.size(); i++) {
+        if (i > 0) {
+          baseHql.append(" OR ");
+        }
+        String prop = meta.searchableProperties.get(i);
+        baseHql.append("lower(COALESCE(cast(").append(alias).append(".")
+            .append(prop).append(" as string), '')) LIKE :search");
+      }
+      baseHql.append(")");
+    }
+
+    String fromClause = baseHql.toString();
+
+    // Count query
+    String countHql = "SELECT COUNT(" + alias + ") " + fromClause;
+    org.hibernate.query.Query<Long> countQuery = OBDal.getInstance()
+        .getSession().createQuery(countHql, Long.class);
+    if (hasSearch) {
+      countQuery.setParameter("search", "%" + search.toLowerCase() + "%");
+    }
+    int totalCount = countQuery.uniqueResult().intValue();
+
+    // Data query with ORDER BY and pagination
+    String dataHql = "SELECT " + alias + " " + fromClause
+        + " ORDER BY " + alias + "." + meta.displayProperty;
+    org.hibernate.query.Query<BaseOBObject> dataQuery = OBDal.getInstance()
+        .getSession().createQuery(dataHql, BaseOBObject.class);
+    if (hasSearch) {
+      dataQuery.setParameter("search", "%" + search.toLowerCase() + "%");
+    }
+    dataQuery.setMaxResults(limit);
+    dataQuery.setFirstResult(offset);
+
+    // Build column metadata
+    JSONArray columns = new JSONArray();
+    for (RichFieldMeta fieldMeta : meta.gridFields) {
+      JSONObject col = new JSONObject();
+      col.put("name", fieldMeta.propertyKey);
+      col.put("label", fieldMeta.label);
+      col.put("sortNo", fieldMeta.sortNo);
+      columns.put(col);
+    }
+
+    // Build results with all grid fields
+    Entity entityDef = ModelProvider.getInstance()
+        .getEntity(meta.entityName);
+    JSONArray items = new JSONArray();
+    for (BaseOBObject bob : dataQuery.list()) {
+      JSONObject item = new JSONObject();
+      item.put("id", bob.getId());
+      item.put("label", bob.getIdentifier());
+
       for (RichFieldMeta fieldMeta : meta.gridFields) {
         Object value = resolvePropertyValue(bob, fieldMeta.property, entityDef);
         item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
@@ -577,8 +700,13 @@ public class NeoSelectorService {
    */
   private static SelectorMeta resolveObuiselSelector(Selector selector) {
     try {
-      // Check for custom query
+      // Check for custom query and retrieve custom HQL if present
       boolean isCustom = Boolean.TRUE.equals(selector.isCustomQuery());
+      String customHql = isCustom ? selector.getHQL() : null;
+      String entityAlias = selector.getEntityAlias();
+      if (StringUtils.isBlank(entityAlias)) {
+        entityAlias = "e";
+      }
 
       Table targetTable = selector.getTable();
       if (targetTable == null) {
@@ -658,7 +786,9 @@ public class NeoSelectorService {
           isCustom,
           valueProp,
           gridFields,
-          searchableProps
+          searchableProps,
+          customHql,
+          entityAlias
       );
 
     } catch (Exception e) {
@@ -908,18 +1038,22 @@ public class NeoSelectorService {
     final String valueProperty;
     final List<RichFieldMeta> gridFields;
     final List<String> searchableProperties;
+    final String customHql;
+    final String entityAlias;
 
     /** Constructor for simple selectors (TableDir, Table, Search). */
     SelectorMeta(String entityName, String displayProperty, String whereClause) {
       this(entityName, displayProperty, whereClause,
           false, false, "id",
-          new ArrayList<>(), new ArrayList<>());
+          new ArrayList<>(), new ArrayList<>(),
+          null, "e");
     }
 
     /** Constructor for rich (OBUISEL) selectors. */
     SelectorMeta(String entityName, String displayProperty, String whereClause,
         boolean isRich, boolean isCustomQuery, String valueProperty,
-        List<RichFieldMeta> gridFields, List<String> searchableProperties) {
+        List<RichFieldMeta> gridFields, List<String> searchableProperties,
+        String customHql, String entityAlias) {
       this.entityName = entityName;
       this.displayProperty = displayProperty;
       this.whereClause = whereClause;
@@ -928,6 +1062,8 @@ public class NeoSelectorService {
       this.valueProperty = valueProperty;
       this.gridFields = gridFields;
       this.searchableProperties = searchableProperties;
+      this.customHql = customHql;
+      this.entityAlias = entityAlias;
     }
   }
 

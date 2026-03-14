@@ -407,7 +407,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         "Number of results to skip", "0"));
     querySelectorOp.responses(new ApiResponses()
         .addApiResponse("200", createJsonResponse("Selector values",
-            createObjectSchema("Selector query results")))
+            createSelectorQueryResponseSchema()))
         .addApiResponse("401", new ApiResponse().description("Unauthorized"))
         .addApiResponse("404", new ApiResponse().description("Selector not found")));
     selectorQueryItem.get(querySelectorOp);
@@ -756,6 +756,49 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     ArraySchema arraySchema = new ArraySchema();
     arraySchema.items(itemSchema);
     return arraySchema;
+  }
+
+  /**
+   * Schema for selector query response with items, columns, pagination.
+   */
+  private Schema<?> createSelectorQueryResponseSchema() {
+    // Item schema: {id, label, ...gridFields}
+    ObjectSchema itemSchema = new ObjectSchema();
+    itemSchema.addProperties("id", new Schema<String>().type("string")
+        .description("Record ID"));
+    itemSchema.addProperties("label", new Schema<String>().type("string")
+        .description("Display value (identifier)"));
+    itemSchema.setDescription("Selector item. Rich selectors include additional "
+        + "grid field properties beyond id and label.");
+    itemSchema.setAdditionalProperties(new Schema<>());
+
+    // Column schema for rich selectors
+    ObjectSchema columnSchema = new ObjectSchema();
+    columnSchema.addProperties("name", new Schema<String>().type("string")
+        .description("Property key (last segment of DAL path)"));
+    columnSchema.addProperties("label", new Schema<String>().type("string")
+        .description("Display label for the column"));
+    columnSchema.addProperties("sortNo", new Schema<Long>().type("integer")
+        .description("Column sort order"));
+
+    ObjectSchema responseSchema = new ObjectSchema();
+    responseSchema.addProperties("items", new ArraySchema().items(itemSchema)
+        .description("Matching selector values"));
+    responseSchema.addProperties("columns", new ArraySchema().items(columnSchema)
+        .description("Grid column definitions (populated for rich/OBUISEL selectors, "
+            + "empty array for simple selectors)"));
+    responseSchema.addProperties("totalCount",
+        new Schema<Integer>().type("integer")
+            .description("Total number of matching records"));
+    responseSchema.addProperties("limit",
+        new Schema<Integer>().type("integer")
+            .description("Page size used for this query"));
+    responseSchema.addProperties("offset",
+        new Schema<Integer>().type("integer")
+            .description("Number of records skipped"));
+    responseSchema.addProperties("hasMore", new BooleanSchema()
+        .description("True if more records exist beyond the current page"));
+    return responseSchema;
   }
 
   /**
