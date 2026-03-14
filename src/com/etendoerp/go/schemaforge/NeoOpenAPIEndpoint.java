@@ -237,6 +237,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
       addSelectorPaths(openAPI, specName, entityName);
       addActionPaths(openAPI, specName, entityName);
       addEvaluateDisplayPaths(openAPI, specName, entityName);
+      addDefaultsPaths(openAPI, specName, entityName);
     }
   }
 
@@ -616,6 +617,53 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         .addApiResponse("405", new ApiResponse().description("Method not allowed")));
 
     pathItem.post(evalOp);
+    openAPI.getPaths().addPathItem(path, pathItem);
+  }
+
+  /**
+   * Register /defaults endpoint in OpenAPI for each entity.
+   * Called from addWindowPaths() alongside other sub-path registrations.
+   */
+  private void addDefaultsPaths(OpenAPI openAPI, String specName, String entityName) {
+    String path = BASE_PATH + specName + "/" + entityName + "/defaults";
+    PathItem pathItem = getOrCreatePathItem(openAPI, path);
+
+    // Response schema
+    ObjectSchema defaultsMapSchema = new ObjectSchema();
+    defaultsMapSchema.setDescription(
+        "Default values map. Keys are field names (camelCase), values are resolved defaults.");
+    defaultsMapSchema.setAdditionalProperties(new Schema<>());
+
+    ObjectSchema metadataSchema = new ObjectSchema();
+    metadataSchema.addProperties("unresolvedFields", new ArraySchema()
+        .items(new StringSchema())
+        .description("Fields whose defaults could not be resolved (SQL expressions, missing context)"));
+    metadataSchema.addProperties("sequenceFields", new ArraySchema()
+        .items(new StringSchema())
+        .description("Fields with auto-generated sequence values (preview only, not consumed)"));
+
+    ObjectSchema responseSchema = new ObjectSchema();
+    responseSchema.addProperties("defaults", defaultsMapSchema);
+    responseSchema.addProperties("metadata", metadataSchema);
+
+    // Operation
+    Operation getOp = createOperation(
+        "Get default values for new " + entityName,
+        "Returns server-resolved default values for creating a new " + entityName
+            + " record. Resolves literal defaults from AD_Column.DefaultValue, "
+            + "session context variables (@#AD_Org_ID@, @#Date@, etc.), "
+            + "and sequence previews (DocumentNo). "
+            + "Use parentId query parameter for child entities that need a parent link.");
+
+    getOp.addParametersItem(createQueryParam("parentId", "string",
+        "Parent record ID for child entities (auto-fills parent link column)", null));
+
+    getOp.responses(new ApiResponses()
+        .addApiResponse("200", createJsonResponse("Default values for new record", responseSchema))
+        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
+        .addApiResponse("404", new ApiResponse().description("Spec or entity not found")));
+
+    pathItem.get(getOp);
     openAPI.getPaths().addPathItem(path, pathItem);
   }
 

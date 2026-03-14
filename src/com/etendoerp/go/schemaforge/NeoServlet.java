@@ -288,6 +288,17 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
 
+      // Handle defaults requests
+      if (pathInfo.isDefaults) {
+        if (!"GET".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Defaults endpoint only supports GET");
+          return;
+        }
+        handleDefaults(response, spec, pathInfo, request);
+        return;
+      }
+
       // Find the entity within this spec
       SFEntity entity = findEntity(spec.getId(), pathInfo.entityName);
       if (entity == null) {
@@ -428,7 +439,12 @@ public class NeoServlet extends HttpBaseServlet {
 
     // Check for /callout sub-path
     if (parts.length >= 3 && "callout".equals(parts[2])) {
-      return new NeoPathInfo(specName, entityName, null, false, null, false, null, false, true);
+      return new NeoPathInfo(specName, entityName, null, false, null, false, null, false, true, false);
+    }
+
+    // Check for /defaults sub-path
+    if (parts.length >= 3 && "defaults".equals(parts[2])) {
+      return new NeoPathInfo(specName, entityName, null, false, null, false, null, false, false, true);
     }
 
     // Check for /evaluate-display sub-path
@@ -1599,6 +1615,49 @@ public class NeoServlet extends HttpBaseServlet {
     }
   }
 
+  /**
+   * Handle default value resolution requests.
+   * GET /sws/neo/{specName}/{entityName}/defaults
+   * Delegates to NeoDefaultsService for resolving AD_Column defaults.
+   */
+  private void handleDefaults(HttpServletResponse response, SFSpec spec,
+      NeoPathInfo pathInfo, HttpServletRequest request) throws IOException {
+    try {
+      SFEntity sfEntity = findEntity(spec.getId(), pathInfo.entityName);
+      if (sfEntity == null) {
+        sendError(response, HttpServletResponse.SC_NOT_FOUND,
+            "Entity not found: " + pathInfo.entityName);
+        return;
+      }
+
+      Tab tab = sfEntity.getADTab();
+      if (tab == null) {
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Entity has no linked AD_Tab: " + pathInfo.entityName);
+        return;
+      }
+
+      String parentId = request.getParameter("parentId");
+
+      NeoContext ctx = NeoContext.builder()
+          .specName(pathInfo.specName)
+          .entityName(pathInfo.entityName)
+          .httpMethod("GET")
+          .adTab(tab)
+          .sfEntity(sfEntity)
+          .obContext(OBContext.getOBContext())
+          .build();
+
+      NeoResponse result = NeoDefaultsService.resolveDefaults(ctx, parentId);
+      writeResponse(response, result);
+    } catch (Exception e) {
+      log.error("Error resolving defaults for {}/{}: {}",
+          pathInfo.specName, pathInfo.entityName, e.getMessage(), e);
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Defaults error: " + e.getMessage());
+    }
+  }
+
   private void sendError(HttpServletResponse response, int status, String message)
       throws IOException {
     NeoResponse errorResponse = NeoResponse.error(status, message);
@@ -1618,34 +1677,43 @@ public class NeoServlet extends HttpBaseServlet {
     final String actionName;
     final boolean isEvaluateDisplay;
     final boolean isCallout;
+    final boolean isDefaults;
 
     NeoPathInfo(String specName, String entityName, String recordId) {
-      this(specName, entityName, recordId, false, null, false, null, false, false);
+      this(specName, entityName, recordId, false, null, false, null, false, false, false);
     }
 
     NeoPathInfo(String specName, String entityName, String recordId,
         boolean isSelector, String selectorField) {
-      this(specName, entityName, recordId, isSelector, selectorField, false, null, false, false);
+      this(specName, entityName, recordId, isSelector, selectorField, false, null, false, false, false);
     }
 
     NeoPathInfo(String specName, String entityName, String recordId,
         boolean isSelector, String selectorField,
         boolean isAction, String actionName) {
       this(specName, entityName, recordId, isSelector, selectorField,
-          isAction, actionName, false, false);
+          isAction, actionName, false, false, false);
     }
 
     NeoPathInfo(String specName, String entityName, String recordId,
         boolean isSelector, String selectorField,
         boolean isAction, String actionName, boolean isEvaluateDisplay) {
       this(specName, entityName, recordId, isSelector, selectorField,
-          isAction, actionName, isEvaluateDisplay, false);
+          isAction, actionName, isEvaluateDisplay, false, false);
     }
 
     NeoPathInfo(String specName, String entityName, String recordId,
         boolean isSelector, String selectorField,
         boolean isAction, String actionName, boolean isEvaluateDisplay,
         boolean isCallout) {
+      this(specName, entityName, recordId, isSelector, selectorField,
+          isAction, actionName, isEvaluateDisplay, isCallout, false);
+    }
+
+    NeoPathInfo(String specName, String entityName, String recordId,
+        boolean isSelector, String selectorField,
+        boolean isAction, String actionName, boolean isEvaluateDisplay,
+        boolean isCallout, boolean isDefaults) {
       this.specName = specName;
       this.entityName = entityName;
       this.recordId = recordId;
@@ -1655,6 +1723,7 @@ public class NeoServlet extends HttpBaseServlet {
       this.actionName = actionName;
       this.isEvaluateDisplay = isEvaluateDisplay;
       this.isCallout = isCallout;
+      this.isDefaults = isDefaults;
     }
   }
 }
