@@ -128,9 +128,15 @@ public class NeoServlet extends HttpBaseServlet {
     // 1. Authenticate via JWT
     try {
       authenticateJwt(request);
-    } catch (Exception e) {
+    } catch (OBException e) {
+      // OBException messages are safe to expose (we control them)
       log.warn("Unauthorized NEO request: {}", e.getMessage());
       sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
+      return;
+    } catch (Exception e) {
+      // Other exceptions (JWT decode failures, NPEs) — don't leak internals
+      log.warn("Unauthorized NEO request: {}", e.getMessage());
+      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
       return;
     }
 
@@ -642,16 +648,30 @@ public class NeoServlet extends HttpBaseServlet {
           result = jsonService.fetch(params);
           break;
         case "POST": {
+          // Validate: POST must NOT have a recordId (creates don't target an existing record)
+          if (context.getRecordId() != null) {
+            return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+                "POST (create) must not include a record ID in the URL");
+          }
           // Filter out non-included and read-only fields from request body
           JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
-          result = jsonService.add(params, filteredBody != null ? filteredBody.toString() : "{}");
+          // Wrap for DefaultJsonDataService: {"data": {fields, "_entityName": ..., "_new": true}}
+          String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
+          result = jsonService.add(params, wrappedBody);
           break;
         }
         case "PUT":
         case "PATCH": {
+          // Validate: PUT/PATCH require a recordId
+          if (context.getRecordId() == null) {
+            return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+                context.getHttpMethod() + " requires a record ID in the URL");
+          }
           // Filter out non-included and read-only fields from request body
           JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
-          result = jsonService.update(params, filteredBody != null ? filteredBody.toString() : "{}");
+          // Wrap for DefaultJsonDataService: {"data": {fields, "_entityName": ..., "id": recordId}}
+          String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
+          result = jsonService.update(params, wrappedBody);
           break;
         }
         case "DELETE":
@@ -664,10 +684,25 @@ public class NeoServlet extends HttpBaseServlet {
 
       JSONObject responseJson = new JSONObject(result);
 
-      // Filter GET response to only include configured fields
-      if ("GET".equals(context.getHttpMethod())) {
-        fieldFilter.filterGetResponse(responseJson);
+      // Check for error responses from DefaultJsonDataService
+      JSONObject innerResponse = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
+      if (innerResponse != null) {
+        int status = innerResponse.optInt(JsonConstants.RESPONSE_STATUS, 0);
+        if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
+          String errMsg = innerResponse.has(JsonConstants.RESPONSE_ERROR)
+              ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
+                  .optString("message", "Write operation failed")
+              : "Write operation failed";
+          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errMsg);
+        }
+        if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
+          // Return 400 with the full error details for validation errors
+          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
+        }
       }
+
+      // Filter response to only include configured fields (for all methods)
+      fieldFilter.filterGetResponse(responseJson);
 
       return NeoResponse.ok(responseJson);
     } catch (Exception e) {
@@ -677,9 +712,40 @@ public class NeoServlet extends HttpBaseServlet {
   }
 
   /**
-   * Build the tab-level where clause, including the tab's own HQL filter
-   * and parent entity filtering for child tabs when parentId is provided.
+   * Wraps a flat JSON body into the structure expected by DefaultJsonDataService:
+   * {@code {"data": {fields..., "_entityName": dalEntityName, "id": recordId}}}
+   *
+   * <p>DefaultJsonDataService.getContentAsJSON() calls jsonObject.get("data"),
+   * so the content MUST be wrapped in a "data" envelope. Additionally,
+   * the "_entityName" property is required for OBDal to resolve the entity,
+   * and "id" is required for updates.</p>
+   *
+   * @param filteredBody the filtered request body (flat JSON from client)
+   * @param dalEntityName the DAL entity name (e.g. "Order")
+   * @param recordId the record ID for updates, or null for creates
+   * @return the wrapped JSON string ready for DefaultJsonDataService
    */
+  private String wrapForSmartclient(JSONObject filteredBody, String dalEntityName,
+      String recordId) {
+    try {
+      JSONObject data = filteredBody != null ? filteredBody : new JSONObject();
+      data.put(JsonConstants.ENTITYNAME, dalEntityName);
+      if (recordId != null) {
+        data.put(JsonConstants.ID, recordId);
+      } else {
+        // Mark as new record for creates
+        data.put(JsonConstants.NEW_INDICATOR, true);
+      }
+
+      JSONObject wrapper = new JSONObject();
+      wrapper.put(JsonConstants.DATA, data);
+      return wrapper.toString();
+    } catch (Exception e) {
+      log.error("Error wrapping body for Smartclient format: {}", e.getMessage(), e);
+      return "{}";
+    }
+  }
+
   /**
    * Builds an HQL where clause fragment that filters a child tab's records
    * by the parent record ID.
