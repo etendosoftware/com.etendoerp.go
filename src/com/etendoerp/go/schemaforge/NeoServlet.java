@@ -658,6 +658,9 @@ public class NeoServlet extends HttpBaseServlet {
           }
           // Filter out non-included and read-only fields from request body
           JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
+          // Inject defaults for mandatory columns not in ETGO_SF_FIELD config
+          // (e.g., C_DocType_ID = "0", DateAcct = today, C_Currency_ID from context)
+          NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context);
           // Wrap for DefaultJsonDataService: {"data": {fields, "_entityName": ..., "_new": true}}
           String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
           result = jsonService.add(params, wrappedBody);

@@ -51,6 +51,10 @@ public class NeoSelectorService {
   private static final String REF_TABLEDIR = "19";
   private static final String REF_SEARCH = "30";
 
+  // Session-level params resolved server-side (should not appear in selectorParams)
+  private static final java.util.Set<String> SESSION_PARAMS = new java.util.HashSet<>(
+      java.util.Arrays.asList("AD_Org_ID", "AD_Client_ID", "AD_User_ID", "AD_Role_ID"));
+
   private NeoSelectorService() {
   }
 
@@ -119,15 +123,19 @@ public class NeoSelectorService {
           item.put("auxFields", auxArray);
         }
 
-        // Include selectorParams from validation rule
+        // Include selectorParams from validation rule (only non-session params)
         org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
         if (valRule != null && StringUtils.isNotBlank(valRule.getValidationCode())) {
           JSONArray params = new JSONArray();
-          Matcher m = VALIDATION_PARAM.matcher(valRule.getValidationCode());
+          // Use a pattern that captures the optional # prefix to identify session params
+          Pattern paramExtract = Pattern.compile("@(#?)(\\w+)@");
+          Matcher m = paramExtract.matcher(valRule.getValidationCode());
           java.util.Set<String> seen = new java.util.HashSet<>();
           while (m.find()) {
-            String param = m.group(1);
-            if (seen.add(param)) {
+            boolean isSession = "#".equals(m.group(1));
+            String param = m.group(2);
+            // Skip session-level params (resolved server-side) and standard context params
+            if (!isSession && !SESSION_PARAMS.contains(param) && seen.add(param)) {
               params.put(param);
             }
           }
@@ -1209,18 +1217,29 @@ public class NeoSelectorService {
     return "id";
   }
 
-  private static final Pattern VALIDATION_PARAM = Pattern.compile("@(\\w+)@");
+  // Matches @Param@ and @#Param@ (session-level variables in Etendo)
+  private static final Pattern VALIDATION_PARAM = Pattern.compile("@#?(\\w+)@");
+
+  // SQL functions that have no HQL equivalent and must cause a clause to be skipped
+  private static final Pattern SQL_ONLY_FUNCTIONS = Pattern.compile(
+      "AD_ISORGINCLUDED|AD_ISCHILDORGINCLUDED", Pattern.CASE_INSENSITIVE);
 
   /**
    * Resolve the column's validation rule into an HQL filter using context params.
    *
    * Validation rules are SQL-style clauses like:
-   *   C_BPartner_Location.C_BPartner_ID=@C_BPartner_ID@ AND C_BPartner_Location.IsShipTo='Y'
+   *   C_DocType.DocBaseType IN ('SOO', 'POO') AND C_DocType.IsSOTrx='@IsSOTrx@'
+   *   AND (AD_ISORGINCLUDED(@AD_Org_ID@, ...) <> '-1' OR ...)
    *
-   * This method:
-   * 1. Replaces @Param@ placeholders with actual values from contextParams
-   * 2. Converts TABLE.COLUMN references to DAL property paths (e.property)
-   * 3. Returns null if no validation rule or required params are missing
+   * This method applies a best-effort strategy:
+   * 1. Splits the validation code into top-level AND clauses
+   * 2. For each clause, checks if all @Param@ placeholders can be resolved
+   * 3. Includes clauses where all params are available (or that have no params)
+   * 4. Skips clauses with unresolvable params or SQL-only functions
+   * 5. Converts TABLE.COLUMN references to DAL property paths (e.property)
+   *
+   * This ensures static filters (e.g., DocBaseType IN ('POO')) are always applied
+   * even when context-dependent clauses cannot be resolved.
    */
   private static String resolveValidationFilter(Column column, String targetEntityName,
       Map<String, String> contextParams) {
@@ -1228,46 +1247,119 @@ public class NeoSelectorService {
     if (valRule == null || StringUtils.isBlank(valRule.getValidationCode())) {
       return null;
     }
-    if (contextParams == null || contextParams.isEmpty()) {
-      return null;
+
+    String code = valRule.getValidationCode().trim();
+
+    // Build combined param map: session variables + caller-provided context params
+    Map<String, String> allParams = new java.util.HashMap<>();
+    OBContext ctx = OBContext.getOBContext();
+    allParams.put("AD_Org_ID", ctx.getCurrentOrganization().getId());
+    allParams.put("AD_Client_ID", ctx.getCurrentClient().getId());
+    allParams.put("AD_User_ID", ctx.getUser().getId());
+    allParams.put("AD_Role_ID", ctx.getRole().getId());
+    if (contextParams != null) {
+      allParams.putAll(contextParams);
     }
 
-    String code = valRule.getValidationCode();
+    // Split into top-level AND clauses, respecting parentheses depth
+    List<String> clauses = splitTopLevelAnd(code);
 
-    // Check that all required @Param@ have values in contextParams
-    Matcher paramMatcher = VALIDATION_PARAM.matcher(code);
-    boolean hasAllParams = true;
-    while (paramMatcher.find()) {
-      String paramName = paramMatcher.group(1);
-      if (!contextParams.containsKey(paramName)) {
-        hasAllParams = false;
-        break;
+    List<String> resolvedClauses = new ArrayList<>();
+    for (String clause : clauses) {
+      String trimmed = clause.trim();
+      if (StringUtils.isBlank(trimmed)) {
+        continue;
       }
+
+      // Skip clauses containing SQL-only functions (no HQL equivalent)
+      if (SQL_ONLY_FUNCTIONS.matcher(trimmed).find()) {
+        log.debug("Skipping validation clause with SQL-only function: {}", trimmed);
+        continue;
+      }
+
+      // Check if all @Param@ in this clause can be resolved
+      Matcher paramMatcher = VALIDATION_PARAM.matcher(trimmed);
+      boolean allResolvable = true;
+      while (paramMatcher.find()) {
+        String paramName = paramMatcher.group(1);
+        if (!allParams.containsKey(paramName)) {
+          allResolvable = false;
+          break;
+        }
+      }
+      if (!allResolvable) {
+        log.debug("Skipping validation clause with unresolvable params: {}", trimmed);
+        continue;
+      }
+
+      // Replace @Param@ and @#Param@ with sanitized values
+      StringBuffer resolved = new StringBuffer();
+      paramMatcher = VALIDATION_PARAM.matcher(trimmed);
+      while (paramMatcher.find()) {
+        String paramName = paramMatcher.group(1);
+        String value = allParams.get(paramName).replace("'", "''");
+        paramMatcher.appendReplacement(resolved,
+            Matcher.quoteReplacement("'" + value + "'"));
+      }
+      paramMatcher.appendTail(resolved);
+
+      resolvedClauses.add(resolved.toString());
     }
-    if (!hasAllParams) {
+
+    if (resolvedClauses.isEmpty()) {
       return null;
     }
 
-    // Replace @Param@ with sanitized values
-    StringBuffer resolved = new StringBuffer();
-    paramMatcher = VALIDATION_PARAM.matcher(code);
-    while (paramMatcher.find()) {
-      String paramName = paramMatcher.group(1);
-      String value = contextParams.get(paramName).replace("'", "''");
-      paramMatcher.appendReplacement(resolved, "'" + value + "'");
-    }
-    paramMatcher.appendTail(resolved);
+    // Join resolved clauses back with AND
+    String joined = String.join(" AND ", resolvedClauses);
 
     // Convert SQL TABLE.COLUMN references to HQL e.property paths
-    String hqlFilter = convertSqlToHql(resolved.toString(), targetEntityName);
+    String hqlFilter = convertSqlToHql(joined, targetEntityName);
     return hqlFilter;
   }
 
   /**
+   * Split a SQL WHERE clause into top-level AND segments.
+   * Respects parentheses nesting so that "A AND (B OR C AND D) AND E"
+   * splits into ["A", "(B OR C AND D)", "E"], not into inner parts.
+   */
+  private static List<String> splitTopLevelAnd(String code) {
+    List<String> parts = new ArrayList<>();
+    int depth = 0;
+    int start = 0;
+    String upper = code.toUpperCase();
+
+    for (int i = 0; i < code.length(); i++) {
+      char c = code.charAt(i);
+      if (c == '(') {
+        depth++;
+      } else if (c == ')') {
+        depth--;
+      } else if (depth == 0 && i + 3 < code.length()) {
+        // Check for top-level AND (preceded/followed by whitespace or newline)
+        if (upper.substring(i, i + 3).equals("AND")
+            && (i == 0 || !Character.isLetterOrDigit(code.charAt(i - 1)))
+            && !Character.isLetterOrDigit(code.charAt(i + 3))) {
+          parts.add(code.substring(start, i).trim());
+          start = i + 3;
+        }
+      }
+    }
+    // Add the last segment
+    String last = code.substring(start).trim();
+    if (!last.isEmpty()) {
+      parts.add(last);
+    }
+    return parts;
+  }
+
+  /**
    * Convert a SQL-style validation clause to HQL.
-   * Replaces TABLE.COLUMN with e.dalProperty, handling FK columns (_ID → .id).
+   * Replaces TABLE.COLUMN with e.dalProperty, handling FK columns (_ID -> .id).
+   * Also converts bare column names (without table prefix) to e.property paths.
    *
-   * Example: "C_BPartner_Location.C_BPartner_ID='abc'" → "e.businessPartner.id='abc'"
+   * Example: "C_DocType.DocBaseType IN ('POO')" -> "e.documentType IN ('POO')"
+   * Example: "docsubtypeso like 'OB'" -> "e.sOSubType like 'OB'"
    */
   private static String convertSqlToHql(String sqlClause, String targetEntityName) {
     try {
@@ -1278,7 +1370,7 @@ public class NeoSelectorService {
 
       String tableName = targetEntity.getTableName();
 
-      // Replace TABLE.COLUMN patterns with e.property
+      // Step 1: Replace TABLE.COLUMN patterns with e.property
       Pattern tableColPattern = Pattern.compile(
           Pattern.quote(tableName) + "\\.(\\w+)", Pattern.CASE_INSENSITIVE);
       Matcher m = tableColPattern.matcher(sqlClause);
@@ -1286,18 +1378,37 @@ public class NeoSelectorService {
       StringBuffer result = new StringBuffer();
       while (m.find()) {
         String dbColName = m.group(1);
-        Property prop = targetEntity.getPropertyByColumnName(dbColName);
-        if (prop != null) {
-          String replacement;
-          if (!prop.isPrimitive() && prop.getTargetEntity() != null) {
-            // FK property: TABLE.FK_ID → e.property.id
-            replacement = "e." + prop.getName() + ".id";
-          } else {
-            replacement = "e." + prop.getName();
+        String replacement = resolveColumnToHql(targetEntity, dbColName);
+        m.appendReplacement(result, Matcher.quoteReplacement(replacement));
+      }
+      m.appendTail(result);
+      String afterTableRef = result.toString();
+
+      // Step 2: Replace bare column names that are NOT already prefixed with "e."
+      // Match word tokens that could be column names (not inside quotes, not SQL keywords)
+      Pattern bareColPattern = Pattern.compile("(?<![.'\"])\\b(\\w+)\\b(?!\\s*\\()");
+      m = bareColPattern.matcher(afterTableRef);
+      result = new StringBuffer();
+      java.util.Set<String> sqlKeywords = new java.util.HashSet<>(java.util.Arrays.asList(
+          "AND", "OR", "NOT", "IN", "IS", "NULL", "LIKE", "BETWEEN",
+          "COALESCE", "CAST", "AS", "SELECT", "FROM", "WHERE", "ORDER", "BY",
+          "ASC", "DESC", "TRUE", "FALSE", "ESCAPE", "e"));
+      while (m.find()) {
+        String token = m.group(1);
+        // Skip SQL keywords, string literals, numbers, and already-resolved "e." references
+        if (sqlKeywords.contains(token.toUpperCase())
+            || token.matches("\\d+")
+            || (m.start() > 0 && afterTableRef.charAt(m.start() - 1) == '.')) {
+          continue;
+        }
+        try {
+          Property prop = targetEntity.getPropertyByColumnName(token);
+          if (prop != null) {
+            String replacement = resolveColumnToHql(targetEntity, token);
+            m.appendReplacement(result, Matcher.quoteReplacement(replacement));
           }
-          m.appendReplacement(result, replacement);
-        } else {
-          m.appendReplacement(result, "e." + dbColName);
+        } catch (Exception ignored) {
+          // Not a column name, leave as-is
         }
       }
       m.appendTail(result);
@@ -1306,6 +1417,20 @@ public class NeoSelectorService {
       log.warn("Could not convert SQL to HQL for entity {}: {}", targetEntityName, e.getMessage());
       return sqlClause;
     }
+  }
+
+  /**
+   * Resolve a single DB column name to an HQL "e.property" path.
+   */
+  private static String resolveColumnToHql(Entity targetEntity, String dbColName) {
+    Property prop = targetEntity.getPropertyByColumnName(dbColName);
+    if (prop != null) {
+      if (!prop.isPrimitive() && prop.getTargetEntity() != null) {
+        return "e." + prop.getName() + ".id";
+      }
+      return "e." + prop.getName();
+    }
+    return "e." + dbColName;
   }
 
   /**

@@ -15,6 +15,7 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.secureApp.LoginUtils;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -172,6 +173,12 @@ public class NeoDefaultsService {
     // Get the default value expression from AD_Column
     String defaultExpr = adColumn.getDefaultValue();
     if (defaultExpr == null || defaultExpr.trim().isEmpty()) {
+      // No column-level default, but Utility.getDefault also checks preferences
+      // which may provide a default for this column+window combination
+      String fromPrefs = Utility.getDefault(conn, vars, dbColumnName, "", windowId, "");
+      if (fromPrefs != null && !fromPrefs.isEmpty()) {
+        return fromPrefs;
+      }
       return null;
     }
 
@@ -337,63 +344,42 @@ public class NeoDefaultsService {
    * (used when no HttpSession is available) with the context values that Utility.getDefault,
    * Utility.getContext, and Utility.getDocumentNo need.
    */
+  /**
+   * Build a VariablesSecureApp from OBContext, fully populated with ALL session variables.
+   *
+   * <p>Delegates to {@link LoginUtils#fillSessionArguments} — the same method that Etendo's
+   * classic login uses. This ensures all context variables ($C_Currency_ID, $C_AcctSchema_ID,
+   * $Element_*, preferences, accounting dimensions, etc.) are resolved identically to the
+   * classic UI, without hardcoding individual variables.</p>
+   */
   private static VariablesSecureApp buildVariablesSecureApp(OBContext obContext) {
     String userId = obContext.getUser().getId();
     String clientId = obContext.getCurrentClient().getId();
     String orgId = obContext.getCurrentOrganization().getId();
     String roleId = obContext.getRole().getId();
     String lang = obContext.getLanguage().getLanguage();
+    String warehouseId = obContext.getWarehouse() != null
+        ? obContext.getWarehouse().getId() : "";
 
     VariablesSecureApp vars = new VariablesSecureApp(userId, clientId, orgId, roleId, lang);
+    DalConnectionProvider conn = new DalConnectionProvider(false);
 
-    // Populate session attributes that Utility.getContext reads via getSessionValue.
-    // When VariablesSecureApp is created without HttpServletRequest, VariablesBase falls back
-    // to an internal HashMap — these setSessionValue calls populate that map.
-    vars.setSessionValue("#AD_User_ID", userId);
-    vars.setSessionValue("#AD_Client_ID", clientId);
-    vars.setSessionValue("#AD_Org_ID", orgId);
-    vars.setSessionValue("#AD_Role_ID", roleId);
-    vars.setSessionValue("#AD_Language", lang);
-
-    // User-accessible client list (format: 'clientId', '0')
-    vars.setSessionValue("#User_Client", "'" + clientId + "','0'");
-
-    // Warehouse
-    if (obContext.getWarehouse() != null) {
-      vars.setSessionValue("#M_Warehouse_ID", obContext.getWarehouse().getId());
-    }
-
-    // Date — Utility.getContext handles #Date specially, but some code reads it from session
-    String today = new SimpleDateFormat(DATE_FORMAT).format(new Date());
-    vars.setSessionValue("#Date", today);
-
-    // User level from role
-    if (obContext.getRole() != null) {
-      String userLevel = obContext.getRole().getUserLevel();
-      if (userLevel != null) {
-        vars.setSessionValue("#User_Level", userLevel);
-      }
-    }
-
-    // Accessible org tree
-    StringBuilder orgTree = new StringBuilder();
-    if (obContext.getOrganizationStructureProvider() != null) {
-      try {
-        var accessibleOrgs = obContext.getReadableOrganizations();
-        for (int i = 0; i < accessibleOrgs.length; i++) {
-          if (i > 0) {
-            orgTree.append(",");
-          }
-          orgTree.append("'").append(accessibleOrgs[i]).append("'");
-        }
-      } catch (Exception e) {
-        log.debug("Could not resolve accessible org tree: {}", e.getMessage());
-        orgTree.append("'").append(orgId).append("'");
-      }
-    }
-    if (orgTree.length() > 0) {
-      vars.setSessionValue("#AccessibleOrgTree", orgTree.toString());
-      vars.setSessionValue("#User_Org", orgTree.toString());
+    try {
+      LoginUtils.fillSessionArguments(conn, vars, userId, lang, "N",
+          roleId, clientId, orgId, warehouseId);
+    } catch (Exception e) {
+      log.warn("LoginUtils.fillSessionArguments failed, falling back to minimal setup: {}",
+          e.getMessage());
+      // Minimal fallback — at least set the basics so simple literals resolve
+      vars.setSessionValue("#AD_User_ID", userId);
+      vars.setSessionValue("#AD_Client_ID", clientId);
+      vars.setSessionValue("#AD_Org_ID", orgId);
+      vars.setSessionValue("#AD_Role_ID", roleId);
+      vars.setSessionValue("#AD_Language", lang);
+      vars.setSessionValue("#M_Warehouse_ID", warehouseId);
+      vars.setSessionValue("#User_Client", "'" + clientId + "','0'");
+      vars.setSessionValue("#Date",
+          new SimpleDateFormat(DATE_FORMAT).format(new Date()));
     }
 
     return vars;
@@ -416,6 +402,70 @@ public class NeoDefaultsService {
       log.debug("Could not resolve window ID: {}", e.getMessage());
     }
     return "";
+  }
+
+  /**
+   * Resolve default values for mandatory table columns that are NOT configured in
+   * ETGO_SF_FIELD. These are "system" columns with NOT NULL DB constraints that need
+   * a value on INSERT (e.g., C_DocType_ID = "0", DateAcct = today, C_Currency_ID).
+   *
+   * <p>Uses the same resolution logic as the /defaults endpoint (Utility.getDefault,
+   * context variables, SQL expressions, preferences), so expressions like @#Date@
+   * and @C_Currency_ID@ are resolved correctly.</p>
+   *
+   * @param body    the filtered request body — columns already present are skipped
+   * @param adTab   the AD_Tab for the entity being created
+   * @param ctx     the NeoContext with OBContext and spec/entity info
+   */
+  public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx) {
+    if (body == null || adTab == null || ctx == null) {
+      return;
+    }
+    try {
+      Entity dalEntity = ModelProvider.getInstance()
+          .getEntityByTableId(adTab.getTable().getId());
+      if (dalEntity == null) {
+        return;
+      }
+
+      // Build resolution infrastructure once for all columns
+      VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext());
+      DalConnectionProvider conn = new DalConnectionProvider(false);
+      String windowId = ctx.getSfEntity() != null ? resolveWindowId(ctx.getSfEntity()) : "";
+
+      for (Column col : adTab.getTable().getADColumnList()) {
+        if (!col.isActive() || !col.isMandatory()) {
+          continue;
+        }
+
+        // Resolve the DAL property name
+        Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
+        if (prop == null) {
+          continue;
+        }
+
+        String propName = prop.getName();
+        // Skip if already present in the body (user or field-filter provided it)
+        if (body.has(propName)) {
+          continue;
+        }
+
+        // Resolve using the same logic as the /defaults endpoint
+        try {
+          Object resolved = resolveFieldDefault(col, null, vars, conn, windowId, ctx);
+          if (resolved != null) {
+            body.put(propName, resolved);
+            log.debug("Injected mandatory default: {} = {}", propName, resolved);
+          }
+        } catch (Exception e) {
+          log.debug("Could not resolve mandatory default for {}: {}",
+              col.getDBColumnName(), e.getMessage());
+        }
+      }
+    } catch (Exception e) {
+      log.error("Error injecting mandatory defaults for tab {}: {}",
+          adTab.getName(), e.getMessage(), e);
+    }
   }
 
   /**
@@ -456,4 +506,5 @@ public class NeoDefaultsService {
     // Fallback to heuristic if DAL entity is not available
     return NeoCalloutService.toCleanFieldName(dbColumnName);
   }
+
 }

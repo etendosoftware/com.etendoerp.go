@@ -532,6 +532,7 @@ public class NeoCalloutService {
       JSONObject updates = new JSONObject();
       JSONObject combos = new JSONObject();
       JSONArray messages = new JSONArray();
+      Map<String, String> rDisplayNames = new java.util.HashMap<>();
 
       if (calloutResult == null) {
         response.put("updates", updates);
@@ -561,6 +562,19 @@ public class NeoCalloutService {
 
         // Skip JSEXECUTE (not applicable in REST context)
         if ("JSEXECUTE".equals(key)) {
+          continue;
+        }
+
+        // Handle _R suffix keys (display representation for combo fields).
+        // E.g., "inpcDoctypetargetId_R" contains the label for "inpcDoctypetargetId".
+        // Store them temporarily and merge after the main loop.
+        if (key.endsWith("_R")) {
+          String baseInpKey = key.substring(0, key.length() - 2);
+          String baseClean = inpToCleanName(baseInpKey, adTab);
+          // Store: we'll merge after the main loop
+          if (!rDisplayNames.containsKey(baseClean)) {
+            rDisplayNames.put(baseClean, fieldResult.optString("value", ""));
+          }
           continue;
         }
 
@@ -596,6 +610,17 @@ public class NeoCalloutService {
           JSONObject updateObj = new JSONObject();
           updateObj.put("value", fieldResult.opt("value"));
           updates.put(cleanName, updateObj);
+        }
+      }
+
+      // Merge _R display names as _identifier into their base field update entries.
+      // E.g., "inpcDoctypetargetId_R" → "Purchase Order" merges into
+      // transactionDocument: { value: "...", _identifier: "Purchase Order" }
+      for (Map.Entry<String, String> rEntry : rDisplayNames.entrySet()) {
+        String baseKey = rEntry.getKey();
+        String displayName = rEntry.getValue();
+        if (updates.has(baseKey) && StringUtils.isNotBlank(displayName)) {
+          updates.getJSONObject(baseKey).put("_identifier", displayName);
         }
       }
 
