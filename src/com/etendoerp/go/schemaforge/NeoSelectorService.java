@@ -403,10 +403,28 @@ public class NeoSelectorService {
       String search, int limit, int offset, String validationFilter) throws Exception {
 
     String alias = meta.entityAlias;
-    StringBuilder baseHql = new StringBuilder(meta.customHql);
 
-    // Check if HQL already has WHERE
-    boolean hasWhere = meta.customHql.toUpperCase().contains(" WHERE ");
+    // Resolve Etendo classic UI placeholder before any processing
+    String rawHql = meta.customHql.replace("@additional_filters@", "1=1");
+
+    // Extract the FROM clause onward from the custom HQL (which includes its own SELECT).
+    // FROM may be preceded by space, newline, or tab — use regex to find it.
+    java.util.regex.Matcher fromMatcher = Pattern.compile("\\sFROM\\s",
+        Pattern.CASE_INSENSITIVE).matcher(rawHql);
+    if (!fromMatcher.find()) {
+      throw new IllegalArgumentException(
+          "Custom HQL does not contain a FROM clause: " + rawHql);
+    }
+    int fromIdx = fromMatcher.start();
+    // We only need the FROM-onwards portion; the data query uses "SELECT alias"
+    // to return BaseOBObject entities, not the custom SELECT columns.
+    String fromOnwards = rawHql.substring(fromIdx);
+
+    StringBuilder baseHql = new StringBuilder(fromOnwards);
+
+    // Check if the FROM-onwards portion already has WHERE (may be preceded by newline)
+    boolean hasWhere = Pattern.compile("\\sWHERE\\s", Pattern.CASE_INSENSITIVE)
+        .matcher(fromOnwards).find();
 
     // Apply where clause from OBUISEL_Selector config with @param@ substitution
     if (StringUtils.isNotBlank(meta.whereClause)) {
@@ -457,8 +475,8 @@ public class NeoSelectorService {
 
     String fromClause = baseHql.toString();
 
-    // Count query
-    String countHql = "SELECT COUNT(" + alias + ") " + fromClause;
+    // Count query — use the FROM-onwards portion (no duplicate SELECT)
+    String countHql = "SELECT COUNT(" + alias + ")" + fromClause;
     org.hibernate.query.Query<Long> countQuery = OBDal.getInstance()
         .getSession().createQuery(countHql, Long.class);
     if (hasSearch) {
@@ -466,8 +484,8 @@ public class NeoSelectorService {
     }
     int totalCount = countQuery.uniqueResult().intValue();
 
-    // Data query with ORDER BY and pagination
-    String dataHql = "SELECT " + alias + " " + fromClause
+    // Data query with ORDER BY and pagination — use entity alias, not custom columns
+    String dataHql = "SELECT " + alias + fromClause
         + " ORDER BY " + alias + "." + meta.displayProperty;
     org.hibernate.query.Query<BaseOBObject> dataQuery = OBDal.getInstance()
         .getSession().createQuery(dataHql, BaseOBObject.class);
@@ -544,22 +562,41 @@ public class NeoSelectorService {
     }
   }
 
+  /** Pattern matching @param@ placeholders in OBUISEL clauses. */
+  private static final Pattern PARAM_PATTERN = Pattern.compile("@([A-Za-z_]+)@");
+
   /**
-   * Replace @param@ placeholders in OBUISEL where clauses with
-   * values from OBContext.
+   * Replace @param@ placeholders in OBUISEL where/HQL clauses with values from OBContext.
+   * Known context params (AD_Org_ID, AD_Client_ID, AD_User_ID, AD_Role_ID) are resolved
+   * case-insensitively. Unknown params (e.g. @inpmWarehouseId@) that depend on form context
+   * are replaced with NULL since NEO selectors don't have that context yet.
    */
   private static String resolveObuiselParams(String whereClause) {
-    String result = whereClause;
     OBContext ctx = OBContext.getOBContext();
-    result = result.replace("@AD_Org_ID@",
-        "'" + ctx.getCurrentOrganization().getId() + "'");
-    result = result.replace("@AD_Client_ID@",
-        "'" + ctx.getCurrentClient().getId() + "'");
-    result = result.replace("@AD_User_ID@",
-        "'" + ctx.getUser().getId() + "'");
-    result = result.replace("@AD_Role_ID@",
-        "'" + ctx.getRole().getId() + "'");
-    return result;
+    java.util.Map<String, String> knownParams = new java.util.HashMap<>();
+    knownParams.put("ad_org_id", "'" + ctx.getCurrentOrganization().getId() + "'");
+    knownParams.put("ad_client_id", "'" + ctx.getCurrentClient().getId() + "'");
+    knownParams.put("ad_user_id", "'" + ctx.getUser().getId() + "'");
+    knownParams.put("ad_role_id", "'" + ctx.getRole().getId() + "'");
+    // Common aliases
+    knownParams.put("client", "'" + ctx.getCurrentClient().getId() + "'");
+
+    java.util.regex.Matcher m = PARAM_PATTERN.matcher(whereClause);
+    StringBuffer sb = new StringBuffer();
+    while (m.find()) {
+      String paramName = m.group(1);
+      String resolved = knownParams.get(paramName.toLowerCase());
+      if (resolved != null) {
+        m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(resolved));
+      } else {
+        // Unknown context param — replace with NULL so the condition
+        // evaluates safely rather than crashing with '@' parse error
+        log.debug("Unresolved OBUISEL param @{}@ replaced with NULL", paramName);
+        m.appendReplacement(sb, "NULL");
+      }
+    }
+    m.appendTail(sb);
+    return sb.toString();
   }
 
   // ---- Resolution helpers ----

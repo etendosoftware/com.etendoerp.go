@@ -12,6 +12,9 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -83,6 +86,9 @@ public class NeoDefaultsService {
         fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
         List<SFField> fields = fieldCrit.list();
 
+        // Resolve the DAL entity once for property name lookup (same names as GET responses)
+        Entity dalEntity = resolveDalEntity(ctx.getSfEntity());
+
         for (SFField sfField : fields) {
           Column adColumn = sfField.getADColumn();
           if (adColumn == null) {
@@ -90,24 +96,26 @@ public class NeoDefaultsService {
           }
 
           String dbColumnName = adColumn.getDBColumnName();
-          String cleanName = NeoCalloutService.toCleanFieldName(dbColumnName);
+          // Use OBDal property name (e.g., "orderDate" for DateOrdered, "businessPartner"
+          // for C_BPartner_ID) — matches GET response keys and frontend field keys
+          String propertyName = resolvePropertyName(dalEntity, dbColumnName);
 
           try {
             Object resolvedValue = resolveFieldDefault(adColumn, parentId, vars, conn, windowId,
                 ctx);
             if (resolvedValue != null) {
-              defaults.put(cleanName, resolvedValue);
+              defaults.put(propertyName, resolvedValue);
 
               // Track sequence fields (wrapped in angle brackets by Utility.getDocumentNo)
               if (isSequenceField(adColumn) && resolvedValue instanceof String
                   && ((String) resolvedValue).startsWith("<")) {
-                sequenceFields.put(cleanName);
+                sequenceFields.put(propertyName);
               }
             }
           } catch (Exception e) {
             log.debug("Could not resolve default for column {}: {}",
                 dbColumnName, e.getMessage());
-            unresolvedFields.put(cleanName);
+            unresolvedFields.put(propertyName);
           }
         }
 
@@ -408,5 +416,44 @@ public class NeoDefaultsService {
       log.debug("Could not resolve window ID: {}", e.getMessage());
     }
     return "";
+  }
+
+  /**
+   * Resolve the DAL Entity from the SFEntity's linked AD_Tab -> AD_Table.
+   * Returns null if the entity cannot be resolved.
+   */
+  private static Entity resolveDalEntity(
+      com.etendoerp.go.schemaforge.data.SFEntity sfEntity) {
+    try {
+      Tab adTab = sfEntity.getADTab();
+      if (adTab != null && adTab.getTable() != null) {
+        return ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve DAL entity: {}", e.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * Resolve the OBDal property name for a DB column.
+   * Uses ModelProvider to get the same names returned by NeoServlet GET responses
+   * (e.g., "orderDate" for DateOrdered, "businessPartner" for C_BPartner_ID).
+   * Falls back to toCleanFieldName if ModelProvider lookup fails.
+   */
+  private static String resolvePropertyName(Entity dalEntity, String dbColumnName) {
+    if (dalEntity != null) {
+      try {
+        Property prop = dalEntity.getPropertyByColumnName(dbColumnName);
+        if (prop != null) {
+          return prop.getName();
+        }
+      } catch (Exception e) {
+        log.debug("Could not resolve property name for column {}: {}",
+            dbColumnName, e.getMessage());
+      }
+    }
+    // Fallback to heuristic if DAL entity is not available
+    return NeoCalloutService.toCleanFieldName(dbColumnName);
   }
 }

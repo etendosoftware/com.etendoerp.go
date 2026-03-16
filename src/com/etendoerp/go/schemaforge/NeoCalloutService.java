@@ -11,6 +11,9 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.client.application.window.servlet.CalloutServletConfig;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
@@ -62,9 +65,12 @@ public class NeoCalloutService {
         // Resolve the column and callout class for the changed field
         CalloutInfo calloutInfo = resolveCallout(adTab, fieldName);
         if (calloutInfo == null) {
-          return NeoResponse.error(404,
-              "No callout found for field: " + fieldName
-                  + " in entity: " + ctx.getEntityName());
+          // No callout for this field — return empty response (not an error)
+          JSONObject emptyResponse = new JSONObject();
+          emptyResponse.put("updates", new JSONObject());
+          emptyResponse.put("combos", new JSONObject());
+          emptyResponse.put("messages", new JSONArray());
+          return NeoResponse.ok(emptyResponse);
         }
 
         // Build synthetic request parameters
@@ -159,26 +165,43 @@ public class NeoCalloutService {
     colCriteria.add(Restrictions.eq(Column.PROPERTY_ACTIVE, true));
     List<Column> columns = colCriteria.list();
 
-    // Try to match the field name against column names
+    // Try to match the field name against column names.
+    // First try OBDal property name (e.g., "businessPartner" for C_BPartner_ID) — this
+    // is what the frontend sends, matching the names used in GET responses.
     Column matchedColumn = null;
-    for (Column col : columns) {
-      String dbColName = col.getDBColumnName();
-      // Match by exact DB column name
-      if (dbColName.equalsIgnoreCase(fieldName)) {
-        matchedColumn = col;
-        break;
+    try {
+      Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(tableId);
+      if (dalEntity != null) {
+        for (Column col : columns) {
+          Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
+          if (prop != null && prop.getName().equals(fieldName)) {
+            matchedColumn = col;
+            break;
+          }
+        }
       }
-      // Match by clean REST name (camelCase without _ID)
-      String cleanName = toCleanFieldName(dbColName);
-      if (cleanName.equalsIgnoreCase(fieldName)) {
-        matchedColumn = col;
-        break;
-      }
-      // Match by inp name
-      String inpName = toInpName(dbColName);
-      if (inpName.equalsIgnoreCase(fieldName)) {
-        matchedColumn = col;
-        break;
+    } catch (Exception e) {
+      log.debug("Could not resolve property name for field '{}': {}", fieldName, e.getMessage());
+    }
+
+    // Fallback: try DB column name, clean REST name, and inp name
+    if (matchedColumn == null) {
+      for (Column col : columns) {
+        String dbColName = col.getDBColumnName();
+        if (dbColName.equalsIgnoreCase(fieldName)) {
+          matchedColumn = col;
+          break;
+        }
+        String cleanName = toCleanFieldName(dbColName);
+        if (cleanName.equalsIgnoreCase(fieldName)) {
+          matchedColumn = col;
+          break;
+        }
+        String inpName = toInpName(dbColName);
+        if (inpName.equalsIgnoreCase(fieldName)) {
+          matchedColumn = col;
+          break;
+        }
       }
     }
 
@@ -335,12 +358,33 @@ public class NeoCalloutService {
       params.put("inpwindowId", new String[]{ adTab.getWindow().getId() });
     }
 
+    // Inject essential context params from OBContext (callouts expect these always present)
+    OBContext obCtx = OBContext.getOBContext();
+    params.put("inpadOrgId", new String[]{ obCtx.getCurrentOrganization().getId() });
+    params.put("inpadClientId", new String[]{ obCtx.getCurrentClient().getId() });
+    // isSOTrx: Purchase windows have isSOTrx=N in their header tab
+    String isSOTrx = adTab.getWindow() != null
+        && Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
+    params.put("isSOTrx", new String[]{ isSOTrx });
+    if (obCtx.getWarehouse() != null) {
+      params.put("inpmWarehouseId", new String[]{ obCtx.getWarehouse().getId() });
+    }
+
     // Build column lookup maps (once, for all form state keys)
+    // Include OBDal property names for mapping frontend keys (e.g., "orderDate" -> "inpdateordered")
+    Map<String, String> propertyNameToInp = new HashMap<>();
     Map<String, String> cleanNameToInp = new HashMap<>();
     Map<String, String> dbNameToInp = new HashMap<>();
     if (adTab.getTable() != null) {
+      String tableId = adTab.getTable().getId();
+      Entity dalEntity = null;
+      try {
+        dalEntity = ModelProvider.getInstance().getEntityByTableId(tableId);
+      } catch (Exception e) {
+        log.debug("Could not resolve DAL entity for table: {}", e.getMessage());
+      }
       OBCriteria<Column> colCriteria = OBDal.getInstance().createCriteria(Column.class);
-      colCriteria.add(Restrictions.eq(Column.PROPERTY_TABLE + ".id", adTab.getTable().getId()));
+      colCriteria.add(Restrictions.eq(Column.PROPERTY_TABLE + ".id", tableId));
       colCriteria.add(Restrictions.eq(Column.PROPERTY_ACTIVE, true));
       List<Column> columns = colCriteria.list();
       for (Column col : columns) {
@@ -348,17 +392,39 @@ public class NeoCalloutService {
         String inpName = toInpName(dbColName);
         dbNameToInp.put(dbColName.toLowerCase(), inpName);
         cleanNameToInp.put(toCleanFieldName(dbColName).toLowerCase(), inpName);
+        // Map OBDal property name (what the frontend sends)
+        if (dalEntity != null) {
+          try {
+            Property prop = dalEntity.getPropertyByColumnName(dbColName);
+            if (prop != null) {
+              propertyNameToInp.put(prop.getName().toLowerCase(), inpName);
+            }
+          } catch (Exception ignored) {
+            // Not all columns have DAL properties
+          }
+        }
       }
     }
 
-    // Map form state fields to inp* parameters
+    // Map form state fields to inp* parameters.
+    // IMPORTANT: do not overwrite the trigger field (inpFieldName) — the `value` param
+    // is authoritative. The formState may contain a stale value (e.g., search query text
+    // instead of the selected ID).
     if (formState != null) {
       @SuppressWarnings("unchecked")
       Iterator<String> keys = formState.keys();
       while (keys.hasNext()) {
         String key = keys.next();
+        // Skip $_identifier companion keys
+        if (key.contains("$_identifier")) continue;
         String val = formState.optString(key, "");
-        String inpKey = resolveToInpName(key, dbNameToInp, cleanNameToInp);
+        // Try OBDal property name first, then fall back to clean/db names
+        String inpKey = propertyNameToInp.get(key.toLowerCase());
+        if (inpKey == null) {
+          inpKey = resolveToInpName(key, dbNameToInp, cleanNameToInp);
+        }
+        // Never overwrite the trigger field — its value comes from the `value` parameter
+        if (inpKey.equals(inpFieldName)) continue;
         params.put(inpKey, new String[]{ val });
       }
     }
@@ -532,17 +598,26 @@ public class NeoCalloutService {
       return inpName;
     }
 
-    // Try to find the column whose inp name matches
+    // Try to find the column whose inp name matches, then resolve its OBDal property name
     if (adTab != null && adTab.getTable() != null) {
       try {
+        String tableId = adTab.getTable().getId();
+        Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(tableId);
+
         OBCriteria<Column> colCriteria = OBDal.getInstance().createCriteria(Column.class);
-        colCriteria.add(Restrictions.eq(Column.PROPERTY_TABLE + ".id",
-            adTab.getTable().getId()));
+        colCriteria.add(Restrictions.eq(Column.PROPERTY_TABLE + ".id", tableId));
         colCriteria.add(Restrictions.eq(Column.PROPERTY_ACTIVE, true));
         List<Column> columns = colCriteria.list();
 
         for (Column col : columns) {
           if (toInpName(col.getDBColumnName()).equals(inpName)) {
+            // Use OBDal property name (matches GET response keys and frontend field keys)
+            if (dalEntity != null) {
+              Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
+              if (prop != null) {
+                return prop.getName();
+              }
+            }
             return toCleanFieldName(col.getDBColumnName());
           }
         }

@@ -45,7 +45,10 @@ import org.openbravo.model.ad.ui.Window;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
 import org.openbravo.base.expression.OBScriptEngine;
+import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.client.application.DynamicExpressionParser;
+import org.openbravo.erpCommon.utility.Utility;
+import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.model.ad.ui.Field;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
@@ -1583,6 +1586,31 @@ public class NeoServlet extends HttpBaseServlet {
     ctx.put("AD_Client_ID", obCtx.getCurrentClient().getId());
     ctx.put("AD_Role_ID", obCtx.getRole().getId());
     ctx.put("AD_User_ID", obCtx.getUser().getId());
+
+    // Resolve $Element_* accounting dimension preferences.
+    // DynamicExpressionParser generates JS referencing context.$Element_XX
+    // for displayLogic expressions like @$Element_MC@='Y'.
+    try {
+      DalConnectionProvider conn = new DalConnectionProvider(false);
+      VariablesSecureApp vars = new VariablesSecureApp(
+          obCtx.getUser().getId(),
+          obCtx.getCurrentClient().getId(),
+          obCtx.getCurrentOrganization().getId(),
+          obCtx.getRole().getId(),
+          obCtx.getLanguage().getLanguage());
+      String[] elements = { "MC", "AY", "OT", "AS", "CC", "U1", "U2", "PJ", "BU", "PR" };
+      for (String el : elements) {
+        String key = "$Element_" + el;
+        String value = Utility.getContext(conn, vars, key, "");
+        ctx.put(key, value);
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve $Element_* preferences: {}", e.getMessage());
+    }
+
+    // Add a "context" object alias so DynamicExpressionParser's JS output
+    // (context.xxx references) can resolve against our eval context
+    ctx.put("context", ctx);
 
     return ctx;
   }
