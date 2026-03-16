@@ -59,6 +59,7 @@ public class NeoCalloutService {
         if (formState == null) {
           formState = new JSONObject();
         }
+        JSONObject auxValues = requestBody.optJSONObject("auxiliaryValues");
 
         Tab adTab = ctx.getAdTab();
 
@@ -75,7 +76,8 @@ public class NeoCalloutService {
 
         // Build synthetic request parameters
         Map<String, String[]> params = buildRequestParams(
-            adTab, fieldName, value, formState, calloutInfo.inpFieldName);
+            adTab, fieldName, value, formState, calloutInfo.inpFieldName,
+            auxValues);
 
         // Build session attributes from OBContext
         Map<String, Object> sessionAttrs = buildSessionAttributes(ctx.getObContext());
@@ -344,7 +346,8 @@ public class NeoCalloutService {
    * Loads columns once and builds a lookup map for efficient resolution.
    */
   private static Map<String, String[]> buildRequestParams(Tab adTab,
-      String fieldName, Object value, JSONObject formState, String inpFieldName) {
+      String fieldName, Object value, JSONObject formState, String inpFieldName,
+      JSONObject auxValues) {
 
     Map<String, String[]> params = new HashMap<>();
 
@@ -426,6 +429,29 @@ public class NeoCalloutService {
         // Never overwrite the trigger field — its value comes from the `value` parameter
         if (inpKey.equals(inpFieldName)) continue;
         params.put(inpKey, new String[]{ val });
+      }
+    }
+
+    // Process auxiliary values (e.g., businessPartner_LOC -> inpcBpartnerId_LOC)
+    // These are extra values from OBUISEL selectors that callouts may depend on.
+    if (auxValues != null) {
+      @SuppressWarnings("unchecked")
+      Iterator<String> auxKeys = auxValues.keys();
+      while (auxKeys.hasNext()) {
+        String key = auxKeys.next();   // e.g., "businessPartner_LOC"
+        String auxVal = auxValues.optString(key, "");
+        // Split into base field name + suffix
+        int suffixStart = key.lastIndexOf('_');
+        if (suffixStart > 0) {
+          String baseName = key.substring(0, suffixStart);  // "businessPartner"
+          String suffix = key.substring(suffixStart);        // "_LOC"
+          // Resolve base field to inp format
+          String inpBase = propertyNameToInp.get(baseName.toLowerCase());
+          if (inpBase == null) {
+            inpBase = resolveToInpName(baseName, dbNameToInp, cleanNameToInp);
+          }
+          params.put(inpBase + suffix, new String[]{ auxVal });
+        }
       }
     }
 

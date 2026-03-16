@@ -107,6 +107,18 @@ public class NeoSelectorService {
         item.put("targetEntity", meta.entityName);
         item.put("displayProperty", meta.displayProperty);
 
+        // Include auxiliary field info if present
+        if (meta.auxFields != null && !meta.auxFields.isEmpty()) {
+          JSONArray auxArray = new JSONArray();
+          for (AuxFieldMeta af : meta.auxFields) {
+            JSONObject auxItem = new JSONObject();
+            auxItem.put("suffix", af.suffix);
+            auxItem.put("name", af.name);
+            auxArray.put(auxItem);
+          }
+          item.put("auxFields", auxArray);
+        }
+
         // Include selectorParams from validation rule
         org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
         if (valRule != null && StringUtils.isNotBlank(valRule.getValidationCode())) {
@@ -370,16 +382,22 @@ public class NeoSelectorService {
     Entity entityDef = ModelProvider.getInstance()
         .getEntity(meta.entityName);
     JSONArray items = new JSONArray();
+    List<String> entityIds = new ArrayList<>();
     for (BaseOBObject bob : dataQuery.list()) {
       JSONObject item = new JSONObject();
       item.put("id", bob.getId());
       item.put("label", bob.getIdentifier());
+      entityIds.add(bob.getId().toString());
 
       // Add all grid fields
       for (RichFieldMeta fieldMeta : meta.gridFields) {
         Object value = resolvePropertyValue(bob, fieldMeta.property, entityDef);
         item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
       }
+
+      // Resolve auxiliary fields that have a DAL property path
+      appendAuxFields(item, bob, meta.auxFields);
+
       items.put(item);
     }
 
@@ -509,16 +527,31 @@ public class NeoSelectorService {
     Entity entityDef = ModelProvider.getInstance()
         .getEntity(meta.entityName);
     JSONArray items = new JSONArray();
+    List<String> entityIds = new ArrayList<>();
     for (BaseOBObject bob : dataQuery.list()) {
       JSONObject item = new JSONObject();
       item.put("id", bob.getId());
       item.put("label", bob.getIdentifier());
+      entityIds.add(bob.getId().toString());
 
       for (RichFieldMeta fieldMeta : meta.gridFields) {
         Object value = resolvePropertyValue(bob, fieldMeta.property, entityDef);
         item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
       }
+
+      // Resolve auxiliary output fields with DAL property paths
+      appendAuxFields(item, bob, meta.auxFields);
+
       items.put(item);
+    }
+
+    // Resolve auxiliary fields WITHOUT property path via the original HQL SELECT.
+    // These fields (e.g., _LOC with alias "locationid") are computed by the HQL
+    // and can only be obtained by executing the original SELECT clause.
+    boolean hasHqlOnlyAux = meta.auxFields.stream()
+        .anyMatch(af -> StringUtils.isBlank(af.property) && StringUtils.isNotBlank(af.hqlAlias));
+    if (hasHqlOnlyAux && !entityIds.isEmpty()) {
+      resolveAuxFieldsViaHql(items, entityIds, rawHql, fromIdx, alias, meta);
     }
 
     JSONObject result = new JSONObject();
@@ -559,6 +592,203 @@ public class NeoSelectorService {
       log.debug("Could not resolve property {} on {}: {}",
           propertyPath, bob.getId(), e.getMessage());
       return null;
+    }
+  }
+
+  /**
+   * Resolve auxiliary field values for a given entity object.
+   * Uses the DAL property path from the selector field to navigate the entity graph.
+   * For list properties (e.g., businessPartnerLocationList), returns the first entry's ID.
+   */
+  private static void appendAuxFields(JSONObject item, BaseOBObject bob,
+      List<AuxFieldMeta> auxFields) {
+    if (auxFields == null || auxFields.isEmpty()) {
+      return;
+    }
+    try {
+      JSONObject aux = new JSONObject();
+      for (AuxFieldMeta af : auxFields) {
+        Object auxVal = resolveAuxFieldValue(bob, af);
+        if (auxVal != null) {
+          aux.put(af.suffix, auxVal.toString());
+        }
+      }
+      if (aux.length() > 0) {
+        item.put("_aux", aux);
+      }
+    } catch (Exception e) {
+      log.debug("Error resolving aux fields for {}: {}", bob.getId(), e.getMessage());
+    }
+  }
+
+  /**
+   * Resolve a single auxiliary field value from a BaseOBObject.
+   * Navigates the DAL property path. For FK/list properties, returns the ID.
+   */
+  private static Object resolveAuxFieldValue(BaseOBObject bob, AuxFieldMeta af) {
+    // Try DAL property path if available
+    if (StringUtils.isNotBlank(af.property)) {
+      try {
+        String[] parts = af.property.split("\\.");
+        Object current = bob;
+        for (String part : parts) {
+          if (current == null) {
+            return null;
+          }
+          if (current instanceof BaseOBObject) {
+            current = ((BaseOBObject) current).get(part);
+          } else {
+            return current;
+          }
+        }
+        if (current instanceof BaseOBObject) {
+          return ((BaseOBObject) current).getId();
+        }
+        if (current instanceof List) {
+          List<?> list = (List<?>) current;
+          if (!list.isEmpty() && list.get(0) instanceof BaseOBObject) {
+            return ((BaseOBObject) list.get(0)).getId();
+          }
+        }
+        return current;
+      } catch (Exception e) {
+        log.debug("Could not resolve aux property {} on {}: {}",
+            af.property, bob.getId(), e.getMessage());
+      }
+    }
+    // No property path — aux value must be resolved via HQL (see resolveAuxFieldsViaHql)
+    return null;
+  }
+
+  /**
+   * Resolve auxiliary field values that lack a DAL property by re-executing
+   * the original OBUISEL custom HQL SELECT for the already-fetched entity IDs.
+   *
+   * The original HQL includes computed/joined columns (e.g., "bploc.id as locationid")
+   * that are not accessible via DAL. This method:
+   * 1. Parses the SELECT clause to build an alias→position map
+   * 2. Finds the position of the entity ID column (by valueFieldAlias or entity alias + ".id")
+   * 3. Executes the original SELECT with an IN(:ids) filter as Object[]
+   * 4. Merges the aux values back into the item JSONArray by matching IDs
+   */
+  @SuppressWarnings("unchecked")
+  private static void resolveAuxFieldsViaHql(JSONArray items, List<String> entityIds,
+      String rawHql, int fromIdx, String entityAlias, SelectorMeta meta) {
+    try {
+      // 1. Extract the original SELECT clause
+      String selectClause = rawHql.substring(0, fromIdx);
+      String fromOnwards = rawHql.substring(fromIdx);
+
+      // 2. Parse aliases from SELECT: "expr as aliasname" → ordered list
+      //    Pattern handles optional DISTINCT keyword and various expressions
+      java.util.regex.Matcher aliasMatcher = Pattern.compile(
+          "(?:,|SELECT(?:\\s+DISTINCT)?)\\s+(.+?)\\s+[Aa][Ss]\\s+(\\w+)",
+          Pattern.DOTALL).matcher(selectClause);
+      List<String> aliases = new ArrayList<>();
+      while (aliasMatcher.find()) {
+        aliases.add(aliasMatcher.group(2).toLowerCase());
+      }
+
+      if (aliases.isEmpty()) {
+        log.debug("Could not parse SELECT aliases from custom HQL");
+        return;
+      }
+
+      // 3. Find ID column position (usually "bp.id as bpid" or similar)
+      String valueAlias = meta.valueProperty != null
+          ? meta.valueProperty.toLowerCase() : "id";
+      int idPos = aliases.indexOf(valueAlias);
+      if (idPos < 0) {
+        // Try common patterns
+        for (int i = 0; i < aliases.size(); i++) {
+          if (aliases.get(i).endsWith("id") && aliases.get(i).length() <= 6) {
+            idPos = i;
+            break;
+          }
+        }
+      }
+      if (idPos < 0) {
+        log.debug("Could not find ID column in custom HQL SELECT aliases: {}", aliases);
+        return;
+      }
+
+      // 4. Build aux alias→position map
+      Map<String, Integer> auxAliasPos = new java.util.HashMap<>();
+      for (AuxFieldMeta af : meta.auxFields) {
+        if (StringUtils.isBlank(af.property) && StringUtils.isNotBlank(af.hqlAlias)) {
+          int pos = aliases.indexOf(af.hqlAlias.toLowerCase());
+          if (pos >= 0) {
+            auxAliasPos.put(af.suffix, pos);
+          }
+        }
+      }
+      if (auxAliasPos.isEmpty()) {
+        return;
+      }
+
+      // 5. Execute original SELECT with ID filter
+      // Strip existing WHERE/ORDER BY conditions after FROM and add simple IN filter
+      String auxHql = selectClause + fromOnwards;
+      // Remove ORDER BY if present (we don't need ordering for aux lookup)
+      int orderByIdx = auxHql.toUpperCase().lastIndexOf("ORDER BY");
+      if (orderByIdx > 0) {
+        auxHql = auxHql.substring(0, orderByIdx);
+      }
+      // Add/append WHERE clause to filter by entity IDs
+      boolean auxHasWhere = Pattern.compile("\\sWHERE\\s", Pattern.CASE_INSENSITIVE)
+          .matcher(auxHql).find();
+      auxHql += (auxHasWhere ? " AND " : " WHERE ")
+          + entityAlias + ".id IN (:auxIds)";
+
+      // Resolve @param@ placeholders
+      auxHql = resolveObuiselParams(auxHql);
+
+      org.hibernate.query.Query<Object[]> auxQuery = OBDal.getInstance()
+          .getSession().createQuery(auxHql, Object[].class);
+      auxQuery.setParameterList("auxIds", entityIds);
+
+      // 6. Build ID→aux map from results
+      Map<String, JSONObject> auxMap = new java.util.HashMap<>();
+      for (Object[] row : auxQuery.list()) {
+        if (row.length <= idPos || row[idPos] == null) {
+          continue;
+        }
+        String rowId = row[idPos].toString();
+        JSONObject aux = new JSONObject();
+        for (Map.Entry<String, Integer> entry : auxAliasPos.entrySet()) {
+          int pos = entry.getValue();
+          if (pos < row.length && row[pos] != null) {
+            aux.put(entry.getKey(), row[pos].toString());
+          }
+        }
+        if (aux.length() > 0) {
+          auxMap.put(rowId, aux);
+        }
+      }
+
+      // 7. Merge back into items
+      for (int i = 0; i < items.length(); i++) {
+        JSONObject item = items.getJSONObject(i);
+        String itemId = item.optString("id");
+        JSONObject aux = auxMap.get(itemId);
+        if (aux != null) {
+          // Merge with any existing _aux from DAL-resolved fields
+          JSONObject existing = item.optJSONObject("_aux");
+          if (existing != null) {
+            @SuppressWarnings("unchecked")
+            java.util.Iterator<String> auxKeysIter = aux.keys();
+            while (auxKeysIter.hasNext()) {
+              String key = auxKeysIter.next();
+              existing.put(key, aux.get(key));
+            }
+          } else {
+            item.put("_aux", aux);
+          }
+        }
+      }
+
+    } catch (Exception e) {
+      log.warn("Could not resolve aux fields via HQL: {}", e.getMessage());
     }
   }
 
@@ -787,12 +1017,26 @@ public class NeoSelectorService {
 
       List<RichFieldMeta> gridFields = new ArrayList<>();
       List<String> searchableProps = new ArrayList<>();
+      List<AuxFieldMeta> auxFields = new ArrayList<>();
 
       for (SelectorField sf : selectorFields) {
         if (!Boolean.TRUE.equals(sf.isActive())) {
           continue;
         }
         String prop = sf.getProperty();
+
+        // Auxiliary output fields (isOutField=Y with a suffix like "_LOC")
+        if (Boolean.TRUE.equals(sf.isOutfield())
+            && StringUtils.isNotBlank(sf.getSuffix())) {
+          String alias = sf.getDisplayColumnAlias();
+          auxFields.add(new AuxFieldMeta(
+              sf.getSuffix(),
+              alias != null ? alias.toLowerCase() : null,
+              sf.getName(),
+              prop));
+          // Aux fields may or may not have a property; continue processing
+        }
+
         if (StringUtils.isBlank(prop)) {
           continue;
         }
@@ -825,7 +1069,8 @@ public class NeoSelectorService {
           gridFields,
           searchableProps,
           customHql,
-          entityAlias
+          entityAlias,
+          auxFields
       );
 
     } catch (Exception e) {
@@ -1077,20 +1322,21 @@ public class NeoSelectorService {
     final List<String> searchableProperties;
     final String customHql;
     final String entityAlias;
+    final List<AuxFieldMeta> auxFields;
 
     /** Constructor for simple selectors (TableDir, Table, Search). */
     SelectorMeta(String entityName, String displayProperty, String whereClause) {
       this(entityName, displayProperty, whereClause,
           false, false, "id",
           new ArrayList<>(), new ArrayList<>(),
-          null, "e");
+          null, "e", new ArrayList<>());
     }
 
     /** Constructor for rich (OBUISEL) selectors. */
     SelectorMeta(String entityName, String displayProperty, String whereClause,
         boolean isRich, boolean isCustomQuery, String valueProperty,
         List<RichFieldMeta> gridFields, List<String> searchableProperties,
-        String customHql, String entityAlias) {
+        String customHql, String entityAlias, List<AuxFieldMeta> auxFields) {
       this.entityName = entityName;
       this.displayProperty = displayProperty;
       this.whereClause = whereClause;
@@ -1101,6 +1347,7 @@ public class NeoSelectorService {
       this.searchableProperties = searchableProperties;
       this.customHql = customHql;
       this.entityAlias = entityAlias;
+      this.auxFields = auxFields;
     }
   }
 
@@ -1118,6 +1365,25 @@ public class NeoSelectorService {
       this.label = label;
       this.property = property;
       this.sortNo = sortNo;
+    }
+  }
+
+  /**
+   * Metadata for an auxiliary output field in an OBUISEL selector.
+   * Auxiliary fields are defined with isOutField=Y and a SUFFIX (e.g., "_LOC").
+   * They provide extra data (like a default location ID) alongside the selected value.
+   */
+  private static class AuxFieldMeta {
+    final String suffix;              // e.g., "_LOC", "_CON"
+    final String hqlAlias;            // e.g., "locationid" (from displayColumnAlias)
+    final String name;                // display name of the field
+    final String property;            // DAL property path (if available)
+
+    AuxFieldMeta(String suffix, String hqlAlias, String name, String property) {
+      this.suffix = suffix;
+      this.hqlAlias = hqlAlias;
+      this.name = name;
+      this.property = property;
     }
   }
 }
