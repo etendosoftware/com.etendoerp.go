@@ -145,4 +145,86 @@ public class NeoContextTest {
       assertEquals(method, ctx.getHttpMethod());
     }
   }
+
+  @Test
+  public void testEndpointTypeViaBuilder() {
+    NeoContext ctx = NeoContext.builder()
+        .specName("Spec")
+        .entityName("Entity")
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.CALLOUT)
+        .build();
+    assertEquals(NeoEndpointType.CALLOUT, ctx.getEndpointType());
+  }
+
+  @Test
+  public void testFieldNameViaBuilder() {
+    NeoContext ctx = NeoContext.builder()
+        .specName("Spec")
+        .entityName("Entity")
+        .httpMethod("GET")
+        .fieldName("warehouse")
+        .build();
+    assertEquals("warehouse", ctx.getFieldName());
+  }
+
+  @Test
+  public void testEndpointTypeDefaultsToNull() {
+    NeoContext ctx = NeoContext.builder()
+        .specName("Spec")
+        .entityName("Entity")
+        .httpMethod("GET")
+        .build();
+    assertNull(ctx.getEndpointType());
+  }
+
+  @Test
+  public void testFieldNameDefaultsToNull() {
+    NeoContext ctx = NeoContext.builder()
+        .specName("Spec")
+        .entityName("Entity")
+        .httpMethod("GET")
+        .build();
+    assertNull(ctx.getFieldName());
+  }
+
+  @Test
+  public void testEndpointTypeEnumValues() {
+    NeoEndpointType[] values = NeoEndpointType.values();
+    assertEquals(6, values.length);
+    assertEquals(NeoEndpointType.CRUD, NeoEndpointType.valueOf("CRUD"));
+    assertEquals(NeoEndpointType.SELECTOR, NeoEndpointType.valueOf("SELECTOR"));
+    assertEquals(NeoEndpointType.ACTION, NeoEndpointType.valueOf("ACTION"));
+    assertEquals(NeoEndpointType.EVALUATE_DISPLAY, NeoEndpointType.valueOf("EVALUATE_DISPLAY"));
+    assertEquals(NeoEndpointType.CALLOUT, NeoEndpointType.valueOf("CALLOUT"));
+    assertEquals(NeoEndpointType.DEFAULTS, NeoEndpointType.valueOf("DEFAULTS"));
+  }
+
+  @Test
+  public void testNeoHandlerAfterHandleDefault() {
+    NeoHandler handler = new NeoHandler() {
+      @Override
+      public NeoResponse handle(NeoContext context) {
+        return null;
+      }
+    };
+    NeoContext ctx = NeoContext.builder()
+        .specName("Spec")
+        .entityName("Entity")
+        .httpMethod("GET")
+        .build();
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  @Test
+  public void testToStringIncludesEndpointType() {
+    NeoContext ctx = NeoContext.builder()
+        .specName("Spec")
+        .entityName("Entity")
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.SELECTOR)
+        .build();
+    String str = ctx.toString();
+    assertTrue(str.contains("SELECTOR"));
+  }
 }

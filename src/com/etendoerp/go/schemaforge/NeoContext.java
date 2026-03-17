@@ -24,6 +24,8 @@ public class NeoContext {
   private final SFEntity sfEntity;
   private final OBContext obContext;
   private NeoResponse previousResult;
+  private final NeoEndpointType endpointType;
+  private final String fieldName;
 
   private NeoContext(Builder builder) {
     this.specName = builder.specName;
@@ -36,6 +38,8 @@ public class NeoContext {
     this.sfEntity = builder.sfEntity;
     this.obContext = builder.obContext;
     this.previousResult = builder.previousResult;
+    this.endpointType = builder.endpointType;
+    this.fieldName = builder.fieldName;
   }
 
   public String getSpecName() {
@@ -82,10 +86,18 @@ public class NeoContext {
     this.previousResult = previousResult;
   }
 
+  public NeoEndpointType getEndpointType() {
+    return endpointType;
+  }
+
+  public String getFieldName() {
+    return fieldName;
+  }
+
   @Override
   public String toString() {
-    return String.format("NeoContext{spec=%s, entity=%s, method=%s, id=%s}",
-        specName, entityName, httpMethod, recordId);
+    return String.format("NeoContext{spec=%s, entity=%s, method=%s, id=%s, endpointType=%s}",
+        specName, entityName, httpMethod, recordId, endpointType);
   }
 
   public static Builder builder() {
@@ -103,6 +115,8 @@ public class NeoContext {
     private SFEntity sfEntity;
     private OBContext obContext;
     private NeoResponse previousResult;
+    private NeoEndpointType endpointType;
+    private String fieldName;
 
     public Builder specName(String specName) {
       this.specName = specName;
@@ -151,6 +165,16 @@ public class NeoContext {
 
     public Builder previousResult(NeoResponse previousResult) {
       this.previousResult = previousResult;
+      return this;
+    }
+
+    public Builder endpointType(NeoEndpointType endpointType) {
+      this.endpointType = endpointType;
+      return this;
+    }
+
+    public Builder fieldName(String fieldName) {
+      this.fieldName = fieldName;
       return this;
     }
 
