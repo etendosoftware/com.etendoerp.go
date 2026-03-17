@@ -6,6 +6,7 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -29,6 +30,8 @@ import org.openbravo.service.db.DalConnectionProvider;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.sequences.SequenceUtils;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 
 /**
  * Service for resolving default values when creating a new record via NEO Headless.
@@ -53,6 +56,15 @@ public class NeoDefaultsService {
 
   private static final Logger log = LogManager.getLogger(NeoDefaultsService.class);
   private static final String DATE_FORMAT = "yyyy-MM-dd";
+
+  // Cache VariablesSecureApp per user+role+org+warehouse combination to avoid calling
+  // LoginUtils.fillSessionArguments (multiple DB queries) on every request.
+  // In the future, if session variables need to reflect real-time preference changes,
+  // this TTL can be shortened or the cache can be invalidated on preference updates.
+  private static final Cache<String, VariablesSecureApp> varsCache = CacheBuilder.newBuilder()
+      .maximumSize(100)
+      .expireAfterWrite(5, TimeUnit.MINUTES)
+      .build();
 
   private NeoDefaultsService() {
   }
@@ -338,14 +350,9 @@ public class NeoDefaultsService {
   }
 
   /**
-   * Build a VariablesSecureApp from OBContext.
-   * NEO Headless authenticates via JWT and has OBContext, but Etendo's Utility methods
-   * require VariablesSecureApp. This bridge populates the session attributes map
-   * (used when no HttpSession is available) with the context values that Utility.getDefault,
-   * Utility.getContext, and Utility.getDocumentNo need.
-   */
-  /**
    * Build a VariablesSecureApp from OBContext, fully populated with ALL session variables.
+   * Results are cached by user+role+org+warehouse key to avoid the overhead of
+   * {@link LoginUtils#fillSessionArguments} (multiple DB queries) on every request.
    *
    * <p>Delegates to {@link LoginUtils#fillSessionArguments} — the same method that Etendo's
    * classic login uses. This ensures all context variables ($C_Currency_ID, $C_AcctSchema_ID,
@@ -360,6 +367,12 @@ public class NeoDefaultsService {
     String lang = obContext.getLanguage().getLanguage();
     String warehouseId = obContext.getWarehouse() != null
         ? obContext.getWarehouse().getId() : "";
+
+    String cacheKey = userId + "|" + roleId + "|" + orgId + "|" + warehouseId;
+    VariablesSecureApp cached = varsCache.getIfPresent(cacheKey);
+    if (cached != null) {
+      return cached;
+    }
 
     VariablesSecureApp vars = new VariablesSecureApp(userId, clientId, orgId, roleId, lang);
     DalConnectionProvider conn = new DalConnectionProvider(false);
@@ -382,6 +395,7 @@ public class NeoDefaultsService {
           new SimpleDateFormat(DATE_FORMAT).format(new Date()));
     }
 
+    varsCache.put(cacheKey, vars);
     return vars;
   }
 
