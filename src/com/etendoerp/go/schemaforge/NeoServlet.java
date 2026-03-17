@@ -748,11 +748,35 @@ public class NeoServlet extends HttpBaseServlet {
             return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
                 "POST (create) must not include a record ID in the URL");
           }
+          // Resolve parentId from body: map generic "parentId" to the actual FK property name
+          // (e.g., parentId → salesOrder for C_OrderLine, parentId → invoice for C_InvoiceLine)
+          JSONObject requestBody = context.getRequestBody();
+          String parentIdValue = null;
+          if (requestBody != null && requestBody.has("parentId")) {
+            parentIdValue = requestBody.getString("parentId");
+            requestBody.remove("parentId");
+            // Find the link-to-parent column and resolve its DAL property name
+            if (adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
+              Entity dalEnt = ModelProvider.getInstance().getEntityByTableName(adTab.getTable().getDBTableName());
+              if (dalEnt != null) {
+                for (Column col : adTab.getTable().getADColumnList()) {
+                  if (col.isLinkToParentColumn() && col.isActive()) {
+                    try {
+                      Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
+                      if (prop != null) {
+                        requestBody.put(prop.getName(), parentIdValue);
+                        break;
+                      }
+                    } catch (Exception ignored) {}
+                  }
+                }
+              }
+            }
+          }
           // Filter out non-included and read-only fields from request body
-          JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
+          JSONObject filteredBody = fieldFilter.filterWriteRequest(requestBody);
           // Inject defaults for mandatory columns not in ETGO_SF_FIELD config
-          // (e.g., C_DocType_ID = "0", DateAcct = today, C_Currency_ID from context)
-          NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context);
+          NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
           // Wrap for DefaultJsonDataService: {"data": {fields, "_entityName": ..., "_new": true}}
           String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
           result = jsonService.add(params, wrappedBody);

@@ -1,6 +1,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -501,7 +502,35 @@ public class NeoSelectorService {
 
     String fromClause = baseHql.toString();
 
-    // Count query — use the FROM-onwards portion (no duplicate SELECT)
+    // Execute the original HQL SELECT (not replaced) to get the custom columns
+    // as Object[] rows — same as the legacy UI. This avoids Hibernate returning
+    // wrong entities when the FROM root differs from the entity alias
+    // (e.g., FROM PricingProductPrice pp JOIN pp.product e).
+
+    // Parse the original SELECT column aliases to build a name→index map
+    String selectPart = rawHql.substring(0, fromIdx).trim();
+    // Remove "select " prefix
+    String selectBody = selectPart.replaceFirst("(?i)^select\\s+", "");
+    String[] selectExprs = selectBody.split(",");
+    Map<String, Integer> colIndexMap = new HashMap<>();
+    for (int i = 0; i < selectExprs.length; i++) {
+      String expr = selectExprs[i].trim();
+      // Extract alias: "pp.standardPrice as standardPrice" → "standardPrice"
+      // or "e.id as id" → "id", or just "e.name" → "name"
+      String colAlias;
+      java.util.regex.Matcher asMatcher = Pattern.compile("\\s+as\\s+(\\w+)\\s*$",
+          Pattern.CASE_INSENSITIVE).matcher(expr);
+      if (asMatcher.find()) {
+        colAlias = asMatcher.group(1);
+      } else {
+        // No "as" — use the last part after "."
+        int dotIdx = expr.lastIndexOf('.');
+        colAlias = dotIdx >= 0 ? expr.substring(dotIdx + 1).trim() : expr.trim();
+      }
+      colIndexMap.put(colAlias.toLowerCase(), i);
+    }
+
+    // Count query
     String countHql = "SELECT COUNT(" + alias + ")" + fromClause;
     org.hibernate.query.Query<Long> countQuery = OBDal.getInstance()
         .getSession().createQuery(countHql, Long.class);
@@ -510,16 +539,23 @@ public class NeoSelectorService {
     }
     int totalCount = countQuery.uniqueResult().intValue();
 
-    // Data query with ORDER BY and pagination — use entity alias, not custom columns
-    String dataHql = "SELECT " + alias + fromClause
+    // Data query — use the ORIGINAL select columns + our filters
+    String dataHql = selectPart + fromClause
         + " ORDER BY " + alias + "." + meta.displayProperty;
-    org.hibernate.query.Query<BaseOBObject> dataQuery = OBDal.getInstance()
-        .getSession().createQuery(dataHql, BaseOBObject.class);
+    org.hibernate.query.Query<?> dataQuery = OBDal.getInstance()
+        .getSession().createQuery(dataHql);
     if (hasSearch) {
       dataQuery.setParameter("search", "%" + search.toLowerCase() + "%");
     }
     dataQuery.setMaxResults(limit);
     dataQuery.setFirstResult(offset);
+
+    // Determine which column index holds the ID (from valueProp, default "id")
+    String valuePropLower = (meta.valueProperty != null ? meta.valueProperty : "id").toLowerCase();
+    Integer idColIdx = colIndexMap.get(valuePropLower);
+    if (idColIdx == null) {
+      idColIdx = colIndexMap.get("id");
+    }
 
     // Build column metadata
     JSONArray columns = new JSONArray();
@@ -531,24 +567,61 @@ public class NeoSelectorService {
       columns.put(col);
     }
 
-    // Build results with all grid fields
+    // Build results from Object[] rows
     Entity entityDef = ModelProvider.getInstance()
         .getEntity(meta.entityName);
     JSONArray items = new JSONArray();
     List<String> entityIds = new ArrayList<>();
-    for (BaseOBObject bob : dataQuery.list()) {
+    for (Object rawRow : dataQuery.list()) {
+      Object[] row = (rawRow instanceof Object[]) ? (Object[]) rawRow : new Object[]{ rawRow };
       JSONObject item = new JSONObject();
-      item.put("id", bob.getId());
-      item.put("label", bob.getIdentifier());
-      entityIds.add(bob.getId().toString());
 
-      for (RichFieldMeta fieldMeta : meta.gridFields) {
-        Object value = resolvePropertyValue(bob, fieldMeta.property, entityDef);
-        item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
+      // Extract ID from the valueProp column
+      String recordId;
+      if (idColIdx != null && idColIdx < row.length) {
+        Object idVal = row[idColIdx];
+        recordId = idVal instanceof BaseOBObject ? ((BaseOBObject) idVal).getId().toString()
+            : String.valueOf(idVal);
+      } else {
+        // Fallback: try first column
+        Object idVal = row[0];
+        recordId = idVal instanceof BaseOBObject ? ((BaseOBObject) idVal).getId().toString()
+            : String.valueOf(idVal);
       }
+      item.put("id", recordId);
+      entityIds.add(recordId);
 
-      // Resolve auxiliary output fields with DAL property paths
-      appendAuxFields(item, bob, meta.auxFields);
+      // Extract display label from the entity alias column or displayProperty
+      String label = "";
+      Integer displayIdx = colIndexMap.get(meta.displayProperty.toLowerCase());
+      if (displayIdx == null) {
+        displayIdx = colIndexMap.get("productname");
+      }
+      if (displayIdx != null && displayIdx < row.length) {
+        Object dispVal = row[displayIdx];
+        label = dispVal != null ? dispVal.toString() : "";
+      }
+      // If still empty, try to load the entity to get its identifier
+      if (label.isEmpty()) {
+        try {
+          BaseOBObject entity = OBDal.getInstance().get(entityDef.getName(), recordId);
+          if (entity != null) label = entity.getIdentifier();
+        } catch (Exception ignored) {}
+      }
+      item.put("label", label);
+
+      // Map grid fields by matching column alias → index
+      for (RichFieldMeta fieldMeta : meta.gridFields) {
+        Integer colIdx = colIndexMap.get(fieldMeta.propertyKey.toLowerCase());
+        if (colIdx != null && colIdx < row.length) {
+          Object value = row[colIdx];
+          if (value instanceof BaseOBObject) {
+            item.put(fieldMeta.propertyKey, ((BaseOBObject) value).getIdentifier());
+          } else {
+            item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
+          }
+        }
+      }
 
       items.put(item);
     }

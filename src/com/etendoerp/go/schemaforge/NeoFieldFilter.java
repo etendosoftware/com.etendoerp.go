@@ -16,6 +16,7 @@ import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -113,6 +114,21 @@ public class NeoFieldFilter {
       // Always include "id" — it's needed for record identification
       included.add("id");
       writable.add("id");
+
+      // Always allow link-to-parent columns — they're needed for child record creation
+      // (e.g., salesOrder on C_OrderLine, invoice on C_InvoiceLine)
+      Tab adTab = sfEntity.getADTab();
+      if (adTab != null && adTab.getTable() != null) {
+      for (Column col : adTab.getTable().getADColumnList()) {
+        if (col.isActive() && col.isLinkToParentColumn()) {
+          Property parentProp = dalEntity.getPropertyByColumnName(col.getDBColumnName());
+          if (parentProp != null) {
+            writable.add(parentProp.getName());
+            included.add(parentProp.getName());
+          }
+        }
+      }
+      }
 
       log.debug("Field filter for entity {}: {} included, {} writable",
           sfEntity.getName(), included.size(), writable.size());

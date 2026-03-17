@@ -1,5 +1,7 @@
 package com.etendoerp.go.schemaforge;
 
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -19,10 +21,14 @@ import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.base.secureApp.LoginUtils;
+import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.erpCommon.ad_callouts.SimpleCallout;
+import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.domain.ModelImplementation;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.JsonConstants;
 
 /**
@@ -67,20 +73,25 @@ public class NeoCalloutService {
         CalloutInfo calloutInfo = resolveCallout(adTab, fieldName);
         if (calloutInfo == null) {
           // No callout for this field — return empty response (not an error)
+          log.info("[NEO-CALLOUT] No callout found for field '{}' on tab '{}'",
+              fieldName, adTab.getName());
           JSONObject emptyResponse = new JSONObject();
           emptyResponse.put("updates", new JSONObject());
           emptyResponse.put("combos", new JSONObject());
           emptyResponse.put("messages", new JSONArray());
           return NeoResponse.ok(emptyResponse);
         }
+        log.info("[NEO-CALLOUT] Found callout '{}' for field '{}' (inp: {}, column: {})",
+            calloutInfo.className, fieldName, calloutInfo.inpFieldName, calloutInfo.columnName);
 
         // Build synthetic request parameters
         Map<String, String[]> params = buildRequestParams(
             adTab, fieldName, value, formState, calloutInfo.inpFieldName,
             auxValues);
 
-        // Build session attributes from OBContext
-        Map<String, Object> sessionAttrs = buildSessionAttributes(ctx.getObContext());
+        // Build session attributes from a fully populated VariablesSecureApp
+        // (includes #GROUPSEPARATOR|qtyEdition, #DECIMALSEPARATOR|qtyEdition, etc.)
+        Map<String, Object> sessionAttrs = buildSessionAttributes(ctx.getObContext(), adTab);
 
         // Create synthetic request and set up RequestContext
         SyntheticHttpServletRequest syntheticRequest =
@@ -111,9 +122,11 @@ public class NeoCalloutService {
         }
 
         JSONObject calloutResult = calloutInstance.executeSimpleCallout(requestContext);
+        log.info("[NEO-CALLOUT] Raw callout result: {}", calloutResult != null ? calloutResult.toString().substring(0, Math.min(500, calloutResult.toString().length())) : "null");
 
         // Transform the callout result to REST format
         JSONObject restResponse = transformResponse(calloutResult, adTab);
+        log.info("[NEO-CALLOUT] Transformed response: {}", restResponse.toString().substring(0, Math.min(500, restResponse.toString().length())));
         return NeoResponse.ok(restResponse);
 
       } finally {
@@ -361,11 +374,10 @@ public class NeoCalloutService {
       params.put("inpwindowId", new String[]{ adTab.getWindow().getId() });
     }
 
-    // Inject essential context params from OBContext (callouts expect these always present)
+    // Inject essential context params from OBContext (security boundary — always authoritative)
     OBContext obCtx = OBContext.getOBContext();
     params.put("inpadOrgId", new String[]{ obCtx.getCurrentOrganization().getId() });
     params.put("inpadClientId", new String[]{ obCtx.getCurrentClient().getId() });
-    // isSOTrx: Purchase windows have isSOTrx=N in their header tab
     String isSOTrx = adTab.getWindow() != null
         && Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
     params.put("isSOTrx", new String[]{ isSOTrx });
@@ -373,11 +385,12 @@ public class NeoCalloutService {
       params.put("inpmWarehouseId", new String[]{ obCtx.getWarehouse().getId() });
     }
 
-    // Build column lookup maps (once, for all form state keys)
+    // Build column lookup maps (once, for all form state keys and default resolution)
     // Include OBDal property names for mapping frontend keys (e.g., "orderDate" -> "inpdateordered")
     Map<String, String> propertyNameToInp = new HashMap<>();
     Map<String, String> cleanNameToInp = new HashMap<>();
     Map<String, String> dbNameToInp = new HashMap<>();
+    List<Column> columns = Collections.emptyList();
     if (adTab.getTable() != null) {
       String tableId = adTab.getTable().getId();
       Entity dalEntity = null;
@@ -389,7 +402,7 @@ public class NeoCalloutService {
       OBCriteria<Column> colCriteria = OBDal.getInstance().createCriteria(Column.class);
       colCriteria.add(Restrictions.eq(Column.PROPERTY_TABLE + ".id", tableId));
       colCriteria.add(Restrictions.eq(Column.PROPERTY_ACTIVE, true));
-      List<Column> columns = colCriteria.list();
+      columns = colCriteria.list();
       for (Column col : columns) {
         String dbColName = col.getDBColumnName();
         String inpName = toInpName(dbColName);
@@ -432,6 +445,61 @@ public class NeoCalloutService {
       }
     }
 
+    // Fill missing columns with their AD defaults so callouts see all fields.
+    // In the classic UI every form field is present in the callout request, even on a new
+    // record. NEO's formState may be sparse (only defaults + user input), so we fill the
+    // gaps using Utility.getDefault — the same resolver the classic UI uses.
+    if (adTab.getTable() != null) {
+      try {
+        VariablesSecureApp vars = buildCalloutVars(obCtx, adTab);
+        DalConnectionProvider conn = new DalConnectionProvider(false);
+        String windowId = adTab.getWindow() != null ? adTab.getWindow().getId() : "";
+        for (Column col : columns) {
+          String inpName = toInpName(col.getDBColumnName());
+          if (params.containsKey(inpName)) {
+            continue;
+          }
+          String resolved = "";
+          try {
+            String defaultExpr = col.getDefaultValue();
+            resolved = Utility.getDefault(conn, vars, col.getDBColumnName(),
+                defaultExpr != null ? defaultExpr.trim() : "", windowId, "");
+          } catch (Exception e) {
+            log.debug("Could not resolve default for column {}: {}",
+                col.getDBColumnName(), e.getMessage());
+          }
+          params.put(inpName, new String[]{ resolved != null ? resolved : "" });
+        }
+      } catch (Exception e) {
+        log.warn("Could not fill callout defaults: {}", e.getMessage());
+      }
+    }
+
+    // For child tabs, inject the parent record ID so callouts can access the parent entity.
+    // E.g., SL_Order_Product reads inpcOrderId to get the order's price list.
+    Long tabLevel = adTab.getTabLevel();
+    log.info("[NEO-CALLOUT] Tab '{}' level={}, formState has id={}", adTab.getName(), tabLevel,
+        formState != null && formState.has("id"));
+    if (tabLevel != null && tabLevel > 0 && formState != null) {
+      Tab parentTab = findParentTab(adTab);
+      log.info("[NEO-CALLOUT] Parent tab: {}", parentTab != null ? parentTab.getName() : "null");
+      if (parentTab != null && parentTab.getTable() != null) {
+        String parentKeyCol = parentTab.getTable().getDBTableName() + "_ID";
+        String inpParentKey = toInpName(parentKeyCol);
+        log.info("[NEO-CALLOUT] Parent key: {} -> {}, already in params: {}", parentKeyCol, inpParentKey, params.containsKey(inpParentKey));
+        // The frontend passes the parent header's "id" in formState
+        // Override even if already set (defaults may have resolved it to empty)
+        String existingVal = params.containsKey(inpParentKey) ? params.get(inpParentKey)[0] : "";
+        if (formState.has("id") && (existingVal == null || existingVal.isEmpty())) {
+          String parentId = formState.optString("id", "");
+          params.put(inpParentKey, new String[]{ parentId });
+          log.info("[NEO-CALLOUT] Injected parent ID: {} = {}", inpParentKey, parentId);
+        } else if (params.containsKey(inpParentKey)) {
+          log.info("[NEO-CALLOUT] Parent key already set: {} = {}", inpParentKey, params.get(inpParentKey)[0]);
+        }
+      }
+    }
+
     // Process auxiliary values (e.g., businessPartner_LOC -> inpcBpartnerId_LOC)
     // These are extra values from OBUISEL selectors that callouts may depend on.
     if (auxValues != null) {
@@ -456,6 +524,45 @@ public class NeoCalloutService {
     }
 
     return params;
+  }
+
+  /**
+   * Build a VariablesSecureApp populated with the full session context.
+   * Uses LoginUtils.fillSessionArguments (same as classic login) so that
+   * Utility.getDefault can resolve context variables like @#AD_Org_ID@, @IsSOTrx@, etc.
+   */
+  private static VariablesSecureApp buildCalloutVars(OBContext obCtx, Tab adTab) {
+    String userId = obCtx.getUser().getId();
+    String clientId = obCtx.getCurrentClient().getId();
+    String orgId = obCtx.getCurrentOrganization().getId();
+    String roleId = obCtx.getRole().getId();
+    String lang = obCtx.getLanguage().getLanguage();
+    String warehouseId = obCtx.getWarehouse() != null
+        ? obCtx.getWarehouse().getId() : "";
+
+    VariablesSecureApp vars = new VariablesSecureApp(userId, clientId, orgId, roleId, lang);
+    DalConnectionProvider conn = new DalConnectionProvider(false);
+
+    try {
+      LoginUtils.fillSessionArguments(conn, vars, userId, lang, "N",
+          roleId, clientId, orgId, warehouseId);
+    } catch (Exception e) {
+      log.debug("LoginUtils.fillSessionArguments failed: {}", e.getMessage());
+      vars.setSessionValue("#AD_User_ID", userId);
+      vars.setSessionValue("#AD_Client_ID", clientId);
+      vars.setSessionValue("#AD_Org_ID", orgId);
+      vars.setSessionValue("#AD_Role_ID", roleId);
+      vars.setSessionValue("#AD_Language", lang);
+      vars.setSessionValue("#M_Warehouse_ID", warehouseId);
+    }
+
+    // Set window-level isSOTrx so expressions like @IsSOTrx@ resolve correctly
+    if (adTab.getWindow() != null) {
+      String soTrx = Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
+      vars.setSessionValue("isSOTrx", soTrx);
+    }
+
+    return vars;
   }
 
   /**
@@ -485,23 +592,82 @@ public class NeoCalloutService {
   }
 
   /**
-   * Build session attributes from OBContext for VariablesSecureApp.
-   * These are the session values that VariablesSecureApp reads via getSessionValue().
+   * Build session attributes for the synthetic request.
+   * Replicates the same two-step process as the classic login:
+   *   1. fillSessionArguments → identity, preferences, context variables
+   *   2. readNumberFormat    → #GROUPSEPARATOR|qtyEdition, #DECIMALSEPARATOR|qtyEdition, etc.
+   * VariablesBase.getSessionValue reads these as UPPERCASE keys from the session.
    */
-  private static Map<String, Object> buildSessionAttributes(OBContext obContext) {
+  private static Map<String, Object> buildSessionAttributes(OBContext obContext, Tab adTab) {
     Map<String, Object> attrs = new HashMap<>();
     if (obContext == null) {
       return attrs;
     }
-    attrs.put("#AD_User_ID", obContext.getUser().getId());
-    attrs.put("#AD_Role_ID", obContext.getRole().getId());
-    attrs.put("#AD_Client_ID", obContext.getCurrentClient().getId());
-    attrs.put("#AD_Org_ID", obContext.getCurrentOrganization().getId());
-    if (obContext.getWarehouse() != null) {
-      attrs.put("#M_Warehouse_ID", obContext.getWarehouse().getId());
+
+    // Step 1: Build VariablesSecureApp with fillSessionArguments (same as classic login)
+    VariablesSecureApp vars = buildCalloutVars(obContext, adTab);
+
+    // Step 2: Read number formats from Format.xml (same as classic login)
+    try {
+      org.openbravo.base.ConfigParameters config =
+          org.openbravo.base.ConfigParameters.retrieveFrom(RequestContext.getServletContext());
+      LoginUtils.readNumberFormat(vars, config.getFormatPath());
+    } catch (Exception e) {
+      log.debug("[NEO-CALLOUT] Could not read Format.xml: {}", e.getMessage());
     }
-    attrs.put("#AD_Language", obContext.getLanguage().getLanguage());
+
+    // Copy all session values from vars to the attrs map.
+    // VariablesSecureApp without a real HttpSession stores values in an internal
+    // sessionAttributes map (field in VariablesBase). Read known keys that callouts need.
+    String[] knownKeys = {
+        "#AD_User_ID", "#AD_Role_ID", "#AD_Client_ID", "#AD_Org_ID",
+        "#M_Warehouse_ID", "#AD_Language", "#AD_Session_ID",
+        "#User_Client", "#Date", "#AD_JavaDateFormat", "#AD_JavaDateTimeFormat",
+    };
+    for (String key : knownKeys) {
+      String val = vars.getSessionValue(key);
+      if (val != null && !val.isEmpty()) {
+        attrs.put(key.toUpperCase(), val);
+      }
+    }
+
+    // Copy number format values for all standard format names
+    String[] formatNames = {"qtyEdition", "euroEdition", "priceEdition", "integerEdition",
+        "generalQtyEdition", "euroInform"};
+    for (String fmt : formatNames) {
+      String gs = vars.getSessionValue("#GroupSeparator|" + fmt);
+      String ds = vars.getSessionValue("#DecimalSeparator|" + fmt);
+      String fo = vars.getSessionValue("#FormatOutput|" + fmt);
+      if (!gs.isEmpty()) attrs.put("#GROUPSEPARATOR|" + fmt.toUpperCase(), gs);
+      if (!ds.isEmpty()) attrs.put("#DECIMALSEPARATOR|" + fmt.toUpperCase(), ds);
+      if (!fo.isEmpty()) attrs.put("#FORMATOUTPUT|" + fmt.toUpperCase(), fo);
+    }
+
     return attrs;
+  }
+
+  /**
+   * Find the parent tab of a child tab by walking the window's tab list in sequence order.
+   * Returns the nearest tab with a lower tab level that precedes the child tab.
+   */
+  private static Tab findParentTab(Tab childTab) {
+    if (childTab.getWindow() == null) {
+      return null;
+    }
+    int childLevel = childTab.getTabLevel() != null ? childTab.getTabLevel().intValue() : 0;
+    List<Tab> tabs = childTab.getWindow().getADTabList();
+    tabs.sort(Comparator.comparingLong(Tab::getSequenceNumber));
+    Tab parent = null;
+    for (Tab t : tabs) {
+      if (t.getId().equals(childTab.getId())) {
+        break;
+      }
+      int level = t.getTabLevel() != null ? t.getTabLevel().intValue() : 0;
+      if (level < childLevel) {
+        parent = t;
+      }
+    }
+    return parent;
   }
 
   // ── Response transformation ────────────────────────────────────────

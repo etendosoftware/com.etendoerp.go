@@ -459,6 +459,10 @@ public class NeoDefaultsService {
    * @param ctx     the NeoContext with OBContext and spec/entity info
    */
   public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx) {
+    injectMandatoryDefaults(body, adTab, ctx, null);
+  }
+
+  public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx, String parentId) {
     if (body == null || adTab == null || ctx == null) {
       return;
     }
@@ -493,7 +497,7 @@ public class NeoDefaultsService {
 
         // Resolve using the same logic as the /defaults endpoint
         try {
-          Object resolved = resolveFieldDefault(col, null, vars, conn, windowId, ctx);
+          Object resolved = resolveFieldDefault(col, parentId, vars, conn, windowId, ctx);
           if (resolved != null) {
             body.put(propName, resolved);
             log.debug("Injected mandatory default: {} = {}", propName, resolved);
