@@ -5,7 +5,11 @@ import java.sql.ResultSet;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.logging.log4j.LogManager;
@@ -56,6 +60,7 @@ public class NeoDefaultsService {
 
   private static final Logger log = LogManager.getLogger(NeoDefaultsService.class);
   private static final String DATE_FORMAT = "yyyy-MM-dd";
+  private static final int MAX_CALLOUT_CHAIN_DEPTH = 5;
 
   // Cache VariablesSecureApp per user+role+org+warehouse combination to avoid calling
   // LoginUtils.fillSessionArguments (multiple DB queries) on every request.
@@ -132,13 +137,35 @@ public class NeoDefaultsService {
           }
         }
 
+        // Execute callout cascade for defaulted fields that have callouts configured
+        Tab adTab = ctx.getAdTab();
+        Set<String> seqFieldSet = new HashSet<>();
+        for (int i = 0; i < sequenceFields.length(); i++) {
+          seqFieldSet.add(sequenceFields.getString(i));
+        }
+
+        CalloutCascadeResult cascadeResult = null;
+        if (adTab != null) {
+          cascadeResult = executeCalloutCascade(ctx, adTab, defaults, seqFieldSet);
+        }
+
         // Build response
         JSONObject response = new JSONObject();
         response.put("defaults", defaults);
 
+        if (cascadeResult != null && cascadeResult.hasResults()) {
+          response.put("calloutResults", cascadeResult.toJSON());
+        }
+
         JSONObject metadata = new JSONObject();
         metadata.put("unresolvedFields", unresolvedFields);
         metadata.put("sequenceFields", sequenceFields);
+        if (cascadeResult != null) {
+          metadata.put("calloutChainDepth", cascadeResult.chainDepth);
+          if (cascadeResult.truncated) {
+            metadata.put("calloutChainTruncated", true);
+          }
+        }
         response.put("metadata", metadata);
 
         return NeoResponse.ok(response);
@@ -519,6 +546,227 @@ public class NeoDefaultsService {
     }
     // Fallback to heuristic if DAL entity is not available
     return NeoCalloutService.toCleanFieldName(dbColumnName);
+  }
+
+  // ── Callout cascade ─────────────────────────────────────────────────
+
+  /**
+   * Execute callout cascade after default resolution.
+   * For each defaulted field that has a callout configured, execute it and merge
+   * the results back into the defaults (so subsequent callouts see updated values).
+   *
+   * @param ctx          the NeoContext
+   * @param adTab        the AD_Tab for callout resolution
+   * @param defaults     the resolved defaults (modified in place with callout updates)
+   * @param seqFields    field names that are sequence previews (skip callouts for these)
+   * @return aggregated callout results
+   */
+  private static CalloutCascadeResult executeCalloutCascade(NeoContext ctx, Tab adTab,
+      JSONObject defaults, Set<String> seqFields) {
+
+    CalloutCascadeResult result = new CalloutCascadeResult();
+
+    try {
+      // Collect fields that have callouts and non-null defaults
+      List<String> fieldsWithCallouts = new ArrayList<>();
+      Iterator<String> keys = defaults.keys();
+      while (keys.hasNext()) {
+        String fieldName = keys.next();
+        if (seqFields.contains(fieldName)) {
+          continue;
+        }
+        Object value = defaults.opt(fieldName);
+        if (value == null || JSONObject.NULL.equals(value)) {
+          continue;
+        }
+        NeoCalloutService.CalloutInfo info = NeoCalloutService.resolveCallout(adTab, fieldName);
+        if (info != null) {
+          fieldsWithCallouts.add(fieldName);
+        }
+      }
+
+      if (fieldsWithCallouts.isEmpty()) {
+        return result;
+      }
+
+      log.info("[NEO-DEFAULTS] Callout cascade: {} fields have callouts: {}",
+          fieldsWithCallouts.size(), fieldsWithCallouts);
+
+      // Build a running form state from current defaults
+      JSONObject formState = new JSONObject(defaults.toString());
+
+      // Execute callouts up to MAX_CALLOUT_CHAIN_DEPTH iterations.
+      // Each iteration processes all pending fields. If a callout produces updates
+      // that affect other fields with callouts, those are queued for the next iteration.
+      Set<String> pendingFields = new LinkedHashSet<>(fieldsWithCallouts);
+      int depth = 0;
+
+      while (!pendingFields.isEmpty() && depth < MAX_CALLOUT_CHAIN_DEPTH) {
+        depth++;
+        Set<String> nextPending = new LinkedHashSet<>();
+
+        for (String fieldName : pendingFields) {
+          Object value = formState.opt(fieldName);
+          if (value == null || JSONObject.NULL.equals(value)) {
+            continue;
+          }
+
+          try {
+            JSONObject calloutRequest = new JSONObject();
+            calloutRequest.put("field", fieldName);
+            calloutRequest.put("value", value);
+            calloutRequest.put("formState", formState);
+
+            NeoResponse calloutResponse = NeoCalloutService.executeCallout(ctx, calloutRequest);
+            if (calloutResponse == null || calloutResponse.getHttpStatus() != 200) {
+              log.debug("[NEO-DEFAULTS] Callout for '{}' failed or returned non-200", fieldName);
+              continue;
+            }
+
+            JSONObject calloutBody = calloutResponse.getBody();
+            if (calloutBody == null) {
+              continue;
+            }
+
+            // Merge updates into form state and track which fields changed
+            JSONObject updates = calloutBody.optJSONObject("updates");
+            if (updates != null) {
+              result.mergeUpdates(updates);
+              Iterator<String> updateKeys = updates.keys();
+              while (updateKeys.hasNext()) {
+                String updatedField = updateKeys.next();
+                JSONObject updateObj = updates.optJSONObject(updatedField);
+                if (updateObj != null && updateObj.has("value")) {
+                  Object newValue = updateObj.get("value");
+                  Object oldValue = formState.opt(updatedField);
+
+                  formState.put(updatedField, newValue);
+                  defaults.put(updatedField, newValue);
+
+                  // If the updated field itself has a callout and the value changed,
+                  // queue it for the next iteration
+                  if (!valueChanged(oldValue, newValue)) {
+                    continue;
+                  }
+                  if (seqFields.contains(updatedField)) {
+                    continue;
+                  }
+                  NeoCalloutService.CalloutInfo nextInfo =
+                      NeoCalloutService.resolveCallout(adTab, updatedField);
+                  if (nextInfo != null) {
+                    nextPending.add(updatedField);
+                  }
+                }
+              }
+            }
+
+            // Merge combos
+            JSONObject combos = calloutBody.optJSONObject("combos");
+            if (combos != null) {
+              result.mergeCombos(combos);
+            }
+
+            // Merge messages
+            JSONArray messages = calloutBody.optJSONArray("messages");
+            if (messages != null) {
+              result.mergeMessages(messages);
+            }
+
+          } catch (Exception e) {
+            log.warn("[NEO-DEFAULTS] Callout cascade error for field '{}': {}",
+                fieldName, e.getMessage());
+          }
+        }
+
+        pendingFields = nextPending;
+      }
+
+      result.chainDepth = depth;
+      result.truncated = depth >= MAX_CALLOUT_CHAIN_DEPTH && !pendingFields.isEmpty();
+      if (result.truncated) {
+        log.warn("[NEO-DEFAULTS] Callout cascade reached max depth {} with pending fields: {}",
+            MAX_CALLOUT_CHAIN_DEPTH, pendingFields);
+      }
+
+    } catch (Exception e) {
+      log.error("[NEO-DEFAULTS] Error in callout cascade: {}", e.getMessage(), e);
+    }
+
+    return result;
+  }
+
+  /**
+   * Check if two values are different (for detecting actual changes from callouts).
+   */
+  private static boolean valueChanged(Object oldValue, Object newValue) {
+    if (oldValue == null && newValue == null) {
+      return false;
+    }
+    if (oldValue == null || newValue == null) {
+      return true;
+    }
+    return !oldValue.toString().equals(newValue.toString());
+  }
+
+  /**
+   * Aggregated result of the callout cascade execution.
+   */
+  static class CalloutCascadeResult {
+    private final JSONObject updates = new JSONObject();
+    private final JSONObject combos = new JSONObject();
+    private final JSONArray messages = new JSONArray();
+    int chainDepth = 0;
+    boolean truncated = false;
+
+    boolean hasResults() {
+      return updates.length() > 0 || combos.length() > 0 || messages.length() > 0;
+    }
+
+    void mergeUpdates(JSONObject newUpdates) {
+      Iterator<String> keys = newUpdates.keys();
+      while (keys.hasNext()) {
+        String key = keys.next();
+        try {
+          updates.put(key, newUpdates.get(key));
+        } catch (Exception e) {
+          // skip
+        }
+      }
+    }
+
+    void mergeCombos(JSONObject newCombos) {
+      Iterator<String> keys = newCombos.keys();
+      while (keys.hasNext()) {
+        String key = keys.next();
+        try {
+          combos.put(key, newCombos.get(key));
+        } catch (Exception e) {
+          // skip
+        }
+      }
+    }
+
+    void mergeMessages(JSONArray newMessages) {
+      for (int i = 0; i < newMessages.length(); i++) {
+        try {
+          messages.put(newMessages.get(i));
+        } catch (Exception e) {
+          // skip
+        }
+      }
+    }
+
+    JSONObject toJSON() {
+      JSONObject json = new JSONObject();
+      try {
+        json.put("updates", updates);
+        json.put("combos", combos);
+        json.put("messages", messages);
+      } catch (Exception e) {
+        // should never happen
+      }
+      return json;
+    }
   }
 
 }
