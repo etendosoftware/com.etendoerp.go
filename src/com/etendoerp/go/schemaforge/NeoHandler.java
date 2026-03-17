@@ -19,4 +19,13 @@ public interface NeoHandler {
    * fall through to default DataSourceServlet handling.
    */
   NeoResponse handle(NeoContext context);
+
+  /**
+   * Post-hook: called AFTER the default service executed.
+   * The context's previousResult contains the service result.
+   * Return a NeoResponse to replace it, or null to keep the original.
+   */
+  default NeoResponse afterHandle(NeoContext context) {
+    return null;
+  }
 }

@@ -45,7 +45,10 @@ import org.openbravo.model.ad.ui.Window;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
 import org.openbravo.base.expression.OBScriptEngine;
+import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.client.application.DynamicExpressionParser;
+import org.openbravo.erpCommon.utility.Utility;
+import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.model.ad.ui.Field;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
@@ -128,9 +131,15 @@ public class NeoServlet extends HttpBaseServlet {
     // 1. Authenticate via JWT
     try {
       authenticateJwt(request);
-    } catch (Exception e) {
+    } catch (OBException e) {
+      // OBException messages are safe to expose (we control them)
       log.warn("Unauthorized NEO request: {}", e.getMessage());
       sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
+      return;
+    } catch (Exception e) {
+      // Other exceptions (JWT decode failures, NPEs) — don't leak internals
+      log.warn("Unauthorized NEO request: {}", e.getMessage());
+      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
       return;
     }
 
@@ -251,7 +260,10 @@ public class NeoServlet extends HttpBaseServlet {
               "Selectors only support GET");
           return;
         }
-        handleSelector(response, spec.getId(), pathInfo, request);
+        NeoResponse selectorResult = dispatchWithHooks(spec, pathInfo.entityName,
+            NeoEndpointType.SELECTOR, pathInfo.selectorField, method,
+            () -> handleSelector(spec.getId(), pathInfo, request));
+        writeResponse(response, selectorResult);
         return;
       }
 
@@ -262,7 +274,10 @@ public class NeoServlet extends HttpBaseServlet {
               "Actions support GET (list) and POST (execute)");
           return;
         }
-        handleButtonAction(response, spec, pathInfo, method, request);
+        NeoResponse actionResult = dispatchWithHooks(spec, pathInfo.entityName,
+            NeoEndpointType.ACTION, pathInfo.actionName, method,
+            () -> handleButtonAction(spec, pathInfo, method, request));
+        writeResponse(response, actionResult);
         return;
       }
 
@@ -273,7 +288,10 @@ public class NeoServlet extends HttpBaseServlet {
               "Method not allowed. Use POST.");
           return;
         }
-        handleEvaluateDisplay(response, spec, pathInfo, request);
+        NeoResponse evalResult = dispatchWithHooks(spec, pathInfo.entityName,
+            NeoEndpointType.EVALUATE_DISPLAY, null, method,
+            () -> handleEvaluateDisplay(spec, pathInfo, request));
+        writeResponse(response, evalResult);
         return;
       }
 
@@ -284,7 +302,24 @@ public class NeoServlet extends HttpBaseServlet {
               "Callout endpoint only supports POST");
           return;
         }
-        handleCallout(response, spec, pathInfo, request);
+        NeoResponse calloutResult = dispatchWithHooks(spec, pathInfo.entityName,
+            NeoEndpointType.CALLOUT, null, method,
+            () -> handleCallout(spec, pathInfo, request));
+        writeResponse(response, calloutResult);
+        return;
+      }
+
+      // Handle defaults requests
+      if (pathInfo.isDefaults) {
+        if (!"GET".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Defaults endpoint only supports GET");
+          return;
+        }
+        NeoResponse defaultsResult = dispatchWithHooks(spec, pathInfo.entityName,
+            NeoEndpointType.DEFAULTS, null, method,
+            () -> handleDefaults(spec, pathInfo, request));
+        writeResponse(response, defaultsResult);
         return;
       }
 
@@ -319,6 +354,7 @@ public class NeoServlet extends HttpBaseServlet {
           .adTab(adTab)
           .sfEntity(entity)
           .obContext(OBContext.getOBContext())
+          .endpointType(NeoEndpointType.CRUD)
           .build();
 
       // Read request body for POST/PUT/PATCH
@@ -336,6 +372,7 @@ public class NeoServlet extends HttpBaseServlet {
                 .adTab(neoContext.getAdTab())
                 .sfEntity(neoContext.getSfEntity())
                 .obContext(neoContext.getObContext())
+                .endpointType(neoContext.getEndpointType())
                 .build();
           }
         } catch (Exception e) {
@@ -428,7 +465,12 @@ public class NeoServlet extends HttpBaseServlet {
 
     // Check for /callout sub-path
     if (parts.length >= 3 && "callout".equals(parts[2])) {
-      return new NeoPathInfo(specName, entityName, null, false, null, false, null, false, true);
+      return new NeoPathInfo(specName, entityName, null, false, null, false, null, false, true, false);
+    }
+
+    // Check for /defaults sub-path
+    if (parts.length >= 3 && "defaults".equals(parts[2])) {
+      return new NeoPathInfo(specName, entityName, null, false, null, false, null, false, false, true);
     }
 
     // Check for /evaluate-display sub-path
@@ -523,14 +565,21 @@ public class NeoServlet extends HttpBaseServlet {
         return handleDefault(context, request, response);
       }
 
-      // Let the handler process the request
-      NeoResponse result = handler.handle(context);
-      if (result != null) {
-        return result;
+      // Pre-hook
+      NeoResponse preResult = handler.handle(context);
+      if (preResult != null) {
+        context.setPreviousResult(preResult);
+        NeoResponse afterResult = handler.afterHandle(context);
+        return afterResult != null ? afterResult : preResult;
       }
 
-      // If handler returns null, continue with default behavior
-      return handleDefault(context, request, response);
+      // Default service
+      NeoResponse defaultResult = handleDefault(context, request, response);
+
+      // Post-hook
+      context.setPreviousResult(defaultResult);
+      NeoResponse afterResult = handler.afterHandle(context);
+      return afterResult != null ? afterResult : defaultResult;
     } catch (Exception e) {
       log.error("Error executing hook handler: {}", javaQualifier, e);
       return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
@@ -550,6 +599,74 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Failed to lookup handler with qualifier: {}", qualifier, e);
       return null;
+    }
+  }
+
+  /**
+   * Execute a sub-endpoint through the hook pipeline.
+   * If a handler exists for the entity qualifier, it gets pre/post hook calls.
+   *
+   * @param spec          the SF spec
+   * @param entityName    the entity name within the spec
+   * @param endpointType  which sub-endpoint is being invoked
+   * @param fieldName     optional field name (selector column, action column, etc.)
+   * @param httpMethod    the HTTP method
+   * @param defaultAction supplier that executes the default service logic
+   * @return the final NeoResponse
+   */
+  private NeoResponse dispatchWithHooks(
+      SFSpec spec, String entityName,
+      NeoEndpointType endpointType, String fieldName,
+      String httpMethod,
+      java.util.function.Supplier<NeoResponse> defaultAction) {
+
+    // Try to resolve entity for its qualifier
+    SFEntity entity = findEntity(spec.getId(), entityName);
+    String qualifier = (entity != null) ? entity.getJavaQualifier() : null;
+
+    if (StringUtils.isBlank(qualifier)) {
+      return defaultAction.get();
+    }
+
+    NeoHandler handler = lookupHandler(qualifier);
+    if (handler == null) {
+      return defaultAction.get();
+    }
+
+    // Build hook context
+    Tab adTab = (entity != null) ? getAdTab(entity) : null;
+    NeoContext hookCtx = NeoContext.builder()
+        .specName(spec.getName())
+        .entityName(entityName)
+        .httpMethod(httpMethod)
+        .endpointType(endpointType)
+        .fieldName(fieldName)
+        .sfEntity(entity)
+        .adTab(adTab)
+        .obContext(OBContext.getOBContext())
+        .build();
+
+    try {
+      // Pre-hook
+      NeoResponse preResult = handler.handle(hookCtx);
+      if (preResult != null) {
+        hookCtx.setPreviousResult(preResult);
+        NeoResponse afterResult = handler.afterHandle(hookCtx);
+        return afterResult != null ? afterResult : preResult;
+      }
+
+      // Default service
+      NeoResponse defaultResult = defaultAction.get();
+
+      // Post-hook
+      hookCtx.setPreviousResult(defaultResult);
+      NeoResponse afterResult = handler.afterHandle(hookCtx);
+      return afterResult != null ? afterResult : defaultResult;
+
+    } catch (Exception e) {
+      log.error("Error in hook dispatch for {}/{}: {}",
+          endpointType, entityName, e.getMessage(), e);
+      return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
     }
   }
 
@@ -626,16 +743,57 @@ public class NeoServlet extends HttpBaseServlet {
           result = jsonService.fetch(params);
           break;
         case "POST": {
+          // Validate: POST must NOT have a recordId (creates don't target an existing record)
+          if (context.getRecordId() != null) {
+            return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+                "POST (create) must not include a record ID in the URL");
+          }
+          // Resolve parentId from body: map generic "parentId" to the actual FK property name
+          // (e.g., parentId → salesOrder for C_OrderLine, parentId → invoice for C_InvoiceLine)
+          JSONObject requestBody = context.getRequestBody();
+          String parentIdValue = null;
+          if (requestBody != null && requestBody.has("parentId")) {
+            parentIdValue = requestBody.getString("parentId");
+            requestBody.remove("parentId");
+            // Find the link-to-parent column and resolve its DAL property name
+            if (adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
+              Entity dalEnt = ModelProvider.getInstance().getEntityByTableName(adTab.getTable().getDBTableName());
+              if (dalEnt != null) {
+                for (Column col : adTab.getTable().getADColumnList()) {
+                  if (col.isLinkToParentColumn() && col.isActive()) {
+                    try {
+                      Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
+                      if (prop != null) {
+                        requestBody.put(prop.getName(), parentIdValue);
+                        break;
+                      }
+                    } catch (Exception ignored) {}
+                  }
+                }
+              }
+            }
+          }
           // Filter out non-included and read-only fields from request body
-          JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
-          result = jsonService.add(params, filteredBody != null ? filteredBody.toString() : "{}");
+          JSONObject filteredBody = fieldFilter.filterWriteRequest(requestBody);
+          // Inject defaults for mandatory columns not in ETGO_SF_FIELD config
+          NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+          // Wrap for DefaultJsonDataService: {"data": {fields, "_entityName": ..., "_new": true}}
+          String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
+          result = jsonService.add(params, wrappedBody);
           break;
         }
         case "PUT":
         case "PATCH": {
+          // Validate: PUT/PATCH require a recordId
+          if (context.getRecordId() == null) {
+            return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+                context.getHttpMethod() + " requires a record ID in the URL");
+          }
           // Filter out non-included and read-only fields from request body
           JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
-          result = jsonService.update(params, filteredBody != null ? filteredBody.toString() : "{}");
+          // Wrap for DefaultJsonDataService: {"data": {fields, "_entityName": ..., "id": recordId}}
+          String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
+          result = jsonService.update(params, wrappedBody);
           break;
         }
         case "DELETE":
@@ -648,10 +806,25 @@ public class NeoServlet extends HttpBaseServlet {
 
       JSONObject responseJson = new JSONObject(result);
 
-      // Filter GET response to only include configured fields
-      if ("GET".equals(context.getHttpMethod())) {
-        fieldFilter.filterGetResponse(responseJson);
+      // Check for error responses from DefaultJsonDataService
+      JSONObject innerResponse = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
+      if (innerResponse != null) {
+        int status = innerResponse.optInt(JsonConstants.RESPONSE_STATUS, 0);
+        if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
+          String errMsg = innerResponse.has(JsonConstants.RESPONSE_ERROR)
+              ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
+                  .optString("message", "Write operation failed")
+              : "Write operation failed";
+          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errMsg);
+        }
+        if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
+          // Return 400 with the full error details for validation errors
+          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
+        }
       }
+
+      // Filter response to only include configured fields (for all methods)
+      fieldFilter.filterGetResponse(responseJson);
 
       return NeoResponse.ok(responseJson);
     } catch (Exception e) {
@@ -661,9 +834,40 @@ public class NeoServlet extends HttpBaseServlet {
   }
 
   /**
-   * Build the tab-level where clause, including the tab's own HQL filter
-   * and parent entity filtering for child tabs when parentId is provided.
+   * Wraps a flat JSON body into the structure expected by DefaultJsonDataService:
+   * {@code {"data": {fields..., "_entityName": dalEntityName, "id": recordId}}}
+   *
+   * <p>DefaultJsonDataService.getContentAsJSON() calls jsonObject.get("data"),
+   * so the content MUST be wrapped in a "data" envelope. Additionally,
+   * the "_entityName" property is required for OBDal to resolve the entity,
+   * and "id" is required for updates.</p>
+   *
+   * @param filteredBody the filtered request body (flat JSON from client)
+   * @param dalEntityName the DAL entity name (e.g. "Order")
+   * @param recordId the record ID for updates, or null for creates
+   * @return the wrapped JSON string ready for DefaultJsonDataService
    */
+  private String wrapForSmartclient(JSONObject filteredBody, String dalEntityName,
+      String recordId) {
+    try {
+      JSONObject data = filteredBody != null ? filteredBody : new JSONObject();
+      data.put(JsonConstants.ENTITYNAME, dalEntityName);
+      if (recordId != null) {
+        data.put(JsonConstants.ID, recordId);
+      } else {
+        // Mark as new record for creates
+        data.put(JsonConstants.NEW_INDICATOR, true);
+      }
+
+      JSONObject wrapper = new JSONObject();
+      wrapper.put(JsonConstants.DATA, data);
+      return wrapper.toString();
+    } catch (Exception e) {
+      log.error("Error wrapping body for Smartclient format: {}", e.getMessage(), e);
+      return "{}";
+    }
+  }
+
   /**
    * Builds an HQL where clause fragment that filters a child tab's records
    * by the parent record ID.
@@ -809,17 +1013,16 @@ public class NeoServlet extends HttpBaseServlet {
    * GET with no actionName: list available button actions for the entity.
    * POST with actionName: execute the button process for a specific record.
    */
-  private void handleButtonAction(HttpServletResponse response, SFSpec spec,
-      NeoPathInfo pathInfo, String method, HttpServletRequest request) throws IOException {
+  private NeoResponse handleButtonAction(SFSpec spec,
+      NeoPathInfo pathInfo, String method, HttpServletRequest request) {
     try {
       String specId = spec.getId();
 
       // Find the entity
       SFEntity entity = findEntity(specId, pathInfo.entityName);
       if (entity == null) {
-        sendError(response, HttpServletResponse.SC_NOT_FOUND,
+        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
             "Entity not found in spec: " + pathInfo.entityName);
-        return;
       }
 
       String entityId = entity.getId();
@@ -872,8 +1075,7 @@ public class NeoServlet extends HttpBaseServlet {
 
         JSONObject responseBody = new JSONObject();
         responseBody.put("actions", actions);
-        writeResponse(response, NeoResponse.ok(responseBody));
-        return;
+        return NeoResponse.ok(responseBody);
       }
 
       if ("POST".equals(method) && pathInfo.actionName != null) {
@@ -895,17 +1097,15 @@ public class NeoServlet extends HttpBaseServlet {
         }
 
         if (targetColumn == null) {
-          sendError(response, HttpServletResponse.SC_NOT_FOUND,
+          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
               "Action not found: " + pathInfo.actionName);
-          return;
         }
 
         // Check reference is Button
         if (targetColumn.getReference() == null
             || !"28".equals((String) targetColumn.getReference().getId())) {
-          sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
               "Field is not a button: " + pathInfo.actionName);
-          return;
         }
 
         // Resolve process: prefer OBUIAPP, fall back to classic
@@ -921,9 +1121,8 @@ public class NeoServlet extends HttpBaseServlet {
           adProcess = targetColumn.getProcess();
         }
         if (adProcess == null && obuiappProcess == null) {
-          sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
               "No process linked to button: " + pathInfo.actionName);
-          return;
         }
 
         // If we only have OBUIAPP and no classic process, try to get the classic process
@@ -931,17 +1130,15 @@ public class NeoServlet extends HttpBaseServlet {
           adProcess = targetColumn.getProcess();
         }
         if (adProcess == null) {
-          sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
               "Button process not supported (OBUIAPP-only process without classic fallback): "
                   + pathInfo.actionName);
-          return;
         }
 
         // Check process access before executing
         if (!hasProcessAccess(adProcess.getId())) {
-          sendError(response, HttpServletResponse.SC_FORBIDDEN,
+          return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
               "Access denied to process for current role");
-          return;
         }
 
         // Read request body
@@ -954,54 +1151,49 @@ public class NeoServlet extends HttpBaseServlet {
         }
         params.put("recordId", pathInfo.recordId);
 
-        NeoResponse result = NeoProcessService.executeProcess(adProcess, params);
-        writeResponse(response, result);
-        return;
+        return NeoProcessService.executeProcess(adProcess, params);
       }
 
       // Invalid combination (e.g., GET with actionName, POST without actionName)
       if ("GET".equals(method) && pathInfo.actionName != null) {
-        sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+        return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
             "Use POST to execute an action, GET is only for listing actions");
       } else {
-        sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
             "POST requires an action name: /{spec}/{entity}/{recordId}/action/{columnName}");
       }
     } catch (Exception e) {
       log.error("Error handling button action: {}", e.getMessage(), e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Action error: " + e.getMessage());
     }
   }
 
-  private void handleSelector(HttpServletResponse response, String specId,
-      NeoPathInfo pathInfo, HttpServletRequest request) throws IOException {
-    NeoResponse selectorResponse;
+  private NeoResponse handleSelector(String specId,
+      NeoPathInfo pathInfo, HttpServletRequest request) {
     if (pathInfo.selectorField == null) {
       // List all available selectors
-      selectorResponse = NeoSelectorService.listSelectors(specId, pathInfo.entityName);
-    } else {
-      // Query a specific selector
-      String search = request.getParameter("q");
-      int limit = parseIntParam(request, "limit", 20);
-      int offset = parseIntParam(request, "offset", 0);
-
-      // Collect context params (all query params except q, limit, offset)
-      Map<String, String> contextParams = new HashMap<>();
-      Enumeration<String> paramNames = request.getParameterNames();
-      while (paramNames.hasMoreElements()) {
-        String paramName = paramNames.nextElement();
-        if (!"q".equals(paramName) && !"limit".equals(paramName)
-            && !"offset".equals(paramName)) {
-          contextParams.put(paramName, request.getParameter(paramName));
-        }
-      }
-
-      selectorResponse = NeoSelectorService.querySelector(
-          specId, pathInfo.entityName, pathInfo.selectorField,
-          search, limit, offset, contextParams);
+      return NeoSelectorService.listSelectors(specId, pathInfo.entityName);
     }
-    writeResponse(response, selectorResponse);
+    // Query a specific selector
+    String search = request.getParameter("q");
+    int limit = parseIntParam(request, "limit", 20);
+    int offset = parseIntParam(request, "offset", 0);
+
+    // Collect context params (all query params except q, limit, offset)
+    Map<String, String> contextParams = new HashMap<>();
+    Enumeration<String> paramNames = request.getParameterNames();
+    while (paramNames.hasMoreElements()) {
+      String paramName = paramNames.nextElement();
+      if (!"q".equals(paramName) && !"limit".equals(paramName)
+          && !"offset".equals(paramName)) {
+        contextParams.put(paramName, request.getParameter(paramName));
+      }
+    }
+
+    return NeoSelectorService.querySelector(
+        specId, pathInfo.entityName, pathInfo.selectorField,
+        search, limit, offset, contextParams);
   }
 
   private int parseIntParam(HttpServletRequest request, String name, int defaultValue) {
@@ -1349,22 +1541,20 @@ public class NeoServlet extends HttpBaseServlet {
    *
    * POST /sws/neo/{specName}/{entityName}/evaluate-display
    */
-  private void handleEvaluateDisplay(HttpServletResponse response, SFSpec spec,
-      NeoPathInfo pathInfo, HttpServletRequest request) throws IOException {
+  private NeoResponse handleEvaluateDisplay(SFSpec spec,
+      NeoPathInfo pathInfo, HttpServletRequest request) {
     try {
       // Find entity
       SFEntity sfEntity = findEntity(spec.getId(), pathInfo.entityName);
       if (sfEntity == null) {
-        sendError(response, HttpServletResponse.SC_NOT_FOUND,
+        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
             "Entity not found: " + pathInfo.entityName);
-        return;
       }
 
       Tab tab = sfEntity.getADTab();
       if (tab == null) {
-        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
             "Entity has no linked AD_Tab: " + pathInfo.entityName);
-        return;
       }
 
       // Parse request body
@@ -1379,8 +1569,7 @@ public class NeoServlet extends HttpBaseServlet {
           }
         }
       } catch (Exception e) {
-        sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid request body");
-        return;
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid request body");
       }
 
       // Build evaluation context
@@ -1421,13 +1610,12 @@ public class NeoServlet extends HttpBaseServlet {
       result.put("visibility", visibility);
       result.put("readOnly", readOnly);
 
-      writeResponse(response,
-          NeoResponse.ok(result));
+      return NeoResponse.ok(result);
 
     } catch (Exception e) {
       log.error("Error evaluating display logic for {}/{}", pathInfo.specName,
           pathInfo.entityName, e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Error evaluating display logic: " + e.getMessage());
     }
   }
@@ -1502,6 +1690,31 @@ public class NeoServlet extends HttpBaseServlet {
     ctx.put("AD_Role_ID", obCtx.getRole().getId());
     ctx.put("AD_User_ID", obCtx.getUser().getId());
 
+    // Resolve $Element_* accounting dimension preferences.
+    // DynamicExpressionParser generates JS referencing context.$Element_XX
+    // for displayLogic expressions like @$Element_MC@='Y'.
+    try {
+      DalConnectionProvider conn = new DalConnectionProvider(false);
+      VariablesSecureApp vars = new VariablesSecureApp(
+          obCtx.getUser().getId(),
+          obCtx.getCurrentClient().getId(),
+          obCtx.getCurrentOrganization().getId(),
+          obCtx.getRole().getId(),
+          obCtx.getLanguage().getLanguage());
+      String[] elements = { "MC", "AY", "OT", "AS", "CC", "U1", "U2", "PJ", "BU", "PR" };
+      for (String el : elements) {
+        String key = "$Element_" + el;
+        String value = Utility.getContext(conn, vars, key, "");
+        ctx.put(key, value);
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve $Element_* preferences: {}", e.getMessage());
+    }
+
+    // Add a "context" object alias so DynamicExpressionParser's JS output
+    // (context.xxx references) can resolve against our eval context
+    ctx.put("context", ctx);
+
     return ctx;
   }
 
@@ -1535,46 +1748,41 @@ public class NeoServlet extends HttpBaseServlet {
    * POST /sws/neo/{specName}/{entityName}/callout
    * Delegates to NeoCalloutService for callout resolution, execution, and response transformation.
    */
-  private void handleCallout(HttpServletResponse response, SFSpec spec,
-      NeoPathInfo pathInfo, HttpServletRequest request) throws IOException {
+  private NeoResponse handleCallout(SFSpec spec,
+      NeoPathInfo pathInfo, HttpServletRequest request) {
     try {
       // Find entity
       SFEntity sfEntity = findEntity(spec.getId(), pathInfo.entityName);
       if (sfEntity == null) {
-        sendError(response, HttpServletResponse.SC_NOT_FOUND,
+        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
             "Entity not found: " + pathInfo.entityName);
-        return;
       }
 
       Tab tab = sfEntity.getADTab();
       if (tab == null) {
-        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
             "Entity has no linked AD_Tab: " + pathInfo.entityName);
-        return;
       }
 
       // Parse request body
       String bodyStr = new String(
           request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
       if (StringUtils.isBlank(bodyStr)) {
-        sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
             "Request body is required for callout execution");
-        return;
       }
 
       JSONObject requestBody;
       try {
         requestBody = new JSONObject(bodyStr);
       } catch (Exception e) {
-        sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
             "Invalid JSON body: " + e.getMessage());
-        return;
       }
 
       if (!requestBody.has("field")) {
-        sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
             "Missing required field: 'field'");
-        return;
       }
 
       // Build context
@@ -1589,13 +1797,52 @@ public class NeoServlet extends HttpBaseServlet {
           .build();
 
       // Delegate to callout service
-      NeoResponse result = NeoCalloutService.executeCallout(neoContext, requestBody);
-      writeResponse(response, result);
+      return NeoCalloutService.executeCallout(neoContext, requestBody);
     } catch (Exception e) {
       log.error("Error handling callout for {}/{}: {}",
           pathInfo.specName, pathInfo.entityName, e.getMessage(), e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Callout error: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Handle default value resolution requests.
+   * GET /sws/neo/{specName}/{entityName}/defaults
+   * Delegates to NeoDefaultsService for resolving AD_Column defaults.
+   */
+  private NeoResponse handleDefaults(SFSpec spec,
+      NeoPathInfo pathInfo, HttpServletRequest request) {
+    try {
+      SFEntity sfEntity = findEntity(spec.getId(), pathInfo.entityName);
+      if (sfEntity == null) {
+        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+            "Entity not found: " + pathInfo.entityName);
+      }
+
+      Tab tab = sfEntity.getADTab();
+      if (tab == null) {
+        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Entity has no linked AD_Tab: " + pathInfo.entityName);
+      }
+
+      String parentId = request.getParameter("parentId");
+
+      NeoContext ctx = NeoContext.builder()
+          .specName(pathInfo.specName)
+          .entityName(pathInfo.entityName)
+          .httpMethod("GET")
+          .adTab(tab)
+          .sfEntity(sfEntity)
+          .obContext(OBContext.getOBContext())
+          .build();
+
+      return NeoDefaultsService.resolveDefaults(ctx, parentId);
+    } catch (Exception e) {
+      log.error("Error resolving defaults for {}/{}: {}",
+          pathInfo.specName, pathInfo.entityName, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Defaults error: " + e.getMessage());
     }
   }
 
@@ -1618,34 +1865,43 @@ public class NeoServlet extends HttpBaseServlet {
     final String actionName;
     final boolean isEvaluateDisplay;
     final boolean isCallout;
+    final boolean isDefaults;
 
     NeoPathInfo(String specName, String entityName, String recordId) {
-      this(specName, entityName, recordId, false, null, false, null, false, false);
+      this(specName, entityName, recordId, false, null, false, null, false, false, false);
     }
 
     NeoPathInfo(String specName, String entityName, String recordId,
         boolean isSelector, String selectorField) {
-      this(specName, entityName, recordId, isSelector, selectorField, false, null, false, false);
+      this(specName, entityName, recordId, isSelector, selectorField, false, null, false, false, false);
     }
 
     NeoPathInfo(String specName, String entityName, String recordId,
         boolean isSelector, String selectorField,
         boolean isAction, String actionName) {
       this(specName, entityName, recordId, isSelector, selectorField,
-          isAction, actionName, false, false);
+          isAction, actionName, false, false, false);
     }
 
     NeoPathInfo(String specName, String entityName, String recordId,
         boolean isSelector, String selectorField,
         boolean isAction, String actionName, boolean isEvaluateDisplay) {
       this(specName, entityName, recordId, isSelector, selectorField,
-          isAction, actionName, isEvaluateDisplay, false);
+          isAction, actionName, isEvaluateDisplay, false, false);
     }
 
     NeoPathInfo(String specName, String entityName, String recordId,
         boolean isSelector, String selectorField,
         boolean isAction, String actionName, boolean isEvaluateDisplay,
         boolean isCallout) {
+      this(specName, entityName, recordId, isSelector, selectorField,
+          isAction, actionName, isEvaluateDisplay, isCallout, false);
+    }
+
+    NeoPathInfo(String specName, String entityName, String recordId,
+        boolean isSelector, String selectorField,
+        boolean isAction, String actionName, boolean isEvaluateDisplay,
+        boolean isCallout, boolean isDefaults) {
       this.specName = specName;
       this.entityName = entityName;
       this.recordId = recordId;
@@ -1655,6 +1911,7 @@ public class NeoServlet extends HttpBaseServlet {
       this.actionName = actionName;
       this.isEvaluateDisplay = isEvaluateDisplay;
       this.isCallout = isCallout;
+      this.isDefaults = isDefaults;
     }
   }
 }

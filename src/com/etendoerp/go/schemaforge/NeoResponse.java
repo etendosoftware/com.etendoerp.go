@@ -62,4 +62,11 @@ public class NeoResponse {
       return new NeoResponse(status, null);
     }
   }
+
+  /**
+   * Create an error response with a full JSON body (e.g. validation error details).
+   */
+  public static NeoResponse error(int status, JSONObject body) {
+    return new NeoResponse(status, body);
+  }
 }

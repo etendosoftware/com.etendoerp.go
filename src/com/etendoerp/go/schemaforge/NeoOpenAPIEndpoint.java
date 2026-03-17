@@ -237,6 +237,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
       addSelectorPaths(openAPI, specName, entityName);
       addActionPaths(openAPI, specName, entityName);
       addEvaluateDisplayPaths(openAPI, specName, entityName);
+      addDefaultsPaths(openAPI, specName, entityName);
     }
   }
 
@@ -406,7 +407,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         "Number of results to skip", "0"));
     querySelectorOp.responses(new ApiResponses()
         .addApiResponse("200", createJsonResponse("Selector values",
-            createObjectSchema("Selector query results")))
+            createSelectorQueryResponseSchema()))
         .addApiResponse("401", new ApiResponse().description("Unauthorized"))
         .addApiResponse("404", new ApiResponse().description("Selector not found")));
     selectorQueryItem.get(querySelectorOp);
@@ -619,6 +620,53 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     openAPI.getPaths().addPathItem(path, pathItem);
   }
 
+  /**
+   * Register /defaults endpoint in OpenAPI for each entity.
+   * Called from addWindowPaths() alongside other sub-path registrations.
+   */
+  private void addDefaultsPaths(OpenAPI openAPI, String specName, String entityName) {
+    String path = BASE_PATH + specName + "/" + entityName + "/defaults";
+    PathItem pathItem = getOrCreatePathItem(openAPI, path);
+
+    // Response schema
+    ObjectSchema defaultsMapSchema = new ObjectSchema();
+    defaultsMapSchema.setDescription(
+        "Default values map. Keys are field names (camelCase), values are resolved defaults.");
+    defaultsMapSchema.setAdditionalProperties(new Schema<>());
+
+    ObjectSchema metadataSchema = new ObjectSchema();
+    metadataSchema.addProperties("unresolvedFields", new ArraySchema()
+        .items(new StringSchema())
+        .description("Fields whose defaults could not be resolved (SQL expressions, missing context)"));
+    metadataSchema.addProperties("sequenceFields", new ArraySchema()
+        .items(new StringSchema())
+        .description("Fields with auto-generated sequence values (preview only, not consumed)"));
+
+    ObjectSchema responseSchema = new ObjectSchema();
+    responseSchema.addProperties("defaults", defaultsMapSchema);
+    responseSchema.addProperties("metadata", metadataSchema);
+
+    // Operation
+    Operation getOp = createOperation(
+        "Get default values for new " + entityName,
+        "Returns server-resolved default values for creating a new " + entityName
+            + " record. Resolves literal defaults from AD_Column.DefaultValue, "
+            + "session context variables (@#AD_Org_ID@, @#Date@, etc.), "
+            + "and sequence previews (DocumentNo). "
+            + "Use parentId query parameter for child entities that need a parent link.");
+
+    getOp.addParametersItem(createQueryParam("parentId", "string",
+        "Parent record ID for child entities (auto-fills parent link column)", null));
+
+    getOp.responses(new ApiResponses()
+        .addApiResponse("200", createJsonResponse("Default values for new record", responseSchema))
+        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
+        .addApiResponse("404", new ApiResponse().description("Spec or entity not found")));
+
+    pathItem.get(getOp);
+    openAPI.getPaths().addPathItem(path, pathItem);
+  }
+
   // ---------------------------------------------------------------------------
   // Helper methods
   // ---------------------------------------------------------------------------
@@ -708,6 +756,49 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     ArraySchema arraySchema = new ArraySchema();
     arraySchema.items(itemSchema);
     return arraySchema;
+  }
+
+  /**
+   * Schema for selector query response with items, columns, pagination.
+   */
+  private Schema<?> createSelectorQueryResponseSchema() {
+    // Item schema: {id, label, ...gridFields}
+    ObjectSchema itemSchema = new ObjectSchema();
+    itemSchema.addProperties("id", new Schema<String>().type("string")
+        .description("Record ID"));
+    itemSchema.addProperties("label", new Schema<String>().type("string")
+        .description("Display value (identifier)"));
+    itemSchema.setDescription("Selector item. Rich selectors include additional "
+        + "grid field properties beyond id and label.");
+    itemSchema.setAdditionalProperties(new Schema<>());
+
+    // Column schema for rich selectors
+    ObjectSchema columnSchema = new ObjectSchema();
+    columnSchema.addProperties("name", new Schema<String>().type("string")
+        .description("Property key (last segment of DAL path)"));
+    columnSchema.addProperties("label", new Schema<String>().type("string")
+        .description("Display label for the column"));
+    columnSchema.addProperties("sortNo", new Schema<Long>().type("integer")
+        .description("Column sort order"));
+
+    ObjectSchema responseSchema = new ObjectSchema();
+    responseSchema.addProperties("items", new ArraySchema().items(itemSchema)
+        .description("Matching selector values"));
+    responseSchema.addProperties("columns", new ArraySchema().items(columnSchema)
+        .description("Grid column definitions (populated for rich/OBUISEL selectors, "
+            + "empty array for simple selectors)"));
+    responseSchema.addProperties("totalCount",
+        new Schema<Integer>().type("integer")
+            .description("Total number of matching records"));
+    responseSchema.addProperties("limit",
+        new Schema<Integer>().type("integer")
+            .description("Page size used for this query"));
+    responseSchema.addProperties("offset",
+        new Schema<Integer>().type("integer")
+            .description("Number of records skipped"));
+    responseSchema.addProperties("hasMore", new BooleanSchema()
+        .description("True if more records exist beyond the current page"));
+    return responseSchema;
   }
 
   /**
