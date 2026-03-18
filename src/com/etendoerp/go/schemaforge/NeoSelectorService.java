@@ -556,6 +556,17 @@ public class NeoSelectorService {
     if (idColIdx == null) {
       idColIdx = colIndexMap.get("id");
     }
+    // Third fallback: scan SELECT expressions for {alias}.id (e.g., "bp.id as bpid")
+    if (idColIdx == null) {
+      String idPrefix = alias.toLowerCase() + ".id";
+      for (int i = 0; i < selectExprs.length; i++) {
+        String expr = selectExprs[i].trim().toLowerCase();
+        if (expr.startsWith(idPrefix)) {
+          idColIdx = i;
+          break;
+        }
+      }
+    }
 
     // Build column metadata
     JSONArray columns = new JSONArray();
@@ -587,6 +598,11 @@ public class NeoSelectorService {
         Object idVal = row[0];
         recordId = idVal instanceof BaseOBObject ? ((BaseOBObject) idVal).getId().toString()
             : String.valueOf(idVal);
+      }
+      // OBUISEL selectors may return composite IDs (e.g., warehouseId + productId = 64 hex chars).
+      // Etendo entity UUIDs are always 32 hex chars. Extract the actual entity ID (last 32 chars).
+      if (recordId != null && recordId.length() == 64 && recordId.matches("[0-9A-Fa-f]{64}")) {
+        recordId = recordId.substring(32);
       }
       item.put("id", recordId);
       entityIds.add(recordId);
