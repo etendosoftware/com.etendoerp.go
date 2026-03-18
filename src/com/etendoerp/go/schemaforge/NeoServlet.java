@@ -706,14 +706,20 @@ public class NeoServlet extends HttpBaseServlet {
       // Build where clause: tab's own HQL + parent filter for child tabs
       StringBuilder whereClause = new StringBuilder();
 
-      String tabWhere = adTab.getHqlwhereclause();
-      if (StringUtils.isNotBlank(tabWhere)) {
-        whereClause.append("(").append(tabWhere).append(")");
-      }
-
       String parentId = context.getQueryParams() != null
           ? context.getQueryParams().get("parentId")
           : null;
+
+      String tabWhere = adTab.getHqlwhereclause();
+      if (StringUtils.isNotBlank(tabWhere)) {
+        // Substitute @PLACEHOLDER@ style tokens used in classic UI tab where clauses
+        // (e.g. @FIN_Payment_ID@) with the actual parentId so indirect parent-child
+        // relationships — where there is no direct FK to the parent table — work in NEO.
+        if (parentId != null && tabWhere.contains("@")) {
+          tabWhere = tabWhere.replaceAll("@[A-Za-z_]+@", "'" + parentId.replace("'", "''") + "'");
+        }
+        whereClause.append("(").append(tabWhere).append(")");
+      }
       if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
         String parentFilter = buildParentWhereClause(adTab, parentId);
         if (StringUtils.isNotBlank(parentFilter)) {
