@@ -1134,7 +1134,7 @@ public class NeoSelectorService {
           // Aux fields may or may not have a property; continue processing
         }
 
-        if (StringUtils.isBlank(prop)) {
+        if (StringUtils.isBlank(prop) || prop.contains("_identifier")) {
           continue;
         }
 
