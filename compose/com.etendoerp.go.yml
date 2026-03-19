@@ -1,0 +1,23 @@
+services:
+  jsreport:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${JSREPORT_PORT:-5488}:5488"
+    volumes:
+      - ../../../schema_forge/templates/reports:/app/sf-templates:ro
+      - ../../../schema_forge/artifacts:/app/sf-artifacts:ro
+      - jsreport-data:/app/data
+    environment:
+      - NODE_ENV=development
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5488/api/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  jsreport-data:
