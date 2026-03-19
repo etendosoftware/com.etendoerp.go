@@ -12,6 +12,7 @@ sourceSets {
 
 dependencies {
     implementation('com.etendoerp:openapi:[2.5.0,)')
+    implementation('com.etendoerp:webhookevents:[2.6.1,)')
     compileOnly 'io.swagger.core.v3:swagger-models:2.1.13'
     compileOnly 'org.apache.commons:commons-lang3:3.12.0'
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'
