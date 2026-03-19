@@ -1,13 +1,11 @@
 services:
   jsreport:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: etendo-jsreport:latest
     ports:
       - "${JSREPORT_PORT:-5488}:5488"
     volumes:
-      - ../../../schema_forge/templates/reports:/app/sf-templates:ro
-      - ../../../schema_forge/artifacts:/app/sf-artifacts:ro
+      - ${SCHEMA_FORGE_DIR}/templates/reports:/app/sf-templates:ro
+      - ${SCHEMA_FORGE_DIR}/artifacts:/app/sf-artifacts:ro
       - jsreport-data:/app/data
     environment:
       - NODE_ENV=development
