@@ -153,7 +153,7 @@ public class OnboardingServlet extends HttpBaseServlet {
 
           // Rollback all changes
           try {
-            OBDal.getInstance().rollback();
+            OBDal.getInstance().rollbackAndClose();
           } catch (Exception rollbackEx) {
             log.error("Rollback failed after step {} error", stepNum, rollbackEx);
           }
