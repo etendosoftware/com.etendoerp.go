@@ -29,8 +29,6 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 import com.etendoerp.go.onboarding.steps.CreateClientStep;
 import com.etendoerp.go.onboarding.steps.CreateOrgStep;
-import com.etendoerp.go.onboarding.steps.CreateClientAdminStep;
-import com.etendoerp.go.onboarding.steps.CreateOrgAdminStep;
 import com.etendoerp.go.onboarding.steps.CreateRoleStep;
 import com.etendoerp.go.onboarding.steps.SeedReferenceDataStep;
 import com.etendoerp.go.onboarding.steps.CreateDocTypesStep;
@@ -44,14 +42,14 @@ import com.etendoerp.go.onboarding.steps.MarkOrgReadyStep;
  * Requires System Administrator role (ID "0").
  *
  * GET  /sws/neo/onboarding  -> JSON describe (input schema)
- * POST /sws/neo/onboarding  -> Runs 8 steps with chunked NDJSON progress
+ * POST /sws/neo/onboarding  -> Runs 6 steps with chunked NDJSON progress
  */
 public class OnboardingServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(OnboardingServlet.class);
 
   private static final String SYSTEM_ADMIN_ROLE_ID = "0";
-  private static final int TOTAL_STEPS = 8;
+  private static final int TOTAL_STEPS = 6;
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -272,8 +270,6 @@ public class OnboardingServlet extends HttpBaseServlet {
     List<OnboardingStep> steps = new ArrayList<>();
     steps.add(new CreateClientStep());
     steps.add(new CreateOrgStep());
-    steps.add(new CreateClientAdminStep());
-    steps.add(new CreateOrgAdminStep());
     steps.add(new CreateRoleStep());
     steps.add(new SeedReferenceDataStep());
     steps.add(new CreateDocTypesStep());

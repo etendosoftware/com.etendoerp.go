@@ -11,6 +11,9 @@ public class OnboardingContext {
   private String languageCode;
   private String countryCode;
 
+  // Resolved by CreateClientStep from currencyCode
+  private String currencyId;
+
   // Accumulated IDs (set by steps, read by subsequent steps)
   private String clientId;
   private String orgId;
@@ -81,6 +84,14 @@ public class OnboardingContext {
 
   public void setCountryCode(String countryCode) {
     this.countryCode = countryCode;
+  }
+
+  public String getCurrencyId() {
+    return currencyId;
+  }
+
+  public void setCurrencyId(String currencyId) {
+    this.currencyId = currencyId;
   }
 
   public String getClientId() {

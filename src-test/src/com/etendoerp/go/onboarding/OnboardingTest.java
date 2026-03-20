@@ -49,6 +49,7 @@ public class OnboardingTest {
   public void testContextAccumulatedIdsInitiallyNull() {
     OnboardingContext ctx = new OnboardingContext();
 
+    assertNull("currencyId should be null initially", ctx.getCurrencyId());
     assertNull("clientId should be null initially", ctx.getClientId());
     assertNull("orgId should be null initially", ctx.getOrgId());
     assertNull("clientAdminUserId should be null initially", ctx.getClientAdminUserId());
