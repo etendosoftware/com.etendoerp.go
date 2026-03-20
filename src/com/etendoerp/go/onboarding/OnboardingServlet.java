@@ -21,6 +21,7 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.system.Client;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
@@ -73,13 +74,7 @@ public class OnboardingServlet extends HttpBaseServlet {
       // 1. Authenticate and extract claims
       String roleId = authenticateJwtAndGetRole(request);
 
-      // 2. Validate System Administrator role
-      if (!SYSTEM_ADMIN_ROLE_ID.equals(roleId)) {
-        sendJsonError(response, HttpServletResponse.SC_FORBIDDEN,
-            "System Administrator role required");
-        return;
-      }
-
+      // 2. Set admin mode — onboarding is self-service, any authenticated user can create a client
       OBContext.setAdminMode(true);
 
       // 3. Parse request body
@@ -238,6 +233,26 @@ public class OnboardingServlet extends HttpBaseServlet {
    */
   private void authenticateJwt(HttpServletRequest request) throws Exception {
     authenticateJwtAndGetRole(request);
+  }
+
+  /**
+   * Check if the role is an admin role (System Administrator or system-level userLevel).
+   */
+  private boolean isAdminRole(String roleId) {
+    if (SYSTEM_ADMIN_ROLE_ID.equals(roleId)) {
+      return true;
+    }
+    try {
+      Role role = OBDal.getInstance().get(Role.class, roleId);
+      if (role != null) {
+        String userLevel = role.getUserLevel();
+        // "S" = System level, " S" = System (with space prefix)
+        return userLevel != null && userLevel.trim().contains("S");
+      }
+    } catch (Exception e) {
+      log.warn("Could not validate role {}: {}", roleId, e.getMessage());
+    }
+    return false;
   }
 
   /**
