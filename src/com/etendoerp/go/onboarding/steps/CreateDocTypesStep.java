@@ -86,6 +86,7 @@ public class CreateDocTypesStep implements OnboardingStep {
     sequence.setName(name);
     sequence.setPrefix(prefix);
     sequence.setStartingNo(startNo);
+    sequence.setNextAssignedNumber(startNo);
     sequence.setIncrementBy(1L);
     sequence.setAutoNumbering(true);
     OBDal.getInstance().save(sequence);

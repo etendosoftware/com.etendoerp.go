@@ -29,6 +29,7 @@ import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.model.financialmgmt.tax.TaxCategory;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.pricing.pricelist.PriceList;
+import org.openbravo.model.pricing.pricelist.PriceListSchema;
 import org.openbravo.model.pricing.pricelist.PriceListVersion;
 import org.openbravo.model.pricing.pricelist.ProductPrice;
 
@@ -224,6 +225,7 @@ public class SeedReferenceDataStep implements OnboardingStep {
     warehouse.setSearchKey("DEFAULT_WH");
     warehouse.setName("Default Warehouse");
     warehouse.setLocationAddress(location);
+    warehouse.setStorageBinSeparator("*");
     OBDal.getInstance().save(warehouse);
     return warehouse;
   }
@@ -254,12 +256,21 @@ public class SeedReferenceDataStep implements OnboardingStep {
 
   private PriceListVersion createPriceListVersion(Client client, Organization org,
       PriceList priceList) {
+    // PriceListSchema (discount schema) is required by PriceListVersion
+    PriceListSchema schema = OBProvider.getInstance().get(PriceListSchema.class);
+    schema.setNewOBObject(true);
+    schema.setClient(client);
+    schema.setOrganization(org);
+    schema.setName(priceList.getName() + " Schema");
+    OBDal.getInstance().save(schema);
+
     PriceListVersion version = OBProvider.getInstance().get(PriceListVersion.class);
     version.setNewOBObject(true);
     version.setClient(client);
     version.setOrganization(org);
     version.setName(priceList.getName() + " " + Year.now().getValue());
     version.setPriceList(priceList);
+    version.setPriceListSchema(schema);
     LocalDate firstOfYear = LocalDate.of(Year.now().getValue(), 1, 1);
     version.setValidFromDate(java.sql.Date.valueOf(firstOfYear));
     OBDal.getInstance().save(version);
@@ -285,6 +296,7 @@ public class SeedReferenceDataStep implements OnboardingStep {
     category.setSearchKey("OTHERS");
     category.setName("Others");
     category.setDefault(false);
+    category.setPlannedMargin(BigDecimal.ZERO);
     OBDal.getInstance().save(category);
     return category;
   }

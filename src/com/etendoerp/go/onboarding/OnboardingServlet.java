@@ -124,8 +124,9 @@ public class OnboardingServlet extends HttpBaseServlet {
       // 8. Build step chain
       List<OnboardingStep> steps = buildStepChain();
 
-      // 9. Execute steps with progress reporting
+      // 9. Execute steps with progress reporting (collect all errors)
       long totalStart = System.currentTimeMillis();
+      List<String> failedSteps = new ArrayList<>();
 
       for (int i = 0; i < steps.size(); i++) {
         OnboardingStep step = steps.get(i);
@@ -146,11 +147,20 @@ public class OnboardingServlet extends HttpBaseServlet {
           long elapsed = System.currentTimeMillis() - stepStart;
           log.error("Onboarding step {} ({}) failed", stepNum, step.name(), e);
 
-          // Rollback all changes
+          // Clear Hibernate session to allow next step to proceed
           try {
             OBDal.getInstance().rollbackAndClose();
           } catch (Exception rollbackEx) {
-            log.error("Rollback failed after step {} error", stepNum, rollbackEx);
+            log.warn("Session cleanup after step {} error", stepNum, rollbackEx);
+          }
+
+          // Restore context for next step
+          try {
+            OBContext.setOBContext(ctx.getClientAdminUserId() != null ? ctx.getClientAdminUserId() : "100",
+                "0", ctx.getClientId() != null ? ctx.getClientId() : "0", "0");
+            OBContext.setAdminMode(false);
+          } catch (Exception ctxEx) {
+            log.warn("Context restore failed after step {}", stepNum, ctxEx);
           }
 
           // Write failure line
@@ -160,7 +170,6 @@ public class OnboardingServlet extends HttpBaseServlet {
           failLine.put("name", step.name());
           failLine.put("status", "failed");
           failLine.put("ms", elapsed);
-          // Get full cause chain for detailed error message
           StringBuilder errorMsg = new StringBuilder(e.getMessage() != null ? e.getMessage() : e.getClass().getName());
           Throwable cause = e.getCause();
           while (cause != null) {
@@ -172,11 +181,30 @@ public class OnboardingServlet extends HttpBaseServlet {
           out.write((failLine.toString() + "\n").getBytes(StandardCharsets.UTF_8));
           out.flush();
           response.flushBuffer();
-          return;
+          failedSteps.add(step.name());
+          continue;
         }
       }
 
-      // 10. All steps succeeded — commit
+      // 10. Check results
+      if (!failedSteps.isEmpty()) {
+        // Some steps failed — rollback everything
+        try {
+          OBDal.getInstance().rollbackAndClose();
+        } catch (Exception ignored) {}
+        long totalMs = System.currentTimeMillis() - totalStart;
+        JSONObject result = new JSONObject();
+        result.put("result", "failed");
+        result.put("failedSteps", new JSONArray(failedSteps));
+        result.put("totalMs", totalMs);
+        result.put("rolledBack", true);
+        out.write((result.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+        out.flush();
+        response.flushBuffer();
+        return;
+      }
+
+      // All steps succeeded — commit
       OBDal.getInstance().getConnection().commit();
 
       long totalMs = System.currentTimeMillis() - totalStart;

@@ -1,11 +1,13 @@
 package com.etendoerp.go.onboarding.steps;
 
-import org.hibernate.criterion.Restrictions;
-import org.openbravo.dal.service.OBCriteria;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.InitialOrgSetup;
 import org.openbravo.erpCommon.utility.OBError;
-import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.onboarding.OnboardingContext;
@@ -25,6 +27,14 @@ public class CreateOrgStep implements OnboardingStep {
 
   @Override
   public void execute(OnboardingContext ctx) throws Exception {
+    // Switch OBContext to the new client so Hibernate filters include it
+    OBContext.setOBContext(ctx.getClientAdminUserId(), "0", ctx.getClientId(), "0");
+    OBContext.setAdminMode(false);
+
+    // Force a fresh Hibernate session so filters pick up the new client context
+    OBDal.getInstance().commitAndClose();
+
+    // Reload client in fresh session
     Client client = OBDal.getInstance().get(Client.class, ctx.getClientId());
 
     // The org admin username is the main admin user with ".org" suffix
@@ -59,13 +69,17 @@ public class CreateOrgStep implements OnboardingStep {
     }
     ctx.setOrgId(orgId);
 
-    // Find the org admin user created by InitialOrgSetup (by username)
-    OBCriteria<User> userCriteria = OBDal.getInstance().createCriteria(User.class);
-    userCriteria.add(Restrictions.eq(User.PROPERTY_USERNAME, orgAdminUser));
-    userCriteria.setMaxResults(1);
-    User orgAdmin = (User) userCriteria.uniqueResult();
-    if (orgAdmin != null) {
-      ctx.setOrgAdminUserId(orgAdmin.getId());
+    // Find the org admin user via SQL (bypasses Hibernate client filters)
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(
+        "SELECT ad_user_id FROM ad_user WHERE username = ? AND ad_client_id = ?")) {
+      ps.setString(1, orgAdminUser);
+      ps.setString(2, ctx.getClientId());
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          ctx.setOrgAdminUserId(rs.getString(1));
+        }
+      }
     }
   }
 }
