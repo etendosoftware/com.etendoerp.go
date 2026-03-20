@@ -4,8 +4,14 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -51,16 +57,69 @@ public class OnboardingServlet extends HttpBaseServlet {
   private static final String SYSTEM_ADMIN_ROLE_ID = "0";
   private static final int TOTAL_STEPS = 6;
 
+  // Clients to exclude from environment listing (System, F&B demo, QA Testing)
+  private static final Set<String> EXCLUDED_CLIENT_IDS = new HashSet<>(Arrays.asList(
+      "0",
+      "23C59575B9CF467C9620760EB255B389",
+      "4028E6C72959682B01295A070852010D"
+  ));
+
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     try {
       authenticateJwt(request);
-      sendDescribe(response);
+      String pathInfo = request.getPathInfo();
+      if (pathInfo != null && pathInfo.equals("/environments")) {
+        sendEnvironments(response);
+      } else {
+        sendDescribe(response);
+      }
     } catch (OBException e) {
       sendJsonError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
     } catch (Exception e) {
       log.error("Error in OnboardingServlet.doGet", e);
       sendJsonError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void sendEnvironments(HttpServletResponse response) throws Exception {
+    OBContext.setAdminMode(false);
+    try {
+      response.setContentType("application/json");
+      response.setCharacterEncoding("UTF-8");
+
+      Connection conn = OBDal.getInstance().getConnection();
+      JSONArray environments = new JSONArray();
+
+      String sql = "SELECT c.ad_client_id, c.name, c.created, "
+          + "o.ad_org_id, o.name AS org_name, "
+          + "u.username, u.ad_user_id "
+          + "FROM ad_client c "
+          + "LEFT JOIN ad_org o ON o.ad_client_id = c.ad_client_id AND o.ad_org_id != '0' "
+          + "LEFT JOIN ad_user u ON u.ad_client_id = c.ad_client_id AND u.ad_org_id = '0' AND u.ad_user_id != '100' "
+          + "WHERE c.ad_client_id NOT IN ('" + String.join("','", EXCLUDED_CLIENT_IDS) + "') "
+          + "ORDER BY c.created DESC";
+
+      try (PreparedStatement ps = conn.prepareStatement(sql);
+           ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONObject env = new JSONObject();
+          env.put("clientId", rs.getString("ad_client_id"));
+          env.put("clientName", rs.getString("name"));
+          env.put("created", rs.getString("created"));
+          env.put("orgId", rs.getString("ad_org_id"));
+          env.put("orgName", rs.getString("org_name"));
+          env.put("adminUser", rs.getString("username"));
+          env.put("adminUserId", rs.getString("ad_user_id"));
+          environments.put(env);
+        }
+      }
+
+      JSONObject result = new JSONObject();
+      result.put("environments", environments);
+      response.getWriter().write(result.toString());
     } finally {
       OBContext.restorePreviousMode();
     }
