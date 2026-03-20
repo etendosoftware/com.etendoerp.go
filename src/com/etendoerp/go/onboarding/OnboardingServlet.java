@@ -71,11 +71,13 @@ public class OnboardingServlet extends HttpBaseServlet {
   @Override
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
     try {
-      // 1. Authenticate and extract claims
-      String roleId = authenticateJwtAndGetRole(request);
+      // 1. Authenticate (validates JWT is valid)
+      authenticateJwt(request);
 
-      // 2. Set admin mode — onboarding is self-service, any authenticated user can create a client
-      OBContext.setAdminMode(true);
+      // 2. Switch to System Admin context for creating new clients
+      // userId=100 (System), roleId=0 (System Administrator), clientId=0, orgId=0
+      OBContext.setOBContext("100", "0", "0", "0");
+      OBContext.setAdminMode(false);
 
       // 3. Parse request body
       JSONObject body = parseRequestBody(request);
@@ -160,7 +162,15 @@ public class OnboardingServlet extends HttpBaseServlet {
           failLine.put("name", step.name());
           failLine.put("status", "failed");
           failLine.put("ms", elapsed);
-          failLine.put("error", e.getMessage());
+          // Get full cause chain for detailed error message
+          StringBuilder errorMsg = new StringBuilder(e.getMessage() != null ? e.getMessage() : e.getClass().getName());
+          Throwable cause = e.getCause();
+          while (cause != null) {
+            errorMsg.append(" | Caused by: ").append(cause.getClass().getSimpleName())
+                .append(": ").append(cause.getMessage());
+            cause = cause.getCause();
+          }
+          failLine.put("error", errorMsg.toString());
           out.write((failLine.toString() + "\n").getBytes(StandardCharsets.UTF_8));
           out.flush();
           response.flushBuffer();

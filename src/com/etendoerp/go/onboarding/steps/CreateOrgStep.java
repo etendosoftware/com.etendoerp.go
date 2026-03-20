@@ -4,6 +4,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
+import org.openbravo.model.common.enterprise.OrganizationType;
 import org.openbravo.base.provider.OBProvider;
 
 import com.etendoerp.go.onboarding.OnboardingContext;
@@ -25,6 +26,9 @@ public class CreateOrgStep implements OnboardingStep {
     org.setClient(client);
     org.setName(ctx.getOrgName());
     org.setSearchKey(ctx.getOrgName().toLowerCase().replaceAll("\\s+", "-"));
+    // OrgType "1" = Legal with accounting (mandatory NOT NULL field)
+    OrganizationType orgType = OBDal.getInstance().get(OrganizationType.class, "1");
+    org.setOrganizationType(orgType);
     OBDal.getInstance().save(org);
 
     OrganizationInformation orgInfo = OBProvider.getInstance().get(OrganizationInformation.class);
