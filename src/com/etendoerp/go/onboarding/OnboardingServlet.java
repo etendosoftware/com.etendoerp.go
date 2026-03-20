@@ -93,14 +93,15 @@ public class OnboardingServlet extends HttpBaseServlet {
       Connection conn = OBDal.getInstance().getConnection();
       JSONArray environments = new JSONArray();
 
-      String sql = "SELECT c.ad_client_id, c.name, c.created, "
+      String sql = "SELECT DISTINCT ON (c.ad_client_id) c.ad_client_id, c.name, c.created, "
           + "o.ad_org_id, o.name AS org_name, "
           + "u.username, u.ad_user_id "
           + "FROM ad_client c "
           + "LEFT JOIN ad_org o ON o.ad_client_id = c.ad_client_id AND o.ad_org_id != '0' "
-          + "LEFT JOIN ad_user u ON u.ad_client_id = c.ad_client_id AND u.ad_org_id = '0' AND u.ad_user_id != '100' "
+          + "LEFT JOIN ad_user u ON u.ad_client_id = c.ad_client_id "
+          + "AND u.ad_user_id != '100' AND u.username NOT LIKE '%.org' "
           + "WHERE c.ad_client_id NOT IN ('" + String.join("','", EXCLUDED_CLIENT_IDS) + "') "
-          + "ORDER BY c.created DESC";
+          + "ORDER BY c.ad_client_id, c.created DESC";
 
       try (PreparedStatement ps = conn.prepareStatement(sql);
            ResultSet rs = ps.executeQuery()) {
