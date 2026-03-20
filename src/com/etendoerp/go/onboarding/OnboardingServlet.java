@@ -68,8 +68,8 @@ public class OnboardingServlet extends HttpBaseServlet {
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     try {
       authenticateJwt(request);
-      String pathInfo = request.getPathInfo();
-      if (pathInfo != null && pathInfo.equals("/environments")) {
+      String action = request.getParameter("action");
+      if ("environments".equals(action)) {
         sendEnvironments(response);
       } else {
         sendDescribe(response);
