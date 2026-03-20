@@ -72,6 +72,8 @@ public class OnboardingServlet extends HttpBaseServlet {
       String action = request.getParameter("action");
       if ("environments".equals(action)) {
         sendEnvironments(response);
+      } else if ("login".equals(action)) {
+        loginAsUser(request, response);
       } else {
         sendDescribe(response);
       }
@@ -80,6 +82,31 @@ public class OnboardingServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error in OnboardingServlet.doGet", e);
       sendJsonError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void loginAsUser(HttpServletRequest request, HttpServletResponse response) throws Exception {
+    String userId = request.getParameter("userId");
+    if (userId == null || userId.isEmpty()) {
+      sendJsonError(response, HttpServletResponse.SC_BAD_REQUEST, "userId parameter required");
+      return;
+    }
+    OBContext.setAdminMode(false);
+    try {
+      User loginUser = OBDal.getInstance().get(User.class, userId);
+      if (loginUser == null) {
+        sendJsonError(response, HttpServletResponse.SC_NOT_FOUND, "User not found");
+        return;
+      }
+      String jwt = SecureWebServicesUtils.generateToken(loginUser);
+      response.setContentType("application/json");
+      response.setCharacterEncoding("UTF-8");
+      JSONObject result = new JSONObject();
+      result.put("status", "success");
+      result.put("token", jwt);
+      response.getWriter().write(result.toString());
     } finally {
       OBContext.restorePreviousMode();
     }
