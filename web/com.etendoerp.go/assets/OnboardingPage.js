@@ -1,8 +1,4 @@
-<<<<<<<< HEAD:web/com.etendoerp.go/assets/OnboardingPage.js
 import{c as p,u as P,r as f,B as b,j as e,a as N,C as t,b as m,d as u,e as c,f as h,g as F,L as o,I as x,h as L,S as A,F as O}from"./index.js";import{U as S}from"./upload.js";import{C as B}from"./chevron-left.js";/**
-========
-import{c as h,u as P,r as f,B as b,j as e,a as y,C as t,b as m,d as u,e as c,f as x,g as F,L as d,I as p,h as L}from"./index-0U2NEqWF.js";import{U as S}from"./upload-B4qVcEN8.js";import{S as A}from"./sparkles-CGaXK699.js";/**
->>>>>>>> origin/feature/ETP-3569:web/com.etendoerp.go/assets/OnboardingPage-BSEOnNAs.js
  * @license lucide-react v0.400.0 - ISC
  *
  * This source code is licensed under the ISC license.

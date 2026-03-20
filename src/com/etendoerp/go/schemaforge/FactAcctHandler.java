@@ -80,7 +80,7 @@ public class FactAcctHandler implements NeoHandler {
 
         // Account: "VALUE - NAME" (GL account code + name)
         if (af.getAccount() != null) {
-          String value = af.getAccount().getValue();
+          String value = af.getAccount().getSearchKey();
           String name = af.getAccount().getName();
           row.put("account", value + " - " + name);
         } else {

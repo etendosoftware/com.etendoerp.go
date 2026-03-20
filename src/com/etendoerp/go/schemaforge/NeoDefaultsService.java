@@ -499,6 +499,14 @@ public class NeoDefaultsService {
         try {
           Object resolved = resolveFieldDefault(col, parentId, vars, conn, windowId, ctx);
           if (resolved != null) {
+            // Skip FK columns with legacy "0" default — OBDal cannot resolve "0" as an entity ID.
+            // These columns (e.g., C_DocType_ID) use "0" to mean "no document type" in classic UI,
+            // but OBDal's JSON import expects either a real UUID or null.
+            if ("0".equals(String.valueOf(resolved))
+                && col.getDBColumnName().toUpperCase().endsWith("_ID")) {
+              log.debug("Skipping FK default '0' for {}", propName);
+              continue;
+            }
             body.put(propName, resolved);
             log.debug("Injected mandatory default: {} = {}", propName, resolved);
           }

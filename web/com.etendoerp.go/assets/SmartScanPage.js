@@ -1,8 +1,4 @@
-<<<<<<<< HEAD:web/com.etendoerp.go/assets/SmartScanPage.js
 import{c,j as e,f as l,C as a,e as t,i as r,T as o,b as n,d as i,k as m,a as x,A as h,l as p}from"./index.js";import{U as u}from"./upload.js";/**
-========
-import{c,j as e,f as l,C as a,e as t,i as r,T as o,b as n,d as i,F as m,a as x,A as h,S as p}from"./index-0U2NEqWF.js";import{U as u}from"./upload-B4qVcEN8.js";/**
->>>>>>>> origin/feature/ETP-3569:web/com.etendoerp.go/assets/SmartScanPage-DmNm-NLg.js
  * @license lucide-react v0.400.0 - ISC
  *
  * This source code is licensed under the ISC license.
