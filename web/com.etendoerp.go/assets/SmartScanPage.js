@@ -1,8 +1,4 @@
-<<<<<<<< HEAD:web/com.etendoerp.go/assets/SmartScanPage-FdFucqOj.js
-import{c,j as e,f as l,C as a,e as t,i as r,T as o,b as n,d as i,k as m,a as x,A as h,l as p}from"./index-DTT2PVHM.js";import{U as u}from"./upload-DC_V5XFX.js";/**
-========
-import{c,j as e,f as l,C as a,e as t,i as r,T as o,b as n,d as i,F as m,a as x,A as h,k as p}from"./index-BTprTp-H.js";import{U as u}from"./upload-DwlBsGr9.js";/**
->>>>>>>> origin/epic/ETP-3504:web/com.etendoerp.go/assets/SmartScanPage-CEC5Mqc0.js
+import{c,j as e,f as l,C as a,e as t,i as r,T as o,b as n,d as i,k as m,a as x,A as h,l as p}from"./index.js";import{U as u}from"./upload.js";/**
  * @license lucide-react v0.400.0 - ISC
  *
  * This source code is licensed under the ISC license.

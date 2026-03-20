@@ -1,8 +1,4 @@
-<<<<<<<< HEAD:web/com.etendoerp.go/assets/upload-DC_V5XFX.js
-import{c as o}from"./index-DTT2PVHM.js";/**
-========
-import{c as o}from"./index-BTprTp-H.js";/**
->>>>>>>> origin/epic/ETP-3504:web/com.etendoerp.go/assets/upload-DwlBsGr9.js
+import{c as o}from"./index.js";/**
  * @license lucide-react v0.400.0 - ISC
  *
  * This source code is licensed under the ISC license.
