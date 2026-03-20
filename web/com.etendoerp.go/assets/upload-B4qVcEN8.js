@@ -1,4 +1,8 @@
+<<<<<<<< HEAD:web/com.etendoerp.go/assets/upload.js
 import{c as o}from"./index.js";/**
+========
+import{c as o}from"./index-0U2NEqWF.js";/**
+>>>>>>>> origin/feature/ETP-3569:web/com.etendoerp.go/assets/upload-B4qVcEN8.js
  * @license lucide-react v0.400.0 - ISC
  *
  * This source code is licensed under the ISC license.
