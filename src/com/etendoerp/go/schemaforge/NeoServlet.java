@@ -207,6 +207,30 @@ public class NeoServlet extends HttpBaseServlet {
 
       // Handle report specs (specType = "R")
       if ("R".equals(specType)) {
+        // Check if any entity has a NeoHandler qualifier — if so, delegate to the handler
+        // instead of using the standard Jasper report flow
+        String reportHandlerQualifier = resolveReportHandlerQualifier(spec);
+        if (reportHandlerQualifier != null) {
+          JSONObject requestBody = null;
+          String bodyStr = new String(request.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+          if (StringUtils.isNotBlank(bodyStr)) {
+            requestBody = new JSONObject(bodyStr);
+          }
+          NeoContext handlerContext = NeoContext.builder()
+              .specName(pathInfo.specName)
+              .entityName(pathInfo.specName)
+              .httpMethod(method)
+              .requestBody(requestBody)
+              .queryParams(extractQueryParams(request))
+              .obContext(OBContext.getOBContext())
+              .build();
+          NeoResponse handlerResult = handleWithHooks(reportHandlerQualifier, handlerContext, request, response);
+          if (handlerResult != null) {
+            writeResponse(response, handlerResult);
+            return;
+          }
+        }
+
         Process adReportProcess = resolveProcess(spec);
         if (adReportProcess != null && !hasProcessAccess(adReportProcess.getId())) {
           sendError(response, HttpServletResponse.SC_FORBIDDEN,
@@ -904,6 +928,28 @@ public class NeoServlet extends HttpBaseServlet {
           childTab.getName(), e.getMessage(), e);
       return null;
     }
+  }
+
+  /**
+   * Check if a report spec has a NeoHandler qualifier on any of its entities.
+   * Returns the qualifier string if found, null otherwise.
+   * This allows report specs to use custom handlers instead of the standard Jasper flow.
+   */
+  private String resolveReportHandlerQualifier(SFSpec spec) {
+    try {
+      OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
+      criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
+      List<SFEntity> entities = criteria.list();
+      for (SFEntity entity : entities) {
+        String qualifier = entity.getJavaQualifier();
+        if (StringUtils.isNotBlank(qualifier)) {
+          return qualifier;
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Error checking report handler qualifier for spec '{}': {}", spec.getName(), e.getMessage());
+    }
+    return null;
   }
 
   /**
