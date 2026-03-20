@@ -28,6 +28,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
@@ -280,6 +281,17 @@ public class OnboardingServlet extends HttpBaseServlet {
       userIds.put("clientAdmin", ctx.getClientAdminUserId());
       userIds.put("orgAdmin", ctx.getOrgAdminUserId());
       summary.put("userIds", userIds);
+
+      // Generate JWT for the client admin user so frontend can auto-login
+      try {
+        User tokenUser = OBDal.getInstance().get(User.class, ctx.getClientAdminUserId());
+        if (tokenUser != null) {
+          String jwt = SecureWebServicesUtils.generateToken(tokenUser);
+          summary.put("token", jwt);
+        }
+      } catch (Exception tokenEx) {
+        log.warn("Could not generate token for new admin user", tokenEx);
+      }
 
       out.write((summary.toString() + "\n").getBytes(StandardCharsets.UTF_8));
       out.flush();
