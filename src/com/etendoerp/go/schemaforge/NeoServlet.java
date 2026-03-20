@@ -47,6 +47,7 @@ import com.auth0.jwt.interfaces.DecodedJWT;
 import org.openbravo.base.expression.OBScriptEngine;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.client.application.DynamicExpressionParser;
+import org.openbravo.erpCommon.utility.DimensionDisplayUtility;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.model.ad.ui.Field;
@@ -1686,19 +1687,61 @@ public class NeoServlet extends HttpBaseServlet {
   private boolean evaluateExpression(String expression, Tab tab, Field field,
       Map<String, Object> evalContext, boolean isReadOnlyLogic) {
     try {
-      // Step 1: Replace system preferences and macros (static, pre-parser)
-      String preprocessed = DynamicExpressionParser
-          .replaceSystemPreferencesInDisplayLogic(expression);
-
-      // Step 2: Parse expression -- resolves session vars, auxiliary inputs,
-      // field references, accounting dimensions
-      DynamicExpressionParser parser =
-          new DynamicExpressionParser(preprocessed, tab, field);
+      // Step 1: Parse the raw expression.
+      // Pass the expression directly to DynamicExpressionParser so it can correctly handle
+      // special tokens like @ACCT_DIMENSION_DISPLAY@ (accounting dimension logic computed
+      // via DimensionDisplayUtility) and field references. Do NOT pre-process with
+      // replaceSystemPreferencesInDisplayLogic: that method replaces @ACCT_DIMENSION_DISPLAY@
+      // with a null CachedPreference value before the parser can handle it, causing the field
+      // to always evaluate as hidden.
+      DynamicExpressionParser parser = new DynamicExpressionParser(expression, tab, field);
       String jsExpr = parser.getJSExpression();
 
-      // Step 3: Prepend OB.Utilities shim so Rhino can evaluate
-      // SmartClient-dependent code (OB.Utilities.getValue, OB.Utilities.Date.JSToOB)
-      String fullScript = OB_UTILITIES_SHIM + "\n" + jsExpr;
+      // If the parser produces an empty expression (e.g. @ACCT_DIMENSION_DISPLAY@ on a field
+      // that has no entry in AD_DimensionMapping — meaning it is not an accounting dimension),
+      // treat it as "no display logic applies" and return the safe default:
+      // visible=true, readOnly=true. This matches classic UI behavior where an unresolvable
+      // expression does not hide the field.
+      if (jsExpr == null || jsExpr.trim().isEmpty()) {
+        return true;
+      }
+
+      // Step 2: Load any session attributes the parser identified as needed
+      // (e.g. @showAddPayment@, @APRM_OrderIsPaid@, @#ShowAcct@) that are not already
+      // in the context from buildEvalContext().
+      List<String> sessionAttrs = parser.getSessionAttributes();
+      if (!sessionAttrs.isEmpty()) {
+        try {
+          OBContext obCtx = OBContext.getOBContext();
+          DalConnectionProvider conn = new DalConnectionProvider(false);
+          VariablesSecureApp vars = new VariablesSecureApp(
+              obCtx.getUser().getId(),
+              obCtx.getCurrentClient().getId(),
+              obCtx.getCurrentOrganization().getId(),
+              obCtx.getRole().getId(),
+              obCtx.getLanguage().getLanguage());
+          for (String attr : sessionAttrs) {
+            if (!evalContext.containsKey(attr)) {
+              evalContext.put(attr, Utility.getContext(conn, vars, attr, ""));
+            }
+          }
+        } catch (Exception e) {
+          log.debug("Could not resolve session attributes for expression '{}': {}",
+              expression, e.getMessage());
+        }
+      }
+
+      // Step 3: Build proper JS objects for 'context' and 'currentValues'.
+      // DynamicExpressionParser generates expressions like context['$Element_BP_POO_H']
+      // and OB.Utilities.getValue(currentValues, 'DOCBASETYPE'). These require native JS
+      // objects — Java HashMaps in Rhino Bindings do NOT support bracket-notation property
+      // access reliably across Rhino versions, so we serialize them as JSON literals.
+      String contextPreamble = buildJsObjectPreamble("context", evalContext, true);
+      @SuppressWarnings("unchecked")
+      Map<String, Object> currentValues = (Map<String, Object>) evalContext.get("currentValues");
+      String cvPreamble = buildJsObjectPreamble("currentValues", currentValues, false);
+
+      String fullScript = OB_UTILITIES_SHIM + "\n" + contextPreamble + "\n" + cvPreamble + "\n" + jsExpr;
 
       // Step 4: Evaluate using Rhino (sandboxed)
       Object result = OBScriptEngine.getInstance().eval(fullScript, evalContext);
@@ -1710,6 +1753,39 @@ public class NeoServlet extends HttpBaseServlet {
       // Safe defaults: true for both — show the field (visible) and lock it (read-only)
       return true;
     }
+  }
+
+  /**
+   * Serializes a Map as a JavaScript var declaration (JSON literal).
+   * Used to inject 'context' and 'currentValues' as native JS objects so that
+   * bracket-notation access (context['$Element_BP_POO_H']) works in Rhino regardless of version.
+   *
+   * @param varName   the JS variable name (e.g. "context", "currentValues")
+   * @param map       the map to serialize; null is treated as an empty map
+   * @param skipSelf  if true, skip entries whose keys match varName or "currentValues"
+   *                  (to avoid circular references when serializing ctx itself)
+   */
+  @SuppressWarnings("unchecked")
+  private String buildJsObjectPreamble(String varName, Map<String, Object> map, boolean skipSelf) {
+    org.codehaus.jettison.json.JSONObject obj = new org.codehaus.jettison.json.JSONObject();
+    if (map != null) {
+      for (Map.Entry<String, Object> e : map.entrySet()) {
+        String key = e.getKey();
+        if (skipSelf && ("context".equals(key) || "currentValues".equals(key))) {
+          continue;
+        }
+        Object val = e.getValue();
+        if (val == null || val instanceof Map) {
+          continue;
+        }
+        try {
+          obj.put(key, val.toString());
+        } catch (Exception ex) {
+          // skip un-serializable entries
+        }
+      }
+    }
+    return "var " + varName + " = " + obj.toString() + ";";
   }
 
   /**
@@ -1742,30 +1818,58 @@ public class NeoServlet extends HttpBaseServlet {
     ctx.put("AD_Role_ID", obCtx.getRole().getId());
     ctx.put("AD_User_ID", obCtx.getUser().getId());
 
-    // Resolve $Element_* accounting dimension preferences.
-    // DynamicExpressionParser generates JS referencing context.$Element_XX
-    // for displayLogic expressions like @$Element_MC@='Y'.
+    // Resolve accounting dimension context variables the same way LoginUtils does at login.
+    // DynamicExpressionParser generates JS referencing context.$IsAcctDimCentrally,
+    // context.$Element_XX (non-centrally managed) and context['$Element_XX_DOCTYPE_H']
+    // (centrally managed) for @ACCT_DIMENSION_DISPLAY@ expressions.
     try {
-      DalConnectionProvider conn = new DalConnectionProvider(false);
-      VariablesSecureApp vars = new VariablesSecureApp(
-          obCtx.getUser().getId(),
-          obCtx.getCurrentClient().getId(),
-          obCtx.getCurrentOrganization().getId(),
-          obCtx.getRole().getId(),
-          obCtx.getLanguage().getLanguage());
-      String[] elements = { "MC", "AY", "OT", "AS", "CC", "U1", "U2", "PJ", "BU", "PR" };
-      for (String el : elements) {
-        String key = "$Element_" + el;
-        String value = Utility.getContext(conn, vars, key, "");
-        ctx.put(key, value);
+      org.openbravo.model.ad.system.Client client = OBDal.getInstance()
+          .get(org.openbravo.model.ad.system.Client.class, obCtx.getCurrentClient().getId());
+
+      boolean isCentrally = client.isAcctdimCentrallyMaintained();
+      ctx.put(DimensionDisplayUtility.IsAcctDimCentrally, isCentrally ? "Y" : "N");
+
+      if (isCentrally) {
+        // Centrally maintained: load $Element_XX_DOCTYPE_LEVEL entries from client config.
+        // DynamicExpressionParser generates context['$Element_BP_' + DOCBASETYPE + '_H']
+        // which requires these specific combinations to be in the context.
+        Map<String, String> acctDimMap = DimensionDisplayUtility
+            .getAccountingDimensionConfiguration(client);
+        ctx.putAll(acctDimMap);
+      } else {
+        // Non-centrally maintained: load legacy global $Element_XX variables.
+        // These come from the accounting schema element configuration.
+        DalConnectionProvider conn = new DalConnectionProvider(false);
+        VariablesSecureApp vars = new VariablesSecureApp(
+            obCtx.getUser().getId(),
+            obCtx.getCurrentClient().getId(),
+            obCtx.getCurrentOrganization().getId(),
+            obCtx.getRole().getId(),
+            obCtx.getLanguage().getLanguage());
+        String[] elements = { "MC", "AY", "OT", "AS", "CC", "U1", "U2", "PJ", "BU", "PR", "BP", "OO" };
+        for (String el : elements) {
+          String key = "$Element_" + el;
+          ctx.put(key, Utility.getContext(conn, vars, key, ""));
+        }
+      }
+
+      // Compute DOCBASETYPE auxiliary input from the transactionDocument field value.
+      // DimensionDisplayUtility generates JS that reads currentValues.DOCBASETYPE to build
+      // the centrally-managed dimension key (e.g. $Element_BP_POO_H).
+      String transactionDocId = currentValues.containsKey("transactionDocument")
+          ? String.valueOf(currentValues.get("transactionDocument"))
+          : "";
+      if (!transactionDocId.isEmpty() && !transactionDocId.equals("null")) {
+        org.openbravo.model.common.enterprise.DocumentType docType = OBDal.getInstance()
+            .get(org.openbravo.model.common.enterprise.DocumentType.class, transactionDocId);
+        if (docType != null && docType.getDocumentCategory() != null) {
+          currentValues.put("DOCBASETYPE", docType.getDocumentCategory());
+          ctx.put("DOCBASETYPE", docType.getDocumentCategory());
+        }
       }
     } catch (Exception e) {
-      log.debug("Could not resolve $Element_* preferences: {}", e.getMessage());
+      log.debug("Could not resolve accounting dimension context: {}", e.getMessage());
     }
-
-    // Add a "context" object alias so DynamicExpressionParser's JS output
-    // (context.xxx references) can resolve against our eval context
-    ctx.put("context", ctx);
 
     return ctx;
   }
