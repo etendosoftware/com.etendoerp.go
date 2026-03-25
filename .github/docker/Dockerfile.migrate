@@ -12,18 +12,17 @@ RUN useradd -m -s /bin/bash etendo
 RUN printf '#!/bin/bash\nset -e\n\
 \n\
 echo "[migrate] Patching DB connection from env vars..."\n\
-sed -i "s|bbdd.host=.*|bbdd.host=${BBDD_HOST}|" /home/etendo/app/gradle.properties\n\
-sed -i "s|bbdd.systemPassword=.*|bbdd.systemPassword=${BBDD_SYSTEMPASSWORD}|" /home/etendo/app/gradle.properties\n\
-sed -i "s|bbdd.url=.*|bbdd.url=jdbc:postgresql://${BBDD_HOST}:${BBDD_PORT:-5432}|" /home/etendo/app/config/Openbravo.properties\n\
-sed -i "s|^bbdd.systemPassword=.*|bbdd.systemPassword=${BBDD_SYSTEMPASSWORD}|" /home/etendo/app/config/Openbravo.properties\n\
+sed -i "s#bbdd.host=.*#bbdd.host=${BBDD_HOST}#" /home/etendo/app/gradle.properties\n\
+sed -i "s#bbdd.systemPassword=.*#bbdd.systemPassword=${BBDD_SYSTEMPASSWORD}#" /home/etendo/app/gradle.properties\n\
+sed -i "s#bbdd.url=.*#bbdd.url=jdbc:postgresql://${BBDD_HOST}:${BBDD_PORT:-5432}#" /home/etendo/app/config/Openbravo.properties\n\
+sed -i "s#^bbdd.systemPassword=.*#bbdd.systemPassword=${BBDD_SYSTEMPASSWORD}#" /home/etendo/app/config/Openbravo.properties\n\
 \n\
 echo "[migrate] Running update.database..."\n\
 cd /home/etendo/app && exec ./gradlew update.database\n\
 ' > /usr/local/bin/migrate.sh && chmod +x /usr/local/bin/migrate.sh
 
 WORKDIR /home/etendo/app
-COPY . .
-RUN chown -R etendo:etendo /home/etendo/app
+COPY --chown=etendo:etendo . .
 
 USER etendo
 
