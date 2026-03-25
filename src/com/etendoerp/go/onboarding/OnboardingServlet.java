@@ -65,8 +65,25 @@ public class OnboardingServlet extends HttpBaseServlet {
       "4028E6C72959682B01295A070852010D"
   ));
 
+  private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
+    String origin = request.getHeader("Origin");
+    if (origin != null) {
+      response.setHeader("Access-Control-Allow-Origin", origin);
+      response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      response.setHeader("Access-Control-Allow-Credentials", "true");
+    }
+  }
+
+  @Override
+  protected void doOptions(HttpServletRequest request, HttpServletResponse response) throws IOException {
+    setCorsHeaders(request, response);
+    response.setStatus(HttpServletResponse.SC_OK);
+  }
+
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
+    setCorsHeaders(request, response);
     try {
       authenticateJwt(request);
       String action = request.getParameter("action");
@@ -156,6 +173,7 @@ public class OnboardingServlet extends HttpBaseServlet {
 
   @Override
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
+    setCorsHeaders(request, response);
     try {
       // 1. Authenticate (validates JWT is valid)
       authenticateJwt(request);
@@ -185,12 +203,21 @@ public class OnboardingServlet extends HttpBaseServlet {
         return;
       }
 
-      // 5. Check duplicate client name
+      // 5. Validate uniqueness before starting
       OBCriteria<Client> clientCriteria = OBDal.getInstance().createCriteria(Client.class);
       clientCriteria.add(Restrictions.eq(Client.PROPERTY_NAME, clientName));
       if (clientCriteria.count() > 0) {
         sendJsonError(response, HttpServletResponse.SC_CONFLICT,
-            "Client with name '" + clientName + "' already exists");
+            "Ya existe una empresa con el nombre '" + clientName + "'");
+        return;
+      }
+
+      // Check duplicate admin email (username is global in Etendo)
+      OBCriteria<User> userCriteria = OBDal.getInstance().createCriteria(User.class);
+      userCriteria.add(Restrictions.eq(User.PROPERTY_USERNAME, adminUser));
+      if (userCriteria.count() > 0) {
+        sendJsonError(response, HttpServletResponse.SC_CONFLICT,
+            "El email '" + adminUser + "' ya esta en uso por otro usuario");
         return;
       }
 
@@ -212,9 +239,8 @@ public class OnboardingServlet extends HttpBaseServlet {
       // 8. Build step chain
       List<OnboardingStep> steps = buildStepChain();
 
-      // 9. Execute steps with progress reporting (collect all errors)
+      // 9. Execute steps with progress reporting (fail-fast on error)
       long totalStart = System.currentTimeMillis();
-      List<String> failedSteps = new ArrayList<>();
 
       for (int i = 0; i < steps.size(); i++) {
         OnboardingStep step = steps.get(i);
@@ -235,20 +261,11 @@ public class OnboardingServlet extends HttpBaseServlet {
           long elapsed = System.currentTimeMillis() - stepStart;
           log.error("Onboarding step {} ({}) failed", stepNum, step.name(), e);
 
-          // Clear Hibernate session to allow next step to proceed
+          // Rollback immediately
           try {
             OBDal.getInstance().rollbackAndClose();
           } catch (Exception rollbackEx) {
-            log.warn("Session cleanup after step {} error", stepNum, rollbackEx);
-          }
-
-          // Restore context for next step
-          try {
-            OBContext.setOBContext(ctx.getClientAdminUserId() != null ? ctx.getClientAdminUserId() : "100",
-                "0", ctx.getClientId() != null ? ctx.getClientId() : "0", "0");
-            OBContext.setAdminMode(false);
-          } catch (Exception ctxEx) {
-            log.warn("Context restore failed after step {}", stepNum, ctxEx);
+            log.warn("Rollback after step {} error", stepNum, rollbackEx);
           }
 
           // Write failure line
@@ -268,28 +285,19 @@ public class OnboardingServlet extends HttpBaseServlet {
           failLine.put("error", errorMsg.toString());
           out.write((failLine.toString() + "\n").getBytes(StandardCharsets.UTF_8));
           out.flush();
-          response.flushBuffer();
-          failedSteps.add(step.name());
-          continue;
-        }
-      }
 
-      // 10. Check results
-      if (!failedSteps.isEmpty()) {
-        // Some steps failed — rollback everything
-        try {
-          OBDal.getInstance().rollbackAndClose();
-        } catch (Exception ignored) {}
-        long totalMs = System.currentTimeMillis() - totalStart;
-        JSONObject result = new JSONObject();
-        result.put("result", "failed");
-        result.put("failedSteps", new JSONArray(failedSteps));
-        result.put("totalMs", totalMs);
-        result.put("rolledBack", true);
-        out.write((result.toString() + "\n").getBytes(StandardCharsets.UTF_8));
-        out.flush();
-        response.flushBuffer();
-        return;
+          // Write final failure summary and stop
+          long totalMs = System.currentTimeMillis() - totalStart;
+          JSONObject result = new JSONObject();
+          result.put("result", "failed");
+          result.put("failedStep", step.name());
+          result.put("totalMs", totalMs);
+          result.put("rolledBack", true);
+          out.write((result.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+          out.flush();
+          response.flushBuffer();
+          return;
+        }
       }
 
       // All steps succeeded — commit
