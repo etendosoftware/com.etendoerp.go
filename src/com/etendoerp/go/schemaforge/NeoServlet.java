@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -56,6 +57,8 @@ import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import org.openbravo.base.provider.OBProvider;
+import org.openbravo.model.ad.utility.Image;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -165,6 +168,14 @@ public class NeoServlet extends HttpBaseServlet {
           return;
         }
         handleDiscovery(response);
+        return;
+      }
+
+      // Built-in image endpoint: /sws/neo/image[/{id}]
+      // Path /image/{id} parses as specName=image, entityName={id}, recordId=null
+      if ("image".equals(pathInfo.specName)) {
+        String resolvedImageId = pathInfo.recordId != null ? pathInfo.recordId : pathInfo.entityName;
+        handleImageRequest(resolvedImageId, method, request, response);
         return;
       }
 
@@ -2068,6 +2079,82 @@ public class NeoServlet extends HttpBaseServlet {
       this.isEvaluateDisplay = isEvaluateDisplay;
       this.isCallout = isCallout;
       this.isDefaults = isDefaults;
+    }
+  }
+
+  /**
+   * Handle built-in image endpoint.
+   *
+   * GET  /sws/neo/image/{id}  — return image binary with correct content type
+   * POST /sws/neo/image        — upload image; body: { name, mimeType, data (base64) }
+   *                              returns { id, name }
+   */
+  private void handleImageRequest(String imageId, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    try {
+      if ("GET".equals(method)) {
+        if (StringUtils.isBlank(imageId)) {
+          sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Image ID required");
+          return;
+        }
+        Image image = OBDal.getInstance().get(Image.class, imageId);
+        if (image == null) {
+          sendError(response, HttpServletResponse.SC_NOT_FOUND, "Image not found: " + imageId);
+          return;
+        }
+        byte[] data = image.getBindaryData();
+        if (data == null || data.length == 0) {
+          sendError(response, HttpServletResponse.SC_NOT_FOUND, "Image has no data");
+          return;
+        }
+        String mimeType = image.getMimetype();
+        if (StringUtils.isBlank(mimeType)) {
+          mimeType = "image/png";
+        }
+        response.setContentType(mimeType);
+        response.setContentLength(data.length);
+        try (OutputStream out = response.getOutputStream()) {
+          out.write(data);
+        }
+      } else if ("POST".equals(method)) {
+        String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        JSONObject body = new JSONObject(bodyStr);
+        String name = body.optString("name", "image");
+        String mimeType = body.optString("mimeType", "image/png");
+        String dataBase64 = body.optString("data", "");
+        if (StringUtils.isBlank(dataBase64)) {
+          sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Image data required");
+          return;
+        }
+        // Strip data URI prefix if present (e.g. "data:image/png;base64,...")
+        if (dataBase64.contains(",")) {
+          dataBase64 = dataBase64.substring(dataBase64.indexOf(',') + 1);
+        }
+        byte[] imageBytes = Base64.getDecoder().decode(dataBase64);
+        Image image = OBProvider.getInstance().get(Image.class);
+        image.setClient(OBContext.getOBContext().getCurrentClient());
+        image.setOrganization(OBContext.getOBContext().getCurrentOrganization());
+        image.setName(name);
+        image.setMimetype(mimeType);
+        image.setBindaryData(imageBytes);
+        OBDal.getInstance().save(image);
+        OBDal.getInstance().flush();
+        JSONObject result = new JSONObject();
+        result.put("imageId", image.getId());
+        result.put("name", image.getName());
+        response.setContentType("application/json");
+        response.setCharacterEncoding("UTF-8");
+        response.setStatus(HttpServletResponse.SC_OK);
+        try (OutputStream out = response.getOutputStream()) {
+          out.write(result.toString().getBytes(StandardCharsets.UTF_8));
+        }
+      } else {
+        sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+            "Image endpoint only supports GET and POST");
+      }
+    } catch (Exception e) {
+      log.error("Error handling image request", e);
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
     }
   }
 }

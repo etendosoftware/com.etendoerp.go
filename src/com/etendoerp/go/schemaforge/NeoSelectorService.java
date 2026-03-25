@@ -17,6 +17,8 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.client.application.ApplicationUtils;
+import org.openbravo.client.kernel.KernelUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -24,6 +26,7 @@ import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.domain.ReferencedTable;
+import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.userinterface.selector.Selector;
 import org.openbravo.userinterface.selector.SelectorField;
 
@@ -218,12 +221,14 @@ public class NeoSelectorService {
 
       // Resolve validation rule filter from context params
       String validationFilter = resolveValidationFilter(column, meta.entityName, contextParams);
+      String organizationFilter = resolveReferenceOrganizationFilter(entity, column, meta, contextParams);
+      String combinedFilter = combineFilters(validationFilter, organizationFilter);
 
       // Build and execute query
       if (meta.isRich) {
-        return executeRichQuery(meta, search, limit, offset, validationFilter);
+        return executeRichQuery(meta, search, limit, offset, combinedFilter);
       }
-      return executeQuery(meta, search, limit, offset, validationFilter);
+      return executeQuery(meta, search, limit, offset, combinedFilter);
 
     } catch (Exception e) {
       log.error("Error querying selector {}/{}", entityName, columnName, e);
@@ -1103,11 +1108,8 @@ public class NeoSelectorService {
         valueProp = valueField.getProperty();
       }
 
-      // Get where clause
-      String whereClause = selector.getHQLWhereClause();
-      if (StringUtils.isBlank(whereClause)) {
-        whereClause = null;
-      }
+      // Get where clause; strip SQL-only constructs not valid in HQL
+      String whereClause = sanitizeAdWhereClause(selector.getHQLWhereClause());
 
       // Load selector fields
       List<SelectorField> selectorFields = selector.getOBUISELSelectorFieldList();
@@ -1270,11 +1272,8 @@ public class NeoSelectorService {
         displayProp = findIdentifierProperty(targetEntity);
       }
 
-      // Get optional where clause
-      String whereClause = refTable.getHqlwhereclause();
-      if (StringUtils.isBlank(whereClause)) {
-        whereClause = null;
-      }
+      // Get optional where clause; strip SQL-only constructs not valid in HQL
+      String whereClause = sanitizeAdWhereClause(refTable.getHqlwhereclause());
 
       return new SelectorMeta(targetEntity.getName(), displayProp, whereClause);
 
@@ -1311,7 +1310,7 @@ public class NeoSelectorService {
 
   // SQL functions that have no HQL equivalent and must cause a clause to be skipped
   private static final Pattern SQL_ONLY_FUNCTIONS = Pattern.compile(
-      "AD_ISORGINCLUDED|AD_ISCHILDORGINCLUDED", Pattern.CASE_INSENSITIVE);
+      "AD_ISORGINCLUDED|AD_ISCHILDORGINCLUDED|AD_ROLE_ORGACCESS", Pattern.CASE_INSENSITIVE);
 
   /**
    * Resolve the column's validation rule into an HQL filter using context params.
@@ -1407,11 +1406,132 @@ public class NeoSelectorService {
     return hqlFilter;
   }
 
+  private static String combineFilters(String... filters) {
+    List<String> parts = new ArrayList<>();
+    for (String filter : filters) {
+      if (StringUtils.isNotBlank(filter)) {
+        parts.add(filter);
+      }
+    }
+    if (parts.isEmpty()) {
+      return null;
+    }
+    return String.join(" AND ", parts);
+  }
+
+  /**
+   * Some classic selectors apply the parent record's organization implicitly.
+   * Price List Version is one of those cases: when opened from a child tab,
+   * Classic only shows versions from the parent product's organization.
+   */
+  private static String resolveReferenceOrganizationFilter(SFEntity sourceEntity,
+      Column sourceColumn, SelectorMeta targetMeta, Map<String, String> contextParams) {
+    if (sourceEntity == null || sourceColumn == null || targetMeta == null) {
+      return null;
+    }
+    if (!"M_PriceList_Version_ID".equalsIgnoreCase(sourceColumn.getDBColumnName())) {
+      return null;
+    }
+
+    Entity targetEntity = ModelProvider.getInstance().getEntity(targetMeta.entityName);
+    if (targetEntity == null || !targetEntity.hasProperty("organization")) {
+      return null;
+    }
+
+    String organizationId = null;
+    if (contextParams != null) {
+      organizationId = contextParams.get("AD_Org_ID");
+      if (StringUtils.isBlank(organizationId)) {
+        organizationId = resolveParentOrganizationId(sourceEntity, contextParams.get("parentId"));
+      }
+    }
+    if (StringUtils.isBlank(organizationId)) {
+      return null;
+    }
+
+    String safeOrgId = organizationId.replace("'", "''");
+    log.debug("Applying organization filter {} to selector {}", safeOrgId,
+        sourceColumn.getDBColumnName());
+    return "e.organization.id='" + safeOrgId + "'";
+  }
+
+  private static String resolveParentOrganizationId(SFEntity sourceEntity, String parentId) {
+    if (sourceEntity == null || StringUtils.isBlank(parentId)) {
+      return null;
+    }
+
+    try {
+      Tab childTab = sourceEntity.getADTab();
+      if (childTab == null || childTab.getTabLevel() == null || childTab.getTabLevel() <= 0) {
+        return null;
+      }
+
+      Tab parentTab = KernelUtils.getInstance().getParentTab(childTab);
+      if (parentTab == null || parentTab.getTable() == null) {
+        return null;
+      }
+
+      String parentProperty = ApplicationUtils.getParentProperty(childTab, parentTab);
+      if (StringUtils.isBlank(parentProperty)) {
+        return null;
+      }
+
+      Entity parentEntity = ModelProvider.getInstance().getEntityByTableId(parentTab.getTable().getId());
+      if (parentEntity == null || !parentEntity.hasProperty("organization")) {
+        return null;
+      }
+
+      BaseOBObject parentRecord = OBDal.getInstance().get(parentEntity.getName(), parentId);
+      if (parentRecord == null) {
+        return null;
+      }
+
+      Object organization = parentRecord.get("organization");
+      if (organization instanceof BaseOBObject) {
+        Object organizationId = ((BaseOBObject) organization).getId();
+        return organizationId != null ? organizationId.toString() : null;
+      }
+      return organization != null ? organization.toString() : null;
+    } catch (Exception e) {
+      log.debug("Could not resolve parent organization for selector context: {}", e.getMessage());
+      return null;
+    }
+  }
+
   /**
    * Split a SQL WHERE clause into top-level AND segments.
    * Respects parentheses nesting so that "A AND (B OR C AND D) AND E"
    * splits into ["A", "(B OR C AND D)", "E"], not into inner parts.
    */
+  /**
+   * Strip SQL-only constructs from an AD where clause before appending to HQL.
+   * Splits on top-level AND, drops any clause that references SQL_ONLY_FUNCTIONS
+   * (e.g. AD_ROLE_ORGACCESS, which is not a mapped Hibernate entity).
+   * OBDal's own bindings (_dal_readableOrganizations_dal_) already enforce org/client access.
+   */
+  private static String sanitizeAdWhereClause(String whereClause) {
+    if (StringUtils.isBlank(whereClause)) {
+      return null;
+    }
+    List<String> clauses = splitTopLevelAnd(whereClause);
+    List<String> kept = new ArrayList<>();
+    for (String clause : clauses) {
+      String trimmed = clause.trim();
+      if (StringUtils.isBlank(trimmed)) {
+        continue;
+      }
+      if (SQL_ONLY_FUNCTIONS.matcher(trimmed).find()) {
+        log.debug("Skipping AD where clause with SQL-only construct: {}", trimmed);
+        continue;
+      }
+      kept.add(trimmed);
+    }
+    if (kept.isEmpty()) {
+      return null;
+    }
+    return String.join(" AND ", kept);
+  }
+
   private static List<String> splitTopLevelAnd(String code) {
     List<String> parts = new ArrayList<>();
     int depth = 0;

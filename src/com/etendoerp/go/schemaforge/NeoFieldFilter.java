@@ -24,8 +24,10 @@ import com.etendoerp.go.schemaforge.data.SFField;
 /**
  * Filters JSON request/response bodies based on ETGO_SF_FIELD configuration.
  *
- * <p>For GET responses, removes fields where IsIncluded=N.
- * For POST/PUT/PATCH inputs, removes fields where IsIncluded=N or IsReadOnly=Y.</p>
+ * <p>
+ * For GET responses, removes fields where IsIncluded=N.
+ * For POST/PUT/PATCH inputs, removes fields where IsIncluded=N or IsReadOnly=Y.
+ * </p>
  */
 public class NeoFieldFilter {
 
@@ -34,7 +36,9 @@ public class NeoFieldFilter {
   /** Set of DAL property names that are included (IsIncluded=Y). */
   private final Set<String> includedFields;
 
-  /** Set of DAL property names that are writable (IsIncluded=Y AND IsReadOnly=N). */
+  /**
+   * Set of DAL property names that are writable (IsIncluded=Y AND IsReadOnly=N).
+   */
   private final Set<String> writableFields;
 
   /** Whether filtering is active (false if no SF_FIELD config exists). */
@@ -50,7 +54,7 @@ public class NeoFieldFilter {
    * Build a field filter for the given SFEntity.
    * Loads all ETGO_SF_FIELD records and resolves their DAL property names.
    *
-   * @param sfEntity the schema forge entity configuration
+   * @param sfEntity      the schema forge entity configuration
    * @param dalEntityName the DAL entity name (from adTab.getTable().getName())
    * @return a filter instance, which may be inactive if no fields are configured
    */
@@ -115,19 +119,20 @@ public class NeoFieldFilter {
       included.add("id");
       writable.add("id");
 
-      // Always allow link-to-parent columns — they're needed for child record creation
+      // Always allow link-to-parent columns — they're needed for child record
+      // creation
       // (e.g., salesOrder on C_OrderLine, invoice on C_InvoiceLine)
       Tab adTab = sfEntity.getADTab();
       if (adTab != null && adTab.getTable() != null) {
-      for (Column col : adTab.getTable().getADColumnList()) {
-        if (col.isActive() && col.isLinkToParentColumn()) {
-          Property parentProp = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-          if (parentProp != null) {
-            writable.add(parentProp.getName());
-            included.add(parentProp.getName());
+        for (Column col : adTab.getTable().getADColumnList()) {
+          if (col.isActive() && col.isLinkToParentColumn()) {
+            Property parentProp = dalEntity.getPropertyByColumnName(col.getDBColumnName());
+            if (parentProp != null) {
+              writable.add(parentProp.getName());
+              included.add(parentProp.getName());
+            }
           }
         }
-      }
       }
 
       log.debug("Field filter for entity {}: {} included, {} writable",
