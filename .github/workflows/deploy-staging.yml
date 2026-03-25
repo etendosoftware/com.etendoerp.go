@@ -1,0 +1,195 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches:
+      - epic/ETP-3504
+
+env:
+  AWS_REGION: eu-west-3
+  ECR_REGISTRY: 278186107973.dkr.ecr.eu-west-3.amazonaws.com
+  ECR_REPO: etendo/etendo_core
+  IMAGE_TAG: develop
+  ECS_CLUSTER: etendo-staging
+  ECS_SERVICE: etendo-core-service
+
+jobs:
+  deploy-staging:
+    name: Build and deploy to staging
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout this module ────────────────────────────────────────────
+      - name: Checkout com.etendoerp.go
+        uses: actions/checkout@v4
+        with:
+          path: module
+
+      # ── 2. Checkout etendo_core ────────────────────────────────────────────
+      - name: Checkout etendo_core
+        uses: actions/checkout@v4
+        with:
+          repository: etendosoftware/etendo_core
+          token: ${{ secrets.ETENDOBOT_TOKEN }}
+          ref: develop
+          path: etendo_core
+
+      # ── 3. Inject this module into etendo_core ─────────────────────────────
+      - name: Inject module
+        run: |
+          rm -rf etendo_core/modules/com.etendoerp.go
+          cp -r module etendo_core/modules/com.etendoerp.go
+          # Remove nested .git to avoid submodule confusion
+          rm -rf etendo_core/modules/com.etendoerp.go/.git
+
+      # ── 4. AWS credentials ─────────────────────────────────────────────────
+      # TODO: migrate to OIDC (IAM OIDC role) once configured
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ── 5. Login to ECR ────────────────────────────────────────────────────
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── 6. Build and push runtime image ───────────────────────────────────
+      - name: Build runtime image
+        working-directory: etendo_core
+        run: |
+          docker build \
+            -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }} \
+            .
+
+      - name: Push runtime image
+        run: |
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }}
+
+      # ── 7. Build and push migration image ─────────────────────────────────
+      - name: Copy migration Dockerfile
+        run: cp module/.github/docker/Dockerfile.migrate etendo_core/
+
+      - name: Build migration image
+        working-directory: etendo_core
+        run: |
+          docker build \
+            -f Dockerfile.migrate \
+            -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:migrate-${{ env.IMAGE_TAG }} \
+            .
+
+      - name: Push migration image
+        run: |
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:migrate-${{ env.IMAGE_TAG }}
+
+      # ── 8. Register migration task definition ─────────────────────────────
+      - name: Register migration task definition
+        id: register-migrate-task
+        run: |
+          cat > /tmp/etendo-migrate-task-def.json << EOF
+          {
+            "family": "etendo-migrate",
+            "networkMode": "awsvpc",
+            "requiresCompatibilities": ["FARGATE"],
+            "cpu": "1024",
+            "memory": "2048",
+            "executionRoleArn": "arn:aws:iam::278186107973:role/ecsTaskExecutionRole",
+            "containerDefinitions": [
+              {
+                "name": "etendo-migrate",
+                "image": "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:migrate-${{ env.IMAGE_TAG }}",
+                "essential": true,
+                "environment": [
+                  { "name": "BBDD_HOST", "value": "etendo-staging.cfm2qm242otk.eu-west-3.rds.amazonaws.com" },
+                  { "name": "BBDD_PORT", "value": "5432" },
+                  { "name": "BBDD_SID",  "value": "etendo" }
+                ],
+                "secrets": [
+                  {
+                    "name": "BBDD_SYSTEMPASSWORD",
+                    "valueFrom": "arn:aws:secretsmanager:eu-west-3:278186107973:secret:etendo/staging/bbdd-system-password-1M0abS"
+                  },
+                  {
+                    "name": "BBDD_PASSWORD",
+                    "valueFrom": "arn:aws:secretsmanager:eu-west-3:278186107973:secret:etendo/staging/bbdd-password-KhAHph"
+                  }
+                ],
+                "logConfiguration": {
+                  "logDriver": "awslogs",
+                  "options": {
+                    "awslogs-group": "/ecs/etendo-staging",
+                    "awslogs-region": "${{ env.AWS_REGION }}",
+                    "awslogs-stream-prefix": "etendo-migrate"
+                  }
+                }
+              }
+            ]
+          }
+          EOF
+
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file:///tmp/etendo-migrate-task-def.json \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "task_def_arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
+          echo "Registered task definition: $TASK_DEF_ARN"
+
+      # ── 9. Run DB migration (ECS one-shot task inside VPC) ─────────────────
+      - name: Run DB migration task
+        id: run-migration
+        run: |
+          TASK_ARN=$(aws ecs run-task \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --task-definition ${{ steps.register-migrate-task.outputs.task_def_arn }} \
+            --launch-type FARGATE \
+            --network-configuration 'awsvpcConfiguration={
+              subnets=[subnet-95adedfc],
+              securityGroups=[sg-05dfda3d85b5f0179],
+              assignPublicIp=ENABLED
+            }' \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].taskArn' \
+            --output text)
+
+          echo "task_arn=$TASK_ARN" >> $GITHUB_OUTPUT
+          echo "Migration task started: $TASK_ARN"
+
+      # ── 10. Wait for migration to complete ────────────────────────────────
+      - name: Wait for migration task
+        run: |
+          echo "Waiting for migration to complete (timeout: 10 min)..."
+          aws ecs wait tasks-stopped \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --tasks ${{ steps.run-migration.outputs.task_arn }} \
+            --region ${{ env.AWS_REGION }}
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --tasks ${{ steps.run-migration.outputs.task_arn }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].containers[0].exitCode' \
+            --output text)
+
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "Migration failed with exit code $EXIT_CODE"
+            echo "Logs: CloudWatch > /ecs/etendo-staging > etendo-migrate"
+            exit 1
+          fi
+
+          echo "Migration completed successfully (exit code 0)"
+
+      # ── 11. Deploy new image to ECS ────────────────────────────────────────
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+          echo "Deployment triggered."
+          echo "Monitor: https://eu-west-3.console.aws.amazon.com/ecs/v2/clusters/${{ env.ECS_CLUSTER }}/services/${{ env.ECS_SERVICE }}"
+          echo "App: https://core.staging.etendo.cloud/etendo/security/Login"

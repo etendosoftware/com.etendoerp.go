@@ -1,0 +1,36 @@
+# Migration runner image for Etendo staging
+# Runs ./gradlew update.database against RDS, then exits.
+# DB credentials are injected at runtime via ECS Secrets Manager (env vars).
+FROM eclipse-temurin:17-jdk-jammy
+
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for gradlew (antInit rejects root)
+RUN useradd -m -s /bin/bash etendo
+
+# Build migrate entrypoint as root so it can live in /usr/local/bin
+RUN printf '#!/bin/bash\nset -e\n\
+\n\
+echo "[migrate] Patching DB connection from env vars..."\n\
+sed -i "s|bbdd.host=.*|bbdd.host=${BBDD_HOST}|" /home/etendo/app/gradle.properties\n\
+sed -i "s|bbdd.systemPassword=.*|bbdd.systemPassword=${BBDD_SYSTEMPASSWORD}|" /home/etendo/app/gradle.properties\n\
+sed -i "s|bbdd.url=.*|bbdd.url=jdbc:postgresql://${BBDD_HOST}:${BBDD_PORT:-5432}|" /home/etendo/app/config/Openbravo.properties\n\
+sed -i "s|^bbdd.systemPassword=.*|bbdd.systemPassword=${BBDD_SYSTEMPASSWORD}|" /home/etendo/app/config/Openbravo.properties\n\
+\n\
+echo "[migrate] Running update.database..."\n\
+cd /home/etendo/app && exec ./gradlew update.database\n\
+' > /usr/local/bin/migrate.sh && chmod +x /usr/local/bin/migrate.sh
+
+WORKDIR /home/etendo/app
+COPY . .
+RUN chown -R etendo:etendo /home/etendo/app
+
+USER etendo
+
+RUN git config --global --add safe.directory /home/etendo/app
+
+# setup downloads dependencies and generates config/Openbravo.properties template
+# (the template has localhost:5432 hardcoded — migrate.sh patches it at runtime)
+RUN ./gradlew setup
+
+ENTRYPOINT ["/usr/local/bin/migrate.sh"]
