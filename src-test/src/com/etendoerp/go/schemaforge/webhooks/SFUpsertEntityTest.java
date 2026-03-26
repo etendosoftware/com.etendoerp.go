@@ -24,12 +24,14 @@ import static org.mockito.Mockito.*;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.model.ad.module.Module;
@@ -46,7 +48,6 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 @MockitoSettings(strictness = Strictness.LENIENT)
 class SFUpsertEntityTest extends BaseWebhookTest {
 
-    @InjectMocks
     private SFUpsertEntity webhook;
 
     private SFSpec mockSpec;
@@ -60,6 +61,62 @@ class SFUpsertEntityTest extends BaseWebhookTest {
         mockTab = mock(Tab.class);
         mockModule = mock(Module.class);
         when(mockTab.getName()).thenReturn("Default Tab Name");
+
+        // Stub OBProvider to return a mock SFEntity that tracks state via setters.
+        SFEntity newEntity = mock(SFEntity.class);
+        when(newEntity.getId()).thenReturn("new-entity-id");
+
+        AtomicReference<String> entityName = new AtomicReference<>("");
+        doAnswer(inv -> { entityName.set(inv.getArgument(0)); return null; })
+            .when(newEntity).setName(any());
+        when(newEntity.getName()).thenAnswer(inv -> entityName.get());
+
+        AtomicBoolean included = new AtomicBoolean(false);
+        doAnswer(inv -> { included.set(inv.getArgument(0)); return null; })
+            .when(newEntity).setIncluded(anyBoolean());
+        when(newEntity.isIncluded()).thenAnswer(inv -> included.get());
+
+        AtomicBoolean get = new AtomicBoolean(false);
+        doAnswer(inv -> { get.set(inv.getArgument(0)); return null; })
+            .when(newEntity).setGet(anyBoolean());
+        when(newEntity.isGet()).thenAnswer(inv -> get.get());
+
+        AtomicBoolean getById = new AtomicBoolean(false);
+        doAnswer(inv -> { getById.set(inv.getArgument(0)); return null; })
+            .when(newEntity).setGetByID(anyBoolean());
+        when(newEntity.isGetByID()).thenAnswer(inv -> getById.get());
+
+        AtomicBoolean post = new AtomicBoolean(false);
+        doAnswer(inv -> { post.set(inv.getArgument(0)); return null; })
+            .when(newEntity).setPost(anyBoolean());
+        when(newEntity.isPost()).thenAnswer(inv -> post.get());
+
+        AtomicBoolean put = new AtomicBoolean(false);
+        doAnswer(inv -> { put.set(inv.getArgument(0)); return null; })
+            .when(newEntity).setPut(anyBoolean());
+        when(newEntity.isPut()).thenAnswer(inv -> put.get());
+
+        AtomicBoolean patch = new AtomicBoolean(false);
+        doAnswer(inv -> { patch.set(inv.getArgument(0)); return null; })
+            .when(newEntity).setPatch(anyBoolean());
+        when(newEntity.isPatch()).thenAnswer(inv -> patch.get());
+
+        AtomicBoolean delete = new AtomicBoolean(false);
+        doAnswer(inv -> { delete.set(inv.getArgument(0)); return null; })
+            .when(newEntity).setDelete(anyBoolean());
+        when(newEntity.isDelete()).thenAnswer(inv -> delete.get());
+
+        AtomicReference<String> javaQualifier = new AtomicReference<>("");
+        doAnswer(inv -> { javaQualifier.set(inv.getArgument(0)); return null; })
+            .when(newEntity).setJavaQualifier(any());
+        when(newEntity.getJavaQualifier()).thenAnswer(inv -> javaQualifier.get());
+
+        AtomicReference<Long> seqNo = new AtomicReference<>();
+        doAnswer(inv -> { seqNo.set(inv.getArgument(0)); return null; })
+            .when(newEntity).setSeqNo(any());
+        when(newEntity.getSeqNo()).thenAnswer(inv -> seqNo.get());
+
+        when(obProvider.get(SFEntity.class)).thenReturn(newEntity);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────
@@ -165,6 +222,7 @@ class SFUpsertEntityTest extends BaseWebhookTest {
         parameters.put(SPEC_ID, TEST_ID_1);
         parameters.put(TAB_ID, TEST_ID_2);
         parameters.put(MODULE_ID, "mod1");
+        stubSuccessfulLookups();
 
         when(obDal.get(SFEntity.class, "nonexistent")).thenReturn(null);
 
