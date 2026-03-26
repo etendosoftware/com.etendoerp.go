@@ -25,6 +25,8 @@ cd /home/etendo/app && exec ./gradlew update.database\n\
 
 WORKDIR /home/etendo/app
 COPY --chown=etendo:etendo . .
+# WORKDIR is created by root — chown the dir itself so etendo can write .gradle/ inside it
+RUN chown etendo:etendo /home/etendo/app
 
 USER etendo
 
@@ -32,7 +34,7 @@ RUN git config --global --add safe.directory /home/etendo/app
 
 # gradle.properties is mounted as a build secret — available only during this RUN,
 # never written to any image layer.
-RUN --mount=type=secret,id=gradle_props,dst=/home/etendo/app/gradle.properties \
+RUN --mount=type=secret,id=gradle_props,dst=/home/etendo/app/gradle.properties,uid=1000 \
     ./gradlew setup
 
 ENTRYPOINT ["/usr/local/bin/migrate.sh"]

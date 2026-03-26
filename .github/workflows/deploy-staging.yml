@@ -37,9 +37,9 @@ jobs:
       # ── 3. Inject this module into etendo_core ─────────────────────────────
       - name: Inject module
         run: |
+          mkdir -p etendo_core/modules
           rm -rf etendo_core/modules/com.etendoerp.go
           cp -r module etendo_core/modules/com.etendoerp.go
-          # Remove nested .git to avoid submodule confusion
           rm -rf etendo_core/modules/com.etendoerp.go/.git
 
       # ── 4. AWS credentials ─────────────────────────────────────────────────
@@ -56,10 +56,32 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       # ── 6. Build and push runtime image ───────────────────────────────────
+      # gradle.properties is not committed to etendo_core — create it from
+      # secrets so it can be passed as a Docker build secret (never baked in layers).
+      - name: Create gradle.properties
+        run: |
+          cat > etendo_core/gradle.properties << EOF
+          githubUser=etendobot
+          githubToken=${{ secrets.ETENDOBOT_TOKEN }}
+          repositoryUser=${{ secrets.NEXUS_USER }}
+          repositoryPassword=${{ secrets.NEXUS_PASSWORD }}
+          nexusUser=${{ secrets.NEXUS_USER }}
+          nexusPassword=${{ secrets.NEXUS_PASSWORD }}
+          allow.root=true
+          EOF
+
+      - name: Copy runtime Dockerfile and entrypoint
+        run: |
+          cp module/.github/docker/Dockerfile.runtime etendo_core/Dockerfile
+          cp module/.github/docker/docker-entrypoint.sh etendo_core/docker-entrypoint.sh
+
       - name: Build runtime image
         working-directory: etendo_core
+        env:
+          DOCKER_BUILDKIT: "1"
         run: |
           docker build \
+            --secret id=gradle_props,src=gradle.properties \
             -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }} \
             .
 
