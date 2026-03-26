@@ -73,9 +73,14 @@ jobs:
 
       - name: Build migration image
         working-directory: etendo_core
+        env:
+          DOCKER_BUILDKIT: "1"
         run: |
+          # gradle.properties is passed as a build secret: mounted only during
+          # the RUN step that needs it, never persisted in image layers.
           docker build \
             -f Dockerfile.migrate \
+            --secret id=gradle_props,src=gradle.properties \
             -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:migrate-${{ env.IMAGE_TAG }} \
             .
 
