@@ -18,6 +18,7 @@ import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
@@ -51,6 +52,7 @@ public class NeoSelectorService {
   private static final String REF_TABLE = "18";
   private static final String REF_TABLEDIR = "19";
   private static final String REF_SEARCH = "30";
+  private static final String REF_LIST = "17";
 
   // Session-level params resolved server-side (should not appear in selectorParams)
   private static final java.util.Set<String> SESSION_PARAMS = new java.util.HashSet<>(
@@ -88,9 +90,19 @@ public class NeoSelectorService {
         }
 
         String refId = getBaseReferenceId(column);
-        // Check for OBUISEL or classic FK reference
+        // Check for OBUISEL, classic FK reference, or List reference (type 17)
         boolean isObuisel = hasObuiselSelector(column);
-        if (!isObuisel && !isFkReference(refId)) {
+        boolean isList = isListReference(refId);
+        if (!isObuisel && !isFkReference(refId) && !isList) {
+          continue;
+        }
+
+        if (isList) {
+          JSONObject item = new JSONObject();
+          item.put("columnName", column.getDBColumnName());
+          item.put("referenceType", "List");
+          item.put("type", "list");
+          selectors.put(item);
           continue;
         }
 
@@ -205,9 +217,15 @@ public class NeoSelectorService {
 
       String refId = getBaseReferenceId(column);
       boolean isObuisel = hasObuiselSelector(column);
-      if (!isObuisel && !isFkReference(refId)) {
+      boolean isList = isListReference(refId);
+      if (!isObuisel && !isFkReference(refId) && !isList) {
         return NeoResponse.error(400,
             "Field is not a FK reference: " + columnName);
+      }
+
+      // List references (type 17) query AD_REF_LIST directly
+      if (isList) {
+        return resolveListSelector(column, search, limit, offset);
       }
 
       SelectorMeta meta = resolveTarget(column, refId);
@@ -250,6 +268,15 @@ public class NeoSelectorService {
         hql.append(" AND ");
       }
       hql.append(validationFilter);
+    }
+
+    // Apply natural org tree filter — mirrors Classic Etendo lookup behavior
+    String orgFilter = buildNaturalOrgFilter(meta.entityName, "e");
+    if (orgFilter != null) {
+      if (hql.length() > 0) {
+        hql.append(" AND ");
+      }
+      hql.append(orgFilter);
     }
 
     // Search filter on display property
@@ -331,6 +358,15 @@ public class NeoSelectorService {
         hql.append(" AND ");
       }
       hql.append(validationFilter);
+    }
+
+    // Apply natural org tree filter — mirrors Classic Etendo lookup behavior
+    String orgFilter = buildNaturalOrgFilter(meta.entityName, alias);
+    if (orgFilter != null) {
+      if (hql.length() > 0) {
+        hql.append(" AND ");
+      }
+      hql.append(orgFilter);
     }
 
     // Search filter: OR across all searchable properties
@@ -468,19 +504,11 @@ public class NeoSelectorService {
       hasWhere = true;
     }
 
-    // Apply readable organizations filter
-    OBContext ctx = OBContext.getOBContext();
-    String[] readableOrgs = ctx.getReadableOrganizations();
-    if (readableOrgs != null && readableOrgs.length > 0) {
+    // Apply natural org tree filter — mirrors Classic Etendo lookup behavior
+    String orgFilter = buildNaturalOrgFilter(meta.entityName, alias);
+    if (orgFilter != null) {
       baseHql.append(hasWhere ? " AND " : " WHERE ");
-      baseHql.append(alias).append(".organization.id IN (");
-      for (int i = 0; i < readableOrgs.length; i++) {
-        if (i > 0) {
-          baseHql.append(", ");
-        }
-        baseHql.append("'").append(readableOrgs[i]).append("'");
-      }
-      baseHql.append(")");
+      baseHql.append(orgFilter);
       hasWhere = true;
     }
 
@@ -981,6 +1009,120 @@ public class NeoSelectorService {
   private static boolean isFkReference(String refId) {
     return REF_TABLE.equals(refId) || REF_TABLEDIR.equals(refId)
         || REF_SEARCH.equals(refId);
+  }
+
+  private static boolean isListReference(String refId) {
+    return REF_LIST.equals(refId);
+  }
+
+  /**
+   * Resolve list values for a List reference (AD_Reference type 17).
+   * Queries AD_REF_LIST using the column's AD_Reference_Value_ID (referenceSearchKey).
+   */
+  @SuppressWarnings("unchecked")
+  private static NeoResponse resolveListSelector(Column column, String search,
+      int limit, int offset) throws Exception {
+
+    org.openbravo.model.ad.domain.Reference listRef = column.getReferenceSearchKey();
+    if (listRef == null) {
+      // Fallback: use the column's own reference (for inline list definitions)
+      listRef = column.getReference();
+    }
+
+    // Apply column-level validation rule (mirrors Classic UI filtering via AD_Val_Rule).
+    // Rules reference the "value" column of AD_REF_LIST (e.g. UPPER(Value)<>'SPANISH').
+    // Only apply static rules — skip any rule that contains @variable@ placeholders.
+    String valRuleSql = null;
+    org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
+    if (valRule != null && StringUtils.isNotBlank(valRule.getValidationCode())) {
+      String ruleCode = valRule.getValidationCode().trim();
+      if (!ruleCode.contains("@")) {
+        valRuleSql = ruleCode;
+      }
+    }
+
+    // Use separate criteria objects for count and data — OBCriteria.count() modifies
+    // the criteria projection state, so reusing the same object for list() returns wrong data.
+    OBCriteria<org.openbravo.model.ad.domain.List> countCrit = OBDal.getInstance()
+        .createCriteria(org.openbravo.model.ad.domain.List.class);
+    countCrit.add(Restrictions.eq(
+        org.openbravo.model.ad.domain.List.PROPERTY_REFERENCE + ".id",
+        listRef.getId()));
+    countCrit.add(Restrictions.eq(
+        org.openbravo.model.ad.domain.List.PROPERTY_ACTIVE, true));
+    if (valRuleSql != null) {
+      countCrit.add(Restrictions.sqlRestriction(valRuleSql));
+    }
+    if (StringUtils.isNotBlank(search)) {
+      countCrit.add(Restrictions.ilike(
+          org.openbravo.model.ad.domain.List.PROPERTY_NAME,
+          "%" + search + "%"));
+    }
+    int totalCount = countCrit.count();
+
+    OBCriteria<org.openbravo.model.ad.domain.List> dataCrit = OBDal.getInstance()
+        .createCriteria(org.openbravo.model.ad.domain.List.class);
+    dataCrit.add(Restrictions.eq(
+        org.openbravo.model.ad.domain.List.PROPERTY_REFERENCE + ".id",
+        listRef.getId()));
+    dataCrit.add(Restrictions.eq(
+        org.openbravo.model.ad.domain.List.PROPERTY_ACTIVE, true));
+    if (valRuleSql != null) {
+      dataCrit.add(Restrictions.sqlRestriction(valRuleSql));
+    }
+    if (StringUtils.isNotBlank(search)) {
+      dataCrit.add(Restrictions.ilike(
+          org.openbravo.model.ad.domain.List.PROPERTY_NAME,
+          "%" + search + "%"));
+    }
+    dataCrit.addOrderBy(
+        org.openbravo.model.ad.domain.List.PROPERTY_SEQUENCENUMBER, true);
+    dataCrit.setFirstResult(offset);
+    dataCrit.setMaxResults(limit);
+
+    JSONArray items = new JSONArray();
+    for (org.openbravo.model.ad.domain.List listItem : dataCrit.list()) {
+      JSONObject item = new JSONObject();
+      // Use the searchKey (stored DB value) as the id, and name as the label
+      item.put("id", listItem.getSearchKey());
+      item.put("label", listItem.getName());
+      items.put(item);
+    }
+
+    JSONObject result = new JSONObject();
+    result.put("items", items);
+    result.put("columns", new JSONArray());
+    result.put("totalCount", totalCount);
+    result.put("limit", limit);
+    result.put("offset", offset);
+    result.put("hasMore", (offset + limit) < totalCount);
+    return NeoResponse.ok(result);
+  }
+
+  /**
+   * Returns a map of searchKey → name for all active entries of a List reference.
+   * Used to enrich GET responses with $_{@literal identifier} labels for List reference fields.
+   *
+   * @param referenceId the AD_Reference_Value_ID of the List reference
+   * @return Map from searchKey (e.g. "GENERIC") to display name (e.g. "Use Generic Account No.")
+   */
+  @SuppressWarnings("unchecked")
+  public static Map<String, String> getListLabels(String referenceId) {
+    Map<String, String> labels = new HashMap<>();
+    try {
+      OBCriteria<org.openbravo.model.ad.domain.List> crit = OBDal.getInstance()
+          .createCriteria(org.openbravo.model.ad.domain.List.class);
+      crit.add(Restrictions.eq(
+          org.openbravo.model.ad.domain.List.PROPERTY_REFERENCE + ".id", referenceId));
+      crit.add(Restrictions.eq(
+          org.openbravo.model.ad.domain.List.PROPERTY_ACTIVE, true));
+      for (org.openbravo.model.ad.domain.List item : crit.list()) {
+        labels.put(item.getSearchKey(), item.getName());
+      }
+    } catch (Exception e) {
+      log.debug("Could not load list labels for reference {}: {}", referenceId, e.getMessage());
+    }
+    return labels;
   }
 
   /**
@@ -1579,6 +1721,52 @@ public class NeoSelectorService {
       this.label = label;
       this.property = property;
       this.sortNo = sortNo;
+    }
+  }
+
+  /**
+   * Builds an HQL fragment "alias.organization.id IN ('orgId1', 'orgId2', ...)" using the
+   * natural org tree of the active org in the current OBContext. This mirrors Classic Etendo
+   * lookup behavior — FK selectors show records accessible from the current org upward in the
+   * hierarchy, not all organizations accessible to the role.
+   *
+   * Returns null if: the entity has no "organization" property, the org is not set, or the
+   * entity is defined at "*" scope only.
+   */
+  private static String buildNaturalOrgFilter(String entityName, String alias) {
+    try {
+      Entity entityDef = ModelProvider.getInstance().getEntity(entityName);
+      // Only apply org filter if entity has "organization" property
+      entityDef.getProperty("organization");
+    } catch (Exception e) {
+      return null;
+    }
+    try {
+      OBContext ctx = OBContext.getOBContext();
+      if (ctx == null || ctx.getCurrentOrganization() == null) {
+        return null;
+      }
+      String activeOrgId = ctx.getCurrentOrganization().getId();
+      OrganizationStructureProvider osp = ctx.getOrganizationStructureProvider();
+      java.util.Set<String> naturalTree = osp.getNaturalTree(activeOrgId);
+      naturalTree.add("0"); // always include the * org
+      if (naturalTree.isEmpty()) {
+        return null;
+      }
+      StringBuilder filter = new StringBuilder(alias).append(".organization.id IN (");
+      boolean first = true;
+      for (String orgId : naturalTree) {
+        if (!first) {
+          filter.append(", ");
+        }
+        filter.append("'").append(orgId).append("'");
+        first = false;
+      }
+      filter.append(")");
+      return filter.toString();
+    } catch (Exception e) {
+      log.warn("Could not build natural org filter for entity {}: {}", entityName, e.getMessage());
+      return null;
     }
   }
 
