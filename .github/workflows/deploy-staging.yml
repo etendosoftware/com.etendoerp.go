@@ -57,9 +57,10 @@ jobs:
 
       # ── 6a. Create gradle.properties ──────────────────────────────────────
       # etendo_core gitignores gradle.properties; we generate it here from
-      # GitHub secrets so that COPY . . in the Dockerfile includes it and
-      # ./gradlew setup generates config/Openbravo.properties with the correct
-      # RDS host (otherwise WAD defaults to localhost:5432 and compilation fails).
+      # GitHub secrets so it is available as a Docker build secret for setup
+      # and includes the RDS host so ./gradlew setup generates
+      # config/Openbravo.properties with the correct bbdd.url
+      # (otherwise WAD defaults to localhost:5432 and compilation fails).
       - name: Create gradle.properties
         run: |
           {
@@ -137,25 +138,6 @@ jobs:
           cp module/.github/docker/docker-entrypoint.sh etendo_core/docker-entrypoint.sh
 
       # ── 6. Build and push runtime image ───────────────────────────────────
-      # gradle.properties is not committed to etendo_core — create it from
-      # secrets so it can be passed as a Docker build secret (never baked in layers).
-      - name: Create gradle.properties
-        run: |
-          cat > etendo_core/gradle.properties << EOF
-          githubUser=etendobot
-          githubToken=${{ secrets.ETENDOBOT_TOKEN }}
-          repositoryUser=${{ secrets.NEXUS_USER }}
-          repositoryPassword=${{ secrets.NEXUS_PASSWORD }}
-          nexusUser=${{ secrets.NEXUS_USER }}
-          nexusPassword=${{ secrets.NEXUS_PASSWORD }}
-          allow.root=true
-          EOF
-
-      - name: Copy runtime Dockerfile and entrypoint
-        run: |
-          cp module/.github/docker/Dockerfile.runtime etendo_core/Dockerfile
-          cp module/.github/docker/docker-entrypoint.sh etendo_core/docker-entrypoint.sh
-
       - name: Build runtime image
         working-directory: etendo_core
         env:
