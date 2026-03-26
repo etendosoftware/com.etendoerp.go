@@ -72,8 +72,6 @@ jobs:
           echo "nexusPassword=${{ secrets.NEXUS_PASSWORD }}"
           echo "allow.root=true"
           echo "context.name=etendo"
-          echo "bbdd.rdbms=POSTGRE"
-          echo "bbdd.driver=org.postgresql.Driver"
           echo "bbdd.sid=etendo"
           echo "bbdd.port=5432"
           echo "bbdd.host=etendo-staging.cfm2qm242otk.eu-west-3.rds.amazonaws.com"
