@@ -150,13 +150,7 @@ public class NeoServlet extends HttpBaseServlet {
     }
 
     // 2. Parse the path
-    NeoPathInfo pathInfo;
-    try {
-      pathInfo = parsePath(request.getPathInfo());
-    } catch (IllegalArgumentException e) {
-      sendError(response, HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-      return;
-    }
+    NeoPathInfo pathInfo = parsePath(request.getPathInfo());
 
     // 3. Resolve spec, entity, and tab
     try {
@@ -208,6 +202,8 @@ public class NeoServlet extends HttpBaseServlet {
       sendError(response, e.getStatusCode(), e.getMessage());
     } catch (Exception e) {
       log.error("Error processing NEO request: {}", e.getMessage(), e);
+      // Intentional: generic message avoids leaking internal details (stack traces,
+      // column names, query fragments) to API consumers. Full details are in the log.
       sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An unexpected error occurred while processing the request.");
     } finally {
@@ -505,6 +501,8 @@ public class NeoServlet extends HttpBaseServlet {
    *   /{specName}/{entityName}[/{id}]          (window specs)
    *   /{specName}/{entityName}/selectors[/{columnName}]
    *   /{specName}/{entityName}/{recordId}/action[/{columnName}]
+   * <p>This method never throws — null, empty, and single-segment paths return discovery/process
+   * mode results instead of failing.
    */
   NeoPathInfo parsePath(String pathInfo) {
     // Discovery mode: no path or root path

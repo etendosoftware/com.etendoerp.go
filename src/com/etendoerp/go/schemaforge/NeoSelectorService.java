@@ -246,7 +246,7 @@ public class NeoSelectorService {
 
       // Resolve validation rule filter from context params
       String validationFilter = resolveValidationFilter(column, meta.entityName, contextParams);
-      String organizationFilter = resolveReferenceOrganizationFilter(entity, column, meta, contextParams);
+      String organizationFilter = resolveOrgFilter(entity, column, meta, contextParams);
       String combinedFilter = combineFilters(validationFilter, organizationFilter);
 
       // Build and execute query
@@ -1614,7 +1614,8 @@ public class NeoSelectorService {
     return hqlFilter;
   }
 
-  private static String combineFilters(String... filters) {
+  /** Package-private for testing. */
+  static String combineFilters(String... filters) {
     List<String> parts = new ArrayList<>();
     for (String filter : filters) {
       if (StringUtils.isNotBlank(filter)) {
@@ -1628,16 +1629,19 @@ public class NeoSelectorService {
   }
 
   /**
-   * Some classic selectors apply the parent record's organization implicitly.
-   * Price List Version is one of those cases: when opened from a child tab,
-   * Classic only shows versions from the parent product's organization.
+   * Applies an organization filter to selectors whose target entity is org-aware.
+   * When the caller provides {@code AD_Org_ID} in context, that org is used directly.
+   * Otherwise, the filter is derived from the parent record's organization (child tabs only,
+   * i.e. tabLevel &gt; 0).
+   * Returns {@code null} (no filter) if no org context is available or if the target entity
+   * does not have an {@code organization} property.
+   *
+   * <p>This compensates for the fact that {@code AD_ISORGINCLUDED} validation clauses are
+   * stripped by {@link #sanitizeAdWhereClause} because they are SQL-only and not valid in HQL.
    */
-  private static String resolveReferenceOrganizationFilter(SFEntity sourceEntity,
+  private static String resolveOrgFilter(SFEntity sourceEntity,
       Column sourceColumn, SelectorMeta targetMeta, Map<String, String> contextParams) {
     if (sourceEntity == null || sourceColumn == null || targetMeta == null) {
-      return null;
-    }
-    if (!"M_PriceList_Version_ID".equalsIgnoreCase(sourceColumn.getDBColumnName())) {
       return null;
     }
 
@@ -1650,7 +1654,7 @@ public class NeoSelectorService {
     if (contextParams != null) {
       organizationId = contextParams.get(AD_ORG_ID);
       if (StringUtils.isBlank(organizationId)) {
-        organizationId = resolveParentOrganizationId(sourceEntity, contextParams.get("parentId"));
+        organizationId = resolveOrgFromParentRecord(sourceEntity, contextParams.get("parentId"));
       }
     }
     if (StringUtils.isBlank(organizationId)) {
@@ -1663,7 +1667,7 @@ public class NeoSelectorService {
     return "e.organization.id='" + safeOrgId + "'";
   }
 
-  private static String resolveParentOrganizationId(SFEntity sourceEntity, String parentId) {
+  private static String resolveOrgFromParentRecord(SFEntity sourceEntity, String parentId) {
     if (sourceEntity == null || StringUtils.isBlank(parentId)) {
       return null;
     }

@@ -282,4 +282,43 @@ class NeoServletPathTest {
     assertFalse(info.isEvaluateDisplay);
   }
 
+  /** Callout path should not be confused with a record ID. */
+  @Test
+  void testParsePathCalloutNotConfusedWithRecordId() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Order/callout");
+
+    assertNull(info.recordId);
+    assertTrue(info.isCallout);
+  }
+
+  /** A regular record ID should not be interpreted as a callout. */
+  @Test
+  void testParsePathRegularRecordIdNotCallout() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Order/ABC123");
+
+    assertEquals("ABC123", info.recordId);
+    assertFalse(info.isCallout);
+  }
+
+  /** NeoPathInfo constructed directly should default isCallout to false. */
+  @Test
+  void testNeoPathInfoDefaultCalloutFalse() {
+    NeoServlet.NeoPathInfo info = new NeoServlet.NeoPathInfo("s", "e", "r");
+
+    assertFalse(info.isCallout);
+  }
+
+  /** Callout sub-path should not be confused with selectors. */
+  @Test
+  void testParsePathCalloutDistinctFromSelectors() {
+    NeoServlet.NeoPathInfo callout = servlet.parsePath("/" + SPEC_NAME + "/Order/callout");
+    NeoServlet.NeoPathInfo selector = servlet.parsePath("/" + SPEC_NAME + "/Order/selectors");
+
+    assertTrue(callout.isCallout);
+    assertFalse(callout.isSelector);
+
+    assertTrue(selector.isSelector);
+    assertFalse(selector.isCallout);
+  }
+
 }
