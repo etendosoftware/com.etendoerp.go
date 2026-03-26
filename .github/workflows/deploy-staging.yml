@@ -135,9 +135,16 @@ jobs:
       # compile.complete.development) reads the DB schema to produce Java classes,
       # so the schema must be up-to-date before the Docker build.
       # Liquibase is idempotent — the ECS migration task (step 9) will no-op.
+      #
+      # Two-step invocation: `setup` runs first so createOBProperties and
+      # antSetup fully generate config/Openbravo.properties (including
+      # bbdd.driver=org.postgresql.Driver). In the second invocation those
+      # tasks are UP-TO-DATE and buildvalidation finds the file ready.
       - name: Update database schema
         working-directory: etendo_core
-        run: ./gradlew setup update.database
+        run: |
+          ./gradlew setup
+          ./gradlew update.database
 
       # ── 6d. Copy runtime Dockerfile and entrypoint ────────────────────────
       - name: Copy runtime Dockerfile and entrypoint
