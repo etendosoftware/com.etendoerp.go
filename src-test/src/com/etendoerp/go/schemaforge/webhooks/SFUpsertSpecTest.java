@@ -32,7 +32,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.dal.service.OBCriteria;
@@ -50,7 +49,6 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 @MockitoSettings(strictness = Strictness.LENIENT)
 class SFUpsertSpecTest extends BaseWebhookTest {
 
-    @InjectMocks
     private SFUpsertSpec webhook;
 
     private Window mockWindow;

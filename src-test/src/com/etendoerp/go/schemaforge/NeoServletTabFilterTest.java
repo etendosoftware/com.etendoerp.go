@@ -1,13 +1,14 @@
 package com.etendoerp.go.schemaforge;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 import java.util.HashMap;
 import java.util.Map;
 
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 /**
  * Unit tests for {@link NeoServlet} tab filtering logic.
@@ -20,19 +21,19 @@ public class NeoServletTabFilterTest {
 
   private NeoServlet servlet;
 
-  @Before
+  @BeforeEach
   public void setUp() {
     servlet = new NeoServlet();
   }
 
   /**
    * buildParentWhereClause returns null when called with a null tab.
-   * The method's internal try-catch catches any NPE and returns null.
+   * The method performs an explicit null check at the start and returns null immediately.
    */
   @Test
   public void testBuildParentWhereClauseWithNullTab() {
     String result = servlet.buildParentWhereClause(null, "ABC123");
-    assertEquals("Should return null when tab is null", null, result);
+    assertNull(result, "Should return null when tab is null");
   }
 
   /**

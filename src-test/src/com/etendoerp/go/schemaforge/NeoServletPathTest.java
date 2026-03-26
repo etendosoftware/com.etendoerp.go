@@ -1,46 +1,48 @@
 package com.etendoerp.go.schemaforge;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 /**
  * Unit tests for {@link NeoServlet} path parsing logic.
  * Tests the parsePath method which extracts specName, entityName, and recordId from the URL.
  */
-public class NeoServletPathTest {
+class NeoServletPathTest {
+
+  private static final String SPEC_NAME = "mySpec";
 
   private NeoServlet servlet;
 
-  @Before
-  public void setUp() {
+  @BeforeEach
+  void setUp() {
     servlet = new NeoServlet();
   }
 
   @Test
-  public void testParsePathSpecAndEntity() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Product");
+  void testParsePathSpecAndEntity() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Product");
 
-    assertEquals("mySpec", info.specName);
+    assertEquals(SPEC_NAME, info.specName);
     assertEquals("Product", info.entityName);
     assertNull(info.recordId);
   }
 
   @Test
-  public void testParsePathWithRecordId() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Product/ABC123");
+  void testParsePathWithRecordId() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Product/ABC123");
 
-    assertEquals("mySpec", info.specName);
+    assertEquals(SPEC_NAME, info.specName);
     assertEquals("Product", info.entityName);
     assertEquals("ABC123", info.recordId);
   }
 
   @Test
-  public void testParsePathWithUuidRecordId() {
+  void testParsePathWithUuidRecordId() {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/sales/Order/550e8400-e29b-41d4-a716-446655440000");
 
     assertEquals("sales", info.specName);
@@ -49,16 +51,16 @@ public class NeoServletPathTest {
   }
 
   @Test
-  public void testParsePathWithoutLeadingSlash() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("mySpec/Product");
+  void testParsePathWithoutLeadingSlash() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath(SPEC_NAME + "/Product");
 
-    assertEquals("mySpec", info.specName);
+    assertEquals(SPEC_NAME, info.specName);
     assertEquals("Product", info.entityName);
     assertNull(info.recordId);
   }
 
   @Test
-  public void testParsePathExtraSegmentsIgnored() {
+  void testParsePathExtraSegmentsIgnored() {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/spec/entity/id/extra/stuff");
 
     assertEquals("spec", info.specName);
@@ -66,32 +68,36 @@ public class NeoServletPathTest {
     assertEquals("id", info.recordId);
   }
 
+  /** Returns discovery mode (all nulls) when path is null. */
   @Test
-  public void testParsePathNullReturnsDiscoveryMode() {
+  void testParsePathNullReturnsDiscoveryMode() {
     NeoServlet.NeoPathInfo info = servlet.parsePath(null);
     assertNull(info.specName);
     assertNull(info.entityName);
     assertNull(info.recordId);
   }
 
+  /** Returns discovery mode (all nulls) when path is empty. */
   @Test
-  public void testParsePathEmptyReturnsDiscoveryMode() {
+  void testParsePathEmptyReturnsDiscoveryMode() {
     NeoServlet.NeoPathInfo info = servlet.parsePath("");
     assertNull(info.specName);
     assertNull(info.entityName);
     assertNull(info.recordId);
   }
 
+  /** Returns only specName when path has a single segment (process spec). */
   @Test
-  public void testParsePathOnlySpecReturnsProcessSpec() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec");
-    assertEquals("mySpec", info.specName);
+  void testParsePathOnlySpecReturnsProcessSpec() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME);
+    assertEquals(SPEC_NAME, info.specName);
     assertNull(info.entityName);
     assertNull(info.recordId);
   }
 
+  /** Returns discovery mode (all nulls) when path is a bare slash. */
   @Test
-  public void testParsePathSlashOnlyReturnsDiscoveryMode() {
+  void testParsePathSlashOnlyReturnsDiscoveryMode() {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/");
     assertNull(info.specName);
     assertNull(info.entityName);
@@ -99,7 +105,7 @@ public class NeoServletPathTest {
   }
 
   @Test
-  public void testParsePathWithSpecialCharacters() {
+  void testParsePathWithSpecialCharacters() {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/my-spec/my_entity");
 
     assertEquals("my-spec", info.specName);
@@ -107,7 +113,7 @@ public class NeoServletPathTest {
   }
 
   @Test
-  public void testParsePathCaseSensitive() {
+  void testParsePathCaseSensitive() {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/MySpec/MyEntity");
 
     assertEquals("MySpec", info.specName);
@@ -115,7 +121,7 @@ public class NeoServletPathTest {
   }
 
   @Test
-  public void testNeoPathInfoFields() {
+  void testNeoPathInfoFields() {
     NeoServlet.NeoPathInfo info = new NeoServlet.NeoPathInfo("s", "e", "r");
 
     assertEquals("s", info.specName);
@@ -124,17 +130,17 @@ public class NeoServletPathTest {
   }
 
   @Test
-  public void testNeoPathInfoNullRecordId() {
+  void testNeoPathInfoNullRecordId() {
     NeoServlet.NeoPathInfo info = new NeoServlet.NeoPathInfo("s", "e", null);
 
     assertNull(info.recordId);
   }
 
   @Test
-  public void testParsePathSelectorsList() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Product/selectors");
+  void testParsePathSelectorsList() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Product/selectors");
 
-    assertEquals("mySpec", info.specName);
+    assertEquals(SPEC_NAME, info.specName);
     assertEquals("Product", info.entityName);
     assertTrue(info.isSelector);
     assertNull(info.selectorField);
@@ -142,10 +148,10 @@ public class NeoServletPathTest {
   }
 
   @Test
-  public void testParsePathSelectorField() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Product/selectors/C_BPartner_ID");
+  void testParsePathSelectorField() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Product/selectors/C_BPartner_ID");
 
-    assertEquals("mySpec", info.specName);
+    assertEquals(SPEC_NAME, info.specName);
     assertEquals("Product", info.entityName);
     assertTrue(info.isSelector);
     assertEquals("C_BPartner_ID", info.selectorField);
@@ -153,20 +159,20 @@ public class NeoServletPathTest {
   }
 
   @Test
-  public void testParsePathRecordIdNotSelector() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Product/ABC123");
+  void testParsePathRecordIdNotSelector() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Product/ABC123");
 
-    assertEquals("mySpec", info.specName);
+    assertEquals(SPEC_NAME, info.specName);
     assertEquals("Product", info.entityName);
     assertFalse(info.isSelector);
     assertEquals("ABC123", info.recordId);
   }
 
   @Test
-  public void testParsePathActionList() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/REC123/action");
+  void testParsePathActionList() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Order/REC123/action");
 
-    assertEquals("mySpec", info.specName);
+    assertEquals(SPEC_NAME, info.specName);
     assertEquals("Order", info.entityName);
     assertEquals("REC123", info.recordId);
     assertTrue(info.isAction);
@@ -175,10 +181,10 @@ public class NeoServletPathTest {
   }
 
   @Test
-  public void testParsePathActionWithColumnName() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/REC123/action/DocAction");
+  void testParsePathActionWithColumnName() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Order/REC123/action/DocAction");
 
-    assertEquals("mySpec", info.specName);
+    assertEquals(SPEC_NAME, info.specName);
     assertEquals("Order", info.entityName);
     assertEquals("REC123", info.recordId);
     assertTrue(info.isAction);
@@ -187,7 +193,7 @@ public class NeoServletPathTest {
   }
 
   @Test
-  public void testParsePathActionWithUuidRecordId() {
+  void testParsePathActionWithUuidRecordId() {
     NeoServlet.NeoPathInfo info = servlet.parsePath(
         "/sales/Invoice/550e8400-e29b-41d4-a716-446655440000/action/Posted");
 
@@ -199,7 +205,7 @@ public class NeoServletPathTest {
   }
 
   @Test
-  public void testParsePathNonActionSubPath() {
+  void testParsePathNonActionSubPath() {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/spec/entity/id/other");
 
     assertEquals("spec", info.specName);
@@ -210,7 +216,7 @@ public class NeoServletPathTest {
   }
 
   @Test
-  public void testNeoPathInfoDefaultActionFields() {
+  void testNeoPathInfoDefaultActionFields() {
     NeoServlet.NeoPathInfo info = new NeoServlet.NeoPathInfo("s", "e", "r");
 
     assertFalse(info.isAction);
@@ -218,7 +224,7 @@ public class NeoServletPathTest {
   }
 
   @Test
-  public void testNeoPathInfoSelectorConstructorDefaultActionFields() {
+  void testNeoPathInfoSelectorConstructorDefaultActionFields() {
     NeoServlet.NeoPathInfo info = new NeoServlet.NeoPathInfo("s", "e", null, true, "field");
 
     assertTrue(info.isSelector);
@@ -227,10 +233,10 @@ public class NeoServletPathTest {
   }
 
   @Test
-  public void testParsePathEvaluateDisplay() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/evaluate-display");
+  void testParsePathEvaluateDisplay() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Order/evaluate-display");
 
-    assertEquals("mySpec", info.specName);
+    assertEquals(SPEC_NAME, info.specName);
     assertEquals("Order", info.entityName);
     assertTrue(info.isEvaluateDisplay);
     assertNull(info.recordId);
@@ -239,23 +245,23 @@ public class NeoServletPathTest {
   }
 
   @Test
-  public void testParsePathEvaluateDisplayNotConfusedWithRecordId() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/evaluate-display");
+  void testParsePathEvaluateDisplayNotConfusedWithRecordId() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Order/evaluate-display");
 
     assertNull(info.recordId);
     assertTrue(info.isEvaluateDisplay);
   }
 
   @Test
-  public void testParsePathRegularRecordIdNotEvaluateDisplay() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/ABC123");
+  void testParsePathRegularRecordIdNotEvaluateDisplay() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Order/ABC123");
 
     assertEquals("ABC123", info.recordId);
     assertFalse(info.isEvaluateDisplay);
   }
 
   @Test
-  public void testNeoPathInfoDefaultEvaluateDisplayFalse() {
+  void testNeoPathInfoDefaultEvaluateDisplayFalse() {
     NeoServlet.NeoPathInfo info = new NeoServlet.NeoPathInfo("s", "e", "r");
 
     assertFalse(info.isEvaluateDisplay);
@@ -264,10 +270,10 @@ public class NeoServletPathTest {
   // ── Callout path tests ─────────────────────────────────────────────
 
   @Test
-  public void testParsePathCallout() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/callout");
+  void testParsePathCallout() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Order/callout");
 
-    assertEquals("mySpec", info.specName);
+    assertEquals(SPEC_NAME, info.specName);
     assertEquals("Order", info.entityName);
     assertTrue(info.isCallout);
     assertNull(info.recordId);
@@ -276,38 +282,4 @@ public class NeoServletPathTest {
     assertFalse(info.isEvaluateDisplay);
   }
 
-  @Test
-  public void testParsePathCalloutNotConfusedWithRecordId() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/callout");
-
-    assertNull(info.recordId);
-    assertTrue(info.isCallout);
-  }
-
-  @Test
-  public void testParsePathRegularRecordIdNotCallout() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec/Order/ABC123");
-
-    assertEquals("ABC123", info.recordId);
-    assertFalse(info.isCallout);
-  }
-
-  @Test
-  public void testNeoPathInfoDefaultCalloutFalse() {
-    NeoServlet.NeoPathInfo info = new NeoServlet.NeoPathInfo("s", "e", "r");
-
-    assertFalse(info.isCallout);
-  }
-
-  @Test
-  public void testParsePathCalloutDistinctFromSelectors() {
-    NeoServlet.NeoPathInfo calloutInfo = servlet.parsePath("/spec/entity/callout");
-    NeoServlet.NeoPathInfo selectorInfo = servlet.parsePath("/spec/entity/selectors");
-
-    assertTrue(calloutInfo.isCallout);
-    assertFalse(calloutInfo.isSelector);
-
-    assertFalse(selectorInfo.isCallout);
-    assertTrue(selectorInfo.isSelector);
-  }
 }

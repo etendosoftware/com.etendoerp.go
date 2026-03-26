@@ -32,7 +32,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.model.ad.module.Module;
@@ -49,13 +48,11 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 @MockitoSettings(strictness = Strictness.LENIENT)
 class SFUpsertEntityTest extends BaseWebhookTest {
 
-    @InjectMocks
     private SFUpsertEntity webhook;
 
     private SFSpec mockSpec;
     private Tab mockTab;
     private Module mockModule;
-    private SFEntity newEntity;
 
     @BeforeEach
     void setUp() {
@@ -66,7 +63,7 @@ class SFUpsertEntityTest extends BaseWebhookTest {
         when(mockTab.getName()).thenReturn("Default Tab Name");
 
         // Stub OBProvider to return a mock SFEntity that tracks state via setters.
-        newEntity = mock(SFEntity.class);
+        SFEntity newEntity = mock(SFEntity.class);
         when(newEntity.getId()).thenReturn("new-entity-id");
 
         AtomicReference<String> entityName = new AtomicReference<>("");

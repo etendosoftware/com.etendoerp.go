@@ -25,6 +25,7 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
 public class SFUpsertField extends BaseWebhookService {
 
   private static final Logger log = LogManager.getLogger(SFUpsertField.class);
+  private static final String ERROR_KEY = "error";
 
   @Override
   public void get(Map<String, String> parameter, Map<String, String> responseVars) {
@@ -38,19 +39,19 @@ public class SFUpsertField extends BaseWebhookService {
       // Validate all referenced objects before creating or loading the field.
       SFEntity entity = OBDal.getInstance().get(SFEntity.class, entityId);
       if (entity == null) {
-        responseVars.put("error", "Entity not found: " + entityId);
+        responseVars.put(ERROR_KEY, "Entity not found: " + entityId);
         return;
       }
 
       Column column = OBDal.getInstance().get(Column.class, columnId);
       if (column == null) {
-        responseVars.put("error", "Column not found: " + columnId);
+        responseVars.put(ERROR_KEY, "Column not found: " + columnId);
         return;
       }
 
       Module module = OBDal.getInstance().get(Module.class, moduleId);
       if (module == null) {
-        responseVars.put("error", "Module not found: " + moduleId);
+        responseVars.put(ERROR_KEY, "Module not found: " + moduleId);
         return;
       }
 
@@ -58,7 +59,7 @@ public class SFUpsertField extends BaseWebhookService {
       if (fieldId != null && !fieldId.isEmpty()) {
         field = OBDal.getInstance().get(SFField.class, fieldId);
         if (field == null) {
-          responseVars.put("error", "Field not found: " + fieldId);
+          responseVars.put(ERROR_KEY, "Field not found: " + fieldId);
           return;
         }
       } else {
@@ -104,7 +105,7 @@ public class SFUpsertField extends BaseWebhookService {
 
     } catch (Exception e) {
       log.error("Error in SFUpsertField", e);
-      responseVars.put("error", e.getMessage());
+      responseVars.put(ERROR_KEY, e.getMessage());
     } finally {
       OBContext.restorePreviousMode();
     }

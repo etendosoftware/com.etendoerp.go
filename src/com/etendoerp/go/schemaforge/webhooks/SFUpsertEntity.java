@@ -25,6 +25,7 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
 public class SFUpsertEntity extends BaseWebhookService {
 
   private static final Logger log = LogManager.getLogger(SFUpsertEntity.class);
+  private static final String ERROR_KEY = "error";
 
   @Override
   public void get(Map<String, String> parameter, Map<String, String> responseVars) {
@@ -38,86 +39,40 @@ public class SFUpsertEntity extends BaseWebhookService {
       // Validate all referenced objects before creating or loading the entity.
       SFSpec spec = OBDal.getInstance().get(SFSpec.class, specId);
       if (spec == null) {
-        responseVars.put("error", "Spec not found: " + specId);
+        responseVars.put(ERROR_KEY, "Spec not found: " + specId);
         return;
       }
 
       Tab tab = OBDal.getInstance().get(Tab.class, tabId);
       if (tab == null) {
-        responseVars.put("error", "Tab not found: " + tabId);
+        responseVars.put(ERROR_KEY, "Tab not found: " + tabId);
         return;
       }
 
       Module module = OBDal.getInstance().get(Module.class, moduleId);
       if (module == null) {
-        responseVars.put("error", "Module not found: " + moduleId);
+        responseVars.put(ERROR_KEY, "Module not found: " + moduleId);
         return;
       }
 
+      boolean isNew = entityId == null || entityId.isEmpty();
       SFEntity entity;
-      if (entityId != null && !entityId.isEmpty()) {
+      if (!isNew) {
         entity = OBDal.getInstance().get(SFEntity.class, entityId);
         if (entity == null) {
-          responseVars.put("error", "Entity not found: " + entityId);
+          responseVars.put(ERROR_KEY, "Entity not found: " + entityId);
           return;
         }
       } else {
-        entity = OBProvider.getInstance().get(SFEntity.class);
-        entity.setNewOBObject(true);
-        entity.setClient(OBContext.getOBContext().getCurrentClient());
-        entity.setOrganization(OBContext.getOBContext().getCurrentOrganization());
-        entity.setActive(true);
-        entity.setCreatedBy(OBContext.getOBContext().getUser());
-        entity.setUpdatedBy(OBContext.getOBContext().getUser());
-        entity.setCreationDate(new Date());
-        entity.setUpdated(new Date());
-        entity.setIncluded(true);
-        entity.setGet(false);
-        entity.setGetByID(false);
-        entity.setPost(false);
-        entity.setPut(false);
-        entity.setPatch(false);
-        entity.setDelete(false);
+        entity = createNewEntity();
       }
 
       entity.setETGOSFSpec(spec);
       entity.setADTab(tab);
       entity.setADModule(module);
 
-      if (parameter.containsKey("Name")) {
-        entity.setName(parameter.get("Name"));
-      } else if (entityId == null || entityId.isEmpty()) {
-        entity.setName(tab.getName());
-      }
-
-      if (parameter.containsKey("IsIncluded")) {
-        entity.setIncluded("Y".equalsIgnoreCase(parameter.get("IsIncluded")));
-      }
-      if (parameter.containsKey("IsGet")) {
-        entity.setGet("Y".equalsIgnoreCase(parameter.get("IsGet")));
-      }
-      if (parameter.containsKey("IsGetbyid")) {
-        entity.setGetByID("Y".equalsIgnoreCase(parameter.get("IsGetbyid")));
-      }
-      if (parameter.containsKey("IsPost")) {
-        entity.setPost("Y".equalsIgnoreCase(parameter.get("IsPost")));
-      }
-      if (parameter.containsKey("IsPut")) {
-        entity.setPut("Y".equalsIgnoreCase(parameter.get("IsPut")));
-      }
-      if (parameter.containsKey("IsPatch")) {
-        entity.setPatch("Y".equalsIgnoreCase(parameter.get("IsPatch")));
-      }
-      if (parameter.containsKey("IsDelete")) {
-        entity.setDelete("Y".equalsIgnoreCase(parameter.get("IsDelete")));
-      }
-
-      if (parameter.containsKey("JavaQualifier")) {
-        entity.setJavaQualifier(parameter.get("JavaQualifier"));
-      }
-      if (parameter.containsKey("SeqNo")) {
-        entity.setSeqNo(Long.valueOf(parameter.get("SeqNo")));
-      }
+      applyName(entity, parameter, tab, isNew);
+      applyOptionalParams(entity, parameter);
 
       OBDal.getInstance().save(entity);
       OBDal.getInstance().flush();
@@ -128,9 +83,67 @@ public class SFUpsertEntity extends BaseWebhookService {
 
     } catch (Exception e) {
       log.error("Error in SFUpsertEntity", e);
-      responseVars.put("error", e.getMessage());
+      responseVars.put(ERROR_KEY, e.getMessage());
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  private SFEntity createNewEntity() {
+    SFEntity entity = OBProvider.getInstance().get(SFEntity.class);
+    entity.setNewOBObject(true);
+    entity.setClient(OBContext.getOBContext().getCurrentClient());
+    entity.setOrganization(OBContext.getOBContext().getCurrentOrganization());
+    entity.setActive(true);
+    entity.setCreatedBy(OBContext.getOBContext().getUser());
+    entity.setUpdatedBy(OBContext.getOBContext().getUser());
+    entity.setCreationDate(new Date());
+    entity.setUpdated(new Date());
+    entity.setIncluded(true);
+    entity.setGet(false);
+    entity.setGetByID(false);
+    entity.setPost(false);
+    entity.setPut(false);
+    entity.setPatch(false);
+    entity.setDelete(false);
+    return entity;
+  }
+
+  private void applyName(SFEntity entity, Map<String, String> parameter, Tab tab, boolean isNew) {
+    if (parameter.containsKey("Name")) {
+      entity.setName(parameter.get("Name"));
+    } else if (isNew) {
+      entity.setName(tab.getName());
+    }
+  }
+
+  private void applyOptionalParams(SFEntity entity, Map<String, String> parameter) {
+    if (parameter.containsKey("IsIncluded")) {
+      entity.setIncluded("Y".equalsIgnoreCase(parameter.get("IsIncluded")));
+    }
+    if (parameter.containsKey("IsGet")) {
+      entity.setGet("Y".equalsIgnoreCase(parameter.get("IsGet")));
+    }
+    if (parameter.containsKey("IsGetbyid")) {
+      entity.setGetByID("Y".equalsIgnoreCase(parameter.get("IsGetbyid")));
+    }
+    if (parameter.containsKey("IsPost")) {
+      entity.setPost("Y".equalsIgnoreCase(parameter.get("IsPost")));
+    }
+    if (parameter.containsKey("IsPut")) {
+      entity.setPut("Y".equalsIgnoreCase(parameter.get("IsPut")));
+    }
+    if (parameter.containsKey("IsPatch")) {
+      entity.setPatch("Y".equalsIgnoreCase(parameter.get("IsPatch")));
+    }
+    if (parameter.containsKey("IsDelete")) {
+      entity.setDelete("Y".equalsIgnoreCase(parameter.get("IsDelete")));
+    }
+    if (parameter.containsKey("JavaQualifier")) {
+      entity.setJavaQualifier(parameter.get("JavaQualifier"));
+    }
+    if (parameter.containsKey("SeqNo")) {
+      entity.setSeqNo(Long.valueOf(parameter.get("SeqNo")));
     }
   }
 }

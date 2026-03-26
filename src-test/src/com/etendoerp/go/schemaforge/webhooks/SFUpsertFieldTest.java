@@ -30,7 +30,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.model.ad.datamodel.Column;
@@ -47,7 +46,6 @@ import com.etendoerp.go.schemaforge.data.SFField;
 @MockitoSettings(strictness = Strictness.LENIENT)
 class SFUpsertFieldTest extends BaseWebhookTest {
 
-    @InjectMocks
     private SFUpsertField webhook;
 
     private SFEntity mockEntity;
