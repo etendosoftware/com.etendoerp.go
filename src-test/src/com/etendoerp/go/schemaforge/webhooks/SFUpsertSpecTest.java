@@ -24,7 +24,9 @@ import static org.mockito.Mockito.*;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -33,6 +35,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.model.ad.module.Module;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Window;
@@ -60,6 +63,21 @@ class SFUpsertSpecTest extends BaseWebhookTest {
         mockWindow = mock(Window.class);
         mockProcess = mock(Process.class);
         mockModule = mock(Module.class);
+
+        // Stub duplicate-name criteria to return empty list (no existing spec with same name).
+        OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
+        when(specCriteria.list()).thenReturn(Collections.emptyList());
+
+        // Stub OBProvider to return a mock SFSpec that tracks state via setters.
+        SFSpec newSpec = mock(SFSpec.class);
+        when(newSpec.getId()).thenReturn("new-spec-id");
+
+        AtomicReference<String> specName = new AtomicReference<>("");
+        doAnswer(inv -> { specName.set(inv.getArgument(0)); return null; })
+            .when(newSpec).setName(any());
+        when(newSpec.getName()).thenAnswer(inv -> specName.get());
+
+        when(obProvider.get(SFSpec.class)).thenReturn(newSpec);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────

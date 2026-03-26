@@ -66,24 +66,36 @@ public class NeoServletPathTest {
     assertEquals("id", info.recordId);
   }
 
-  @Test(expected = IllegalArgumentException.class)
-  public void testParsePathNull() {
-    servlet.parsePath(null);
+  @Test
+  public void testParsePathNullReturnsDiscoveryMode() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath(null);
+    assertNull(info.specName);
+    assertNull(info.entityName);
+    assertNull(info.recordId);
   }
 
-  @Test(expected = IllegalArgumentException.class)
-  public void testParsePathEmpty() {
-    servlet.parsePath("");
+  @Test
+  public void testParsePathEmptyReturnsDiscoveryMode() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("");
+    assertNull(info.specName);
+    assertNull(info.entityName);
+    assertNull(info.recordId);
   }
 
-  @Test(expected = IllegalArgumentException.class)
-  public void testParsePathOnlySpec() {
-    servlet.parsePath("/mySpec");
+  @Test
+  public void testParsePathOnlySpecReturnsProcessSpec() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/mySpec");
+    assertEquals("mySpec", info.specName);
+    assertNull(info.entityName);
+    assertNull(info.recordId);
   }
 
-  @Test(expected = IllegalArgumentException.class)
-  public void testParsePathSlashOnly() {
-    servlet.parsePath("/");
+  @Test
+  public void testParsePathSlashOnlyReturnsDiscoveryMode() {
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/");
+    assertNull(info.specName);
+    assertNull(info.entityName);
+    assertNull(info.recordId);
   }
 
   @Test

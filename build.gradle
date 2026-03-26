@@ -1,5 +1,51 @@
-plugins {
-    id 'java'
+/**
+*   This file was generated automatically by the 'createModuleBuild' task.
+*   Created at: 2026-03-25T23:15:58.894577918Z.
+*
+*   WARNING: Do not put your credentials directly in this file.
+*
+*/
+
+group          = "com.etendoerp"
+version        = "1.0.0"
+description    = "Etendo Go mobile application module"
+ext.artifact   = "go"
+ext.repository = "https://maven.pkg.github.com/etendosoftware/com.etendoerp.essentials.extensions"
+
+configurations {
+    moduleDependencyContainer
+}
+
+publishing {
+    publications {
+        "com.etendoerp.go"(MavenPublication) {
+            from components.java
+            groupId    = group
+            artifactId = artifact
+            version    = version
+        }
+    }
+    repositories {
+        maven {
+            url = "https://maven.pkg.github.com/etendosoftware/com.etendoerp.essentials.extensions"
+        }
+    }
+}
+
+repositories {
+    mavenCentral()
+    maven {
+        url = "https://maven.pkg.github.com/etendosoftware/com.etendoerp.essentials.extensions"
+    }
+    maven {
+        url = "https://repo.futit.cloud/repository/maven-releases"
+    }
+    maven {
+        url = "https://repo.futit.cloud/repository/maven-public-releases"
+    }
+    maven {
+        url = "https://repo.futit.cloud/repository/maven-public-jars"
+    }
 }
 
 sourceSets {
@@ -10,14 +56,22 @@ sourceSets {
     }
 }
 
+/**
+* Declare Java dependencies using 'implementation'
+* Ex: implementation "com.sun.mail:javax.mail:1.6.2"
+*/
 dependencies {
-    implementation('com.etendoerp:openapi:[2.5.0,)')
-    implementation('com.etendoerp:webhookevents:[2.6.1,)')
+    implementation('com.etendoerp.platform:etendo-core:[25.2.0,26.1.0)')
+    implementation('com.etendoerp:webhookevents:2.6.1')
+    implementation('com.etendoerp:openapi:2.5.0')
     compileOnly 'io.swagger.core.v3:swagger-models:2.1.13'
     compileOnly 'org.apache.commons:commons-lang3:3.12.0'
+    testImplementation 'junit:junit:4.13.2'
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'
-    testImplementation 'org.junit.jupiter:junit-jupiter-engine:5.9.2'
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine:5.9.2'
+    testRuntimeOnly 'org.junit.vintage:junit-vintage-engine:5.9.2'
     testImplementation 'org.mockito:mockito-core:5.2.0'
     testImplementation 'org.mockito:mockito-inline:5.2.0'
     testImplementation 'org.mockito:mockito-junit-jupiter:5.2.0'
 }
+

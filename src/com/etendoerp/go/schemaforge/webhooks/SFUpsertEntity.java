@@ -5,6 +5,7 @@ import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.module.Module;
@@ -34,6 +35,25 @@ public class SFUpsertEntity extends BaseWebhookService {
       String tabId = parameter.get("TabID");
       String moduleId = parameter.get("ModuleID");
 
+      // Validate all referenced objects before creating or loading the entity.
+      SFSpec spec = OBDal.getInstance().get(SFSpec.class, specId);
+      if (spec == null) {
+        responseVars.put("error", "Spec not found: " + specId);
+        return;
+      }
+
+      Tab tab = OBDal.getInstance().get(Tab.class, tabId);
+      if (tab == null) {
+        responseVars.put("error", "Tab not found: " + tabId);
+        return;
+      }
+
+      Module module = OBDal.getInstance().get(Module.class, moduleId);
+      if (module == null) {
+        responseVars.put("error", "Module not found: " + moduleId);
+        return;
+      }
+
       SFEntity entity;
       if (entityId != null && !entityId.isEmpty()) {
         entity = OBDal.getInstance().get(SFEntity.class, entityId);
@@ -42,7 +62,7 @@ public class SFUpsertEntity extends BaseWebhookService {
           return;
         }
       } else {
-        entity = new SFEntity();
+        entity = OBProvider.getInstance().get(SFEntity.class);
         entity.setNewOBObject(true);
         entity.setClient(OBContext.getOBContext().getCurrentClient());
         entity.setOrganization(OBContext.getOBContext().getCurrentOrganization());
@@ -60,25 +80,8 @@ public class SFUpsertEntity extends BaseWebhookService {
         entity.setDelete(false);
       }
 
-      SFSpec spec = OBDal.getInstance().get(SFSpec.class, specId);
-      if (spec == null) {
-        responseVars.put("error", "Spec not found: " + specId);
-        return;
-      }
       entity.setETGOSFSpec(spec);
-
-      Tab tab = OBDal.getInstance().get(Tab.class, tabId);
-      if (tab == null) {
-        responseVars.put("error", "Tab not found: " + tabId);
-        return;
-      }
       entity.setADTab(tab);
-
-      Module module = OBDal.getInstance().get(Module.class, moduleId);
-      if (module == null) {
-        responseVars.put("error", "Module not found: " + moduleId);
-        return;
-      }
       entity.setADModule(module);
 
       if (parameter.containsKey("Name")) {

@@ -5,6 +5,7 @@ import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
@@ -34,6 +35,25 @@ public class SFUpsertField extends BaseWebhookService {
       String columnId = parameter.get("ColumnID");
       String moduleId = parameter.get("ModuleID");
 
+      // Validate all referenced objects before creating or loading the field.
+      SFEntity entity = OBDal.getInstance().get(SFEntity.class, entityId);
+      if (entity == null) {
+        responseVars.put("error", "Entity not found: " + entityId);
+        return;
+      }
+
+      Column column = OBDal.getInstance().get(Column.class, columnId);
+      if (column == null) {
+        responseVars.put("error", "Column not found: " + columnId);
+        return;
+      }
+
+      Module module = OBDal.getInstance().get(Module.class, moduleId);
+      if (module == null) {
+        responseVars.put("error", "Module not found: " + moduleId);
+        return;
+      }
+
       SFField field;
       if (fieldId != null && !fieldId.isEmpty()) {
         field = OBDal.getInstance().get(SFField.class, fieldId);
@@ -42,7 +62,7 @@ public class SFUpsertField extends BaseWebhookService {
           return;
         }
       } else {
-        field = new SFField();
+        field = OBProvider.getInstance().get(SFField.class);
         field.setNewOBObject(true);
         field.setClient(OBContext.getOBContext().getCurrentClient());
         field.setOrganization(OBContext.getOBContext().getCurrentOrganization());
@@ -55,25 +75,8 @@ public class SFUpsertField extends BaseWebhookService {
         field.setReadOnly(false);
       }
 
-      SFEntity entity = OBDal.getInstance().get(SFEntity.class, entityId);
-      if (entity == null) {
-        responseVars.put("error", "Entity not found: " + entityId);
-        return;
-      }
       field.setETGOSFEntity(entity);
-
-      Column column = OBDal.getInstance().get(Column.class, columnId);
-      if (column == null) {
-        responseVars.put("error", "Column not found: " + columnId);
-        return;
-      }
       field.setADColumn(column);
-
-      Module module = OBDal.getInstance().get(Module.class, moduleId);
-      if (module == null) {
-        responseVars.put("error", "Module not found: " + moduleId);
-        return;
-      }
       field.setADModule(module);
 
       if (parameter.containsKey("IsIncluded")) {

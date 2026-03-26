@@ -19,10 +19,12 @@ package com.etendoerp.go.schemaforge.webhooks;
 import static com.etendoerp.go.schemaforge.TestConstants.*;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.*;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -58,6 +60,22 @@ class SFUpsertFieldTest extends BaseWebhookTest {
         mockEntity = mock(SFEntity.class);
         mockColumn = mock(Column.class);
         mockModule = mock(Module.class);
+
+        // Stub OBProvider to return a mock SFField that tracks state via setters.
+        SFField newField = mock(SFField.class);
+        when(newField.getId()).thenReturn("new-field-id");
+
+        AtomicBoolean fieldIncluded = new AtomicBoolean(false);
+        doAnswer(inv -> { fieldIncluded.set(inv.getArgument(0)); return null; })
+            .when(newField).setIncluded(anyBoolean());
+        when(newField.isIncluded()).thenAnswer(inv -> fieldIncluded.get());
+
+        AtomicBoolean fieldReadOnly = new AtomicBoolean(false);
+        doAnswer(inv -> { fieldReadOnly.set(inv.getArgument(0)); return null; })
+            .when(newField).setReadOnly(anyBoolean());
+        when(newField.isReadOnly()).thenAnswer(inv -> fieldReadOnly.get());
+
+        when(obProvider.get(SFField.class)).thenReturn(newField);
     }
 
     // ── helpers ──────────────────────────────────────────────────────────
@@ -145,6 +163,7 @@ class SFUpsertFieldTest extends BaseWebhookTest {
     void testFieldNotFoundOnUpdate() {
         parameters.put(FIELD_ID, "nonexistent");
         setupValidRequestParams();
+        stubSuccessfulLookups();
 
         when(obDal.get(SFField.class, "nonexistent")).thenReturn(null);
 

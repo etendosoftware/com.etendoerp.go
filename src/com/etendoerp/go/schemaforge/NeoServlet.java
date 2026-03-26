@@ -78,6 +78,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 public class NeoServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
+  private static final int MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024;
 
   /**
    * Minimal shim for SmartClient functions used by DynamicExpressionParser output.
@@ -914,7 +915,10 @@ public class NeoServlet extends HttpBaseServlet {
    * Builds an HQL where clause fragment that filters a child tab's records
    * by the parent record ID.
    */
-  private String buildParentWhereClause(Tab childTab, String parentId) {
+  String buildParentWhereClause(Tab childTab, String parentId) {
+    if (childTab == null) {
+      return null;
+    }
     try {
       Tab parentTab = KernelUtils.getInstance().getParentTab(childTab);
       if (parentTab == null) {
@@ -2117,7 +2121,12 @@ public class NeoServlet extends HttpBaseServlet {
           out.write(data);
         }
       } else if ("POST".equals(method)) {
-        String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        byte[] rawBytes = request.getInputStream().readNBytes(MAX_IMAGE_SIZE_BYTES + 1);
+        if (rawBytes.length > MAX_IMAGE_SIZE_BYTES) {
+          sendError(response, HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE, "Image exceeds 10 MB limit");
+          return;
+        }
+        String bodyStr = new String(rawBytes, StandardCharsets.UTF_8);
         JSONObject body = new JSONObject(bodyStr);
         String name = body.optString("name", "image");
         String mimeType = body.optString("mimeType", "image/png");
@@ -2154,7 +2163,8 @@ public class NeoServlet extends HttpBaseServlet {
       }
     } catch (Exception e) {
       log.error("Error handling image request", e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      OBDal.getInstance().rollbackAndClose();
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Image request failed");
     }
   }
 }
