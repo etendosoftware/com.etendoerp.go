@@ -131,7 +131,17 @@ jobs:
             --cidr ${RUNNER_IP}/32 \
             --region ${{ env.AWS_REGION }} || echo "SG rule already exists"
 
-      # ── 6c. Copy runtime Dockerfile and entrypoint ────────────────────────
+      # ── 6c. Update database schema (pre-build) ────────────────────────────
+      # etendo_core:develop may reference new DAL entities (e.g. EmailBpContact)
+      # that do not yet exist in staging. generate.entities (called inside
+      # compile.complete.development) reads the DB schema to produce Java classes,
+      # so the schema must be up-to-date before the Docker build.
+      # Liquibase is idempotent — the ECS migration task (step 9) will no-op.
+      - name: Update database schema
+        working-directory: etendo_core
+        run: ./gradlew setup update.database
+
+      # ── 6d. Copy runtime Dockerfile and entrypoint ────────────────────────
       - name: Copy runtime Dockerfile and entrypoint
         run: |
           cp module/.github/docker/Dockerfile.runtime etendo_core/Dockerfile
