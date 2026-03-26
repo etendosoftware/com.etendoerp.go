@@ -1,9 +1,7 @@
 name: Deploy to Staging
 
 on:
-  push:
-    branches:
-      - epic/ETP-3504
+  workflow_dispatch: # Disabled automatic trigger — pipeline moved to Jenkins (ETP-3604)
 
 env:
   AWS_REGION: eu-west-3
