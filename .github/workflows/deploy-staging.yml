@@ -130,6 +130,12 @@ jobs:
             --cidr ${RUNNER_IP}/32 \
             --region ${{ env.AWS_REGION }} || echo "SG rule already exists"
 
+      # ── 6c. Copy runtime Dockerfile and entrypoint ────────────────────────
+      - name: Copy runtime Dockerfile and entrypoint
+        run: |
+          cp module/.github/docker/Dockerfile.runtime etendo_core/Dockerfile
+          cp module/.github/docker/docker-entrypoint.sh etendo_core/docker-entrypoint.sh
+
       # ── 6. Build and push runtime image ───────────────────────────────────
       # gradle.properties is not committed to etendo_core — create it from
       # secrets so it can be passed as a Docker build secret (never baked in layers).
