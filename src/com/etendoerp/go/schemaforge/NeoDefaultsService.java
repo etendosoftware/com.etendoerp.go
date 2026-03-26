@@ -9,6 +9,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -20,6 +21,7 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.secureApp.LoginUtils;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
@@ -386,7 +388,7 @@ public class NeoDefaultsService {
    * $Element_*, preferences, accounting dimensions, etc.) are resolved identically to the
    * classic UI, without hardcoding individual variables.</p>
    */
-  private static VariablesSecureApp buildVariablesSecureApp(OBContext obContext) {
+  static VariablesSecureApp buildVariablesSecureApp(OBContext obContext) {
     String userId = obContext.getUser().getId();
     String clientId = obContext.getCurrentClient().getId();
     String orgId = obContext.getCurrentOrganization().getId();
@@ -478,6 +480,42 @@ public class NeoDefaultsService {
       DalConnectionProvider conn = new DalConnectionProvider(false);
       String windowId = ctx.getSfEntity() != null ? resolveWindowId(ctx.getSfEntity()) : "";
 
+      // Load parent record values for resolving @FieldName@ defaults (e.g., @DateOrdered@, @C_Currency_ID@).
+      // In classic Etendo, these are window-context variables set when the user is on the parent tab.
+      // In NEO Headless, we resolve them by reading the parent record directly.
+      Map<String, Object> parentValues = new java.util.HashMap<>();
+      if (parentId != null && !parentId.isEmpty() && adTab.getTabLevel() > 0) {
+        try {
+          Tab parentTab = adTab.getWindow().getADTabList().stream()
+              .filter(t -> t.getTabLevel() == adTab.getTabLevel() - 1 && t.isActive())
+              .findFirst().orElse(null);
+          if (parentTab != null) {
+            Entity parentEntity = ModelProvider.getInstance()
+                .getEntityByTableId(parentTab.getTable().getId());
+            if (parentEntity != null) {
+              BaseOBObject parentRecord = OBDal.getInstance().get(parentEntity.getName(), parentId);
+              if (parentRecord != null) {
+                for (Property p : parentEntity.getProperties()) {
+                  Object val = parentRecord.get(p.getName());
+                  if (val != null) {
+                    // Store by DB column name (uppercase) for matching @ColumnName@ expressions
+                    String colName = p.getColumnName();
+                    if (colName != null) {
+                      parentValues.put(colName.toUpperCase(), val instanceof BaseOBObject
+                          ? ((BaseOBObject) val).getId().toString() : val);
+                    }
+                  }
+                }
+                log.debug("Loaded {} parent values from {} for child defaults",
+                    parentValues.size(), parentEntity.getName());
+              }
+            }
+          }
+        } catch (Exception e) {
+          log.debug("Could not load parent record for defaults: {}", e.getMessage());
+        }
+      }
+
       for (Column col : adTab.getTable().getADColumnList()) {
         if (!col.isActive() || !col.isMandatory()) {
           continue;
@@ -498,6 +536,19 @@ public class NeoDefaultsService {
         // Resolve using the same logic as the /defaults endpoint
         try {
           Object resolved = resolveFieldDefault(col, parentId, vars, conn, windowId, ctx);
+          // Fallback: if not resolved and the default expression references a parent field
+          // (e.g., @DateOrdered@, @C_Currency_ID@), look it up in the parent record values.
+          if (resolved == null && !parentValues.isEmpty()) {
+            String defaultExpr = col.getDefaultValue();
+            if (defaultExpr != null && defaultExpr.matches("^@[A-Za-z_]+@$")) {
+              String refCol = defaultExpr.substring(1, defaultExpr.length() - 1).toUpperCase();
+              Object parentVal = parentValues.get(refCol);
+              if (parentVal != null) {
+                resolved = parentVal;
+                log.debug("Resolved @{}@ from parent record: {}", refCol, resolved);
+              }
+            }
+          }
           if (resolved != null) {
             // Skip FK columns with legacy "0" default — OBDal cannot resolve "0" as an entity ID.
             // These columns (e.g., C_DocType_ID) use "0" to mean "no document type" in classic UI,

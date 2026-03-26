@@ -19,9 +19,15 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.client.kernel.RequestContext;
+import org.openbravo.model.ad.process.ProcessInstance;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.ProcessParameter;
+import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.scheduling.ProcessBundle;
+import org.openbravo.service.db.CallProcess;
 import org.openbravo.service.db.DalBaseProcess;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -47,6 +53,22 @@ public class NeoProcessService {
 
   /** UIPattern value for OBUIAPP (Standard) processes. */
   private static final String UI_PATTERN_STANDARD = "S";
+
+  /** Default Post OBUIAPP process ID (com.smf.jobs.defaults.Post). */
+  private static final String DEFAULT_POST_PROCESS_ID = "57496FB9CF9E4E8F847224017941570E";
+
+  /**
+   * Resolve the default Post OBUIAPP process for hardcoded "Posted" buttons.
+   */
+  private static org.openbravo.client.application.Process resolveDefaultPostProcess() {
+    try {
+      return OBDal.getInstance().get(
+          org.openbravo.client.application.Process.class, DEFAULT_POST_PROCESS_ID);
+    } catch (Exception e) {
+      log.debug("Default Post process not found: {}", DEFAULT_POST_PROCESS_ID);
+      return null;
+    }
+  }
 
   private NeoProcessService() {
   }
@@ -82,9 +104,7 @@ public class NeoProcessService {
         }
 
         if (StringUtils.isNotBlank(process.getProcedure())) {
-          return NeoResponse.error(501,
-              "DB procedure processes are not supported via Neo API: "
-                  + process.getProcedure());
+          return executeDbProcedure(process, params);
         }
 
         return NeoResponse.error(400,
@@ -177,13 +197,19 @@ public class NeoProcessService {
             continue;
           }
 
-          // Check for linked process (classic or OBUIAPP)
+          // Check for linked process (classic or OBUIAPP),
+          // then check for hardcoded "Posted" fallback
           Process process = column.getProcess();
           org.openbravo.client.application.Process obuiappProcess =
               column.getOBUIAPPProcess();
 
           if (process == null && obuiappProcess == null) {
-            continue;
+            if ("Posted".equals(column.getDBColumnName())) {
+              obuiappProcess = resolveDefaultPostProcess();
+            }
+            if (obuiappProcess == null) {
+              continue;
+            }
           }
 
           JSONObject action = new JSONObject();
@@ -332,8 +358,68 @@ public class NeoProcessService {
    */
   private static NeoResponse executeObuiappProcess(Process process,
       JSONObject params) throws Exception {
+    return executeObuiappHandler(process.getJavaClassName(), process.getId(), params);
+  }
 
-    String className = process.getJavaClassName();
+  /**
+   * Execute an OBUIAPP process directly from an
+   * {@link org.openbravo.client.application.Process} entity.
+   * Used for button columns that only have an OBUIAPP process linked
+   * (no classic AD_Process fallback).
+   *
+   * @param obuiappProcess the OBUIAPP process definition
+   * @param params         JSON object with parameter values.
+   *                       Should include inpRecordId and optionally inpTabId.
+   * @return NeoResponse with execution result
+   */
+  public static NeoResponse executeObuiappProcess(
+      org.openbravo.client.application.Process obuiappProcess,
+      JSONObject params) {
+    if (params == null) {
+      params = new JSONObject();
+    }
+    try {
+      OBContext.setAdminMode();
+      try {
+        return executeObuiappHandler(
+            obuiappProcess.getJavaClassName(),
+            obuiappProcess.getId(),
+            params);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("Error executing OBUIAPP process {}", obuiappProcess.getName(), e);
+      return NeoResponse.error(500,
+          "Process execution failed: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Ensure that RequestContext has a fully populated VariablesSecureApp
+   * derived from the current OBContext. Many classic and OBUIAPP handlers
+   * call RequestContext.get().getVariablesSecureApp() internally (e.g.,
+   * Post, ProcessOrder). In NEO Headless there is no HTTP session, so
+   * we build one from the JWT-authenticated OBContext.
+   */
+  private static void ensureRequestContextVars() {
+    try {
+      VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(
+          OBContext.getOBContext());
+      RequestContext.get().setVariableSecureApp(vars);
+    } catch (Exception e) {
+      log.warn("Could not set VariablesSecureApp on RequestContext: {}",
+          e.getMessage());
+    }
+  }
+
+  /**
+   * Shared implementation for OBUIAPP process execution.
+   * Builds the content/params JSON and invokes doExecute via reflection.
+   */
+  private static NeoResponse executeObuiappHandler(String className,
+      String processId, JSONObject params) throws Exception {
+
     Class<?> handlerClass = Class.forName(className);
     Object handlerInstance =
         WeldUtils.getInstanceFromStaticBeanManager(handlerClass);
@@ -359,19 +445,48 @@ public class NeoProcessService {
       }
     }
     content.put("_params", cleanParams);
-    content.put("_action", process.getId());
+    content.put("_action", processId);
 
-    // Add record context if present (for button processes / Type B)
+    // Add record context if present (for button processes / Type B).
+    // SMF Jobs (Action/Data framework) expects _entityName, recordIds,
+    // and inpKeyName to resolve the input records.
     if (params.has("inpRecordId")) {
-      content.put("inpRecordId", params.getString("inpRecordId"));
+      String recordId = params.getString("inpRecordId");
+      content.put("inpRecordId", recordId);
+
+      // Provide recordIds array and inpKeyName for SMF Jobs Data constructor.
+      // The Data class uses inpKeyName to locate the single-record ID in the JSON,
+      // and recordIds as a batch selection list.
+      JSONArray recordIds = new JSONArray();
+      recordIds.put(recordId);
+      content.put("recordIds", recordIds);
+      content.put("inpKeyName", "inpRecordId");
     }
     if (params.has("inpTabId")) {
-      content.put("inpTabId", params.getString("inpTabId"));
+      String tabId = params.getString("inpTabId");
+      content.put("inpTabId", tabId);
+
+      // Resolve DAL entity name from tab for SMF Jobs framework
+      try {
+        Tab tab = OBDal.getInstance().get(Tab.class, tabId);
+        if (tab != null && tab.getTable() != null) {
+          String dalEntityName = tab.getTable().getName();
+          content.put("_entityName", dalEntityName);
+        }
+      } catch (Exception e) {
+        log.debug("Could not resolve entity name from tab {}", tabId, e);
+      }
     }
+
+    // Ensure RequestContext has a VariablesSecureApp populated from OBContext.
+    // Many OBUIAPP handlers (e.g., com.smf.jobs.defaults.Post) call
+    // RequestContext.get().getVariablesSecureApp() internally, which requires
+    // a session-like context that NEO Headless does not provide by default.
+    ensureRequestContextVars();
 
     // Build the parameters map as BaseProcessActionHandler.execute would
     Map<String, Object> handlerParams = new HashMap<>();
-    handlerParams.put("processId", process.getId());
+    handlerParams.put("processId", processId);
     @SuppressWarnings("unchecked")
     Iterator<String> keys = params.keys();
     while (keys.hasNext()) {
@@ -448,6 +563,104 @@ public class NeoProcessService {
     // Read the result from the bundle
     Object bundleResult = bundle.getResult();
     return translateClassicResult(bundleResult, process);
+  }
+
+  /**
+   * Execute a DB procedure process via CallProcess.
+   *
+   * For DocAction-style processes (C_Order_Post, M_InOut_Post0, etc.),
+   * the caller should pass a "docAction" parameter with the action code
+   * (e.g., "CO" for Complete, "RE" for Reactivate). This method sets the
+   * DocumentAction field on the record before calling the procedure.
+   */
+  private static NeoResponse executeDbProcedure(Process process,
+      JSONObject params) throws Exception {
+
+    ensureRequestContextVars();
+
+    String recordId = params.optString("recordId",
+        params.optString("inpRecordId", null));
+
+    if (recordId == null || recordId.isBlank()) {
+      return NeoResponse.error(400,
+          "DB procedure requires a recordId");
+    }
+
+    // For DocAction processes: set the action on the document before calling
+    String docAction = params.optString("docAction", null);
+    if (docAction != null && !docAction.isBlank()) {
+      String tabId = params.optString("inpTabId", null);
+      if (tabId != null) {
+        try {
+          Tab tab = OBDal.getInstance().get(Tab.class, tabId);
+          if (tab != null && tab.getTable() != null) {
+            String dalEntityName = tab.getTable().getName();
+            BaseOBObject record = OBDal.getInstance().get(dalEntityName, recordId);
+            if (record != null && record.getEntity().hasProperty("documentAction")) {
+              record.set("documentAction", docAction);
+              OBDal.getInstance().save(record);
+              OBDal.getInstance().flush();
+            }
+          }
+        } catch (Exception e) {
+          log.warn("Could not set docAction on record: {}", e.getMessage());
+        }
+      }
+    }
+
+    // Build parameters map for CallProcess (excludes internal context keys)
+    Map<String, String> procParams = null;
+    @SuppressWarnings("unchecked")
+    Iterator<String> keys = params.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if ("recordId".equals(key) || "inpRecordId".equals(key)
+          || "inpTabId".equals(key) || "docAction".equals(key)) {
+        continue;
+      }
+      if (procParams == null) {
+        procParams = new HashMap<>();
+      }
+      procParams.put(key, params.optString(key));
+    }
+
+    ProcessInstance pInstance = CallProcess.getInstance()
+        .call(process, recordId, procParams);
+
+    // Refresh to get the result written by the procedure
+    OBDal.getInstance().getSession().refresh(pInstance);
+
+    return translatePInstanceResult(pInstance, process);
+  }
+
+  /**
+   * Translate a ProcessInstance result (from CallProcess/DB procedure) to NeoResponse.
+   */
+  private static NeoResponse translatePInstanceResult(
+      ProcessInstance pInstance, Process process) throws Exception {
+
+    JSONObject result = new JSONObject();
+    long resultCode = pInstance.getResult() != null ? pInstance.getResult() : 0L;
+    String errorMsg = pInstance.getErrorMsg();
+
+    if (resultCode == 0L) {
+      // Error
+      String cleanMsg = errorMsg != null
+          ? errorMsg.replaceFirst("@ERROR=", "") : "Process failed";
+      result.put("status", "error");
+      result.put("message", cleanMsg);
+      return new NeoResponse(400, result);
+    }
+
+    // Success
+    result.put("status", "success");
+    if (errorMsg != null && !errorMsg.isBlank()) {
+      result.put("message", errorMsg.replaceFirst("@SUCCESS=", ""));
+    } else {
+      result.put("message",
+          "Process " + process.getName() + " executed successfully");
+    }
+    return NeoResponse.ok(result);
   }
 
   // ---- Validation ----

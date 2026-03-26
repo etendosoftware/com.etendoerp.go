@@ -394,9 +394,18 @@ public class NeoSelectorService {
     List<String> entityIds = new ArrayList<>();
     for (BaseOBObject bob : dataQuery.list()) {
       JSONObject item = new JSONObject();
-      item.put("id", bob.getId());
+      // Use valueProperty to extract the correct ID (e.g., "product.id" for product selectors
+      // that query a view like M_Product_Price_Warehouse_v). Falls back to bob.getId().
+      String recordId;
+      if (meta.valueProperty != null && !meta.valueProperty.equals("id")) {
+        Object valObj = resolvePropertyValue(bob, meta.valueProperty, entityDef);
+        recordId = valObj != null ? valObj.toString() : bob.getId().toString();
+      } else {
+        recordId = bob.getId().toString();
+      }
+      item.put("id", recordId);
       item.put("label", bob.getIdentifier());
-      entityIds.add(bob.getId().toString());
+      entityIds.add(recordId);
 
       // Add all grid fields
       for (RichFieldMeta fieldMeta : meta.gridFields) {

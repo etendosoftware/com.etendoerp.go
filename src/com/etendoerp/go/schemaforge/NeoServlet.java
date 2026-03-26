@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -804,8 +805,8 @@ public class NeoServlet extends HttpBaseServlet {
               }
             }
           }
-          // Filter out non-included and read-only fields from request body
-          JSONObject filteredBody = fieldFilter.filterWriteRequest(requestBody);
+          // Filter out non-included fields (allow read-only on create — callouts/defaults set them)
+          JSONObject filteredBody = fieldFilter.filterCreateRequest(requestBody);
           // Inject defaults for mandatory columns not in ETGO_SF_FIELD config
           NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
           // Wrap for DefaultJsonDataService: {"data": {fields, "_entityName": ..., "_new": true}}
@@ -882,6 +883,8 @@ public class NeoServlet extends HttpBaseServlet {
       String recordId) {
     try {
       JSONObject data = filteredBody != null ? filteredBody : new JSONObject();
+      // Coerce string values to proper JSON types using the DAL model
+      coerceTypes(data, dalEntityName);
       data.put(JsonConstants.ENTITYNAME, dalEntityName);
       if (recordId != null) {
         data.put(JsonConstants.ID, recordId);
@@ -896,6 +899,64 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error wrapping body for Smartclient format: {}", e.getMessage(), e);
       return "{}";
+    }
+  }
+
+  /**
+   * Coerce string values in the JSON body to proper types based on the DAL model.
+   * The frontend and defaults endpoint may send numeric values as strings (e.g., "0")
+   * but DefaultJsonDataService expects BigDecimal for numeric properties.
+   */
+  @SuppressWarnings("unchecked")
+  private void coerceTypes(JSONObject data, String dalEntityName) {
+    try {
+      Entity entity = ModelProvider.getInstance().getEntity(dalEntityName);
+      if (entity == null) {
+        return;
+      }
+      // Collect coerced values first to avoid ConcurrentModificationException
+      Map<String, Object> coerced = new java.util.HashMap<>();
+      Iterator<String> keys = data.keys();
+      while (keys.hasNext()) {
+        String key = keys.next();
+        Object val = data.opt(key);
+        if (!(val instanceof String)) {
+          continue;
+        }
+        try {
+          Property prop = entity.getProperty(key);
+          if (prop == null || !prop.isPrimitive()) {
+            continue;
+          }
+          String strVal = (String) val;
+          Class<?> type = prop.getPrimitiveObjectType();
+          if (type == null) {
+            continue;
+          }
+          if (java.math.BigDecimal.class.isAssignableFrom(type)) {
+            if (!strVal.isEmpty()) {
+              coerced.put(key, new java.math.BigDecimal(strVal));
+            }
+          } else if (Long.class.isAssignableFrom(type)) {
+            if (!strVal.isEmpty()) {
+              coerced.put(key, Long.parseLong(strVal));
+            }
+          }
+        } catch (Exception ignored) {
+          // Not a DAL property or not primitive — skip
+          continue;
+        }
+      }
+      // Apply coerced values after iteration
+      for (Map.Entry<String, Object> entry : coerced.entrySet()) {
+        data.put(entry.getKey(), entry.getValue());
+      }
+      if (!coerced.isEmpty()) {
+        log.info("[NEO] coerceTypes: converted {} fields for {}: {}", coerced.size(),
+            dalEntityName, coerced.keySet());
+      }
+    } catch (Exception e) {
+      log.error("Error coercing types for {}: {}", dalEntityName, e.getMessage(), e);
     }
   }
 
@@ -1102,22 +1163,28 @@ public class NeoServlet extends HttpBaseServlet {
             continue;
           }
 
-          // Check if column has a process linked
+          // Resolve process: prefer OBUIAPP, fall back to classic,
+          // then check for hardcoded "Posted" fallback
           Process classicProcess = column.getProcess();
-          Object obuiappProcess = column.getOBUIAPPProcess();
+          org.openbravo.client.application.Process obuiappProcess =
+              column.getOBUIAPPProcess();
 
+          // Fallback: hardcoded "Posted" → use com.smf.jobs.defaults.Post
           if (classicProcess == null && obuiappProcess == null) {
-            continue;
+            if ("Posted".equals(column.getDBColumnName())) {
+              obuiappProcess = resolveDefaultPostProcess();
+            }
+            if (obuiappProcess == null) {
+              continue;
+            }
           }
 
           JSONObject actionObj = new JSONObject();
           actionObj.put("columnName", column.getDBColumnName());
           if (obuiappProcess != null) {
             actionObj.put("processType", "OBUIAPP");
-            org.openbravo.client.application.Process obuiProc =
-                (org.openbravo.client.application.Process) obuiappProcess;
-            String procName = obuiProc.getName();
-            actionObj.put("processName", procName != null ? procName : "");
+            actionObj.put("processName",
+                obuiappProcess.getName() != null ? obuiappProcess.getName() : "");
           } else {
             actionObj.put("processType", "Classic");
             actionObj.put("processName",
@@ -1161,37 +1228,21 @@ public class NeoServlet extends HttpBaseServlet {
               "Field is not a button: " + pathInfo.actionName);
         }
 
-        // Resolve process: prefer OBUIAPP, fall back to classic
-        Process adProcess = null;
-        org.openbravo.client.application.Process obuiappProcess = targetColumn.getOBUIAPPProcess();
-        if (obuiappProcess != null) {
-          // OBUIAPP processes are a different class, but NeoProcessService expects
-          // org.openbravo.model.ad.ui.Process. Look up the classic process ID from OBUIAPP.
-          // Actually, check if there's a classic process first.
-          adProcess = targetColumn.getProcess();
-        }
-        if (adProcess == null && obuiappProcess == null) {
-          adProcess = targetColumn.getProcess();
-        }
-        if (adProcess == null && obuiappProcess == null) {
-          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-              "No process linked to button: " + pathInfo.actionName);
-        }
+        // Resolve process: prefer OBUIAPP, fall back to classic,
+        // then check for hardcoded "Posted" fallback
+        org.openbravo.client.application.Process obuiappProcess =
+            targetColumn.getOBUIAPPProcess();
+        Process adProcess = targetColumn.getProcess();
 
-        // If we only have OBUIAPP and no classic process, try to get the classic process
-        if (adProcess == null) {
-          adProcess = targetColumn.getProcess();
-        }
-        if (adProcess == null) {
-          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-              "Button process not supported (OBUIAPP-only process without classic fallback): "
-                  + pathInfo.actionName);
-        }
-
-        // Check process access before executing
-        if (!hasProcessAccess(adProcess.getId())) {
-          return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
-              "Access denied to process for current role");
+        // Fallback: hardcoded "Posted" → use com.smf.jobs.defaults.Post
+        if (adProcess == null && obuiappProcess == null) {
+          if ("Posted".equals(targetColumn.getDBColumnName())) {
+            obuiappProcess = resolveDefaultPostProcess();
+          }
+          if (adProcess == null && obuiappProcess == null) {
+            return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+                "No process linked to button: " + pathInfo.actionName);
+          }
         }
 
         // Read request body
@@ -1203,6 +1254,27 @@ public class NeoServlet extends HttpBaseServlet {
           params = new JSONObject();
         }
         params.put("recordId", pathInfo.recordId);
+
+        // Execute: OBUIAPP takes priority over classic
+        if (obuiappProcess != null) {
+          params.put("inpRecordId", pathInfo.recordId);
+          if (entity.getADTab() != null) {
+            params.put("inpTabId", entity.getADTab().getId());
+          }
+          return NeoProcessService.executeObuiappProcess(obuiappProcess, params);
+        }
+
+        // Check process access before executing classic process
+        if (!hasProcessAccess(adProcess.getId())) {
+          return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
+              "Access denied to process for current role");
+        }
+
+        // Enrich params with record/tab context for DB procedures
+        params.put("inpRecordId", pathInfo.recordId);
+        if (entity.getADTab() != null) {
+          params.put("inpTabId", entity.getADTab().getId());
+        }
 
         return NeoProcessService.executeProcess(adProcess, params);
       }
@@ -1275,6 +1347,26 @@ public class NeoServlet extends HttpBaseServlet {
     criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ACTIVE, true));
     criteria.setMaxResults(1);
     return !criteria.list().isEmpty();
+  }
+
+  /**
+   * Default OBUIAPP process ID for the "Post" action (com.smf.jobs.defaults.Post).
+   * Used as fallback when a "Posted" button column has no linked process.
+   */
+  private static final String DEFAULT_POST_PROCESS_ID = "57496FB9CF9E4E8F847224017941570E";
+
+  /**
+   * Resolve the default Post OBUIAPP process for hardcoded "Posted" buttons.
+   * Returns null if the process is not available in this instance.
+   */
+  private org.openbravo.client.application.Process resolveDefaultPostProcess() {
+    try {
+      return OBDal.getInstance().get(
+          org.openbravo.client.application.Process.class, DEFAULT_POST_PROCESS_ID);
+    } catch (Exception e) {
+      log.debug("Default Post process not found: {}", DEFAULT_POST_PROCESS_ID);
+      return null;
+    }
   }
 
   /**
