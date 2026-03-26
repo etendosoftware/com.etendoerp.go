@@ -22,6 +22,7 @@ import org.apache.http.entity.ContentType;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
@@ -161,26 +162,18 @@ public class NeoServlet extends HttpBaseServlet {
     try {
       OBContext.setAdminMode();
 
-      // Discovery mode: list all specs
       if (pathInfo.specName == null) {
-        if (!"GET".equals(method)) {
-          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-              "Discovery endpoint only supports GET");
-          return;
-        }
-        handleDiscovery(response);
+        handleDiscoveryMode(method, response);
         return;
       }
 
       // Built-in image endpoint: /sws/neo/image[/{id}]
-      // Path /image/{id} parses as specName=image, entityName={id}, recordId=null
       if ("image".equals(pathInfo.specName)) {
         String resolvedImageId = pathInfo.recordId != null ? pathInfo.recordId : pathInfo.entityName;
         handleImageRequest(resolvedImageId, method, request, response);
         return;
       }
 
-      // Find the spec
       SFSpec spec = findSpec(pathInfo.specName);
       if (spec == null) {
         sendError(response, HttpServletResponse.SC_NOT_FOUND,
@@ -188,256 +181,297 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
 
-      // Handle process specs (specType = "P")
-      String specType = spec.getSpecType();
-      if ("P".equals(specType)) {
-        // Check process access
-        Process adProcessForAccess = resolveProcess(spec);
-        if (adProcessForAccess != null && !hasProcessAccess(adProcessForAccess.getId())) {
-          sendError(response, HttpServletResponse.SC_FORBIDDEN,
-              "Access denied to process for current role");
-          return;
-        }
-
-        if ("GET".equals(method)) {
-          // Describe process: return parameter metadata
-          if (adProcessForAccess == null) {
-            sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-                "Process spec has no linked AD_Process");
-            return;
-          }
-          writeResponse(response, NeoProcessService.describeProcess(adProcessForAccess));
-          return;
-        }
-        if (!"POST".equals(method)) {
-          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-              "Process specs only support GET (describe) and POST (execute)");
-          return;
-        }
-        handleProcessSpec(spec, request, response);
-        return;
-      }
-
-      // Handle report specs (specType = "R")
-      if ("R".equals(specType)) {
-        // Check if any entity has a NeoHandler qualifier — if so, delegate to the handler
-        // instead of using the standard Jasper report flow
-        String reportHandlerQualifier = resolveReportHandlerQualifier(spec);
-        if (reportHandlerQualifier != null) {
-          JSONObject requestBody = null;
-          String bodyStr = new String(request.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
-          if (StringUtils.isNotBlank(bodyStr)) {
-            requestBody = new JSONObject(bodyStr);
-          }
-          NeoContext handlerContext = NeoContext.builder()
-              .specName(pathInfo.specName)
-              .entityName(pathInfo.specName)
-              .httpMethod(method)
-              .requestBody(requestBody)
-              .queryParams(extractQueryParams(request))
-              .obContext(OBContext.getOBContext())
-              .build();
-          NeoResponse handlerResult = handleWithHooks(reportHandlerQualifier, handlerContext, request, response);
-          if (handlerResult != null) {
-            writeResponse(response, handlerResult);
-            return;
-          }
-        }
-
-        Process adReportProcess = resolveProcess(spec);
-        if (adReportProcess != null && !hasProcessAccess(adReportProcess.getId())) {
-          sendError(response, HttpServletResponse.SC_FORBIDDEN,
-              "Access denied to report for current role");
-          return;
-        }
-
-        if ("GET".equals(method)) {
-          if (adReportProcess == null) {
-            sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-                "Report spec has no linked AD_Process");
-            return;
-          }
-          writeResponse(response, NeoReportService.describeReport(adReportProcess));
-          return;
-        }
-        if (!"POST".equals(method)) {
-          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-              "Report specs support GET (describe) and POST (generateReport)");
-          return;
-        }
-        handleReportSpec(spec, request, response);
+      if (routeBySpecType(spec, pathInfo.specName, method, request, response)) {
         return;
       }
 
       // Check window access
       Window window = spec.getADWindow();
-      if (window != null) {
-        if (!hasWindowAccess(window.getId())) {
-          sendError(response, HttpServletResponse.SC_FORBIDDEN,
-              "Access denied to window for current role");
-          return;
-        }
+      if (window != null && !hasWindowAccess(window.getId())) {
+        sendError(response, HttpServletResponse.SC_FORBIDDEN,
+            "Access denied to window for current role");
+        return;
       }
 
-      // For window specs without entityName, return spec metadata
       if (pathInfo.entityName == null) {
-        if (!"GET".equals(method)) {
-          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-              "Spec describe only supports GET");
-          return;
-        }
-        handleSpecDescribe(response, spec);
+        handleSpecDescribeMode(spec, method, response);
         return;
       }
 
-      // Handle selector requests
-      if (pathInfo.isSelector) {
-        if (!"GET".equals(method)) {
-          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-              "Selectors only support GET");
-          return;
-        }
-        NeoResponse selectorResult = dispatchWithHooks(spec, pathInfo.entityName,
-            NeoEndpointType.SELECTOR, pathInfo.selectorField, method,
-            () -> handleSelector(spec.getId(), pathInfo, request));
-        writeResponse(response, selectorResult);
+      if (routeSubPath(spec, pathInfo, method, request, response)) {
         return;
       }
 
-      // Handle action requests (button processes)
-      if (pathInfo.isAction) {
-        if (!"POST".equals(method) && !"GET".equals(method)) {
-          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-              "Actions support GET (list) and POST (execute)");
-          return;
-        }
-        NeoResponse actionResult = dispatchWithHooks(spec, pathInfo.entityName,
-            NeoEndpointType.ACTION, pathInfo.actionName, method,
-            () -> handleButtonAction(spec, pathInfo, method, request));
-        writeResponse(response, actionResult);
-        return;
-      }
+      handleEntityCrudRequest(spec, pathInfo, method, request, response);
 
-      // Handle evaluate-display requests
-      if (pathInfo.isEvaluateDisplay) {
-        if (!"POST".equals(method)) {
-          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-              "Method not allowed. Use POST.");
-          return;
-        }
-        NeoResponse evalResult = dispatchWithHooks(spec, pathInfo.entityName,
-            NeoEndpointType.EVALUATE_DISPLAY, null, method,
-            () -> handleEvaluateDisplay(spec, pathInfo, request));
-        writeResponse(response, evalResult);
-        return;
-      }
-
-      // Handle callout requests
-      if (pathInfo.isCallout) {
-        if (!"POST".equals(method)) {
-          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-              "Callout endpoint only supports POST");
-          return;
-        }
-        NeoResponse calloutResult = dispatchWithHooks(spec, pathInfo.entityName,
-            NeoEndpointType.CALLOUT, null, method,
-            () -> handleCallout(spec, pathInfo, request));
-        writeResponse(response, calloutResult);
-        return;
-      }
-
-      // Handle defaults requests
-      if (pathInfo.isDefaults) {
-        if (!"GET".equals(method)) {
-          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-              "Defaults endpoint only supports GET");
-          return;
-        }
-        NeoResponse defaultsResult = dispatchWithHooks(spec, pathInfo.entityName,
-            NeoEndpointType.DEFAULTS, null, method,
-            () -> handleDefaults(spec, pathInfo, request));
-        writeResponse(response, defaultsResult);
-        return;
-      }
-
-      // Find the entity within this spec
-      SFEntity entity = findEntity(spec.getId(), pathInfo.entityName);
-      if (entity == null) {
-        sendError(response, HttpServletResponse.SC_NOT_FOUND,
-            "Entity not found in spec: " + pathInfo.entityName);
-        return;
-      }
-
-      // Check if the HTTP method is enabled
-      if (!isMethodEnabled(entity, method)) {
-        sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            method + " not enabled for " + pathInfo.entityName);
-        return;
-      }
-
-      // Get AD_Tab directly from entity
-      Tab adTab = getAdTab(entity);
-
-      // Build query params map
-      Map<String, String> queryParams = extractQueryParams(request);
-
-      // Build context
-      NeoContext neoContext = NeoContext.builder()
-          .specName(pathInfo.specName)
-          .entityName(pathInfo.entityName)
-          .httpMethod(method)
-          .recordId(pathInfo.recordId)
-          .queryParams(queryParams)
-          .adTab(adTab)
-          .sfEntity(entity)
-          .obContext(OBContext.getOBContext())
-          .endpointType(NeoEndpointType.CRUD)
-          .build();
-
-      // Read request body for POST/PUT/PATCH
-      if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
-        try {
-          String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-          if (StringUtils.isNotBlank(bodyStr)) {
-            neoContext = NeoContext.builder()
-                .specName(neoContext.getSpecName())
-                .entityName(neoContext.getEntityName())
-                .httpMethod(neoContext.getHttpMethod())
-                .recordId(neoContext.getRecordId())
-                .requestBody(new JSONObject(bodyStr))
-                .queryParams(neoContext.getQueryParams())
-                .adTab(neoContext.getAdTab())
-                .sfEntity(neoContext.getSfEntity())
-                .obContext(neoContext.getObContext())
-                .endpointType(neoContext.getEndpointType())
-                .build();
-          }
-        } catch (Exception e) {
-          sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body: " + e.getMessage());
-          return;
-        }
-      }
-
-      // 4. Check for hooks via Java_Qualifier on entity
-      String javaQualifier = entity.getJavaQualifier();
-
-      NeoResponse neoResponse;
-      if (StringUtils.isNotBlank(javaQualifier)) {
-        neoResponse = handleWithHooks(javaQualifier, neoContext, request, response);
-      } else {
-        neoResponse = handleDefault(neoContext, request, response);
-      }
-
-      // 5. Write response
-      if (neoResponse != null) {
-        writeResponse(response, neoResponse);
-      }
-
+    } catch (NeoRequestException e) {
+      sendError(response, e.getStatusCode(), e.getMessage());
     } catch (Exception e) {
       log.error("Error processing NEO request: {}", e.getMessage(), e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "An unexpected error occurred while processing the request.");
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  private void handleDiscoveryMode(String method, HttpServletResponse response) throws IOException {
+    if (!"GET".equals(method)) {
+      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Discovery endpoint only supports GET");
+      return;
+    }
+    handleDiscovery(response);
+  }
+
+  private void handleSpecDescribeMode(SFSpec spec, String method, HttpServletResponse response)
+      throws IOException, NeoRequestException {
+    requireMethod(method, "GET", "Spec describe only supports GET");
+    handleSpecDescribe(response, spec);
+  }
+
+  private boolean routeBySpecType(SFSpec spec, String specName, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException, JSONException {
+    String specType = spec.getSpecType();
+    if ("P".equals(specType)) {
+      routeProcessSpec(spec, method, request, response);
+      return true;
+    }
+    if ("R".equals(specType)) {
+      routeReportSpec(spec, specName, method, request, response);
+      return true;
+    }
+    return false;
+  }
+
+  private void routeProcessSpec(SFSpec spec, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    Process adProcess = resolveProcess(spec);
+    if (adProcess != null && !hasProcessAccess(adProcess.getId())) {
+      sendError(response, HttpServletResponse.SC_FORBIDDEN,
+          "Access denied to process for current role");
+      return;
+    }
+    if ("GET".equals(method)) {
+      if (adProcess == null) {
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Process spec has no linked AD_Process");
+        return;
+      }
+      writeResponse(response, NeoProcessService.describeProcess(adProcess));
+      return;
+    }
+    if (!"POST".equals(method)) {
+      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Process specs only support GET (describe) and POST (execute)");
+      return;
+    }
+    handleProcessSpec(spec, request, response);
+  }
+
+  private void routeReportSpec(SFSpec spec, String specName, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException, JSONException {
+    String reportHandlerQualifier = resolveReportHandlerQualifier(spec);
+    if (reportHandlerQualifier != null) {
+      JSONObject requestBody = null;
+      String bodyStr = new String(request.getInputStream().readAllBytes(),
+          java.nio.charset.StandardCharsets.UTF_8);
+      if (StringUtils.isNotBlank(bodyStr)) {
+        requestBody = new JSONObject(bodyStr);
+      }
+      NeoContext handlerContext = NeoContext.builder()
+          .specName(specName)
+          .entityName(specName)
+          .httpMethod(method)
+          .requestBody(requestBody)
+          .queryParams(extractQueryParams(request))
+          .obContext(OBContext.getOBContext())
+          .build();
+      NeoResponse handlerResult = handleWithHooks(reportHandlerQualifier, handlerContext, request, response);
+      if (handlerResult != null) {
+        writeResponse(response, handlerResult);
+        return;
+      }
+    }
+
+    Process adReportProcess = resolveProcess(spec);
+    if (adReportProcess != null && !hasProcessAccess(adReportProcess.getId())) {
+      sendError(response, HttpServletResponse.SC_FORBIDDEN,
+          "Access denied to report for current role");
+      return;
+    }
+    if ("GET".equals(method)) {
+      if (adReportProcess == null) {
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Report spec has no linked AD_Process");
+        return;
+      }
+      writeResponse(response, NeoReportService.describeReport(adReportProcess));
+      return;
+    }
+    if (!"POST".equals(method)) {
+      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Report specs support GET (describe) and POST (generateReport)");
+      return;
+    }
+    handleReportSpec(spec, request, response);
+  }
+
+  private boolean routeSubPath(SFSpec spec, NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response)
+      throws IOException, NeoRequestException {
+    if (pathInfo.isSelector) {
+      return routeSelectorSubPath(spec, pathInfo, method, request, response);
+    }
+    if (pathInfo.isAction) {
+      return routeActionSubPath(spec, pathInfo, method, request, response);
+    }
+    if (pathInfo.isEvaluateDisplay) {
+      return routeEvaluateDisplaySubPath(spec, pathInfo, method, request, response);
+    }
+    if (pathInfo.isCallout) {
+      return routeCalloutSubPath(spec, pathInfo, method, request, response);
+    }
+    if (pathInfo.isDefaults) {
+      return routeDefaultsSubPath(spec, pathInfo, method, request, response);
+    }
+    return false;
+  }
+
+  private boolean routeSelectorSubPath(SFSpec spec, NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response)
+      throws IOException, NeoRequestException {
+    requireMethod(method, "GET", "Selectors only support GET");
+    NeoResponse selectorResult = dispatchWithHooks(spec, pathInfo.entityName,
+        NeoEndpointType.SELECTOR, pathInfo.selectorField, method,
+        () -> handleSelector(spec.getId(), pathInfo, request));
+    writeResponse(response, selectorResult);
+    return true;
+  }
+
+  private boolean routeEvaluateDisplaySubPath(SFSpec spec, NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response)
+      throws IOException, NeoRequestException {
+    requireMethod(method, "POST", "Method not allowed. Use POST.");
+    NeoResponse evalResult = dispatchWithHooks(spec, pathInfo.entityName,
+        NeoEndpointType.EVALUATE_DISPLAY, null, method,
+        () -> handleEvaluateDisplay(spec, pathInfo, request));
+    writeResponse(response, evalResult);
+    return true;
+  }
+
+  private void requireMethod(String actualMethod, String expectedMethod, String message)
+      throws NeoMethodNotAllowedException {
+    if (!expectedMethod.equals(actualMethod)) {
+      throw new NeoMethodNotAllowedException(message);
+    }
+  }
+
+  private boolean routeCalloutSubPath(SFSpec spec, NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!"POST".equals(method)) {
+      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Callout endpoint only supports POST");
+      return true;
+    }
+    NeoResponse calloutResult = dispatchWithHooks(spec, pathInfo.entityName,
+        NeoEndpointType.CALLOUT, null, method,
+        () -> handleCallout(spec, pathInfo, request));
+    writeResponse(response, calloutResult);
+    return true;
+  }
+
+  private boolean routeDefaultsSubPath(SFSpec spec, NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!"GET".equals(method)) {
+      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Defaults endpoint only supports GET");
+      return true;
+    }
+    NeoResponse defaultsResult = dispatchWithHooks(spec, pathInfo.entityName,
+        NeoEndpointType.DEFAULTS, null, method,
+        () -> handleDefaults(spec, pathInfo, request));
+    writeResponse(response, defaultsResult);
+    return true;
+  }
+
+  private boolean routeActionSubPath(SFSpec spec, NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!"POST".equals(method) && !"GET".equals(method)) {
+      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Actions support GET (list) and POST (execute)");
+      return true;
+    }
+    NeoResponse actionResult = dispatchWithHooks(spec, pathInfo.entityName,
+        NeoEndpointType.ACTION, pathInfo.actionName, method,
+        () -> handleButtonAction(spec, pathInfo, method, request));
+    writeResponse(response, actionResult);
+    return true;
+  }
+
+  private void handleEntityCrudRequest(SFSpec spec, NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    SFEntity entity = findEntity(spec.getId(), pathInfo.entityName);
+    if (entity == null) {
+      sendError(response, HttpServletResponse.SC_NOT_FOUND,
+          "Entity not found in spec: " + pathInfo.entityName);
+      return;
+    }
+
+    if (!isMethodEnabled(entity, method)) {
+      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          method + " not enabled for " + pathInfo.entityName);
+      return;
+    }
+
+    Tab adTab = getAdTab(entity);
+    Map<String, String> queryParams = extractQueryParams(request);
+
+    NeoContext neoContext = NeoContext.builder()
+        .specName(pathInfo.specName)
+        .entityName(pathInfo.entityName)
+        .httpMethod(method)
+        .recordId(pathInfo.recordId)
+        .queryParams(queryParams)
+        .adTab(adTab)
+        .sfEntity(entity)
+        .obContext(OBContext.getOBContext())
+        .endpointType(NeoEndpointType.CRUD)
+        .build();
+
+    if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
+      try {
+        String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        if (StringUtils.isNotBlank(bodyStr)) {
+          neoContext = NeoContext.builder()
+              .specName(neoContext.getSpecName())
+              .entityName(neoContext.getEntityName())
+              .httpMethod(neoContext.getHttpMethod())
+              .recordId(neoContext.getRecordId())
+              .requestBody(new JSONObject(bodyStr))
+              .queryParams(neoContext.getQueryParams())
+              .adTab(neoContext.getAdTab())
+              .sfEntity(neoContext.getSfEntity())
+              .obContext(neoContext.getObContext())
+              .endpointType(neoContext.getEndpointType())
+              .build();
+        }
+      } catch (Exception e) {
+        sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body: " + e.getMessage());
+        return;
+      }
+    }
+
+    String javaQualifier = entity.getJavaQualifier();
+    NeoResponse neoResponse;
+    if (StringUtils.isNotBlank(javaQualifier)) {
+      neoResponse = handleWithHooks(javaQualifier, neoContext, request, response);
+    } else {
+      neoResponse = handleDefault(neoContext, request, response);
+    }
+
+    if (neoResponse != null) {
+      writeResponse(response, neoResponse);
     }
   }
 
@@ -2021,6 +2055,29 @@ public class NeoServlet extends HttpBaseServlet {
       throws IOException {
     NeoResponse errorResponse = NeoResponse.error(status, message);
     writeResponse(response, errorResponse);
+  }
+
+  private static class NeoRequestException extends Exception {
+    private static final long serialVersionUID = 1L;
+
+    private final int statusCode;
+
+    NeoRequestException(int statusCode, String message) {
+      super(message);
+      this.statusCode = statusCode;
+    }
+
+    int getStatusCode() {
+      return statusCode;
+    }
+  }
+
+  private static class NeoMethodNotAllowedException extends NeoRequestException {
+    private static final long serialVersionUID = 1L;
+
+    NeoMethodNotAllowedException(String message) {
+      super(HttpServletResponse.SC_METHOD_NOT_ALLOWED, message);
+    }
   }
 
   /**
