@@ -31,10 +31,13 @@ import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
@@ -54,9 +57,16 @@ abstract class BaseWebhookTest {
     protected Client client;
     @Mock
     protected Organization organization;
+    @Mock
+    protected User user;
+    @Mock
+    protected Role role;
+    @Mock
+    protected OBProvider obProvider;
 
     protected MockedStatic<OBDal> obDalMock;
     protected MockedStatic<OBContext> obContextMock;
+    protected MockedStatic<OBProvider> obProviderMock;
 
     protected Map<String, String> parameters;
     protected Map<String, String> responseVars;
@@ -65,12 +75,16 @@ abstract class BaseWebhookTest {
     void baseSetUp() {
         obDalMock = mockStatic(OBDal.class);
         obContextMock = mockStatic(OBContext.class);
+        obProviderMock = mockStatic(OBProvider.class);
 
         obDalMock.when(OBDal::getInstance).thenReturn(obDal);
         obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+        obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
 
         when(obContext.getCurrentClient()).thenReturn(client);
         when(obContext.getCurrentOrganization()).thenReturn(organization);
+        when(obContext.getUser()).thenReturn(user);
+        when(obContext.getRole()).thenReturn(role);
 
         parameters = new HashMap<>();
         responseVars = new HashMap<>();
@@ -80,6 +94,7 @@ abstract class BaseWebhookTest {
     void baseTearDown() {
         obDalMock.close();
         obContextMock.close();
+        obProviderMock.close();
     }
 
     /**
