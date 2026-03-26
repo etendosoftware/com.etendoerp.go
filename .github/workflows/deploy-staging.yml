@@ -55,6 +55,81 @@ jobs:
       - name: Login to ECR
         uses: aws-actions/amazon-ecr-login@v2
 
+      # ── 6a. Create gradle.properties ──────────────────────────────────────
+      # etendo_core gitignores gradle.properties; we generate it here from
+      # GitHub secrets so that COPY . . in the Dockerfile includes it and
+      # ./gradlew setup generates config/Openbravo.properties with the correct
+      # RDS host (otherwise WAD defaults to localhost:5432 and compilation fails).
+      - name: Create gradle.properties
+        run: |
+          {
+          echo "githubUser=etendobot"
+          echo "githubToken=${{ secrets.ETENDOBOT_TOKEN }}"
+          echo "repositoryUser=${{ secrets.NEXUS_USER }}"
+          echo "repositoryPassword=${{ secrets.NEXUS_PASSWORD }}"
+          echo "nexusUser=${{ secrets.NEXUS_USER }}"
+          echo "nexusPassword=${{ secrets.NEXUS_PASSWORD }}"
+          echo "allow.root=true"
+          echo "context.name=etendo"
+          echo "bbdd.rdbms=POSTGRE"
+          echo "bbdd.driver=org.postgresql.Driver"
+          echo "bbdd.sid=etendo"
+          echo "bbdd.port=5432"
+          echo "bbdd.host=etendo-staging.cfm2qm242otk.eu-west-3.rds.amazonaws.com"
+          echo "bbdd.systemUser=postgres"
+          echo "bbdd.systemPassword=${{ secrets.BBDD_SYSTEMPASSWORD }}"
+          echo "bbdd.user=tad"
+          echo "bbdd.password=${{ secrets.BBDD_PASSWORD }}"
+          echo "org.gradle.jvmargs=-Dfile.encoding=UTF-8"
+          echo "org.gradle.daemon=false"
+          } > etendo_core/gradle.properties
+
+      # ── 6b. Open RDS port 5432 to runner ──────────────────────────────────
+      # WAD (Window Application Designer) queries the DB at compile time to
+      # generate *Data.java classes. The RDS is private; we temporarily enable
+      # public access and add the runner IP to the SG. Both are reverted in
+      # step 12 (if: always).
+      - name: Open RDS for Docker build
+        id: open-rds
+        run: |
+          RUNNER_IP=$(curl -sf https://api.ipify.org)
+          echo "runner_ip=${RUNNER_IP}" >> $GITHUB_OUTPUT
+
+          RDS_SG=$(aws rds describe-db-instances \
+            --db-instance-identifier etendo-staging \
+            --region ${{ env.AWS_REGION }} \
+            --query 'DBInstances[0].VpcSecurityGroups[0].VpcSecurityGroupId' \
+            --output text)
+          echo "rds_sg=${RDS_SG}" >> $GITHUB_OUTPUT
+
+          CURRENT_PA=$(aws rds describe-db-instances \
+            --db-instance-identifier etendo-staging \
+            --region ${{ env.AWS_REGION }} \
+            --query 'DBInstances[0].PubliclyAccessible' \
+            --output text)
+
+          if [ "$CURRENT_PA" != "True" ]; then
+            echo "Enabling public access on RDS..."
+            aws rds modify-db-instance \
+              --db-instance-identifier etendo-staging \
+              --publicly-accessible \
+              --apply-immediately \
+              --region ${{ env.AWS_REGION }}
+            aws rds wait db-instance-available \
+              --db-instance-identifier etendo-staging \
+              --region ${{ env.AWS_REGION }}
+            echo "Public access enabled."
+          else
+            echo "RDS already publicly accessible."
+          fi
+
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${RDS_SG} \
+            --protocol tcp \
+            --port 5432 \
+            --cidr ${RUNNER_IP}/32 \
+            --region ${{ env.AWS_REGION }} || echo "SG rule already exists"
+
       # ── 6. Build and push runtime image ───────────────────────────────────
       # gradle.properties is not committed to etendo_core — create it from
       # secrets so it can be passed as a Docker build secret (never baked in layers).
@@ -220,3 +295,20 @@ jobs:
           echo "Deployment triggered."
           echo "Monitor: https://eu-west-3.console.aws.amazon.com/ecs/v2/clusters/${{ env.ECS_CLUSTER }}/services/${{ env.ECS_SERVICE }}"
           echo "App: https://core.staging.etendo.cloud/etendo/security/Login"
+
+      # ── 12. Close RDS port 5432 from runner (always runs) ─────────────────
+      - name: Close RDS from Docker build
+        if: always()
+        run: |
+          RUNNER_IP="${{ steps.open-rds.outputs.runner_ip }}"
+          RDS_SG="${{ steps.open-rds.outputs.rds_sg }}"
+          if [ -n "$RUNNER_IP" ] && [ -n "$RDS_SG" ]; then
+            aws ec2 revoke-security-group-ingress \
+              --group-id ${RDS_SG} \
+              --protocol tcp \
+              --port 5432 \
+              --cidr ${RUNNER_IP}/32 \
+              --region ${{ env.AWS_REGION }} || echo "SG rule already removed"
+          else
+            echo "No runner IP or SG to clean up."
+          fi
