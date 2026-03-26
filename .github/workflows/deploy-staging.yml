@@ -37,9 +37,9 @@ jobs:
       # ── 3. Inject this module into etendo_core ─────────────────────────────
       - name: Inject module
         run: |
+          mkdir -p etendo_core/modules
           rm -rf etendo_core/modules/com.etendoerp.go
           cp -r module etendo_core/modules/com.etendoerp.go
-          # Remove nested .git to avoid submodule confusion
           rm -rf etendo_core/modules/com.etendoerp.go/.git
 
       # ── 4. AWS credentials ─────────────────────────────────────────────────
