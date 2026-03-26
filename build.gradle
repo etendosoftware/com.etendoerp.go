@@ -10,7 +10,7 @@ group          = "com.etendoerp"
 version        = "1.0.0"
 description    = "Etendo Go mobile application module"
 ext.artifact   = "go"
-ext.repository = "https://maven.pkg.github.com/etendosoftware/com.etendoerp.essentials.extensions"
+ext.repository = "https://maven.pkg.github.com/etendosoftware/com.etendoerp.go"
 
 configurations {
     moduleDependencyContainer
@@ -27,7 +27,7 @@ publishing {
     }
     repositories {
         maven {
-            url = "https://maven.pkg.github.com/etendosoftware/com.etendoerp.essentials.extensions"
+            url = "https://maven.pkg.github.com/etendosoftware/com.etendoerp.go"
         }
     }
 }
@@ -35,7 +35,7 @@ publishing {
 repositories {
     mavenCentral()
     maven {
-        url = "https://maven.pkg.github.com/etendosoftware/com.etendoerp.essentials.extensions"
+        url = "https://maven.pkg.github.com/etendosoftware/com.etendoerp.go"
     }
     maven {
         url = "https://repo.futit.cloud/repository/maven-releases"
