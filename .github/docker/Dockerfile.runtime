@@ -1,0 +1,59 @@
+# ─────────────────────────────────────────────
+# Stage 1: Builder — compila y genera el WAR
+# ─────────────────────────────────────────────
+FROM eclipse-temurin:17-jdk-jammy AS builder
+
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+# Usuario no-root para gradlew (antInit rechaza root)
+RUN useradd -m -s /bin/bash etendo
+
+WORKDIR /home/etendo/app
+COPY --chown=etendo:etendo . .
+# WORKDIR is created by root — chown the dir itself so etendo can write .gradle/ inside it
+RUN chown etendo:etendo /home/etendo/app
+
+USER etendo
+
+RUN git config --global --add safe.directory /home/etendo/app
+
+# gradle.properties se monta como build secret — disponible solo en este RUN,
+# nunca escrito en ninguna capa de la imagen.
+RUN --mount=type=secret,id=gradle_props,dst=/home/etendo/app/gradle.properties,uid=1000 \
+    ./gradlew setup
+
+# compile.complete.development compila todo el Java sin tocar la DB.
+# antWar empaqueta el WAR resultante en lib/etendo.war.
+# NO se corre install — el schema ya existe en RDS y se inicializó una sola vez.
+RUN ./gradlew compile.complete.development antWar
+
+# ─────────────────────────────────────────────
+# Stage 2: Runtime — solo Tomcat + WAR
+# ─────────────────────────────────────────────
+FROM tomcat:9.0-jdk17
+
+RUN apt-get update && apt-get install -y postgresql-client curl && rm -rf /var/lib/apt/lists/*
+
+# Limpiar webapps por defecto
+RUN rm -rf "$CATALINA_HOME/webapps"/*
+
+# Copiar el WAR del builder y expandirlo
+COPY --from=builder /home/etendo/app/lib/etendo.war /tmp/etendo.war
+RUN mkdir -p "$CATALINA_HOME/webapps/etendo" \
+ && cd "$CATALINA_HOME/webapps/etendo" \
+ && jar xf /tmp/etendo.war \
+ && rm /tmp/etendo.war
+
+# Directorio de adjuntos requerido por Etendo
+RUN mkdir -p /opt/openbravo/attachments
+
+# Entrypoint: inyecta openbravo.properties desde env vars y arranca Tomcat
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
+    CMD curl -sf http://localhost:8080/etendo/security/Login || exit 1
+
+ENTRYPOINT ["/docker-entrypoint.sh"]

@@ -1,3 +1,20 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright © 2021–2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
@@ -13,10 +30,13 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
+import org.hibernate.query.Query;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.client.application.ApplicationUtils;
+import org.openbravo.client.kernel.KernelUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -24,6 +44,7 @@ import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.domain.ReferencedTable;
+import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.userinterface.selector.Selector;
 import org.openbravo.userinterface.selector.SelectorField;
 
@@ -55,6 +76,30 @@ public class NeoSelectorService {
   // Session-level params resolved server-side (should not appear in selectorParams)
   private static final java.util.Set<String> SESSION_PARAMS = new java.util.HashSet<>(
       java.util.Arrays.asList("AD_Org_ID", "AD_Client_ID", "AD_User_ID", "AD_Role_ID"));
+
+  private static final String AD_ORG_ID = "AD_Org_ID";
+  private static final String SQL_AND = " AND ";
+  private static final String SQL_WHERE = " WHERE ";
+  private static final String SQL_ORDER_BY = "ORDER BY";
+  private static final String SQL_AS = " as ";
+  private static final String SEARCH_PARAM = "search";
+  private static final String AUX_IDS_PARAM = "auxIds";
+  private static final String PROP_ORGANIZATION = "organization";
+  private static final String JSON_ID = "id";
+  private static final String JSON_LABEL = "label";
+  private static final String JSON_ITEMS = "items";
+  private static final String JSON_COLUMNS = "columns";
+  private static final String JSON_TOTAL_COUNT = "totalCount";
+  private static final String JSON_LIMIT = "limit";
+  private static final String JSON_OFFSET = "offset";
+  private static final String JSON_HAS_MORE = "hasMore";
+  private static final String JSON_AUX = "_aux";
+  private static final String JSON_NAME = "name";
+  private static final String JSON_SORT_NO = "sortNo";
+  private static final Pattern FROM_CLAUSE_PATTERN = Pattern.compile("\\sFROM\\s",
+      Pattern.CASE_INSENSITIVE);
+  private static final Pattern WHERE_CLAUSE_PATTERN = Pattern.compile("\\sWHERE\\s",
+      Pattern.CASE_INSENSITIVE);
 
   private NeoSelectorService() {
   }
@@ -218,12 +263,14 @@ public class NeoSelectorService {
 
       // Resolve validation rule filter from context params
       String validationFilter = resolveValidationFilter(column, meta.entityName, contextParams);
+      String organizationFilter = resolveOrgFilter(entity, column, meta, contextParams);
+      String combinedFilter = combineFilters(validationFilter, organizationFilter);
 
       // Build and execute query
       if (meta.isRich) {
-        return executeRichQuery(meta, search, limit, offset, validationFilter);
+        return executeRichQuery(meta, search, limit, offset, combinedFilter);
       }
-      return executeQuery(meta, search, limit, offset, validationFilter);
+      return executeQuery(meta, search, limit, offset, combinedFilter);
 
     } catch (Exception e) {
       log.error("Error querying selector {}/{}", entityName, columnName, e);
@@ -247,7 +294,7 @@ public class NeoSelectorService {
     // Apply validation rule filter (resolved from context params)
     if (StringUtils.isNotBlank(validationFilter)) {
       if (hql.length() > 0) {
-        hql.append(" AND ");
+        hql.append(SQL_AND);
       }
       hql.append(validationFilter);
     }
@@ -255,7 +302,7 @@ public class NeoSelectorService {
     // Search filter on display property
     if (StringUtils.isNotBlank(search)) {
       if (hql.length() > 0) {
-        hql.append(" AND ");
+        hql.append(SQL_AND);
       }
       hql.append("lower(e.").append(meta.displayProperty)
           .append(") LIKE :search");
@@ -290,18 +337,18 @@ public class NeoSelectorService {
     JSONArray items = new JSONArray();
     for (BaseOBObject bob : dataQuery.list()) {
       JSONObject item = new JSONObject();
-      item.put("id", bob.getId());
-      item.put("label", bob.getIdentifier());
+      item.put(JSON_ID, bob.getId());
+      item.put(JSON_LABEL, bob.getIdentifier());
       items.put(item);
     }
 
     JSONObject result = new JSONObject();
-    result.put("items", items);
-    result.put("columns", new JSONArray());
-    result.put("totalCount", totalCount);
-    result.put("limit", limit);
-    result.put("offset", offset);
-    result.put("hasMore", (offset + limit) < totalCount);
+    result.put(JSON_ITEMS, items);
+    result.put(JSON_COLUMNS, new JSONArray());
+    result.put(JSON_TOTAL_COUNT, totalCount);
+    result.put(JSON_LIMIT, limit);
+    result.put(JSON_OFFSET, offset);
+    result.put(JSON_HAS_MORE, (offset + limit) < totalCount);
     return NeoResponse.ok(result);
   }
 
@@ -328,7 +375,7 @@ public class NeoSelectorService {
     // Apply validation rule filter (resolved from context params)
     if (StringUtils.isNotBlank(validationFilter)) {
       if (hql.length() > 0) {
-        hql.append(" AND ");
+        hql.append(SQL_AND);
       }
       hql.append(validationFilter);
     }
@@ -336,7 +383,7 @@ public class NeoSelectorService {
     // Search filter: OR across all searchable properties
     if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
       if (hql.length() > 0) {
-        hql.append(" AND ");
+        hql.append(SQL_AND);
       }
       hql.append("(");
       for (int i = 0; i < meta.searchableProperties.size(); i++) {
@@ -381,9 +428,9 @@ public class NeoSelectorService {
     JSONArray columns = new JSONArray();
     for (RichFieldMeta fieldMeta : meta.gridFields) {
       JSONObject col = new JSONObject();
-      col.put("name", fieldMeta.propertyKey);
-      col.put("label", fieldMeta.label);
-      col.put("sortNo", fieldMeta.sortNo);
+      col.put(JSON_NAME, fieldMeta.propertyKey);
+      col.put(JSON_LABEL, fieldMeta.label);
+      col.put(JSON_SORT_NO, fieldMeta.sortNo);
       columns.put(col);
     }
 
@@ -403,8 +450,8 @@ public class NeoSelectorService {
       } else {
         recordId = bob.getId().toString();
       }
-      item.put("id", recordId);
-      item.put("label", bob.getIdentifier());
+      item.put(JSON_ID, recordId);
+      item.put(JSON_LABEL, bob.getIdentifier());
       entityIds.add(recordId);
 
       // Add all grid fields
@@ -420,12 +467,12 @@ public class NeoSelectorService {
     }
 
     JSONObject result = new JSONObject();
-    result.put("items", items);
-    result.put("columns", columns);
-    result.put("totalCount", totalCount);
-    result.put("limit", limit);
-    result.put("offset", offset);
-    result.put("hasMore", (offset + limit) < totalCount);
+    result.put(JSON_ITEMS, items);
+    result.put(JSON_COLUMNS, columns);
+    result.put(JSON_TOTAL_COUNT, totalCount);
+    result.put(JSON_LIMIT, limit);
+    result.put(JSON_OFFSET, offset);
+    result.put(JSON_HAS_MORE, (offset + limit) < totalCount);
     return NeoResponse.ok(result);
   }
 
@@ -437,237 +484,198 @@ public class NeoSelectorService {
   @SuppressWarnings("unchecked")
   private static NeoResponse executeCustomHqlQuery(SelectorMeta meta,
       String search, int limit, int offset, String validationFilter) throws Exception {
+    CustomHqlContext context = prepareCustomHqlContext(meta, search, validationFilter);
+    int totalCount = executeCustomCountQuery(context, search);
+    Query<?> dataQuery = buildCustomDataQuery(context, meta, search, limit, offset);
+    Integer idColIdx = resolveIdColumnIndex(context.colIndexMap, meta.valueProperty,
+        context.alias, context.selectExprs);
 
-    String alias = meta.entityAlias;
+    Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
+    List<String> entityIds = new ArrayList<>();
+    JSONArray items = buildItemsFromRows(dataQuery.list(), context.colIndexMap, idColIdx,
+        meta, entityDef, entityIds);
 
-    // Resolve Etendo classic UI placeholder before any processing
-    String rawHql = meta.customHql.replace("@additional_filters@", "1=1");
-
-    // Extract the FROM clause onward from the custom HQL (which includes its own SELECT).
-    // FROM may be preceded by space, newline, or tab — use regex to find it.
-    java.util.regex.Matcher fromMatcher = Pattern.compile("\\sFROM\\s",
-        Pattern.CASE_INSENSITIVE).matcher(rawHql);
-    if (!fromMatcher.find()) {
-      throw new IllegalArgumentException(
-          "Custom HQL does not contain a FROM clause: " + rawHql);
+    if (hasHqlOnlyAuxFields(meta) && !entityIds.isEmpty()) {
+      resolveAuxFieldsViaHql(items, entityIds, context.rawHql, context.fromIdx,
+          context.alias, meta);
     }
-    int fromIdx = fromMatcher.start();
-    // We only need the FROM-onwards portion; the data query uses "SELECT alias"
-    // to return BaseOBObject entities, not the custom SELECT columns.
-    String fromOnwards = rawHql.substring(fromIdx);
 
+    return buildSelectorResponse(items, buildColumnsJson(meta.gridFields), totalCount, limit, offset);
+  }
+
+  /**
+   * Build the filtered FROM clause by appending WHERE/AND conditions for
+   * validation filter, org filter, search filter, and OBUISEL where clause.
+   */
+  private static String buildFilteredFromClause(String fromOnwards, SelectorMeta meta,
+      String validationFilter, String search, String alias) {
     StringBuilder baseHql = new StringBuilder(fromOnwards);
-
-    // Check if the FROM-onwards portion already has WHERE (may be preceded by newline)
-    boolean hasWhere = Pattern.compile("\\sWHERE\\s", Pattern.CASE_INSENSITIVE)
-        .matcher(fromOnwards).find();
+    boolean hasWhere = containsWhereClause(fromOnwards);
 
     // Apply where clause from OBUISEL_Selector config with @param@ substitution
     if (StringUtils.isNotBlank(meta.whereClause)) {
       String resolved = resolveObuiselParams(meta.whereClause);
-      baseHql.append(hasWhere ? " AND " : " WHERE ");
-      baseHql.append(resolved);
-      hasWhere = true;
+      hasWhere = appendCondition(baseHql, hasWhere, resolved);
     }
 
     // Apply validation rule filter (resolved from context params)
     if (StringUtils.isNotBlank(validationFilter)) {
-      baseHql.append(hasWhere ? " AND " : " WHERE ");
-      baseHql.append(validationFilter);
-      hasWhere = true;
+      hasWhere = appendCondition(baseHql, hasWhere, validationFilter);
     }
 
     // Apply readable organizations filter
     OBContext ctx = OBContext.getOBContext();
     String[] readableOrgs = ctx.getReadableOrganizations();
     if (readableOrgs != null && readableOrgs.length > 0) {
-      baseHql.append(hasWhere ? " AND " : " WHERE ");
-      baseHql.append(alias).append(".organization.id IN (");
-      for (int i = 0; i < readableOrgs.length; i++) {
-        if (i > 0) {
-          baseHql.append(", ");
-        }
-        baseHql.append("'").append(readableOrgs[i]).append("'");
-      }
-      baseHql.append(")");
-      hasWhere = true;
+      hasWhere = appendCondition(baseHql, hasWhere,
+          buildOrganizationFilter(alias, readableOrgs));
     }
 
     // Search filter across searchable properties
     boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
     if (hasSearch) {
-      baseHql.append(hasWhere ? " AND " : " WHERE ");
-      baseHql.append("(");
-      for (int i = 0; i < meta.searchableProperties.size(); i++) {
-        if (i > 0) {
-          baseHql.append(" OR ");
-        }
-        String prop = meta.searchableProperties.get(i);
-        baseHql.append("lower(COALESCE(cast(").append(alias).append(".")
-            .append(prop).append(" as string), '')) LIKE :search");
-      }
-      baseHql.append(")");
+      appendCondition(baseHql, hasWhere,
+          buildSearchFilter(alias, meta.searchableProperties));
     }
 
-    String fromClause = baseHql.toString();
+    return baseHql.toString();
+  }
 
-    // Execute the original HQL SELECT (not replaced) to get the custom columns
-    // as Object[] rows — same as the legacy UI. This avoids Hibernate returning
-    // wrong entities when the FROM root differs from the entity alias
-    // (e.g., FROM PricingProductPrice pp JOIN pp.product e).
-
-    // Parse the original SELECT column aliases to build a name→index map
-    String selectPart = rawHql.substring(0, fromIdx).trim();
-    // Remove "select " prefix
-    String selectBody = selectPart.replaceFirst("(?i)^select\\s+", "");
-    String[] selectExprs = selectBody.split(",");
+  /**
+   * Parse SELECT column expressions into a map of lowercase alias to column index.
+   * Handles "expr as alias" and bare "expr.property" forms.
+   */
+  private static Map<String, Integer> parseSelectAliases(String[] selectExprs) {
     Map<String, Integer> colIndexMap = new HashMap<>();
     for (int i = 0; i < selectExprs.length; i++) {
-      String expr = selectExprs[i].trim();
-      // Extract alias: "pp.standardPrice as standardPrice" → "standardPrice"
-      // or "e.id as id" → "id", or just "e.name" → "name"
-      String colAlias;
-      java.util.regex.Matcher asMatcher = Pattern.compile("\\s+as\\s+(\\w+)\\s*$",
-          Pattern.CASE_INSENSITIVE).matcher(expr);
-      if (asMatcher.find()) {
-        colAlias = asMatcher.group(1);
-      } else {
-        // No "as" — use the last part after "."
-        int dotIdx = expr.lastIndexOf('.');
-        colAlias = dotIdx >= 0 ? expr.substring(dotIdx + 1).trim() : expr.trim();
-      }
-      colIndexMap.put(colAlias.toLowerCase(), i);
+      colIndexMap.put(extractSelectAlias(selectExprs[i]).toLowerCase(), i);
     }
+    return colIndexMap;
+  }
 
-    // Count query
-    String countHql = "SELECT COUNT(" + alias + ")" + fromClause;
-    org.hibernate.query.Query<Long> countQuery = OBDal.getInstance()
-        .getSession().createQuery(countHql, Long.class);
-    if (hasSearch) {
-      countQuery.setParameter("search", "%" + search.toLowerCase() + "%");
-    }
-    int totalCount = countQuery.uniqueResult().intValue();
-
-    // Data query — use the ORIGINAL select columns + our filters
-    String dataHql = selectPart + fromClause
-        + " ORDER BY " + alias + "." + meta.displayProperty;
-    org.hibernate.query.Query<?> dataQuery = OBDal.getInstance()
-        .getSession().createQuery(dataHql);
-    if (hasSearch) {
-      dataQuery.setParameter("search", "%" + search.toLowerCase() + "%");
-    }
-    dataQuery.setMaxResults(limit);
-    dataQuery.setFirstResult(offset);
-
-    // Determine which column index holds the ID (from valueProp, default "id")
-    String valuePropLower = (meta.valueProperty != null ? meta.valueProperty : "id").toLowerCase();
+  /**
+   * Resolve the column index that holds the entity ID in the SELECT expression list.
+   * Tries: valueProp → "id" → {alias}.id prefix scan.
+   */
+  private static Integer resolveIdColumnIndex(Map<String, Integer> colIndexMap,
+      String valueProperty, String alias, String[] selectExprs) {
+    String valuePropLower = (valueProperty != null ? valueProperty : "id").toLowerCase();
     Integer idColIdx = colIndexMap.get(valuePropLower);
     if (idColIdx == null) {
       idColIdx = colIndexMap.get("id");
     }
-    // Third fallback: scan SELECT expressions for {alias}.id (e.g., "bp.id as bpid")
     if (idColIdx == null) {
       String idPrefix = alias.toLowerCase() + ".id";
       for (int i = 0; i < selectExprs.length; i++) {
-        String expr = selectExprs[i].trim().toLowerCase();
-        if (expr.startsWith(idPrefix)) {
+        if (isEntityIdSelectExpression(selectExprs[i], idPrefix)) {
           idColIdx = i;
           break;
         }
       }
     }
+    return idColIdx;
+  }
 
-    // Build column metadata
-    JSONArray columns = new JSONArray();
-    for (RichFieldMeta fieldMeta : meta.gridFields) {
-      JSONObject col = new JSONObject();
-      col.put("name", fieldMeta.propertyKey);
-      col.put("label", fieldMeta.label);
-      col.put("sortNo", fieldMeta.sortNo);
-      columns.put(col);
-    }
-
-    // Build results from Object[] rows
-    Entity entityDef = ModelProvider.getInstance()
-        .getEntity(meta.entityName);
+  /**
+   * Build the items JSONArray from raw query result rows, extracting IDs, labels,
+   * and grid field values. Populates entityIds list as a side effect.
+   */
+  private static JSONArray buildItemsFromRows(List<?> rows, Map<String, Integer> colIndexMap,
+      Integer idColIdx, SelectorMeta meta, Entity entityDef,
+      List<String> entityIds) throws Exception {
     JSONArray items = new JSONArray();
-    List<String> entityIds = new ArrayList<>();
-    for (Object rawRow : dataQuery.list()) {
-      Object[] row = (rawRow instanceof Object[]) ? (Object[]) rawRow : new Object[]{ rawRow };
-      JSONObject item = new JSONObject();
+    for (Object rawRow : rows) {
+      items.put(buildItemFromRow(rawRow, colIndexMap, idColIdx, meta, entityDef, entityIds));
+    }
+    return items;
+  }
 
-      // Extract ID from the valueProp column
-      String recordId;
-      if (idColIdx != null && idColIdx < row.length) {
-        Object idVal = row[idColIdx];
-        recordId = idVal instanceof BaseOBObject ? ((BaseOBObject) idVal).getId().toString()
-            : String.valueOf(idVal);
-      } else {
-        // Fallback: try first column
-        Object idVal = row[0];
-        recordId = idVal instanceof BaseOBObject ? ((BaseOBObject) idVal).getId().toString()
-            : String.valueOf(idVal);
-      }
-      // OBUISEL selectors may return composite IDs (e.g., warehouseId + productId = 64 hex chars).
-      // Etendo entity UUIDs are always 32 hex chars. Extract the actual entity ID (last 32 chars).
-      if (recordId != null && recordId.length() == 64 && recordId.matches("[0-9A-Fa-f]{64}")) {
-        recordId = recordId.substring(32);
-      }
-      item.put("id", recordId);
-      entityIds.add(recordId);
+  private static JSONObject buildItemFromRow(Object rawRow, Map<String, Integer> colIndexMap,
+      Integer idColIdx, SelectorMeta meta, Entity entityDef, List<String> entityIds) throws Exception {
+    Object[] row = normalizeRow(rawRow);
+    String recordId = extractRecordId(row, idColIdx);
+    JSONObject item = new JSONObject();
+    item.put(JSON_ID, recordId);
+    item.put(JSON_LABEL, extractDisplayLabel(row, colIndexMap, meta, entityDef, recordId));
+    entityIds.add(recordId);
+    appendGridFieldValues(item, row, colIndexMap, meta.gridFields);
+    return item;
+  }
 
-      // Extract display label from the entity alias column or displayProperty
-      String label = "";
-      Integer displayIdx = colIndexMap.get(meta.displayProperty.toLowerCase());
-      if (displayIdx == null) {
-        displayIdx = colIndexMap.get("productname");
-      }
-      if (displayIdx != null && displayIdx < row.length) {
-        Object dispVal = row[displayIdx];
-        label = dispVal != null ? dispVal.toString() : "";
-      }
-      // If still empty, try to load the entity to get its identifier
-      if (label.isEmpty()) {
-        try {
-          BaseOBObject entity = OBDal.getInstance().get(entityDef.getName(), recordId);
-          if (entity != null) label = entity.getIdentifier();
-        } catch (Exception ignored) {}
-      }
-      item.put("label", label);
+  private static Object[] normalizeRow(Object rawRow) {
+    return rawRow instanceof Object[] ? (Object[]) rawRow : new Object[]{ rawRow };
+  }
 
-      // Map grid fields by matching column alias → index
-      for (RichFieldMeta fieldMeta : meta.gridFields) {
-        Integer colIdx = colIndexMap.get(fieldMeta.propertyKey.toLowerCase());
-        if (colIdx != null && colIdx < row.length) {
-          Object value = row[colIdx];
-          if (value instanceof BaseOBObject) {
-            item.put(fieldMeta.propertyKey, ((BaseOBObject) value).getIdentifier());
-          } else {
-            item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
-          }
+  private static void appendGridFieldValues(JSONObject item, Object[] row,
+      Map<String, Integer> colIndexMap, List<RichFieldMeta> gridFields) throws Exception {
+    for (RichFieldMeta fieldMeta : gridFields) {
+      appendGridFieldValue(item, row, colIndexMap, fieldMeta);
+    }
+  }
+
+  private static void appendGridFieldValue(JSONObject item, Object[] row,
+      Map<String, Integer> colIndexMap, RichFieldMeta fieldMeta) throws Exception {
+    Integer columnIndex = colIndexMap.get(fieldMeta.propertyKey.toLowerCase());
+    if (columnIndex == null || columnIndex >= row.length) {
+      return;
+    }
+    item.put(fieldMeta.propertyKey, toJsonValue(row[columnIndex]));
+  }
+
+  private static Object toJsonValue(Object value) {
+    if (value instanceof BaseOBObject) {
+      return ((BaseOBObject) value).getIdentifier();
+    }
+    return value != null ? value : JSONObject.NULL;
+  }
+
+  /**
+   * Extract the record ID from a query result row, handling BaseOBObject and composite IDs.
+   */
+  private static String extractRecordId(Object[] row, Integer idColIdx) {
+    Object idVal;
+    if (idColIdx != null && idColIdx < row.length) {
+      idVal = row[idColIdx];
+    } else {
+      idVal = row[0];
+    }
+    String recordId = idVal instanceof BaseOBObject
+        ? ((BaseOBObject) idVal).getId().toString()
+        : String.valueOf(idVal);
+    // OBUISEL selectors may return composite IDs (e.g., warehouseId + productId = 64 hex chars).
+    // Etendo entity UUIDs are always 32 hex chars. Extract the actual entity ID (last 32 chars).
+    if (recordId != null && recordId.length() == 64 && recordId.matches("[0-9A-Fa-f]{64}")) {
+      recordId = recordId.substring(32);
+    }
+    return recordId;
+  }
+
+  /**
+   * Extract the display label for a row from the column index map or by loading the entity.
+   */
+  private static String extractDisplayLabel(Object[] row, Map<String, Integer> colIndexMap,
+      SelectorMeta meta, Entity entityDef, String recordId) {
+    String label = "";
+    Integer displayIdx = colIndexMap.get(meta.displayProperty.toLowerCase());
+    if (displayIdx == null) {
+      displayIdx = colIndexMap.get("productname");
+    }
+    if (displayIdx != null && displayIdx < row.length) {
+      Object dispVal = row[displayIdx];
+      label = dispVal != null ? dispVal.toString() : "";
+    }
+    if (label.isEmpty()) {
+      try {
+        BaseOBObject entity = OBDal.getInstance().get(entityDef.getName(), recordId);
+        if (entity != null) {
+          label = entity.getIdentifier();
         }
+      } catch (Exception e) {
+        log.debug("Could not load entity identifier for record {}: {}",
+            recordId, e.getMessage());
       }
-
-      items.put(item);
     }
-
-    // Resolve auxiliary fields WITHOUT property path via the original HQL SELECT.
-    // These fields (e.g., _LOC with alias "locationid") are computed by the HQL
-    // and can only be obtained by executing the original SELECT clause.
-    boolean hasHqlOnlyAux = meta.auxFields.stream()
-        .anyMatch(af -> StringUtils.isBlank(af.property) && StringUtils.isNotBlank(af.hqlAlias));
-    if (hasHqlOnlyAux && !entityIds.isEmpty()) {
-      resolveAuxFieldsViaHql(items, entityIds, rawHql, fromIdx, alias, meta);
-    }
-
-    JSONObject result = new JSONObject();
-    result.put("items", items);
-    result.put("columns", columns);
-    result.put("totalCount", totalCount);
-    result.put("limit", limit);
-    result.put("offset", offset);
-    result.put("hasMore", (offset + limit) < totalCount);
-    return NeoResponse.ok(result);
+    return label;
   }
 
   /**
@@ -781,120 +789,342 @@ public class NeoSelectorService {
   private static void resolveAuxFieldsViaHql(JSONArray items, List<String> entityIds,
       String rawHql, int fromIdx, String entityAlias, SelectorMeta meta) {
     try {
-      // 1. Extract the original SELECT clause
-      String selectClause = rawHql.substring(0, fromIdx);
-      String fromOnwards = rawHql.substring(fromIdx);
-
-      // 2. Parse aliases from SELECT: "expr as aliasname" → ordered list
-      //    Pattern handles optional DISTINCT keyword and various expressions
-      java.util.regex.Matcher aliasMatcher = Pattern.compile(
-          "(?:,|SELECT(?:\\s+DISTINCT)?)\\s+(.+?)\\s+[Aa][Ss]\\s+(\\w+)",
-          Pattern.DOTALL).matcher(selectClause);
-      List<String> aliases = new ArrayList<>();
-      while (aliasMatcher.find()) {
-        aliases.add(aliasMatcher.group(2).toLowerCase());
-      }
-
-      if (aliases.isEmpty()) {
-        log.debug("Could not parse SELECT aliases from custom HQL");
+      AuxQueryContext context = buildAuxQueryContext(rawHql, fromIdx, entityAlias, meta);
+      if (context == null) {
         return;
       }
-
-      // 3. Find ID column position (usually "bp.id as bpid" or similar)
-      String valueAlias = meta.valueProperty != null
-          ? meta.valueProperty.toLowerCase() : "id";
-      int idPos = aliases.indexOf(valueAlias);
-      if (idPos < 0) {
-        // Try common patterns
-        for (int i = 0; i < aliases.size(); i++) {
-          if (aliases.get(i).endsWith("id") && aliases.get(i).length() <= 6) {
-            idPos = i;
-            break;
-          }
-        }
-      }
-      if (idPos < 0) {
-        log.debug("Could not find ID column in custom HQL SELECT aliases: {}", aliases);
-        return;
-      }
-
-      // 4. Build aux alias→position map
-      Map<String, Integer> auxAliasPos = new java.util.HashMap<>();
-      for (AuxFieldMeta af : meta.auxFields) {
-        if (StringUtils.isBlank(af.property) && StringUtils.isNotBlank(af.hqlAlias)) {
-          int pos = aliases.indexOf(af.hqlAlias.toLowerCase());
-          if (pos >= 0) {
-            auxAliasPos.put(af.suffix, pos);
-          }
-        }
-      }
-      if (auxAliasPos.isEmpty()) {
-        return;
-      }
-
-      // 5. Execute original SELECT with ID filter
-      // Strip existing WHERE/ORDER BY conditions after FROM and add simple IN filter
-      String auxHql = selectClause + fromOnwards;
-      // Remove ORDER BY if present (we don't need ordering for aux lookup)
-      int orderByIdx = auxHql.toUpperCase().lastIndexOf("ORDER BY");
-      if (orderByIdx > 0) {
-        auxHql = auxHql.substring(0, orderByIdx);
-      }
-      // Add/append WHERE clause to filter by entity IDs
-      boolean auxHasWhere = Pattern.compile("\\sWHERE\\s", Pattern.CASE_INSENSITIVE)
-          .matcher(auxHql).find();
-      auxHql += (auxHasWhere ? " AND " : " WHERE ")
-          + entityAlias + ".id IN (:auxIds)";
-
-      // Resolve @param@ placeholders
-      auxHql = resolveObuiselParams(auxHql);
-
-      org.hibernate.query.Query<Object[]> auxQuery = OBDal.getInstance()
-          .getSession().createQuery(auxHql, Object[].class);
-      auxQuery.setParameterList("auxIds", entityIds);
-
-      // 6. Build ID→aux map from results
-      Map<String, JSONObject> auxMap = new java.util.HashMap<>();
-      for (Object[] row : auxQuery.list()) {
-        if (row.length <= idPos || row[idPos] == null) {
-          continue;
-        }
-        String rowId = row[idPos].toString();
-        JSONObject aux = new JSONObject();
-        for (Map.Entry<String, Integer> entry : auxAliasPos.entrySet()) {
-          int pos = entry.getValue();
-          if (pos < row.length && row[pos] != null) {
-            aux.put(entry.getKey(), row[pos].toString());
-          }
-        }
-        if (aux.length() > 0) {
-          auxMap.put(rowId, aux);
-        }
-      }
-
-      // 7. Merge back into items
-      for (int i = 0; i < items.length(); i++) {
-        JSONObject item = items.getJSONObject(i);
-        String itemId = item.optString("id");
-        JSONObject aux = auxMap.get(itemId);
-        if (aux != null) {
-          // Merge with any existing _aux from DAL-resolved fields
-          JSONObject existing = item.optJSONObject("_aux");
-          if (existing != null) {
-            @SuppressWarnings("unchecked")
-            java.util.Iterator<String> auxKeysIter = aux.keys();
-            while (auxKeysIter.hasNext()) {
-              String key = auxKeysIter.next();
-              existing.put(key, aux.get(key));
-            }
-          } else {
-            item.put("_aux", aux);
-          }
-        }
-      }
-
+      Query<Object[]> auxQuery = OBDal.getInstance()
+          .getSession().createQuery(context.hql, Object[].class);
+      auxQuery.setParameterList(AUX_IDS_PARAM, entityIds);
+      mergeAuxMapIntoItems(items,
+          buildAuxMapFromRows(auxQuery.list(), context.idPosition, context.auxAliasPositions));
     } catch (Exception e) {
       log.warn("Could not resolve aux fields via HQL: {}", e.getMessage());
+    }
+  }
+
+  private static CustomHqlContext prepareCustomHqlContext(SelectorMeta meta,
+      String search, String validationFilter) {
+    String rawHql = meta.customHql.replace("@additional_filters@", "1=1");
+    int fromIdx = findFromClauseIndex(rawHql);
+    String selectPart = rawHql.substring(0, fromIdx).trim();
+    String[] selectExprs = extractSelectExpressions(selectPart);
+    String fromClause = buildFilteredFromClause(rawHql.substring(fromIdx), meta,
+        validationFilter, search, meta.entityAlias);
+
+    CustomHqlContext context = new CustomHqlContext();
+    context.alias = meta.entityAlias;
+    context.rawHql = rawHql;
+    context.fromIdx = fromIdx;
+    context.selectPart = selectPart;
+    context.selectExprs = selectExprs;
+    context.colIndexMap = parseSelectAliases(selectExprs);
+    context.hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
+    context.fromClause = fromClause;
+    return context;
+  }
+
+  private static int executeCustomCountQuery(CustomHqlContext context, String search) {
+    Query<Long> countQuery = OBDal.getInstance().getSession().createQuery(
+        "SELECT COUNT(" + context.alias + ")" + context.fromClause, Long.class);
+    bindSearchParameter(countQuery, context.hasSearch, search);
+    return countQuery.uniqueResult().intValue();
+  }
+
+  private static Query<?> buildCustomDataQuery(CustomHqlContext context, SelectorMeta meta,
+      String search, int limit, int offset) {
+    Query<?> dataQuery = OBDal.getInstance().getSession().createQuery(
+        context.selectPart + context.fromClause + " ORDER BY " + context.alias + "."
+            + meta.displayProperty);
+    bindSearchParameter(dataQuery, context.hasSearch, search);
+    dataQuery.setMaxResults(limit);
+    dataQuery.setFirstResult(offset);
+    return dataQuery;
+  }
+
+  private static JSONArray buildColumnsJson(List<RichFieldMeta> gridFields) throws Exception {
+    JSONArray columns = new JSONArray();
+    for (RichFieldMeta fieldMeta : gridFields) {
+      JSONObject col = new JSONObject();
+      col.put(JSON_NAME, fieldMeta.propertyKey);
+      col.put(JSON_LABEL, fieldMeta.label);
+      col.put(JSON_SORT_NO, fieldMeta.sortNo);
+      columns.put(col);
+    }
+    return columns;
+  }
+
+  private static NeoResponse buildSelectorResponse(JSONArray items, JSONArray columns,
+      int totalCount, int limit, int offset) throws Exception {
+    JSONObject result = new JSONObject();
+    result.put(JSON_ITEMS, items);
+    result.put(JSON_COLUMNS, columns);
+    result.put(JSON_TOTAL_COUNT, totalCount);
+    result.put(JSON_LIMIT, limit);
+    result.put(JSON_OFFSET, offset);
+    result.put(JSON_HAS_MORE, (offset + limit) < totalCount);
+    return NeoResponse.ok(result);
+  }
+
+  private static boolean hasHqlOnlyAuxFields(SelectorMeta meta) {
+    return meta.auxFields.stream()
+        .anyMatch(af -> StringUtils.isBlank(af.property) && StringUtils.isNotBlank(af.hqlAlias));
+  }
+
+  private static int findFromClauseIndex(String rawHql) {
+    Matcher fromMatcher = FROM_CLAUSE_PATTERN.matcher(rawHql);
+    if (!fromMatcher.find()) {
+      throw new IllegalArgumentException("Custom HQL does not contain a FROM clause: " + rawHql);
+    }
+    return fromMatcher.start();
+  }
+
+  private static void bindSearchParameter(Query<?> query, boolean hasSearch, String search) {
+    if (hasSearch) {
+      query.setParameter(SEARCH_PARAM, "%" + search.toLowerCase() + "%");
+    }
+  }
+
+  private static boolean appendCondition(StringBuilder hql, boolean hasWhere, String condition) {
+    hql.append(hasWhere ? SQL_AND : SQL_WHERE).append(condition);
+    return true;
+  }
+
+  private static boolean containsWhereClause(String hql) {
+    return WHERE_CLAUSE_PATTERN.matcher(hql).find();
+  }
+
+  private static String buildOrganizationFilter(String alias, String[] readableOrgs) {
+    StringBuilder filter = new StringBuilder(alias).append(".organization.id IN (");
+    for (int i = 0; i < readableOrgs.length; i++) {
+      if (i > 0) {
+        filter.append(", ");
+      }
+      filter.append("'").append(readableOrgs[i]).append("'");
+    }
+    return filter.append(")").toString();
+  }
+
+  private static String buildSearchFilter(String alias, List<String> searchableProperties) {
+    StringBuilder filter = new StringBuilder("(");
+    for (int i = 0; i < searchableProperties.size(); i++) {
+      if (i > 0) {
+        filter.append(" OR ");
+      }
+      filter.append("lower(COALESCE(cast(").append(alias).append(".")
+          .append(searchableProperties.get(i)).append(" as string), '')) LIKE :")
+          .append(SEARCH_PARAM);
+    }
+    return filter.append(")").toString();
+  }
+
+  private static AuxQueryContext buildAuxQueryContext(String rawHql, int fromIdx,
+      String entityAlias, SelectorMeta meta) {
+    String selectClause = rawHql.substring(0, fromIdx);
+    List<String> aliases = extractSelectAliases(extractSelectExpressions(selectClause));
+    if (aliases.isEmpty()) {
+      log.debug("Could not parse SELECT aliases from custom HQL");
+      return null;
+    }
+
+    int idPosition = resolveAuxIdPosition(aliases, meta);
+    if (idPosition < 0) {
+      log.debug("Could not find ID column in custom HQL SELECT aliases: {}", aliases);
+      return null;
+    }
+
+    Map<String, Integer> auxAliasPositions = resolveAuxAliasPositions(aliases, meta.auxFields);
+    if (auxAliasPositions.isEmpty()) {
+      return null;
+    }
+
+    String auxHql = buildAuxHql(selectClause, rawHql.substring(fromIdx), entityAlias);
+    return new AuxQueryContext(auxHql, idPosition, auxAliasPositions);
+  }
+
+  private static List<String> extractSelectAliases(String[] selectExprs) {
+    List<String> aliases = new ArrayList<>();
+    for (String selectExpr : selectExprs) {
+      aliases.add(extractSelectAlias(selectExpr).toLowerCase());
+    }
+    return aliases;
+  }
+
+  private static String[] extractSelectExpressions(String selectClause) {
+    List<String> expressions = splitTopLevelComma(stripSelectKeyword(selectClause));
+    return expressions.toArray(new String[0]);
+  }
+
+  private static String stripSelectKeyword(String selectClause) {
+    return selectClause.trim().replaceFirst("(?i)^select\\s+", "");
+  }
+
+  private static List<String> splitTopLevelComma(String code) {
+    List<String> parts = new ArrayList<>();
+    StringBuilder current = new StringBuilder();
+    int depth = 0;
+    boolean inSingleQuote = false;
+    boolean inDoubleQuote = false;
+
+    for (int i = 0; i < code.length(); i++) {
+      char ch = code.charAt(i);
+      if (ch == '\'' && !inDoubleQuote) {
+        inSingleQuote = !inSingleQuote;
+      } else if (ch == '"' && !inSingleQuote) {
+        inDoubleQuote = !inDoubleQuote;
+      } else if (!inSingleQuote && !inDoubleQuote) {
+        if (ch == '(') {
+          depth++;
+        } else if (ch == ')' && depth > 0) {
+          depth--;
+        } else if (ch == ',' && depth == 0) {
+          addSelectExpression(parts, current);
+          continue;
+        }
+      }
+      current.append(ch);
+    }
+
+    addSelectExpression(parts, current);
+    return parts;
+  }
+
+  private static void addSelectExpression(List<String> parts, StringBuilder current) {
+    String expression = current.toString().trim();
+    if (StringUtils.isNotBlank(expression)) {
+      parts.add(expression);
+    }
+    current.setLength(0);
+  }
+
+  private static String extractSelectAlias(String selectExpr) {
+    String alias = extractAliasFromAsClause(selectExpr);
+    if (alias != null) {
+      return alias;
+    }
+    int dotIdx = selectExpr.lastIndexOf('.');
+    return dotIdx >= 0 ? selectExpr.substring(dotIdx + 1).trim() : selectExpr.trim();
+  }
+
+  private static String extractAliasFromAsClause(String selectExpr) {
+    String lower = selectExpr.toLowerCase();
+    int asIndex = lower.lastIndexOf(SQL_AS);
+    if (asIndex < 0) {
+      return null;
+    }
+    return selectExpr.substring(asIndex + SQL_AS.length()).trim();
+  }
+
+  private static boolean isEntityIdSelectExpression(String selectExpr, String idPrefix) {
+    return stripSelectAlias(selectExpr).equalsIgnoreCase(idPrefix);
+  }
+
+  private static String stripSelectAlias(String selectExpr) {
+    String lower = selectExpr.toLowerCase();
+    int asIndex = lower.lastIndexOf(SQL_AS);
+    return asIndex >= 0 ? selectExpr.substring(0, asIndex).trim() : selectExpr.trim();
+  }
+
+  private static int resolveAuxIdPosition(List<String> aliases, SelectorMeta meta) {
+    String valueAlias = meta.valueProperty != null ? meta.valueProperty.toLowerCase() : "id";
+    int idPosition = aliases.indexOf(valueAlias);
+    if (idPosition >= 0) {
+      return idPosition;
+    }
+    for (int i = 0; i < aliases.size(); i++) {
+      String alias = aliases.get(i);
+      if (alias.endsWith("id") && alias.length() <= 6) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  private static Map<String, Integer> resolveAuxAliasPositions(List<String> aliases,
+      List<AuxFieldMeta> auxFields) {
+    Map<String, Integer> auxAliasPositions = new HashMap<>();
+    for (AuxFieldMeta auxField : auxFields) {
+      if (StringUtils.isNotBlank(auxField.property) || StringUtils.isBlank(auxField.hqlAlias)) {
+        continue;
+      }
+      int position = aliases.indexOf(auxField.hqlAlias.toLowerCase());
+      if (position >= 0) {
+        auxAliasPositions.put(auxField.suffix, position);
+      }
+    }
+    return auxAliasPositions;
+  }
+
+  private static String buildAuxHql(String selectClause, String fromOnwards, String entityAlias) {
+    String baseHql = stripTrailingOrderBy(selectClause + fromOnwards);
+    String filteredHql = baseHql + (containsWhereClause(baseHql) ? SQL_AND : SQL_WHERE)
+        + entityAlias + ".id IN (:" + AUX_IDS_PARAM + ")";
+    return resolveObuiselParams(filteredHql);
+  }
+
+  private static String stripTrailingOrderBy(String hql) {
+    int orderByIdx = hql.toUpperCase().lastIndexOf(SQL_ORDER_BY);
+    return orderByIdx > 0 ? hql.substring(0, orderByIdx) : hql;
+  }
+
+  private static Map<String, JSONObject> buildAuxMapFromRows(List<Object[]> rows,
+      int idPosition, Map<String, Integer> auxAliasPositions) throws Exception {
+    Map<String, JSONObject> auxMap = new HashMap<>();
+    for (Object[] row : rows) {
+      String rowId = extractAuxRowId(row, idPosition);
+      if (rowId == null) {
+        continue;
+      }
+      JSONObject aux = buildAuxJson(row, auxAliasPositions);
+      if (aux.length() > 0) {
+        auxMap.put(rowId, aux);
+      }
+    }
+    return auxMap;
+  }
+
+  private static String extractAuxRowId(Object[] row, int idPosition) {
+    if (row.length <= idPosition || row[idPosition] == null) {
+      return null;
+    }
+    return row[idPosition].toString();
+  }
+
+  private static JSONObject buildAuxJson(Object[] row,
+      Map<String, Integer> auxAliasPositions) throws Exception {
+    JSONObject aux = new JSONObject();
+    for (Map.Entry<String, Integer> entry : auxAliasPositions.entrySet()) {
+      int position = entry.getValue();
+      if (position < row.length && row[position] != null) {
+        aux.put(entry.getKey(), row[position].toString());
+      }
+    }
+    return aux;
+  }
+
+  private static void mergeAuxMapIntoItems(JSONArray items,
+      Map<String, JSONObject> auxMap) throws Exception {
+    for (int i = 0; i < items.length(); i++) {
+      JSONObject item = items.getJSONObject(i);
+      JSONObject aux = auxMap.get(item.optString(JSON_ID));
+      if (aux == null) {
+        continue;
+      }
+      mergeAuxJson(item, aux);
+    }
+  }
+
+  private static void mergeAuxJson(JSONObject item, JSONObject aux) throws Exception {
+    JSONObject existing = item.optJSONObject(JSON_AUX);
+    if (existing == null) {
+      item.put(JSON_AUX, aux);
+      return;
+    }
+    @SuppressWarnings("unchecked")
+    java.util.Iterator<String> auxKeysIter = aux.keys();
+    while (auxKeysIter.hasNext()) {
+      String key = auxKeysIter.next();
+      existing.put(key, aux.get(key));
     }
   }
 
@@ -1112,11 +1342,8 @@ public class NeoSelectorService {
         valueProp = valueField.getProperty();
       }
 
-      // Get where clause
-      String whereClause = selector.getHQLWhereClause();
-      if (StringUtils.isBlank(whereClause)) {
-        whereClause = null;
-      }
+      // Get where clause; strip SQL-only constructs not valid in HQL
+      String whereClause = sanitizeAdWhereClause(selector.getHQLWhereClause());
 
       // Load selector fields
       List<SelectorField> selectorFields = selector.getOBUISELSelectorFieldList();
@@ -1279,11 +1506,8 @@ public class NeoSelectorService {
         displayProp = findIdentifierProperty(targetEntity);
       }
 
-      // Get optional where clause
-      String whereClause = refTable.getHqlwhereclause();
-      if (StringUtils.isBlank(whereClause)) {
-        whereClause = null;
-      }
+      // Get optional where clause; strip SQL-only constructs not valid in HQL
+      String whereClause = sanitizeAdWhereClause(refTable.getHqlwhereclause());
 
       return new SelectorMeta(targetEntity.getName(), displayProp, whereClause);
 
@@ -1320,7 +1544,7 @@ public class NeoSelectorService {
 
   // SQL functions that have no HQL equivalent and must cause a clause to be skipped
   private static final Pattern SQL_ONLY_FUNCTIONS = Pattern.compile(
-      "AD_ISORGINCLUDED|AD_ISCHILDORGINCLUDED", Pattern.CASE_INSENSITIVE);
+      "AD_ISORGINCLUDED|AD_ISCHILDORGINCLUDED|AD_ROLE_ORGACCESS", Pattern.CASE_INSENSITIVE);
 
   /**
    * Resolve the column's validation rule into an HQL filter using context params.
@@ -1351,7 +1575,7 @@ public class NeoSelectorService {
     // Build combined param map: session variables + caller-provided context params
     Map<String, String> allParams = new java.util.HashMap<>();
     OBContext ctx = OBContext.getOBContext();
-    allParams.put("AD_Org_ID", ctx.getCurrentOrganization().getId());
+    allParams.put(AD_ORG_ID, ctx.getCurrentOrganization().getId());
     allParams.put("AD_Client_ID", ctx.getCurrentClient().getId());
     allParams.put("AD_User_ID", ctx.getUser().getId());
     allParams.put("AD_Role_ID", ctx.getRole().getId());
@@ -1409,11 +1633,107 @@ public class NeoSelectorService {
     }
 
     // Join resolved clauses back with AND
-    String joined = String.join(" AND ", resolvedClauses);
+    String joined = String.join(SQL_AND, resolvedClauses);
 
     // Convert SQL TABLE.COLUMN references to HQL e.property paths
     String hqlFilter = convertSqlToHql(joined, targetEntityName);
     return hqlFilter;
+  }
+
+  /** Package-private for testing. */
+  static String combineFilters(String... filters) {
+    List<String> parts = new ArrayList<>();
+    for (String filter : filters) {
+      if (StringUtils.isNotBlank(filter)) {
+        parts.add(filter);
+      }
+    }
+    if (parts.isEmpty()) {
+      return null;
+    }
+    return String.join(SQL_AND, parts);
+  }
+
+  /**
+   * Applies an organization filter to selectors whose target entity is org-aware.
+   * When the caller provides {@code AD_Org_ID} in context, that org is used directly.
+   * Otherwise, the filter is derived from the parent record's organization (child tabs only,
+   * i.e. tabLevel &gt; 0).
+   * Returns {@code null} (no filter) if no org context is available or if the target entity
+   * does not have an {@code organization} property.
+   *
+   * <p>This compensates for the fact that {@code AD_ISORGINCLUDED} validation clauses are
+   * stripped by {@link #sanitizeAdWhereClause} because they are SQL-only and not valid in HQL.
+   */
+  private static String resolveOrgFilter(SFEntity sourceEntity,
+      Column sourceColumn, SelectorMeta targetMeta, Map<String, String> contextParams) {
+    if (sourceEntity == null || sourceColumn == null || targetMeta == null) {
+      return null;
+    }
+
+    Entity targetEntity = ModelProvider.getInstance().getEntity(targetMeta.entityName);
+    if (targetEntity == null || !targetEntity.hasProperty(PROP_ORGANIZATION)) {
+      return null;
+    }
+
+    String organizationId = null;
+    if (contextParams != null) {
+      organizationId = contextParams.get(AD_ORG_ID);
+      if (StringUtils.isBlank(organizationId)) {
+        organizationId = resolveOrgFromParentRecord(sourceEntity, contextParams.get("parentId"));
+      }
+    }
+    if (StringUtils.isBlank(organizationId)) {
+      return null;
+    }
+
+    String safeOrgId = organizationId.replace("'", "''");
+    log.debug("Applying organization filter {} to selector {}", safeOrgId,
+        sourceColumn.getDBColumnName());
+    return "e.organization.id='" + safeOrgId + "'";
+  }
+
+  private static String resolveOrgFromParentRecord(SFEntity sourceEntity, String parentId) {
+    if (sourceEntity == null || StringUtils.isBlank(parentId)) {
+      return null;
+    }
+
+    try {
+      Tab childTab = sourceEntity.getADTab();
+      if (childTab == null || childTab.getTabLevel() == null || childTab.getTabLevel() <= 0) {
+        return null;
+      }
+
+      Tab parentTab = KernelUtils.getInstance().getParentTab(childTab);
+      if (parentTab == null || parentTab.getTable() == null) {
+        return null;
+      }
+
+      String parentProperty = ApplicationUtils.getParentProperty(childTab, parentTab);
+      if (StringUtils.isBlank(parentProperty)) {
+        return null;
+      }
+
+      Entity parentEntity = ModelProvider.getInstance().getEntityByTableId(parentTab.getTable().getId());
+      if (parentEntity == null || !parentEntity.hasProperty(PROP_ORGANIZATION)) {
+        return null;
+      }
+
+      BaseOBObject parentRecord = OBDal.getInstance().get(parentEntity.getName(), parentId);
+      if (parentRecord == null) {
+        return null;
+      }
+
+      Object organization = parentRecord.get(PROP_ORGANIZATION);
+      if (organization instanceof BaseOBObject) {
+        Object organizationId = ((BaseOBObject) organization).getId();
+        return organizationId != null ? organizationId.toString() : null;
+      }
+      return organization != null ? organization.toString() : null;
+    } catch (Exception e) {
+      log.debug("Could not resolve parent organization for selector context: {}", e.getMessage());
+      return null;
+    }
   }
 
   /**
@@ -1421,6 +1741,34 @@ public class NeoSelectorService {
    * Respects parentheses nesting so that "A AND (B OR C AND D) AND E"
    * splits into ["A", "(B OR C AND D)", "E"], not into inner parts.
    */
+  /**
+   * Strip SQL-only constructs from an AD where clause before appending to HQL.
+   * Splits on top-level AND, drops any clause that references SQL_ONLY_FUNCTIONS
+   * (e.g. AD_ROLE_ORGACCESS, which is not a mapped Hibernate entity).
+   * OBDal's own bindings (_dal_readableOrganizations_dal_) already enforce org/client access.
+   */
+  private static String sanitizeAdWhereClause(String whereClause) {
+    if (StringUtils.isBlank(whereClause)) {
+      return null;
+    }
+    List<String> clauses = splitTopLevelAnd(whereClause);
+    List<String> kept = new ArrayList<>();
+    for (String clause : clauses) {
+      String trimmed = clause.trim();
+      if (StringUtils.isBlank(trimmed)) {
+        // skip blank clauses
+      } else if (SQL_ONLY_FUNCTIONS.matcher(trimmed).find()) {
+        log.debug("Skipping AD where clause with SQL-only construct: {}", trimmed);
+      } else {
+        kept.add(trimmed);
+      }
+    }
+    if (kept.isEmpty()) {
+      return null;
+    }
+    return String.join(SQL_AND, kept);
+  }
+
   private static List<String> splitTopLevelAnd(String code) {
     List<String> parts = new ArrayList<>();
     int depth = 0;
@@ -1571,6 +1919,29 @@ public class NeoSelectorService {
       this.customHql = customHql;
       this.entityAlias = entityAlias;
       this.auxFields = auxFields;
+    }
+  }
+
+  private static class CustomHqlContext {
+    String alias;
+    String rawHql;
+    int fromIdx;
+    String selectPart;
+    String[] selectExprs;
+    Map<String, Integer> colIndexMap;
+    boolean hasSearch;
+    String fromClause;
+  }
+
+  private static class AuxQueryContext {
+    final String hql;
+    final int idPosition;
+    final Map<String, Integer> auxAliasPositions;
+
+    AuxQueryContext(String hql, int idPosition, Map<String, Integer> auxAliasPositions) {
+      this.hql = hql;
+      this.idPosition = idPosition;
+      this.auxAliasPositions = auxAliasPositions;
     }
   }
 

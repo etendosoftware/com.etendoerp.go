@@ -1,0 +1,315 @@
+name: Deploy to Staging
+
+on:
+  workflow_dispatch: # Disabled automatic trigger — pipeline moved to Jenkins (ETP-3604)
+
+env:
+  AWS_REGION: eu-west-3
+  ECR_REGISTRY: 278186107973.dkr.ecr.eu-west-3.amazonaws.com
+  ECR_REPO: etendo/etendo_core
+  IMAGE_TAG: develop
+  ECS_CLUSTER: etendo-staging
+  ECS_SERVICE: etendo-core-service
+
+jobs:
+  deploy-staging:
+    name: Build and deploy to staging
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout this module ────────────────────────────────────────────
+      - name: Checkout com.etendoerp.go
+        uses: actions/checkout@v4
+        with:
+          path: module
+
+      # ── 2. Checkout etendo_core ────────────────────────────────────────────
+      - name: Checkout etendo_core
+        uses: actions/checkout@v4
+        with:
+          repository: etendosoftware/etendo_core
+          token: ${{ secrets.ETENDOBOT_TOKEN }}
+          ref: develop
+          path: etendo_core
+
+      # ── 3. Inject this module into etendo_core ─────────────────────────────
+      - name: Inject module
+        run: |
+          mkdir -p etendo_core/modules
+          rm -rf etendo_core/modules/com.etendoerp.go
+          cp -r module etendo_core/modules/com.etendoerp.go
+          rm -rf etendo_core/modules/com.etendoerp.go/.git
+
+      # ── 4. AWS credentials ─────────────────────────────────────────────────
+      # TODO: migrate to OIDC (IAM OIDC role) once configured
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ── 5. Login to ECR ────────────────────────────────────────────────────
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── 6a. Create gradle.properties ──────────────────────────────────────
+      # etendo_core gitignores gradle.properties; we generate it here from
+      # GitHub secrets so it is available as a Docker build secret for setup
+      # and includes the RDS host so ./gradlew setup generates
+      # config/Openbravo.properties with the correct bbdd.url
+      # (otherwise WAD defaults to localhost:5432 and compilation fails).
+      - name: Create gradle.properties
+        run: |
+          {
+          echo "githubUser=etendobot"
+          echo "githubToken=${{ secrets.ETENDOBOT_TOKEN }}"
+          echo "repositoryUser=${{ secrets.NEXUS_USER }}"
+          echo "repositoryPassword=${{ secrets.NEXUS_PASSWORD }}"
+          echo "nexusUser=${{ secrets.NEXUS_USER }}"
+          echo "nexusPassword=${{ secrets.NEXUS_PASSWORD }}"
+          echo "allow.root=true"
+          echo "context.name=etendo"
+          echo "bbdd.sid=etendo"
+          echo "bbdd.port=5432"
+          echo "bbdd.host=etendo-staging.cfm2qm242otk.eu-west-3.rds.amazonaws.com"
+          echo "bbdd.systemUser=postgres"
+          echo "bbdd.systemPassword=${{ secrets.BBDD_SYSTEMPASSWORD }}"
+          echo "bbdd.user=tad"
+          echo "bbdd.password=${{ secrets.BBDD_PASSWORD }}"
+          echo "org.gradle.jvmargs=-Dfile.encoding=UTF-8"
+          echo "org.gradle.daemon=false"
+          } > etendo_core/gradle.properties
+
+      # ── 6b. Open RDS port 5432 to runner ──────────────────────────────────
+      # WAD (Window Application Designer) queries the DB at compile time to
+      # generate *Data.java classes. The RDS is private; we temporarily enable
+      # public access and add the runner IP to the SG. Both are reverted in
+      # step 12 (if: always).
+      - name: Open RDS for Docker build
+        id: open-rds
+        run: |
+          RUNNER_IP=$(curl -sf https://api.ipify.org)
+          echo "runner_ip=${RUNNER_IP}" >> $GITHUB_OUTPUT
+
+          RDS_SG=$(aws rds describe-db-instances \
+            --db-instance-identifier etendo-staging \
+            --region ${{ env.AWS_REGION }} \
+            --query 'DBInstances[0].VpcSecurityGroups[0].VpcSecurityGroupId' \
+            --output text)
+          echo "rds_sg=${RDS_SG}" >> $GITHUB_OUTPUT
+
+          CURRENT_PA=$(aws rds describe-db-instances \
+            --db-instance-identifier etendo-staging \
+            --region ${{ env.AWS_REGION }} \
+            --query 'DBInstances[0].PubliclyAccessible' \
+            --output text)
+
+          if [ "$CURRENT_PA" != "True" ]; then
+            echo "Enabling public access on RDS..."
+            aws rds modify-db-instance \
+              --db-instance-identifier etendo-staging \
+              --publicly-accessible \
+              --apply-immediately \
+              --region ${{ env.AWS_REGION }}
+            aws rds wait db-instance-available \
+              --db-instance-identifier etendo-staging \
+              --region ${{ env.AWS_REGION }}
+            echo "Public access enabled."
+          else
+            echo "RDS already publicly accessible."
+          fi
+
+          aws ec2 authorize-security-group-ingress \
+            --group-id ${RDS_SG} \
+            --protocol tcp \
+            --port 5432 \
+            --cidr ${RUNNER_IP}/32 \
+            --region ${{ env.AWS_REGION }} || echo "SG rule already exists"
+
+      # ── 6c. Update database schema (pre-build) ────────────────────────────
+      # etendo_core:develop may reference new DAL entities (e.g. EmailBpContact)
+      # that do not yet exist in staging. generate.entities (called inside
+      # compile.complete.development) reads the DB schema to produce Java classes,
+      # so the schema must be up-to-date before the Docker build.
+      # Liquibase is idempotent — the ECS migration task (step 9) will no-op.
+      #
+      # Two-step invocation: `setup` runs first so createOBProperties and
+      # antSetup fully generate config/Openbravo.properties (including
+      # bbdd.driver=org.postgresql.Driver). In the second invocation those
+      # tasks are UP-TO-DATE and buildvalidation finds the file ready.
+      - name: Update database schema
+        working-directory: etendo_core
+        run: |
+          ./gradlew setup
+          ./gradlew update.database
+
+      # ── 6d. Copy runtime Dockerfile and entrypoint ────────────────────────
+      - name: Copy runtime Dockerfile and entrypoint
+        run: |
+          cp module/.github/docker/Dockerfile.runtime etendo_core/Dockerfile
+          cp module/.github/docker/docker-entrypoint.sh etendo_core/docker-entrypoint.sh
+
+      # ── 6. Build and push runtime image ───────────────────────────────────
+      - name: Build runtime image
+        working-directory: etendo_core
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          docker build \
+            --secret id=gradle_props,src=gradle.properties \
+            -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }} \
+            .
+
+      - name: Push runtime image
+        run: |
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }}
+
+      # ── 7. Build and push migration image ─────────────────────────────────
+      - name: Copy migration Dockerfile
+        run: cp module/.github/docker/Dockerfile.migrate etendo_core/
+
+      - name: Build migration image
+        working-directory: etendo_core
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: |
+          # gradle.properties is passed as a build secret: mounted only during
+          # the RUN step that needs it, never persisted in image layers.
+          docker build \
+            -f Dockerfile.migrate \
+            --secret id=gradle_props,src=gradle.properties \
+            -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:migrate-${{ env.IMAGE_TAG }} \
+            .
+
+      - name: Push migration image
+        run: |
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:migrate-${{ env.IMAGE_TAG }}
+
+      # ── 8. Register migration task definition ─────────────────────────────
+      - name: Register migration task definition
+        id: register-migrate-task
+        run: |
+          cat > /tmp/etendo-migrate-task-def.json << EOF
+          {
+            "family": "etendo-migrate",
+            "networkMode": "awsvpc",
+            "requiresCompatibilities": ["FARGATE"],
+            "cpu": "1024",
+            "memory": "2048",
+            "executionRoleArn": "arn:aws:iam::278186107973:role/ecsTaskExecutionRole",
+            "containerDefinitions": [
+              {
+                "name": "etendo-migrate",
+                "image": "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:migrate-${{ env.IMAGE_TAG }}",
+                "essential": true,
+                "environment": [
+                  { "name": "BBDD_HOST", "value": "etendo-staging.cfm2qm242otk.eu-west-3.rds.amazonaws.com" },
+                  { "name": "BBDD_PORT", "value": "5432" },
+                  { "name": "BBDD_SID",  "value": "etendo" }
+                ],
+                "secrets": [
+                  {
+                    "name": "BBDD_SYSTEMPASSWORD",
+                    "valueFrom": "arn:aws:secretsmanager:eu-west-3:278186107973:secret:etendo/staging/bbdd-system-password-1M0abS"
+                  },
+                  {
+                    "name": "BBDD_PASSWORD",
+                    "valueFrom": "arn:aws:secretsmanager:eu-west-3:278186107973:secret:etendo/staging/bbdd-password-KhAHph"
+                  }
+                ],
+                "logConfiguration": {
+                  "logDriver": "awslogs",
+                  "options": {
+                    "awslogs-group": "/ecs/etendo-staging",
+                    "awslogs-region": "${{ env.AWS_REGION }}",
+                    "awslogs-stream-prefix": "etendo-migrate"
+                  }
+                }
+              }
+            ]
+          }
+          EOF
+
+          TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file:///tmp/etendo-migrate-task-def.json \
+            --region ${{ env.AWS_REGION }} \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "task_def_arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
+          echo "Registered task definition: $TASK_DEF_ARN"
+
+      # ── 9. Run DB migration (ECS one-shot task inside VPC) ─────────────────
+      - name: Run DB migration task
+        id: run-migration
+        run: |
+          TASK_ARN=$(aws ecs run-task \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --task-definition ${{ steps.register-migrate-task.outputs.task_def_arn }} \
+            --launch-type FARGATE \
+            --network-configuration 'awsvpcConfiguration={
+              subnets=[subnet-95adedfc],
+              securityGroups=[sg-05dfda3d85b5f0179],
+              assignPublicIp=ENABLED
+            }' \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].taskArn' \
+            --output text)
+
+          echo "task_arn=$TASK_ARN" >> $GITHUB_OUTPUT
+          echo "Migration task started: $TASK_ARN"
+
+      # ── 10. Wait for migration to complete ────────────────────────────────
+      - name: Wait for migration task
+        run: |
+          echo "Waiting for migration to complete (timeout: 10 min)..."
+          aws ecs wait tasks-stopped \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --tasks ${{ steps.run-migration.outputs.task_arn }} \
+            --region ${{ env.AWS_REGION }}
+
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --tasks ${{ steps.run-migration.outputs.task_arn }} \
+            --region ${{ env.AWS_REGION }} \
+            --query 'tasks[0].containers[0].exitCode' \
+            --output text)
+
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "Migration failed with exit code $EXIT_CODE"
+            echo "Logs: CloudWatch > /ecs/etendo-staging > etendo-migrate"
+            exit 1
+          fi
+
+          echo "Migration completed successfully (exit code 0)"
+
+      # ── 11. Deploy new image to ECS ────────────────────────────────────────
+      - name: Deploy to ECS
+        run: |
+          aws ecs update-service \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --service ${{ env.ECS_SERVICE }} \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+          echo "Deployment triggered."
+          echo "Monitor: https://eu-west-3.console.aws.amazon.com/ecs/v2/clusters/${{ env.ECS_CLUSTER }}/services/${{ env.ECS_SERVICE }}"
+          echo "App: https://core.staging.etendo.cloud/etendo/security/Login"
+
+      # ── 12. Close RDS port 5432 from runner (always runs) ─────────────────
+      - name: Close RDS from Docker build
+        if: always()
+        run: |
+          RUNNER_IP="${{ steps.open-rds.outputs.runner_ip }}"
+          RDS_SG="${{ steps.open-rds.outputs.rds_sg }}"
+          if [ -n "$RUNNER_IP" ] && [ -n "$RDS_SG" ]; then
+            aws ec2 revoke-security-group-ingress \
+              --group-id ${RDS_SG} \
+              --protocol tcp \
+              --port 5432 \
+              --cidr ${RUNNER_IP}/32 \
+              --region ${{ env.AWS_REGION }} || echo "SG rule already removed"
+          else
+            echo "No runner IP or SG to clean up."
+          fi

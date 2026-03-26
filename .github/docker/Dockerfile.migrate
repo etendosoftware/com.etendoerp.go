@@ -1,0 +1,40 @@
+# Migration runner image for Etendo staging
+# Runs ./gradlew update.database against RDS, then exits.
+# DB credentials are injected at runtime via ECS Secrets Manager (env vars).
+# Build-time credentials (Nexus/GitHub) are passed as Docker build secrets
+# and are never persisted in any image layer.
+FROM eclipse-temurin:17-jdk-jammy
+
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for gradlew (antInit rejects root)
+RUN useradd -m -s /bin/bash etendo
+
+# Build migrate entrypoint as root so it can live in /usr/local/bin
+RUN printf '#!/bin/bash\nset -e\n\
+\n\
+echo "[migrate] Patching DB connection from env vars..."\n\
+sed -i "s#bbdd.host=.*#bbdd.host=${BBDD_HOST}#" /home/etendo/app/gradle.properties\n\
+sed -i "s#bbdd.systemPassword=.*#bbdd.systemPassword=${BBDD_SYSTEMPASSWORD}#" /home/etendo/app/gradle.properties\n\
+sed -i "s#bbdd.url=.*#bbdd.url=jdbc:postgresql://${BBDD_HOST}:${BBDD_PORT:-5432}#" /home/etendo/app/config/Openbravo.properties\n\
+sed -i "s#^bbdd.systemPassword=.*#bbdd.systemPassword=${BBDD_SYSTEMPASSWORD}#" /home/etendo/app/config/Openbravo.properties\n\
+\n\
+echo "[migrate] Running update.database..."\n\
+cd /home/etendo/app && exec ./gradlew update.database\n\
+' > /usr/local/bin/migrate.sh && chmod +x /usr/local/bin/migrate.sh
+
+WORKDIR /home/etendo/app
+COPY --chown=etendo:etendo . .
+# WORKDIR is created by root — chown the dir itself so etendo can write .gradle/ inside it
+RUN chown etendo:etendo /home/etendo/app
+
+USER etendo
+
+RUN git config --global --add safe.directory /home/etendo/app
+
+# gradle.properties is mounted as a build secret — available only during this RUN,
+# never written to any image layer.
+RUN --mount=type=secret,id=gradle_props,dst=/home/etendo/app/gradle.properties,uid=1000 \
+    ./gradlew setup
+
+ENTRYPOINT ["/usr/local/bin/migrate.sh"]
