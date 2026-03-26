@@ -10,37 +10,44 @@ import org.junit.jupiter.api.Test;
  */
 class NeoSelectorServiceTest {
 
-  // ── combineFilters ────────────────────────────────────────────────────
+  private static final String FILTER_A = "a.id='X'";
+  private static final String FILTER_B = "b.org='Y'";
 
+  /** Combining two null filters returns null. */
   @Test
-  void testCombineFilters_bothNull_returnsNull() {
+  void testCombineFiltersBothNullReturnsNull() {
     assertNull(NeoSelectorService.combineFilters(null, null));
   }
 
+  /** Combining two blank filters returns null. */
   @Test
-  void testCombineFilters_bothBlank_returnsNull() {
+  void testCombineFiltersBothBlankReturnsNull() {
     assertNull(NeoSelectorService.combineFilters("", "  "));
   }
 
+  /** A single non-blank filter is returned as-is. */
   @Test
-  void testCombineFilters_singleNonBlank_returnsThat() {
-    assertEquals("a.id='X'", NeoSelectorService.combineFilters(null, "a.id='X'"));
+  void testCombineFiltersSingleNonBlankReturnsThat() {
+    assertEquals(FILTER_A, NeoSelectorService.combineFilters(null, FILTER_A));
   }
 
+  /** Two non-blank filters are joined with AND. */
   @Test
-  void testCombineFilters_twoNonBlank_joinsWithAnd() {
-    String result = NeoSelectorService.combineFilters("a.id='X'", "b.org='Y'");
-    assertEquals("a.id='X' AND b.org='Y'", result);
+  void testCombineFiltersTwoNonBlankJoinsWithAnd() {
+    String result = NeoSelectorService.combineFilters(FILTER_A, FILTER_B);
+    assertEquals(FILTER_A + " AND " + FILTER_B, result);
   }
 
+  /** Blank entries in the middle are skipped. */
   @Test
-  void testCombineFilters_skipsBlanksInMiddle() {
+  void testCombineFiltersSkipsBlanksInMiddle() {
     String result = NeoSelectorService.combineFilters("x=1", "", "y=2");
     assertEquals("x=1 AND y=2", result);
   }
 
+  /** Calling with no arguments returns null. */
   @Test
-  void testCombineFilters_noArgs_returnsNull() {
+  void testCombineFiltersNoArgsReturnsNull() {
     assertNull(NeoSelectorService.combineFilters());
   }
 }

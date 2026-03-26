@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 class NeoServletPathTest {
 
   private static final String SPEC_NAME = "mySpec";
+  private static final String CALLOUT_PATH = "/Order/callout";
 
   private NeoServlet servlet;
 
@@ -271,7 +272,7 @@ class NeoServletPathTest {
 
   @Test
   void testParsePathCallout() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Order/callout");
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + CALLOUT_PATH);
 
     assertEquals(SPEC_NAME, info.specName);
     assertEquals("Order", info.entityName);
@@ -285,7 +286,7 @@ class NeoServletPathTest {
   /** Callout path should not be confused with a record ID. */
   @Test
   void testParsePathCalloutNotConfusedWithRecordId() {
-    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Order/callout");
+    NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + CALLOUT_PATH);
 
     assertNull(info.recordId);
     assertTrue(info.isCallout);
@@ -311,7 +312,7 @@ class NeoServletPathTest {
   /** Callout sub-path should not be confused with selectors. */
   @Test
   void testParsePathCalloutDistinctFromSelectors() {
-    NeoServlet.NeoPathInfo callout = servlet.parsePath("/" + SPEC_NAME + "/Order/callout");
+    NeoServlet.NeoPathInfo callout = servlet.parsePath("/" + SPEC_NAME + CALLOUT_PATH);
     NeoServlet.NeoPathInfo selector = servlet.parsePath("/" + SPEC_NAME + "/Order/selectors");
 
     assertTrue(callout.isCallout);
