@@ -361,119 +361,112 @@ public class NeoSelectorService {
     if (meta.isCustomQuery && StringUtils.isNotBlank(meta.customHql)) {
       return executeCustomHqlQuery(meta, search, limit, offset, validationFilter);
     }
-    // Custom query flag set but no HQL defined: fall through to standard query
 
     String alias = "e";
-    StringBuilder hql = new StringBuilder();
+    String whereStr = buildRichWhereClause(meta, search, validationFilter, alias);
+    boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
 
-    // Apply where clause from OBUISEL_Selector with @param@ substitution
-    if (StringUtils.isNotBlank(meta.whereClause)) {
-      String resolved = resolveObuiselParams(meta.whereClause);
-      hql.append(resolved);
-    }
+    int totalCount = createRichOBQuery(meta.entityName, whereStr, hasSearch, search).count();
 
-    // Apply validation rule filter (resolved from context params)
-    if (StringUtils.isNotBlank(validationFilter)) {
-      if (hql.length() > 0) {
-        hql.append(SQL_AND);
-      }
-      hql.append(validationFilter);
-    }
-
-    // Search filter: OR across all searchable properties
-    if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
-      if (hql.length() > 0) {
-        hql.append(SQL_AND);
-      }
-      hql.append("(");
-      for (int i = 0; i < meta.searchableProperties.size(); i++) {
-        if (i > 0) {
-          hql.append(" OR ");
-        }
-        String prop = meta.searchableProperties.get(i);
-        hql.append("lower(COALESCE(cast(").append(alias).append(".")
-            .append(prop).append(" as string), '')) LIKE :search");
-      }
-      hql.append(")");
-    }
-
-    // Prefix with alias "as e" so OBQuery registers the entity alias
-    String whereStr = hql.length() > 0
-        ? "as " + alias + " where " + hql.toString()
-        : "as " + alias;
-
-    // Count query
-    OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
-        .createQuery(meta.entityName, whereStr);
-    if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
-      countQuery.setNamedParameter("search",
-          "%" + search.toLowerCase() + "%");
-    }
-    int totalCount = countQuery.count();
-
-    // Data query with ordering and pagination
-    String orderBy = " ORDER BY " + alias + "." + meta.displayProperty;
-    String dataWhere = whereStr + orderBy;
-
-    OBQuery<BaseOBObject> dataQuery = OBDal.getInstance()
-        .createQuery(meta.entityName, dataWhere);
-    if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
-      dataQuery.setNamedParameter("search",
-          "%" + search.toLowerCase() + "%");
-    }
+    String dataWhere = whereStr + " ORDER BY " + alias + "." + meta.displayProperty;
+    OBQuery<BaseOBObject> dataQuery = createRichOBQuery(meta.entityName, dataWhere,
+        hasSearch, search);
     dataQuery.setMaxResult(limit);
     dataQuery.setFirstResult(offset);
 
-    // Build column metadata
-    JSONArray columns = new JSONArray();
-    for (RichFieldMeta fieldMeta : meta.gridFields) {
-      JSONObject col = new JSONObject();
-      col.put(JSON_NAME, fieldMeta.propertyKey);
-      col.put(JSON_LABEL, fieldMeta.label);
-      col.put(JSON_SORT_NO, fieldMeta.sortNo);
-      columns.put(col);
+    JSONArray items = buildRichItems(dataQuery.list(), meta);
+    return buildSelectorResponse(items, buildColumnsJson(meta.gridFields),
+        totalCount, limit, offset);
+  }
+
+  /**
+   * Build the WHERE clause for a standard (non-custom-HQL) rich selector query.
+   */
+  private static String buildRichWhereClause(SelectorMeta meta, String search,
+      String validationFilter, String alias) {
+    StringBuilder hql = new StringBuilder();
+    boolean hasCondition = false;
+
+    if (StringUtils.isNotBlank(meta.whereClause)) {
+      hql.append(resolveObuiselParams(meta.whereClause));
+      hasCondition = true;
     }
 
-    // Build results with all grid fields
-    Entity entityDef = ModelProvider.getInstance()
-        .getEntity(meta.entityName);
+    if (StringUtils.isNotBlank(validationFilter)) {
+      if (hasCondition) {
+        hql.append(SQL_AND);
+      }
+      hql.append(validationFilter);
+      hasCondition = true;
+    }
+
+    if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
+      if (hasCondition) {
+        hql.append(SQL_AND);
+      }
+      hql.append(buildSearchFilter(alias, meta.searchableProperties));
+    }
+
+    return hql.length() > 0
+        ? "as " + alias + " where " + hql
+        : "as " + alias;
+  }
+
+  /**
+   * Create an OBQuery for the rich selector, binding the search parameter if needed.
+   */
+  private static OBQuery<BaseOBObject> createRichOBQuery(String entityName, String whereStr,
+      boolean hasSearch, String search) {
+    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(entityName, whereStr);
+    if (hasSearch) {
+      query.setNamedParameter(SEARCH_PARAM, "%" + search.toLowerCase() + "%");
+    }
+    return query;
+  }
+
+  /**
+   * Build result items from OBQuery results, resolving IDs, grid fields, and aux fields.
+   */
+  private static JSONArray buildRichItems(List<BaseOBObject> rows, SelectorMeta meta)
+      throws Exception {
+    Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
     JSONArray items = new JSONArray();
-    List<String> entityIds = new ArrayList<>();
-    for (BaseOBObject bob : dataQuery.list()) {
-      JSONObject item = new JSONObject();
-      // Use valueProperty to extract the correct ID (e.g., "product.id" for product selectors
-      // that query a view like M_Product_Price_Warehouse_v). Falls back to bob.getId().
-      String recordId;
-      if (meta.valueProperty != null && !meta.valueProperty.equals("id")) {
-        Object valObj = resolvePropertyValue(bob, meta.valueProperty, entityDef);
-        recordId = valObj != null ? valObj.toString() : bob.getId().toString();
-      } else {
-        recordId = bob.getId().toString();
-      }
-      item.put(JSON_ID, recordId);
-      item.put(JSON_LABEL, bob.getIdentifier());
-      entityIds.add(recordId);
-
-      // Add all grid fields
-      for (RichFieldMeta fieldMeta : meta.gridFields) {
-        Object value = resolvePropertyValue(bob, fieldMeta.property, entityDef);
-        item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
-      }
-
-      // Resolve auxiliary fields that have a DAL property path
-      appendAuxFields(item, bob, meta.auxFields);
-
+    for (BaseOBObject bob : rows) {
+      JSONObject item = buildRichItem(bob, meta, entityDef);
       items.put(item);
     }
+    return items;
+  }
 
-    JSONObject result = new JSONObject();
-    result.put(JSON_ITEMS, items);
-    result.put(JSON_COLUMNS, columns);
-    result.put(JSON_TOTAL_COUNT, totalCount);
-    result.put(JSON_LIMIT, limit);
-    result.put(JSON_OFFSET, offset);
-    result.put(JSON_HAS_MORE, (offset + limit) < totalCount);
-    return NeoResponse.ok(result);
+  /**
+   * Build a single result item from a BaseOBObject, extracting ID, label, grid fields and aux.
+   */
+  private static JSONObject buildRichItem(BaseOBObject bob, SelectorMeta meta,
+      Entity entityDef) throws Exception {
+    JSONObject item = new JSONObject();
+    String recordId = resolveRecordId(bob, meta.valueProperty, entityDef);
+    item.put(JSON_ID, recordId);
+    item.put(JSON_LABEL, bob.getIdentifier());
+
+    for (RichFieldMeta fieldMeta : meta.gridFields) {
+      Object value = resolvePropertyValue(bob, fieldMeta.property, entityDef);
+      item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
+    }
+
+    appendAuxFields(item, bob, meta.auxFields);
+    return item;
+  }
+
+  /**
+   * Resolve the record ID from a BaseOBObject using the value property, falling back to getId().
+   */
+  private static String resolveRecordId(BaseOBObject bob, String valueProperty,
+      Entity entityDef) {
+    if (valueProperty != null && !valueProperty.equals("id")) {
+      Object valObj = resolvePropertyValue(bob, valueProperty, entityDef);
+      return valObj != null ? valObj.toString() : bob.getId().toString();
+    }
+    return bob.getId().toString();
   }
 
   /**

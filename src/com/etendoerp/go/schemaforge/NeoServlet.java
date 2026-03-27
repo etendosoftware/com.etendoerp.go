@@ -981,31 +981,8 @@ public class NeoServlet extends HttpBaseServlet {
       while (keys.hasNext()) {
         String key = keys.next();
         Object val = data.opt(key);
-        if (!(val instanceof String)) {
-          continue;
-        }
-        try {
-          Property prop = entity.getProperty(key);
-          if (prop == null || !prop.isPrimitive()) {
-            continue;
-          }
-          String strVal = (String) val;
-          Class<?> type = prop.getPrimitiveObjectType();
-          if (type == null) {
-            continue;
-          }
-          if (java.math.BigDecimal.class.isAssignableFrom(type)) {
-            if (!strVal.isEmpty()) {
-              coerced.put(key, new java.math.BigDecimal(strVal));
-            }
-          } else if (Long.class.isAssignableFrom(type)) {
-            if (!strVal.isEmpty()) {
-              coerced.put(key, Long.parseLong(strVal));
-            }
-          }
-        } catch (Exception ignored) {
-          // Not a DAL property or not primitive — skip
-          continue;
+        if (val instanceof String) {
+          coerceField(entity, key, (String) val, coerced);
         }
       }
       // Apply coerced values after iteration
@@ -1018,6 +995,22 @@ public class NeoServlet extends HttpBaseServlet {
       }
     } catch (Exception e) {
       log.error("Error coercing types for {}: {}", dalEntityName, e.getMessage(), e);
+    }
+  }
+
+  private void coerceField(Entity entity, String key, String strVal, Map<String, Object> coerced) {
+    try {
+      Property prop = entity.getProperty(key);
+      if (prop != null && prop.isPrimitive()) {
+        Class<?> type = prop.getPrimitiveObjectType();
+        if (type != null && java.math.BigDecimal.class.isAssignableFrom(type) && !strVal.isEmpty()) {
+          coerced.put(key, new java.math.BigDecimal(strVal));
+        } else if (type != null && Long.class.isAssignableFrom(type) && !strVal.isEmpty()) {
+          coerced.put(key, Long.parseLong(strVal));
+        }
+      }
+    } catch (Exception ignored) {
+      // Not a DAL property or not primitive — skip
     }
   }
 
@@ -1194,168 +1187,153 @@ public class NeoServlet extends HttpBaseServlet {
   private NeoResponse handleButtonAction(SFSpec spec,
       NeoPathInfo pathInfo, String method, HttpServletRequest request) {
     try {
-      String specId = spec.getId();
-
-      // Find the entity
-      SFEntity entity = findEntity(specId, pathInfo.entityName);
+      SFEntity entity = findEntity(spec.getId(), pathInfo.entityName);
       if (entity == null) {
         return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
             "Entity not found in spec: " + pathInfo.entityName);
       }
 
-      String entityId = entity.getId();
-
       if ("GET".equals(method) && pathInfo.actionName == null) {
-        // List available button actions
-        OBCriteria<SFField> fieldCriteria = OBDal.getInstance()
-            .createCriteria(SFField.class);
-        fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
-        fieldCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-        fieldCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-        List<SFField> fields = fieldCriteria.list();
-
-        JSONArray actions = new JSONArray();
-        for (SFField field : fields) {
-          Column column = field.getADColumn();
-          if (column == null) {
-            continue;
-          }
-
-          // Check if column reference is Button (AD_Reference_ID = '28')
-          if (column.getReference() == null
-              || !"28".equals((String) column.getReference().getId())) {
-            continue;
-          }
-
-          // Resolve process: prefer OBUIAPP, fall back to classic,
-          // then check for hardcoded "Posted" fallback
-          Process classicProcess = column.getProcess();
-          org.openbravo.client.application.Process obuiappProcess =
-              column.getOBUIAPPProcess();
-
-          // Fallback: hardcoded "Posted" → use com.smf.jobs.defaults.Post
-          if (classicProcess == null && obuiappProcess == null) {
-            if ("Posted".equals(column.getDBColumnName())) {
-              obuiappProcess = resolveDefaultPostProcess();
-            }
-            if (obuiappProcess == null) {
-              continue;
-            }
-          }
-
-          JSONObject actionObj = new JSONObject();
-          actionObj.put("columnName", column.getDBColumnName());
-          if (obuiappProcess != null) {
-            actionObj.put("processType", "OBUIAPP");
-            actionObj.put("processName",
-                obuiappProcess.getName() != null ? obuiappProcess.getName() : "");
-          } else {
-            actionObj.put("processType", "Classic");
-            actionObj.put("processName",
-                classicProcess.getName() != null ? classicProcess.getName() : "");
-          }
-          actions.put(actionObj);
-        }
-
-        JSONObject responseBody = new JSONObject();
-        responseBody.put("actions", actions);
-        return NeoResponse.ok(responseBody);
+        return listButtonActions(entity.getId());
       }
-
       if ("POST".equals(method) && pathInfo.actionName != null) {
-        // Execute button action
-        OBCriteria<SFField> fieldCriteria = OBDal.getInstance()
-            .createCriteria(SFField.class);
-        fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
-        fieldCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-        fieldCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-        List<SFField> fields = fieldCriteria.list();
-
-        Column targetColumn = null;
-        for (SFField field : fields) {
-          Column column = field.getADColumn();
-          if (column != null && pathInfo.actionName.equals(column.getDBColumnName())) {
-            targetColumn = column;
-            break;
-          }
-        }
-
-        if (targetColumn == null) {
-          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
-              "Action not found: " + pathInfo.actionName);
-        }
-
-        // Check reference is Button
-        if (targetColumn.getReference() == null
-            || !"28".equals((String) targetColumn.getReference().getId())) {
-          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-              "Field is not a button: " + pathInfo.actionName);
-        }
-
-        // Resolve process: prefer OBUIAPP, fall back to classic,
-        // then check for hardcoded "Posted" fallback
-        org.openbravo.client.application.Process obuiappProcess =
-            targetColumn.getOBUIAPPProcess();
-        Process adProcess = targetColumn.getProcess();
-
-        // Fallback: hardcoded "Posted" → use com.smf.jobs.defaults.Post
-        if (adProcess == null && obuiappProcess == null) {
-          if ("Posted".equals(targetColumn.getDBColumnName())) {
-            obuiappProcess = resolveDefaultPostProcess();
-          }
-          if (adProcess == null && obuiappProcess == null) {
-            return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-                "No process linked to button: " + pathInfo.actionName);
-          }
-        }
-
-        // Read request body
-        JSONObject params = null;
-        String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        if (StringUtils.isNotBlank(bodyStr)) {
-          params = new JSONObject(bodyStr);
-        } else {
-          params = new JSONObject();
-        }
-        params.put("recordId", pathInfo.recordId);
-
-        // Execute: OBUIAPP takes priority over classic
-        if (obuiappProcess != null) {
-          params.put("inpRecordId", pathInfo.recordId);
-          if (entity.getADTab() != null) {
-            params.put("inpTabId", entity.getADTab().getId());
-          }
-          return NeoProcessService.executeObuiappProcess(obuiappProcess, params);
-        }
-
-        // Check process access before executing classic process
-        if (!hasProcessAccess(adProcess.getId())) {
-          return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
-              "Access denied to process for current role");
-        }
-
-        // Enrich params with record/tab context for DB procedures
-        params.put("inpRecordId", pathInfo.recordId);
-        if (entity.getADTab() != null) {
-          params.put("inpTabId", entity.getADTab().getId());
-        }
-
-        return NeoProcessService.executeProcess(adProcess, params);
+        return executeButtonAction(entity, pathInfo, request);
       }
-
-      // Invalid combination (e.g., GET with actionName, POST without actionName)
-      if ("GET".equals(method) && pathInfo.actionName != null) {
+      if ("GET".equals(method)) {
         return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
             "Use POST to execute an action, GET is only for listing actions");
-      } else {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-            "POST requires an action name: /{spec}/{entity}/{recordId}/action/{columnName}");
       }
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "POST requires an action name: /{spec}/{entity}/{recordId}/action/{columnName}");
     } catch (Exception e) {
       log.error("Error handling button action: {}", e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Action error: " + e.getMessage());
     }
+  }
+
+  /**
+   * List available button actions for an entity, returning column name and process metadata.
+   */
+  private NeoResponse listButtonActions(String entityId) throws Exception {
+    List<SFField> fields = loadEntityFields(entityId);
+    JSONArray actions = new JSONArray();
+    for (SFField field : fields) {
+      JSONObject actionObj = buildButtonActionEntry(field);
+      if (actionObj != null) {
+        actions.put(actionObj);
+      }
+    }
+    JSONObject responseBody = new JSONObject();
+    responseBody.put("actions", actions);
+    return NeoResponse.ok(responseBody);
+  }
+
+  /**
+   * Build a single action entry JSON for a field if it is a valid button with a linked process.
+   * Returns null if the field should be skipped.
+   */
+  private JSONObject buildButtonActionEntry(SFField field) throws Exception {
+    Column column = field.getADColumn();
+    if (column == null || column.getReference() == null
+        || !"28".equals((String) column.getReference().getId())) {
+      return null;
+    }
+
+    Process classicProcess = column.getProcess();
+    org.openbravo.client.application.Process obuiappProcess = column.getOBUIAPPProcess();
+
+    if (classicProcess == null && obuiappProcess == null) {
+      if ("Posted".equals(column.getDBColumnName())) {
+        obuiappProcess = resolveDefaultPostProcess();
+      }
+      if (obuiappProcess == null) {
+        return null;
+      }
+    }
+
+    JSONObject actionObj = new JSONObject();
+    actionObj.put("columnName", column.getDBColumnName());
+    if (obuiappProcess != null) {
+      actionObj.put("processType", "OBUIAPP");
+      actionObj.put("processName", obuiappProcess.getName() != null ? obuiappProcess.getName() : "");
+    } else {
+      actionObj.put("processType", "Classic");
+      actionObj.put("processName", classicProcess.getName() != null ? classicProcess.getName() : "");
+    }
+    return actionObj;
+  }
+
+  /**
+   * Execute a button action for a specific record.
+   */
+  private NeoResponse executeButtonAction(SFEntity entity,
+      NeoPathInfo pathInfo, HttpServletRequest request) throws Exception {
+    Column targetColumn = findButtonColumn(entity.getId(), pathInfo.actionName);
+    if (targetColumn == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          "Action not found: " + pathInfo.actionName);
+    }
+    if (targetColumn.getReference() == null
+        || !"28".equals((String) targetColumn.getReference().getId())) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Field is not a button: " + pathInfo.actionName);
+    }
+
+    org.openbravo.client.application.Process obuiappProcess = targetColumn.getOBUIAPPProcess();
+    Process adProcess = targetColumn.getProcess();
+
+    if (adProcess == null && obuiappProcess == null) {
+      if ("Posted".equals(targetColumn.getDBColumnName())) {
+        obuiappProcess = resolveDefaultPostProcess();
+      }
+      if (adProcess == null && obuiappProcess == null) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+            "No process linked to button: " + pathInfo.actionName);
+      }
+    }
+
+    String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+    JSONObject params = StringUtils.isNotBlank(bodyStr) ? new JSONObject(bodyStr) : new JSONObject();
+    params.put("recordId", pathInfo.recordId);
+    params.put("inpRecordId", pathInfo.recordId);
+    if (entity.getADTab() != null) {
+      params.put("inpTabId", entity.getADTab().getId());
+    }
+
+    if (obuiappProcess != null) {
+      return NeoProcessService.executeObuiappProcess(obuiappProcess, params);
+    }
+    if (!hasProcessAccess(adProcess.getId())) {
+      return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
+          "Access denied to process for current role");
+    }
+    return NeoProcessService.executeProcess(adProcess, params);
+  }
+
+  /**
+   * Load the active, included SFField list for an entity.
+   */
+  private List<SFField> loadEntityFields(String entityId) {
+    OBCriteria<SFField> fieldCriteria = OBDal.getInstance().createCriteria(SFField.class);
+    fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
+    fieldCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
+    fieldCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    return fieldCriteria.list();
+  }
+
+  /**
+   * Find the Column for the given action name among the entity's button fields.
+   * Returns null if not found.
+   */
+  private Column findButtonColumn(String entityId, String actionName) {
+    for (SFField field : loadEntityFields(entityId)) {
+      Column column = field.getADColumn();
+      if (column != null && actionName.equals(column.getDBColumnName())) {
+        return column;
+      }
+    }
+    return null;
   }
 
   private NeoResponse handleSelector(String specId,
