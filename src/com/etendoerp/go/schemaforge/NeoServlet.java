@@ -889,12 +889,6 @@ public class NeoServlet extends HttpBaseServlet {
       // Filter response to only include configured fields (for all methods)
       fieldFilter.filterGetResponse(responseJson);
 
-      // Enrich GET responses: add $_{identifier} labels for List reference fields
-      // so the frontend can display human-readable names instead of raw search keys
-      if ("GET".equals(context.getHttpMethod()) && context.getSfEntity() != null) {
-        enrichListIdentifiers(responseJson, context.getSfEntity());
-      }
-
       return NeoResponse.ok(responseJson);
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
