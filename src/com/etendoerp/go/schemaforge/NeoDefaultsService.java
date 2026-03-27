@@ -26,6 +26,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -37,6 +38,7 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.base.secureApp.LoginUtils;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
@@ -403,7 +405,7 @@ public class NeoDefaultsService {
    * $Element_*, preferences, accounting dimensions, etc.) are resolved identically to the
    * classic UI, without hardcoding individual variables.</p>
    */
-  private static VariablesSecureApp buildVariablesSecureApp(OBContext obContext) {
+  static VariablesSecureApp buildVariablesSecureApp(OBContext obContext) {
     String userId = obContext.getUser().getId();
     String clientId = obContext.getCurrentClient().getId();
     String orgId = obContext.getCurrentOrganization().getId();
@@ -490,52 +492,84 @@ public class NeoDefaultsService {
         return;
       }
 
-      // Build resolution infrastructure once for all columns
       VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext());
       DalConnectionProvider conn = new DalConnectionProvider(false);
       String windowId = ctx.getSfEntity() != null ? resolveWindowId(ctx.getSfEntity()) : "";
+      Map<String, Object> parentValues = loadParentValues(adTab, parentId);
 
       for (Column col : adTab.getTable().getADColumnList()) {
-        if (!col.isActive() || !col.isMandatory()) {
-          continue;
-        }
-
-        // Resolve the DAL property name
-        Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-        if (prop == null) {
-          continue;
-        }
-
-        String propName = prop.getName();
-        // Skip if already present in the body (user or field-filter provided it)
-        if (body.has(propName)) {
-          continue;
-        }
-
-        // Resolve using the same logic as the /defaults endpoint
-        try {
-          Object resolved = resolveFieldDefault(col, parentId, vars, conn, windowId, ctx);
-          if (resolved != null) {
-            // Skip FK columns with legacy "0" default — OBDal cannot resolve "0" as an entity ID.
-            // These columns (e.g., C_DocType_ID) use "0" to mean "no document type" in classic UI,
-            // but OBDal's JSON import expects either a real UUID or null.
-            if ("0".equals(String.valueOf(resolved))
-                && col.getDBColumnName().toUpperCase().endsWith("_ID")) {
-              log.debug("Skipping FK default '0' for {}", propName);
-              continue;
-            }
-            body.put(propName, resolved);
-            log.debug("Injected mandatory default: {} = {}", propName, resolved);
-          }
-        } catch (Exception e) {
-          log.debug("Could not resolve mandatory default for {}: {}",
-              col.getDBColumnName(), e.getMessage());
-        }
+        injectColumnDefaultIfMissing(body, col, dalEntity, parentId, parentValues,
+            vars, conn, windowId, ctx);
       }
     } catch (Exception e) {
       log.error("Error injecting mandatory defaults for tab {}: {}",
           adTab.getName(), e.getMessage(), e);
     }
+  }
+
+  /**
+   * Inject the mandatory default for a single column into the body if it is missing.
+   * Skips inactive, non-mandatory, unresolvable, or already-present fields.
+   */
+  private static void injectColumnDefaultIfMissing(JSONObject body, Column col,
+      Entity dalEntity, String parentId, Map<String, Object> parentValues,
+      VariablesSecureApp vars, DalConnectionProvider conn,
+      String windowId, NeoContext ctx) {
+    if (!col.isActive() || !col.isMandatory()) {
+      return;
+    }
+    Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
+    if (prop == null || body.has(prop.getName())) {
+      return;
+    }
+    try {
+      Object resolved = resolveFieldDefault(col, parentId, vars, conn, windowId, ctx);
+      if (resolved == null) {
+        resolved = resolveFromParentValues(col, parentValues);
+      }
+      applyResolvedDefault(body, col, prop.getName(), resolved);
+    } catch (Exception e) {
+      log.debug("Could not resolve mandatory default for {}: {}",
+          col.getDBColumnName(), e.getMessage());
+    }
+  }
+
+  /**
+   * If the column's default expression is a single @FieldName@ token, look it up
+   * in the parent record values map. Returns null if not found.
+   */
+  private static Object resolveFromParentValues(Column col, Map<String, Object> parentValues) {
+    if (parentValues.isEmpty()) {
+      return null;
+    }
+    String defaultExpr = col.getDefaultValue();
+    if (defaultExpr == null || !defaultExpr.matches("^@[A-Za-z_]+@$")) {
+      return null;
+    }
+    String refCol = defaultExpr.substring(1, defaultExpr.length() - 1).toUpperCase();
+    Object value = parentValues.get(refCol);
+    if (value != null) {
+      log.debug("Resolved @{}@ from parent record: {}", refCol, value);
+    }
+    return value;
+  }
+
+  /**
+   * Put the resolved default into the body, unless it is a legacy FK "0" default.
+   */
+  private static void applyResolvedDefault(JSONObject body, Column col,
+      String propName, Object resolved) throws Exception {
+    if (resolved == null) {
+      return;
+    }
+    // Skip FK columns with legacy "0" default — OBDal cannot resolve "0" as an entity ID.
+    if ("0".equals(String.valueOf(resolved))
+        && col.getDBColumnName().toUpperCase().endsWith("_ID")) {
+      log.debug("Skipping FK default '0' for {}", propName);
+      return;
+    }
+    body.put(propName, resolved);
+    log.debug("Injected mandatory default: {} = {}", propName, resolved);
   }
 
   /**
@@ -796,6 +830,42 @@ public class NeoDefaultsService {
       }
       return json;
     }
+  }
+
+  private static Map<String, Object> loadParentValues(Tab adTab, String parentId) {
+    Map<String, Object> parentValues = new java.util.HashMap<>();
+    if (parentId != null && !parentId.isEmpty() && adTab.getTabLevel() > 0) {
+      try {
+        Tab parentTab = adTab.getWindow().getADTabList().stream()
+            .filter(t -> t.getTabLevel() == adTab.getTabLevel() - 1 && t.isActive())
+            .findFirst().orElse(null);
+        if (parentTab != null) {
+          Entity parentEntity = ModelProvider.getInstance()
+              .getEntityByTableId(parentTab.getTable().getId());
+          if (parentEntity != null) {
+            BaseOBObject parentRecord = OBDal.getInstance().get(parentEntity.getName(), parentId);
+            if (parentRecord != null) {
+              for (Property p : parentEntity.getProperties()) {
+                Object val = parentRecord.get(p.getName());
+                if (val != null) {
+                  // Store by DB column name (uppercase) for matching @ColumnName@ expressions
+                  String colName = p.getColumnName();
+                  if (colName != null) {
+                    parentValues.put(colName.toUpperCase(), val instanceof BaseOBObject
+                        ? ((BaseOBObject) val).getId().toString() : val);
+                  }
+                }
+              }
+              log.debug("Loaded {} parent values from {} for child defaults",
+                  parentValues.size(), parentEntity.getName());
+            }
+          }
+        }
+      } catch (Exception e) {
+        log.debug("Could not load parent record for defaults: {}", e.getMessage());
+      }
+    }
+    return parentValues;
   }
 
 }

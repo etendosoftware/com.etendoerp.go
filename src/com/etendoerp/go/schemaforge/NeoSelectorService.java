@@ -402,112 +402,123 @@ public class NeoSelectorService {
     if (meta.isCustomQuery && StringUtils.isNotBlank(meta.customHql)) {
       return executeCustomHqlQuery(meta, search, limit, offset, validationFilter);
     }
-    // Custom query flag set but no HQL defined: fall through to standard query
 
     String alias = "e";
+    String whereStr = buildRichWhereClause(meta, search, validationFilter, alias);
     boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
-    String whereStr = buildRichWhereClause(meta, alias, search, validationFilter);
 
-    OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
-        .createQuery(meta.entityName, whereStr);
-    if (hasSearch) {
-      countQuery.setNamedParameter(SEARCH_PARAM, "%" + search.toLowerCase() + "%");
-    }
-    int totalCount = countQuery.count();
+    int totalCount = createRichOBQuery(meta.entityName, whereStr, hasSearch, search).count();
 
     String dataWhere = whereStr + " ORDER BY " + alias + "." + meta.displayProperty;
-    OBQuery<BaseOBObject> dataQuery = OBDal.getInstance()
-        .createQuery(meta.entityName, dataWhere);
-    if (hasSearch) {
-      dataQuery.setNamedParameter(SEARCH_PARAM, "%" + search.toLowerCase() + "%");
-    }
+    OBQuery<BaseOBObject> dataQuery = createRichOBQuery(meta.entityName, dataWhere,
+        hasSearch, search);
     dataQuery.setMaxResult(limit);
     dataQuery.setFirstResult(offset);
 
-    JSONArray columns = buildRichColumnMetadata(meta);
-    Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
-    if (entityDef == null) {
-      throw new OBException(ERR_ENTITY_NOT_FOUND + meta.entityName);
-    }
-    JSONArray items = buildRichQueryItems(dataQuery, meta, entityDef);
-
-    JSONObject result = new JSONObject();
-    result.put(JSON_ITEMS, items);
-    result.put(JSON_COLUMNS, columns);
-    result.put(JSON_TOTAL_COUNT, totalCount);
-    result.put(JSON_LIMIT, limit);
-    result.put(JSON_OFFSET, offset);
-    result.put(JSON_HAS_MORE, (offset + limit) < totalCount);
-    return NeoResponse.ok(result);
+    JSONArray items = buildRichItems(dataQuery.list(), meta);
+    return buildSelectorResponse(items, buildColumnsJson(meta.gridFields),
+        totalCount, limit, offset);
   }
 
   /**
-   * Builds the HQL WHERE clause string for a rich (OBUISEL) selector query.
+   * Build the WHERE clause for a standard (non-custom-HQL) rich selector query.
    * Applies selector where clause, validation filter, org tree filter, and search filter in order.
    */
-  private static String buildRichWhereClause(SelectorMeta meta, String alias,
-      String search, String validationFilter) {
+  private static String buildRichWhereClause(SelectorMeta meta, String search,
+      String validationFilter, String alias) {
     StringBuilder hql = new StringBuilder();
+    boolean hasCondition = false;
 
     if (StringUtils.isNotBlank(meta.whereClause)) {
       hql.append(resolveObuiselParams(meta.whereClause));
+      hasCondition = true;
     }
+
     if (StringUtils.isNotBlank(validationFilter)) {
-      if (hql.length() > 0) {
+      if (hasCondition) {
         hql.append(SQL_AND);
       }
       hql.append(validationFilter);
+      hasCondition = true;
     }
+
+    // Apply natural org tree filter — mirrors Classic Etendo lookup behavior
     String orgFilter = buildNaturalOrgFilter(meta.entityName, alias);
     if (orgFilter != null) {
-      if (hql.length() > 0) {
+      if (hasCondition) {
         hql.append(SQL_AND);
       }
       hql.append(orgFilter);
+      hasCondition = true;
     }
+
     if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
-      if (hql.length() > 0) {
+      if (hasCondition) {
         hql.append(SQL_AND);
       }
       hql.append(buildSearchFilter(alias, meta.searchableProperties));
     }
 
-    return hql.length() > 0 ? "as " + alias + " where " + hql : "as " + alias;
+    return hql.length() > 0
+        ? "as " + alias + " where " + hql
+        : "as " + alias;
   }
 
   /**
-   * Builds the column metadata array for a rich selector response.
+   * Create an OBQuery for the rich selector, binding the search parameter if needed.
    */
-  private static JSONArray buildRichColumnMetadata(SelectorMeta meta) throws Exception {
-    JSONArray columns = new JSONArray();
-    for (RichFieldMeta fieldMeta : meta.gridFields) {
-      JSONObject col = new JSONObject();
-      col.put(JSON_NAME, fieldMeta.propertyKey);
-      col.put(JSON_LABEL, fieldMeta.label);
-      col.put(JSON_SORT_NO, fieldMeta.sortNo);
-      columns.put(col);
+  private static OBQuery<BaseOBObject> createRichOBQuery(String entityName, String whereStr,
+      boolean hasSearch, String search) {
+    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(entityName, whereStr);
+    if (hasSearch) {
+      query.setNamedParameter(SEARCH_PARAM, "%" + search.toLowerCase() + "%");
     }
-    return columns;
+    return query;
   }
 
   /**
-   * Builds the items array for a rich selector response, resolving all grid fields and aux fields.
+   * Build result items from OBQuery results, resolving IDs, grid fields, and aux fields.
    */
-  private static JSONArray buildRichQueryItems(OBQuery<BaseOBObject> dataQuery,
-      SelectorMeta meta, Entity entityDef) throws Exception {
+  private static JSONArray buildRichItems(List<BaseOBObject> rows, SelectorMeta meta)
+      throws Exception {
+    Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
     JSONArray items = new JSONArray();
-    for (BaseOBObject bob : dataQuery.list()) {
-      JSONObject item = new JSONObject();
-      item.put(JSON_ID, bob.getId());
-      item.put(JSON_LABEL, bob.getIdentifier());
-      for (RichFieldMeta fieldMeta : meta.gridFields) {
-        Object value = resolvePropertyValue(bob, fieldMeta.property, entityDef);
-        item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
-      }
-      appendAuxFields(item, bob, meta.auxFields);
+    for (BaseOBObject bob : rows) {
+      JSONObject item = buildRichItem(bob, meta, entityDef);
       items.put(item);
     }
     return items;
+  }
+
+  /**
+   * Build a single result item from a BaseOBObject, extracting ID, label, grid fields and aux.
+   */
+  private static JSONObject buildRichItem(BaseOBObject bob, SelectorMeta meta,
+      Entity entityDef) throws Exception {
+    JSONObject item = new JSONObject();
+    String recordId = resolveRecordId(bob, meta.valueProperty, entityDef);
+    item.put(JSON_ID, recordId);
+    item.put(JSON_LABEL, bob.getIdentifier());
+
+    for (RichFieldMeta fieldMeta : meta.gridFields) {
+      Object value = resolvePropertyValue(bob, fieldMeta.property, entityDef);
+      item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
+    }
+
+    appendAuxFields(item, bob, meta.auxFields);
+    return item;
+  }
+
+  /**
+   * Resolve the record ID from a BaseOBObject using the value property, falling back to getId().
+   */
+  private static String resolveRecordId(BaseOBObject bob, String valueProperty,
+      Entity entityDef) {
+    if (valueProperty != null && !valueProperty.equals("id")) {
+      Object valObj = resolvePropertyValue(bob, valueProperty, entityDef);
+      return valObj != null ? valObj.toString() : bob.getId().toString();
+    }
+    return bob.getId().toString();
   }
 
   /**

@@ -205,7 +205,7 @@ public class NeoFieldFilter {
   }
 
   /**
-   * Filter a POST/PUT/PATCH request body.
+   * Filter a PUT/PATCH request body.
    * Removes fields that are not included or are read-only.
    * The input is the raw JSON body from the client.
    *
@@ -213,6 +213,23 @@ public class NeoFieldFilter {
    * @return the filtered JSON (modified in place)
    */
   public JSONObject filterWriteRequest(JSONObject requestBody) {
+    return filterBody(requestBody, writableFields);
+  }
+
+  /**
+   * Filter a POST (create) request body.
+   * Allows read-only fields through because they may carry values from callouts
+   * or defaults that are required for record creation (e.g., transactionDocument).
+   * Only removes fields that are not included at all.
+   *
+   * @param requestBody the request body JSON
+   * @return the filtered JSON (modified in place)
+   */
+  public JSONObject filterCreateRequest(JSONObject requestBody) {
+    return filterBody(requestBody, includedFields);
+  }
+
+  private JSONObject filterBody(JSONObject requestBody, Set<String> allowedFields) {
     if (!active || requestBody == null) {
       return requestBody;
     }
@@ -224,7 +241,7 @@ public class NeoFieldFilter {
       if (requestBody.has("data") && requestBody.optJSONObject("data") != null) {
         bodyToFilter = requestBody.getJSONObject("data");
       }
-      filterRecord(bodyToFilter, writableFields);
+      filterRecord(bodyToFilter, allowedFields);
       return bodyToFilter;
     } catch (Exception e) {
       log.error("Error filtering write request: {}", e.getMessage(), e);
