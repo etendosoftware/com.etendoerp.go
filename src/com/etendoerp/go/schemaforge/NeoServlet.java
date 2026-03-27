@@ -932,6 +932,52 @@ public class NeoServlet extends HttpBaseServlet {
   }
 
   /**
+   * Collects all List reference fields (AD_Reference type 17) for the given entity,
+   * returning a map of DAL property name → AD_Reference_Value_ID.
+   */
+  private static Map<String, String> collectListRefFields(SFEntity sfEntity) {
+    Map<String, String> listRefFields = new HashMap<>();
+    OBCriteria<SFField> sfFieldCrit = OBDal.getInstance().createCriteria(SFField.class);
+    sfFieldCrit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
+    sfFieldCrit.setFilterOnReadableClients(false);
+    sfFieldCrit.setFilterOnReadableOrganization(false);
+    Tab adTab = sfEntity.getADTab();
+    if (adTab == null || adTab.getTable() == null) {
+      return listRefFields;
+    }
+    org.openbravo.base.model.Entity dalEnt = ModelProvider.getInstance()
+        .getEntityByTableName(adTab.getTable().getDBTableName());
+    if (dalEnt == null) {
+      return listRefFields;
+    }
+    for (SFField sfField : sfFieldCrit.list()) {
+      addListRefField(sfField, dalEnt, listRefFields);
+    }
+    return listRefFields;
+  }
+
+  private static void addListRefField(SFField sfField,
+      org.openbravo.base.model.Entity dalEnt,
+      Map<String, String> listRefFields) {
+    Column col = sfField.getADColumn();
+    if (!Boolean.TRUE.equals(sfField.isIncluded()) || col == null) {
+      return;
+    }
+    String refId = col.getReference() != null ? col.getReference().getId() : null;
+    if (!"17".equals(refId)) {
+      return;
+    }
+    Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
+    if (prop == null) {
+      return;
+    }
+    String listRefId = col.getReferenceSearchKey() != null
+        ? col.getReferenceSearchKey().getId()
+        : col.getReference().getId();
+    listRefFields.put(prop.getName(), listRefId);
+  }
+
+  /**
    * Post-processes a GET response to add ${@literal field}$_identifier entries for List reference
    * fields (AD_Reference type 17). This mirrors how FK fields already have $_{@literal identifier}
    * added by DefaultJsonDataService, letting the frontend display human-readable labels
@@ -946,43 +992,7 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
 
-      // Collect List reference fields: prop name → referenceId
-      Map<String, String> listRefFields = new HashMap<>();
-      OBCriteria<SFField> sfFieldCrit = OBDal.getInstance().createCriteria(SFField.class);
-      sfFieldCrit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
-      sfFieldCrit.setFilterOnReadableClients(false);
-      sfFieldCrit.setFilterOnReadableOrganization(false);
-      for (SFField sfField : sfFieldCrit.list()) {
-        if (!Boolean.TRUE.equals(sfField.isIncluded()) || sfField.getADColumn() == null) {
-          continue;
-        }
-        Column col = sfField.getADColumn();
-        String refId = col.getReference() != null ? col.getReference().getId() : null;
-        if (!"17".equals(refId)) {
-          continue;
-        }
-        // Use the DAL property name to find the right key in the JSON
-        Tab adTab = sfEntity.getADTab();
-        if (adTab == null || adTab.getTable() == null) {
-          continue;
-        }
-        org.openbravo.base.model.Entity dalEnt = ModelProvider.getInstance()
-            .getEntityByTableName(adTab.getTable().getDBTableName());
-        if (dalEnt == null) {
-          continue;
-        }
-        Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
-        if (prop == null) {
-          continue;
-        }
-        // Key in the JSON response is the DAL property name
-        String propName = prop.getName();
-        // Use AD_Reference_Value_ID if present, else the reference itself
-        String listRefId = col.getReferenceSearchKey() != null
-            ? col.getReferenceSearchKey().getId()
-            : col.getReference().getId();
-        listRefFields.put(propName, listRefId);
-      }
+      Map<String, String> listRefFields = collectListRefFields(sfEntity);
 
       if (listRefFields.isEmpty()) {
         return;
@@ -999,9 +1009,9 @@ public class NeoServlet extends HttpBaseServlet {
       JSONArray dataArray = inner.optJSONArray(JsonConstants.RESPONSE_DATA);
       if (dataArray != null) {
         for (int i = 0; i < dataArray.length(); i++) {
-          JSONObject record = dataArray.optJSONObject(i);
-          if (record != null) {
-            addListIdentifiers(record, listRefFields, labelCache);
+          JSONObject jsonRecord = dataArray.optJSONObject(i);
+          if (jsonRecord != null) {
+            addListIdentifiers(jsonRecord, listRefFields, labelCache);
           }
         }
       } else {
@@ -1016,14 +1026,14 @@ public class NeoServlet extends HttpBaseServlet {
     }
   }
 
-  private static void addListIdentifiers(JSONObject record,
+  private static void addListIdentifiers(JSONObject jsonRecord,
       Map<String, String> listRefFields,
       Map<String, Map<String, String>> labelCache) {
     try {
       for (Map.Entry<String, String> entry : listRefFields.entrySet()) {
         String propName = entry.getKey();
         String listRefId = entry.getValue();
-        String rawValue = record.optString(propName, null);
+        String rawValue = jsonRecord.optString(propName, null);
         if (rawValue == null || rawValue.isEmpty()) {
           continue;
         }
@@ -1032,7 +1042,7 @@ public class NeoServlet extends HttpBaseServlet {
             id -> NeoSelectorService.getListLabels(id));
         String label = labels.get(rawValue);
         if (label != null) {
-          record.put(propName + "$_identifier", label);
+          jsonRecord.put(propName + "$_identifier", label);
         }
       }
     } catch (Exception e) {

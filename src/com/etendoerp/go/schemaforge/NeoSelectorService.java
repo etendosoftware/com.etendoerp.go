@@ -31,6 +31,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.Query;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
@@ -98,6 +99,8 @@ public class NeoSelectorService {
   private static final String JSON_AUX = "_aux";
   private static final String JSON_NAME = "name";
   private static final String JSON_SORT_NO = "sortNo";
+  private static final String JSON_REFERENCE_TYPE = "referenceType";
+  private static final String ERR_ENTITY_NOT_FOUND = "Entity not found: ";
   private static final Pattern FROM_CLAUSE_PATTERN = Pattern.compile("\\sFROM\\s",
       Pattern.CASE_INSENSITIVE);
   private static final Pattern WHERE_CLAUSE_PATTERN = Pattern.compile("\\sWHERE\\s",
@@ -116,7 +119,7 @@ public class NeoSelectorService {
       // Find the entity record
       SFEntity entity = findEntity(specId, entityName);
       if (entity == null) {
-        return NeoResponse.error(404, "Entity not found: " + entityName);
+        return NeoResponse.error(404, ERR_ENTITY_NOT_FOUND + entityName);
       }
 
       // Find all included fields for this entity
@@ -133,76 +136,21 @@ public class NeoSelectorService {
         if (column == null) {
           continue;
         }
-
         String refId = getBaseReferenceId(column);
-        // Check for OBUISEL, classic FK reference, or List reference (type 17)
         boolean isObuisel = hasObuiselSelector(column);
         boolean isList = isListReference(refId);
-        if (!isObuisel && !isFkReference(refId) && !isList) {
-          continue;
-        }
-
         if (isList) {
           JSONObject item = new JSONObject();
           item.put("columnName", column.getDBColumnName());
-          item.put("referenceType", "List");
+          item.put(JSON_REFERENCE_TYPE, "List");
           item.put("type", "list");
           selectors.put(item);
-          continue;
-        }
-
-        SelectorMeta meta = resolveTarget(column, refId);
-        if (meta == null) {
-          continue;
-        }
-
-        JSONObject item = new JSONObject();
-        item.put("columnName", column.getDBColumnName());
-        if (meta.isRich) {
-          item.put("referenceType", "OBUISEL");
-          item.put("type", "rich");
-        } else {
-          item.put("referenceType", refId.equals(REF_TABLE) ? "Table"
-              : refId.equals(REF_TABLEDIR) ? "TableDir" : "Search");
-          item.put("type", "simple");
-        }
-        item.put("targetEntity", meta.entityName);
-        item.put("displayProperty", meta.displayProperty);
-
-        // Include auxiliary field info if present
-        if (meta.auxFields != null && !meta.auxFields.isEmpty()) {
-          JSONArray auxArray = new JSONArray();
-          for (AuxFieldMeta af : meta.auxFields) {
-            JSONObject auxItem = new JSONObject();
-            auxItem.put("suffix", af.suffix);
-            auxItem.put("name", af.name);
-            auxArray.put(auxItem);
-          }
-          item.put("auxFields", auxArray);
-        }
-
-        // Include selectorParams from validation rule (only non-session params)
-        org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
-        if (valRule != null && StringUtils.isNotBlank(valRule.getValidationCode())) {
-          JSONArray params = new JSONArray();
-          // Use a pattern that captures the optional # prefix to identify session params
-          Pattern paramExtract = Pattern.compile("@(#?)(\\w+)@");
-          Matcher m = paramExtract.matcher(valRule.getValidationCode());
-          java.util.Set<String> seen = new java.util.HashSet<>();
-          while (m.find()) {
-            boolean isSession = "#".equals(m.group(1));
-            String param = m.group(2);
-            // Skip session-level params (resolved server-side) and standard context params
-            if (!isSession && !SESSION_PARAMS.contains(param) && seen.add(param)) {
-              params.put(param);
-            }
-          }
-          if (params.length() > 0) {
-            item.put("selectorParams", params);
+        } else if (isObuisel || isFkReference(refId)) {
+          SelectorMeta meta = resolveTarget(column, refId);
+          if (meta != null) {
+            selectors.put(buildFkSelectorItem(column, refId, meta));
           }
         }
-
-        selectors.put(item);
       }
 
       JSONObject result = new JSONObject();
@@ -214,6 +162,72 @@ public class NeoSelectorService {
       log.error("Error listing selectors for {}", entityName, e);
       return NeoResponse.error(500, e.getMessage());
     }
+  }
+
+  /**
+   * Builds a selector metadata item for a FK (Table, TableDir, Search, or OBUISEL) column.
+   */
+  private static JSONObject buildFkSelectorItem(Column column, String refId,
+      SelectorMeta meta) throws Exception {
+    JSONObject item = new JSONObject();
+    item.put("columnName", column.getDBColumnName());
+    if (meta.isRich) {
+      item.put(JSON_REFERENCE_TYPE, "OBUISEL");
+      item.put("type", "rich");
+    } else {
+      item.put(JSON_REFERENCE_TYPE, resolveSimpleReferenceType(refId));
+      item.put("type", "simple");
+    }
+    item.put("targetEntity", meta.entityName);
+    item.put("displayProperty", meta.displayProperty);
+    if (meta.auxFields != null && !meta.auxFields.isEmpty()) {
+      item.put("auxFields", buildAuxFieldsJson(meta.auxFields));
+    }
+    org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
+    if (valRule != null && StringUtils.isNotBlank(valRule.getValidationCode())) {
+      JSONArray params = extractSelectorParams(valRule);
+      if (params.length() > 0) {
+        item.put("selectorParams", params);
+      }
+    }
+    return item;
+  }
+
+  private static String resolveSimpleReferenceType(String refId) {
+    if (refId.equals(REF_TABLE)) {
+      return "Table";
+    }
+    if (refId.equals(REF_TABLEDIR)) {
+      return "TableDir";
+    }
+    return "Search";
+  }
+
+  private static JSONArray buildAuxFieldsJson(List<AuxFieldMeta> auxFields) throws Exception {
+    JSONArray auxArray = new JSONArray();
+    for (AuxFieldMeta af : auxFields) {
+      JSONObject auxItem = new JSONObject();
+      auxItem.put("suffix", af.suffix);
+      auxItem.put("name", af.name);
+      auxArray.put(auxItem);
+    }
+    return auxArray;
+  }
+
+  private static JSONArray extractSelectorParams(
+      org.openbravo.model.ad.domain.Validation valRule) {
+    JSONArray params = new JSONArray();
+    Pattern paramExtract = Pattern.compile("@(#?)(\\w+)@");
+    Matcher m = paramExtract.matcher(valRule.getValidationCode());
+    java.util.Set<String> seen = new java.util.HashSet<>();
+    while (m.find()) {
+      boolean isSession = "#".equals(m.group(1));
+      String param = m.group(2);
+      if (!isSession && !SESSION_PARAMS.contains(param) && seen.add(param)) {
+        params.put(param);
+      }
+    }
+    return params;
   }
 
   /**
@@ -244,7 +258,7 @@ public class NeoSelectorService {
       // Find the entity
       SFEntity entity = findEntity(specId, entityName);
       if (entity == null) {
-        return NeoResponse.error(404, "Entity not found: " + entityName);
+        return NeoResponse.error(404, ERR_ENTITY_NOT_FOUND + entityName);
       }
 
       // Find the specific field by column name
@@ -321,7 +335,7 @@ public class NeoSelectorService {
     String orgFilter = buildNaturalOrgFilter(meta.entityName, "e");
     if (orgFilter != null) {
       if (hql.length() > 0) {
-        hql.append(" AND ");
+        hql.append(SQL_AND);
       }
       hql.append(orgFilter);
     }
@@ -342,7 +356,7 @@ public class NeoSelectorService {
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
         .createQuery(meta.entityName, whereStr);
     if (StringUtils.isNotBlank(search)) {
-      countQuery.setNamedParameter("search",
+      countQuery.setNamedParameter(SEARCH_PARAM,
           "%" + search.toLowerCase() + "%");
     }
     int totalCount = countQuery.count();
@@ -354,7 +368,7 @@ public class NeoSelectorService {
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance()
         .createQuery(meta.entityName, dataWhere);
     if (StringUtils.isNotBlank(search)) {
-      dataQuery.setNamedParameter("search",
+      dataQuery.setNamedParameter(SEARCH_PARAM,
           "%" + search.toLowerCase() + "%");
     }
     dataQuery.setMaxResult(limit);
@@ -391,107 +405,31 @@ public class NeoSelectorService {
     // Custom query flag set but no HQL defined: fall through to standard query
 
     String alias = "e";
-    StringBuilder hql = new StringBuilder();
+    boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
+    String whereStr = buildRichWhereClause(meta, alias, search, validationFilter);
 
-    // Apply where clause from OBUISEL_Selector with @param@ substitution
-    if (StringUtils.isNotBlank(meta.whereClause)) {
-      String resolved = resolveObuiselParams(meta.whereClause);
-      hql.append(resolved);
-    }
-
-    // Apply validation rule filter (resolved from context params)
-    if (StringUtils.isNotBlank(validationFilter)) {
-      if (hql.length() > 0) {
-        hql.append(SQL_AND);
-      }
-      hql.append(validationFilter);
-    }
-
-    // Apply natural org tree filter — mirrors Classic Etendo lookup behavior
-    String orgFilter = buildNaturalOrgFilter(meta.entityName, alias);
-    if (orgFilter != null) {
-      if (hql.length() > 0) {
-        hql.append(" AND ");
-      }
-      hql.append(orgFilter);
-    }
-
-    // Search filter: OR across all searchable properties
-    if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
-      if (hql.length() > 0) {
-        hql.append(SQL_AND);
-      }
-      hql.append("(");
-      for (int i = 0; i < meta.searchableProperties.size(); i++) {
-        if (i > 0) {
-          hql.append(" OR ");
-        }
-        String prop = meta.searchableProperties.get(i);
-        hql.append("lower(COALESCE(cast(").append(alias).append(".")
-            .append(prop).append(" as string), '')) LIKE :search");
-      }
-      hql.append(")");
-    }
-
-    // Prefix with alias "as e" so OBQuery registers the entity alias
-    String whereStr = hql.length() > 0
-        ? "as " + alias + " where " + hql.toString()
-        : "as " + alias;
-
-    // Count query
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
         .createQuery(meta.entityName, whereStr);
-    if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
-      countQuery.setNamedParameter("search",
-          "%" + search.toLowerCase() + "%");
+    if (hasSearch) {
+      countQuery.setNamedParameter(SEARCH_PARAM, "%" + search.toLowerCase() + "%");
     }
     int totalCount = countQuery.count();
 
-    // Data query with ordering and pagination
-    String orderBy = " ORDER BY " + alias + "." + meta.displayProperty;
-    String dataWhere = whereStr + orderBy;
-
+    String dataWhere = whereStr + " ORDER BY " + alias + "." + meta.displayProperty;
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance()
         .createQuery(meta.entityName, dataWhere);
-    if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
-      dataQuery.setNamedParameter("search",
-          "%" + search.toLowerCase() + "%");
+    if (hasSearch) {
+      dataQuery.setNamedParameter(SEARCH_PARAM, "%" + search.toLowerCase() + "%");
     }
     dataQuery.setMaxResult(limit);
     dataQuery.setFirstResult(offset);
 
-    // Build column metadata
-    JSONArray columns = new JSONArray();
-    for (RichFieldMeta fieldMeta : meta.gridFields) {
-      JSONObject col = new JSONObject();
-      col.put(JSON_NAME, fieldMeta.propertyKey);
-      col.put(JSON_LABEL, fieldMeta.label);
-      col.put(JSON_SORT_NO, fieldMeta.sortNo);
-      columns.put(col);
+    JSONArray columns = buildRichColumnMetadata(meta);
+    Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
+    if (entityDef == null) {
+      throw new OBException(ERR_ENTITY_NOT_FOUND + meta.entityName);
     }
-
-    // Build results with all grid fields
-    Entity entityDef = ModelProvider.getInstance()
-        .getEntity(meta.entityName);
-    JSONArray items = new JSONArray();
-    List<String> entityIds = new ArrayList<>();
-    for (BaseOBObject bob : dataQuery.list()) {
-      JSONObject item = new JSONObject();
-      item.put(JSON_ID, bob.getId());
-      item.put(JSON_LABEL, bob.getIdentifier());
-      entityIds.add(bob.getId().toString());
-
-      // Add all grid fields
-      for (RichFieldMeta fieldMeta : meta.gridFields) {
-        Object value = resolvePropertyValue(bob, fieldMeta.property, entityDef);
-        item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
-      }
-
-      // Resolve auxiliary fields that have a DAL property path
-      appendAuxFields(item, bob, meta.auxFields);
-
-      items.put(item);
-    }
+    JSONArray items = buildRichQueryItems(dataQuery, meta, entityDef);
 
     JSONObject result = new JSONObject();
     result.put(JSON_ITEMS, items);
@@ -501,6 +439,75 @@ public class NeoSelectorService {
     result.put(JSON_OFFSET, offset);
     result.put(JSON_HAS_MORE, (offset + limit) < totalCount);
     return NeoResponse.ok(result);
+  }
+
+  /**
+   * Builds the HQL WHERE clause string for a rich (OBUISEL) selector query.
+   * Applies selector where clause, validation filter, org tree filter, and search filter in order.
+   */
+  private static String buildRichWhereClause(SelectorMeta meta, String alias,
+      String search, String validationFilter) {
+    StringBuilder hql = new StringBuilder();
+
+    if (StringUtils.isNotBlank(meta.whereClause)) {
+      hql.append(resolveObuiselParams(meta.whereClause));
+    }
+    if (StringUtils.isNotBlank(validationFilter)) {
+      if (hql.length() > 0) {
+        hql.append(SQL_AND);
+      }
+      hql.append(validationFilter);
+    }
+    String orgFilter = buildNaturalOrgFilter(meta.entityName, alias);
+    if (orgFilter != null) {
+      if (hql.length() > 0) {
+        hql.append(SQL_AND);
+      }
+      hql.append(orgFilter);
+    }
+    if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
+      if (hql.length() > 0) {
+        hql.append(SQL_AND);
+      }
+      hql.append(buildSearchFilter(alias, meta.searchableProperties));
+    }
+
+    return hql.length() > 0 ? "as " + alias + " where " + hql : "as " + alias;
+  }
+
+  /**
+   * Builds the column metadata array for a rich selector response.
+   */
+  private static JSONArray buildRichColumnMetadata(SelectorMeta meta) throws Exception {
+    JSONArray columns = new JSONArray();
+    for (RichFieldMeta fieldMeta : meta.gridFields) {
+      JSONObject col = new JSONObject();
+      col.put(JSON_NAME, fieldMeta.propertyKey);
+      col.put(JSON_LABEL, fieldMeta.label);
+      col.put(JSON_SORT_NO, fieldMeta.sortNo);
+      columns.put(col);
+    }
+    return columns;
+  }
+
+  /**
+   * Builds the items array for a rich selector response, resolving all grid fields and aux fields.
+   */
+  private static JSONArray buildRichQueryItems(OBQuery<BaseOBObject> dataQuery,
+      SelectorMeta meta, Entity entityDef) throws Exception {
+    JSONArray items = new JSONArray();
+    for (BaseOBObject bob : dataQuery.list()) {
+      JSONObject item = new JSONObject();
+      item.put(JSON_ID, bob.getId());
+      item.put(JSON_LABEL, bob.getIdentifier());
+      for (RichFieldMeta fieldMeta : meta.gridFields) {
+        Object value = resolvePropertyValue(bob, fieldMeta.property, entityDef);
+        item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
+      }
+      appendAuxFields(item, bob, meta.auxFields);
+      items.put(item);
+    }
+    return items;
   }
 
   /**
@@ -1322,18 +1329,18 @@ public class NeoSelectorService {
     for (org.openbravo.model.ad.domain.List listItem : dataCrit.list()) {
       JSONObject item = new JSONObject();
       // Use the searchKey (stored DB value) as the id, and name as the label
-      item.put("id", listItem.getSearchKey());
-      item.put("label", listItem.getName());
+      item.put(JSON_ID, listItem.getSearchKey());
+      item.put(JSON_LABEL, listItem.getName());
       items.put(item);
     }
 
     JSONObject result = new JSONObject();
-    result.put("items", items);
-    result.put("columns", new JSONArray());
-    result.put("totalCount", totalCount);
-    result.put("limit", limit);
-    result.put("offset", offset);
-    result.put("hasMore", (offset + limit) < totalCount);
+    result.put(JSON_ITEMS, items);
+    result.put(JSON_COLUMNS, new JSONArray());
+    result.put(JSON_TOTAL_COUNT, totalCount);
+    result.put(JSON_LIMIT, limit);
+    result.put(JSON_OFFSET, offset);
+    result.put(JSON_HAS_MORE, (offset + limit) < totalCount);
     return NeoResponse.ok(result);
   }
 
@@ -2116,7 +2123,7 @@ public class NeoSelectorService {
     try {
       Entity entityDef = ModelProvider.getInstance().getEntity(entityName);
       // Only apply org filter if entity has "organization" property
-      entityDef.getProperty("organization");
+      entityDef.getProperty(PROP_ORGANIZATION);
     } catch (Exception e) {
       return null;
     }
