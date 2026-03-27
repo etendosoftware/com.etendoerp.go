@@ -63,6 +63,8 @@ import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoDiscoveryHelper;
 import com.etendoerp.go.schemaforge.util.NeoDisplayLogicHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
+import org.openbravo.client.application.ApplicationUtils;
+import org.openbravo.client.kernel.KernelUtils;
 import com.etendoerp.go.schemaforge.util.NeoProcessReportHelper;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
@@ -887,10 +889,315 @@ public class NeoServlet extends HttpBaseServlet {
       // Filter response to only include configured fields (for all methods)
       fieldFilter.filterGetResponse(responseJson);
 
+      // Enrich GET responses: add $_{identifier} labels for List reference fields
+      // so the frontend can display human-readable names instead of raw search keys
+      if ("GET".equals(context.getHttpMethod()) && context.getSfEntity() != null) {
+        enrichListIdentifiers(responseJson, context.getSfEntity());
+      }
+
       return NeoResponse.ok(responseJson);
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    }
+  }
+
+  /**
+   * Collects all List reference fields (AD_Reference type 17) for the given entity,
+   * returning a map of DAL property name → AD_Reference_Value_ID.
+   */
+  private static Map<String, String> collectListRefFields(SFEntity sfEntity) {
+    Map<String, String> listRefFields = new HashMap<>();
+    OBCriteria<SFField> sfFieldCrit = OBDal.getInstance().createCriteria(SFField.class);
+    sfFieldCrit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
+    sfFieldCrit.setFilterOnReadableClients(false);
+    sfFieldCrit.setFilterOnReadableOrganization(false);
+    Tab adTab = sfEntity.getADTab();
+    if (adTab == null || adTab.getTable() == null) {
+      return listRefFields;
+    }
+    org.openbravo.base.model.Entity dalEnt = ModelProvider.getInstance()
+        .getEntityByTableName(adTab.getTable().getDBTableName());
+    if (dalEnt == null) {
+      return listRefFields;
+    }
+    for (SFField sfField : sfFieldCrit.list()) {
+      addListRefField(sfField, dalEnt, listRefFields);
+    }
+    return listRefFields;
+  }
+
+  private static void addListRefField(SFField sfField,
+      org.openbravo.base.model.Entity dalEnt,
+      Map<String, String> listRefFields) {
+    Column col = sfField.getADColumn();
+    if (!Boolean.TRUE.equals(sfField.isIncluded()) || col == null) {
+      return;
+    }
+    String refId = col.getReference() != null ? col.getReference().getId() : null;
+    if (!"17".equals(refId)) {
+      return;
+    }
+    Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
+    if (prop == null) {
+      return;
+    }
+    String listRefId = col.getReferenceSearchKey() != null
+        ? col.getReferenceSearchKey().getId()
+        : col.getReference().getId();
+    listRefFields.put(prop.getName(), listRefId);
+  }
+
+  /**
+   * Post-processes a GET response to add ${@literal field}$_identifier entries for List reference
+   * fields (AD_Reference type 17). This mirrors how FK fields already have $_{@literal identifier}
+   * added by DefaultJsonDataService, letting the frontend display human-readable labels
+   * (e.g. "Use Generic Account No.") instead of raw search keys (e.g. "GENERIC").
+   *
+   * <p>A per-request cache keyed by referenceId avoids repeated DB queries for the same list
+   * when the response contains multiple records with the same field.</p>
+   */
+  private static void enrichListIdentifiers(JSONObject responseJson, SFEntity sfEntity) {
+    try {
+      if (sfEntity == null) {
+        return;
+      }
+
+      Map<String, String> listRefFields = collectListRefFields(sfEntity);
+
+      if (listRefFields.isEmpty()) {
+        return;
+      }
+
+      // Cache: referenceId → Map<searchKey, label>
+      Map<String, Map<String, String>> labelCache = new HashMap<>();
+
+      // Resolve the data array from the response JSON
+      JSONObject inner = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
+      if (inner == null) {
+        return;
+      }
+      JSONArray dataArray = inner.optJSONArray(JsonConstants.RESPONSE_DATA);
+      if (dataArray != null) {
+        for (int i = 0; i < dataArray.length(); i++) {
+          JSONObject jsonRecord = dataArray.optJSONObject(i);
+          if (jsonRecord != null) {
+            addListIdentifiers(jsonRecord, listRefFields, labelCache);
+          }
+        }
+      } else {
+        // Single-record response: data may be a JSONObject
+        JSONObject singleRecord = inner.optJSONObject(JsonConstants.RESPONSE_DATA);
+        if (singleRecord != null) {
+          addListIdentifiers(singleRecord, listRefFields, labelCache);
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Error enriching list identifiers: {}", e.getMessage());
+    }
+  }
+
+  private static void addListIdentifiers(JSONObject jsonRecord,
+      Map<String, String> listRefFields,
+      Map<String, Map<String, String>> labelCache) {
+    try {
+      for (Map.Entry<String, String> entry : listRefFields.entrySet()) {
+        String propName = entry.getKey();
+        String listRefId = entry.getValue();
+        String rawValue = jsonRecord.optString(propName, null);
+        if (rawValue == null || rawValue.isEmpty()) {
+          continue;
+        }
+        // Load label map for this reference (cached)
+        Map<String, String> labels = labelCache.computeIfAbsent(listRefId,
+            id -> NeoSelectorService.getListLabels(id));
+        String label = labels.get(rawValue);
+        if (label != null) {
+          jsonRecord.put(propName + "$_identifier", label);
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Error adding list identifiers to record: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Wraps a flat JSON body into the structure expected by DefaultJsonDataService:
+   * {@code {"data": {fields..., "_entityName": dalEntityName, "id": recordId}}}
+   *
+   * <p>DefaultJsonDataService.getContentAsJSON() calls jsonObject.get("data"),
+   * so the content MUST be wrapped in a "data" envelope. Additionally,
+   * the "_entityName" property is required for OBDal to resolve the entity,
+   * and "id" is required for updates.</p>
+   *
+   * @param filteredBody the filtered request body (flat JSON from client)
+   * @param dalEntityName the DAL entity name (e.g. "Order")
+   * @param recordId the record ID for updates, or null for creates
+   * @return the wrapped JSON string ready for DefaultJsonDataService
+   */
+  private String wrapForSmartclient(JSONObject filteredBody, String dalEntityName,
+      String recordId) {
+    try {
+      JSONObject data = filteredBody != null ? filteredBody : new JSONObject();
+      data.put(JsonConstants.ENTITYNAME, dalEntityName);
+      if (recordId != null) {
+        data.put(JsonConstants.ID, recordId);
+      } else {
+        // Mark as new record for creates
+        data.put(JsonConstants.NEW_INDICATOR, true);
+      }
+
+      JSONObject wrapper = new JSONObject();
+      wrapper.put(JsonConstants.DATA, data);
+      return wrapper.toString();
+    } catch (Exception e) {
+      log.error("Error wrapping body for Smartclient format: {}", e.getMessage(), e);
+      return "{}";
+    }
+  }
+
+  /**
+   * Builds an HQL where clause fragment that filters a child tab's records
+   * by the parent record ID.
+   */
+  String buildParentWhereClause(Tab childTab, String parentId) {
+    if (childTab == null) {
+      return null;
+    }
+    try {
+      Tab parentTab = KernelUtils.getInstance().getParentTab(childTab);
+      if (parentTab == null) {
+        return null;
+      }
+
+      String parentProperty = ApplicationUtils.getParentProperty(childTab, parentTab);
+      if (StringUtils.isBlank(parentProperty)) {
+        return null;
+      }
+
+      Entity childEntity = ModelProvider.getInstance()
+          .getEntityByTableId(childTab.getTable().getId());
+      Property prop = childEntity.getProperty(parentProperty);
+
+      if (prop != null && !prop.isPrimitive()) {
+        return "e." + parentProperty + ".id='" + parentId.replace("'", "''") + "'";
+      } else {
+        return "e." + parentProperty + "='" + parentId.replace("'", "''") + "'";
+      }
+    } catch (Exception e) {
+      log.error("Error building parent where clause for tab '{}': {}",
+          childTab.getName(), e.getMessage(), e);
+      return null;
+    }
+  }
+
+  /**
+   * Check if a report spec has a NeoHandler qualifier on any of its entities.
+   * Returns the qualifier string if found, null otherwise.
+   * This allows report specs to use custom handlers instead of the standard Jasper flow.
+   */
+  private String resolveReportHandlerQualifier(SFSpec spec) {
+    try {
+      OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
+      criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
+      List<SFEntity> entities = criteria.list();
+      for (SFEntity entity : entities) {
+        String qualifier = entity.getJavaQualifier();
+        if (StringUtils.isNotBlank(qualifier)) {
+          return qualifier;
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Error checking report handler qualifier for spec '{}': {}", spec.getName(), e.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * Resolve the AD_Process linked to a process-type spec.
+   */
+  private Process resolveProcess(SFSpec spec) {
+    return spec.getProcess();
+  }
+
+  /**
+   * Handle a process-type spec POST. Reads the request body as JSON
+   * and delegates to NeoProcessService.
+   */
+  private void handleProcessSpec(SFSpec spec, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    try {
+      Process adProcess = resolveProcess(spec);
+      if (adProcess == null) {
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Process spec has no linked AD_Process");
+        return;
+      }
+
+      // Read request body
+      JSONObject requestBody = null;
+      String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+      if (StringUtils.isNotBlank(bodyStr)) {
+        requestBody = new JSONObject(bodyStr);
+      }
+
+      // Delegate to NeoProcessService
+      NeoResponse result = NeoProcessService.executeProcess(adProcess, requestBody);
+      writeResponse(response, result);
+    } catch (Exception e) {
+      log.error("Error executing process spec '{}': {}", spec.getName(), e.getMessage(), e);
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Process execution error: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Handle a report-type spec POST. Reads the request body for exportType and params,
+   * resolves report metadata, sets response headers, then streams the report output.
+   */
+  private void handleReportSpec(SFSpec spec, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    try {
+      Process adProcess = resolveProcess(spec);
+      if (adProcess == null) {
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Report spec has no linked AD_Process");
+        return;
+      }
+
+      // Read request body
+      String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+      JSONObject body = StringUtils.isNotBlank(bodyStr)
+          ? new JSONObject(bodyStr) : new JSONObject();
+      String exportType = body.optString("exportType", "PDF");
+      JSONObject params = body.optJSONObject("params");
+      if (params == null) {
+        params = new JSONObject();
+      }
+
+      // Resolve metadata first (filename, content type)
+      NeoReportService.ReportMetadata meta =
+          NeoReportService.resolveReportMetadata(adProcess, exportType);
+
+      // Set response headers BEFORE writing to output stream
+      response.setStatus(HttpServletResponse.SC_OK);
+      response.setContentType(meta.getContentType());
+      response.setHeader("Content-Disposition",
+          "attachment; filename=\"" + meta.getFilename() + "\"");
+
+      // Generate report directly to response output stream
+      OutputStream out = response.getOutputStream();
+      NeoReportService.generateReport(adProcess, params, exportType, out);
+      out.flush();
+
+    } catch (Exception e) {
+      log.error("Error generating report for spec '{}': {}",
+          spec.getName(), e.getMessage(), e);
+      // Only send error if response not already committed
+      if (!response.isCommitted()) {
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Report generation failed: " + e.getMessage());
+      }
     }
   }
 
