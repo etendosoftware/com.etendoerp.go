@@ -77,12 +77,36 @@ public class McpServlet extends HttpServlet {
   protected void doGet(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
 
-    // Read OAuth2 identity set by OAuth2Filter
+    // Read OAuth2 identity — set by OAuth2Filter if registered, or validate inline
     String userId = (String) request.getAttribute(OAuth2Filter.ATTR_USER_ID);
     String roleId = (String) request.getAttribute(OAuth2Filter.ATTR_ROLE_ID);
     String clientId = (String) request.getAttribute(OAuth2Filter.ATTR_CLIENT_ID);
     String orgId = (String) request.getAttribute(OAuth2Filter.ATTR_ORG_ID);
     String scopes = (String) request.getAttribute(OAuth2Filter.ATTR_SCOPES);
+
+    // If filter was not registered, validate token inline
+    if (userId == null) {
+      String authHeader = request.getHeader("Authorization");
+      if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+        response.setContentType(CONTENT_TYPE_JSON);
+        response.getWriter().write("{\"error\":\"Missing Authorization: Bearer <token> header\"}");
+        return;
+      }
+      String bearerToken = authHeader.substring(7).trim();
+      java.util.Map<String, String> identity = OAuth2Filter.validateToken(bearerToken);
+      if (identity == null) {
+        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+        response.setContentType(CONTENT_TYPE_JSON);
+        response.getWriter().write("{\"error\":\"Invalid or expired OAuth2 token\"}");
+        return;
+      }
+      userId = identity.get(OAuth2Filter.ATTR_USER_ID);
+      roleId = identity.get(OAuth2Filter.ATTR_ROLE_ID);
+      clientId = identity.get(OAuth2Filter.ATTR_CLIENT_ID);
+      orgId = identity.get(OAuth2Filter.ATTR_ORG_ID);
+      scopes = identity.get(OAuth2Filter.ATTR_SCOPES);
+    }
 
     // SSE response headers
     response.setContentType(CONTENT_TYPE_SSE);

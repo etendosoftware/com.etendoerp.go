@@ -197,4 +197,64 @@ public class OAuth2Filter implements Filter {
         .replace("\r", "\\r")
         .replace("\t", "\\t");
   }
+
+  // ── Static token validation (callable without filter registration) ────
+
+  /**
+   * Validate a Bearer token and return the resolved identity, or null if invalid.
+   * This allows McpServlet to validate tokens directly when the filter is not
+   * registered in the servlet container.
+   *
+   * @param bearerToken the raw access token (not hashed)
+   * @return resolved identity map with keys matching ATTR_* constants, or null if invalid
+   */
+  public static java.util.Map<String, String> validateToken(String bearerToken) {
+    if (bearerToken == null || bearerToken.isEmpty()) {
+      return null;
+    }
+
+    String tokenHash = OAuth2Utils.hashToken(bearerToken);
+
+    try (Connection conn = new DalConnectionProvider(false).getConnection();
+         PreparedStatement ps = conn.prepareStatement(TOKEN_LOOKUP_SQL)) {
+
+      ps.setString(1, tokenHash);
+
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) {
+          return null;
+        }
+
+        if ("Y".equals(rs.getString("is_revoked"))) {
+          return null;
+        }
+
+        Timestamp expiresAt = rs.getTimestamp("expires_at");
+        if (expiresAt != null && OAuth2Utils.isTokenExpired(expiresAt)) {
+          return null;
+        }
+
+        if (!"Y".equals(rs.getString("client_active"))) {
+          return null;
+        }
+
+        String tokenScopes = rs.getString("token_scopes");
+        String clientScopes = rs.getString("client_scopes");
+        String effectiveScopes = (tokenScopes != null && !tokenScopes.isEmpty())
+            ? tokenScopes
+            : clientScopes;
+
+        java.util.Map<String, String> identity = new java.util.HashMap<>();
+        identity.put(ATTR_USER_ID, rs.getString("ad_user_id"));
+        identity.put(ATTR_ROLE_ID, rs.getString("ad_role_id"));
+        identity.put(ATTR_CLIENT_ID, rs.getString("etendo_client_id"));
+        identity.put(ATTR_ORG_ID, DEFAULT_ORG_ID);
+        identity.put(ATTR_SCOPES, effectiveScopes);
+        return identity;
+      }
+    } catch (SQLException e) {
+      log.error("Database error during static token validation", e);
+      return null;
+    }
+  }
 }
