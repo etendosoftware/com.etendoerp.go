@@ -336,7 +336,7 @@ public class ToolRegistry {
       for (SFEntity entity : entities) {
         OBCriteria<SFField> fieldCriteria = OBDal.getInstance().createCriteria(SFField.class);
         fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entity.getId()));
-        fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ACTIVE, true));
+        fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
         fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
         List<SFField> fields = fieldCriteria.list();
 
