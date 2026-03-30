@@ -33,7 +33,6 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.http.entity.ContentType;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
@@ -66,6 +65,7 @@ import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import org.openbravo.client.application.ApplicationUtils;
 import org.openbravo.client.kernel.KernelUtils;
 import com.etendoerp.go.schemaforge.util.NeoProcessReportHelper;
+import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
@@ -889,135 +889,14 @@ public class NeoServlet extends HttpBaseServlet {
       // Filter response to only include configured fields (for all methods)
       fieldFilter.filterGetResponse(responseJson);
 
-      // Enrich GET responses: add $_{identifier} labels for List reference fields
-      // so the frontend can display human-readable names instead of raw search keys
       if ("GET".equals(context.getHttpMethod()) && context.getSfEntity() != null) {
-        enrichListIdentifiers(responseJson, context.getSfEntity());
+        NeoListIdentifierHelper.enrichListIdentifiers(responseJson, context.getSfEntity());
       }
 
       return NeoResponse.ok(responseJson);
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-    }
-  }
-
-  /**
-   * Collects all List reference fields (AD_Reference type 17) for the given entity,
-   * returning a map of DAL property name → AD_Reference_Value_ID.
-   */
-  private static Map<String, String> collectListRefFields(SFEntity sfEntity) {
-    Map<String, String> listRefFields = new HashMap<>();
-    OBCriteria<SFField> sfFieldCrit = OBDal.getInstance().createCriteria(SFField.class);
-    sfFieldCrit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
-    sfFieldCrit.setFilterOnReadableClients(false);
-    sfFieldCrit.setFilterOnReadableOrganization(false);
-    Tab adTab = sfEntity.getADTab();
-    if (adTab == null || adTab.getTable() == null) {
-      return listRefFields;
-    }
-    org.openbravo.base.model.Entity dalEnt = ModelProvider.getInstance()
-        .getEntityByTableName(adTab.getTable().getDBTableName());
-    if (dalEnt == null) {
-      return listRefFields;
-    }
-    for (SFField sfField : sfFieldCrit.list()) {
-      addListRefField(sfField, dalEnt, listRefFields);
-    }
-    return listRefFields;
-  }
-
-  private static void addListRefField(SFField sfField,
-      org.openbravo.base.model.Entity dalEnt,
-      Map<String, String> listRefFields) {
-    Column col = sfField.getADColumn();
-    if (!Boolean.TRUE.equals(sfField.isIncluded()) || col == null) {
-      return;
-    }
-    String refId = col.getReference() != null ? col.getReference().getId() : null;
-    if (!"17".equals(refId)) {
-      return;
-    }
-    Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
-    if (prop == null) {
-      return;
-    }
-    String listRefId = col.getReferenceSearchKey() != null
-        ? col.getReferenceSearchKey().getId()
-        : col.getReference().getId();
-    listRefFields.put(prop.getName(), listRefId);
-  }
-
-  /**
-   * Post-processes a GET response to add ${@literal field}$_identifier entries for List reference
-   * fields (AD_Reference type 17). This mirrors how FK fields already have $_{@literal identifier}
-   * added by DefaultJsonDataService, letting the frontend display human-readable labels
-   * (e.g. "Use Generic Account No.") instead of raw search keys (e.g. "GENERIC").
-   *
-   * <p>A per-request cache keyed by referenceId avoids repeated DB queries for the same list
-   * when the response contains multiple records with the same field.</p>
-   */
-  private static void enrichListIdentifiers(JSONObject responseJson, SFEntity sfEntity) {
-    try {
-      if (sfEntity == null) {
-        return;
-      }
-
-      Map<String, String> listRefFields = collectListRefFields(sfEntity);
-
-      if (listRefFields.isEmpty()) {
-        return;
-      }
-
-      // Cache: referenceId → Map<searchKey, label>
-      Map<String, Map<String, String>> labelCache = new HashMap<>();
-
-      // Resolve the data array from the response JSON
-      JSONObject inner = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
-      if (inner == null) {
-        return;
-      }
-      JSONArray dataArray = inner.optJSONArray(JsonConstants.RESPONSE_DATA);
-      if (dataArray != null) {
-        for (int i = 0; i < dataArray.length(); i++) {
-          JSONObject jsonRecord = dataArray.optJSONObject(i);
-          if (jsonRecord != null) {
-            addListIdentifiers(jsonRecord, listRefFields, labelCache);
-          }
-        }
-      } else {
-        // Single-record response: data may be a JSONObject
-        JSONObject singleRecord = inner.optJSONObject(JsonConstants.RESPONSE_DATA);
-        if (singleRecord != null) {
-          addListIdentifiers(singleRecord, listRefFields, labelCache);
-        }
-      }
-    } catch (Exception e) {
-      log.debug("Error enriching list identifiers: {}", e.getMessage());
-    }
-  }
-
-  private static void addListIdentifiers(JSONObject jsonRecord,
-      Map<String, String> listRefFields,
-      Map<String, Map<String, String>> labelCache) {
-    try {
-      for (Map.Entry<String, String> entry : listRefFields.entrySet()) {
-        String propName = entry.getKey();
-        String listRefId = entry.getValue();
-        String rawValue = jsonRecord.optString(propName, null);
-        if (rawValue == null || rawValue.isEmpty()) {
-          continue;
-        }
-        // Load label map for this reference (cached)
-        Map<String, String> labels = labelCache.computeIfAbsent(listRefId,
-            id -> NeoSelectorService.getListLabels(id));
-        String label = labels.get(rawValue);
-        if (label != null) {
-          jsonRecord.put(propName + "$_identifier", label);
-        }
-      }
-    } catch (Exception e) {
-      log.debug("Error adding list identifiers to record: {}", e.getMessage());
     }
   }
 
