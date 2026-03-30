@@ -84,9 +84,9 @@ public class NeoListIdentifierHelper {
       JSONArray dataArray = inner.optJSONArray(JsonConstants.RESPONSE_DATA);
       if (dataArray != null) {
         for (int i = 0; i < dataArray.length(); i++) {
-          JSONObject record = dataArray.optJSONObject(i);
-          if (record != null) {
-            addListIdentifiers(record, listRefFields, labelCache);
+          JSONObject jsonRecord = dataArray.optJSONObject(i);
+          if (jsonRecord != null) {
+            addListIdentifiers(jsonRecord, listRefFields, labelCache);
           }
         }
       } else {
@@ -146,14 +146,14 @@ public class NeoListIdentifierHelper {
     listRefFields.put(prop.getName(), listRefId);
   }
 
-  private static void addListIdentifiers(JSONObject record,
+  private static void addListIdentifiers(JSONObject jsonRecord,
       Map<String, String> listRefFields,
       Map<String, Map<String, String>> labelCache) {
     try {
       for (Map.Entry<String, String> entry : listRefFields.entrySet()) {
         String propName = entry.getKey();
         String listRefId = entry.getValue();
-        String rawValue = record.optString(propName, null);
+        String rawValue = jsonRecord.optString(propName, null);
         if (rawValue == null || rawValue.isEmpty()) {
           continue;
         }
@@ -161,7 +161,7 @@ public class NeoListIdentifierHelper {
             id -> NeoSelectorService.getListLabels(id));
         String label = labels.get(rawValue);
         if (label != null) {
-          record.put(propName + "$_identifier", label);
+          jsonRecord.put(propName + "$_identifier", label);
         }
       }
     } catch (Exception e) {
