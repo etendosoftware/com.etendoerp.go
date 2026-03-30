@@ -30,14 +30,15 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  *   <li>OAuth2 scopes — does the session have the required scope (neo:read, neo:write, etc.)?</li>
  * </ol>
  * <p>
- * Tool generation by spec type:
+ * Tool generation strategy:
  * <ul>
- *   <li><b>W (Window)</b>: CRUD tools (neo_list, neo_get, neo_create, neo_update, neo_delete)
- *       plus neo_selectors and neo_defaults</li>
- *   <li><b>P (Process)</b>: A named process tool (e.g. complete_order)</li>
- *   <li><b>R (Report)</b>: A named report tool (e.g. generate_invoice_report)</li>
+ *   <li><b>CRUD tools</b> (neo_list, neo_get, neo_create, neo_update, neo_delete, neo_selectors,
+ *       neo_defaults): registered ONCE with a required {@code spec} parameter that has an enum
+ *       listing all accessible window spec names. This avoids MCP tool name collisions.</li>
+ *   <li><b>Process tools</b>: one per process spec, named by spec (e.g. "complete_order")</li>
+ *   <li><b>Report tools</b>: one per report spec, prefixed with "generate_"</li>
+ *   <li><b>neo_discover</b>: always included when the user has read access</li>
  * </ul>
- * The neo_discover tool is always included when the user has read access.
  */
 public class ToolRegistry {
 
@@ -65,15 +66,60 @@ public class ToolRegistry {
 
     // Query all active specs
     OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ACTIVE, true));
+    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
     criteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
     List<SFSpec> specs = criteria.list();
 
+    // Collect accessible window spec names for CRUD tool enum
+    List<String> accessibleWindowSpecs = new ArrayList<>();
+
     for (SFSpec spec : specs) {
       try {
-        addToolsForSpec(spec, canRead, canWrite, canProcess, canReport, tools);
+        String specType = spec.getSpecType();
+        String specName = spec.getName();
+
+        if ("W".equals(specType)) {
+          Window window = spec.getADWindow();
+          if (window != null && !NeoAccessUtils.hasWindowAccess(window.getId())) {
+            continue;
+          }
+          accessibleWindowSpecs.add(specName);
+
+        } else if ("P".equals(specType)) {
+          Process adProcess = spec.getProcess();
+          if (adProcess != null && !NeoAccessUtils.hasProcessAccess(adProcess.getId())) {
+            continue;
+          }
+          if (canProcess) {
+            tools.add(buildProcessTool(specName, spec));
+          }
+
+        } else if ("R".equals(specType)) {
+          Process adProcess = spec.getProcess();
+          if (adProcess != null && !NeoAccessUtils.hasProcessAccess(adProcess.getId())) {
+            continue;
+          }
+          if (canReport) {
+            tools.add(buildReportTool(specName, spec));
+          }
+        }
       } catch (Exception e) {
         log.warn("Error generating tools for spec '{}': {}", spec.getName(), e.getMessage());
+      }
+    }
+
+    // Register CRUD tools once with enum of accessible spec names
+    if (!accessibleWindowSpecs.isEmpty()) {
+      if (canRead) {
+        tools.add(buildListTool(accessibleWindowSpecs));
+        tools.add(buildGetTool(accessibleWindowSpecs));
+        tools.add(buildSelectorsTool(accessibleWindowSpecs));
+        tools.add(buildDefaultsTool(accessibleWindowSpecs));
+      }
+      if (canWrite) {
+        tools.add(buildCreateTool(accessibleWindowSpecs));
+        tools.add(buildUpdateTool(accessibleWindowSpecs));
+        tools.add(buildDeleteTool(accessibleWindowSpecs));
       }
     }
 
@@ -81,53 +127,50 @@ public class ToolRegistry {
     return tools;
   }
 
-  // ── Per-spec tool generation ───────────────────────────────────────────
+  // ── Tool name resolution ──────────────────────────────────────────────
 
-  private void addToolsForSpec(SFSpec spec, boolean canRead, boolean canWrite,
-      boolean canProcess, boolean canReport, List<McpToolDefinition> tools) {
+  /**
+   * Resolve the spec name associated with a tool name.
+   * <p>
+   * For CRUD tools (neo_list, etc.), the spec comes from the "spec" argument.
+   * For process tools, the tool name IS the snake_case version of the spec name.
+   * For report tools, strip the "generate_" prefix and convert back to kebab.
+   *
+   * @param toolName  the MCP tool name
+   * @param arguments the tool call arguments (may contain "spec")
+   * @return the spec name, or null if not resolvable
+   */
+  public static String resolveSpecName(String toolName, org.codehaus.jettison.json.JSONObject arguments) {
+    // CRUD tools carry spec in arguments
+    if (isCrudTool(toolName)) {
+      return arguments != null ? arguments.optString("spec", null) : null;
+    }
 
-    String specType = spec.getSpecType();
-    String specName = spec.getName();
+    // Report tools: strip "generate_" prefix and convert back to kebab
+    if (toolName.startsWith("generate_")) {
+      return snakeToKebab(toolName.substring("generate_".length()));
+    }
 
-    if ("W".equals(specType)) {
-      // RBAC check for windows
-      Window window = spec.getADWindow();
-      if (window != null && !NeoAccessUtils.hasWindowAccess(window.getId())) {
-        return;
-      }
+    // Process tools: tool name is snake_case of spec name
+    return snakeToKebab(toolName);
+  }
 
-      // CRUD tools gated by read/write scopes
-      if (canRead) {
-        tools.add(buildListTool(specName, spec));
-        tools.add(buildGetTool(specName, spec));
-        tools.add(buildSelectorsTool(specName, spec));
-        tools.add(buildDefaultsTool(specName, spec));
-      }
-      if (canWrite) {
-        tools.add(buildCreateTool(specName, spec));
-        tools.add(buildUpdateTool(specName, spec));
-        tools.add(buildDeleteTool(specName, spec));
-      }
-
-    } else if ("P".equals(specType)) {
-      // RBAC check for processes
-      Process adProcess = spec.getProcess();
-      if (adProcess != null && !NeoAccessUtils.hasProcessAccess(adProcess.getId())) {
-        return;
-      }
-      if (canProcess) {
-        tools.add(buildProcessTool(specName, spec));
-      }
-
-    } else if ("R".equals(specType)) {
-      // RBAC check for reports
-      Process adProcess = spec.getProcess();
-      if (adProcess != null && !NeoAccessUtils.hasProcessAccess(adProcess.getId())) {
-        return;
-      }
-      if (canReport) {
-        tools.add(buildReportTool(specName, spec));
-      }
+  /**
+   * Check if a tool name is a CRUD tool (shared across specs).
+   */
+  public static boolean isCrudTool(String toolName) {
+    switch (toolName) {
+      case "neo_discover":
+      case "neo_list":
+      case "neo_get":
+      case "neo_create":
+      case "neo_update":
+      case "neo_delete":
+      case "neo_selectors":
+      case "neo_defaults":
+        return true;
+      default:
+        return false;
     }
   }
 
@@ -140,19 +183,16 @@ public class ToolRegistry {
     return new McpToolDefinition(
         "neo_discover",
         "List all available NEO Headless API specs the current user can access. "
-            + "Returns spec names, types, entities, and available HTTP methods.",
+            + "Returns spec names, types, entities, and available HTTP methods. "
+            + "Use this first to discover what specs and entities are available.",
         schema);
   }
 
-  // ── CRUD tools (window specs) ──────────────────────────────────────────
+  // ── CRUD tools (registered once with spec enum) ───────────────────────
 
-  private McpToolDefinition buildListTool(String specName, SFSpec spec) {
-    String desc = String.format("List records from '%s'", specName);
-    if (spec.getDescription() != null) {
-      desc += ". " + spec.getDescription();
-    }
-
+  private McpToolDefinition buildListTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
+    props.put("spec", enumProp("Spec name (use neo_discover to find available specs)", specNames));
     props.put("entity", stringProp("Entity name within the spec (e.g. 'header', 'lines')", true));
     props.put("filters", objectProp("Filter criteria as key-value pairs (column=value)"));
     props.put("limit", intProp("Maximum number of records to return (default 100)"));
@@ -161,75 +201,84 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         "neo_list",
-        desc,
-        buildObjectSchema(props, List.of("entity")));
+        "List records from a NEO Headless API spec. "
+            + "Supports filtering, pagination, and sorting.",
+        buildObjectSchema(props, List.of("spec", "entity")));
   }
 
-  private McpToolDefinition buildGetTool(String specName, SFSpec spec) {
+  private McpToolDefinition buildGetTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
+    props.put("spec", enumProp("Spec name", specNames));
     props.put("entity", stringProp("Entity name within the spec", true));
     props.put("id", stringProp("Record ID to retrieve", true));
 
     return new McpToolDefinition(
         "neo_get",
-        String.format("Get a single record by ID from '%s'", specName),
-        buildObjectSchema(props, List.of("entity", "id")));
+        "Get a single record by ID from a NEO Headless API spec.",
+        buildObjectSchema(props, List.of("spec", "entity", "id")));
   }
 
-  private McpToolDefinition buildCreateTool(String specName, SFSpec spec) {
+  private McpToolDefinition buildCreateTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
+    props.put("spec", enumProp("Spec name", specNames));
     props.put("entity", stringProp("Entity name within the spec", true));
     props.put("fields", objectProp("Field values for the new record"));
 
     return new McpToolDefinition(
         "neo_create",
-        String.format("Create a new record in '%s'", specName),
-        buildObjectSchema(props, List.of("entity", "fields")));
+        "Create a new record in a NEO Headless API spec.",
+        buildObjectSchema(props, List.of("spec", "entity", "fields")));
   }
 
-  private McpToolDefinition buildUpdateTool(String specName, SFSpec spec) {
+  private McpToolDefinition buildUpdateTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
+    props.put("spec", enumProp("Spec name", specNames));
     props.put("entity", stringProp("Entity name within the spec", true));
     props.put("id", stringProp("Record ID to update", true));
     props.put("fields", objectProp("Field values to update"));
 
     return new McpToolDefinition(
         "neo_update",
-        String.format("Update an existing record in '%s'", specName),
-        buildObjectSchema(props, List.of("entity", "id", "fields")));
+        "Update an existing record in a NEO Headless API spec.",
+        buildObjectSchema(props, List.of("spec", "entity", "id", "fields")));
   }
 
-  private McpToolDefinition buildDeleteTool(String specName, SFSpec spec) {
+  private McpToolDefinition buildDeleteTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
+    props.put("spec", enumProp("Spec name", specNames));
     props.put("entity", stringProp("Entity name within the spec", true));
     props.put("id", stringProp("Record ID to delete", true));
 
     return new McpToolDefinition(
         "neo_delete",
-        String.format("Delete a record from '%s'", specName),
-        buildObjectSchema(props, List.of("entity", "id")));
+        "Delete a record from a NEO Headless API spec.",
+        buildObjectSchema(props, List.of("spec", "entity", "id")));
   }
 
-  private McpToolDefinition buildSelectorsTool(String specName, SFSpec spec) {
+  private McpToolDefinition buildSelectorsTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
+    props.put("spec", enumProp("Spec name", specNames));
     props.put("entity", stringProp("Entity name within the spec", true));
     props.put("column", stringProp("Column name to get selector values for", true));
     props.put("query", stringProp("Search query to filter selector values", false));
 
     return new McpToolDefinition(
         "neo_selectors",
-        String.format("Get foreign-key selector values for a column in '%s'", specName),
-        buildObjectSchema(props, List.of("entity", "column")));
+        "Get foreign-key selector values for a column. "
+            + "Use this to discover valid values for FK reference fields.",
+        buildObjectSchema(props, List.of("spec", "entity", "column")));
   }
 
-  private McpToolDefinition buildDefaultsTool(String specName, SFSpec spec) {
+  private McpToolDefinition buildDefaultsTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
+    props.put("spec", enumProp("Spec name", specNames));
     props.put("entity", stringProp("Entity name within the spec", true));
 
     return new McpToolDefinition(
         "neo_defaults",
-        String.format("Get default field values for creating a new record in '%s'", specName),
-        buildObjectSchema(props, List.of("entity")));
+        "Get default field values for creating a new record. "
+            + "Call this before neo_create to know which fields are pre-populated.",
+        buildObjectSchema(props, List.of("spec", "entity")));
   }
 
   // ── Process tool ───────────────────────────────────────────────────────
@@ -336,6 +385,14 @@ public class ToolRegistry {
     return prop;
   }
 
+  private Map<String, Object> enumProp(String description, List<String> values) {
+    Map<String, Object> prop = new LinkedHashMap<>();
+    prop.put("type", "string");
+    prop.put("description", description);
+    prop.put("enum", values);
+    return prop;
+  }
+
   private Map<String, Object> intProp(String description) {
     Map<String, Object> prop = new LinkedHashMap<>();
     prop.put("type", "integer");
@@ -368,5 +425,12 @@ public class ToolRegistry {
    */
   static String kebabToSnake(String kebab) {
     return kebab.replace('-', '_');
+  }
+
+  /**
+   * Convert snake_case to kebab-case (e.g. "complete_order" to "complete-order").
+   */
+  static String snakeToKebab(String snake) {
+    return snake.replace('_', '-');
   }
 }
