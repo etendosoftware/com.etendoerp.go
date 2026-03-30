@@ -64,5 +64,8 @@
       </foreign-key>
       <check name="ETGO_OA2T_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_OA2T_ISREVOKED"><![CDATA[IS_REVOKED IN ('Y', 'N')]]></check>
+      <unique name="ETGO_OA2T_TOKENHASH_UQ">
+        <unique-column name="ACCESS_TOKEN_HASH"/>
+      </unique>
     </table>
   </database>
