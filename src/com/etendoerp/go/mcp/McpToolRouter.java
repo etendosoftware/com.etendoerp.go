@@ -630,8 +630,9 @@ public class McpToolRouter {
         where.append("e.").append(prop.getName()).append("='")
             .append(value.replace("'", "''")).append("'");
       } else {
-        where.append("e.").append(key).append("='")
-            .append(value.replace("'", "''")).append("'");
+        // No resolved property — skip to prevent HQL injection
+        log.warn("Filter key '{}' could not be resolved to a DAL property, ignoring", key);
+        continue;
       }
     }
     return where.length() > 0 ? where.toString() : null;
