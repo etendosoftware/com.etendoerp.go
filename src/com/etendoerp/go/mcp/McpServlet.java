@@ -229,9 +229,9 @@ public class McpServlet extends HttpServlet {
       case "tools/call":
         return handleToolsCall(session, params);
       case "resources/list":
-        return handleResourcesList();
+        return handleResourcesList(session);
       case "resources/read":
-        return handleResourcesRead(params);
+        return handleResourcesRead(session, params);
       default:
         throw new McpMethodNotFoundException("Method not found: " + method);
     }
@@ -336,23 +336,49 @@ public class McpServlet extends HttpServlet {
 
   /**
    * Handle "resources/list" — return available resources.
-   * Placeholder: returns empty list. C8 will implement resource providers.
+   * Queries all active specs and builds a resource catalog that AI agents can browse
+   * without invoking tool calls.
    */
-  private JSONObject handleResourcesList() throws JSONException {
-    JSONObject result = new JSONObject();
-    result.put("resources", new JSONArray());
-    return result;
+  private JSONObject handleResourcesList(SseSession session) throws Exception {
+    return McpSessionManager.executeInContext(
+        session.userId, session.roleId, session.clientId, session.orgId, null,
+        () -> {
+          McpResourceProvider provider = new McpResourceProvider();
+          JSONObject result = new JSONObject();
+          result.put("resources", provider.listResources());
+          return result;
+        });
   }
 
   // ── Handler: resources/read ─────────────────────────────────────────────
 
   /**
-   * Handle "resources/read" — read a specific resource.
-   * Placeholder: returns error. C8 will implement resource providers.
+   * Handle "resources/read" — read a specific resource by URI.
+   * Delegates to McpResourceProvider which resolves spec schemas, entity details,
+   * and process parameters from the ETGO_SF_* tables.
    */
-  private JSONObject handleResourcesRead(JSONObject params) throws Exception {
+  private JSONObject handleResourcesRead(SseSession session, JSONObject params) throws Exception {
     String uri = params != null ? params.optString("uri", "") : "";
-    throw new McpMethodNotFoundException("Resource not found: " + uri);
+    if (uri.isEmpty()) {
+      throw new IllegalArgumentException("Missing 'uri' parameter for resources/read");
+    }
+
+    return McpSessionManager.executeInContext(
+        session.userId, session.roleId, session.clientId, session.orgId, null,
+        () -> {
+          McpResourceProvider provider = new McpResourceProvider();
+          JSONObject resourceContent = provider.readResource(uri);
+
+          JSONObject result = new JSONObject();
+          JSONArray contents = new JSONArray();
+          JSONObject content = new JSONObject();
+          content.put("uri", uri);
+          content.put("mimeType", "application/json");
+          content.put("text", resourceContent.toString(2));
+          contents.put(content);
+          result.put("contents", contents);
+          return result;
+        });
   }
 
   // ── SSE helpers ─────────────────────────────────────────────────────────
