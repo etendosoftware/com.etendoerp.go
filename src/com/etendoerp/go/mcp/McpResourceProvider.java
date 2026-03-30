@@ -66,7 +66,7 @@ public class McpResourceProvider {
 
     // Dynamic resources: one per active spec
     OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ACTIVE, true));
+    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
     criteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
 
     for (SFSpec spec : criteria.list()) {
@@ -134,7 +134,7 @@ public class McpResourceProvider {
    */
   private JSONObject readSpecsList() throws Exception {
     OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ACTIVE, true));
+    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
     criteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
     List<SFSpec> specs = criteria.list();
 
@@ -317,7 +317,7 @@ public class McpResourceProvider {
   private SFSpec findSpecByName(String specName) {
     OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
     criteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, specName));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ACTIVE, true));
+    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
     criteria.setMaxResults(1);
     List<SFSpec> results = criteria.list();
     if (results.isEmpty()) {
@@ -367,7 +367,7 @@ public class McpResourceProvider {
   private JSONArray buildFieldsArray(String entityId) throws Exception {
     OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
     criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
-    criteria.add(Restrictions.eq(SFField.PROPERTY_ACTIVE, true));
+    criteria.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
     criteria.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
     criteria.addOrder(Order.asc(SFField.PROPERTY_SEQNO));
     List<SFField> fields = criteria.list();
