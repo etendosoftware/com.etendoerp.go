@@ -301,8 +301,9 @@ public class McpServlet extends HttpServlet {
   /**
    * Handle "tools/call" — execute a tool by name.
    * <p>
-   * This is a placeholder implementation. Real tool handlers (CRUD, process,
-   * report, discover) will be wired in tasks C4-C7.
+   * Routes the tool call through {@link McpToolRouter} which dispatches to the
+   * appropriate handler (CRUD, process, report, or discover). Each tool call
+   * executes within a scoped OBContext via {@link McpSessionManager}.
    */
   private JSONObject handleToolsCall(SseSession session, JSONObject params) throws Exception {
     if (params == null) {
@@ -315,20 +316,9 @@ public class McpServlet extends HttpServlet {
     return McpSessionManager.executeInContext(
         session.userId, session.roleId, session.clientId, session.orgId, null,
         () -> {
-          // TODO: Route to actual tool handlers (C4, C5, C6, C7)
-          // For now, return a placeholder response
           log.info("MCP tools/call: tool={}, session={}", toolName, session.id);
-
-          JSONObject textContent = new JSONObject();
-          textContent.put("type", "text");
-          textContent.put("text",
-              "Tool '" + toolName + "' called successfully (handler not yet implemented)");
-
-          JSONObject result = new JSONObject();
-          JSONArray contentArray = new JSONArray();
-          contentArray.put(textContent);
-          result.put("content", contentArray);
-          return result;
+          McpToolRouter router = new McpToolRouter();
+          return router.route(toolName, arguments);
         });
   }
 

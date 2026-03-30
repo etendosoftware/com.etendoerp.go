@@ -56,6 +56,21 @@ public class ToolRegistryTest {
   }
 
   @Test
+  public void testSnakeToKebabSimple() {
+    assertEquals("complete-order", ToolRegistry.snakeToKebab("complete_order"));
+  }
+
+  @Test
+  public void testSnakeToKebabMultipleUnderscores() {
+    assertEquals("sales-order-lines", ToolRegistry.snakeToKebab("sales_order_lines"));
+  }
+
+  @Test
+  public void testSnakeToKebabNoUnderscores() {
+    assertEquals("invoices", ToolRegistry.snakeToKebab("invoices"));
+  }
+
+  @Test
   public void testMcpToolDefinitionToString() {
     McpToolDefinition tool = new McpToolDefinition("neo_get", "Get record", Collections.emptyMap());
     String str = tool.toString();
