@@ -1966,6 +1966,31 @@ public class NeoSelectorService {
    * Example: "C_DocType.DocBaseType IN ('POO')" -> "e.documentType IN ('POO')"
    * Example: "docsubtypeso like 'OB'" -> "e.sOSubType like 'OB'"
    */
+  /**
+   * Replace "FROM TableName" in subqueries with the correct OBDal entity name.
+   * Validation rules use SQL table names (e.g. "FROM Fin_Finacc_Paymentmethod") but HQL
+   * requires entity names (e.g. "FROM FinancialMgmtFinAccPaymentMethod").
+   */
+  private static String resolveSubqueryTableNames(String sql) {
+    if (sql == null) {
+      return sql;
+    }
+    Pattern fromTablePattern = Pattern.compile(
+        "\\bFROM\\s+(\\w+)", Pattern.CASE_INSENSITIVE);
+    Matcher fromMatcher = fromTablePattern.matcher(sql);
+    StringBuffer result = new StringBuffer();
+    while (fromMatcher.find()) {
+      String fromTable = fromMatcher.group(1);
+      Entity subEntity = ModelProvider.getInstance().getEntityByTableName(fromTable);
+      if (subEntity != null) {
+        fromMatcher.appendReplacement(result,
+            Matcher.quoteReplacement("FROM " + subEntity.getName()));
+      }
+    }
+    fromMatcher.appendTail(result);
+    return result.toString();
+  }
+
   private static String convertSqlToHql(String sqlClause, String targetEntityName) {
     try {
       Entity targetEntity = ModelProvider.getInstance().getEntity(targetEntityName);
@@ -1974,6 +1999,9 @@ public class NeoSelectorService {
       }
 
       String tableName = targetEntity.getTableName();
+
+      // Step 0: Replace "FROM TableName" in subqueries with the correct OBDal entity name.
+      sqlClause = resolveSubqueryTableNames(sqlClause);
 
       // Step 1: Replace TABLE.COLUMN patterns with e.property
       Pattern tableColPattern = Pattern.compile(
