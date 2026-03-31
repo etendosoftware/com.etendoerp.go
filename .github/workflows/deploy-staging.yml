@@ -1,9 +1,7 @@
 name: Deploy to Staging
 
 on:
-  push:
-    branches:
-      - epic/ETP-3504
+  workflow_dispatch: # Disabled automatic trigger — pipeline moved to Jenkins (ETP-3604)
 
 env:
   AWS_REGION: eu-west-3
@@ -57,9 +55,10 @@ jobs:
 
       # ── 6a. Create gradle.properties ──────────────────────────────────────
       # etendo_core gitignores gradle.properties; we generate it here from
-      # GitHub secrets so that COPY . . in the Dockerfile includes it and
-      # ./gradlew setup generates config/Openbravo.properties with the correct
-      # RDS host (otherwise WAD defaults to localhost:5432 and compilation fails).
+      # GitHub secrets so it is available as a Docker build secret for setup
+      # and includes the RDS host so ./gradlew setup generates
+      # config/Openbravo.properties with the correct bbdd.url
+      # (otherwise WAD defaults to localhost:5432 and compilation fails).
       - name: Create gradle.properties
         run: |
           {
@@ -71,8 +70,6 @@ jobs:
           echo "nexusPassword=${{ secrets.NEXUS_PASSWORD }}"
           echo "allow.root=true"
           echo "context.name=etendo"
-          echo "bbdd.rdbms=POSTGRE"
-          echo "bbdd.driver=org.postgresql.Driver"
           echo "bbdd.sid=etendo"
           echo "bbdd.port=5432"
           echo "bbdd.host=etendo-staging.cfm2qm242otk.eu-west-3.rds.amazonaws.com"
@@ -130,26 +127,30 @@ jobs:
             --cidr ${RUNNER_IP}/32 \
             --region ${{ env.AWS_REGION }} || echo "SG rule already exists"
 
-      # ── 6. Build and push runtime image ───────────────────────────────────
-      # gradle.properties is not committed to etendo_core — create it from
-      # secrets so it can be passed as a Docker build secret (never baked in layers).
-      - name: Create gradle.properties
+      # ── 6c. Update database schema (pre-build) ────────────────────────────
+      # etendo_core:develop may reference new DAL entities (e.g. EmailBpContact)
+      # that do not yet exist in staging. generate.entities (called inside
+      # compile.complete.development) reads the DB schema to produce Java classes,
+      # so the schema must be up-to-date before the Docker build.
+      # Liquibase is idempotent — the ECS migration task (step 9) will no-op.
+      #
+      # Two-step invocation: `setup` runs first so createOBProperties and
+      # antSetup fully generate config/Openbravo.properties (including
+      # bbdd.driver=org.postgresql.Driver). In the second invocation those
+      # tasks are UP-TO-DATE and buildvalidation finds the file ready.
+      - name: Update database schema
+        working-directory: etendo_core
         run: |
-          cat > etendo_core/gradle.properties << EOF
-          githubUser=etendobot
-          githubToken=${{ secrets.ETENDOBOT_TOKEN }}
-          repositoryUser=${{ secrets.NEXUS_USER }}
-          repositoryPassword=${{ secrets.NEXUS_PASSWORD }}
-          nexusUser=${{ secrets.NEXUS_USER }}
-          nexusPassword=${{ secrets.NEXUS_PASSWORD }}
-          allow.root=true
-          EOF
+          ./gradlew setup
+          ./gradlew update.database
 
+      # ── 6d. Copy runtime Dockerfile and entrypoint ────────────────────────
       - name: Copy runtime Dockerfile and entrypoint
         run: |
           cp module/.github/docker/Dockerfile.runtime etendo_core/Dockerfile
           cp module/.github/docker/docker-entrypoint.sh etendo_core/docker-entrypoint.sh
 
+      # ── 6. Build and push runtime image ───────────────────────────────────
       - name: Build runtime image
         working-directory: etendo_core
         env:
