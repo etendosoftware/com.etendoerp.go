@@ -120,16 +120,7 @@ public final class NeoButtonActionHelper {
     JSONObject params = StringUtils.isNotBlank(bodyStr) ? new JSONObject(bodyStr) : new JSONObject();
     params.put("recordId", pathInfo.recordId);
     params.put("inpRecordId", pathInfo.recordId);
-    if (entity.getADTab() != null) {
-      params.put("inpTabId", entity.getADTab().getId());
-      // Pass the table-specific ID key expected by scheduling processes (e.g. M_Inventory_ID)
-      String tableName = entity.getADTab().getTable() != null
-          ? entity.getADTab().getTable().getDBTableName()
-          : null;
-      if (tableName != null) {
-        params.put(tableName + "_ID", pathInfo.recordId);
-      }
-    }
+    addTabParams(entity, pathInfo, params);
     if (obuiappProcess != null) {
       return NeoProcessService.executeObuiappProcess(obuiappProcess, params);
     }
@@ -138,6 +129,21 @@ public final class NeoButtonActionHelper {
           "Access denied to process for current role");
     }
     return NeoProcessService.executeProcess(adProcess, params);
+  }
+
+  private static void addTabParams(SFEntity entity, NeoPathInfo pathInfo,
+      JSONObject params) throws Exception {
+    if (entity.getADTab() == null) {
+      return;
+    }
+    params.put("inpTabId", entity.getADTab().getId());
+    // Pass the table-specific ID key expected by scheduling processes (e.g. M_Inventory_ID)
+    String tableName = entity.getADTab().getTable() != null
+        ? entity.getADTab().getTable().getDBTableName()
+        : null;
+    if (tableName != null) {
+      params.put(tableName + "_ID", pathInfo.recordId);
+    }
   }
 
   public static List<SFField> loadEntityFields(String entityId) {

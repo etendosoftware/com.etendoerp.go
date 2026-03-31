@@ -134,10 +134,8 @@ public class NeoProcessService {
         }
 
         if (StringUtils.isNotBlank(className)) {
-          Class<?> cls;
-          try {
-            cls = Class.forName(className);
-          } catch (ClassNotFoundException e) {
+          Class<?> cls = loadClass(className);
+          if (cls == null) {
             return NeoResponse.error(500,
                 "Process class not found: " + className);
           }
@@ -391,6 +389,14 @@ public class NeoProcessService {
     return parameters;
   }
 
+  private static Class<?> loadClass(String className) {
+    try {
+      return Class.forName(className);
+    } catch (ClassNotFoundException e) {
+      return null;
+    }
+  }
+
   // ---- Execution strategies ----
 
   /**
@@ -399,6 +405,11 @@ public class NeoProcessService {
    * Since BaseProcessActionHandler.execute and doExecute are protected,
    * this method uses reflection to invoke doExecute directly on the
    * concrete handler instance obtained from the CDI container.
+   *
+   * @param process the AD_Process to execute (must have a valid Java class name)
+   * @param params  JSON object with parameter values (e.g. inpRecordId, inpTabId)
+   * @return NeoResponse with the execution result
+   * @throws Exception if reflection or process execution fails
    */
   public static NeoResponse executeObuiappProcess(Process process,
       JSONObject params) throws Exception {
