@@ -397,6 +397,28 @@ public class NeoProcessService {
     }
   }
 
+  /**
+   * Converts a JSONObject of process parameters into the Map format expected
+   * by ProcessBundle. Maps NEO internal keys to classic process conventions:
+   * inpRecordId → recordID, inpTabId → tabId.
+   */
+  @SuppressWarnings("unchecked")
+  private static Map<String, Object> buildBundleParams(JSONObject params) throws Exception {
+    Map<String, Object> bundleParams = new HashMap<>();
+    Iterator<String> keys = params.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if (INP_RECORD_ID.equals(key)) {
+        bundleParams.put("recordID", params.get(key));
+      } else if (INP_TAB_ID.equals(key)) {
+        bundleParams.put("tabId", params.get(key));
+      } else {
+        bundleParams.put(key, params.get(key));
+      }
+    }
+    return bundleParams;
+  }
+
   // ---- Execution strategies ----
 
   /**
@@ -588,21 +610,7 @@ public class NeoProcessService {
     ProcessBundle bundle = new ProcessBundle(bundleMap);
 
     // Set the process parameters
-    Map<String, Object> bundleParams = new HashMap<>();
-    @SuppressWarnings("unchecked")
-    Iterator<String> keys = params.keys();
-    while (keys.hasNext()) {
-      String key = keys.next();
-      // Map internal context keys to classic process conventions
-      if (INP_RECORD_ID.equals(key)) {
-        bundleParams.put("recordID", params.get(key));
-      } else if (INP_TAB_ID.equals(key)) {
-        bundleParams.put("tabId", params.get(key));
-      } else {
-        bundleParams.put(key, params.get(key));
-      }
-    }
-    bundle.setParams(bundleParams);
+    bundle.setParams(buildBundleParams(params));
 
     // Invoke protected doExecute directly via reflection.
     // We bypass DalBaseProcess.execute() because it requires a
@@ -641,20 +649,7 @@ public class NeoProcessService {
     VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(
         OBContext.getOBContext());
     ProcessBundle bundle = new ProcessBundle(adProcess.getId(), vars);
-    Map<String, Object> bundleParams = new HashMap<>();
-    @SuppressWarnings("unchecked")
-    Iterator<String> keys = params.keys();
-    while (keys.hasNext()) {
-      String key = keys.next();
-      if (INP_RECORD_ID.equals(key)) {
-        bundleParams.put("recordID", params.get(key));
-      } else if (INP_TAB_ID.equals(key)) {
-        bundleParams.put("tabId", params.get(key));
-      } else {
-        bundleParams.put(key, params.get(key));
-      }
-    }
-    bundle.setParams(bundleParams);
+    bundle.setParams(buildBundleParams(params));
     ((org.openbravo.scheduling.Process) processInstance).execute(bundle);
     Object bundleResult = bundle.getResult();
     return translateClassicResult(bundleResult, adProcess);
