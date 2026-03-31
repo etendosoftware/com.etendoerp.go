@@ -25,7 +25,7 @@ RUN --mount=type=secret,id=gradle_props,dst=/home/etendo/app/gradle.properties,u
 # compile.complete.development compila todo el Java sin tocar la DB.
 # antWar empaqueta el WAR resultante en lib/etendo.war.
 # NO se corre install — el schema ya existe en RDS y se inicializó una sola vez.
-RUN ./gradlew compile.complete.development antWar
+RUN ./gradlew compile.complete smartbuild antWar
 
 # ─────────────────────────────────────────────
 # Stage 2: Runtime — solo Tomcat + WAR
