@@ -58,7 +58,7 @@ public class PaymentDetailsHandler implements NeoHandler {
       // parentId is a FIN_Payment_Schedule ID (invoice payment schedule)
       List<FIN_PaymentScheduleDetail> details = OBDal.getInstance()
           .createQuery(FIN_PaymentScheduleDetail.class,
-              "as psd where psd.invoicePaymentSchedule.id = :parentId and psd.active = true")
+              "as psd where psd.invoicePaymentSchedule.id = :parentId and psd.active = true and psd.paymentDetails is not null")
           .setNamedParameter("parentId", parentId)
           .list();
 
