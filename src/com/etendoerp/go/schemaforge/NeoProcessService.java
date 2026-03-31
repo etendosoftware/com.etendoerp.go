@@ -403,17 +403,21 @@ public class NeoProcessService {
    * inpRecordId → recordID, inpTabId → tabId.
    */
   @SuppressWarnings("unchecked")
-  private static Map<String, Object> buildBundleParams(JSONObject params) throws Exception {
+  private static Map<String, Object> buildBundleParams(JSONObject params) throws JSONException {
+    if (params == null) {
+      return new HashMap<>();
+    }
     Map<String, Object> bundleParams = new HashMap<>();
     Iterator<String> keys = params.keys();
     while (keys.hasNext()) {
       String key = keys.next();
+      Object value = params.isNull(key) ? null : params.get(key);
       if (INP_RECORD_ID.equals(key)) {
-        bundleParams.put("recordID", params.get(key));
+        bundleParams.put("recordID", value);
       } else if (INP_TAB_ID.equals(key)) {
-        bundleParams.put("tabId", params.get(key));
+        bundleParams.put("tabId", value);
       } else {
-        bundleParams.put(key, params.get(key));
+        bundleParams.put(key, value);
       }
     }
     return bundleParams;
@@ -836,13 +840,15 @@ public class NeoProcessService {
       List<ModelImplementation> impls = process.getADModelImplementationList();
       for (ModelImplementation impl : impls) {
         if (Boolean.TRUE.equals(impl.isDefault())
+            && "P".equals(impl.getAction())
             && StringUtils.isNotBlank(impl.getJavaClassName())) {
           return impl.getJavaClassName();
         }
       }
-      // Fallback: return the first non-blank classname
+      // Fallback: return the first non-blank classname with action = 'P'
       for (ModelImplementation impl : impls) {
-        if (StringUtils.isNotBlank(impl.getJavaClassName())) {
+        if ("P".equals(impl.getAction())
+            && StringUtils.isNotBlank(impl.getJavaClassName())) {
           return impl.getJavaClassName();
         }
       }
