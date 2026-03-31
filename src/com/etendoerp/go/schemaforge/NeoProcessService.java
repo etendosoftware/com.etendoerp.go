@@ -47,6 +47,7 @@ import org.openbravo.model.ad.ui.ProcessParameter;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.service.db.CallProcess;
+import org.openbravo.model.ad.domain.ModelImplementation;
 import org.openbravo.service.db.DalBaseProcess;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -55,16 +56,16 @@ import com.etendoerp.go.schemaforge.data.SFField;
 /**
  * Service for executing AD_Process definitions via the Neo headless API.
  *
- * Supports two process types:
+ * Supports three process types:
  * <ul>
  *   <li>OBUIAPP processes (UIPattern = "Standard") -- invoked via
  *       {@link BaseProcessActionHandler} using reflection on the
  *       protected doExecute method</li>
- *   <li>Classic processes -- invoked directly via
- *       {@link DalBaseProcess#execute(ProcessBundle)}</li>
+ *   <li>Classic processes extending {@link DalBaseProcess} -- invoked via
+ *       reflection on the protected doExecute method</li>
+ *   <li>Scheduling processes implementing {@link Process} -- invoked via
+ *       {@link Process#execute(ProcessBundle)}</li>
  * </ul>
- *
- * DB procedure processes are not supported (returns 501).
  */
 public class NeoProcessService {
 
@@ -126,8 +127,28 @@ public class NeoProcessService {
           return executeObuiappProcess(process, params);
         }
 
-        if (StringUtils.isNotBlank(process.getJavaClassName())) {
-          return executeClassicProcess(process, params);
+        // Resolve classname: try AD_Process.classname first, then AD_Model_Object (Process Class subtab)
+        String className = process.getJavaClassName();
+        if (StringUtils.isBlank(className)) {
+          className = resolveModelImplementationClass(process);
+        }
+
+        if (StringUtils.isNotBlank(className)) {
+          Class<?> cls;
+          try {
+            cls = Class.forName(className);
+          } catch (ClassNotFoundException e) {
+            return NeoResponse.error(500,
+                "Process class not found: " + className);
+          }
+          if (DalBaseProcess.class.isAssignableFrom(cls)) {
+            return executeClassicProcess(process, cls, params);
+          }
+          if (org.openbravo.scheduling.Process.class.isAssignableFrom(cls)) {
+            return executeSchedulingProcess(process, cls, params);
+          }
+          return NeoResponse.error(500,
+              "Process class is not a supported handler type: " + className);
         }
 
         if (StringUtils.isNotBlank(process.getProcedure())) {
@@ -379,7 +400,7 @@ public class NeoProcessService {
    * this method uses reflection to invoke doExecute directly on the
    * concrete handler instance obtained from the CDI container.
    */
-  private static NeoResponse executeObuiappProcess(Process process,
+  public static NeoResponse executeObuiappProcess(Process process,
       JSONObject params) throws Exception {
     return executeObuiappHandler(process.getJavaClassName(), process.getId(), params);
   }
@@ -540,16 +561,14 @@ public class NeoProcessService {
    * The caller is responsible for OBContext and transaction management.
    */
   private static NeoResponse executeClassicProcess(Process process,
-      JSONObject params) throws Exception {
+      Class<?> processClass, JSONObject params) throws Exception {
 
-    String className = process.getJavaClassName();
-    Class<?> processClass = Class.forName(className);
     Object processInstance =
         WeldUtils.getInstanceFromStaticBeanManager(processClass);
 
     if (!(processInstance instanceof DalBaseProcess)) {
       return NeoResponse.error(500,
-          "Process class is not a DalBaseProcess: " + className);
+          "Process class is not a DalBaseProcess: " + processClass.getName());
     }
 
     // Build a ProcessBundle using the Map-based constructor
@@ -586,6 +605,48 @@ public class NeoProcessService {
     // Read the result from the bundle
     Object bundleResult = bundle.getResult();
     return translateClassicResult(bundleResult, process);
+  }
+
+  /**
+   * Execute a scheduling process (implements {@link Process}).
+   *
+   * These processes are called via {@link Process#execute(ProcessBundle)}.
+   * The bundle params include both generic keys (recordID, inpRecordId) and
+   * the table-specific key injected by the caller (e.g. M_Inventory_ID).
+   */
+  private static NeoResponse executeSchedulingProcess(
+      org.openbravo.model.ad.ui.Process adProcess,
+      Class<?> processClass,
+      JSONObject params) throws Exception {
+    Object processInstance = WeldUtils.getInstanceFromStaticBeanManager(processClass);
+    if (!(processInstance instanceof org.openbravo.scheduling.Process)) {
+      return NeoResponse.error(500,
+          "Process class does not implement org.openbravo.scheduling.Process: "
+          + processClass.getName());
+    }
+    // Use the VariablesSecureApp constructor so ProcessBundle.getContext() is non-null.
+    // Scheduling processes (e.g. InventoryCountProcess) call getContext().getLanguage()
+    // internally; the Map-based constructor leaves context null.
+    VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(
+        OBContext.getOBContext());
+    ProcessBundle bundle = new ProcessBundle(adProcess.getId(), vars);
+    Map<String, Object> bundleParams = new HashMap<>();
+    @SuppressWarnings("unchecked")
+    Iterator<String> keys = params.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if (INP_RECORD_ID.equals(key)) {
+        bundleParams.put("recordID", params.get(key));
+      } else if (INP_TAB_ID.equals(key)) {
+        bundleParams.put("tabId", params.get(key));
+      } else {
+        bundleParams.put(key, params.get(key));
+      }
+    }
+    bundle.setParams(bundleParams);
+    ((org.openbravo.scheduling.Process) processInstance).execute(bundle);
+    Object bundleResult = bundle.getResult();
+    return translateClassicResult(bundleResult, adProcess);
   }
 
   /**
@@ -756,6 +817,34 @@ public class NeoProcessService {
     }
 
     return NeoResponse.ok(result);
+  }
+
+  /**
+   * Resolve the Java class name from the AD_Model_Object table (Process Class subtab).
+   * Returns the classname of the default implementation with action = 'P' (Process),
+   * or null if none found.
+   */
+  private static String resolveModelImplementationClass(
+      org.openbravo.model.ad.ui.Process process) {
+    try {
+      List<ModelImplementation> impls = process.getADModelImplementationList();
+      for (ModelImplementation impl : impls) {
+        if (Boolean.TRUE.equals(impl.isDefault())
+            && StringUtils.isNotBlank(impl.getJavaClassName())) {
+          return impl.getJavaClassName();
+        }
+      }
+      // Fallback: return the first non-blank classname
+      for (ModelImplementation impl : impls) {
+        if (StringUtils.isNotBlank(impl.getJavaClassName())) {
+          return impl.getJavaClassName();
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve model implementation class for process {}: {}",
+          process.getName(), e.getMessage());
+    }
+    return null;
   }
 
   /**

@@ -122,6 +122,13 @@ public final class NeoButtonActionHelper {
     params.put("inpRecordId", pathInfo.recordId);
     if (entity.getADTab() != null) {
       params.put("inpTabId", entity.getADTab().getId());
+      // Pass the table-specific ID key expected by scheduling processes (e.g. M_Inventory_ID)
+      String tableName = entity.getADTab().getTable() != null
+          ? entity.getADTab().getTable().getDBTableName()
+          : null;
+      if (tableName != null) {
+        params.put(tableName + "_ID", pathInfo.recordId);
+      }
     }
     if (obuiappProcess != null) {
       return NeoProcessService.executeObuiappProcess(obuiappProcess, params);
@@ -144,7 +151,10 @@ public final class NeoButtonActionHelper {
   public static Column findButtonColumn(String entityId, String actionName) {
     for (SFField field : loadEntityFields(entityId)) {
       Column column = field.getADColumn();
-      if (column != null && actionName.equals(column.getDBColumnName())) {
+      if (column == null) continue;
+      // Match by DB column name (e.g. "Processing") or by camelCase field name (e.g. "processNow")
+      if (actionName.equals(column.getDBColumnName())
+          || actionName.equals(field.getJavaQualifier())) {
         return column;
       }
     }
