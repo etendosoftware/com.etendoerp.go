@@ -1,0 +1,54 @@
+name: XML Record Order Check
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    paths:
+      - 'src-db/database/sourcedata/**/*.xml'
+
+jobs:
+  check-xml-order:
+    name: Validate XML record ordering
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check sourcedata XML record order
+        run: |
+          EXIT_CODE=0
+
+          for xml_file in src-db/database/sourcedata/*.xml; do
+            [ -f "$xml_file" ] || continue
+
+            # Extract record IDs from opening tags: <!--ID--><TABLE>
+            ids=$(grep -oE '<!--[A-Fa-f0-9]+--><[A-Z_]+>' "$xml_file" \
+                  | sed 's/<!--\([A-Fa-f0-9]*\)-->.*/\1/' \
+                  | tr '[:lower:]' '[:upper:]')
+
+            [ -z "$ids" ] && continue
+
+            sorted=$(echo "$ids" | sort)
+
+            if [ "$ids" != "$sorted" ]; then
+              echo "::error file=${xml_file}::Records are NOT in ascending UUID order"
+
+              # Show first out-of-order pair
+              prev=""
+              while IFS= read -r current; do
+                if [ -n "$prev" ] && [ "$(printf '%s\n%s' "$prev" "$current" | sort | head -1)" != "$prev" ]; then
+                  echo "  First violation: $prev should come before $current"
+                  break
+                fi
+                prev="$current"
+              done <<< "$ids"
+
+              EXIT_CODE=1
+            fi
+          done
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "All sourcedata XML files have correctly ordered records."
+          fi
+
+          exit $EXIT_CODE
