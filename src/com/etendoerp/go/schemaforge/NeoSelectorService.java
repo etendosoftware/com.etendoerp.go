@@ -1972,20 +1972,19 @@ public class NeoSelectorService {
    * requires entity names (e.g. "FROM FinancialMgmtFinAccPaymentMethod").
    */
   private static String resolveSubqueryTableNames(String sql) {
+    if (sql == null) {
+      return sql;
+    }
     Pattern fromTablePattern = Pattern.compile(
         "\\bFROM\\s+(\\w+)", Pattern.CASE_INSENSITIVE);
     Matcher fromMatcher = fromTablePattern.matcher(sql);
     StringBuffer result = new StringBuffer();
     while (fromMatcher.find()) {
       String fromTable = fromMatcher.group(1);
-      try {
-        Entity subEntity = ModelProvider.getInstance().getEntityByTableName(fromTable);
-        if (subEntity != null) {
-          fromMatcher.appendReplacement(result,
-              Matcher.quoteReplacement("FROM " + subEntity.getName()));
-        }
-      } catch (Exception ignored) {
-        // Not a known table name — leave as-is
+      Entity subEntity = ModelProvider.getInstance().getEntityByTableName(fromTable);
+      if (subEntity != null) {
+        fromMatcher.appendReplacement(result,
+            Matcher.quoteReplacement("FROM " + subEntity.getName()));
       }
     }
     fromMatcher.appendTail(result);
