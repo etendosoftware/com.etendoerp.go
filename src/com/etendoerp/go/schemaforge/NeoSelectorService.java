@@ -1975,6 +1975,28 @@ public class NeoSelectorService {
 
       String tableName = targetEntity.getTableName();
 
+      // Step 0: Replace "FROM TableName" in subqueries with the correct OBDal entity name.
+      // Validation rules use SQL table names (e.g. "FROM Fin_Finacc_Paymentmethod") but HQL
+      // requires entity names (e.g. "FROM FinancialMgmtFinAccPaymentMethod").
+      Pattern fromTablePattern = Pattern.compile(
+          "\\bFROM\\s+(\\w+)", Pattern.CASE_INSENSITIVE);
+      Matcher fromMatcher = fromTablePattern.matcher(sqlClause);
+      StringBuffer fromResult = new StringBuffer();
+      while (fromMatcher.find()) {
+        String fromTable = fromMatcher.group(1);
+        try {
+          Entity subEntity = ModelProvider.getInstance().getEntityByTableName(fromTable);
+          if (subEntity != null) {
+            fromMatcher.appendReplacement(fromResult,
+                Matcher.quoteReplacement("FROM " + subEntity.getName()));
+          }
+        } catch (Exception ignored) {
+          // Not a known table name — leave as-is
+        }
+      }
+      fromMatcher.appendTail(fromResult);
+      sqlClause = fromResult.toString();
+
       // Step 1: Replace TABLE.COLUMN patterns with e.property
       Pattern tableColPattern = Pattern.compile(
           Pattern.quote(tableName) + "\\.(\\w+)", Pattern.CASE_INSENSITIVE);
