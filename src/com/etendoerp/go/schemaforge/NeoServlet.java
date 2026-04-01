@@ -64,6 +64,7 @@ import com.etendoerp.go.schemaforge.util.NeoDisplayLogicHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import org.openbravo.client.application.ApplicationUtils;
 import org.openbravo.client.kernel.KernelUtils;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import com.etendoerp.go.schemaforge.util.NeoProcessReportHelper;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
@@ -878,7 +879,8 @@ public class NeoServlet extends HttpBaseServlet {
               ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
                   .optString("message", "Write operation failed")
               : "Write operation failed";
-          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errMsg);
+          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+              OBMessageUtils.messageBD(errMsg));
         }
         if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
           // Return 400 with the full error details for validation errors
