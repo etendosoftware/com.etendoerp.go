@@ -1,3 +1,20 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright © 2021–2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
 package com.etendoerp.go.schemaforge.webhooks;
 
 import java.util.Date;
@@ -5,6 +22,7 @@ import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
@@ -24,6 +42,7 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
 public class SFUpsertField extends BaseWebhookService {
 
   private static final Logger log = LogManager.getLogger(SFUpsertField.class);
+  private static final String ERROR_KEY = "error";
 
   @Override
   public void get(Map<String, String> parameter, Map<String, String> responseVars) {
@@ -34,15 +53,34 @@ public class SFUpsertField extends BaseWebhookService {
       String columnId = parameter.get("ColumnID");
       String moduleId = parameter.get("ModuleID");
 
+      // Validate all referenced objects before creating or loading the field.
+      SFEntity entity = OBDal.getInstance().get(SFEntity.class, entityId);
+      if (entity == null) {
+        responseVars.put(ERROR_KEY, "Entity not found: " + entityId);
+        return;
+      }
+
+      Column column = OBDal.getInstance().get(Column.class, columnId);
+      if (column == null) {
+        responseVars.put(ERROR_KEY, "Column not found: " + columnId);
+        return;
+      }
+
+      Module module = OBDal.getInstance().get(Module.class, moduleId);
+      if (module == null) {
+        responseVars.put(ERROR_KEY, "Module not found: " + moduleId);
+        return;
+      }
+
       SFField field;
       if (fieldId != null && !fieldId.isEmpty()) {
         field = OBDal.getInstance().get(SFField.class, fieldId);
         if (field == null) {
-          responseVars.put("error", "Field not found: " + fieldId);
+          responseVars.put(ERROR_KEY, "Field not found: " + fieldId);
           return;
         }
       } else {
-        field = new SFField();
+        field = OBProvider.getInstance().get(SFField.class);
         field.setNewOBObject(true);
         field.setClient(OBContext.getOBContext().getCurrentClient());
         field.setOrganization(OBContext.getOBContext().getCurrentOrganization());
@@ -55,25 +93,8 @@ public class SFUpsertField extends BaseWebhookService {
         field.setReadOnly(false);
       }
 
-      SFEntity entity = OBDal.getInstance().get(SFEntity.class, entityId);
-      if (entity == null) {
-        responseVars.put("error", "Entity not found: " + entityId);
-        return;
-      }
       field.setETGOSFEntity(entity);
-
-      Column column = OBDal.getInstance().get(Column.class, columnId);
-      if (column == null) {
-        responseVars.put("error", "Column not found: " + columnId);
-        return;
-      }
       field.setADColumn(column);
-
-      Module module = OBDal.getInstance().get(Module.class, moduleId);
-      if (module == null) {
-        responseVars.put("error", "Module not found: " + moduleId);
-        return;
-      }
       field.setADModule(module);
 
       if (parameter.containsKey("IsIncluded")) {
@@ -101,7 +122,7 @@ public class SFUpsertField extends BaseWebhookService {
 
     } catch (Exception e) {
       log.error("Error in SFUpsertField", e);
-      responseVars.put("error", e.getMessage());
+      responseVars.put(ERROR_KEY, e.getMessage());
     } finally {
       OBContext.restorePreviousMode();
     }

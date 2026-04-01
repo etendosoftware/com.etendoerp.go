@@ -1,3 +1,20 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright © 2021–2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
 package com.etendoerp.go.schemaforge;
 
 import java.util.HashSet;
@@ -24,8 +41,10 @@ import com.etendoerp.go.schemaforge.data.SFField;
 /**
  * Filters JSON request/response bodies based on ETGO_SF_FIELD configuration.
  *
- * <p>For GET responses, removes fields where IsIncluded=N.
- * For POST/PUT/PATCH inputs, removes fields where IsIncluded=N or IsReadOnly=Y.</p>
+ * <p>
+ * For GET responses, removes fields where IsIncluded=N.
+ * For POST/PUT/PATCH inputs, removes fields where IsIncluded=N or IsReadOnly=Y.
+ * </p>
  */
 public class NeoFieldFilter {
 
@@ -34,7 +53,9 @@ public class NeoFieldFilter {
   /** Set of DAL property names that are included (IsIncluded=Y). */
   private final Set<String> includedFields;
 
-  /** Set of DAL property names that are writable (IsIncluded=Y AND IsReadOnly=N). */
+  /**
+   * Set of DAL property names that are writable (IsIncluded=Y AND IsReadOnly=N).
+   */
   private final Set<String> writableFields;
 
   /** Whether filtering is active (false if no SF_FIELD config exists). */
@@ -50,7 +71,7 @@ public class NeoFieldFilter {
    * Build a field filter for the given SFEntity.
    * Loads all ETGO_SF_FIELD records and resolves their DAL property names.
    *
-   * @param sfEntity the schema forge entity configuration
+   * @param sfEntity      the schema forge entity configuration
    * @param dalEntityName the DAL entity name (from adTab.getTable().getName())
    * @return a filter instance, which may be inactive if no fields are configured
    */
@@ -115,19 +136,20 @@ public class NeoFieldFilter {
       included.add("id");
       writable.add("id");
 
-      // Always allow link-to-parent columns — they're needed for child record creation
+      // Always allow link-to-parent columns — they're needed for child record
+      // creation
       // (e.g., salesOrder on C_OrderLine, invoice on C_InvoiceLine)
       Tab adTab = sfEntity.getADTab();
       if (adTab != null && adTab.getTable() != null) {
-      for (Column col : adTab.getTable().getADColumnList()) {
-        if (col.isActive() && col.isLinkToParentColumn()) {
-          Property parentProp = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-          if (parentProp != null) {
-            writable.add(parentProp.getName());
-            included.add(parentProp.getName());
+        for (Column col : adTab.getTable().getADColumnList()) {
+          if (col.isActive() && col.isLinkToParentColumn()) {
+            Property parentProp = dalEntity.getPropertyByColumnName(col.getDBColumnName());
+            if (parentProp != null) {
+              writable.add(parentProp.getName());
+              included.add(parentProp.getName());
+            }
           }
         }
-      }
       }
 
       log.debug("Field filter for entity {}: {} included, {} writable",
@@ -183,7 +205,7 @@ public class NeoFieldFilter {
   }
 
   /**
-   * Filter a POST/PUT/PATCH request body.
+   * Filter a PUT/PATCH request body.
    * Removes fields that are not included or are read-only.
    * The input is the raw JSON body from the client.
    *
@@ -191,6 +213,23 @@ public class NeoFieldFilter {
    * @return the filtered JSON (modified in place)
    */
   public JSONObject filterWriteRequest(JSONObject requestBody) {
+    return filterBody(requestBody, writableFields);
+  }
+
+  /**
+   * Filter a POST (create) request body.
+   * Allows read-only fields through because they may carry values from callouts
+   * or defaults that are required for record creation (e.g., transactionDocument).
+   * Only removes fields that are not included at all.
+   *
+   * @param requestBody the request body JSON
+   * @return the filtered JSON (modified in place)
+   */
+  public JSONObject filterCreateRequest(JSONObject requestBody) {
+    return filterBody(requestBody, includedFields);
+  }
+
+  private JSONObject filterBody(JSONObject requestBody, Set<String> allowedFields) {
     if (!active || requestBody == null) {
       return requestBody;
     }
@@ -202,7 +241,7 @@ public class NeoFieldFilter {
       if (requestBody.has("data") && requestBody.optJSONObject("data") != null) {
         bodyToFilter = requestBody.getJSONObject("data");
       }
-      filterRecord(bodyToFilter, writableFields);
+      filterRecord(bodyToFilter, allowedFields);
       return bodyToFilter;
     } catch (Exception e) {
       log.error("Error filtering write request: {}", e.getMessage(), e);

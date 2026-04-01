@@ -1,0 +1,140 @@
+name: XML Record Order Check
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    paths:
+      - 'src-db/database/sourcedata/**/*.xml'
+
+jobs:
+  check-xml-order:
+    name: Validate XML record ordering
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check sourcedata XML record order
+        run: |
+          EXIT_CODE=0
+
+          for xml_file in src-db/database/sourcedata/*.xml; do
+            [ -f "$xml_file" ] || continue
+
+            # Extract record IDs from opening tags: <!--ID--><TABLE>
+            ids=$(grep -oE '<!--[A-Fa-f0-9]+--><[A-Z_]+>' "$xml_file" \
+                  | sed 's/<!--\([A-Fa-f0-9]*\)-->.*/\1/' \
+                  | tr '[:lower:]' '[:upper:]')
+
+            [ -z "$ids" ] && continue
+
+            sorted=$(echo "$ids" | sort)
+
+            if [ "$ids" != "$sorted" ]; then
+              echo "::error file=${xml_file}::Records are NOT in ascending UUID order"
+
+              # Show first out-of-order pair
+              prev=""
+              while IFS= read -r current; do
+                if [ -n "$prev" ] && [ "$(printf '%s\n%s' "$prev" "$current" | sort | head -1)" != "$prev" ]; then
+                  echo "  First violation: $prev should come before $current"
+                  break
+                fi
+                prev="$current"
+              done <<< "$ids"
+
+              EXIT_CODE=1
+            fi
+          done
+
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "All sourcedata XML files have correctly ordered records."
+          fi
+
+          exit $EXIT_CODE
+
+  check-xml-unique-constraints:
+    name: Validate XML unique constraints
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check ETGO_SF_ENTITY unique constraint (ETGO_SF_SPEC_ID, NAME)
+        run: |
+          python3 - <<'PYEOF'
+          import xml.etree.ElementTree as ET
+          import sys
+
+          xml_file = "src-db/database/sourcedata/ETGO_SF_ENTITY.xml"
+          tree = ET.parse(xml_file)
+          root = tree.getroot()
+
+          seen = {}
+          errors = []
+
+          for entity in root.findall("ETGO_SF_ENTITY"):
+              eid   = (entity.findtext("ETGO_SF_ENTITY_ID") or "").strip()
+              spec  = (entity.findtext("ETGO_SF_SPEC_ID")   or "").strip()
+              name  = (entity.findtext("NAME")               or "").strip()
+              key   = (spec, name)
+
+              if key in seen:
+                  errors.append(
+                      f"Duplicate (ETGO_SF_SPEC_ID={spec}, NAME={name}): "
+                      f"IDs {seen[key]} and {eid}"
+                  )
+              else:
+                  seen[key] = eid
+
+          if errors:
+              print(f"::error file={xml_file}::Unique constraint violation in ETGO_SF_ENTITY")
+              for e in errors:
+                  print(f"  {e}")
+              sys.exit(1)
+          else:
+              print("ETGO_SF_ENTITY: no unique constraint violations found.")
+          PYEOF
+
+  check-xml-orphans:
+    name: Validate XML referential integrity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check orphan entities and fields
+        run: |
+          python3 - <<'PYEOF'
+          import xml.etree.ElementTree as ET
+          import sys
+
+          def get_ids(filepath, tag, id_field):
+              root = ET.parse(filepath).getroot()
+              return {(e.findtext(id_field) or "").strip() for e in root.findall(tag)}
+
+          spec_ids   = get_ids("src-db/database/sourcedata/ETGO_SF_SPEC.xml",   "ETGO_SF_SPEC",   "ETGO_SF_SPEC_ID")
+          entity_ids = get_ids("src-db/database/sourcedata/ETGO_SF_ENTITY.xml", "ETGO_SF_ENTITY", "ETGO_SF_ENTITY_ID")
+
+          errors = []
+
+          for e in ET.parse("src-db/database/sourcedata/ETGO_SF_ENTITY.xml").getroot().findall("ETGO_SF_ENTITY"):
+              eid  = (e.findtext("ETGO_SF_ENTITY_ID") or "").strip()
+              spec = (e.findtext("ETGO_SF_SPEC_ID")   or "").strip()
+              if spec not in spec_ids:
+                  errors.append(f"ETGO_SF_ENTITY {eid} references missing ETGO_SF_SPEC_ID={spec}")
+
+          for f in ET.parse("src-db/database/sourcedata/ETGO_SF_FIELD.xml").getroot().findall("ETGO_SF_FIELD"):
+              fid    = (f.findtext("ETGO_SF_FIELD_ID")  or "").strip()
+              entity = (f.findtext("ETGO_SF_ENTITY_ID") or "").strip()
+              if entity not in entity_ids:
+                  errors.append(f"ETGO_SF_FIELD {fid} references missing ETGO_SF_ENTITY_ID={entity}")
+
+          if errors:
+              print("::error::Referential integrity violations in sourcedata XMLs")
+              for e in errors:
+                  print(f"  {e}")
+              sys.exit(1)
+          else:
+              print("No orphan records found.")
+          PYEOF

@@ -1,5 +1,23 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright © 2021–2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
 package com.etendoerp.go.schemaforge;
 
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -10,6 +28,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.weld.WeldUtils;
@@ -19,9 +38,16 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.client.kernel.RequestContext;
+import org.openbravo.model.ad.process.ProcessInstance;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.ProcessParameter;
+import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.scheduling.ProcessBundle;
+import org.openbravo.service.db.CallProcess;
+import org.openbravo.model.ad.domain.ModelImplementation;
 import org.openbravo.service.db.DalBaseProcess;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -30,16 +56,16 @@ import com.etendoerp.go.schemaforge.data.SFField;
 /**
  * Service for executing AD_Process definitions via the Neo headless API.
  *
- * Supports two process types:
+ * Supports three process types:
  * <ul>
  *   <li>OBUIAPP processes (UIPattern = "Standard") -- invoked via
  *       {@link BaseProcessActionHandler} using reflection on the
  *       protected doExecute method</li>
- *   <li>Classic processes -- invoked directly via
- *       {@link DalBaseProcess#execute(ProcessBundle)}</li>
+ *   <li>Classic processes extending {@link DalBaseProcess} -- invoked via
+ *       reflection on the protected doExecute method</li>
+ *   <li>Scheduling processes implementing {@link Process} -- invoked via
+ *       {@link Process#execute(ProcessBundle)}</li>
  * </ul>
- *
- * DB procedure processes are not supported (returns 501).
  */
 public class NeoProcessService {
 
@@ -47,6 +73,30 @@ public class NeoProcessService {
 
   /** UIPattern value for OBUIAPP (Standard) processes. */
   private static final String UI_PATTERN_STANDARD = "S";
+
+  /** Default Post OBUIAPP process ID (com.smf.jobs.defaults.Post). */
+  private static final String DEFAULT_POST_PROCESS_ID = "57496FB9CF9E4E8F847224017941570E";
+  public static final String MESSAGE = "message";
+  public static final String PROCESS_TYPE = "processType";
+  public static final String INP_RECORD_ID = "inpRecordId";
+  public static final String INP_TAB_ID = "inpTabId";
+  public static final String STATUS = "status";
+  public static final String ERROR = "error";
+  public static final String SUCCESS = "success";
+  public static final String PROCESS_ID = "processId";
+
+  /**
+   * Resolve the default Post OBUIAPP process for hardcoded "Posted" buttons.
+   */
+  private static org.openbravo.client.application.Process resolveDefaultPostProcess() {
+    try {
+      return OBDal.getInstance().get(
+          org.openbravo.client.application.Process.class, DEFAULT_POST_PROCESS_ID);
+    } catch (Exception e) {
+      log.debug("Default Post process not found: {}", DEFAULT_POST_PROCESS_ID);
+      return null;
+    }
+  }
 
   private NeoProcessService() {
   }
@@ -77,14 +127,30 @@ public class NeoProcessService {
           return executeObuiappProcess(process, params);
         }
 
-        if (StringUtils.isNotBlank(process.getJavaClassName())) {
-          return executeClassicProcess(process, params);
+        // Resolve classname: try AD_Process.classname first, then AD_Model_Object (Process Class subtab)
+        String className = process.getJavaClassName();
+        if (StringUtils.isBlank(className)) {
+          className = resolveModelImplementationClass(process);
+        }
+
+        if (StringUtils.isNotBlank(className)) {
+          Class<?> cls = loadClass(className);
+          if (cls == null) {
+            return NeoResponse.error(500,
+                "Process class not found: " + className);
+          }
+          if (DalBaseProcess.class.isAssignableFrom(cls)) {
+            return executeClassicProcess(process, cls, params);
+          }
+          if (org.openbravo.scheduling.Process.class.isAssignableFrom(cls)) {
+            return executeSchedulingProcess(process, cls, params);
+          }
+          return NeoResponse.error(500,
+              "Process class is not a supported handler type: " + className);
         }
 
         if (StringUtils.isNotBlank(process.getProcedure())) {
-          return NeoResponse.error(501,
-              "DB procedure processes are not supported via Neo API: "
-                  + process.getProcedure());
+          return executeDbProcedure(process, params);
         }
 
         return NeoResponse.error(400,
@@ -118,9 +184,9 @@ public class NeoProcessService {
       enrichedParams = params != null
           ? new JSONObject(params.toString())
           : new JSONObject();
-      enrichedParams.put("inpRecordId", recordId);
+      enrichedParams.put(INP_RECORD_ID, recordId);
       if (tabId != null) {
-        enrichedParams.put("inpTabId", tabId);
+        enrichedParams.put(INP_TAB_ID, tabId);
       }
     } catch (Exception e) {
       log.error("Error enriching params with record context", e);
@@ -168,38 +234,7 @@ public class NeoProcessService {
 
         for (SFField field : fields) {
           Column column = field.getADColumn();
-          if (column == null || column.getReference() == null) {
-            continue;
-          }
-
-          // Check if column reference is Button (AD_Reference_ID = '28')
-          if (!"28".equals(column.getReference().getId())) {
-            continue;
-          }
-
-          // Check for linked process (classic or OBUIAPP)
-          Process process = column.getProcess();
-          org.openbravo.client.application.Process obuiappProcess =
-              column.getOBUIAPPProcess();
-
-          if (process == null && obuiappProcess == null) {
-            continue;
-          }
-
-          JSONObject action = new JSONObject();
-          action.put("columnName", column.getDBColumnName());
-
-          if (obuiappProcess != null) {
-            action.put("processName", obuiappProcess.getName());
-            action.put("processId", obuiappProcess.getId());
-            action.put("processType", "OBUIAPP");
-          } else {
-            action.put("processName", process.getName());
-            action.put("processId", process.getId());
-            action.put("processType", resolveProcessType(process));
-          }
-
-          actions.put(action);
+          collectColumnInfo(column, actions);
         }
 
         JSONObject result = new JSONObject();
@@ -215,6 +250,38 @@ public class NeoProcessService {
       log.error("Error listing actions for entity {}", entityName, e);
       return NeoResponse.error(500,
           "Error listing actions: " + e.getMessage());
+    }
+  }
+
+  private static void collectColumnInfo(Column column, JSONArray actions) throws JSONException {
+    if (column != null && column.getReference() != null && "28".equals(column.getReference().getId())) {
+      // Check for linked process (classic or OBUIAPP),
+      // then check for hardcoded "Posted" fallback
+      Process process = column.getProcess();
+      org.openbravo.client.application.Process obuiappProcess =
+          column.getOBUIAPPProcess();
+
+      if (process == null && obuiappProcess == null && "Posted".equals(column.getDBColumnName())) {
+          obuiappProcess = resolveDefaultPostProcess();
+        }
+
+
+      if (obuiappProcess != null || process != null) {
+        JSONObject action = new JSONObject();
+        action.put("columnName", column.getDBColumnName());
+
+        if (obuiappProcess != null) {
+          action.put("processName", obuiappProcess.getName());
+          action.put(PROCESS_ID, obuiappProcess.getId());
+          action.put(PROCESS_TYPE, "OBUIAPP");
+        } else {
+          action.put("processName", process.getName());
+          action.put(PROCESS_ID, process.getId());
+          action.put(PROCESS_TYPE, resolveProcessType(process));
+        }
+
+        actions.put(action);
+      }
     }
   }
 
@@ -241,7 +308,7 @@ public class NeoProcessService {
 
         // Determine process type label
         String processType = resolveProcessType(process);
-        result.put("processType", processType);
+        result.put(PROCESS_TYPE, processType);
 
         // Build parameter list
         JSONArray parameters = buildParameterArray(process);
@@ -286,9 +353,10 @@ public class NeoProcessService {
    * Build a JSONArray describing all active parameters of a process.
    */
   private static JSONArray buildParameterArray(Process process)
-      throws Exception {
+      throws JSONException {
     JSONArray parameters = new JSONArray();
     List<ProcessParameter> paramList = process.getADProcessParameterList();
+
     for (ProcessParameter param : paramList) {
       if (!Boolean.TRUE.equals(param.isActive())) {
         continue;
@@ -321,6 +389,40 @@ public class NeoProcessService {
     return parameters;
   }
 
+  private static Class<?> loadClass(String className) {
+    try {
+      return Class.forName(className);
+    } catch (ClassNotFoundException e) {
+      return null;
+    }
+  }
+
+  /**
+   * Converts a JSONObject of process parameters into the Map format expected
+   * by ProcessBundle. Maps NEO internal keys to classic process conventions:
+   * inpRecordId → recordID, inpTabId → tabId.
+   */
+  @SuppressWarnings("unchecked")
+  private static Map<String, Object> buildBundleParams(JSONObject params) throws JSONException {
+    if (params == null) {
+      return new HashMap<>();
+    }
+    Map<String, Object> bundleParams = new HashMap<>();
+    Iterator<String> keys = params.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      Object value = params.isNull(key) ? null : params.get(key);
+      if (INP_RECORD_ID.equals(key)) {
+        bundleParams.put("recordID", value);
+      } else if (INP_TAB_ID.equals(key)) {
+        bundleParams.put("tabId", value);
+      } else {
+        bundleParams.put(key, value);
+      }
+    }
+    return bundleParams;
+  }
+
   // ---- Execution strategies ----
 
   /**
@@ -329,11 +431,76 @@ public class NeoProcessService {
    * Since BaseProcessActionHandler.execute and doExecute are protected,
    * this method uses reflection to invoke doExecute directly on the
    * concrete handler instance obtained from the CDI container.
+   *
+   * @param process the AD_Process to execute (must have a valid Java class name)
+   * @param params  JSON object with parameter values (e.g. inpRecordId, inpTabId)
+   * @return NeoResponse with the execution result
+   * @throws Exception if reflection or process execution fails
    */
-  private static NeoResponse executeObuiappProcess(Process process,
+  public static NeoResponse executeObuiappProcess(Process process,
       JSONObject params) throws Exception {
+    return executeObuiappHandler(process.getJavaClassName(), process.getId(), params);
+  }
 
-    String className = process.getJavaClassName();
+  /**
+   * Execute an OBUIAPP process directly from an
+   * {@link org.openbravo.client.application.Process} entity.
+   * Used for button columns that only have an OBUIAPP process linked
+   * (no classic AD_Process fallback).
+   *
+   * @param obuiappProcess the OBUIAPP process definition
+   * @param params         JSON object with parameter values.
+   *                       Should include inpRecordId and optionally inpTabId.
+   * @return NeoResponse with execution result
+   */
+  public static NeoResponse executeObuiappProcess(
+      org.openbravo.client.application.Process obuiappProcess,
+      JSONObject params) {
+    if (params == null) {
+      params = new JSONObject();
+    }
+    try {
+      OBContext.setAdminMode();
+      try {
+        return executeObuiappHandler(
+            obuiappProcess.getJavaClassName(),
+            obuiappProcess.getId(),
+            params);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("Error executing OBUIAPP process {}", obuiappProcess.getName(), e);
+      return NeoResponse.error(500,
+          "Process execution failed: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Ensure that RequestContext has a fully populated VariablesSecureApp
+   * derived from the current OBContext. Many classic and OBUIAPP handlers
+   * call RequestContext.get().getVariablesSecureApp() internally (e.g.,
+   * Post, ProcessOrder). In NEO Headless there is no HTTP session, so
+   * we build one from the JWT-authenticated OBContext.
+   */
+  private static void ensureRequestContextVars() {
+    try {
+      VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(
+          OBContext.getOBContext());
+      RequestContext.get().setVariableSecureApp(vars);
+    } catch (Exception e) {
+      log.warn("Could not set VariablesSecureApp on RequestContext: {}",
+          e.getMessage());
+    }
+  }
+
+  /**
+   * Shared implementation for OBUIAPP process execution.
+   * Builds the content/params JSON and invokes doExecute via reflection.
+   */
+  private static NeoResponse executeObuiappHandler(String className,
+      String processId, JSONObject params) throws Exception {
+
     Class<?> handlerClass = Class.forName(className);
     Object handlerInstance =
         WeldUtils.getInstanceFromStaticBeanManager(handlerClass);
@@ -345,7 +512,7 @@ public class NeoProcessService {
     }
 
     // Build the content JSON in the format expected by OBUIAPP handlers:
-    // { "_params": { ... }, "_action": "<processId>" }
+    // an JSON with _params (object) and _action: "processId"
     JSONObject content = new JSONObject();
 
     // Build a clean _params object without internal context keys
@@ -354,24 +521,53 @@ public class NeoProcessService {
     Iterator<String> paramKeys = params.keys();
     while (paramKeys.hasNext()) {
       String pk = paramKeys.next();
-      if (!"inpRecordId".equals(pk) && !"inpTabId".equals(pk)) {
+      if (!INP_RECORD_ID.equals(pk) && !INP_TAB_ID.equals(pk)) {
         cleanParams.put(pk, params.get(pk));
       }
     }
     content.put("_params", cleanParams);
-    content.put("_action", process.getId());
+    content.put("_action", processId);
 
-    // Add record context if present (for button processes / Type B)
-    if (params.has("inpRecordId")) {
-      content.put("inpRecordId", params.getString("inpRecordId"));
+    // Add record context if present (for button processes / Type B).
+    // SMF Jobs (Action/Data framework) expects _entityName, recordIds,
+    // and inpKeyName to resolve the input records.
+    if (params.has(INP_RECORD_ID)) {
+      String recordId = params.getString(INP_RECORD_ID);
+      content.put(INP_RECORD_ID, recordId);
+
+      // Provide recordIds array and inpKeyName for SMF Jobs Data constructor.
+      // The Data class uses inpKeyName to locate the single-record ID in the JSON,
+      // and recordIds as a batch selection list.
+      JSONArray recordIds = new JSONArray();
+      recordIds.put(recordId);
+      content.put("recordIds", recordIds);
+      content.put("inpKeyName", INP_RECORD_ID);
     }
-    if (params.has("inpTabId")) {
-      content.put("inpTabId", params.getString("inpTabId"));
+    if (params.has(INP_TAB_ID)) {
+      String tabId = params.getString(INP_TAB_ID);
+      content.put(INP_TAB_ID, tabId);
+
+      // Resolve DAL entity name from tab for SMF Jobs framework
+      try {
+        Tab tab = OBDal.getInstance().get(Tab.class, tabId);
+        if (tab != null && tab.getTable() != null) {
+          String dalEntityName = tab.getTable().getName();
+          content.put("_entityName", dalEntityName);
+        }
+      } catch (Exception e) {
+        log.debug("Could not resolve entity name from tab {}", tabId, e);
+      }
     }
+
+    // Ensure RequestContext has a VariablesSecureApp populated from OBContext.
+    // Many OBUIAPP handlers (e.g., com.smf.jobs.defaults.Post) call
+    // RequestContext.get().getVariablesSecureApp() internally, which requires
+    // a session-like context that NEO Headless does not provide by default.
+    ensureRequestContextVars();
 
     // Build the parameters map as BaseProcessActionHandler.execute would
     Map<String, Object> handlerParams = new HashMap<>();
-    handlerParams.put("processId", process.getId());
+    handlerParams.put(PROCESS_ID, processId);
     @SuppressWarnings("unchecked")
     Iterator<String> keys = params.keys();
     while (keys.hasNext()) {
@@ -402,16 +598,14 @@ public class NeoProcessService {
    * The caller is responsible for OBContext and transaction management.
    */
   private static NeoResponse executeClassicProcess(Process process,
-      JSONObject params) throws Exception {
+      Class<?> processClass, JSONObject params) throws Exception {
 
-    String className = process.getJavaClassName();
-    Class<?> processClass = Class.forName(className);
     Object processInstance =
         WeldUtils.getInstanceFromStaticBeanManager(processClass);
 
     if (!(processInstance instanceof DalBaseProcess)) {
       return NeoResponse.error(500,
-          "Process class is not a DalBaseProcess: " + className);
+          "Process class is not a DalBaseProcess: " + processClass.getName());
     }
 
     // Build a ProcessBundle using the Map-based constructor
@@ -420,21 +614,7 @@ public class NeoProcessService {
     ProcessBundle bundle = new ProcessBundle(bundleMap);
 
     // Set the process parameters
-    Map<String, Object> bundleParams = new HashMap<>();
-    @SuppressWarnings("unchecked")
-    Iterator<String> keys = params.keys();
-    while (keys.hasNext()) {
-      String key = keys.next();
-      // Map internal context keys to classic process conventions
-      if ("inpRecordId".equals(key)) {
-        bundleParams.put("recordID", params.get(key));
-      } else if ("inpTabId".equals(key)) {
-        bundleParams.put("tabId", params.get(key));
-      } else {
-        bundleParams.put(key, params.get(key));
-      }
-    }
-    bundle.setParams(bundleParams);
+    bundle.setParams(buildBundleParams(params));
 
     // Invoke protected doExecute directly via reflection.
     // We bypass DalBaseProcess.execute() because it requires a
@@ -450,6 +630,137 @@ public class NeoProcessService {
     return translateClassicResult(bundleResult, process);
   }
 
+  /**
+   * Execute a scheduling process (implements {@link Process}).
+   *
+   * These processes are called via {@link Process#execute(ProcessBundle)}.
+   * The bundle params include both generic keys (recordID, inpRecordId) and
+   * the table-specific key injected by the caller (e.g. M_Inventory_ID).
+   */
+  private static NeoResponse executeSchedulingProcess(
+      org.openbravo.model.ad.ui.Process adProcess,
+      Class<?> processClass,
+      JSONObject params) throws Exception {
+    Object processInstance = WeldUtils.getInstanceFromStaticBeanManager(processClass);
+    if (!(processInstance instanceof org.openbravo.scheduling.Process)) {
+      return NeoResponse.error(500,
+          "Process class does not implement org.openbravo.scheduling.Process: "
+          + processClass.getName());
+    }
+    // Use the VariablesSecureApp constructor so ProcessBundle.getContext() is non-null.
+    // Scheduling processes (e.g. InventoryCountProcess) call getContext().getLanguage()
+    // internally; the Map-based constructor leaves context null.
+    VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(
+        OBContext.getOBContext());
+    ProcessBundle bundle = new ProcessBundle(adProcess.getId(), vars);
+    bundle.setParams(buildBundleParams(params));
+    ((org.openbravo.scheduling.Process) processInstance).execute(bundle);
+    Object bundleResult = bundle.getResult();
+    return translateClassicResult(bundleResult, adProcess);
+  }
+
+  /**
+   * Execute a DB procedure process via CallProcess.
+   *
+   * For DocAction-style processes (C_Order_Post, M_InOut_Post0, etc.),
+   * the caller should pass a "docAction" parameter with the action code
+   * (e.g., "CO" for Complete, "RE" for Reactivate). This method sets the
+   * DocumentAction field on the record before calling the procedure.
+   */
+  private static NeoResponse executeDbProcedure(Process process,
+      JSONObject params) throws Exception {
+
+    ensureRequestContextVars();
+
+    String recordId = params.optString("recordId",
+        params.optString(INP_RECORD_ID, null));
+
+    if (recordId == null || recordId.isBlank()) {
+      return NeoResponse.error(400,
+          "DB procedure requires a recordId");
+    }
+
+    // For DocAction processes: set the action on the document before calling
+    String docAction = params.optString("docAction", null);
+    if (docAction != null && !docAction.isBlank()) {
+      String tabId = params.optString(INP_TAB_ID, null);
+      if (tabId != null) {
+        setDocAction(tabId, recordId, docAction);
+      }
+    }
+
+    // Build parameters map for CallProcess (excludes internal context keys)
+    Map<String, String> procParams = null;
+    @SuppressWarnings("unchecked")
+    Iterator<String> keys = params.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if ("recordId".equals(key) || INP_RECORD_ID.equals(key)
+          || INP_TAB_ID.equals(key) || "docAction".equals(key)) {
+        continue;
+      }
+      if (procParams == null) {
+        procParams = new HashMap<>();
+      }
+      procParams.put(key, params.optString(key));
+    }
+
+    ProcessInstance pInstance = CallProcess.getInstance()
+        .call(process, recordId, procParams);
+
+    // Refresh to get the result written by the procedure
+    OBDal.getInstance().getSession().refresh(pInstance);
+
+    return translatePInstanceResult(pInstance, process);
+  }
+
+  private static void setDocAction(String tabId, String recordId, String docAction) {
+    try {
+      Tab tab = OBDal.getInstance().get(Tab.class, tabId);
+      if (tab != null && tab.getTable() != null) {
+        String dalEntityName = tab.getTable().getName();
+        BaseOBObject rec = OBDal.getInstance().get(dalEntityName, recordId);
+        if (rec != null && rec.getEntity().hasProperty("documentAction")) {
+          rec.set("documentAction", docAction);
+          OBDal.getInstance().save(rec);
+          OBDal.getInstance().flush();
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not set docAction on record: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Translate a ProcessInstance result (from CallProcess/DB procedure) to NeoResponse.
+   */
+  private static NeoResponse translatePInstanceResult(
+      ProcessInstance pInstance, Process process) throws JSONException {
+
+    JSONObject result = new JSONObject();
+    long resultCode = pInstance.getResult() != null ? pInstance.getResult() : 0L;
+    String errorMsg = pInstance.getErrorMsg();
+
+    if (resultCode == 0L) {
+      // Error
+      String cleanMsg = errorMsg != null
+          ? errorMsg.replaceFirst("@ERROR=", "") : "Process failed";
+      result.put(STATUS, ERROR);
+      result.put(MESSAGE, cleanMsg);
+      return new NeoResponse(400, result);
+    }
+
+    // Success
+    result.put(STATUS, SUCCESS);
+    if (errorMsg != null && !errorMsg.isBlank()) {
+      result.put(MESSAGE, errorMsg.replaceFirst("@SUCCESS=", ""));
+    } else {
+      result.put(MESSAGE,
+          "Process " + process.getName() + " executed successfully");
+    }
+    return NeoResponse.ok(result);
+  }
+
   // ---- Validation ----
 
   /**
@@ -461,24 +772,12 @@ public class NeoProcessService {
       JSONObject params) {
     List<ProcessParameter> paramList = process.getADProcessParameterList();
     for (ProcessParameter param : paramList) {
-      if (!Boolean.TRUE.equals(param.isActive())) {
-        continue;
-      }
-      if (!Boolean.TRUE.equals(param.isMandatory())) {
-        continue;
-      }
-
       String columnName = param.getDBColumnName();
-      if (columnName == null) {
-        continue;
-      }
-
-      if (!params.has(columnName) || params.isNull(columnName)) {
-        if (StringUtils.isBlank(param.getDefaultValue())) {
-          return NeoResponse.error(400,
-              "Missing mandatory parameter: " + columnName
-                  + " (" + param.getName() + ")");
-        }
+      if (Boolean.TRUE.equals(param.isActive()) && Boolean.TRUE.equals(param.isMandatory()) && columnName != null
+          && (!params.has(columnName) || params.isNull(columnName)) && StringUtils.isBlank(param.getDefaultValue())) {
+        return NeoResponse.error(400,
+            "Missing mandatory parameter: " + columnName
+                + " (" + param.getName() + ")");
       }
     }
     return null;
@@ -493,36 +792,36 @@ public class NeoProcessService {
    */
   @SuppressWarnings("unchecked")
   private static NeoResponse translateObuiappResult(
-      JSONObject handlerResult) throws Exception {
+      JSONObject handlerResult) throws JSONException {
 
     if (handlerResult == null) {
       JSONObject successResult = new JSONObject();
-      successResult.put("status", "success");
+      successResult.put(STATUS, SUCCESS);
       return NeoResponse.ok(successResult);
     }
 
     JSONObject result = new JSONObject();
 
-    if (handlerResult.has("message")) {
-      JSONObject message = handlerResult.getJSONObject("message");
-      String severity = message.optString("severity", "success");
+    if (handlerResult.has(MESSAGE)) {
+      JSONObject message = handlerResult.getJSONObject(MESSAGE);
+      String severity = message.optString("severity", SUCCESS);
       String text = message.optString("text", "");
 
-      result.put("status", severity);
-      result.put("message", text);
+      result.put(STATUS, severity);
+      result.put(MESSAGE, text);
 
-      if ("error".equals(severity)) {
+      if (ERROR.equals(severity)) {
         return new NeoResponse(400, result);
       }
     } else {
-      result.put("status", "success");
+      result.put(STATUS, SUCCESS);
     }
 
     // Pass through any additional response data
     Iterator<String> keys = handlerResult.keys();
     while (keys.hasNext()) {
       String key = keys.next();
-      if (!"message".equals(key)) {
+      if (!MESSAGE.equals(key)) {
         result.put(key, handlerResult.get(key));
       }
     }
@@ -531,31 +830,61 @@ public class NeoProcessService {
   }
 
   /**
+   * Resolve the Java class name from the AD_Model_Object table (Process Class subtab).
+   * Returns the classname of the default implementation with action = 'P' (Process),
+   * or null if none found.
+   */
+  private static String resolveModelImplementationClass(
+      org.openbravo.model.ad.ui.Process process) {
+    try {
+      List<ModelImplementation> impls = process.getADModelImplementationList();
+      for (ModelImplementation impl : impls) {
+        if (Boolean.TRUE.equals(impl.isDefault())
+            && "P".equals(impl.getAction())
+            && StringUtils.isNotBlank(impl.getJavaClassName())) {
+          return impl.getJavaClassName();
+        }
+      }
+      // Fallback: return the first non-blank classname with action = 'P'
+      for (ModelImplementation impl : impls) {
+        if ("P".equals(impl.getAction())
+            && StringUtils.isNotBlank(impl.getJavaClassName())) {
+          return impl.getJavaClassName();
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve model implementation class for process {}: {}",
+          process.getName(), e.getMessage());
+    }
+    return null;
+  }
+
+  /**
    * Translate a classic process result (typically OBError) to a NeoResponse.
    */
   private static NeoResponse translateClassicResult(Object bundleResult,
-      Process process) throws Exception {
+      Process process) throws JSONException {
 
     JSONObject result = new JSONObject();
 
     if (bundleResult instanceof OBError) {
       OBError error = (OBError) bundleResult;
-      result.put("status", error.getType().toLowerCase());
+      result.put(STATUS, error.getType().toLowerCase());
       result.put("title", StringUtils.defaultString(error.getTitle()));
-      result.put("message", StringUtils.defaultString(error.getMessage()));
+      result.put(MESSAGE, StringUtils.defaultString(error.getMessage()));
 
-      if ("error".equalsIgnoreCase(error.getType())) {
+      if (ERROR.equalsIgnoreCase(error.getType())) {
         return new NeoResponse(400, result);
       }
       return NeoResponse.ok(result);
     }
 
     if (bundleResult != null) {
-      result.put("status", "success");
-      result.put("message", bundleResult.toString());
+      result.put(STATUS, SUCCESS);
+      result.put(MESSAGE, bundleResult.toString());
     } else {
-      result.put("status", "success");
-      result.put("message",
+      result.put(STATUS, SUCCESS);
+      result.put(MESSAGE,
           "Process " + process.getName() + " executed successfully");
     }
 

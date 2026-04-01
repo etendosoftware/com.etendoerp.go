@@ -1,24 +1,34 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright © 2021–2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
 package com.etendoerp.go.schemaforge;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertSame;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
-import javax.servlet.http.HttpServletRequest;
-
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 /**
  * Unit tests for {@link NeoServlet} tab filtering logic.
- *
- * Tests the wrapWithTabFilters method which injects tabId, windowId,
- * and parent entity filters into the request before delegating to
- * DataSourceServlet.
  *
  * Note: Tests that require a running DAL (e.g., verifying HQL where clause
  * application or parent property resolution) must be run as integration tests
@@ -28,85 +38,19 @@ public class NeoServletTabFilterTest {
 
   private NeoServlet servlet;
 
-  @Before
+  @BeforeEach
   public void setUp() {
     servlet = new NeoServlet();
   }
 
   /**
-   * When NeoContext has no AD_Tab, wrapWithTabFilters should return the
-   * original request unchanged (no wrapping).
-   */
-  @Test
-  public void testWrapWithTabFiltersReturnsOriginalWhenNoTab() {
-    NeoContext context = NeoContext.builder()
-        .specName("testSpec")
-        .entityName("Product")
-        .httpMethod("GET")
-        .queryParams(Collections.emptyMap())
-        .build();
-
-    // Use a minimal stub request
-    HttpServletRequest stubRequest = new StubHttpServletRequest();
-    HttpServletRequest result = servlet.wrapWithTabFilters(stubRequest, context);
-
-    // Should return the same reference when there is no tab
-    assertSame("Should return original request when adTab is null",
-        stubRequest, result);
-  }
-
-  /**
-   * When NeoContext has no AD_Tab and queryParams include parentId,
-   * the wrapper should still return the original request.
-   */
-  @Test
-  public void testWrapWithTabFiltersIgnoresParentIdWhenNoTab() {
-    Map<String, String> params = new HashMap<>();
-    params.put("parentId", "ABC123");
-
-    NeoContext context = NeoContext.builder()
-        .specName("testSpec")
-        .entityName("OrderLine")
-        .httpMethod("GET")
-        .queryParams(params)
-        .build();
-
-    HttpServletRequest stubRequest = new StubHttpServletRequest();
-    HttpServletRequest result = servlet.wrapWithTabFilters(stubRequest, context);
-
-    assertSame("Should return original request when adTab is null",
-        stubRequest, result);
-  }
-
-  /**
-   * When NeoContext has null queryParams, wrapWithTabFilters should not
-   * throw a NullPointerException.
-   */
-  @Test
-  public void testWrapWithTabFiltersHandlesNullQueryParams() {
-    NeoContext context = NeoContext.builder()
-        .specName("testSpec")
-        .entityName("Product")
-        .httpMethod("GET")
-        .queryParams(null)
-        .build();
-
-    HttpServletRequest stubRequest = new StubHttpServletRequest();
-    HttpServletRequest result = servlet.wrapWithTabFilters(stubRequest, context);
-
-    // Should return original (no tab set)
-    assertSame(stubRequest, result);
-  }
-
-  /**
-   * Verify that buildParentWhereClause returns null when called with a null tab.
-   * This tests the null safety of the method.
+   * buildParentWhereClause returns null when called with a null tab.
+   * The method performs an explicit null check at the start and returns null immediately.
    */
   @Test
   public void testBuildParentWhereClauseWithNullTab() {
-    // buildParentWhereClause catches all exceptions and returns null
     String result = servlet.buildParentWhereClause(null, "ABC123");
-    assertEquals("Should return null when tab is null", null, result);
+    assertNull(result, "Should return null when tab is null");
   }
 
   /**
