@@ -20,7 +20,6 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
 import java.util.Date;
-import java.util.HashSet;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -32,10 +31,10 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.data.FieldProvider;
 import org.openbravo.erpCommon.ad_reports.AgingDao;
-import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.service.db.DalConnectionProvider;
 
@@ -117,6 +116,7 @@ public class AgingReportHandler implements NeoHandler {
       String col4 = body.optString("column4", DEFAULT_COL4);
       String bPartnerId = body.optString("bPartnerId", "");
       String orgId = body.optString("orgId", "");
+      String glId = body.optString("glId", "");
 
       // Resolve date
       Date currentDate;
@@ -132,31 +132,31 @@ public class AgingReportHandler implements NeoHandler {
         orgId = obCtx.getCurrentOrganization().getId();
       }
 
-      // Build organization tree
-      Set<String> organizations = new HashSet<>();
-      organizations.add(orgId);
-      Organization org = OBDal.getInstance().get(Organization.class, orgId);
-      if (org != null) {
-        // Include child organizations
-        Set<String> naturalTree = OBContext.getOBContext()
-            .getOrganizationStructureProvider(obCtx.getCurrentClient().getId())
-            .getNaturalTree(orgId);
-        organizations.addAll(naturalTree);
-      }
+      // Build organization tree (org + children only, matching Classic behavior)
+      Set<String> organizations = new OrganizationStructureProvider().getChildTree(orgId, true);
 
-      // Resolve accounting schema for currency conversion
-      String accSchemaId = "";
-      try {
-        AcctSchema acctSchema = OBDal.getInstance()
-            .createQuery(AcctSchema.class, "client.id = :clientId and active = true")
-            .setNamedParameter("clientId", obCtx.getCurrentClient().getId())
-            .setMaxResult(1)
-            .uniqueResult();
-        if (acctSchema != null) {
-          accSchemaId = acctSchema.getId();
+      // Resolve accounting schema: use explicit glId if provided, otherwise look up the schema
+      // directly linked to the selected org (not inherited from parents)
+      String accSchemaId = glId;
+      if (accSchemaId.isEmpty()) {
+        try {
+          OBContext.setAdminMode(true);
+          AcctSchema acctSchema = OBDal.getInstance()
+              .createQuery(AcctSchema.class,
+                  "exists (from OrganizationAcctSchema oas where oas.accountingSchema=this"
+                      + " and oas.organization.id=:orgId and oas.active=true)"
+                      + " and active=true")
+              .setNamedParameter("orgId", orgId)
+              .setMaxResult(1)
+              .uniqueResult();
+          if (acctSchema != null) {
+            accSchemaId = acctSchema.getId();
+          }
+        } catch (Exception e) {
+          log.warn("Could not resolve accounting schema for org {}", orgId, e);
+        } finally {
+          OBContext.restorePreviousMode();
         }
-      } catch (Exception e) {
-        log.warn("Could not resolve accounting schema", e);
       }
 
       // Set session variable required by AgingDao (legacy code expects this in HTTP session)
@@ -202,7 +202,7 @@ public class AgingReportHandler implements NeoHandler {
           row.put("days120", toBigDecimal(fp.getField("amount4")));
           row.put("days150plus", toBigDecimal(fp.getField("amount5")));
           row.put("total", toBigDecimal(fp.getField("Total")));
-          row.put("credit", toBigDecimal(fp.getField("credit")));
+          row.put("credits", toBigDecimal(fp.getField("credit")));
           row.put("net", toBigDecimal(fp.getField("net")));
           rows.put(row);
         }
