@@ -1312,15 +1312,25 @@ public class NeoServlet extends HttpBaseServlet {
    * Parsed path components.
    */
   public static class NeoPathInfo {
+    /** The spec name identifying the API configuration entry. */
     public final String specName;
+    /** The entity name within the spec (e.g. a tab or sub-entity identifier). */
     public final String entityName;
+    /** The record ID targeted by the request, or {@code null} for collection-level operations. */
     public final String recordId;
+    /** Whether the request targets a selector endpoint. */
     public final boolean isSelector;
+    /** The field name used as the selector key, or {@code null} when {@code isSelector} is false. */
     public final String selectorField;
+    /** Whether the request targets a button action endpoint. */
     public final boolean isAction;
+    /** The action name (DB column name or Java qualifier) to execute, or {@code null} when {@code isAction} is false. */
     public final String actionName;
+    /** Whether the request is an evaluate-display (dynamic visibility) call. */
     public final boolean isEvaluateDisplay;
+    /** Whether the request targets a callout endpoint. */
     public final boolean isCallout;
+    /** Whether the request is a field-defaults resolution call. */
     public final boolean isDefaults;
 
     NeoPathInfo(String specName, String entityName, String recordId) {

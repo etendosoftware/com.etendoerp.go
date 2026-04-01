@@ -62,6 +62,13 @@ public final class NeoDiscoveryHelper {
   private NeoDiscoveryHelper() {
   }
 
+  /**
+   * Handles the discovery endpoint by listing all active specs the current user has access to,
+   * including their type, linked window or process IDs, and entity summaries.
+   *
+   * @return a {@link NeoResponse} containing a JSON object with a {@code specs} array,
+   *         or an error response if the operation fails
+   */
   public static NeoResponse handleDiscovery() {
     try {
       OBCriteria<SFSpec> specCriteria = OBDal.getInstance().createCriteria(SFSpec.class);
@@ -108,6 +115,14 @@ public final class NeoDiscoveryHelper {
     }
   }
 
+  /**
+   * Handles the spec-describe endpoint by returning the full structure of a given spec,
+   * including all active included entities, their HTTP methods, tab metadata, and fields.
+   *
+   * @param spec the {@link SFSpec} to describe
+   * @return a {@link NeoResponse} containing a JSON object with the spec details and entities,
+   *         or an error response if the operation fails
+   */
   public static NeoResponse handleSpecDescribe(SFSpec spec) {
     try {
       String specId = spec.getId();
@@ -155,6 +170,14 @@ public final class NeoDiscoveryHelper {
     }
   }
 
+  /**
+   * Builds a summary JSON array of active included entities belonging to the given spec,
+   * each entry containing the entity name and its supported HTTP methods.
+   *
+   * @param specId the ID of the {@link SFSpec} whose entities should be summarised
+   * @return a {@link JSONArray} of entity summary objects ordered by sequence number
+   * @throws Exception if a database or JSON error occurs
+   */
   public static JSONArray buildEntitySummaryArray(String specId) throws Exception {
     OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
     criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
@@ -172,6 +195,13 @@ public final class NeoDiscoveryHelper {
     return arr;
   }
 
+  /**
+   * Builds a JSON array of HTTP method strings (GET, POST, PUT, PATCH, DELETE) enabled
+   * on the given entity according to its boolean flags.
+   *
+   * @param entity the {@link SFEntity} whose method flags should be inspected
+   * @return a {@link JSONArray} containing the enabled HTTP method names
+   */
   public static JSONArray buildMethodsArray(SFEntity entity) {
     JSONArray methods = new JSONArray();
     if (Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID())) {
@@ -192,6 +222,14 @@ public final class NeoDiscoveryHelper {
     return methods;
   }
 
+  /**
+   * Builds a JSON array of field descriptors for all active included fields belonging to the
+   * given entity, including column type, selector metadata, and validation parameters.
+   *
+   * @param entityId the ID of the {@link SFEntity} whose fields should be described
+   * @return a {@link JSONArray} of field descriptor objects ordered by sequence number
+   * @throws Exception if a database or JSON error occurs
+   */
   public static JSONArray buildFieldsArray(String entityId) throws Exception {
     OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
     criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
@@ -234,6 +272,13 @@ public final class NeoDiscoveryHelper {
     return refId != null && SELECTOR_REFS.contains(refId);
   }
 
+  /**
+   * Extracts the unique context parameter tokens (e.g. {@code @PARAM@}) referenced in the
+   * column's validation rule code, returning them as a JSON array of plain strings.
+   *
+   * @param column the AD {@link Column} whose validation rule should be inspected
+   * @return a {@link JSONArray} of unique parameter name strings, empty if none are found
+   */
   public static JSONArray extractValidationParams(Column column) {
     JSONArray params = new JSONArray();
     org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
@@ -252,6 +297,13 @@ public final class NeoDiscoveryHelper {
     return params;
   }
 
+  /**
+   * Maps an AD reference ID to its human-readable selector type label.
+   *
+   * @param refId the AD reference ID to map (e.g. {@code "19"} for TableDir)
+   * @return the selector type string ({@code "TableDir"}, {@code "Table"}, {@code "Search"},
+   *         or {@code "OBUISEL"}), or {@code null} if the reference is not a known selector type
+   */
   public static String mapSelectorType(String refId) {
     if (refId == null) return null;
     switch (refId) {
@@ -263,6 +315,14 @@ public final class NeoDiscoveryHelper {
     }
   }
 
+  /**
+   * Maps an AD reference ID to a simplified JSON-friendly type name used in field descriptors.
+   *
+   * @param refId the AD reference ID to map; may be {@code null}
+   * @return a type string such as {@code "string"}, {@code "number"}, {@code "boolean"},
+   *         {@code "date"}, {@code "datetime"}, {@code "time"}, {@code "list"}, {@code "id"},
+   *         or {@code "button"}; defaults to {@code "string"} for unknown references
+   */
   public static String mapReferenceToType(String refId) {
     if (refId == null) return "string";
     switch (refId) {

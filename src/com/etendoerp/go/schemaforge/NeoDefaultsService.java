@@ -481,6 +481,16 @@ public class NeoDefaultsService {
     injectMandatoryDefaults(body, adTab, ctx, null);
   }
 
+  /**
+   * Injects mandatory default values into the request body for a new record,
+   * resolving callout-driven defaults relative to the given parent record ID.
+   *
+   * @param body     the JSON body to populate with default field values
+   * @param adTab    the Etendo AD Tab that defines the fields and their defaults
+   * @param ctx      the NeoContext with OBContext and spec/entity info
+   * @param parentId the ID of the parent record used to resolve parent-scoped defaults,
+   *                 or {@code null} if the record has no parent
+   */
   public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx, String parentId) {
     if (body == null || adTab == null || ctx == null) {
       return;

@@ -112,6 +112,10 @@ public class NeoSelectorService {
   /**
    * List all available selectors for an entity.
    * Only returns fields that are included and have a FK reference type.
+   *
+   * @param specId     the ETGO_SF_Spec ID
+   * @param entityName the entity name within the spec
+   * @return a NeoResponse with the list of selector field descriptors, or an error response
    */
   @SuppressWarnings("unchecked")
   public static NeoResponse listSelectors(String specId, String entityName) {
@@ -233,12 +237,14 @@ public class NeoSelectorService {
   /**
    * Query selector values for a specific FK field.
    *
-   * @param specId     the ETGO_SF_Spec ID
-   * @param entityName the entity name within the spec
-   * @param columnName the DB column name (e.g., C_BPartner_ID)
-   * @param search     optional search text (filters on display property)
-   * @param limit      page size (default 20, max 100)
-   * @param offset     page offset (default 0)
+   * @param specId        the ETGO_SF_Spec ID
+   * @param entityName    the entity name within the spec
+   * @param columnName    the DB column name (e.g., C_BPartner_ID)
+   * @param search        optional search text (filters on display property)
+   * @param limit         page size (default 20, max 100)
+   * @param offset        page offset (default 0)
+   * @param contextParams additional key/value context used to filter selector values
+   * @return a NeoResponse with the matching selector records, or an error response
    */
   @SuppressWarnings("unchecked")
   public static NeoResponse querySelector(String specId, String entityName,

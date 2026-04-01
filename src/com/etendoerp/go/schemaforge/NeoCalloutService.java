@@ -279,6 +279,9 @@ public class NeoCalloutService {
    *   DocumentNo     -> inpdocumentno
    *   IsActive       -> inpisactive
    *   M_Warehouse_ID -> inpmWarehouseId
+   *
+   * @param columnName the raw DB column name to transform
+   * @return the column name prefixed with "inp" and transformed to camelCase
    */
   public static String toInpName(String columnName) {
     return "inp" + transformColumnName(columnName);

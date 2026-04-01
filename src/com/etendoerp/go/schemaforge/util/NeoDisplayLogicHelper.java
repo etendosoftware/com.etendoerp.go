@@ -65,6 +65,17 @@ public final class NeoDisplayLogicHelper {
   private NeoDisplayLogicHelper() {
   }
 
+  /**
+   * Handles the evaluate-display endpoint by computing the visibility and readOnly state of all
+   * active fields in the entity's linked AD_Tab, given the field values supplied in the request
+   * body under the {@code fieldValues} key.
+   *
+   * @param spec     the {@link SFSpec} that owns the target entity
+   * @param pathInfo the parsed path information containing the spec and entity names
+   * @param request  the HTTP request whose body may contain a {@code fieldValues} JSON object
+   * @return a {@link NeoResponse} with a JSON object containing {@code visibility} and
+   *         {@code readOnly} maps, or an error response if the entity is not found or evaluation fails
+   */
   public static NeoResponse handleEvaluateDisplay(SFSpec spec,
       com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo pathInfo,
       HttpServletRequest request) {
@@ -127,6 +138,21 @@ public final class NeoDisplayLogicHelper {
     }
   }
 
+  /**
+   * Evaluates a single Openbravo display-logic or readOnly-logic expression in the context of
+   * the given field values, resolving any session attributes required by the expression.
+   *
+   * @param expression      the raw logic expression string to evaluate
+   * @param tab             the AD {@link Tab} the expression belongs to
+   * @param field           the AD {@link Field} the expression is attached to (may be {@code null}
+   *                        for tab-level expressions)
+   * @param evalContext     the mutable evaluation context populated with current field values and
+   *                        OBContext session variables
+   * @param isReadOnlyLogic {@code true} if the expression is a readOnly-logic expression;
+   *                        {@code false} if it is a display-logic expression
+   * @return {@code true} if the expression evaluates to {@code true}, {@code false} otherwise;
+   *         returns {@code true} on evaluation errors to fail open
+   */
   public static boolean evaluateExpression(String expression, Tab tab, Field field,
       Map<String, Object> evalContext, boolean isReadOnlyLogic) {
     try {
@@ -170,6 +196,17 @@ public final class NeoDisplayLogicHelper {
     }
   }
 
+  /**
+   * Builds a JavaScript variable declaration string that assigns the serialized contents of
+   * the given map to the named variable, optionally skipping the internal context keys.
+   *
+   * @param varName  the name of the JavaScript variable to declare
+   * @param map      the map whose entries should be serialized as the variable value;
+   *                 {@code null} values and {@link Map} values are skipped
+   * @param skipSelf {@code true} to skip the {@code "context"} and {@code "currentValues"} entries
+   *                 from the map (used when serializing the top-level context object)
+   * @return a JavaScript statement of the form {@code var varName = {...};}
+   */
   @SuppressWarnings("unchecked")
   public static String buildJsObjectPreamble(String varName, Map<String, Object> map,
       boolean skipSelf) {
@@ -194,6 +231,14 @@ public final class NeoDisplayLogicHelper {
     return "var " + varName + " = " + obj.toString() + ";";
   }
 
+  /**
+   * Builds the evaluation context map from the provided field values JSON object, enriching it
+   * with OBContext session variables (org, client, role, user) and accounting dimension flags.
+   *
+   * @param fieldValues a {@link JSONObject} containing the current record field values keyed by
+   *                    property name; JSON {@code null} values are mapped to Java {@code null}
+   * @return a mutable context map ready for use in {@link #evaluateExpression}
+   */
   public static Map<String, Object> buildEvalContext(JSONObject fieldValues) {
     Map<String, Object> ctx = new HashMap<>();
     Map<String, Object> currentValues = new HashMap<>();
@@ -251,6 +296,13 @@ public final class NeoDisplayLogicHelper {
     return ctx;
   }
 
+  /**
+   * Resolves the DAL property name for the given AD field, falling back to the column's DB column
+   * name if no matching DAL property is found, and to the field name if no column is linked.
+   *
+   * @param field the AD {@link Field} whose property name should be resolved
+   * @return the DAL property name, DB column name, or field display name, in that order of preference
+   */
   public static String getPropertyName(Field field) {
     Column column = field.getColumn();
     if (column == null) {

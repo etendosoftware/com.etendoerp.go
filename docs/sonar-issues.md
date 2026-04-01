@@ -86,10 +86,10 @@
 - [ ] **[MAJOR]** `java:S1141` — line 132
   Extract this nested try block into a separate method.
 
-- [ ] **[MAJOR]** `java:S1176` — line 283
+- [x] **[MAJOR]** `java:S1176` — line 283
   Document this method return value.
 
-- [ ] **[MAJOR]** `java:S1176` — line 283
+- [x] **[MAJOR]** `java:S1176` — line 283
   Document the parameter(s): columnName
 
 - [ ] **[MAJOR]** `java:S1172` — line 379
@@ -113,49 +113,49 @@
 
 ## src/com/etendoerp/go/schemaforge/NeoContext.java
 
-- [ ] **[MAJOR]** `java:S1176` — line 120
+- [x] **[MAJOR]** `java:S1176` — line 120
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 124
+- [x] **[MAJOR]** `java:S1176` — line 124
   Document this public class by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 138
+- [x] **[MAJOR]** `java:S1176` — line 138
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 143
+- [x] **[MAJOR]** `java:S1176` — line 143
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 148
+- [x] **[MAJOR]** `java:S1176` — line 148
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 153
+- [x] **[MAJOR]** `java:S1176` — line 153
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 158
+- [x] **[MAJOR]** `java:S1176` — line 158
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 163
+- [x] **[MAJOR]** `java:S1176` — line 163
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 168
+- [x] **[MAJOR]** `java:S1176` — line 168
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 173
+- [x] **[MAJOR]** `java:S1176` — line 173
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 178
+- [x] **[MAJOR]** `java:S1176` — line 178
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 183
+- [x] **[MAJOR]** `java:S1176` — line 183
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 188
+- [x] **[MAJOR]** `java:S1176` — line 188
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 193
+- [x] **[MAJOR]** `java:S1176` — line 193
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 198
+- [x] **[MAJOR]** `java:S1176` — line 198
   Document this public method by adding an explicit description.
 
 
@@ -179,7 +179,7 @@
 - [ ] **[MAJOR]** `java:S1172` — line 292
   Remove this unused method parameter "ctx".
 
-- [ ] **[MAJOR]** `java:S1176` — line 484
+- [x] **[MAJOR]** `java:S1176` — line 484
   Document this public method by adding an explicit description.
 
 - [ ] **[MAJOR]** `java:S107` — line 514
@@ -215,16 +215,16 @@
 
 ## src/com/etendoerp/go/schemaforge/NeoHandler.java
 
-- [ ] **[MAJOR]** `java:S1176` — line 38
+- [x] **[MAJOR]** `java:S1176` — line 38
   Document the parameter(s): context
 
-- [ ] **[MAJOR]** `java:S1176` — line 38
+- [x] **[MAJOR]** `java:S1176` — line 38
   Document this method return value.
 
-- [ ] **[MAJOR]** `java:S1176` — line 45
+- [x] **[MAJOR]** `java:S1176` — line 45
   Document the parameter(s): context
 
-- [ ] **[MAJOR]** `java:S1176` — line 45
+- [x] **[MAJOR]** `java:S1176` — line 45
   Document this method return value.
 
 
@@ -320,7 +320,7 @@
 
 ## src/com/etendoerp/go/schemaforge/NeoReportService.java
 
-- [ ] **[MAJOR]** `java:S1176` — line 65
+- [x] **[MAJOR]** `java:S1176` — line 65
   Document this public constructor by adding an explicit description.
 
 - [ ] **[MAJOR]** `java:S112` — line 130
@@ -338,28 +338,28 @@
 
 ## src/com/etendoerp/go/schemaforge/NeoResponse.java
 
-- [ ] **[MAJOR]** `java:S1176` — line 35
+- [x] **[MAJOR]** `java:S1176` — line 35
   Document this public constructor by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 53
+- [x] **[MAJOR]** `java:S1176` — line 53
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 58
+- [x] **[MAJOR]** `java:S1176` — line 58
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 62
+- [x] **[MAJOR]** `java:S1176` — line 62
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 66
+- [x] **[MAJOR]** `java:S1176` — line 66
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 70
+- [x] **[MAJOR]** `java:S1176` — line 70
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 86
+- [x] **[MAJOR]** `java:S1176` — line 86
   Document this method return value.
 
-- [ ] **[MAJOR]** `java:S1176` — line 86
+- [x] **[MAJOR]** `java:S1176` — line 86
   Document the parameter(s): status, body
 
 
@@ -380,16 +380,16 @@
 - [ ] **[MAJOR]** `java:S1448` — line 66
   class "NeoSelectorService" has 88 methods, which is greater than the 35 authorized. Split it into smaller classes.
 
-- [ ] **[MAJOR]** `java:S1176` — line 117
+- [x] **[MAJOR]** `java:S1176` — line 117
   Document this method return value.
 
-- [ ] **[MAJOR]** `java:S1176` — line 117
+- [x] **[MAJOR]** `java:S1176` — line 117
   Document the parameter(s): specId, entityName
 
-- [ ] **[MAJOR]** `java:S1176` — line 244
+- [x] **[MAJOR]** `java:S1176` — line 244
   Document this method return value.
 
-- [ ] **[MAJOR]** `java:S1176` — line 244
+- [x] **[MAJOR]** `java:S1176` — line 244
   Document the parameter(s): contextParams
 
 - [ ] **[MAJOR]** `java:S1172` — line 731
@@ -452,34 +452,34 @@
 - [ ] **[MAJOR]** `java:S1141` — line 1209
   Extract this nested try block into a separate method.
 
-- [ ] **[MAJOR]** `java:S1176` — line 1315
+- [x] **[MAJOR]** `java:S1176` — line 1315
   Document this public field by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 1316
+- [x] **[MAJOR]** `java:S1176` — line 1316
   Document this public field by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 1317
+- [x] **[MAJOR]** `java:S1176` — line 1317
   Document this public field by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 1318
+- [x] **[MAJOR]** `java:S1176` — line 1318
   Document this public field by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 1319
+- [x] **[MAJOR]** `java:S1176` — line 1319
   Document this public field by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 1320
+- [x] **[MAJOR]** `java:S1176` — line 1320
   Document this public field by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 1321
+- [x] **[MAJOR]** `java:S1176` — line 1321
   Document this public field by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 1322
+- [x] **[MAJOR]** `java:S1176` — line 1322
   Document this public field by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 1323
+- [x] **[MAJOR]** `java:S1176` — line 1323
   Document this public field by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 1324
+- [x] **[MAJOR]** `java:S1176` — line 1324
   Document this public field by adding an explicit description.
 
 - [ ] **[MAJOR]** `java:S107` — line 1342
@@ -536,16 +536,16 @@
 
 ## src/com/etendoerp/go/schemaforge/util/NeoAccessHelper.java
 
-- [ ] **[MAJOR]** `java:S1176` — line 44
+- [x] **[MAJOR]** `java:S1176` — line 44
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 57
+- [x] **[MAJOR]** `java:S1176` — line 57
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 70
+- [x] **[MAJOR]** `java:S1176` — line 70
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 80
+- [x] **[MAJOR]** `java:S1176` — line 80
   Document this public method by adding an explicit description.
 
 
@@ -554,19 +554,19 @@
 - [ ] **[MAJOR]** `java:S1068` — line 49
   Remove this unused "log" private field.
 
-- [ ] **[MAJOR]** `java:S1176` — line 54
+- [x] **[MAJOR]** `java:S1176` — line 54
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 68
+- [x] **[MAJOR]** `java:S1176` — line 68
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 96
+- [x] **[MAJOR]** `java:S1176` — line 96
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 149
+- [x] **[MAJOR]** `java:S1176` — line 149
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 157
+- [x] **[MAJOR]** `java:S1176` — line 157
   Document this public method by adding an explicit description.
 
 
@@ -578,28 +578,28 @@
 - [ ] **[CRITICAL]** `java:S1192` — line 267
   Define a constant instead of duplicating this literal "string" 3 times.
 
-- [ ] **[MAJOR]** `java:S1176` — line 65
+- [x] **[MAJOR]** `java:S1176` — line 65
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 111
+- [x] **[MAJOR]** `java:S1176` — line 111
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 158
+- [x] **[MAJOR]** `java:S1176` — line 158
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 175
+- [x] **[MAJOR]** `java:S1176` — line 175
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 195
+- [x] **[MAJOR]** `java:S1176` — line 195
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 237
+- [x] **[MAJOR]** `java:S1176` — line 237
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 255
+- [x] **[MAJOR]** `java:S1176` — line 255
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 266
+- [x] **[MAJOR]** `java:S1176` — line 266
   Document this public method by adding an explicit description.
 
 - [ ] **[MINOR]** `java:S135` — line 72
@@ -614,13 +614,13 @@
 - [ ] **[CRITICAL]** `java:S1192` — line 161
   Define a constant instead of duplicating this literal "currentValues" 4 times.
 
-- [ ] **[MAJOR]** `java:S1176` — line 68
+- [x] **[MAJOR]** `java:S1176` — line 68
   Document this public method by adding an explicit description.
 
 - [ ] **[MAJOR]** `java:S1141` — line 83
   Extract this nested try block into a separate method.
 
-- [ ] **[MAJOR]** `java:S1176` — line 130
+- [x] **[MAJOR]** `java:S1176` — line 130
   Document this public method by adding an explicit description.
 
 - [ ] **[MAJOR]** `java:S1172` — line 131
@@ -629,13 +629,13 @@
 - [ ] **[MAJOR]** `java:S1141` — line 140
   Extract this nested try block into a separate method.
 
-- [ ] **[MAJOR]** `java:S1176` — line 174
+- [x] **[MAJOR]** `java:S1176` — line 174
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 197
+- [x] **[MAJOR]** `java:S1176` — line 197
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 254
+- [x] **[MAJOR]** `java:S1176` — line 254
   Document this public method by adding an explicit description.
 
 - [ ] **[MINOR]** `java:S135` — line 178
@@ -644,34 +644,34 @@
 
 ## src/com/etendoerp/go/schemaforge/util/NeoImageHelper.java
 
-- [ ] **[MAJOR]** `java:S1176` — line 50
+- [x] **[MAJOR]** `java:S1176` — line 50
   Document this public method by adding an explicit description.
 
 
 ## src/com/etendoerp/go/schemaforge/util/NeoProcessReportHelper.java
 
-- [ ] **[MAJOR]** `java:S1176` — line 53
+- [x] **[MAJOR]** `java:S1176` — line 53
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 71
+- [x] **[MAJOR]** `java:S1176` — line 71
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 94
+- [x] **[MAJOR]** `java:S1176` — line 94
   Document this public method by adding an explicit description.
 
 
 ## src/com/etendoerp/go/schemaforge/util/NeoTypeCoercionHelper.java
 
-- [ ] **[MAJOR]** `java:S1176` — line 45
+- [x] **[MAJOR]** `java:S1176` — line 45
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 66
+- [x] **[MAJOR]** `java:S1176` — line 66
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 93
+- [x] **[MAJOR]** `java:S1176` — line 93
   Document this public method by adding an explicit description.
 
-- [ ] **[MAJOR]** `java:S1176` — line 110
+- [x] **[MAJOR]** `java:S1176` — line 110
   Document this public method by adding an explicit description.
 
 

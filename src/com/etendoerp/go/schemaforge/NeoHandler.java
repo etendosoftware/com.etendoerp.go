@@ -34,6 +34,9 @@ public interface NeoHandler {
    * Handle the request.
    * Return a NeoResponse to produce the full response, or null to
    * fall through to default DataSourceServlet handling.
+   *
+   * @param context the NeoContext carrying request metadata, entity info and OB session
+   * @return a {@link NeoResponse} to send to the client, or {@code null} to fall through
    */
   NeoResponse handle(NeoContext context);
 
@@ -41,6 +44,9 @@ public interface NeoHandler {
    * Post-hook: called AFTER the default service executed.
    * The context's previousResult contains the service result.
    * Return a NeoResponse to replace it, or null to keep the original.
+   *
+   * @param context the NeoContext whose {@code previousResult} holds the default service output
+   * @return a {@link NeoResponse} to replace the default result, or {@code null} to keep it
    */
   default NeoResponse afterHandle(NeoContext context) {
     return null;
