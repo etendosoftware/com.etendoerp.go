@@ -86,6 +86,7 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 public class NeoServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
+  private static final String HOOK_ERROR_PREFIX = "Hook handler error: ";
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -406,16 +407,21 @@ public class NeoServlet extends HttpBaseServlet {
               @Override public int read() { return bais.read(); }
               @Override public boolean isFinished() { return bais.available() == 0; }
               @Override public boolean isReady() { return true; }
-              @Override public void setReadListener(javax.servlet.ReadListener l) {}
+              @Override public void setReadListener(javax.servlet.ReadListener l) {
+                // No async support needed for cached body re-reading
+              }
             };
           }
         };
-      } catch (Exception ignored) {}
+      } catch (Exception ignored) {
+        // Body parsing is optional; action proceeds without it
+      }
     }
     final HttpServletRequest wrappedRequest = request;
+    ActionDispatchParams actionParams = new ActionDispatchParams(
+        pathInfo.recordId, actionBody);
     NeoResponse actionResult = dispatchWithHooks(spec, pathInfo.entityName,
-        NeoEndpointType.ACTION, pathInfo.actionName, method,
-        pathInfo.recordId, actionBody,
+        NeoEndpointType.ACTION, pathInfo.actionName, method, actionParams,
         () -> handleButtonAction(spec, pathInfo, method, wrappedRequest));
     writeResponse(response, actionResult);
     return true;
@@ -667,7 +673,7 @@ public class NeoServlet extends HttpBaseServlet {
       return afterResult != null ? afterResult : defaultResult;
     } catch (Exception e) {
       log.error("Error executing hook handler: {}", javaQualifier, e);
-      return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
+      return NeoResponse.error(500, HOOK_ERROR_PREFIX + e.getMessage());
     }
   }
 
@@ -751,7 +757,21 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error in hook dispatch for {}/{}: {}",
           endpointType, entityName, e.getMessage(), e);
-      return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
+      return NeoResponse.error(500, HOOK_ERROR_PREFIX + e.getMessage());
+    }
+  }
+
+  /**
+   * Groups the extra parameters needed by action endpoint hook dispatch,
+   * reducing the method parameter count.
+   */
+  private static class ActionDispatchParams {
+    final String recordId;
+    final JSONObject requestBody;
+
+    ActionDispatchParams(String recordId, JSONObject requestBody) {
+      this.recordId = recordId;
+      this.requestBody = requestBody;
     }
   }
 
@@ -762,7 +782,7 @@ public class NeoServlet extends HttpBaseServlet {
   private NeoResponse dispatchWithHooks(
       SFSpec spec, String entityName,
       NeoEndpointType endpointType, String fieldName,
-      String httpMethod, String recordId, JSONObject requestBody,
+      String httpMethod, ActionDispatchParams actionParams,
       java.util.function.Supplier<NeoResponse> defaultAction) {
 
     SFEntity entity = findEntity(spec.getId(), entityName);
@@ -784,8 +804,8 @@ public class NeoServlet extends HttpBaseServlet {
         .httpMethod(httpMethod)
         .endpointType(endpointType)
         .fieldName(fieldName)
-        .recordId(recordId)
-        .requestBody(requestBody)
+        .recordId(actionParams.recordId)
+        .requestBody(actionParams.requestBody)
         .sfEntity(entity)
         .adTab(adTab)
         .obContext(OBContext.getOBContext())
@@ -808,7 +828,7 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error in hook dispatch for {}/{}: {}",
           endpointType, entityName, e.getMessage(), e);
-      return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
+      return NeoResponse.error(500, HOOK_ERROR_PREFIX + e.getMessage());
     }
   }
 

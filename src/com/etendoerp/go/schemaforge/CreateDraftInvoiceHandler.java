@@ -59,8 +59,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(CreateDraftInvoiceHandler.class);
   private static final String ACTION_NAME = "createDraftInvoice";
-
   private static final String CHECK_ACTION = "checkDraftInvoice";
+
+  private static final String SPEC_GOODS_SHIPMENT = "goods-shipment";
+  private static final String FIELD_DOCUMENT_NO = "documentNo";
+  private static final String PARAM_SHIPMENT_IDS = "shipmentIds";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -95,7 +98,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         Invoice invoice;
         if ("sales-order".equals(specName)) {
           invoice = createFromOrder(recordId, lineOverrides);
-        } else if ("goods-shipment".equals(specName)) {
+        } else if (SPEC_GOODS_SHIPMENT.equals(specName)) {
           List<String> shipmentIds = parseShipmentIds(body, recordId);
           invoice = createFromShipments(shipmentIds, lineOverrides);
         } else {
@@ -108,7 +111,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
         JSONObject data = new JSONObject();
         data.put("id", invoice.getId());
-        data.put("documentNo", invoice.getDocumentNo());
+        data.put(FIELD_DOCUMENT_NO, invoice.getDocumentNo());
         data.put("documentStatus", invoice.getDocumentStatus());
 
         JSONObject responseData = new JSONObject();
@@ -141,8 +144,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       OBContext.setAdminMode(true);
       try {
         List<String> ids = new java.util.ArrayList<>();
-        if ("goods-shipment".equals(specName) && context.getRequestBody() != null
-            && context.getRequestBody().has("shipmentIds")) {
+        if (SPEC_GOODS_SHIPMENT.equals(specName) && context.getRequestBody() != null
+            && context.getRequestBody().has(PARAM_SHIPMENT_IDS)) {
           ids = parseShipmentIds(context.getRequestBody(), recordId);
         } else if (StringUtils.isNotBlank(recordId)) {
           ids.add(recordId);
@@ -157,14 +160,14 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         data.put("count", drafts.size());
         if (!drafts.isEmpty()) {
           data.put("id", drafts.get(0).getId());
-          data.put("documentNo", drafts.get(0).getDocumentNo());
+          data.put(FIELD_DOCUMENT_NO, drafts.get(0).getDocumentNo());
         }
         if (drafts.size() > 1) {
           JSONArray arr = new JSONArray();
           for (Invoice inv : drafts) {
             JSONObject item = new JSONObject();
             item.put("id", inv.getId());
-            item.put("documentNo", inv.getDocumentNo());
+            item.put(FIELD_DOCUMENT_NO, inv.getDocumentNo());
             arr.put(item);
           }
           data.put("drafts", arr);
@@ -188,7 +191,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     String hql;
     if ("sales-order".equals(specName)) {
       hql = "from Invoice i where i.salesOrder.id in :ids and i.documentStatus = 'DR' and i.salesTransaction = true order by i.creationDate desc";
-    } else if ("goods-shipment".equals(specName)) {
+    } else if (SPEC_GOODS_SHIPMENT.equals(specName)) {
       hql = "from Invoice i where i.salesOrder.id in (select s.salesOrder.id from MaterialMgmtShipmentInOut s where s.id in :ids) and i.documentStatus = 'DR' and i.salesTransaction = true order by i.creationDate desc";
     } else {
       return java.util.Collections.emptyList();
@@ -269,15 +272,17 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
 
+    addOrderLinesToInvoice(invoice, order, lineOverrides);
+
+    return invoice;
+  }
+
+  private void addOrderLinesToInvoice(Invoice invoice, Order order,
+      Map<String, BigDecimal> lineOverrides) {
     boolean hasOverrides = !lineOverrides.isEmpty();
     long lineNo = 10;
     for (OrderLine ol : order.getOrderLineList()) {
-      if (!ol.isActive()) {
-        continue;
-      }
-
-      // If overrides specified, skip lines not in the list
-      if (hasOverrides && !lineOverrides.containsKey(ol.getId())) {
+      if (shouldSkipOrderLine(ol, hasOverrides, lineOverrides)) {
         continue;
       }
 
@@ -290,7 +295,6 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         continue;
       }
 
-      // Use override quantity if specified, capped at max invoiceable
       BigDecimal qtyToInvoice = hasOverrides
           ? lineOverrides.get(ol.getId()).min(maxQty)
           : maxQty;
@@ -315,15 +319,18 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       OBDal.getInstance().save(il);
       lineNo += 10;
     }
+  }
 
-    return invoice;
+  private boolean shouldSkipOrderLine(OrderLine ol, boolean hasOverrides,
+      Map<String, BigDecimal> lineOverrides) {
+    return !ol.isActive() || (hasOverrides && !lineOverrides.containsKey(ol.getId()));
   }
 
   private List<String> parseShipmentIds(JSONObject body, String recordId) {
     List<String> ids = new java.util.ArrayList<>();
-    if (body != null && body.has("shipmentIds")) {
+    if (body != null && body.has(PARAM_SHIPMENT_IDS)) {
       try {
-        JSONArray arr = body.getJSONArray("shipmentIds");
+        JSONArray arr = body.getJSONArray(PARAM_SHIPMENT_IDS);
         for (int i = 0; i < arr.length(); i++) {
           ids.add(arr.getString(i));
         }
@@ -338,6 +345,20 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   }
 
   private Invoice createFromShipments(List<String> shipmentIds, Map<String, BigDecimal> lineOverrides) {
+    List<ShipmentInOut> shipments = loadAndValidateShipments(shipmentIds);
+
+    ShipmentInOut first = shipments.get(0);
+    Invoice invoice = createInvoiceHeaderFromShipment(first, shipments);
+
+    OBDal.getInstance().save(invoice);
+    OBDal.getInstance().flush();
+
+    addShipmentLinesToInvoice(invoice, shipments, lineOverrides);
+
+    return invoice;
+  }
+
+  private List<ShipmentInOut> loadAndValidateShipments(List<String> shipmentIds) {
     List<ShipmentInOut> shipments = new java.util.ArrayList<>();
     for (String id : shipmentIds) {
       ShipmentInOut s = OBDal.getInstance().get(ShipmentInOut.class, id);
@@ -350,17 +371,20 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       throw new IllegalArgumentException("No shipments provided");
     }
 
-    // Validate all shipments belong to the same BP
-    ShipmentInOut first = shipments.get(0);
-    BusinessPartner bp = first.getBusinessPartner();
+    BusinessPartner bp = shipments.get(0).getBusinessPartner();
     for (ShipmentInOut s : shipments) {
       if (!s.getBusinessPartner().getId().equals(bp.getId())) {
         throw new IllegalArgumentException("All shipments must belong to the same Business Partner");
       }
     }
+    return shipments;
+  }
 
-    // Resolve invoice document type from first shipment's linked order
+  private Invoice createInvoiceHeaderFromShipment(ShipmentInOut first,
+      List<ShipmentInOut> shipments) {
+    BusinessPartner bp = first.getBusinessPartner();
     Order linkedOrder = first.getSalesOrder();
+
     DocumentType invoiceDocType = null;
     if (linkedOrder != null && linkedOrder.getTransactionDocument() != null) {
       invoiceDocType = linkedOrder.getTransactionDocument().getDocumentTypeForInvoice();
@@ -389,7 +413,6 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       invoice.setCurrency(linkedOrder.getCurrency());
       invoice.setPaymentTerms(linkedOrder.getPaymentTerms());
       invoice.setPaymentMethod(linkedOrder.getPaymentMethod());
-      // Only set salesOrder if all shipments belong to the same order
       if (shipments.size() == 1) {
         invoice.setSalesOrder(linkedOrder);
       }
@@ -405,17 +428,16 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     invoice.setGrandTotalAmount(BigDecimal.ZERO);
     invoice.setWithholdingamount(BigDecimal.ZERO);
 
-    OBDal.getInstance().save(invoice);
-    OBDal.getInstance().flush();
+    return invoice;
+  }
 
+  private void addShipmentLinesToInvoice(Invoice invoice, List<ShipmentInOut> shipments,
+      Map<String, BigDecimal> lineOverrides) {
     boolean hasOverrides = !lineOverrides.isEmpty();
     long lineNo = 10;
     for (ShipmentInOut shipment : shipments) {
       for (ShipmentInOutLine sl : shipment.getMaterialMgmtShipmentInOutLineList()) {
-        if (!sl.isActive()) {
-          continue;
-        }
-        if (hasOverrides && !lineOverrides.containsKey(sl.getId())) {
+        if (shouldSkipShipmentLine(sl, hasOverrides, lineOverrides)) {
           continue;
         }
 
@@ -431,35 +453,43 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           continue;
         }
 
-        InvoiceLine il = OBProvider.getInstance().get(InvoiceLine.class);
-        il.setOrganization(sl.getOrganization());
-        il.setInvoice(invoice);
-        il.setLineNo(lineNo);
-        il.setProduct(sl.getProduct());
-        il.setInvoicedQuantity(qty);
-        il.setUOM(sl.getUOM());
-        il.setGoodsShipmentLine(sl);
-
-        OrderLine ol = sl.getSalesOrderLine();
-        if (ol != null) {
-          il.setUnitPrice(ol.getUnitPrice());
-          il.setListPrice(ol.getListPrice());
-          il.setPriceLimit(ol.getPriceLimit());
-          il.setLineNetAmount(qty.multiply(ol.getUnitPrice()));
-          il.setTax(ol.getTax());
-          il.setSalesOrderLine(ol);
-        } else {
-          il.setUnitPrice(BigDecimal.ZERO);
-          il.setListPrice(BigDecimal.ZERO);
-          il.setLineNetAmount(BigDecimal.ZERO);
-        }
-
+        InvoiceLine il = createShipmentInvoiceLine(invoice, sl, qty, lineNo);
         OBDal.getInstance().save(il);
         lineNo += 10;
       }
     }
+  }
 
-    return invoice;
+  private boolean shouldSkipShipmentLine(ShipmentInOutLine sl, boolean hasOverrides,
+      Map<String, BigDecimal> lineOverrides) {
+    return !sl.isActive() || (hasOverrides && !lineOverrides.containsKey(sl.getId()));
+  }
+
+  private InvoiceLine createShipmentInvoiceLine(Invoice invoice, ShipmentInOutLine sl,
+      BigDecimal qty, long lineNo) {
+    InvoiceLine il = OBProvider.getInstance().get(InvoiceLine.class);
+    il.setOrganization(sl.getOrganization());
+    il.setInvoice(invoice);
+    il.setLineNo(lineNo);
+    il.setProduct(sl.getProduct());
+    il.setInvoicedQuantity(qty);
+    il.setUOM(sl.getUOM());
+    il.setGoodsShipmentLine(sl);
+
+    OrderLine ol = sl.getSalesOrderLine();
+    if (ol != null) {
+      il.setUnitPrice(ol.getUnitPrice());
+      il.setListPrice(ol.getListPrice());
+      il.setPriceLimit(ol.getPriceLimit());
+      il.setLineNetAmount(qty.multiply(ol.getUnitPrice()));
+      il.setTax(ol.getTax());
+      il.setSalesOrderLine(ol);
+    } else {
+      il.setUnitPrice(BigDecimal.ZERO);
+      il.setListPrice(BigDecimal.ZERO);
+      il.setLineNetAmount(BigDecimal.ZERO);
+    }
+    return il;
   }
 
   @SuppressWarnings("unchecked")
@@ -503,17 +533,3 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     return results.isEmpty() ? null : results.get(0);
   }
 }
-
-/*
- * SQL to register the handler on the relevant entities:
- *
- * -- Register on sales-order header entity
- * UPDATE etgo_sf_entity SET java_qualifier = 'createDraftInvoiceHandler'
- * WHERE etgo_sf_entity_id = '3B006BDF3E704510B38D814A703AD8A1';
- *
- * -- Register on goods-shipment goodsShipment entity
- * UPDATE etgo_sf_entity SET java_qualifier = 'createDraftInvoiceHandler'
- * WHERE name = 'goodsShipment' AND etgo_sf_spec_id IN (
- *   SELECT etgo_sf_spec_id FROM etgo_sf_spec WHERE name = 'goods-shipment'
- * );
- */
