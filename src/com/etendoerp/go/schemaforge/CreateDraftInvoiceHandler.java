@@ -282,48 +282,45 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     boolean hasOverrides = !lineOverrides.isEmpty();
     long lineNo = 10;
     for (OrderLine ol : order.getOrderLineList()) {
-      if (shouldSkipOrderLine(ol, hasOverrides, lineOverrides)) {
+      BigDecimal qty = resolveOrderLineQty(ol, hasOverrides, lineOverrides);
+      if (qty == null) {
         continue;
       }
-
-      BigDecimal delivered = ol.getDeliveredQuantity() != null
-          ? ol.getDeliveredQuantity() : BigDecimal.ZERO;
-      BigDecimal invoiced = ol.getInvoicedQuantity() != null
-          ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
-      BigDecimal maxQty = delivered.subtract(invoiced);
-      if (maxQty.compareTo(BigDecimal.ZERO) <= 0) {
-        continue;
-      }
-
-      BigDecimal qtyToInvoice = hasOverrides
-          ? lineOverrides.get(ol.getId()).min(maxQty)
-          : maxQty;
-      if (qtyToInvoice.compareTo(BigDecimal.ZERO) <= 0) {
-        continue;
-      }
-
-      InvoiceLine il = OBProvider.getInstance().get(InvoiceLine.class);
-      il.setOrganization(ol.getOrganization());
-      il.setInvoice(invoice);
-      il.setLineNo(lineNo);
-      il.setProduct(ol.getProduct());
-      il.setInvoicedQuantity(qtyToInvoice);
-      il.setUOM(ol.getUOM());
-      il.setUnitPrice(ol.getUnitPrice());
-      il.setListPrice(ol.getListPrice());
-      il.setPriceLimit(ol.getPriceLimit());
-      il.setLineNetAmount(qtyToInvoice.multiply(ol.getUnitPrice()));
-      il.setTax(ol.getTax());
-      il.setSalesOrderLine(ol);
-
-      OBDal.getInstance().save(il);
+      createOrderInvoiceLine(invoice, ol, qty, lineNo);
       lineNo += 10;
     }
   }
 
-  private boolean shouldSkipOrderLine(OrderLine ol, boolean hasOverrides,
+  private BigDecimal resolveOrderLineQty(OrderLine ol, boolean hasOverrides,
       Map<String, BigDecimal> lineOverrides) {
-    return !ol.isActive() || (hasOverrides && !lineOverrides.containsKey(ol.getId()));
+    if (!ol.isActive() || (hasOverrides && !lineOverrides.containsKey(ol.getId()))) {
+      return null;
+    }
+    BigDecimal delivered = ol.getDeliveredQuantity() != null ? ol.getDeliveredQuantity() : BigDecimal.ZERO;
+    BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
+    BigDecimal maxQty = delivered.subtract(invoiced);
+    if (maxQty.compareTo(BigDecimal.ZERO) <= 0) {
+      return null;
+    }
+    BigDecimal qty = hasOverrides ? lineOverrides.get(ol.getId()).min(maxQty) : maxQty;
+    return qty.compareTo(BigDecimal.ZERO) > 0 ? qty : null;
+  }
+
+  private void createOrderInvoiceLine(Invoice invoice, OrderLine ol, BigDecimal qty, long lineNo) {
+    InvoiceLine il = OBProvider.getInstance().get(InvoiceLine.class);
+    il.setOrganization(ol.getOrganization());
+    il.setInvoice(invoice);
+    il.setLineNo(lineNo);
+    il.setProduct(ol.getProduct());
+    il.setInvoicedQuantity(qty);
+    il.setUOM(ol.getUOM());
+    il.setUnitPrice(ol.getUnitPrice());
+    il.setListPrice(ol.getListPrice());
+    il.setPriceLimit(ol.getPriceLimit());
+    il.setLineNetAmount(qty.multiply(ol.getUnitPrice()));
+    il.setTax(ol.getTax());
+    il.setSalesOrderLine(ol);
+    OBDal.getInstance().save(il);
   }
 
   private List<String> parseShipmentIds(JSONObject body, String recordId) {
@@ -437,22 +434,10 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     long lineNo = 10;
     for (ShipmentInOut shipment : shipments) {
       for (ShipmentInOutLine sl : shipment.getMaterialMgmtShipmentInOutLineList()) {
-        if (shouldSkipShipmentLine(sl, hasOverrides, lineOverrides)) {
+        BigDecimal qty = resolveShipmentLineQty(sl, hasOverrides, lineOverrides);
+        if (qty == null) {
           continue;
         }
-
-        BigDecimal maxQty = sl.getMovementQuantity();
-        if (maxQty == null || maxQty.compareTo(BigDecimal.ZERO) <= 0) {
-          continue;
-        }
-
-        BigDecimal qty = hasOverrides
-            ? lineOverrides.get(sl.getId()).min(maxQty)
-            : maxQty;
-        if (qty.compareTo(BigDecimal.ZERO) <= 0) {
-          continue;
-        }
-
         InvoiceLine il = createShipmentInvoiceLine(invoice, sl, qty, lineNo);
         OBDal.getInstance().save(il);
         lineNo += 10;
@@ -460,9 +445,17 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     }
   }
 
-  private boolean shouldSkipShipmentLine(ShipmentInOutLine sl, boolean hasOverrides,
+  private BigDecimal resolveShipmentLineQty(ShipmentInOutLine sl, boolean hasOverrides,
       Map<String, BigDecimal> lineOverrides) {
-    return !sl.isActive() || (hasOverrides && !lineOverrides.containsKey(sl.getId()));
+    if (!sl.isActive() || (hasOverrides && !lineOverrides.containsKey(sl.getId()))) {
+      return null;
+    }
+    BigDecimal maxQty = sl.getMovementQuantity();
+    if (maxQty == null || maxQty.compareTo(BigDecimal.ZERO) <= 0) {
+      return null;
+    }
+    BigDecimal qty = hasOverrides ? lineOverrides.get(sl.getId()).min(maxQty) : maxQty;
+    return qty.compareTo(BigDecimal.ZERO) > 0 ? qty : null;
   }
 
   private InvoiceLine createShipmentInvoiceLine(Invoice invoice, ShipmentInOutLine sl,
