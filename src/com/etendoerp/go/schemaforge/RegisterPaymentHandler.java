@@ -92,113 +92,26 @@ public class RegisterPaymentHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invoice ID is required");
     }
 
+    JSONObject body = context.getRequestBody();
+    if (body == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Request body is required");
+    }
+
+    String scheduleId = body.optString("scheduleId", null);
+    String strAmount = body.optString("actual_payment", null);
+    String strDate = body.optString("payment_date", null);
+    String accountId = body.optString("fin_financial_account_id", null);
+
+    if (StringUtils.isBlank(scheduleId) || StringUtils.isBlank(strAmount)
+        || StringUtils.isBlank(strDate) || StringUtils.isBlank(accountId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Missing required fields: scheduleId, actual_payment, payment_date, fin_financial_account_id");
+    }
+
     try {
       OBContext.setAdminMode(true);
       try {
-        JSONObject body = context.getRequestBody();
-        if (body == null) {
-          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Request body is required");
-        }
-
-        String scheduleId = body.optString("scheduleId", null);
-        String strAmount = body.optString("actual_payment", null);
-        String strDate = body.optString("payment_date", null);
-        String accountId = body.optString("fin_financial_account_id", null);
-
-        if (StringUtils.isBlank(scheduleId) || StringUtils.isBlank(strAmount)
-            || StringUtils.isBlank(strDate) || StringUtils.isBlank(accountId)) {
-          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-              "Missing required fields: scheduleId, actual_payment, payment_date, fin_financial_account_id");
-        }
-
-        Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
-        if (invoice == null) {
-          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Invoice not found");
-        }
-
-        FIN_PaymentSchedule schedule = OBDal.getInstance().get(FIN_PaymentSchedule.class, scheduleId);
-        if (schedule == null) {
-          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Payment schedule not found");
-        }
-
-        BigDecimal amount = new BigDecimal(strAmount);
-        Date paymentDate = JsonUtils.createDateFormat().parse(strDate);
-        FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
-        if (account == null) {
-          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Financial account not found");
-        }
-
-        // Resolve pending PSDs for this schedule
-        List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(scheduleId);
-        if (pendingPSDs.isEmpty()) {
-          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-              "No pending payment schedule details found for this installment");
-        }
-
-        BusinessPartner bp = invoice.getBusinessPartner();
-        Organization org = invoice.getOrganization();
-        Currency currency = invoice.getCurrency();
-        FIN_PaymentMethod paymentMethod = invoice.getPaymentMethod();
-        if (paymentMethod == null) {
-          paymentMethod = bp.getPaymentMethod();
-        }
-
-        // Find ARR document type for receipts
-        DocumentType docType = FIN_Utility.getDocumentType(org, "ARR");
-        String docNo = FIN_Utility.getDocumentNo(docType, "FIN_Payment");
-
-        // Ensure RequestContext has VariablesSecureApp
-        VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(
-            OBContext.getOBContext());
-        RequestContext.get().setVariableSecureApp(vars);
-
-        // Create the payment
-        FIN_Payment payment = new AdvPaymentMngtDao().getNewPayment(
-            true, org, docType, docNo, bp, paymentMethod, account,
-            "0", paymentDate, "", currency, BigDecimal.ONE, amount);
-
-        payment.setAmount(amount);
-        // Set financial transaction amount directly (same currency = 1:1 rate)
-        payment.setFinancialTransactionAmount(amount);
-        payment.setFinancialTransactionConvertRate(BigDecimal.ONE);
-        OBDal.getInstance().save(payment);
-        OBDal.getInstance().flush();
-
-        // Link PSDs to the payment
-        BigDecimal remaining = amount;
-        for (FIN_PaymentScheduleDetail psd : pendingPSDs) {
-          if (remaining.compareTo(BigDecimal.ZERO) <= 0) {
-            break;
-          }
-          BigDecimal psdAmount = psd.getAmount();
-          BigDecimal assignAmount = remaining.min(psdAmount);
-          FIN_AddPayment.updatePaymentDetail(psd, payment, assignAmount, false);
-          remaining = remaining.subtract(assignAmount);
-        }
-
-        // Process the payment (action = P = Process)
-        OBError result = FIN_AddPayment.processPayment(vars,
-            new DalConnectionProvider(false), "P", payment, "");
-        OBDal.getInstance().flush();
-
-        if ("Error".equalsIgnoreCase(result.getType())) {
-          throw new OBException(result.getMessage());
-        }
-
-        JSONObject data = new JSONObject();
-        data.put("id", payment.getId());
-        data.put("documentNo", payment.getDocumentNo());
-        data.put("amount", payment.getAmount());
-        data.put("status", result.getType());
-        data.put("message", result.getMessage());
-
-        JSONObject responseData = new JSONObject();
-        responseData.put("data", data);
-        JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
-
-        return NeoResponse.created(wrapper);
-
+        return doRegisterPayment(invoiceId, scheduleId, strAmount, strDate, accountId);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -209,6 +122,97 @@ public class RegisterPaymentHandler implements NeoHandler {
       log.error("Error registering payment for invoice {}: {}", invoiceId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while registering the payment");
+    }
+  }
+
+  private NeoResponse doRegisterPayment(String invoiceId, String scheduleId,
+      String strAmount, String strDate, String accountId) throws Exception {
+
+    Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+    if (invoice == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Invoice not found");
+    }
+
+    FIN_PaymentSchedule schedule = OBDal.getInstance().get(FIN_PaymentSchedule.class, scheduleId);
+    if (schedule == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Payment schedule not found");
+    }
+
+    BigDecimal amount = new BigDecimal(strAmount);
+    Date paymentDate = JsonUtils.createDateFormat().parse(strDate);
+    FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+    if (account == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Financial account not found");
+    }
+
+    List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(scheduleId);
+    if (pendingPSDs.isEmpty()) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "No pending payment schedule details found for this installment");
+    }
+
+    BusinessPartner bp = invoice.getBusinessPartner();
+    Organization org = invoice.getOrganization();
+    Currency currency = invoice.getCurrency();
+    FIN_PaymentMethod paymentMethod = invoice.getPaymentMethod();
+    if (paymentMethod == null && bp != null) {
+      paymentMethod = bp.getPaymentMethod();
+    }
+
+    DocumentType docType = FIN_Utility.getDocumentType(org, "ARR");
+    if (docType == null) {
+      throw new OBException("Document type for Receipts (ARR) not found for the organization.");
+    }
+    String docNo = FIN_Utility.getDocumentNo(docType, "FIN_Payment");
+
+    VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
+    RequestContext.get().setVariableSecureApp(vars);
+
+    FIN_Payment payment = new AdvPaymentMngtDao().getNewPayment(
+        true, org, docType, docNo, bp, paymentMethod, account,
+        "0", paymentDate, "", currency, BigDecimal.ONE, amount);
+
+    payment.setAmount(amount);
+    payment.setFinancialTransactionAmount(amount);
+    payment.setFinancialTransactionConvertRate(BigDecimal.ONE);
+    OBDal.getInstance().save(payment);
+    OBDal.getInstance().flush();
+
+    linkPSDsToPayment(pendingPSDs, payment, amount);
+
+    OBError result = FIN_AddPayment.processPayment(vars,
+        new DalConnectionProvider(false), "P", payment, "");
+    OBDal.getInstance().flush();
+
+    if ("Error".equalsIgnoreCase(result.getType())) {
+      throw new OBException(result.getMessage());
+    }
+
+    JSONObject data = new JSONObject();
+    data.put("id", payment.getId());
+    data.put("documentNo", payment.getDocumentNo());
+    data.put("amount", payment.getAmount());
+    data.put("status", result.getType());
+    data.put("message", result.getMessage());
+
+    JSONObject responseData = new JSONObject();
+    responseData.put("data", data);
+    JSONObject wrapper = new JSONObject();
+    wrapper.put("response", responseData);
+
+    return NeoResponse.created(wrapper);
+  }
+
+  private void linkPSDsToPayment(List<FIN_PaymentScheduleDetail> psds,
+      FIN_Payment payment, BigDecimal amount) {
+    BigDecimal remaining = amount;
+    for (FIN_PaymentScheduleDetail psd : psds) {
+      if (remaining.compareTo(BigDecimal.ZERO) <= 0) {
+        break;
+      }
+      BigDecimal assignAmount = remaining.min(psd.getAmount());
+      FIN_AddPayment.updatePaymentDetail(psd, payment, assignAmount, false);
+      remaining = remaining.subtract(assignAmount);
     }
   }
 
@@ -240,7 +244,7 @@ public class RegisterPaymentHandler implements NeoHandler {
           item.put("documentNo", p.getDocumentNo());
           item.put("amount", p.getAmount());
           item.put("paymentDate", p.getPaymentDate() != null
-              ? new java.text.SimpleDateFormat("yyyy-MM-dd").format(p.getPaymentDate()) : null);
+              ? JsonUtils.createDateFormat().format(p.getPaymentDate()) : null);
           item.put("status", p.getStatus());
           item.put("receipt", p.isReceipt());
           if (p.getAccount() != null) {
