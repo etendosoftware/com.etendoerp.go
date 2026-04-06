@@ -116,9 +116,11 @@ public class RegisterPaymentHandler implements NeoHandler {
         OBContext.restorePreviousMode();
       }
     } catch (OBException e) {
+      OBDal.getInstance().rollbackAndClose();
       log.warn("Payment registration failed for invoice {}: {}", invoiceId, e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
+      OBDal.getInstance().rollbackAndClose();
       log.error("Error registering payment for invoice {}: {}", invoiceId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while registering the payment");
@@ -138,8 +140,18 @@ public class RegisterPaymentHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Payment schedule not found");
     }
 
-    BigDecimal amount = new BigDecimal(strAmount);
-    Date paymentDate = JsonUtils.createDateFormat().parse(strDate);
+    BigDecimal amount;
+    try {
+      amount = new BigDecimal(strAmount);
+    } catch (NumberFormatException e) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid amount format: " + strAmount);
+    }
+    Date paymentDate;
+    try {
+      paymentDate = JsonUtils.createDateFormat().parse(strDate);
+    } catch (java.text.ParseException e) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid date format: " + strDate);
+    }
     FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
     if (account == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Financial account not found");
@@ -157,6 +169,10 @@ public class RegisterPaymentHandler implements NeoHandler {
     FIN_PaymentMethod paymentMethod = invoice.getPaymentMethod();
     if (paymentMethod == null && bp != null) {
       paymentMethod = bp.getPaymentMethod();
+    }
+    if (paymentMethod == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Payment method not found for the invoice or business partner");
     }
 
     DocumentType docType = FIN_Utility.getDocumentType(org, "ARR");
