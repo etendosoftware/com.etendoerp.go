@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.text.ParseException;
 import java.util.Date;
 import java.util.List;
 
@@ -149,7 +150,7 @@ public class RegisterPaymentHandler implements NeoHandler {
     Date paymentDate;
     try {
       paymentDate = JsonUtils.createDateFormat().parse(strDate);
-    } catch (java.text.ParseException e) {
+    } catch (ParseException e) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid date format: " + strDate);
     }
     FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
