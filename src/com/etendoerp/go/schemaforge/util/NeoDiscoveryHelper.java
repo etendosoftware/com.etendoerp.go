@@ -29,10 +29,13 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.module.Module;
+import org.openbravo.model.ad.system.Language;
+import org.openbravo.model.ad.ui.ElementTrl;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
@@ -50,6 +53,7 @@ public final class NeoDiscoveryHelper {
   private static final Logger log = LogManager.getLogger(NeoDiscoveryHelper.class);
 
   private static final Set<String> SELECTOR_REFS = new HashSet<>();
+
   static {
     SELECTOR_REFS.add("19"); // TableDir
     SELECTOR_REFS.add("18"); // Table
@@ -193,6 +197,7 @@ public final class NeoDiscoveryHelper {
   }
 
   public static JSONArray buildFieldsArray(String entityId) throws Exception {
+    Language lang = OBContext.getOBContext().getLanguage();
     OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
     criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
     criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
@@ -211,7 +216,7 @@ public final class NeoDiscoveryHelper {
       fieldObj.put("id", field.getId());
       fieldObj.put("columnId", column.getId());
       fieldObj.put("name", column.getDBColumnName());
-      fieldObj.put("label", column.getName());
+      fieldObj.put("label", getTranslatedColumnLabel(column, lang));
       fieldObj.put("columnType", mapReferenceToType(refId));
       fieldObj.put("readOnly", Boolean.TRUE.equals(field.isReadOnly()));
       fieldObj.put("included", Boolean.TRUE.equals(field.isIncluded()));
@@ -228,6 +233,22 @@ public final class NeoDiscoveryHelper {
       arr.put(fieldObj);
     }
     return arr;
+  }
+
+  /**
+   * Resolve the translated name for a column's AD_Element for the given language.
+   * Falls back to the English column name if no translation is found.
+   */
+  private static String getTranslatedColumnLabel(Column column, Language lang) {
+    if (column.getApplicationElement() == null || lang == null) {
+      return column.getName();
+    }
+    OBCriteria<ElementTrl> criteria = OBDal.getInstance().createCriteria(ElementTrl.class);
+    criteria.add(Restrictions.eq(ElementTrl.PROPERTY_APPLICATIONELEMENT, column.getApplicationElement()));
+    criteria.add(Restrictions.eq(ElementTrl.PROPERTY_LANGUAGE, lang));
+    criteria.setMaxResults(1);
+    ElementTrl trl = (ElementTrl) criteria.uniqueResult();
+    return (trl != null && trl.getName() != null) ? trl.getName() : column.getName();
   }
 
   private static boolean isSelectorReference(String refId) {
@@ -255,21 +276,32 @@ public final class NeoDiscoveryHelper {
   public static String mapSelectorType(String refId) {
     if (refId == null) return null;
     switch (refId) {
-      case "19": return "TableDir";
-      case "18": return "Table";
-      case "30": return "Search";
-      case "95E2A8B50A254B2AAE6774B8C2F28120": return "OBUISEL";
-      default: return null;
+      case "19":
+        return "TableDir";
+      case "18":
+        return "Table";
+      case "30":
+        return "Search";
+      case "95E2A8B50A254B2AAE6774B8C2F28120":
+        return "OBUISEL";
+      default:
+        return null;
     }
   }
 
   public static String mapReferenceToType(String refId) {
     if (refId == null) return "string";
     switch (refId) {
-      case "10": case "14": case "34":
+      case "10":
+      case "14":
+      case "34":
         return "string";
-      case "11": case "22": case "29": case "12":
-      case "800008": case "800019":
+      case "11":
+      case "22":
+      case "29":
+      case "12":
+      case "800008":
+      case "800019":
         return "number";
       case "20":
         return "boolean";
