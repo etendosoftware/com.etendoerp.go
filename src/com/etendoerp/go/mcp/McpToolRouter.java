@@ -35,6 +35,7 @@ import com.etendoerp.go.schemaforge.NeoReportService;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
@@ -505,6 +506,21 @@ public class McpToolRouter {
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
 
+    // Load SF_FIELD visibility map: AD_COLUMN_ID -> visibility string
+    Map<String, String> visibilityByColumnId = new HashMap<>();
+    OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
+    fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
+    fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
+    for (SFField sfField : fieldCrit.list()) {
+      Column adCol = sfField.getADColumn();
+      if (adCol != null) {
+        String vis = (String) sfField.get("visibility");
+        if (vis != null && !vis.trim().isEmpty()) {
+          visibilityByColumnId.put((String) adCol.getId(), vis.trim());
+        }
+      }
+    }
+
     // Build fields array from AD_Column (dictionary-driven, like the classic UI)
     JSONArray fieldsArray = new JSONArray();
     for (Column col : adTab.getTable().getADColumnList()) {
@@ -553,6 +569,15 @@ public class McpToolRouter {
         fieldObj.put("defaultExpression", defaultExpr.trim());
       }
 
+      // Visibility from ETGO_SF_FIELD (editable, readOnly, system, discarded)
+      String visibility = visibilityByColumnId.get((String) col.getId());
+      if (visibility != null) {
+        fieldObj.put("visibility", visibility);
+        // userRequired: only true when field is editable AND mandatory in the AD dictionary
+        boolean userRequired = "editable".equals(visibility) && col.isMandatory();
+        fieldObj.put("userRequired", userRequired);
+      }
+
       // FK selector info
       boolean hasSelector = refId != null && SELECTOR_REFS.contains(refId);
       if (hasSelector) {
@@ -589,10 +614,11 @@ public class McpToolRouter {
 
     // Usage hints
     entitySchema.put("hint",
-        "Fields with hasSelector=true: use neo_selectors to look up valid FK values. "
-        + "Fields with required=true and no defaultExpression: you MUST provide a value in neo_create. "
+        "Fields with userRequired=true: MUST be provided in neo_create. "
+        + "Fields with visibility=system are auto-derived by Etendo callouts — omit them. "
+        + "Fields with visibility=discarded are excluded — do not send them. "
         + "Fields with readOnly=true are auto-generated (DocumentNo, IDs). "
-        + "Fields with a defaultExpression are auto-filled if you omit them (e.g. dates, currency).");
+        + "Use neo_selectors for FK fields with hasSelector=true.");
 
     return wrapAsTextContent(entitySchema.toString(2));
   }
