@@ -86,7 +86,7 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 public class NeoServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
-  private static final String HOOK_ERROR_MSG = HOOK_ERROR_MSG;
+  private static final String HOOK_ERROR_MSG = "An internal error occurred while processing the hook handler";
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
