@@ -356,6 +356,7 @@ public class AgingReportHandler implements NeoHandler {
 
   private static JSONObject buildDocRow(FieldProvider fp, int activeBuckets) throws Exception {
     JSONObject doc = new JSONObject();
+    doc.put("invoiceId",    fp.getField("INVOICE_ID"));
     doc.put("docNo",        fp.getField("INVOICE_NUMBER"));
     doc.put("dateInvoiced", fp.getField("INVOICE_DATE"));
 
