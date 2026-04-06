@@ -62,6 +62,17 @@ public class NeoCalloutService {
 
   private static final Logger log = LogManager.getLogger(NeoCalloutService.class);
 
+  /** JSON key for the field value in callout requests and responses. */
+  private static final String VALUE = "value";
+  /** JSON key for the field updates map in callout responses. */
+  private static final String UPDATES = "updates";
+  /** JSON key for the combo options map in callout responses. */
+  private static final String COMBOS = "combos";
+  /** JSON key for the messages array in callout responses. */
+  private static final String MESSAGES = "messages";
+  /** JSON key for the entries array in combo field results. */
+  private static final String ENTRIES = "entries";
+
   private NeoCalloutService() {
   }
 
@@ -77,7 +88,7 @@ public class NeoCalloutService {
       OBContext.setAdminMode();
       try {
         String fieldName = requestBody.getString("field");
-        Object value = requestBody.opt("value");
+        Object value = requestBody.opt(VALUE);
         JSONObject formState = requestBody.optJSONObject("formState");
         if (formState == null) {
           formState = new JSONObject();
@@ -93,9 +104,9 @@ public class NeoCalloutService {
           log.info("[NEO-CALLOUT] No callout found for field '{}' on tab '{}'",
               fieldName, adTab.getName());
           JSONObject emptyResponse = new JSONObject();
-          emptyResponse.put("updates", new JSONObject());
-          emptyResponse.put("combos", new JSONObject());
-          emptyResponse.put("messages", new JSONArray());
+          emptyResponse.put(UPDATES, new JSONObject());
+          emptyResponse.put(COMBOS, new JSONObject());
+          emptyResponse.put(MESSAGES, new JSONArray());
           return NeoResponse.ok(emptyResponse);
         }
         log.info("[NEO-CALLOUT] Found callout '{}' for field '{}' (inp: {}, column: {})",
@@ -721,9 +732,9 @@ public class NeoCalloutService {
       Map<String, String> rDisplayNames = new java.util.HashMap<>();
 
       if (calloutResult == null) {
-        response.put("updates", updates);
-        response.put("combos", combos);
-        response.put("messages", messages);
+        response.put(UPDATES, updates);
+        response.put(COMBOS, combos);
+        response.put(MESSAGES, messages);
         return response;
       }
 
@@ -741,7 +752,7 @@ public class NeoCalloutService {
             || "SUCCESS".equals(key)) {
           JSONObject msg = new JSONObject();
           msg.put("type", key);
-          msg.put("text", fieldResult.optString("value", ""));
+          msg.put("text", fieldResult.optString(VALUE, ""));
           messages.put(msg);
           continue;
         }
@@ -759,22 +770,22 @@ public class NeoCalloutService {
           String baseClean = inpToCleanName(baseInpKey, adTab);
           // Store: we'll merge after the main loop
           if (!rDisplayNames.containsKey(baseClean)) {
-            rDisplayNames.put(baseClean, fieldResult.optString("value", ""));
+            rDisplayNames.put(baseClean, fieldResult.optString(VALUE, ""));
           }
           continue;
         }
 
         // Determine if this is a combo update (has entries) or simple field update
-        boolean hasEntries = fieldResult.has("entries");
+        boolean hasEntries = fieldResult.has(ENTRIES);
         String cleanName = inpToCleanName(key, adTab);
 
         if (hasEntries) {
           // Combo update
           JSONObject comboObj = new JSONObject();
-          if (fieldResult.has("value")) {
-            comboObj.put("selected", fieldResult.opt("value"));
+          if (fieldResult.has(VALUE)) {
+            comboObj.put("selected", fieldResult.opt(VALUE));
           }
-          JSONArray rawEntries = fieldResult.optJSONArray("entries");
+          JSONArray rawEntries = fieldResult.optJSONArray(ENTRIES);
           if (rawEntries != null) {
             JSONArray cleanEntries = new JSONArray();
             for (int i = 0; i < rawEntries.length(); i++) {
@@ -788,13 +799,13 @@ public class NeoCalloutService {
                 cleanEntries.put(cleanEntry);
               }
             }
-            comboObj.put("entries", cleanEntries);
+            comboObj.put(ENTRIES, cleanEntries);
           }
           combos.put(cleanName, comboObj);
         } else {
           // Simple field update
           JSONObject updateObj = new JSONObject();
-          updateObj.put("value", fieldResult.opt("value"));
+          updateObj.put(VALUE, fieldResult.opt(VALUE));
           updates.put(cleanName, updateObj);
         }
       }
@@ -810,9 +821,9 @@ public class NeoCalloutService {
         }
       }
 
-      response.put("updates", updates);
-      response.put("combos", combos);
-      response.put("messages", messages);
+      response.put(UPDATES, updates);
+      response.put(COMBOS, combos);
+      response.put(MESSAGES, messages);
 
     } catch (Exception e) {
       log.error("Error transforming callout response: {}", e.getMessage(), e);

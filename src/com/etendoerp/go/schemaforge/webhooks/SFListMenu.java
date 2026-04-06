@@ -44,6 +44,9 @@ public class SFListMenu extends BaseWebhookService {
 
   private static final Logger log = LogManager.getLogger(SFListMenu.class);
 
+  /** JSON key used for the nested children array in menu tree nodes. */
+  private static final String CHILDREN = "children";
+
   private static final String MENU_TREE_SQL =
       "WITH RECURSIVE menu_tree AS ("
       + "  SELECT tn.node_id, tn.parent_id, tn.seqno,"
@@ -137,7 +140,7 @@ public class SFListMenu extends BaseWebhookService {
 
       // Folders always get a children array
       if ("Y".equals(isSummary)) {
-        node.put("children", new JSONArray());
+        node.put(CHILDREN, new JSONArray());
       }
 
       nodeMap.put(nodeId, node);
@@ -147,13 +150,13 @@ public class SFListMenu extends BaseWebhookService {
         roots.add(node);
       } else {
         JSONObject parent = nodeMap.get(parentId);
-        if (parent.has("children")) {
-          parent.getJSONArray("children").put(node);
+        if (parent.has(CHILDREN)) {
+          parent.getJSONArray(CHILDREN).put(node);
         } else {
           // Parent wasn't marked as folder but has children — add array
           JSONArray children = new JSONArray();
           children.put(node);
-          parent.put("children", children);
+          parent.put(CHILDREN, children);
         }
       }
     }

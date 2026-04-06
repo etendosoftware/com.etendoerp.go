@@ -76,11 +76,12 @@ public class NeoSelectorService {
   private static final String REF_SEARCH = "30";
   private static final String REF_LIST = "17";
 
+  /** Active Directory organization identifier field name. */
+  private static final String AD_ORG_ID = "AD_Org_ID";
+
   // Session-level params resolved server-side (should not appear in selectorParams)
   private static final java.util.Set<String> SESSION_PARAMS = new java.util.HashSet<>(
-      java.util.Arrays.asList("AD_Org_ID", "AD_Client_ID", "AD_User_ID", "AD_Role_ID"));
-
-  private static final String AD_ORG_ID = "AD_Org_ID";
+      java.util.Arrays.asList(AD_ORG_ID, "AD_Client_ID", "AD_User_ID", "AD_Role_ID"));
   private static final String SQL_AND = " AND ";
   private static final String SQL_WHERE = " WHERE ";
   private static final String SQL_ORDER_BY = "ORDER BY";

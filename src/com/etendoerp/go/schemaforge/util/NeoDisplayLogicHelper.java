@@ -56,6 +56,9 @@ public final class NeoDisplayLogicHelper {
 
   private static final Logger log = LogManager.getLogger(NeoDisplayLogicHelper.class);
 
+  /** Key used in the evaluation context map for the current record field values. */
+  private static final String CURRENT_VALUES = "currentValues";
+
   private static final String OB_UTILITIES_SHIM =
       "var OB = { Utilities: { "
       + "getValue: function(obj, key) { return obj != null ? obj[key] : null; }, "
@@ -90,19 +93,7 @@ public final class NeoDisplayLogicHelper {
         return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
             "Entity has no linked AD_Tab: " + pathInfo.entityName);
       }
-      JSONObject fieldValues = new JSONObject();
-      try {
-        String body = new String(
-            request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        if (body != null && !body.trim().isEmpty()) {
-          JSONObject bodyJson = new JSONObject(body);
-          if (bodyJson.has("fieldValues")) {
-            fieldValues = bodyJson.getJSONObject("fieldValues");
-          }
-        }
-      } catch (Exception e) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid request body");
-      }
+      JSONObject fieldValues = parseRequestBody(request);
       Map<String, Object> evalContext = buildEvalContext(fieldValues);
       JSONObject visibility = new JSONObject();
       JSONObject readOnly = new JSONObject();
@@ -114,14 +105,14 @@ public final class NeoDisplayLogicHelper {
         String propertyName = getPropertyName(field);
         String displayLogic = field.getDisplayLogic();
         if (displayLogic != null && !displayLogic.trim().isEmpty()) {
-          boolean isVisible = evaluateExpression(displayLogic, tab, field, evalContext, false);
+          boolean isVisible = evaluateExpression(displayLogic, tab, field, evalContext);
           visibility.put(propertyName, isVisible);
         }
         Column column = field.getColumn();
         if (column != null) {
           String readOnlyLogic = column.getReadOnlyLogic();
           if (readOnlyLogic != null && !readOnlyLogic.trim().isEmpty()) {
-            boolean isReadOnly = evaluateExpression(readOnlyLogic, tab, field, evalContext, true);
+            boolean isReadOnly = evaluateExpression(readOnlyLogic, tab, field, evalContext);
             readOnly.put(propertyName, isReadOnly);
           }
         }
@@ -148,13 +139,11 @@ public final class NeoDisplayLogicHelper {
    *                        for tab-level expressions)
    * @param evalContext     the mutable evaluation context populated with current field values and
    *                        OBContext session variables
-   * @param isReadOnlyLogic {@code true} if the expression is a readOnly-logic expression;
-   *                        {@code false} if it is a display-logic expression
    * @return {@code true} if the expression evaluates to {@code true}, {@code false} otherwise;
    *         returns {@code true} on evaluation errors to fail open
    */
   public static boolean evaluateExpression(String expression, Tab tab, Field field,
-      Map<String, Object> evalContext, boolean isReadOnlyLogic) {
+      Map<String, Object> evalContext) {
     try {
       DynamicExpressionParser parser = new DynamicExpressionParser(expression, tab, field);
       String jsExpr = parser.getJSExpression();
@@ -184,8 +173,8 @@ public final class NeoDisplayLogicHelper {
       }
       String contextPreamble = buildJsObjectPreamble("context", evalContext, true);
       @SuppressWarnings("unchecked")
-      Map<String, Object> currentValues = (Map<String, Object>) evalContext.get("currentValues");
-      String cvPreamble = buildJsObjectPreamble("currentValues", currentValues, false);
+      Map<String, Object> currentValues = (Map<String, Object>) evalContext.get(CURRENT_VALUES);
+      String cvPreamble = buildJsObjectPreamble(CURRENT_VALUES, currentValues, false);
       String fullScript = OB_UTILITIES_SHIM + "\n" + contextPreamble + "\n" + cvPreamble + "\n" + jsExpr;
       Object result = OBScriptEngine.getInstance().eval(fullScript, evalContext);
       return Boolean.TRUE.equals(result);
@@ -214,11 +203,9 @@ public final class NeoDisplayLogicHelper {
     if (map != null) {
       for (Map.Entry<String, Object> e : map.entrySet()) {
         String key = e.getKey();
-        if (skipSelf && ("context".equals(key) || "currentValues".equals(key))) {
-          continue;
-        }
         Object val = e.getValue();
-        if (val == null || val instanceof Map) {
+        boolean skipKey = skipSelf && ("context".equals(key) || CURRENT_VALUES.equals(key));
+        if (skipKey || val == null || val instanceof Map) {
           continue;
         }
         try {
@@ -249,7 +236,7 @@ public final class NeoDisplayLogicHelper {
       Object value = fieldValues.opt(key);
       currentValues.put(key, value == JSONObject.NULL ? null : value);
     }
-    ctx.put("currentValues", currentValues);
+    ctx.put(CURRENT_VALUES, currentValues);
     ctx.putAll(currentValues);
     OBContext obCtx = OBContext.getOBContext();
     ctx.put("AD_Org_ID", obCtx.getCurrentOrganization().getId());
@@ -319,14 +306,43 @@ public final class NeoDisplayLogicHelper {
     return column.getDBColumnName();
   }
 
+  /**
+   * Finds the SchemaForge entity record matching the given specification ID and entity name.
+   *
+   * @param specId     unique ID of parent ETGO_SF_Spec
+   * @param entityName name of the entity to find
+   * @return the matching {@link SFEntity}, or {@code null} if not found or inactive
+   */
   private static SFEntity findEntity(String specId, String entityName) {
     OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
     criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
     criteria.add(Restrictions.eq(SFEntity.PROPERTY_NAME, entityName));
+  /**
+   * Reads and parses the field values from the HTTP request body.
+   * Expects a JSON object with a {@code fieldValues} sub-object.
+   *
+   * @param request the current HTTP request
+   * @return a {@link JSONObject} containing the field values, or an empty object if parsing fails
+   */
     criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
     criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
     criteria.setMaxResults(1);
     java.util.List<SFEntity> results = criteria.list();
     return results.isEmpty() ? null : results.get(0);
+  }
+
+  private static JSONObject parseRequestBody(HttpServletRequest request) {
+    try {
+      String body = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+      if (body != null && !body.trim().isEmpty()) {
+        JSONObject bodyJson = new JSONObject(body);
+        if (bodyJson.has("fieldValues")) {
+          return bodyJson.getJSONObject("fieldValues");
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Error parsing request body: {}", e.getMessage());
+    }
+    return new JSONObject();
   }
 }

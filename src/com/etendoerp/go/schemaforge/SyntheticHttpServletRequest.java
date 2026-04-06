@@ -52,6 +52,9 @@ import javax.servlet.http.Part;
  */
 public class SyntheticHttpServletRequest implements HttpServletRequest {
 
+  /** Local hostname used for synthetic request metadata. */
+  private static final String LOCALHOST = "localhost";
+
   private final Map<String, String[]> parameters;
   private final Map<String, Object> attributes;
   private final SyntheticHttpSession syntheticSession;
@@ -139,11 +142,11 @@ public class SyntheticHttpServletRequest implements HttpServletRequest {
   @Override public ServletInputStream getInputStream() { return null; }
   @Override public String getProtocol() { return "HTTP/1.1"; }
   @Override public String getScheme() { return "http"; }
-  @Override public String getServerName() { return "localhost"; }
+  @Override public String getServerName() { return LOCALHOST; }
   @Override public int getServerPort() { return 8080; }
   @Override public BufferedReader getReader() { return null; }
   @Override public String getRemoteAddr() { return "127.0.0.1"; }
-  @Override public String getRemoteHost() { return "localhost"; }
+  @Override public String getRemoteHost() { return LOCALHOST; }
   @Override public Locale getLocale() { return Locale.US; }
   @Override public Enumeration<Locale> getLocales() {
     return Collections.enumeration(Collections.singletonList(Locale.US));
@@ -152,7 +155,7 @@ public class SyntheticHttpServletRequest implements HttpServletRequest {
   @Override public RequestDispatcher getRequestDispatcher(String path) { return null; }
   @Override public String getRealPath(String path) { return null; }
   @Override public int getRemotePort() { return 0; }
-  @Override public String getLocalName() { return "localhost"; }
+  @Override public String getLocalName() { return LOCALHOST; }
   @Override public String getLocalAddr() { return "127.0.0.1"; }
   @Override public int getLocalPort() { return 8080; }
   @Override public ServletContext getServletContext() { return null; }

@@ -27,11 +27,19 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
  * This handler intercepts GET list requests for the "paymentDetails" entity,
  * queries the full chain, and returns all relevant fields.
  */
+/**
+ * NeoHandler for payment details that resolves the complex many-to-many relationship
+ * between payment schedules and payments in Openbravo/Etendo:
+ *   FIN_Payment_ScheduleDetail → FIN_Payment_Detail → FIN_Payment
+ *
+ * This handler intercepts GET list requests for the "paymentDetails" entity,
+ * queries the full chain, and returns all relevant fields.
+ */
 @Named("paymentDetailsHandler")
 public class PaymentDetailsHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(PaymentDetailsHandler.class);
-  private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("dd-MM-yyyy");
+  private final SimpleDateFormat dateFormat = new SimpleDateFormat("dd-MM-yyyy");
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -78,7 +86,7 @@ public class PaymentDetailsHandler implements NeoHandler {
           if (payment != null) {
             row.put("documentNo", payment.getDocumentNo() != null ? payment.getDocumentNo() : "");
             row.put("paymentDate", payment.getPaymentDate() != null
-                ? DATE_FORMAT.format(payment.getPaymentDate()) : "");
+                ? dateFormat.format(payment.getPaymentDate()) : "");
             row.put("status", payment.getStatus() != null ? payment.getStatus() : "");
             row.put("finPaymentID", payment.getId());
             row.put("finPaymentID$_identifier", payment.getDocumentNo() != null

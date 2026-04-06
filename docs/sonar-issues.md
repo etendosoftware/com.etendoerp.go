@@ -5,31 +5,31 @@
 
 ## src/com/etendoerp/go/schemaforge/AgingReportHandler.java
 
-- [ ] **[CRITICAL]** `java:S1192` — line 89
+- [x] **[CRITICAL]** `java:S1192` — line 89
   Define a constant instead of duplicating this literal "recOrPay" 3 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 89
+- [x] **[CRITICAL]** `java:S1192` — line 89
   Define a constant instead of duplicating this literal "string" 3 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 90
+- [x] **[CRITICAL]** `java:S1192` — line 90
   Define a constant instead of duplicating this literal "currentDate" 3 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 91
+- [x] **[CRITICAL]** `java:S1192` — line 91
   Define a constant instead of duplicating this literal "column1" 3 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 91
+- [x] **[CRITICAL]** `java:S1192` — line 91
   Define a constant instead of duplicating this literal "integer" 4 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 92
+- [x] **[CRITICAL]** `java:S1192` — line 92
   Define a constant instead of duplicating this literal "column2" 3 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 93
+- [x] **[CRITICAL]** `java:S1192` — line 93
   Define a constant instead of duplicating this literal "column3" 3 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 94
+- [x] **[CRITICAL]** `java:S1192` — line 94
   Define a constant instead of duplicating this literal "column4" 3 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 95
+- [x] **[CRITICAL]** `java:S1192` — line 95
   Define a constant instead of duplicating this literal "bPartnerId" 3 times.
 
 - [ ] **[MAJOR]** `java:S1141` — line 149
@@ -56,16 +56,16 @@
 
 ## src/com/etendoerp/go/schemaforge/NeoCalloutService.java
 
-- [ ] **[CRITICAL]** `java:S1192` — line 80
+- [x] **[CRITICAL]** `java:S1192` — line 80
   Define a constant instead of duplicating this literal "value" 7 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 96
+- [x] **[CRITICAL]** `java:S1192` — line 96
   Define a constant instead of duplicating this literal "updates" 3 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 97
+- [x] **[CRITICAL]** `java:S1192` — line 97
   Define a constant instead of duplicating this literal "combos" 3 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 98
+- [x] **[CRITICAL]** `java:S1192` — line 98
   Define a constant instead of duplicating this literal "messages" 3 times.
 
 - [ ] **[CRITICAL]** `java:S3776` — line 187
@@ -77,7 +77,7 @@
 - [ ] **[CRITICAL]** `java:S3776` — line 711
   Refactor this method to reduce its Cognitive Complexity from 40 to the 15 allowed.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 765
+- [x] **[CRITICAL]** `java:S1192` — line 765
   Define a constant instead of duplicating this literal "entries" 3 times.
 
 - [ ] **[CRITICAL]** `java:S3776` — line 830
@@ -167,7 +167,7 @@
 - [ ] **[CRITICAL]** `java:S3776` — line 627
   Refactor this method to reduce its Cognitive Complexity from 67 to the 15 allowed.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 680
+- [x] **[CRITICAL]** `java:S1192` — line 680
   Define a constant instead of duplicating this literal "value" 3 times.
 
 - [ ] **[CRITICAL]** `java:S3776` — line 835
@@ -230,55 +230,55 @@
 
 ## src/com/etendoerp/go/schemaforge/NeoOpenAPIEndpoint.java
 
-- [ ] **[CRITICAL]** `java:S1192` — line 137
+- [x] **[CRITICAL]** `java:S1192` — line 137
   Define a constant instead of duplicating this literal "Unauthorized" 18 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 138
+- [x] **[CRITICAL]** `java:S1192` — line 138
   Define a constant instead of duplicating this literal "Spec not found" 4 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 149
+- [x] **[CRITICAL]** `java:S1192` — line 149
   Define a constant instead of duplicating this literal "Bad request" 5 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 208
+- [x] **[CRITICAL]** `java:S1192` — line 208
   Define a constant instead of duplicating this literal "application/json" 4 times.
 
 - [ ] **[CRITICAL]** `java:S3776` — line 264
   Refactor this method to reduce its Cognitive Complexity from 16 to the 15 allowed.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 283
+- [x] **[CRITICAL]** `java:S1192` — line 283
   Define a constant instead of duplicating this literal "List " 3 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 285
+- [x] **[CRITICAL]** `java:S1192` — line 285
   Define a constant instead of duplicating this literal "integer" 10 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 293
+- [x] **[CRITICAL]** `java:S1192` — line 293
   Define a constant instead of duplicating this literal "Spec or entity not found" 3 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 299
+- [x] **[CRITICAL]** `java:S1192` — line 299
   Define a constant instead of duplicating this literal " record" 8 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 300
+- [x] **[CRITICAL]** `java:S1192` — line 300
   Define a constant instead of duplicating this literal " record." 6 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 321
+- [x] **[CRITICAL]** `java:S1192` — line 321
   Define a constant instead of duplicating this literal "string" 33 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 322
+- [x] **[CRITICAL]** `java:S1192` — line 322
   Define a constant instead of duplicating this literal "Record ID" 3 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 333
+- [x] **[CRITICAL]** `java:S1192` — line 333
   Define a constant instead of duplicating this literal "Record not found" 4 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 415
+- [x] **[CRITICAL]** `java:S1192` — line 415
   Define a constant instead of duplicating this literal "columnName" 4 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 543
+- [x] **[CRITICAL]** `java:S1192` — line 543
   Define a constant instead of duplicating this literal "label" 3 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 547
+- [x] **[CRITICAL]** `java:S1192` — line 547
   Define a constant instead of duplicating this literal "boolean" 3 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 752
+- [x] **[CRITICAL]** `java:S1192` — line 752
   Define a constant instead of duplicating this literal "object" 3 times.
 
 - [ ] **[MAJOR]** `java:S125` — line 402
@@ -365,7 +365,7 @@
 
 ## src/com/etendoerp/go/schemaforge/NeoSelectorService.java
 
-- [ ] **[CRITICAL]** `java:S1192` — line 81
+- [x] **[CRITICAL]** `java:S1192` — line 81
   Use already-defined constant 'AD_ORG_ID' instead of duplicating its value here.
 
 - [ ] **[CRITICAL]** `java:S3776` — line 787
@@ -416,10 +416,10 @@
 
 ## src/com/etendoerp/go/schemaforge/NeoServlet.java
 
-- [ ] **[CRITICAL]** `java:S1192` — line 107
+- [x] **[CRITICAL]** `java:S1192` — line 107
   Define a constant instead of duplicating this literal "DELETE" 3 times.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 112
+- [x] **[CRITICAL]** `java:S1192` — line 112
   Define a constant instead of duplicating this literal "PATCH" 5 times.
 
 - [ ] **[CRITICAL]** `java:S3776` — line 496
@@ -428,7 +428,7 @@
 - [ ] **[CRITICAL]** `java:S3776` — line 731
   Refactor this method to reduce its Cognitive Complexity from 73 to the 15 allowed.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 768
+- [x] **[CRITICAL]** `java:S1192` — line 768
   Define a constant instead of duplicating this literal "parentId" 5 times.
 
 - [ ] **[MAJOR]** `java:S1448` — line 86
@@ -512,7 +512,7 @@
 - [ ] **[CRITICAL]** `java:S1186` — line 135
   Add a nested comment explaining why this method is empty, throw an UnsupportedOperationException or complete the implementation.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 142
+- [x] **[CRITICAL]** `java:S1192` — line 142
   Define a constant instead of duplicating this literal "localhost" 3 times.
 
 - [ ] **[CRITICAL]** `java:S1186` — line 194
@@ -530,7 +530,7 @@
 
 ## src/com/etendoerp/go/schemaforge/WidgetKpisHandler.java
 
-- [ ] **[CRITICAL]** `java:S1192` — line 43
+- [x] **[CRITICAL]** `java:S1192` — line 43
   Define a constant instead of duplicating this literal "currency" 3 times.
 
 
@@ -575,7 +575,7 @@
 - [ ] **[CRITICAL]** `java:S3776` — line 65
   Refactor this method to reduce its Cognitive Complexity from 29 to the 15 allowed.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 267
+- [x] **[CRITICAL]** `java:S1192` — line 267
   Define a constant instead of duplicating this literal "string" 3 times.
 
 - [x] **[MAJOR]** `java:S1176` — line 65
@@ -611,7 +611,7 @@
 - [ ] **[CRITICAL]** `java:S3776` — line 68
   Refactor this method to reduce its Cognitive Complexity from 20 to the 15 allowed.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 161
+- [x] **[CRITICAL]** `java:S1192` — line 161
   Define a constant instead of duplicating this literal "currentValues" 4 times.
 
 - [x] **[MAJOR]** `java:S1176` — line 68
@@ -680,7 +680,7 @@
 - [ ] **[CRITICAL]** `java:S3776` — line 103
   Refactor this method to reduce its Cognitive Complexity from 21 to the 15 allowed.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 140
+- [x] **[CRITICAL]** `java:S1192` — line 140
   Define a constant instead of duplicating this literal "children" 4 times.
 
 
@@ -689,6 +689,6 @@
 - [ ] **[CRITICAL]** `java:S3776` — line 51
   Refactor this method to reduce its Cognitive Complexity from 28 to the 15 allowed.
 
-- [ ] **[CRITICAL]** `java:S1192` — line 73
+- [x] **[CRITICAL]** `java:S1192` — line 73
   Define a constant instead of duplicating this literal "error" 9 times.
 

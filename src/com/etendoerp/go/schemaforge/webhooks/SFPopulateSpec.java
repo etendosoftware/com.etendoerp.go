@@ -28,9 +28,8 @@ import com.etendoerp.go.schemaforge.PopulateSpecHelper;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
- * Webhook that populates ETGO_SF_Entity and ETGO_SF_Field records
- * for a given ETGO_SF_Spec. Same logic as PopulateSpecProcess but invoked
- * via webhook.
+ * Webhook service to trigger the population of a SchemaForge specification.
+ * It automatically scans the linked AD Window or Process and creates child records.
  *
  * Required params: SpecID, ModuleID
  * Optional params: IncludeAllMethods (Y/N, default N),

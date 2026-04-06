@@ -49,6 +49,9 @@ public final class NeoDiscoveryHelper {
 
   private static final Logger log = LogManager.getLogger(NeoDiscoveryHelper.class);
 
+  /** JSON-friendly type name for string/text AD reference types. */
+  private static final String TYPE_STRING = "string";
+
   private static final Set<String> SELECTOR_REFS = new HashSet<>();
   static {
     SELECTOR_REFS.add("19"); // TableDir
@@ -77,18 +80,11 @@ public final class NeoDiscoveryHelper {
 
       JSONArray specsArray = new JSONArray();
       for (SFSpec spec : allSpecs) {
+        if (!isSpecAccessible(spec)) {
+          continue;
+        }
         String specType = spec.getSpecType();
         Window specWindow = spec.getADWindow();
-        if ("W".equals(specType)) {
-          if (specWindow != null && !NeoAccessHelper.hasWindowAccess(specWindow.getId())) {
-            continue;
-          }
-        } else if ("P".equals(specType) || "R".equals(specType)) {
-          Process adProcess = NeoAccessHelper.resolveProcess(spec);
-          if (adProcess != null && !NeoAccessHelper.hasProcessAccess(adProcess.getId())) {
-            continue;
-          }
-        }
         JSONObject specObj = new JSONObject();
         specObj.put("id", spec.getId());
         specObj.put("name", spec.getName());
@@ -268,6 +264,19 @@ public final class NeoDiscoveryHelper {
     return arr;
   }
 
+  private static boolean isSpecAccessible(SFSpec spec) {
+    String specType = spec.getSpecType();
+    if ("W".equals(specType)) {
+      Window specWindow = spec.getADWindow();
+      return specWindow == null || NeoAccessHelper.hasWindowAccess(specWindow.getId());
+    }
+    if ("P".equals(specType) || "R".equals(specType)) {
+      Process adProcess = NeoAccessHelper.resolveProcess(spec);
+      return adProcess == null || NeoAccessHelper.hasProcessAccess(adProcess.getId());
+    }
+    return true;
+  }
+
   private static boolean isSelectorReference(String refId) {
     return refId != null && SELECTOR_REFS.contains(refId);
   }
@@ -324,10 +333,10 @@ public final class NeoDiscoveryHelper {
    *         or {@code "button"}; defaults to {@code "string"} for unknown references
    */
   public static String mapReferenceToType(String refId) {
-    if (refId == null) return "string";
+    if (refId == null) return TYPE_STRING;
     switch (refId) {
       case "10": case "14": case "34":
-        return "string";
+        return TYPE_STRING;
       case "11": case "22": case "29": case "12":
       case "800008": case "800019":
         return "number";
@@ -346,7 +355,7 @@ public final class NeoDiscoveryHelper {
       case "13":
         return "id";
       default:
-        return "string";
+        return TYPE_STRING;
     }
   }
 }

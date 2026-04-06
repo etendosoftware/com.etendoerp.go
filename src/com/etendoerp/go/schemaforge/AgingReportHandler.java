@@ -64,6 +64,25 @@ public class AgingReportHandler implements NeoHandler {
   private static final String DEFAULT_COL3 = "90";
   private static final String DEFAULT_COL4 = "120";
 
+  /** Parameter key for receivables/payables direction. */
+  private static final String REC_OR_PAY = "recOrPay";
+  /** Parameter type name for string fields. */
+  private static final String STRING_TYPE = "string";
+  /** Parameter key for the as-of date. */
+  private static final String CURRENT_DATE = "currentDate";
+  /** Parameter key for the first aging bucket boundary. */
+  private static final String COLUMN1 = "column1";
+  /** Parameter type name for integer fields. */
+  private static final String INTEGER_TYPE = "integer";
+  /** Parameter key for the second aging bucket boundary. */
+  private static final String COLUMN2 = "column2";
+  /** Parameter key for the third aging bucket boundary. */
+  private static final String COLUMN3 = "column3";
+  /** Parameter key for the fourth aging bucket boundary. */
+  private static final String COLUMN4 = "column4";
+  /** Parameter key for business partner UUID filter. */
+  private static final String B_PARTNER_ID = "bPartnerId";
+
   @Override
   public NeoResponse handle(NeoContext context) {
     String method = context.getHttpMethod();
@@ -86,14 +105,14 @@ public class AgingReportHandler implements NeoHandler {
       desc.put("description", "Aging schedule for receivables or payables, grouped by business partner");
 
       JSONArray params = new JSONArray();
-      params.put(param("recOrPay", "string", true, "RECEIVABLES or PAYABLES"));
-      params.put(param("currentDate", "date", false, "As-of date (yyyy-MM-dd). Defaults to today."));
-      params.put(param("column1", "integer", false, "First aging bucket boundary in days. Default: 30"));
-      params.put(param("column2", "integer", false, "Second aging bucket boundary. Default: 60"));
-      params.put(param("column3", "integer", false, "Third aging bucket boundary. Default: 90"));
-      params.put(param("column4", "integer", false, "Fourth aging bucket boundary. Default: 120"));
-      params.put(param("bPartnerId", "string", false, "Filter by business partner UUID"));
-      params.put(param("orgId", "string", false, "Filter by organization UUID"));
+      params.put(param(REC_OR_PAY, STRING_TYPE, true, "RECEIVABLES or PAYABLES"));
+      params.put(param(CURRENT_DATE, "date", false, "As-of date (yyyy-MM-dd). Defaults to today."));
+      params.put(param(COLUMN1, INTEGER_TYPE, false, "First aging bucket boundary in days. Default: 30"));
+      params.put(param(COLUMN2, INTEGER_TYPE, false, "Second aging bucket boundary. Default: 60"));
+      params.put(param(COLUMN3, INTEGER_TYPE, false, "Third aging bucket boundary. Default: 90"));
+      params.put(param(COLUMN4, INTEGER_TYPE, false, "Fourth aging bucket boundary. Default: 120"));
+      params.put(param(B_PARTNER_ID, STRING_TYPE, false, "Filter by business partner UUID"));
+      params.put(param("orgId", STRING_TYPE, false, "Filter by organization UUID"));
       desc.put("parameters", params);
 
       return NeoResponse.ok(desc);
@@ -109,13 +128,13 @@ public class AgingReportHandler implements NeoHandler {
         return NeoResponse.error(400, "Request body is required");
       }
 
-      String recOrPay = body.optString("recOrPay", "RECEIVABLES");
-      String dateStr = body.optString("currentDate", "");
-      String col1 = body.optString("column1", DEFAULT_COL1);
-      String col2 = body.optString("column2", DEFAULT_COL2);
-      String col3 = body.optString("column3", DEFAULT_COL3);
-      String col4 = body.optString("column4", DEFAULT_COL4);
-      String bPartnerId = body.optString("bPartnerId", "");
+      String recOrPay = body.optString(REC_OR_PAY, "RECEIVABLES");
+      String dateStr = body.optString(CURRENT_DATE, "");
+      String col1 = body.optString(COLUMN1, DEFAULT_COL1);
+      String col2 = body.optString(COLUMN2, DEFAULT_COL2);
+      String col3 = body.optString(COLUMN3, DEFAULT_COL3);
+      String col4 = body.optString(COLUMN4, DEFAULT_COL4);
+      String bPartnerId = body.optString(B_PARTNER_ID, "");
       String orgId = body.optString("orgId", "");
 
       // Resolve date
@@ -193,7 +212,7 @@ public class AgingReportHandler implements NeoHandler {
       if (data != null) {
         for (FieldProvider fp : data) {
           JSONObject row = new JSONObject();
-          row.put("bPartnerId", fp.getField("BPartnerID"));
+          row.put(B_PARTNER_ID, fp.getField("BPartnerID"));
           row.put("bPartner", fp.getField("BPartner"));
           row.put("current", toBigDecimal(fp.getField("amount0")));
           row.put("days30", toBigDecimal(fp.getField("amount1")));
@@ -213,12 +232,12 @@ public class AgingReportHandler implements NeoHandler {
       responseData.put("count", rows.length());
 
       JSONObject meta = new JSONObject();
-      meta.put("recOrPay", recOrPay);
-      meta.put("currentDate", new SimpleDateFormat("yyyy-MM-dd").format(currentDate));
-      meta.put("column1", col1);
-      meta.put("column2", col2);
-      meta.put("column3", col3);
-      meta.put("column4", col4);
+      meta.put(REC_OR_PAY, recOrPay);
+      meta.put(CURRENT_DATE, new SimpleDateFormat("yyyy-MM-dd").format(currentDate));
+      meta.put(COLUMN1, col1);
+      meta.put(COLUMN2, col2);
+      meta.put(COLUMN3, col3);
+      meta.put(COLUMN4, col4);
       responseData.put("meta", meta);
 
       JSONObject wrapper = new JSONObject();

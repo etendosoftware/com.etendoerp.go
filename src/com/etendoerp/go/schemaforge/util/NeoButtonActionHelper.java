@@ -46,8 +46,6 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  */
 public final class NeoButtonActionHelper {
 
-  private static final Logger log = LogManager.getLogger(NeoButtonActionHelper.class);
-
   private NeoButtonActionHelper() {
   }
 

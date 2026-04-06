@@ -87,6 +87,13 @@ public class NeoServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
 
+  /** HTTP method name for DELETE operations. */
+  private static final String HTTP_DELETE = "DELETE";
+  /** HTTP method name for PATCH operations. */
+  private static final String HTTP_PATCH = "PATCH";
+  /** Query and body parameter name used to pass the parent record identifier. */
+  private static final String PARENT_ID = "parentId";
+
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     processRequest(request, response, "GET");
@@ -104,13 +111,13 @@ public class NeoServlet extends HttpBaseServlet {
 
   @Override
   public void doDelete(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    processRequest(request, response, "DELETE");
+    processRequest(request, response, HTTP_DELETE);
   }
 
   @Override
   public void service(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    if ("PATCH".equalsIgnoreCase(request.getMethod())) {
-      processRequest(request, response, "PATCH");
+    if (HTTP_PATCH.equalsIgnoreCase(request.getMethod())) {
+      processRequest(request, response, HTTP_PATCH);
     } else {
       try {
         super.service(request, response);
@@ -424,7 +431,7 @@ public class NeoServlet extends HttpBaseServlet {
         .endpointType(NeoEndpointType.CRUD)
         .build();
 
-    if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
+    if ("POST".equals(method) || "PUT".equals(method) || HTTP_PATCH.equals(method)) {
       try {
         String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         if (StringUtils.isNotBlank(bodyStr)) {
@@ -765,7 +772,7 @@ public class NeoServlet extends HttpBaseServlet {
       StringBuilder whereClause = new StringBuilder();
 
       String parentId = context.getQueryParams() != null
-          ? context.getQueryParams().get("parentId")
+          ? context.getQueryParams().get(PARENT_ID)
           : null;
 
       String tabWhere = adTab.getHqlwhereclause();
@@ -816,9 +823,9 @@ public class NeoServlet extends HttpBaseServlet {
           // (e.g., parentId → salesOrder for C_OrderLine, parentId → invoice for C_InvoiceLine)
           JSONObject requestBody = context.getRequestBody();
           String parentIdValue = null;
-          if (requestBody != null && requestBody.has("parentId")) {
-            parentIdValue = requestBody.getString("parentId");
-            requestBody.remove("parentId");
+          if (requestBody != null && requestBody.has(PARENT_ID)) {
+            parentIdValue = requestBody.getString(PARENT_ID);
+            requestBody.remove(PARENT_ID);
             // Find the link-to-parent column and resolve its DAL property name
             if (adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
               Entity dalEnt = ModelProvider.getInstance().getEntityByTableName(adTab.getTable().getDBTableName());
@@ -1259,7 +1266,7 @@ public class NeoServlet extends HttpBaseServlet {
             "Entity has no linked AD_Tab: " + pathInfo.entityName);
       }
 
-      String parentId = request.getParameter("parentId");
+      String parentId = request.getParameter(PARENT_ID);
 
       NeoContext ctx = NeoContext.builder()
           .specName(pathInfo.specName)

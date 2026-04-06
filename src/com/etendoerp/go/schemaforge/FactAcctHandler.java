@@ -43,11 +43,20 @@ import org.openbravo.model.financialmgmt.accounting.AccountingFact;
  *   recordID = parentId  (from queryParams)
  *   table.id = adTableId (318 for C_Invoice, 319 for M_InOut)
  */
+/**
+ * NeoHandler that provides accounting entry data (AccountingFact/FactAcct) for the frontend.
+ * Intercepts list requests for supported document types where the standard parent-link (via
+ * ApplicationUtils.getParentProperty) returns null and produces empty results.
+ *
+ * This handler queries AccountingFact directly using:
+ *   recordID = parentId  (from queryParams)
+ *   table.id = adTableId (318 for C_Invoice, 319 for M_InOut)
+ */
 @Named("factAcctHandler")
 public class FactAcctHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(FactAcctHandler.class);
-  private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyy-MM-dd");
+  private final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd");
 
   /** AD_Table_ID for each supported document type (spec name → table ID). */
   private static final Map<String, String> TABLE_ID_BY_SPEC = Map.of(
@@ -106,7 +115,7 @@ public class FactAcctHandler implements NeoHandler {
 
         // Accounting date
         if (af.getAccountingDate() != null) {
-          row.put("accountingDate", DATE_FORMAT.format(af.getAccountingDate()));
+          row.put("accountingDate", dateFormat.format(af.getAccountingDate()));
         } else {
           row.put("accountingDate", JSONObject.NULL);
         }

@@ -32,6 +32,9 @@ public class WidgetKpisHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(WidgetKpisHandler.class);
 
+  /** KPI format type for monetary/currency values. */
+  private static final String CURRENCY = "currency";
+
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!"GET".equals(context.getHttpMethod())) {
@@ -40,9 +43,9 @@ public class WidgetKpisHandler implements NeoHandler {
 
     try {
       JSONArray data = new JSONArray();
-      data.put(kpi("revenueThisMonth", "Revenue this month", 48250, "currency", 12.5, "DollarSign"));
-      data.put(kpi("expensesThisMonth", "Expenses this month", 31800, "currency", 3.2, "CreditCard"));
-      data.put(kpi("netProfit", "Net Profit", 16450, "currency", 28.7, "TrendingUp"));
+      data.put(kpi("revenueThisMonth", "Revenue this month", 48250, CURRENCY, 12.5, "DollarSign"));
+      data.put(kpi("expensesThisMonth", "Expenses this month", 31800, CURRENCY, 3.2, "CreditCard"));
+      data.put(kpi("netProfit", "Net Profit", 16450, CURRENCY, 28.7, "TrendingUp"));
       data.put(kpi("pendingInvoices", "Pending Invoices", 7, "number", -2, "Clock"));
 
       JSONObject responseData = new JSONObject();

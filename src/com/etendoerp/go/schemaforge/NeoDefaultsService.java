@@ -79,6 +79,8 @@ public class NeoDefaultsService {
 
   private static final Logger log = LogManager.getLogger(NeoDefaultsService.class);
   private static final String DATE_FORMAT = "yyyy-MM-dd";
+  /** JSON key for the field value in callout request and response objects. */
+  private static final String VALUE = "value";
   private static final int MAX_CALLOUT_CHAIN_DEPTH = 5;
 
   // Cache VariablesSecureApp per user+role+org+warehouse combination to avoid calling
@@ -687,7 +689,7 @@ public class NeoDefaultsService {
           try {
             JSONObject calloutRequest = new JSONObject();
             calloutRequest.put("field", fieldName);
-            calloutRequest.put("value", value);
+            calloutRequest.put(VALUE, value);
             calloutRequest.put("formState", formState);
 
             NeoResponse calloutResponse = NeoCalloutService.executeCallout(ctx, calloutRequest);
@@ -709,8 +711,8 @@ public class NeoDefaultsService {
               while (updateKeys.hasNext()) {
                 String updatedField = updateKeys.next();
                 JSONObject updateObj = updates.optJSONObject(updatedField);
-                if (updateObj != null && updateObj.has("value")) {
-                  Object newValue = updateObj.get("value");
+                if (updateObj != null && updateObj.has(VALUE)) {
+                  Object newValue = updateObj.get(VALUE);
                   Object oldValue = formState.opt(updatedField);
 
                   formState.put(updatedField, newValue);
