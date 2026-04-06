@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -33,6 +34,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -124,16 +126,13 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
-    } catch (IllegalArgumentException e) {
-      log.warn("Bad request creating draft invoice from {}: {}", specName, e.getMessage());
+    } catch (OBException e) {
+      log.warn("Error creating draft invoice from {}: {}", specName, e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-    } catch (IllegalStateException e) {
-      log.warn("State error creating draft invoice from {}: {}", specName, e.getMessage());
-      return NeoResponse.error(422, e.getMessage());
     } catch (Exception e) {
       log.error("Error creating draft invoice from {}: {}", specName, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Failed to create invoice: " + e.getMessage());
+          "An internal error occurred while creating the invoice");
     }
   }
 
@@ -232,7 +231,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   private Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides) {
     Order order = OBDal.getInstance().get(Order.class, orderId);
     if (order == null) {
-      throw new IllegalArgumentException("Order not found: " + orderId);
+      throw new OBException("Order not found: " + orderId);
     }
 
     BusinessPartner bp = order.getBusinessPartner();
@@ -245,7 +244,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       invoiceDocType = findARInvoiceDocType(order.getOrganization().getId());
     }
     if (invoiceDocType == null) {
-      throw new IllegalStateException("No AR Invoice document type found");
+      throw new OBException("No AR Invoice document type found");
     }
 
     Invoice invoice = OBProvider.getInstance().get(Invoice.class);
@@ -317,7 +316,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     il.setUnitPrice(ol.getUnitPrice());
     il.setListPrice(ol.getListPrice());
     il.setPriceLimit(ol.getPriceLimit());
-    il.setLineNetAmount(qty.multiply(ol.getUnitPrice()));
+    int precision = invoice.getCurrency().getStandardPrecision().intValue();
+    il.setLineNetAmount(qty.multiply(ol.getUnitPrice()).setScale(precision, RoundingMode.HALF_UP));
     il.setTax(ol.getTax());
     il.setSalesOrderLine(ol);
     OBDal.getInstance().save(il);
@@ -360,18 +360,18 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     for (String id : shipmentIds) {
       ShipmentInOut s = OBDal.getInstance().get(ShipmentInOut.class, id);
       if (s == null) {
-        throw new IllegalArgumentException("Shipment not found: " + id);
+        throw new OBException("Shipment not found: " + id);
       }
       shipments.add(s);
     }
     if (shipments.isEmpty()) {
-      throw new IllegalArgumentException("No shipments provided");
+      throw new OBException("No shipments provided");
     }
 
     BusinessPartner bp = shipments.get(0).getBusinessPartner();
     for (ShipmentInOut s : shipments) {
       if (!s.getBusinessPartner().getId().equals(bp.getId())) {
-        throw new IllegalArgumentException("All shipments must belong to the same Business Partner");
+        throw new OBException("All shipments must belong to the same Business Partner");
       }
     }
     return shipments;
@@ -390,7 +390,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       invoiceDocType = findARInvoiceDocType(first.getOrganization().getId());
     }
     if (invoiceDocType == null) {
-      throw new IllegalStateException("No AR Invoice document type found");
+      throw new OBException("No AR Invoice document type found");
     }
 
     Invoice invoice = OBProvider.getInstance().get(Invoice.class);
@@ -417,6 +417,10 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       invoice.setPriceList(bp.getPriceList());
       if (bp.getPriceList() != null) {
         invoice.setCurrency(bp.getPriceList().getCurrency());
+      }
+      if (bp.getPaymentTerms() == null || bp.getPaymentMethod() == null) {
+        throw new OBException(
+            "Business Partner is missing mandatory Payment Terms or Payment Method");
       }
       invoice.setPaymentTerms(bp.getPaymentTerms());
       invoice.setPaymentMethod(bp.getPaymentMethod());
@@ -474,7 +478,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       il.setUnitPrice(ol.getUnitPrice());
       il.setListPrice(ol.getListPrice());
       il.setPriceLimit(ol.getPriceLimit());
-      il.setLineNetAmount(qty.multiply(ol.getUnitPrice()));
+      int precision = invoice.getCurrency().getStandardPrecision().intValue();
+      il.setLineNetAmount(qty.multiply(ol.getUnitPrice()).setScale(precision, RoundingMode.HALF_UP));
       il.setTax(ol.getTax());
       il.setSalesOrderLine(ol);
     } else {

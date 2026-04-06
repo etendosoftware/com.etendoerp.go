@@ -673,7 +673,7 @@ public class NeoServlet extends HttpBaseServlet {
       return afterResult != null ? afterResult : defaultResult;
     } catch (Exception e) {
       log.error("Error executing hook handler: {}", javaQualifier, e);
-      return NeoResponse.error(500, HOOK_ERROR_PREFIX + e.getMessage());
+      return NeoResponse.error(500, "An internal error occurred while processing the hook handler");
     }
   }
 
@@ -757,7 +757,7 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error in hook dispatch for {}/{}: {}",
           endpointType, entityName, e.getMessage(), e);
-      return NeoResponse.error(500, HOOK_ERROR_PREFIX + e.getMessage());
+      return NeoResponse.error(500, "An internal error occurred while processing the hook handler");
     }
   }
 
@@ -828,7 +828,7 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error in hook dispatch for {}/{}: {}",
           endpointType, entityName, e.getMessage(), e);
-      return NeoResponse.error(500, HOOK_ERROR_PREFIX + e.getMessage());
+      return NeoResponse.error(500, "An internal error occurred while processing the hook handler");
     }
   }
 
