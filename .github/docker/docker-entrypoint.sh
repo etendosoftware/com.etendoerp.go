@@ -76,7 +76,7 @@ tomcat.manager.password=admin
 minimizeJSandCSS=yes
 sqlc.queryExecutionStrategy=optimized
 authentication.class=
-validate.model=true
+validate.model=false
 isMinorVersion=false
 safe.mode=false
 strict.template.application=false
@@ -96,4 +96,10 @@ echo ">>> openbravo.properties written."
 # Start Tomcat in foreground
 # ─────────────────────────────────────────────
 echo ">>> Starting Tomcat on port 8080..."
+
+# Redirigir logs de Etendo (log4j) a stdout para que aparezcan en CloudWatch
+ETENDO_LOG="$CATALINA_HOME/logs/openbravo.log"
+touch "$ETENDO_LOG" 2>/dev/null || true
+tail -F "$ETENDO_LOG" 2>/dev/null &
+
 exec "$CATALINA_HOME/bin/catalina.sh" run
