@@ -76,7 +76,7 @@ tomcat.manager.password=admin
 minimizeJSandCSS=yes
 sqlc.queryExecutionStrategy=optimized
 authentication.class=
-validate.model=true
+validate.model=false
 isMinorVersion=false
 safe.mode=false
 strict.template.application=false
@@ -93,7 +93,20 @@ EOF
 echo ">>> openbravo.properties written."
 
 # ─────────────────────────────────────────────
+# Enable Etendo Console appender so logs go to stdout → CloudWatch
+# log4j2-web.xml ships with Console commented out; patch it at runtime.
+# ─────────────────────────────────────────────
+LOG4J_FILE="$CATALINA_HOME/webapps/etendo/WEB-INF/classes/log4j2-web.xml"
+if [ -f "$LOG4J_FILE" ]; then
+    sed -i 's|<!-- <AppenderRef ref="Console"/> -->|<AppenderRef ref="Console"/>|g' "$LOG4J_FILE"
+    echo ">>> Console appender enabled in log4j2-web.xml."
+else
+    echo ">>> WARNING: log4j2-web.xml not found at $LOG4J_FILE"
+fi
+
+# ─────────────────────────────────────────────
 # Start Tomcat in foreground
 # ─────────────────────────────────────────────
 echo ">>> Starting Tomcat on port 8080..."
+
 exec "$CATALINA_HOME/bin/catalina.sh" run
