@@ -116,6 +116,37 @@ public final class OAuth2Utils {
   }
 
   /**
+   * Generate a cryptographically secure authorization code (32 bytes, 64 hex chars).
+   */
+  public static String generateAuthCode() {
+    byte[] bytes = new byte[TOKEN_BYTE_LENGTH];
+    SECURE_RANDOM.nextBytes(bytes);
+    return bytesToHex(bytes);
+  }
+
+  /**
+   * Verify a PKCE S256 code_challenge against a code_verifier.
+   * S256: code_challenge = BASE64URL(SHA256(ASCII(code_verifier)))
+   *
+   * @param codeVerifier  the original code_verifier sent in the token request
+   * @param codeChallenge the code_challenge sent in the authorize request
+   * @return true if the verifier matches the challenge
+   */
+  public static boolean verifyCodeChallenge(String codeVerifier, String codeChallenge) {
+    if (codeVerifier == null || codeChallenge == null) {
+      return false;
+    }
+    try {
+      MessageDigest digest = MessageDigest.getInstance(HASH_ALGORITHM);
+      byte[] hash = digest.digest(codeVerifier.getBytes(StandardCharsets.US_ASCII));
+      String computed = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(hash);
+      return constantTimeEquals(computed, codeChallenge);
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException("SHA-256 not available", e);
+    }
+  }
+
+  /**
    * Compute SHA-256 hex digest of the input string.
    */
   private static String sha256Hex(String input) {

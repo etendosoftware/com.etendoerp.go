@@ -115,6 +115,7 @@ public class ToolRegistry {
         tools.add(buildGetTool(accessibleWindowSpecs));
         tools.add(buildSelectorsTool(accessibleWindowSpecs));
         tools.add(buildDefaultsTool(accessibleWindowSpecs));
+        tools.add(buildSchemaTool(accessibleWindowSpecs));
       }
       if (canWrite) {
         tools.add(buildCreateTool(accessibleWindowSpecs));
@@ -168,6 +169,7 @@ public class ToolRegistry {
       case "neo_delete":
       case "neo_selectors":
       case "neo_defaults":
+      case "neo_schema":
         return true;
       default:
         return false;
@@ -278,6 +280,21 @@ public class ToolRegistry {
         "neo_defaults",
         "Get default field values for creating a new record. "
             + "Call this before neo_create to know which fields are pre-populated.",
+        buildObjectSchema(props, List.of("spec", "entity")));
+  }
+
+  // ── Schema tool ────────────────────────────────────────────────────────
+
+  private McpToolDefinition buildSchemaTool(List<String> specNames) {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("spec", enumProp("Spec name (use neo_discover to find available specs)", specNames));
+    props.put("entity", stringProp("Entity name within the spec (e.g. 'Header', 'Lines')", true));
+
+    return new McpToolDefinition(
+        "neo_schema",
+        "Get the field schema for an entity: field names, types, required flag, "
+            + "read-only flag, default values, and which fields have FK selectors. "
+            + "Call this BEFORE neo_create to know which fields exist and which are required.",
         buildObjectSchema(props, List.of("spec", "entity")));
   }
 

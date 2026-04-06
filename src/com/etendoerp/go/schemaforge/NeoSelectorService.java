@@ -203,6 +203,39 @@ public class NeoSelectorService {
             "Could not resolve AD_Column for field: " + columnName);
       }
 
+      return querySelectorByColumn(column, columnName, search, limit, offset, contextParams);
+
+    } catch (Exception e) {
+      log.error("Error querying selector {}/{}", entityName, columnName, e);
+      return NeoResponse.error(500, e.getMessage());
+    }
+  }
+
+  /**
+   * Query selector values using an AD_Column directly, bypassing ETGO_SF_FIELD lookup.
+   * Used by the MCP layer to resolve FK selectors for ALL dictionary columns,
+   * not just those included in ETGO_SF_FIELD configuration.
+   *
+   * @param column       the AD_Column to query selectors for
+   * @param columnName   the DB column name (for error messages)
+   * @param search       optional search text
+   * @param limit        page size (default 20, max 100)
+   * @param offset       page offset (default 0)
+   * @param contextParams context parameters for validation rule resolution
+   */
+  public static NeoResponse querySelectorByColumn(Column column, String columnName,
+      String search, int limit, int offset, Map<String, String> contextParams) {
+    try {
+      if (limit <= 0) {
+        limit = DEFAULT_LIMIT;
+      }
+      if (limit > MAX_LIMIT) {
+        limit = MAX_LIMIT;
+      }
+      if (offset < 0) {
+        offset = 0;
+      }
+
       String refId = getBaseReferenceId(column);
       boolean isObuisel = hasObuiselSelector(column);
       if (!isObuisel && !isFkReference(refId)) {
@@ -226,7 +259,7 @@ public class NeoSelectorService {
       return executeQuery(meta, search, limit, offset, validationFilter);
 
     } catch (Exception e) {
-      log.error("Error querying selector {}/{}", entityName, columnName, e);
+      log.error("Error querying selector by column {}", columnName, e);
       return NeoResponse.error(500, e.getMessage());
     }
   }

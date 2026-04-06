@@ -98,6 +98,8 @@ public class McpToolRouter {
             return handleSelectors(specName, arguments);
           case "neo_defaults":
             return handleDefaults(specName, arguments);
+          case "neo_schema":
+            return handleSchema(specName, arguments);
           default:
             // Check if it's a report tool (generate_*)
             if (toolName.startsWith("generate_")) {
@@ -290,8 +292,10 @@ public class McpToolRouter {
 
     Map<String, String> params = buildBaseParams(adTab, dalEntityName);
 
-    // Filter out non-included and read-only fields
-    JSONObject filteredBody = fieldFilter.filterWriteRequest(fields);
+    // MCP: accept all valid table columns from AI agents, not just SF-configured ones.
+    // filterWriteRequest strips fields not in ETGO_SF_FIELD writableFields, which is
+    // too restrictive for MCP where AI agents need to set any valid column.
+    JSONObject filteredBody = mapFieldsToDalProperties(fields, adTab);
 
     // Resolve parentId if present
     String parentIdValue = null;
@@ -311,6 +315,13 @@ public class McpToolRouter {
         .obContext(OBContext.getOBContext())
         .build();
     NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, ctx, parentIdValue);
+
+    // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
+    // go through the DAL as an entity reference. Replace with a real value from the body
+    // when possible (e.g. documentType="0" -> copy from transactionDocument), or remove.
+    Entity dalEntity = ModelProvider.getInstance()
+        .getEntityByTableId(adTab.getTable().getId());
+    resolveFkSentinels(filteredBody, dalEntity);
 
     // Wrap for DefaultJsonDataService
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
@@ -349,8 +360,8 @@ public class McpToolRouter {
 
     Map<String, String> params = buildBaseParams(adTab, dalEntityName);
 
-    // Filter out non-included and read-only fields
-    JSONObject filteredBody = fieldFilter.filterWriteRequest(fields);
+    // MCP: accept all valid table columns from AI agents
+    JSONObject filteredBody = mapFieldsToDalProperties(fields, adTab);
 
     // Wrap for DefaultJsonDataService with record ID
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, recordId);
@@ -406,19 +417,34 @@ public class McpToolRouter {
 
   /**
    * Query FK selector values for a column.
+   * Resolves the AD_Column from the dictionary (AD_Tab → AD_Table → AD_Column),
+   * bypassing ETGO_SF_FIELD so all FK columns are queryable — not just included ones.
    */
   private JSONObject handleSelectors(String specName, JSONObject args) throws Exception {
     validateArgs(args, "entity", "column");
 
     String entityName = args.getString("entity");
-    String column = args.getString("column");
+    String columnName = args.getString("column");
     String query = args.optString("query", null);
 
     SFSpec spec = findSpecOrThrow(specName);
+    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
-    NeoResponse neoResponse = NeoSelectorService.querySelector(
-        spec.getId(), entityName, column,
-        query, 50, 0, new HashMap<>());
+    // Find the AD_Column by DB column name directly from the table
+    Column adColumn = null;
+    for (Column col : adTab.getTable().getADColumnList()) {
+      if (col.getDBColumnName().equalsIgnoreCase(columnName)) {
+        adColumn = col;
+        break;
+      }
+    }
+    if (adColumn == null) {
+      throw new IllegalArgumentException("Column not found in table: " + columnName);
+    }
+
+    NeoResponse neoResponse = NeoSelectorService.querySelectorByColumn(
+        adColumn, columnName, query, 50, 0, new HashMap<>());
 
     return neoResponseToMcpResult(neoResponse);
   }
@@ -448,6 +474,157 @@ public class McpToolRouter {
 
     NeoResponse neoResponse = NeoDefaultsService.resolveDefaults(ctx, null);
     return neoResponseToMcpResult(neoResponse);
+  }
+
+  // ── neo_schema ─────────────────────────────────────────────────────────
+
+  // AD_Reference IDs for selector types (FK references)
+  private static final java.util.Set<String> SELECTOR_REFS = new java.util.HashSet<>(
+      java.util.Arrays.asList("19", "18", "30", "95E2A8B50A254B2AAE6774B8C2F28120"));
+
+  // System/audit columns excluded from schema (auto-managed by Etendo)
+  private static final java.util.Set<String> SYSTEM_COLUMNS = new java.util.HashSet<>(
+      java.util.Arrays.asList(
+          "AD_CLIENT_ID", "AD_ORG_ID", "ISACTIVE",
+          "CREATED", "CREATEDBY", "UPDATED", "UPDATEDBY"));
+
+  /**
+   * Get the field schema for an entity from the AD dictionary.
+   * Reads AD_Column metadata directly (same source as the Etendo classic UI form),
+   * so the agent sees exactly the same fields the UI would show.
+   */
+  private JSONObject handleSchema(String specName, JSONObject args) throws Exception {
+    validateArgs(args, "entity");
+
+    String entityName = args.getString("entity");
+
+    SFSpec spec = findSpecOrThrow(specName);
+    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    Tab adTab = getAdTabOrThrow(sfEntity, entityName);
+
+    Entity dalEntity = ModelProvider.getInstance()
+        .getEntityByTableName(adTab.getTable().getDBTableName());
+
+    // Build fields array from AD_Column (dictionary-driven, like the classic UI)
+    JSONArray fieldsArray = new JSONArray();
+    for (Column col : adTab.getTable().getADColumnList()) {
+      if (!col.isActive()) {
+        continue;
+      }
+      String dbColName = col.getDBColumnName();
+      if (SYSTEM_COLUMNS.contains(dbColName.toUpperCase())) {
+        continue;
+      }
+
+      // Resolve DAL property name (camelCase, matches GET response keys)
+      String propName = dbColName;
+      if (dalEntity != null) {
+        try {
+          Property prop = dalEntity.getPropertyByColumnName(dbColName);
+          if (prop != null) {
+            propName = prop.getName();
+          }
+        } catch (Exception ignored) {
+          // keep dbColName as fallback
+        }
+      }
+
+      String refId = col.getReference() != null
+          ? (String) col.getReference().getId() : null;
+
+      JSONObject fieldObj = new JSONObject();
+      fieldObj.put("name", propName);
+      fieldObj.put("column", dbColName);
+      fieldObj.put("label", col.getName());
+      fieldObj.put("type", mapColumnType(refId));
+      fieldObj.put("required", col.isMandatory());
+
+      // A field is readOnly if: it's a PK, a DocumentNo, or has an automatic sequence
+      String tableName = adTab.getTable().getDBTableName();
+      String expectedPK = tableName + "_ID";
+      boolean isReadOnly = expectedPK.equalsIgnoreCase(dbColName)
+          || "DocumentNo".equalsIgnoreCase(dbColName)
+          || (Boolean.TRUE.equals(col.isUseAutomaticSequence()));
+      fieldObj.put("readOnly", isReadOnly);
+
+      // Default value expression (so agent knows what the system auto-fills)
+      String defaultExpr = col.getDefaultValue();
+      if (defaultExpr != null && !defaultExpr.trim().isEmpty()) {
+        fieldObj.put("defaultExpression", defaultExpr.trim());
+      }
+
+      // FK selector info
+      boolean hasSelector = refId != null && SELECTOR_REFS.contains(refId);
+      if (hasSelector) {
+        fieldObj.put("hasSelector", true);
+        fieldObj.put("selectorType", mapSelectorType(refId));
+      }
+
+      fieldsArray.put(fieldObj);
+    }
+
+    // Build entity schema
+    JSONObject entitySchema = new JSONObject();
+    entitySchema.put("spec", specName);
+    entitySchema.put("entity", entityName);
+    entitySchema.put("table", adTab.getTable().getDBTableName());
+
+    // Methods from SFEntity config
+    JSONArray methods = new JSONArray();
+    if (Boolean.TRUE.equals(sfEntity.isGet()) || Boolean.TRUE.equals(sfEntity.isGetByID())) {
+      methods.put("GET");
+    }
+    if (Boolean.TRUE.equals(sfEntity.isPost())) {
+      methods.put("POST");
+    }
+    if (Boolean.TRUE.equals(sfEntity.isPut())) {
+      methods.put("PUT");
+    }
+    if (Boolean.TRUE.equals(sfEntity.isDelete())) {
+      methods.put("DELETE");
+    }
+    entitySchema.put("methods", methods);
+    entitySchema.put("fields", fieldsArray);
+    entitySchema.put("fieldCount", fieldsArray.length());
+
+    // Usage hints
+    entitySchema.put("hint",
+        "Fields with hasSelector=true: use neo_selectors to look up valid FK values. "
+        + "Fields with required=true and no defaultExpression: you MUST provide a value in neo_create. "
+        + "Fields with readOnly=true are auto-generated (DocumentNo, IDs). "
+        + "Fields with a defaultExpression are auto-filled if you omit them (e.g. dates, currency).");
+
+    return wrapAsTextContent(entitySchema.toString(2));
+  }
+
+  private String mapColumnType(String refId) {
+    if (refId == null) return "string";
+    switch (refId) {
+      case "10": case "14": case "34": return "string";
+      case "11": case "22": case "29": case "12":
+      case "800008": case "800019": return "number";
+      case "20": return "boolean";
+      case "15": return "date";
+      case "16": return "datetime";
+      case "24": return "time";
+      case "28": return "button";
+      case "17": return "list";
+      case "13": return "id";
+      case "19": case "18": case "30":
+      case "95E2A8B50A254B2AAE6774B8C2F28120": return "foreignKey";
+      default: return "string";
+    }
+  }
+
+  private String mapSelectorType(String refId) {
+    if (refId == null) return null;
+    switch (refId) {
+      case "19": return "TableDir";
+      case "18": return "Table";
+      case "30": return "Search";
+      case "95E2A8B50A254B2AAE6774B8C2F28120": return "OBUISEL";
+      default: return null;
+    }
   }
 
   // ── Process execution ─────────────────────────────────────────────────
@@ -636,6 +813,90 @@ public class McpToolRouter {
       }
     }
     return where.length() > 0 ? where.toString() : null;
+  }
+
+  /**
+   * Map user-provided fields to DAL property names without SF-field filtering.
+   * Accepts both DAL property names ("businessPartner") and DB column names
+   * ("C_BPartner_ID"), resolving all to their DAL property equivalents.
+   * This allows MCP AI agents to set any valid column on the table.
+   */
+  private JSONObject mapFieldsToDalProperties(JSONObject fields, Tab adTab)
+      throws JSONException {
+    Entity dalEntity = ModelProvider.getInstance()
+        .getEntityByTableId(adTab.getTable().getId());
+    JSONObject mapped = new JSONObject();
+
+    Iterator<String> keys = fields.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      Object value = fields.get(key);
+
+      // Try as DAL property name first
+      Property prop = dalEntity.getProperty(key, false);
+      if (prop != null) {
+        mapped.put(key, value);
+        continue;
+      }
+
+      // Try as DB column name
+      prop = dalEntity.getPropertyByColumnName(key, false);
+      if (prop != null) {
+        mapped.put(prop.getName(), value);
+        continue;
+      }
+
+      // Pass through unknown keys (parentId, etc.)
+      mapped.put(key, value);
+    }
+    return mapped;
+  }
+
+  /**
+   * Replace FK sentinel values ("0") in the body with real values.
+   * The DAL's JsonToDataConverter tries to load entities by ID, and "0" is not a valid UUID.
+   * In Etendo, "0" means "not yet determined" — the real value comes from a related field
+   * (e.g. C_DocType_ID copies from C_DocTypeTarget_ID). For each sentinel, we find another
+   * property in the body that targets the same entity and has a real value.
+   */
+  private void resolveFkSentinels(JSONObject body, Entity dalEntity) throws JSONException {
+    // First pass: collect all sentinels and all real FK values by target entity
+    Map<String, String> sentinelProps = new HashMap<>(); // propName -> targetEntityName
+    Map<String, String> realValues = new HashMap<>();    // targetEntityName -> value
+
+    Iterator<String> keys = body.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      Property prop = dalEntity.getProperty(key, false);
+      if (prop == null || prop.isPrimitive() || prop.getTargetEntity() == null) {
+        continue;
+      }
+      String targetEntity = prop.getTargetEntity().getName();
+      String value = body.optString(key, "");
+      if ("0".equals(value)) {
+        sentinelProps.put(key, targetEntity);
+      } else if (!value.isEmpty()) {
+        realValues.put(targetEntity, value);
+      }
+    }
+
+    // Second pass: replace sentinels with real values from same-target-entity fields
+    for (Map.Entry<String, String> entry : sentinelProps.entrySet()) {
+      String propName = entry.getKey();
+      String targetEntity = entry.getValue();
+      String realValue = realValues.get(targetEntity);
+      if (realValue != null) {
+        body.put(propName, realValue);
+        log.debug("Resolved FK sentinel: {} = {} (from sibling targeting {})",
+            propName, realValue, targetEntity);
+      } else {
+        // No sibling with real value — remove to avoid DAL error. The column must
+        // either have a DB default or be nullable; if not, the INSERT will fail.
+        body.remove(propName);
+        log.warn("Removed FK sentinel '0' for {} — no sibling value found for {}",
+            propName, targetEntity);
+      }
+    }
   }
 
   /**

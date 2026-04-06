@@ -1,5 +1,7 @@
 package com.etendoerp.go.mcp;
 
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.concurrent.Callable;
 
 import org.apache.logging.log4j.LogManager;
@@ -51,20 +53,40 @@ public class McpSessionManager {
 
     OBContext previousContext = OBContext.getOBContext();
     try {
-      // Set OBContext using the same method as NeoServlet.authenticateJwt
+      // Resolve org: if "0" (wildcard), find the first transactional org for this role
       String effectiveOrg = orgId != null ? orgId : DEFAULT_ORG;
+      if (DEFAULT_ORG.equals(effectiveOrg)) {
+        String resolved = resolveDefaultOrg(roleId);
+        if (resolved != null) {
+          effectiveOrg = resolved;
+          log.debug("Resolved default org for role {}: {}", roleId, effectiveOrg);
+        }
+      }
+
+      // Resolve client: if "0" (System), get the client from the role
+      // Tables with access level "Organization" reject clientId=0
+      String effectiveClient = clientId;
+      if ("0".equals(clientId)) {
+        String resolvedClient = resolveClientFromRole(roleId);
+        if (resolvedClient != null) {
+          effectiveClient = resolvedClient;
+          log.debug("Resolved client from role {}: {}", roleId, effectiveClient);
+        }
+      }
+
+      // Set OBContext using the same method as NeoServlet.authenticateJwt
       OBContext context = SecureWebServicesUtils.createContext(
-          userId, roleId, effectiveOrg, warehouseId, clientId);
+          userId, roleId, effectiveOrg, warehouseId, effectiveClient);
       OBContext.setOBContext(context);
 
       T result = callable.call();
 
-      // Commit and close the Hibernate session on success
-      OBDal.getInstance().commitAndClose();
+      // Flush but do NOT close — DalRequestFilter owns the session lifecycle
+      OBDal.getInstance().flush();
 
       return result;
     } catch (Exception e) {
-      // Rollback on failure
+      // Rollback on failure but do NOT close the session
       try {
         OBDal.getInstance().rollbackAndClose();
       } catch (Exception rollbackEx) {
@@ -127,5 +149,62 @@ public class McpSessionManager {
   public static void runInContext(String userId, String roleId,
       String clientId, Runnable action) throws Exception {
     runInContext(userId, roleId, clientId, DEFAULT_ORG, null, action);
+  }
+
+  /**
+   * Resolve the AD_Client_ID from the role record.
+   * When the OAuth2 token stores clientId="0" (System), we need the role's actual client
+   * because tables with access level "Organization" reject client 0.
+   */
+  private static String resolveClientFromRole(String roleId) {
+    try {
+      return OBDal.getInstance().getSession().doReturningWork(connection -> {
+        String sql = "SELECT ad_client_id FROM ad_role WHERE ad_role_id = ?";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+          ps.setString(1, roleId);
+          try (ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) {
+              String cid = rs.getString(1);
+              return "0".equals(cid) ? null : cid;
+            }
+          }
+        }
+        return null;
+      });
+    } catch (Exception e) {
+      log.warn("Failed to resolve client from role {}: {}", roleId, e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Resolve the first transactional organization accessible by the given role.
+   * Uses the Hibernate session's JDBC connection (same pattern as OAuth2Filter).
+   * Returns null if no transactional org is found (falls back to org "0").
+   */
+  private static String resolveDefaultOrg(String roleId) {
+    try {
+      return OBDal.getInstance().getSession().doReturningWork(connection -> {
+        String sql =
+            "SELECT ra.ad_org_id FROM ad_role_orgaccess ra "
+            + "JOIN ad_org o ON ra.ad_org_id = o.ad_org_id "
+            + "JOIN ad_orgtype ot ON o.ad_orgtype_id = ot.ad_orgtype_id "
+            + "WHERE ra.ad_role_id = ? AND ra.isactive = 'Y' AND o.isactive = 'Y' "
+            + "AND ot.istransactionsallowed = 'Y' "
+            + "ORDER BY o.name LIMIT 1";
+        try (PreparedStatement ps = connection.prepareStatement(sql)) {
+          ps.setString(1, roleId);
+          try (ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) {
+              return rs.getString(1);
+            }
+          }
+        }
+        return null;
+      });
+    } catch (Exception e) {
+      log.warn("Failed to resolve default org for role {}: {}", roleId, e.getMessage());
+      return null;
+    }
   }
 }
