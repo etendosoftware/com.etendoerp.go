@@ -1,6 +1,7 @@
 # Build
 build/
 out/
+web/
 *.class
 
 # IDE
