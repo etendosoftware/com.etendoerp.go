@@ -86,6 +86,7 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 public class NeoServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
+  private static final String HOOK_ERROR_MSG = "An internal error occurred while processing the hook handler";
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -387,9 +388,41 @@ public class NeoServlet extends HttpBaseServlet {
           "Actions support GET (list) and POST (execute)");
       return true;
     }
+    JSONObject actionBody = null;
+    if ("POST".equals(method)) {
+      try {
+        byte[] bodyBytes = request.getInputStream().readAllBytes();
+        String bodyStr = new String(bodyBytes, java.nio.charset.StandardCharsets.UTF_8);
+        if (StringUtils.isNotBlank(bodyStr)) {
+          actionBody = new JSONObject(bodyStr);
+        }
+        // Reset the input stream for handleButtonAction fallback
+        // Wrap request to allow re-reading the body
+        final byte[] cachedBody = bodyBytes;
+        request = new javax.servlet.http.HttpServletRequestWrapper(request) {
+          @Override
+          public javax.servlet.ServletInputStream getInputStream() {
+            return new javax.servlet.ServletInputStream() {
+              private final java.io.ByteArrayInputStream bais = new java.io.ByteArrayInputStream(cachedBody);
+              @Override public int read() { return bais.read(); }
+              @Override public boolean isFinished() { return bais.available() == 0; }
+              @Override public boolean isReady() { return true; }
+              @Override public void setReadListener(javax.servlet.ReadListener l) {
+                // No async support needed for cached body re-reading
+              }
+            };
+          }
+        };
+      } catch (Exception ignored) {
+        // Body parsing is optional; action proceeds without it
+      }
+    }
+    final HttpServletRequest wrappedRequest = request;
+    ActionDispatchParams actionParams = new ActionDispatchParams(
+        pathInfo.recordId, actionBody);
     NeoResponse actionResult = dispatchWithHooks(spec, pathInfo.entityName,
-        NeoEndpointType.ACTION, pathInfo.actionName, method,
-        () -> handleButtonAction(spec, pathInfo, method, request));
+        NeoEndpointType.ACTION, pathInfo.actionName, method, actionParams,
+        () -> handleButtonAction(spec, pathInfo, method, wrappedRequest));
     writeResponse(response, actionResult);
     return true;
   }
@@ -640,7 +673,7 @@ public class NeoServlet extends HttpBaseServlet {
       return afterResult != null ? afterResult : defaultResult;
     } catch (Exception e) {
       log.error("Error executing hook handler: {}", javaQualifier, e);
-      return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
+      return NeoResponse.error(500, HOOK_ERROR_MSG);
     }
   }
 
@@ -724,7 +757,78 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error in hook dispatch for {}/{}: {}",
           endpointType, entityName, e.getMessage(), e);
-      return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
+      return NeoResponse.error(500, HOOK_ERROR_MSG);
+    }
+  }
+
+  /**
+   * Groups the extra parameters needed by action endpoint hook dispatch,
+   * reducing the method parameter count.
+   */
+  private static class ActionDispatchParams {
+    final String recordId;
+    final JSONObject requestBody;
+
+    ActionDispatchParams(String recordId, JSONObject requestBody) {
+      this.recordId = recordId;
+      this.requestBody = requestBody;
+    }
+  }
+
+  /**
+   * Overload that passes recordId and requestBody to the hook context.
+   * Used by action endpoints where the record context matters.
+   */
+  private NeoResponse dispatchWithHooks(
+      SFSpec spec, String entityName,
+      NeoEndpointType endpointType, String fieldName,
+      String httpMethod, ActionDispatchParams actionParams,
+      java.util.function.Supplier<NeoResponse> defaultAction) {
+
+    SFEntity entity = findEntity(spec.getId(), entityName);
+    String qualifier = (entity != null) ? entity.getJavaQualifier() : null;
+
+    if (StringUtils.isBlank(qualifier)) {
+      return defaultAction.get();
+    }
+
+    NeoHandler handler = lookupHandler(qualifier);
+    if (handler == null) {
+      return defaultAction.get();
+    }
+
+    Tab adTab = (entity != null) ? getAdTab(entity) : null;
+    NeoContext hookCtx = NeoContext.builder()
+        .specName(spec.getName())
+        .entityName(entityName)
+        .httpMethod(httpMethod)
+        .endpointType(endpointType)
+        .fieldName(fieldName)
+        .recordId(actionParams.recordId)
+        .requestBody(actionParams.requestBody)
+        .sfEntity(entity)
+        .adTab(adTab)
+        .obContext(OBContext.getOBContext())
+        .build();
+
+    try {
+      NeoResponse preResult = handler.handle(hookCtx);
+      if (preResult != null) {
+        hookCtx.setPreviousResult(preResult);
+        NeoResponse afterResult = handler.afterHandle(hookCtx);
+        return afterResult != null ? afterResult : preResult;
+      }
+
+      NeoResponse defaultResult = defaultAction.get();
+
+      hookCtx.setPreviousResult(defaultResult);
+      NeoResponse afterResult = handler.afterHandle(hookCtx);
+      return afterResult != null ? afterResult : defaultResult;
+
+    } catch (Exception e) {
+      log.error("Error in hook dispatch for {}/{}: {}",
+          endpointType, entityName, e.getMessage(), e);
+      return NeoResponse.error(500, HOOK_ERROR_MSG);
     }
   }
 
