@@ -293,8 +293,10 @@ public class ToolRegistry {
     return new McpToolDefinition(
         "neo_schema",
         "Get the field schema for an entity: field names, types, required flag, "
-            + "read-only flag, default values, and which fields have FK selectors. "
-            + "Call this BEFORE neo_create to know which fields exist and which are required.",
+            + "read-only flag, default values, visibility (editable/readOnly/system/discarded), "
+            + "and which fields have FK selectors. Call this BEFORE neo_create to know which "
+            + "fields exist and which are required. Only fields with userRequired=true need to "
+            + "be provided — system fields are auto-derived by Etendo callouts.",
         buildObjectSchema(props, List.of("spec", "entity")));
   }
 
