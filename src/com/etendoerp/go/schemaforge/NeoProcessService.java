@@ -42,8 +42,10 @@ import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.model.ad.process.ProcessInstance;
+import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.ProcessParameter;
+import org.openbravo.model.ad.ui.ProcessParameterTrl;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.service.db.CallProcess;
@@ -352,8 +354,20 @@ public class NeoProcessService {
   /**
    * Build a JSONArray describing all active parameters of a process.
    */
+  private static String getTranslatedParamName(ProcessParameter param, Language lang) {
+    if (lang == null) return param.getName();
+    OBCriteria<ProcessParameterTrl> criteria = OBDal.getInstance()
+        .createCriteria(ProcessParameterTrl.class);
+    criteria.add(Restrictions.eq(ProcessParameterTrl.PROPERTY_PROCESSPARAMETER, param));
+    criteria.add(Restrictions.eq(ProcessParameterTrl.PROPERTY_LANGUAGE, lang));
+    criteria.setMaxResults(1);
+    ProcessParameterTrl trl = (ProcessParameterTrl) criteria.uniqueResult();
+    return (trl != null && trl.getName() != null) ? trl.getName() : param.getName();
+  }
+
   private static JSONArray buildParameterArray(Process process)
       throws JSONException {
+    Language lang = OBContext.getOBContext().getLanguage();
     JSONArray parameters = new JSONArray();
     List<ProcessParameter> paramList = process.getADProcessParameterList();
 
@@ -362,7 +376,7 @@ public class NeoProcessService {
         continue;
       }
       JSONObject paramObj = new JSONObject();
-      paramObj.put("name", param.getName());
+      paramObj.put("name", getTranslatedParamName(param, lang));
       paramObj.put("dbColumnName", param.getDBColumnName());
       paramObj.put("sequenceNumber", param.getSequenceNumber());
       paramObj.put("mandatory",
