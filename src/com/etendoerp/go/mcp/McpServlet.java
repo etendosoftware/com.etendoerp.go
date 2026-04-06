@@ -9,12 +9,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
-import javax.servlet.AsyncContext;
-import javax.servlet.AsyncEvent;
-import javax.servlet.AsyncListener;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -25,28 +20,26 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
+import org.openbravo.dal.core.OBContext;
+
 import com.etendoerp.go.oauth2.OAuth2Filter;
 
 /**
- * MCP (Model Context Protocol) servlet implementing SSE transport over javax.servlet.
+ * MCP (Model Context Protocol) servlet implementing Streamable HTTP transport.
  * <p>
- * The MCP Java SDK's built-in {@code HttpServletSseServerTransportProvider} requires
- * jakarta.servlet (Servlet 6.0), which is incompatible with Etendo's Tomcat 9 runtime
- * (javax.servlet / Servlet 4.0). This servlet implements the MCP SSE transport manually
- * using {@link AsyncContext}.
+ * Uses stateless request/response over POST instead of SSE+AsyncContext,
+ * because Etendo's servlet filter chain (DalRequestFilter, KernelFilter, etc.)
+ * does not support async operations.
  * <p>
- * <b>MCP SSE Protocol:</b>
- * <ol>
- *   <li>Client sends GET to {@code /sws/mcp} — server opens SSE stream, sends
- *       an {@code endpoint} event with a POST URL containing the session ID</li>
- *   <li>Client sends JSON-RPC 2.0 messages as POST to that endpoint URL</li>
- *   <li>Server processes each message and writes SSE {@code message} events back
- *       on the held GET connection</li>
- * </ol>
+ * <b>Streamable HTTP Protocol:</b>
+ * <ul>
+ *   <li>Client sends JSON-RPC 2.0 messages as POST to {@code /sws/mcp}</li>
+ *   <li>Server processes each message and returns the JSON-RPC response directly</li>
+ *   <li>No persistent SSE connection — each call is independent</li>
+ * </ul>
  * <p>
- * Authentication is handled upstream by {@link OAuth2Filter}, which sets request
- * attributes (userId, roleId, clientId, orgId, scopes). Each tool call is executed
- * within a scoped OBContext via {@link McpSessionManager}.
+ * Authentication is handled inline via {@link OAuth2Filter#validateToken(String)}.
+ * Each tool call is executed within a scoped OBContext via {@link McpSessionManager}.
  */
 public class McpServlet extends HttpServlet {
 
@@ -57,174 +50,173 @@ public class McpServlet extends HttpServlet {
   private static final String SERVER_NAME = "etendo-neo";
   private static final String SERVER_VERSION = "1.0.0";
 
-  private static final String CONTENT_TYPE_SSE = "text/event-stream";
   private static final String CONTENT_TYPE_JSON = "application/json;charset=UTF-8";
-  private static final String CHARSET_UTF8 = "UTF-8";
 
-  /** Active SSE sessions keyed by session ID. Thread-safe for concurrent access. */
-  private final Map<String, SseSession> sessions = new ConcurrentHashMap<>();
+  // ── CORS ───────────────────────────────────────────────────────────────
 
-  // ── GET: Open SSE connection ────────────────────────────────────────────
+  private void setCorsHeaders(HttpServletResponse response) {
+    response.setHeader("Access-Control-Allow-Origin", "*");
+    response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    response.setHeader("Access-Control-Allow-Headers",
+        "Content-Type, Authorization, Accept, Mcp-Session-Id");
+    response.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id, WWW-Authenticate");
+    response.setHeader("Access-Control-Max-Age", "86400");
+  }
 
-  /**
-   * Handle GET /sws/mcp — open an SSE connection.
-   * <p>
-   * Starts an async context with no timeout, creates an SseSession storing the
-   * OAuth2 identity, registers cleanup listeners, and sends the initial
-   * {@code endpoint} event telling the client where to POST JSON-RPC messages.
-   */
   @Override
-  protected void doGet(HttpServletRequest request, HttpServletResponse response)
+  protected void doOptions(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-
-    // Read OAuth2 identity — set by OAuth2Filter if registered, or validate inline
-    String userId = (String) request.getAttribute(OAuth2Filter.ATTR_USER_ID);
-    String roleId = (String) request.getAttribute(OAuth2Filter.ATTR_ROLE_ID);
-    String clientId = (String) request.getAttribute(OAuth2Filter.ATTR_CLIENT_ID);
-    String orgId = (String) request.getAttribute(OAuth2Filter.ATTR_ORG_ID);
-    String scopes = (String) request.getAttribute(OAuth2Filter.ATTR_SCOPES);
-
-    // If filter was not registered, validate token inline
-    if (userId == null) {
-      String authHeader = request.getHeader("Authorization");
-      if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-        response.setContentType(CONTENT_TYPE_JSON);
-        response.getWriter().write("{\"error\":\"Missing Authorization: Bearer <token> header\"}");
-        return;
-      }
-      String bearerToken = authHeader.substring(7).trim();
-      java.util.Map<String, String> identity = OAuth2Filter.validateToken(bearerToken);
-      if (identity == null) {
-        response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-        response.setContentType(CONTENT_TYPE_JSON);
-        response.getWriter().write("{\"error\":\"Invalid or expired OAuth2 token\"}");
-        return;
-      }
-      userId = identity.get(OAuth2Filter.ATTR_USER_ID);
-      roleId = identity.get(OAuth2Filter.ATTR_ROLE_ID);
-      clientId = identity.get(OAuth2Filter.ATTR_CLIENT_ID);
-      orgId = identity.get(OAuth2Filter.ATTR_ORG_ID);
-      scopes = identity.get(OAuth2Filter.ATTR_SCOPES);
-    }
-
-    // SSE response headers
-    response.setContentType(CONTENT_TYPE_SSE);
-    response.setCharacterEncoding(CHARSET_UTF8);
-    response.setHeader("Cache-Control", "no-cache");
-    response.setHeader("Connection", "keep-alive");
-    response.setHeader("X-Accel-Buffering", "no");
-
-    // Start async context — SSE connections are long-lived
-    AsyncContext asyncContext = request.startAsync();
-    asyncContext.setTimeout(0); // No timeout
-
-    // Create session
-    String sessionId = UUID.randomUUID().toString();
-    SseSession session = new SseSession(
-        sessionId, asyncContext, userId, roleId, clientId, orgId, scopes);
-    sessions.put(sessionId, session);
-
-    // Register cleanup on disconnect, timeout, or error
-    asyncContext.addListener(new AsyncListener() {
-      @Override
-      public void onComplete(AsyncEvent event) {
-        cleanupSession(sessionId);
-      }
-
-      @Override
-      public void onTimeout(AsyncEvent event) {
-        cleanupSession(sessionId);
-      }
-
-      @Override
-      public void onError(AsyncEvent event) {
-        cleanupSession(sessionId);
-      }
-
-      @Override
-      public void onStartAsync(AsyncEvent event) {
-        // No action needed
-      }
-    });
-
-    // Send the initial "endpoint" event — tells the client the POST URL
-    String postUrl = request.getContextPath() + request.getServletPath() + "/" + sessionId;
-    sendSseEvent(session, "endpoint", postUrl);
-
-    log.info("MCP SSE session opened: {} (user: {}, role: {})", sessionId, userId, roleId);
+    setCorsHeaders(response);
+    response.setStatus(HttpServletResponse.SC_NO_CONTENT);
   }
 
   // ── POST: Receive JSON-RPC message ──────────────────────────────────────
 
   /**
-   * Handle POST /sws/mcp/{sessionId} — receive a JSON-RPC 2.0 message.
+   * Handle POST /sws/mcp — receive a JSON-RPC 2.0 message and respond synchronously.
    * <p>
-   * Parses the session ID from the path, looks up the SSE session, dispatches
-   * the JSON-RPC method, and writes the response back as an SSE event on the
-   * GET connection. The HTTP response to the POST is always 202 Accepted.
+   * Validates the OAuth2 Bearer token, parses the JSON-RPC request, dispatches
+   * the method, and returns the JSON-RPC response in the same HTTP response.
    */
   @Override
   protected void doPost(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
 
-    String pathInfo = request.getPathInfo();
-    if (pathInfo == null || pathInfo.length() < 2) {
-      sendJsonError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing session ID in path");
-      return;
+    setCorsHeaders(response);
+
+    // Authenticate via OAuth2 Bearer token
+    AuthIdentity identity = authenticate(request, response);
+    if (identity == null) {
+      return; // Response already sent by authenticate()
     }
 
-    String sessionId = pathInfo.substring(1); // Strip leading '/'
-    SseSession session = sessions.get(sessionId);
-    if (session == null) {
-      sendJsonError(response, HttpServletResponse.SC_NOT_FOUND, "Session not found: " + sessionId);
-      return;
-    }
+    response.setContentType(CONTENT_TYPE_JSON);
 
-    // Read request body
     String body = readRequestBody(request);
 
     try {
       JSONObject rpcMessage = new JSONObject(body);
       String method = rpcMessage.optString("method", "");
-      Object id = rpcMessage.opt("id"); // null for notifications (e.g. "initialized")
+      Object id = rpcMessage.opt("id");
 
-      log.debug("MCP message received: method={}, id={}, session={}", method, id, sessionId);
+      log.debug("MCP request: method={}, id={}", method, id);
 
       // Dispatch the method
-      JSONObject result = dispatchMethod(session, method, rpcMessage.optJSONObject("params"));
+      JSONObject result = dispatchMethod(identity, method, rpcMessage.optJSONObject("params"));
 
-      // Send JSON-RPC response via SSE (only for requests, not notifications)
-      if (id != null && result != null) {
-        JSONObject rpcResponse = new JSONObject();
-        rpcResponse.put("jsonrpc", "2.0");
-        rpcResponse.put("id", id);
-        rpcResponse.put("result", result);
-        sendSseEvent(session, "message", rpcResponse.toString());
+      // Notifications (no id) don't get a response body
+      if (id == null) {
+        response.setStatus(HttpServletResponse.SC_NO_CONTENT);
+        return;
       }
 
-      // HTTP POST always returns 202 Accepted
-      response.setStatus(HttpServletResponse.SC_ACCEPTED);
-      response.setContentType(CONTENT_TYPE_JSON);
-      response.getWriter().write("{\"status\":\"accepted\"}");
+      // Build JSON-RPC response
+      JSONObject rpcResponse = new JSONObject();
+      rpcResponse.put("jsonrpc", "2.0");
+      rpcResponse.put("id", id);
+      rpcResponse.put("result", result != null ? result : new JSONObject());
+
+      response.setStatus(HttpServletResponse.SC_OK);
+      response.getWriter().write(rpcResponse.toString());
 
     } catch (Exception e) {
-      log.error("Error processing MCP message for session {}: {}", sessionId, e.getMessage(), e);
+      log.error("Error processing MCP message: {}", e.getMessage(), e);
 
-      // Try to send JSON-RPC error via SSE with appropriate error code
       try {
         Object rpcId = new JSONObject(body).opt("id");
         int errorCode = (e instanceof McpMethodNotFoundException) ? -32601 : -32603;
         JSONObject errorResponse = buildJsonRpcError(rpcId, errorCode, e.getMessage());
-        sendSseEvent(session, "message", errorResponse.toString());
-      } catch (Exception sseErr) {
-        log.error("Failed to send error via SSE for session {}", sessionId, sseErr);
-      }
 
-      // HTTP POST still returns 202 — errors go via SSE
-      response.setStatus(HttpServletResponse.SC_ACCEPTED);
-      response.setContentType(CONTENT_TYPE_JSON);
-      response.getWriter().write("{\"status\":\"accepted\"}");
+        response.setStatus(HttpServletResponse.SC_OK);
+        response.getWriter().write(errorResponse.toString());
+      } catch (Exception ex) {
+        response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+        response.getWriter().write("{\"error\":\"Internal server error\"}");
+      }
+    }
+  }
+
+  // ── GET: Server info / health check ────────────────────────────────────
+
+  /**
+   * Handle GET /sws/mcp — return server info for discovery.
+   * MCP Streamable HTTP clients may GET the endpoint to check capabilities.
+   */
+  @Override
+  protected void doGet(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    setCorsHeaders(response);
+    response.setContentType(CONTENT_TYPE_JSON);
+    response.setStatus(HttpServletResponse.SC_OK);
+
+    try {
+      JSONObject info = new JSONObject();
+      info.put("name", SERVER_NAME);
+      info.put("version", SERVER_VERSION);
+      info.put("protocolVersion", PROTOCOL_VERSION);
+      info.put("transport", "streamable-http");
+      response.getWriter().write(info.toString());
+    } catch (JSONException e) {
+      response.getWriter().write("{\"name\":\"" + SERVER_NAME + "\"}");
+    }
+  }
+
+  // ── Authentication ─────────────────────────────────────────────────────
+
+  /**
+   * Validate the OAuth2 Bearer token and return the identity.
+   * Sends an error response and returns null if authentication fails.
+   */
+  private AuthIdentity authenticate(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+
+    // Check if OAuth2Filter already set attributes
+    String userId = (String) request.getAttribute(OAuth2Filter.ATTR_USER_ID);
+    if (userId != null) {
+      return new AuthIdentity(
+          userId,
+          (String) request.getAttribute(OAuth2Filter.ATTR_ROLE_ID),
+          (String) request.getAttribute(OAuth2Filter.ATTR_CLIENT_ID),
+          (String) request.getAttribute(OAuth2Filter.ATTR_ORG_ID),
+          (String) request.getAttribute(OAuth2Filter.ATTR_SCOPES));
+    }
+
+    // Inline validation
+    String authHeader = request.getHeader("Authorization");
+    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+      sendJsonError(response, HttpServletResponse.SC_UNAUTHORIZED,
+          "Missing Authorization: Bearer <token> header");
+      return null;
+    }
+
+    String bearerToken = authHeader.substring(7).trim();
+
+    // Try OAuth2 token first
+    Map<String, String> tokenIdentity = OAuth2Filter.validateToken(bearerToken);
+    if (tokenIdentity != null) {
+      return new AuthIdentity(
+          tokenIdentity.get(OAuth2Filter.ATTR_USER_ID),
+          tokenIdentity.get(OAuth2Filter.ATTR_ROLE_ID),
+          tokenIdentity.get(OAuth2Filter.ATTR_CLIENT_ID),
+          tokenIdentity.get(OAuth2Filter.ATTR_ORG_ID),
+          tokenIdentity.get(OAuth2Filter.ATTR_SCOPES));
+    }
+
+    // Fallback: try JWT token
+    try {
+      com.auth0.jwt.interfaces.DecodedJWT jwt =
+          com.smf.securewebservices.utils.SecureWebServicesUtils.decodeToken(bearerToken);
+      return new AuthIdentity(
+          jwt.getClaim("user").asString(),
+          jwt.getClaim("role").asString(),
+          jwt.getClaim("client").asString(),
+          jwt.getClaim("organization").asString(),
+          "neo:*");
+    } catch (Exception e) {
+      log.warn("Both OAuth2 and JWT authentication failed for MCP request");
+      sendJsonError(response, HttpServletResponse.SC_UNAUTHORIZED,
+          "Invalid or expired token (OAuth2 and JWT both failed)");
+      return null;
     }
   }
 
@@ -232,30 +224,25 @@ public class McpServlet extends HttpServlet {
 
   /**
    * Route a JSON-RPC method to its handler.
-   *
-   * @param session the SSE session with OAuth2 identity
-   * @param method  the JSON-RPC method name
-   * @param params  the params object (may be null)
-   * @return the result object to include in the JSON-RPC response, or null for notifications
    */
-  private JSONObject dispatchMethod(SseSession session, String method, JSONObject params)
+  private JSONObject dispatchMethod(AuthIdentity identity, String method, JSONObject params)
       throws Exception {
     switch (method) {
       case "initialize":
         return handleInitialize();
       case "initialized":
-        // Notification — no response required
+      case "notifications/initialized":
         return null;
       case "ping":
         return new JSONObject();
       case "tools/list":
-        return handleToolsList(session);
+        return handleToolsList(identity);
       case "tools/call":
-        return handleToolsCall(session, params);
+        return handleToolsCall(identity, params);
       case "resources/list":
-        return handleResourcesList(session);
+        return handleResourcesList(identity);
       case "resources/read":
-        return handleResourcesRead(session, params);
+        return handleResourcesRead(identity, params);
       default:
         throw new McpMethodNotFoundException("Method not found: " + method);
     }
@@ -263,14 +250,10 @@ public class McpServlet extends HttpServlet {
 
   // ── Handler: initialize ─────────────────────────────────────────────────
 
-  /**
-   * Handle the "initialize" method — return server capabilities and info.
-   */
   private JSONObject handleInitialize() throws JSONException {
     JSONObject result = new JSONObject();
     result.put("protocolVersion", PROTOCOL_VERSION);
 
-    // Capabilities
     JSONObject capabilities = new JSONObject();
 
     JSONObject toolsCap = new JSONObject();
@@ -283,7 +266,6 @@ public class McpServlet extends HttpServlet {
 
     result.put("capabilities", capabilities);
 
-    // Server info
     JSONObject serverInfo = new JSONObject();
     serverInfo.put("name", SERVER_NAME);
     serverInfo.put("version", SERVER_VERSION);
@@ -294,42 +276,32 @@ public class McpServlet extends HttpServlet {
 
   // ── Handler: tools/list ─────────────────────────────────────────────────
 
-  /**
-   * Handle "tools/list" — return all MCP tools the authenticated user can access.
-   * Executes within an OBContext scoped to the session's OAuth2 identity.
-   */
-  private JSONObject handleToolsList(SseSession session) throws Exception {
-    return McpSessionManager.executeInContext(
-        session.userId, session.roleId, session.clientId, session.orgId, null,
-        () -> {
-          ToolRegistry registry = new ToolRegistry();
-          Set<String> scopes = parseScopes(session.scopes);
-          List<McpToolDefinition> tools = registry.generateTools(scopes);
+  private JSONObject handleToolsList(AuthIdentity identity) throws Exception {
+    OBContext.setAdminMode(true);
+    try {
+      ToolRegistry registry = new ToolRegistry();
+      Set<String> scopes = parseScopes(identity.scopes);
+      List<McpToolDefinition> tools = registry.generateTools(scopes);
 
-          JSONObject result = new JSONObject();
-          JSONArray toolsArray = new JSONArray();
-          for (McpToolDefinition tool : tools) {
-            JSONObject toolJson = new JSONObject();
-            toolJson.put("name", tool.getName());
-            toolJson.put("description", tool.getDescription());
-            toolJson.put("inputSchema", mapToJsonObject(tool.getInputSchema()));
-            toolsArray.put(toolJson);
-          }
-          result.put("tools", toolsArray);
-          return result;
-        });
+      JSONObject result = new JSONObject();
+      JSONArray toolsArray = new JSONArray();
+      for (McpToolDefinition tool : tools) {
+        JSONObject toolJson = new JSONObject();
+        toolJson.put("name", tool.getName());
+        toolJson.put("description", tool.getDescription());
+        toolJson.put("inputSchema", mapToJsonObject(tool.getInputSchema()));
+        toolsArray.put(toolJson);
+      }
+      result.put("tools", toolsArray);
+      return result;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   // ── Handler: tools/call ─────────────────────────────────────────────────
 
-  /**
-   * Handle "tools/call" — execute a tool by name.
-   * <p>
-   * Routes the tool call through {@link McpToolRouter} which dispatches to the
-   * appropriate handler (CRUD, process, report, or discover). Each tool call
-   * executes within a scoped OBContext via {@link McpSessionManager}.
-   */
-  private JSONObject handleToolsCall(SseSession session, JSONObject params) throws Exception {
+  private JSONObject handleToolsCall(AuthIdentity identity, JSONObject params) throws Exception {
     if (params == null) {
       throw new IllegalArgumentException("Missing params for tools/call");
     }
@@ -337,141 +309,79 @@ public class McpServlet extends HttpServlet {
     String toolName = params.getString("name");
     JSONObject arguments = params.optJSONObject("arguments");
 
+    log.info("MCP tools/call: tool={}, user={}, role={}, client={}, org={}",
+        toolName, identity.userId, identity.roleId, identity.clientId, identity.orgId);
+
     return McpSessionManager.executeInContext(
-        session.userId, session.roleId, session.clientId, session.orgId, null,
-        () -> {
-          log.info("MCP tools/call: tool={}, session={}", toolName, session.id);
-          McpToolRouter router = new McpToolRouter();
-          return router.route(toolName, arguments);
+        identity.userId, identity.roleId, identity.clientId,
+        identity.orgId, null, () -> {
+          OBContext.setAdminMode(true);
+          try {
+            McpToolRouter router = new McpToolRouter();
+            return router.route(toolName, arguments);
+          } finally {
+            OBContext.restorePreviousMode();
+          }
         });
   }
 
   // ── Handler: resources/list ─────────────────────────────────────────────
 
-  /**
-   * Handle "resources/list" — return available resources.
-   * Queries all active specs and builds a resource catalog that AI agents can browse
-   * without invoking tool calls.
-   */
-  private JSONObject handleResourcesList(SseSession session) throws Exception {
-    return McpSessionManager.executeInContext(
-        session.userId, session.roleId, session.clientId, session.orgId, null,
-        () -> {
-          McpResourceProvider provider = new McpResourceProvider();
-          JSONObject result = new JSONObject();
-          result.put("resources", provider.listResources());
-          return result;
-        });
+  private JSONObject handleResourcesList(AuthIdentity identity) throws Exception {
+    OBContext.setAdminMode(true);
+    try {
+      McpResourceProvider provider = new McpResourceProvider();
+      JSONObject result = new JSONObject();
+      result.put("resources", provider.listResources());
+      return result;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   // ── Handler: resources/read ─────────────────────────────────────────────
 
-  /**
-   * Handle "resources/read" — read a specific resource by URI.
-   * Delegates to McpResourceProvider which resolves spec schemas, entity details,
-   * and process parameters from the ETGO_SF_* tables.
-   */
-  private JSONObject handleResourcesRead(SseSession session, JSONObject params) throws Exception {
+  private JSONObject handleResourcesRead(AuthIdentity identity, JSONObject params) throws Exception {
     String uri = params != null ? params.optString("uri", "") : "";
     if (uri.isEmpty()) {
       throw new IllegalArgumentException("Missing 'uri' parameter for resources/read");
     }
 
-    return McpSessionManager.executeInContext(
-        session.userId, session.roleId, session.clientId, session.orgId, null,
-        () -> {
-          McpResourceProvider provider = new McpResourceProvider();
-          JSONObject resourceContent = provider.readResource(uri);
+    OBContext.setAdminMode(true);
+    try {
+      McpResourceProvider provider = new McpResourceProvider();
+      JSONObject resourceContent = provider.readResource(uri);
 
-          JSONObject result = new JSONObject();
-          JSONArray contents = new JSONArray();
-          JSONObject content = new JSONObject();
-          content.put("uri", uri);
-          content.put("mimeType", "application/json");
-          content.put("text", resourceContent.toString(2));
-          contents.put(content);
-          result.put("contents", contents);
-          return result;
-        });
-  }
-
-  // ── SSE helpers ─────────────────────────────────────────────────────────
-
-  /**
-   * Send an SSE event on the session's async response writer.
-   * <p>
-   * Format per SSE spec:
-   * <pre>
-   * event: {eventType}\n
-   * data: {data}\n
-   * \n
-   * </pre>
-   *
-   * @param session   the SSE session
-   * @param eventType SSE event name (e.g. "endpoint", "message")
-   * @param data      event payload (typically JSON string or URL)
-   */
-  private void sendSseEvent(SseSession session, String eventType, String data) throws IOException {
-    PrintWriter writer = session.asyncContext.getResponse().getWriter();
-    writer.write("event: " + eventType + "\n");
-    writer.write("data: " + data + "\n\n");
-    writer.flush();
-
-    if (writer.checkError()) {
-      log.warn("SSE write error detected for session {}, cleaning up", session.id);
-      cleanupSession(session.id);
-    }
-  }
-
-  // ── Session cleanup ─────────────────────────────────────────────────────
-
-  /**
-   * Remove a session from the map and complete its async context.
-   */
-  private void cleanupSession(String sessionId) {
-    SseSession removed = sessions.remove(sessionId);
-    if (removed != null) {
-      try {
-        removed.asyncContext.complete();
-      } catch (Exception e) {
-        // Already completed or response committed — safe to ignore
-        log.debug("AsyncContext already completed for session {}", sessionId);
-      }
-      log.info("MCP SSE session closed: {}", sessionId);
+      JSONObject result = new JSONObject();
+      JSONArray contents = new JSONArray();
+      JSONObject content = new JSONObject();
+      content.put("uri", uri);
+      content.put("mimeType", "application/json");
+      content.put("text", resourceContent.toString(2));
+      contents.put(content);
+      result.put("contents", contents);
+      return result;
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
   // ── JSON-RPC error builder ──────────────────────────────────────────────
 
-  /**
-   * Build a JSON-RPC 2.0 error response.
-   *
-   * @param id      the request ID (may be null)
-   * @param code    JSON-RPC error code (-32600 to -32603, or application-defined)
-   * @param message human-readable error message
-   * @return the complete JSON-RPC error response object
-   */
   private JSONObject buildJsonRpcError(Object id, int code, String message) throws JSONException {
     JSONObject error = new JSONObject();
     error.put("code", code);
     error.put("message", message != null ? message : "Internal error");
 
-    JSONObject response = new JSONObject();
-    response.put("jsonrpc", "2.0");
-    if (id != null) {
-      response.put("id", id);
-    } else {
-      response.put("id", JSONObject.NULL);
-    }
-    response.put("error", error);
-    return response;
+    JSONObject resp = new JSONObject();
+    resp.put("jsonrpc", "2.0");
+    resp.put("id", id != null ? id : JSONObject.NULL);
+    resp.put("error", error);
+    return resp;
   }
 
   // ── Utility methods ─────────────────────────────────────────────────────
 
-  /**
-   * Read the full request body as a string.
-   */
   private String readRequestBody(HttpServletRequest request) throws IOException {
     StringBuilder sb = new StringBuilder();
     try (BufferedReader reader = request.getReader()) {
@@ -483,10 +393,6 @@ public class McpServlet extends HttpServlet {
     return sb.toString();
   }
 
-  /**
-   * Parse a space-separated scope string into a Set.
-   * Returns empty set if scopes is null or blank.
-   */
   private Set<String> parseScopes(String scopes) {
     if (scopes == null || scopes.trim().isEmpty()) {
       return Collections.emptySet();
@@ -494,19 +400,17 @@ public class McpServlet extends HttpServlet {
     return new HashSet<>(Arrays.asList(scopes.trim().split("\\s+")));
   }
 
-  /**
-   * Send a JSON error as an HTTP response body (for POST errors before SSE).
-   */
   private void sendJsonError(HttpServletResponse response, int status, String message)
       throws IOException {
     response.setStatus(status);
     response.setContentType(CONTENT_TYPE_JSON);
+    if (status == HttpServletResponse.SC_UNAUTHORIZED) {
+      response.setHeader("WWW-Authenticate",
+          "Bearer resource_metadata=\"/.well-known/oauth-protected-resource\"");
+    }
     response.getWriter().write("{\"error\":\"" + escapeJson(message) + "\"}");
   }
 
-  /**
-   * Minimal JSON string escaping.
-   */
   private String escapeJson(String value) {
     if (value == null) {
       return "";
@@ -517,9 +421,6 @@ public class McpServlet extends HttpServlet {
         .replace("\r", "\\r");
   }
 
-  /**
-   * Convert a {@code Map<String, Object>} to a JSONObject, handling nested maps and lists.
-   */
   @SuppressWarnings("unchecked")
   private JSONObject mapToJsonObject(Map<String, Object> map) throws JSONException {
     JSONObject json = new JSONObject();
@@ -539,9 +440,6 @@ public class McpServlet extends HttpServlet {
     return json;
   }
 
-  /**
-   * Convert a List to a JSONArray, handling nested maps and lists.
-   */
   @SuppressWarnings("unchecked")
   private JSONArray listToJsonArray(List<Object> list) throws JSONException {
     JSONArray array = new JSONArray();
@@ -560,27 +458,19 @@ public class McpServlet extends HttpServlet {
     return array;
   }
 
-  // ── SSE Session ─────────────────────────────────────────────────────────
+  // ── Auth identity holder ───────────────────────────────────────────────
 
   /**
-   * Holds the state for a single MCP SSE connection.
-   * <p>
-   * Stores the async context (for writing SSE events) and the OAuth2 identity
-   * (for scoping OBContext on each tool call).
+   * Holds the authenticated OAuth2 identity for the duration of one request.
    */
-  static class SseSession {
-    final String id;
-    final AsyncContext asyncContext;
+  static class AuthIdentity {
     final String userId;
     final String roleId;
     final String clientId;
     final String orgId;
     final String scopes;
 
-    SseSession(String id, AsyncContext asyncContext, String userId, String roleId,
-        String clientId, String orgId, String scopes) {
-      this.id = id;
-      this.asyncContext = asyncContext;
+    AuthIdentity(String userId, String roleId, String clientId, String orgId, String scopes) {
       this.userId = userId;
       this.roleId = roleId;
       this.clientId = clientId;
@@ -591,10 +481,6 @@ public class McpServlet extends HttpServlet {
 
   // ── Custom exceptions ───────────────────────────────────────────────────
 
-  /**
-   * Thrown when a JSON-RPC method is not recognized.
-   * Maps to JSON-RPC error code -32601 (Method not found).
-   */
   static class McpMethodNotFoundException extends Exception {
     private static final long serialVersionUID = 1L;
 

@@ -547,6 +547,19 @@ public class NeoDefaultsService {
     }
   }
 
+  private static final String REF_TABLE = "18";
+  private static final String REF_TABLEDIR = "19";
+  private static final String REF_SEARCH = "30";
+
+  /**
+   * Check if a column is a FK reference (Table, TableDir, or Search).
+   * Used to detect sentinel values like "0" that are not valid entity IDs.
+   */
+  private static boolean isFkColumn(Column col) {
+    String refId = col.getReference() != null ? col.getReference().getId() : null;
+    return REF_TABLE.equals(refId) || REF_TABLEDIR.equals(refId) || REF_SEARCH.equals(refId);
+  }
+
   /**
    * Inject the mandatory default for a single column into the body if it is missing.
    * Skips inactive, non-mandatory, unresolvable, or already-present fields.

@@ -49,6 +49,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="REFRESH_TOKEN_HASH" primaryKey="false" required="false" type="VARCHAR" size="64" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <column name="IS_REVOKED" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
         <default><![CDATA[N]]></default>
         <onCreateDefault/>
@@ -66,6 +70,9 @@
       <check name="ETGO_OA2T_ISREVOKED"><![CDATA[IS_REVOKED IN ('Y', 'N')]]></check>
       <unique name="ETGO_OA2T_TOKENHASH_UQ">
         <unique-column name="ACCESS_TOKEN_HASH"/>
+      </unique>
+      <unique name="ETGO_OA2T_REFTOKENHASH_UQ">
+        <unique-column name="REFRESH_TOKEN_HASH"/>
       </unique>
     </table>
   </database>
