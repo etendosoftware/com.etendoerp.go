@@ -86,7 +86,7 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 public class NeoServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
-  private static final String HOOK_ERROR_PREFIX = "Hook handler error: ";
+  private static final String HOOK_ERROR_MSG = HOOK_ERROR_MSG;
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -673,7 +673,7 @@ public class NeoServlet extends HttpBaseServlet {
       return afterResult != null ? afterResult : defaultResult;
     } catch (Exception e) {
       log.error("Error executing hook handler: {}", javaQualifier, e);
-      return NeoResponse.error(500, "An internal error occurred while processing the hook handler");
+      return NeoResponse.error(500, HOOK_ERROR_MSG);
     }
   }
 
@@ -757,7 +757,7 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error in hook dispatch for {}/{}: {}",
           endpointType, entityName, e.getMessage(), e);
-      return NeoResponse.error(500, "An internal error occurred while processing the hook handler");
+      return NeoResponse.error(500, HOOK_ERROR_MSG);
     }
   }
 
@@ -828,7 +828,7 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error in hook dispatch for {}/{}: {}",
           endpointType, entityName, e.getMessage(), e);
-      return NeoResponse.error(500, "An internal error occurred while processing the hook handler");
+      return NeoResponse.error(500, HOOK_ERROR_MSG);
     }
   }
 
