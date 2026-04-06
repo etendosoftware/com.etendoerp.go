@@ -171,7 +171,8 @@ public class AgingReportHandler implements NeoHandler {
 
       return NeoResponse.ok(desc);
     } catch (Exception e) {
-      return NeoResponse.error(500, e.getMessage());
+      log.error("Error building aging report descriptor", e);
+      return NeoResponse.error(500, "Internal Server Error");
     }
   }
 
@@ -223,7 +224,7 @@ public class AgingReportHandler implements NeoHandler {
 
     } catch (Exception e) {
       log.error("Error executing aging report", e);
-      return NeoResponse.error(500, "Aging report failed: " + e.getMessage());
+      return NeoResponse.error(500, "Internal Server Error");
     }
   }
 
