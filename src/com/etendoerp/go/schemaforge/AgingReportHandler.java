@@ -20,6 +20,8 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -35,6 +37,7 @@ import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.data.FieldProvider;
 import org.openbravo.erpCommon.ad_reports.AgingDao;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.service.db.DalConnectionProvider;
 
@@ -110,11 +113,47 @@ public class AgingReportHandler implements NeoHandler {
 
       String recOrPay = body.optString("recOrPay", "RECEIVABLES");
       String dateStr = body.optString("currentDate", "");
-      String col1 = body.optString("column1", DEFAULT_COL1);
-      String col2 = body.optString("column2", DEFAULT_COL2);
-      String col3 = body.optString("column3", DEFAULT_COL3);
-      String col4 = body.optString("column4", DEFAULT_COL4);
-      String bPartnerId = body.optString("bPartnerId", "");
+      boolean showDetails = body.optBoolean("showDetails", false);
+
+      // Detect active buckets — sequential non-empty column values from left.
+      // If none are provided, fall back to the standard 4-bucket layout (30/60/90/120).
+      String col1Raw = body.optString("column1", "");
+      String col2Raw = body.optString("column2", "");
+      String col3Raw = body.optString("column3", "");
+      String col4Raw = body.optString("column4", "");
+
+      int activeBuckets;
+      if (col1Raw.isEmpty()) {
+        activeBuckets = 4;
+        col1Raw = DEFAULT_COL1;
+        col2Raw = DEFAULT_COL2;
+        col3Raw = DEFAULT_COL3;
+        col4Raw = DEFAULT_COL4;
+      } else {
+        activeBuckets = 1;
+        if (!col2Raw.isEmpty()) activeBuckets = 2;
+        if (activeBuckets >= 2 && !col3Raw.isEmpty()) activeBuckets = 3;
+        if (activeBuckets >= 3 && !col4Raw.isEmpty()) activeBuckets = 4;
+      }
+
+      // Fill unused slots with a large sentinel so SQL buckets collapse into the "plus" bucket
+      String col1 = col1Raw;
+      String col2 = activeBuckets >= 2 ? col2Raw : "99999";
+      String col3 = activeBuckets >= 3 ? col3Raw : "99999";
+      String col4 = activeBuckets >= 4 ? col4Raw : "99999";
+      // Convert comma-separated IDs to SQL IN format: ('id1','id2') as expected by AgingDaoData
+      String bPartnerRaw = body.optString("bPartnerId", "");
+      String bPartnerId = "";
+      if (!bPartnerRaw.isEmpty()) {
+        String[] ids = bPartnerRaw.split(",");
+        StringBuilder inClause = new StringBuilder("(");
+        for (int i = 0; i < ids.length; i++) {
+          if (i > 0) inClause.append(",");
+          inClause.append("'").append(ids[i].trim().replace("'", "''")).append("'");
+        }
+        inClause.append(")");
+        bPartnerId = inClause.toString();
+      }
       String orgId = body.optString("orgId", "");
       String glId = body.optString("glId", "");
 
@@ -138,25 +177,27 @@ public class AgingReportHandler implements NeoHandler {
       // Resolve accounting schema: use explicit glId if provided, otherwise look up the schema
       // directly linked to the selected org (not inherited from parents)
       String accSchemaId = glId;
-      if (accSchemaId.isEmpty()) {
-        try {
-          OBContext.setAdminMode(true);
-          AcctSchema acctSchema = OBDal.getInstance()
-              .createQuery(AcctSchema.class,
-                  "exists (from OrganizationAcctSchema oas where oas.accountingSchema=this"
-                      + " and oas.organization.id=:orgId and oas.active=true)"
-                      + " and active=true")
-              .setNamedParameter("orgId", orgId)
-              .setMaxResult(1)
-              .uniqueResult();
-          if (acctSchema != null) {
-            accSchemaId = acctSchema.getId();
-          }
-        } catch (Exception e) {
-          log.warn("Could not resolve accounting schema for org {}", orgId, e);
-        } finally {
-          OBContext.restorePreviousMode();
+      Currency reportCurrency = null;
+      try {
+        OBContext.setAdminMode(true);
+        AcctSchema acctSchema = accSchemaId.isEmpty()
+            ? OBDal.getInstance()
+                .createQuery(AcctSchema.class,
+                    "exists (from OrganizationAcctSchema oas where oas.accountingSchema=this"
+                        + " and oas.organization.id=:orgId and oas.active=true)"
+                        + " and active=true")
+                .setNamedParameter("orgId", orgId)
+                .setMaxResult(1)
+                .uniqueResult()
+            : OBDal.getInstance().get(AcctSchema.class, accSchemaId);
+        if (acctSchema != null) {
+          accSchemaId = acctSchema.getId();
+          reportCurrency = acctSchema.getCurrency();
         }
+      } catch (Exception e) {
+        log.warn("Could not resolve accounting schema for org {}", orgId, e);
+      } finally {
+        OBContext.restorePreviousMode();
       }
 
       // Set session variable required by AgingDao (legacy code expects this in HTTP session)
@@ -195,12 +236,18 @@ public class AgingReportHandler implements NeoHandler {
           JSONObject row = new JSONObject();
           row.put("bPartnerId", fp.getField("BPartnerID"));
           row.put("bPartner", fp.getField("BPartner"));
+          // Merge unused buckets into daysPlus so amounts are never silently discarded
+          BigDecimal daysPlus = toBigDecimal(fp.getField("amount5"));
+          if (activeBuckets < 4) daysPlus = daysPlus.add(toBigDecimal(fp.getField("amount4")));
+          if (activeBuckets < 3) daysPlus = daysPlus.add(toBigDecimal(fp.getField("amount3")));
+          if (activeBuckets < 2) daysPlus = daysPlus.add(toBigDecimal(fp.getField("amount2")));
+
           row.put("current", toBigDecimal(fp.getField("amount0")));
           row.put("days30", toBigDecimal(fp.getField("amount1")));
-          row.put("days60", toBigDecimal(fp.getField("amount2")));
-          row.put("days90", toBigDecimal(fp.getField("amount3")));
-          row.put("days120", toBigDecimal(fp.getField("amount4")));
-          row.put("days150plus", toBigDecimal(fp.getField("amount5")));
+          row.put("days60", activeBuckets >= 2 ? toBigDecimal(fp.getField("amount2")) : BigDecimal.ZERO);
+          row.put("days90", activeBuckets >= 3 ? toBigDecimal(fp.getField("amount3")) : BigDecimal.ZERO);
+          row.put("days120", activeBuckets >= 4 ? toBigDecimal(fp.getField("amount4")) : BigDecimal.ZERO);
+          row.put("days150plus", daysPlus);
           row.put("total", toBigDecimal(fp.getField("Total")));
           row.put("credits", toBigDecimal(fp.getField("credit")));
           row.put("net", toBigDecimal(fp.getField("net")));
@@ -208,17 +255,95 @@ public class AgingReportHandler implements NeoHandler {
         }
       }
 
+      // --- Detail mode: fetch document-level rows and attach to each BP summary row ---
+      if (showDetails && reportCurrency != null) {
+        SimpleDateFormat detailDateFmt = new SimpleDateFormat("yyyy-MM-dd");
+        FieldProvider[] detailData = dao.getOpenReceivablesAgingScheduleDetails(
+            conn, currentDate, detailDateFmt, reportCurrency,
+            organizations, recOrPay,
+            col1, col2, col3, col4,
+            bPartnerId,
+            false,  // showDoubtfulDebt
+            true    // excludeVoids
+        );
+
+        // Group detail rows by bPartnerId.
+        // insertData() puts amounts in AMOUNT0-AMOUNT5 (one non-null per row).
+        // Credit rows use AMOUNT6 — skip them here (shown only in BP subtotal from summary).
+        Map<String, JSONArray> docsByBp = new LinkedHashMap<>();
+        if (detailData != null) {
+          for (FieldProvider fp : detailData) {
+            // Skip credit rows (AMOUNT6 set by CREDIT_SCOPE=6)
+            if (fp.getField("AMOUNT6") != null && !fp.getField("AMOUNT6").isEmpty()) {
+              continue;
+            }
+            String bpId = fp.getField("BPARTNER");
+            if (bpId == null) bpId = "";
+            docsByBp.computeIfAbsent(bpId, k -> new JSONArray());
+
+            JSONObject doc = new JSONObject();
+            doc.put("docNo", fp.getField("INVOICE_NUMBER"));
+            doc.put("dateInvoiced", fp.getField("INVOICE_DATE"));
+
+            // Amounts are pre-assigned to bucket fields by insertData()
+            BigDecimal a0 = toBigDecimal(fp.getField("AMOUNT0"));
+            BigDecimal a1 = toBigDecimal(fp.getField("AMOUNT1"));
+            BigDecimal a2 = toBigDecimal(fp.getField("AMOUNT2"));
+            BigDecimal a3 = toBigDecimal(fp.getField("AMOUNT3"));
+            BigDecimal a4 = toBigDecimal(fp.getField("AMOUNT4"));
+            BigDecimal a5 = toBigDecimal(fp.getField("AMOUNT5"));
+
+            // Merge overflow buckets into daysPlus
+            BigDecimal daysPlus = a5;
+            if (activeBuckets < 4) daysPlus = daysPlus.add(a4);
+            if (activeBuckets < 3) daysPlus = daysPlus.add(a3);
+            if (activeBuckets < 2) daysPlus = daysPlus.add(a2);
+
+            doc.put("current",     a0);
+            doc.put("days30",      a1);
+            doc.put("days60",      activeBuckets >= 2 ? a2 : BigDecimal.ZERO);
+            doc.put("days90",      activeBuckets >= 3 ? a3 : BigDecimal.ZERO);
+            doc.put("days120",     activeBuckets >= 4 ? a4 : BigDecimal.ZERO);
+            doc.put("days150plus", daysPlus);
+
+            docsByBp.get(bpId).put(doc);
+          }
+        }
+
+        // Attach docs to each summary row
+        for (int i = 0; i < rows.length(); i++) {
+          JSONObject row = rows.getJSONObject(i);
+          String bpId = row.optString("bPartnerId", "");
+          JSONArray docs = docsByBp.getOrDefault(bpId, new JSONArray());
+          row.put("docs", docs);
+        }
+      }
+
       JSONObject responseData = new JSONObject();
       responseData.put("data", rows);
       responseData.put("count", rows.length());
 
+      // Determine label for the last (plus) bucket
+      String lastColValue = activeBuckets >= 4 ? col4Raw
+          : activeBuckets >= 3 ? col3Raw
+          : activeBuckets >= 2 ? col2Raw
+          : col1Raw;
+
       JSONObject meta = new JSONObject();
       meta.put("recOrPay", recOrPay);
       meta.put("currentDate", new SimpleDateFormat("yyyy-MM-dd").format(currentDate));
-      meta.put("column1", col1);
-      meta.put("column2", col2);
-      meta.put("column3", col3);
-      meta.put("column4", col4);
+      // Store display values (never the 99999 sentinel)
+      meta.put("column1", col1Raw);
+      meta.put("column2", activeBuckets >= 2 ? col2Raw : "");
+      meta.put("column3", activeBuckets >= 3 ? col3Raw : "");
+      meta.put("column4", activeBuckets >= 4 ? col4Raw : "");
+      // Bucket visibility flags for the template
+      meta.put("activeBuckets", activeBuckets);
+      meta.put("showBucket2", activeBuckets >= 2);
+      meta.put("showBucket3", activeBuckets >= 3);
+      meta.put("showBucket4", activeBuckets >= 4);
+      meta.put("lastBucketLabel", ">" + lastColValue);
+      meta.put("showDetails", showDetails);
       responseData.put("meta", meta);
 
       JSONObject wrapper = new JSONObject();
