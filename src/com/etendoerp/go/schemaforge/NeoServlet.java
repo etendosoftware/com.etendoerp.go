@@ -954,9 +954,11 @@ public class NeoServlet extends HttpBaseServlet {
           if (adTab != null && adTab.getTabLevel() != null && adTab.getTabLevel() == 0) {
             Set<String> seqFields = new HashSet<>();
             NeoDefaultsService.executeCalloutCascade(context, adTab, filteredBody, seqFields);
+            // Callouts (e.g. SE_Order_Organization) may override doctype with a
+            // default that doesn't match the window's tab filter (e.g. Standard Order
+            // instead of Quotation). Re-apply the correct doctype after the cascade.
+            NeoDefaultsService.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
             // Remove empty-string FK values left by callouts that couldn't resolve them
-            // (e.g., BP without sales payment term). This allows the second inject pass
-            // to attempt fallback defaults for those mandatory columns.
             NeoDefaultsService.removeEmptyFkValues(filteredBody, adTab);
             // Re-inject mandatory defaults for fields that callouts left empty
             NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);

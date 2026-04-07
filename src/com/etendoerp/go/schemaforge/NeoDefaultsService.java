@@ -672,6 +672,44 @@ public class NeoDefaultsService {
   }
 
   /**
+   * Re-apply the correct doctype after the callout cascade.
+   * Callouts like SE_Order_Organization set transactionDocument to the org's default doctype,
+   * which may not match the tab's HQL filter (e.g., Standard Order instead of Quotation).
+   * This method resolves the correct doctype based on the tab filter and overwrites both
+   * documentType and transactionDocument in the body.
+   */
+  public static void reapplyDocTypeFromTabFilter(JSONObject body, Tab adTab, NeoContext ctx) {
+    if (body == null || adTab == null || ctx == null) return;
+    try {
+      // Find the DocTypeTarget column to resolve the correct doctype
+      for (Column col : adTab.getTable().getADColumnList()) {
+        if ("C_DocTypeTarget_ID".equalsIgnoreCase(col.getDBColumnName())) {
+          String correctId = resolveDefaultDocTypeId(col, ctx);
+          if (correctId != null) {
+            Entity dalEntity = ModelProvider.getInstance()
+                .getEntityByTableId(adTab.getTable().getId());
+            if (dalEntity != null) {
+              Property targetProp = dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID");
+              Property typeProp = dalEntity.getPropertyByColumnName("C_DocType_ID");
+              if (targetProp != null) {
+                body.put(targetProp.getName(), correctId);
+                log.debug("Reapplied transactionDocument={}", correctId);
+              }
+              if (typeProp != null) {
+                body.put(typeProp.getName(), correctId);
+                log.debug("Reapplied documentType={}", correctId);
+              }
+            }
+          }
+          break;
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Error reapplying doctype: {}", e.getMessage());
+    }
+  }
+
+  /**
    * Remove empty-string values from the body for mandatory FK columns.
    * Callouts may set FK fields to "" when they cannot resolve a value (e.g., BP without
    * sales payment term). Removing these allows injectMandatoryDefaults to attempt
@@ -750,15 +788,8 @@ public class NeoDefaultsService {
       // Extract DocSubTypeSO constraint from the tab's HQL where clause if present.
       String subTypeFilter = null;
       String subTypeExclude = null;
-      boolean hasCtx = ctx != null && ctx.getSfEntity() != null && ctx.getSfEntity().getADTab() != null;
-      log.info("[NEO-DOCTYPE] resolveDefaultDocTypeId col={}, hasCtx={}, sfEntity={}, adTab={}",
-          colName,
-          hasCtx,
-          ctx != null && ctx.getSfEntity() != null ? ctx.getSfEntity().getName() : "null",
-          hasCtx ? ctx.getSfEntity().getADTab().getName() : "null");
-      if (hasCtx) {
+      if (ctx != null && ctx.getSfEntity() != null && ctx.getSfEntity().getADTab() != null) {
         String tabWhere = ctx.getSfEntity().getADTab().getHqlwhereclause();
-        log.info("[NEO-DOCTYPE] tabWhere={}", tabWhere);
         if (tabWhere != null) {
           java.util.regex.Matcher m = java.util.regex.Pattern
               .compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'", java.util.regex.Pattern.CASE_INSENSITIVE)
