@@ -31,35 +31,24 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 /**
- * NeoHandler that returns monthly revenue trend data for the dashboard widget.
- * Queries completed sales invoices (c_invoice) grouped by month, using the last
- * 12 months of available data anchored to the most recent invoice date.
+ * NeoHandler that returns the 10 most recent sales invoices for the dashboard widget.
+ * Queries sales invoices (c_invoice) joined with business partner, ordered by
+ * invoice date descending, limited to the latest 10 records.
  */
-@Named("widgetRevenueTrendHandler")
-public class WidgetRevenueTrendHandler implements NeoHandler {
+@Named("widgetRecentInvoicesHandler")
+public class WidgetRecentInvoicesHandler implements NeoHandler {
 
-  private static final Logger log = LogManager.getLogger(WidgetRevenueTrendHandler.class);
+  private static final Logger log = LogManager.getLogger(WidgetRecentInvoicesHandler.class);
 
-  private static final String REVENUE_QUERY =
-      "WITH max_date AS ( "
-    + "  SELECT date_trunc('month', max(dateinvoiced)) AS last_month "
-    + "  FROM c_invoice "
-    + "  WHERE issotrx = 'Y' AND docstatus IN ('CO','CL') AND ad_client_id = :clientId "
-    + "), "
-    + "months AS ( "
-    + "  SELECT generate_series( "
-    + "    (SELECT last_month - interval '11 months' FROM max_date), "
-    + "    (SELECT last_month FROM max_date), "
-    + "    CAST('1 month' AS interval) "
-    + "  ) AS month "
-    + ") "
-    + "SELECT to_char(m.month, 'Mon') AS label, "
-    + "       COALESCE(SUM(i.grandtotal), 0) AS total "
-    + "FROM months m "
-    + "LEFT JOIN c_invoice i ON date_trunc('month', i.dateinvoiced) = m.month "
-    + "  AND i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId "
-    + "GROUP BY m.month, to_char(m.month, 'Mon') "
-    + "ORDER BY m.month";
+  private static final String RECENT_INVOICES_QUERY =
+      "SELECT i.c_invoice_id, bp.name AS client, "
+    + "to_char(i.dateinvoiced, 'DD-MM-YYYY') AS date, "
+    + "i.grandtotal AS amount, i.docstatus AS status "
+    + "FROM c_invoice i "
+    + "JOIN c_bpartner bp ON bp.c_bpartner_id = i.c_bpartner_id "
+    + "WHERE i.issotrx = 'Y' AND i.ad_client_id = :clientId "
+    + "ORDER BY i.dateinvoiced DESC, i.created DESC "
+    + "LIMIT 10";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -75,27 +64,22 @@ public class WidgetRevenueTrendHandler implements NeoHandler {
         @SuppressWarnings("unchecked")
         NativeQuery<Object[]> query = OBDal.getInstance()
             .getSession()
-            .createNativeQuery(REVENUE_QUERY);
+            .createNativeQuery(RECENT_INVOICES_QUERY);
         query.setParameter("clientId", clientId);
 
         List<Object[]> rows = query.list();
 
-        JSONArray labels = new JSONArray();
-        JSONArray values = new JSONArray();
+        JSONArray data = new JSONArray();
 
         for (Object[] row : rows) {
-          String label = ((String) row[0]).trim();
-          BigDecimal total = (BigDecimal) row[1];
-          labels.put(label);
-          values.put(total.longValue());
+          JSONObject item = new JSONObject();
+          item.put("id", String.valueOf(row[0]));
+          item.put("client", String.valueOf(row[1]));
+          item.put("date", String.valueOf(row[2]));
+          item.put("amount", ((BigDecimal) row[3]).doubleValue());
+          item.put("status", String.valueOf(row[4]));
+          data.put(item);
         }
-
-        JSONObject trend = new JSONObject();
-        trend.put("labels", labels);
-        trend.put("values", values);
-
-        JSONArray data = new JSONArray();
-        data.put(trend);
 
         JSONObject responseData = new JSONObject();
         responseData.put("data", data);
@@ -109,8 +93,8 @@ public class WidgetRevenueTrendHandler implements NeoHandler {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
-      log.error("Error building revenue trend data", e);
-      return NeoResponse.error(500, "Revenue trend handler failed: " + e.getMessage());
+      log.error("Error fetching recent invoices", e);
+      return NeoResponse.error(500, "Recent invoices handler failed: " + e.getMessage());
     }
   }
 }
