@@ -104,14 +104,14 @@ public class WidgetActivityHandler implements NeoHandler {
 
         JSONArray data = new JSONArray();
         for (Object[] row : rows) {
-          String docType   = (String) row[0];
-          String documentNo = (String) row[1];
-          String docStatus = (String) row[2];
+          String docType   = String.valueOf(row[0]);
+          String documentNo = String.valueOf(row[1]);
+          String docStatus = String.valueOf(row[2]);
           BigDecimal amount = (BigDecimal) row[3]; // may be null for shipments
           Timestamp eventTime = (Timestamp) row[4];
-          String userName  = (String) row[5];
-          String isSoTrx   = (String) row[6];
-          String recordId  = (String) row[7];
+          String userName  = String.valueOf(row[5]);
+          String isSoTrx   = String.valueOf(row[6]);
+          String recordId  = String.valueOf(row[7]);
 
           String text = buildDescription(docType, documentNo, docStatus, amount, isSoTrx);
           String type = "CO".equals(docStatus) ? "system" : "note";

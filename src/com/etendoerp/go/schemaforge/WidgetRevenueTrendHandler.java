@@ -50,7 +50,7 @@ public class WidgetRevenueTrendHandler implements NeoHandler {
     + "  SELECT generate_series( "
     + "    (SELECT last_month - interval '11 months' FROM max_date), "
     + "    (SELECT last_month FROM max_date), "
-    + "    '1 month'::interval "
+    + "    CAST('1 month' AS interval) "
     + "  ) AS month "
     + ") "
     + "SELECT to_char(m.month, 'Mon') AS label, "

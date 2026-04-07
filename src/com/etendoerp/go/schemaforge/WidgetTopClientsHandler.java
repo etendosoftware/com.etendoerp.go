@@ -31,23 +31,29 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 /**
- * NeoHandler that returns the 10 most recent sales invoices for the dashboard widget.
- * Queries sales invoices (c_invoice) joined with business partner, ordered by
- * invoice date descending, limited to the latest 10 records.
+ * NeoHandler that returns the top 10 clients by revenue for the last 12 months.
+ * The 12-month window is anchored to the most recent invoice date (treating it
+ * as "today"), so demo/test databases without current-date data still show results.
  */
-@Named("widgetRecentInvoicesHandler")
-public class WidgetRecentInvoicesHandler implements NeoHandler {
+@Named("widgetTopClientsHandler")
+public class WidgetTopClientsHandler implements NeoHandler {
 
-  private static final Logger log = LogManager.getLogger(WidgetRecentInvoicesHandler.class);
+  private static final Logger log = LogManager.getLogger(WidgetTopClientsHandler.class);
 
-  private static final String RECENT_INVOICES_QUERY =
-      "SELECT i.c_invoice_id, bp.name AS client, "
-    + "to_char(i.dateinvoiced, 'DD-MM-YYYY') AS date, "
-    + "i.grandtotal AS amount, i.docstatus AS status "
+  private static final String TOP_CLIENTS_QUERY =
+      "WITH max_date AS ( "
+    + "  SELECT MAX(dateinvoiced) AS last_date "
+    + "  FROM c_invoice "
+    + "  WHERE issotrx = 'Y' AND docstatus IN ('CO','CL') AND ad_client_id = :clientId "
+    + ") "
+    + "SELECT bp.name, SUM(i.grandtotal) AS total "
     + "FROM c_invoice i "
     + "JOIN c_bpartner bp ON bp.c_bpartner_id = i.c_bpartner_id "
-    + "WHERE i.issotrx = 'Y' AND i.ad_client_id = :clientId "
-    + "ORDER BY i.dateinvoiced DESC, i.created DESC "
+    + "WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') "
+    + "  AND i.ad_client_id = :clientId "
+    + "  AND i.dateinvoiced > (SELECT last_date - CAST('12 months' AS interval) FROM max_date) "
+    + "GROUP BY bp.c_bpartner_id, bp.name "
+    + "ORDER BY SUM(i.grandtotal) DESC "
     + "LIMIT 10";
 
   @Override
@@ -64,20 +70,16 @@ public class WidgetRecentInvoicesHandler implements NeoHandler {
         @SuppressWarnings("unchecked")
         NativeQuery<Object[]> query = OBDal.getInstance()
             .getSession()
-            .createNativeQuery(RECENT_INVOICES_QUERY);
+            .createNativeQuery(TOP_CLIENTS_QUERY);
         query.setParameter("clientId", clientId);
 
         List<Object[]> rows = query.list();
 
         JSONArray data = new JSONArray();
-
         for (Object[] row : rows) {
           JSONObject item = new JSONObject();
-          item.put("id", String.valueOf(row[0]));
-          item.put("client", String.valueOf(row[1]));
-          item.put("date", String.valueOf(row[2]));
-          item.put("amount", ((BigDecimal) row[3]).doubleValue());
-          item.put("status", String.valueOf(row[4]));
+          item.put("name", String.valueOf(row[0]));
+          item.put("total", ((BigDecimal) row[1]).doubleValue());
           data.put(item);
         }
 
@@ -93,8 +95,8 @@ public class WidgetRecentInvoicesHandler implements NeoHandler {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
-      log.error("Error fetching recent invoices", e);
-      return NeoResponse.error(500, "Recent invoices handler failed: " + e.getMessage());
+      log.error("Error fetching top clients", e);
+      return NeoResponse.error(500, "Top clients handler failed: " + e.getMessage());
     }
   }
 }
