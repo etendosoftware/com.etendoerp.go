@@ -891,7 +891,11 @@ public class NeoDefaultsService {
   private static String queryDefaultDocType(String clientId, String docBaseType,
       String isSOTrx, String subTypeFilter, String subTypeExclude, String colName)
       throws Exception {
-    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+    OBContext obCtx = OBContext.getOBContext();
+    if (obCtx == null || obCtx.getCurrentOrganization() == null) {
+      return null;
+    }
+    String orgId = obCtx.getCurrentOrganization().getId();
 
     StringBuilder sql = new StringBuilder();
     sql.append("SELECT dt.C_DocType_ID FROM C_DocType dt ");
@@ -918,9 +922,9 @@ public class NeoDefaultsService {
       ps.setString(paramIndex++, orgId);
       ps.setString(paramIndex++, clientId);
       if (subTypeFilter != null) {
-        ps.setString(paramIndex, subTypeFilter);
+        ps.setString(paramIndex++, subTypeFilter);
       } else if (subTypeExclude != null) {
-        ps.setString(paramIndex, subTypeExclude);
+        ps.setString(paramIndex++, subTypeExclude);
       }
 
       try (ResultSet rs = ps.executeQuery()) {
