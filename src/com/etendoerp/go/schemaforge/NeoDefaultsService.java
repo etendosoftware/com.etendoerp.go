@@ -80,6 +80,12 @@ public class NeoDefaultsService {
   private static final Logger log = LogManager.getLogger(NeoDefaultsService.class);
   private static final String DATE_FORMAT = "yyyy-MM-dd";
   private static final int MAX_CALLOUT_CHAIN_DEPTH = 5;
+  private static final java.util.regex.Pattern SUBTYPE_NOT_LIKE_PATTERN =
+      java.util.regex.Pattern.compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'",
+          java.util.regex.Pattern.CASE_INSENSITIVE);
+  private static final java.util.regex.Pattern SUBTYPE_LIKE_PATTERN =
+      java.util.regex.Pattern.compile("sOSubType\\s+LIKE\\s+'(\\w+)'",
+          java.util.regex.Pattern.CASE_INSENSITIVE);
 
   // Cache VariablesSecureApp per user+role+org+warehouse combination to avoid calling
   // LoginUtils.fillSessionArguments (multiple DB queries) on every request.
@@ -681,12 +687,13 @@ public class NeoDefaultsService {
       sql.append(hasName ? "t.Name ASC" : "t." + keyColumn + " ASC");
 
       try (PreparedStatement ps = OBDal.getInstance().getConnection(false)
-          .prepareStatement(sql.toString() + " LIMIT 1")) {
+          .prepareStatement(sql.toString())) {
+        ps.setMaxRows(1);
         ps.setString(1, clientId);
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
             String id = rs.getString(1);
-            log.debug("Fallback FK default for {}: {} (table={})",
+            log.warn("Fallback FK default for {}: {} (table={}) — no explicit default configured",
                 dbColName, id, refTable.getDBTableName());
             return id;
           }
@@ -864,17 +871,11 @@ public class NeoDefaultsService {
     if (ctx != null && ctx.getSfEntity() != null && ctx.getSfEntity().getADTab() != null) {
       String tabWhere = ctx.getSfEntity().getADTab().getHqlwhereclause();
       if (tabWhere != null) {
-        java.util.regex.Matcher m = java.util.regex.Pattern
-            .compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'",
-                java.util.regex.Pattern.CASE_INSENSITIVE)
-            .matcher(tabWhere);
+        java.util.regex.Matcher m = SUBTYPE_NOT_LIKE_PATTERN.matcher(tabWhere);
         if (m.find()) {
           subTypeExclude = m.group(1);
         } else {
-          m = java.util.regex.Pattern
-              .compile("sOSubType\\s+LIKE\\s+'(\\w+)'",
-                  java.util.regex.Pattern.CASE_INSENSITIVE)
-              .matcher(tabWhere);
+          m = SUBTYPE_LIKE_PATTERN.matcher(tabWhere);
           if (m.find()) {
             subTypeFilter = m.group(1);
           }
