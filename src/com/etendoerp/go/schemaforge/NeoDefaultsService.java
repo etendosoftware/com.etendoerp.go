@@ -891,20 +891,21 @@ public class NeoDefaultsService {
   private static String queryDefaultDocType(String clientId, String docBaseType,
       String isSOTrx, String subTypeFilter, String subTypeExclude, String colName)
       throws Exception {
+    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+
     StringBuilder sql = new StringBuilder();
     sql.append("SELECT dt.C_DocType_ID FROM C_DocType dt ");
     sql.append("WHERE dt.IsActive = 'Y' ");
     sql.append("AND dt.AD_Client_ID = ? ");
     sql.append("AND dt.DocBaseType = ? ");
     sql.append("AND dt.IsSOTrx = ? ");
+    // Filter by org: doctype must be in the current org tree or shared (org 0)
+    sql.append("AND (dt.AD_Org_ID = '0' OR AD_ISORGINCLUDED(?, dt.AD_Org_ID, ?) <> '-1') ");
 
-    int extraParams = 0;
     if (subTypeFilter != null) {
       sql.append("AND dt.DocSubTypeSO = ? ");
-      extraParams = 1;
     } else if (subTypeExclude != null) {
       sql.append("AND (dt.DocSubTypeSO IS NULL OR dt.DocSubTypeSO != ?) ");
-      extraParams = 2;
     }
     sql.append("ORDER BY dt.IsDefault DESC, dt.Name ASC");
 
@@ -914,9 +915,11 @@ public class NeoDefaultsService {
       ps.setString(paramIndex++, clientId);
       ps.setString(paramIndex++, docBaseType);
       ps.setString(paramIndex++, isSOTrx);
-      if (extraParams == 1) {
+      ps.setString(paramIndex++, orgId);
+      ps.setString(paramIndex++, clientId);
+      if (subTypeFilter != null) {
         ps.setString(paramIndex, subTypeFilter);
-      } else if (extraParams == 2) {
+      } else if (subTypeExclude != null) {
         ps.setString(paramIndex, subTypeExclude);
       }
 
