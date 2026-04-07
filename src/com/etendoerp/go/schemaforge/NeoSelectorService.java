@@ -2253,4 +2253,147 @@ public class NeoSelectorService {
       this.property = property;
     }
   }
+
+  /**
+   * Resolve selector auxiliary values (_aux) for a specific record ID.
+   * Used by the callout cascade to provide aux values (prices, UOM, currency)
+   * that classic Etendo UI passes from the selector response.
+   *
+   * @param column    the AD_Column with the selector reference
+   * @param fieldName the REST field name (e.g., "product")
+   * @param recordId  the selected record ID
+   * @return JSONObject with keys like "product_PSTD", "product_UOM", or null if no aux
+   */
+  public static JSONObject resolveSelectorAuxForId(Column column, String fieldName,
+      String recordId) {
+    if (column == null || recordId == null || recordId.isEmpty()) {
+      return null;
+    }
+    try {
+      String refId = getBaseReferenceId(column);
+      SelectorMeta meta = resolveTarget(column, refId);
+      if (meta == null || meta.auxFields == null || meta.auxFields.isEmpty()) {
+        return null;
+      }
+
+      // For rich (OBUISEL) selectors with custom HQL, query via HQL
+      if (meta.isRich && meta.isCustomQuery && StringUtils.isNotBlank(meta.customHql)) {
+        return resolveAuxViaHql(meta, fieldName, recordId);
+      }
+
+      // For DAL-resolvable aux fields, load the entity and read properties.
+      // If valueProperty != "id" (e.g., "product.id" for ProductByPriceAndWarehouse),
+      // we need to query by that property instead of OBDal.get(entityName, id).
+      BaseOBObject bob = null;
+      if ("id".equals(meta.valueProperty)) {
+        bob = (BaseOBObject) OBDal.getInstance().get(meta.entityName, recordId);
+      } else {
+        // Query by the value property path (e.g., "product.id")
+        try {
+          String hql = "from " + meta.entityName + " where " + meta.valueProperty + " = :val";
+          org.hibernate.query.Query<?> q = OBDal.getInstance().getSession().createQuery(hql);
+          q.setParameter("val", recordId);
+          q.setMaxResults(1);
+          List<?> results = q.list();
+          if (!results.isEmpty()) {
+            bob = (BaseOBObject) results.get(0);
+          }
+        } catch (Exception e) {
+          log.debug("Could not query {} by {}: {}", meta.entityName, meta.valueProperty, e.getMessage());
+        }
+      }
+      if (bob == null) {
+        log.debug("No record found in {} for value {} (valueProperty={})",
+            meta.entityName, recordId, meta.valueProperty);
+        return null;
+      }
+
+      JSONObject result = new JSONObject();
+      for (AuxFieldMeta af : meta.auxFields) {
+        Object auxVal = resolveAuxFieldValue(bob, af);
+        if (auxVal != null) {
+          result.put(fieldName + af.suffix, auxVal.toString());
+        }
+      }
+      return result.length() > 0 ? result : null;
+
+    } catch (Exception e) {
+      log.debug("Could not resolve selector aux for {} / {}: {}",
+          fieldName, recordId, e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Resolve aux values via the original OBUISEL custom HQL for a single record.
+   */
+  @SuppressWarnings("unchecked")
+  private static JSONObject resolveAuxViaHql(SelectorMeta meta, String fieldName,
+      String recordId) {
+    try {
+      String hql = meta.customHql;
+      // Parse SELECT clause to build alias→position map
+      String selectClause = hql.substring(0, hql.toUpperCase().indexOf(" FROM "));
+      String[] selectParts = selectClause.replaceFirst("(?i)^\\s*select\\s+", "").split(",");
+
+      java.util.Map<String, Integer> aliasPos = new java.util.HashMap<>();
+      for (int i = 0; i < selectParts.length; i++) {
+        String part = selectParts[i].trim();
+        int asIdx = part.toLowerCase().lastIndexOf(" as ");
+        if (asIdx >= 0) {
+          String alias = part.substring(asIdx + 4).trim().replace("\"", "");
+          aliasPos.put(alias.toLowerCase(), i);
+        }
+      }
+
+      // Find the ID position (entity alias + ".id")
+      String idAlias = meta.entityAlias + ".id";
+      int idPos = -1;
+      for (int i = 0; i < selectParts.length; i++) {
+        String part = selectParts[i].trim();
+        if (part.contains(idAlias) || part.toLowerCase().endsWith(" as id")) {
+          idPos = i;
+          break;
+        }
+      }
+
+      // Add ID filter to the query
+      String fromClause = hql.substring(hql.toUpperCase().indexOf(" FROM "));
+      String fullHql = selectClause + fromClause;
+      if (fullHql.toUpperCase().contains(" WHERE ")) {
+        fullHql += " AND " + meta.entityAlias + ".id = :recordId";
+      } else {
+        fullHql += " WHERE " + meta.entityAlias + ".id = :recordId";
+      }
+
+      org.hibernate.query.Query<?> query = OBDal.getInstance().getSession().createQuery(fullHql);
+      query.setParameter("recordId", recordId);
+      query.setMaxResults(1);
+
+      List<?> results = query.list();
+      if (results.isEmpty()) {
+        return null;
+      }
+
+      Object row = results.get(0);
+      Object[] cols = row instanceof Object[] ? (Object[]) row : new Object[]{ row };
+
+      JSONObject result = new JSONObject();
+      for (AuxFieldMeta af : meta.auxFields) {
+        Integer pos = aliasPos.get(af.hqlAlias.toLowerCase());
+        if (pos != null && pos < cols.length && cols[pos] != null) {
+          Object val = cols[pos];
+          if (val instanceof BaseOBObject) {
+            val = ((BaseOBObject) val).getId();
+          }
+          result.put(fieldName + af.suffix, val.toString());
+        }
+      }
+      return result.length() > 0 ? result : null;
+
+    } catch (Exception e) {
+      log.debug("Could not resolve aux via HQL for {}: {}", fieldName, e.getMessage());
+      return null;
+    }
+  }
 }

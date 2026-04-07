@@ -1,6 +1,7 @@
 package com.etendoerp.go.mcp;
 
 import java.io.ByteArrayOutputStream;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -298,6 +299,11 @@ public class McpToolRouter {
     // too restrictive for MCP where AI agents need to set any valid column.
     JSONObject filteredBody = mapFieldsToDalProperties(fields, adTab);
 
+    // Snapshot user-provided fields BEFORE callout cascade can overwrite them.
+    // Callouts derive dependent fields (e.g. product → tax, UOM) and may reset them
+    // to sentinel "0" even when the user explicitly provided valid values.
+    JSONObject userProvided = new JSONObject(filteredBody.toString());
+
     // Resolve parentId if present
     String parentIdValue = null;
     if (filteredBody.has("parentId")) {
@@ -317,12 +323,38 @@ public class McpToolRouter {
         .build();
     NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, ctx, parentIdValue);
 
+    // Restore user-provided fields that callouts may have overwritten with sentinels.
+    // User intent takes precedence over callout-derived values.
+    Iterator<String> userKeys = userProvided.keys();
+    while (userKeys.hasNext()) {
+      String key = userKeys.next();
+      if ("parentId".equals(key)) {
+        continue;
+      }
+      filteredBody.put(key, userProvided.get(key));
+    }
+
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
     // when possible (e.g. documentType="0" -> copy from transactionDocument), or remove.
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableId(adTab.getTable().getId());
     resolveFkSentinels(filteredBody, dalEntity);
+
+    // Coerce string values to proper JSON types expected by the DAL (Long, BigDecimal, Boolean).
+    // Callout cascade returns all values as strings, but DefaultJsonDataService/JsonToDataConverter
+    // expects JSON numbers and booleans for numeric/boolean DAL properties.
+    coerceFieldTypes(filteredBody, dalEntity);
+
+    // Validate mandatory fields before insert — return structured error matching neo_schema contract
+    JSONArray missingFields = validateMandatoryFields(filteredBody, adTab, dalEntity);
+    if (missingFields.length() > 0) {
+      JSONObject errorObj = new JSONObject();
+      errorObj.put("error", "Missing required fields that could not be auto-resolved");
+      errorObj.put("missingFields", missingFields);
+      errorObj.put("hint", "Provide these fields in the request, or use neo_selectors to find valid values for foreignKey fields");
+      return wrapAsErrorContent(errorObj.toString(2));
+    }
 
     // Wrap for DefaultJsonDataService
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
@@ -432,7 +464,7 @@ public class McpToolRouter {
     SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
-    // Find the AD_Column by DB column name directly from the table
+    // Find the AD_Column by DB column name or DAL property name (field name from schema)
     Column adColumn = null;
     for (Column col : adTab.getTable().getADColumnList()) {
       if (col.getDBColumnName().equalsIgnoreCase(columnName)) {
@@ -440,6 +472,25 @@ public class McpToolRouter {
         break;
       }
     }
+
+    // Fallback: resolve by DAL property name (e.g. "businessPartner" → "C_BPartner_ID")
+    if (adColumn == null) {
+      Entity dalEntity = ModelProvider.getInstance().getEntityByTableName(adTab.getTable().getDBTableName());
+      if (dalEntity != null) {
+        for (Column col : adTab.getTable().getADColumnList()) {
+          try {
+            Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
+            if (prop != null && prop.getName().equalsIgnoreCase(columnName)) {
+              adColumn = col;
+              break;
+            }
+          } catch (Exception ignored) {
+            // Column not mappable to property
+          }
+        }
+      }
+    }
+
     if (adColumn == null) {
       throw new IllegalArgumentException("Column not found in table: " + columnName);
     }
@@ -885,6 +936,115 @@ public class McpToolRouter {
    * (e.g. C_DocType_ID copies from C_DocTypeTarget_ID). For each sentinel, we find another
    * property in the body that targets the same entity and has a real value.
    */
+  /**
+   * Validate that all mandatory columns have a value in the body before insert.
+   * Returns a JSONArray of missing fields using the same structure as neo_schema
+   * (name, column, type, hasSelector) so the model knows exactly what to provide.
+   */
+  private JSONArray validateMandatoryFields(JSONObject body, Tab adTab, Entity dalEntity) {
+    JSONArray missing = new JSONArray();
+    if (dalEntity == null) {
+      return missing;
+    }
+
+    for (Column col : adTab.getTable().getADColumnList()) {
+      if (!col.isActive() || !col.isMandatory()) {
+        continue;
+      }
+      // Skip primary key column (auto-generated by DAL)
+      if (col.getDBColumnName().equalsIgnoreCase(adTab.getTable().getDBTableName() + "_ID")) {
+        continue;
+      }
+      String dbColName = col.getDBColumnName();
+      if (SYSTEM_COLUMNS.contains(dbColName.toUpperCase())) {
+        continue;
+      }
+
+      Property prop = null;
+      try {
+        prop = dalEntity.getPropertyByColumnName(dbColName);
+      } catch (Exception ignored) {
+        continue;
+      }
+      if (prop == null) {
+        continue;
+      }
+
+      String propName = prop.getName();
+      if (body.has(propName) && !body.isNull(propName)) {
+        Object val = body.opt(propName);
+        if (val instanceof String && !((String) val).isEmpty()) {
+          continue;
+        }
+        if (!(val instanceof String)) {
+          continue;
+        }
+      }
+
+      // This mandatory field is missing — build schema-compatible descriptor
+      try {
+        JSONObject fieldInfo = new JSONObject();
+        fieldInfo.put("name", propName);
+        fieldInfo.put("column", dbColName);
+
+        String refId = col.getReference() != null ? col.getReference().getId() : null;
+        boolean isFK = SELECTOR_REFS.contains(refId);
+        fieldInfo.put("type", isFK ? "foreignKey" : "other");
+        if (isFK) {
+          fieldInfo.put("hasSelector", true);
+        }
+        fieldInfo.put("label", col.getName());
+        missing.put(fieldInfo);
+      } catch (Exception ignored) {
+        // skip
+      }
+    }
+    return missing;
+  }
+
+  /**
+   * Coerce string values in the body to the proper JSON types expected by the DAL.
+   * Callout cascade and session defaults return everything as strings, but
+   * DefaultJsonDataService expects JSON numbers for Long/BigDecimal properties
+   * and JSON booleans for Boolean properties.
+   */
+  private void coerceFieldTypes(JSONObject body, Entity dalEntity) {
+    if (body == null || dalEntity == null) {
+      return;
+    }
+    List<String> keys = new ArrayList<>();
+    Iterator<String> it = body.keys();
+    while (it.hasNext()) {
+      keys.add(it.next());
+    }
+    for (String key : keys) {
+      Property prop = dalEntity.getProperty(key, false);
+      if (prop == null || !prop.isPrimitive()) {
+        continue;
+      }
+      Object val = body.opt(key);
+      if (!(val instanceof String)) {
+        continue;
+      }
+      String strVal = (String) val;
+      if (strVal.isEmpty()) {
+        continue;
+      }
+      try {
+        Class<?> type = prop.getPrimitiveObjectType();
+        if (type == Long.class) {
+          body.put(key, Long.parseLong(strVal.contains(".") ? strVal.substring(0, strVal.indexOf('.')) : strVal));
+        } else if (type == java.math.BigDecimal.class) {
+          body.put(key, new java.math.BigDecimal(strVal));
+        } else if (type == Boolean.class) {
+          body.put(key, "Y".equalsIgnoreCase(strVal) || "true".equalsIgnoreCase(strVal));
+        }
+      } catch (Exception e) {
+        log.debug("Could not coerce field {} value '{}': {}", key, strVal, e.getMessage());
+      }
+    }
+  }
+
   private void resolveFkSentinels(JSONObject body, Entity dalEntity) throws JSONException {
     // First pass: collect all sentinels and all real FK values by target entity
     Map<String, String> sentinelProps = new HashMap<>(); // propName -> targetEntityName

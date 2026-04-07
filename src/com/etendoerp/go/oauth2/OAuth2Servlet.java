@@ -1247,10 +1247,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String baseUrl = buildBaseUrl(request);
 
       JSONObject metadata = new JSONObject();
-      metadata.put("issuer", baseUrl + "/sws/oauth2");
-      metadata.put("authorization_endpoint", baseUrl + "/sws/oauth2/authorize");
-      metadata.put("token_endpoint", baseUrl + "/sws/oauth2/token");
-      metadata.put("registration_endpoint", baseUrl + "/sws/oauth2/register");
+      metadata.put("issuer", baseUrl + "/oauth2");
+      metadata.put("authorization_endpoint", baseUrl + "/oauth2/authorize");
+      metadata.put("token_endpoint", baseUrl + "/oauth2/token");
+      metadata.put("registration_endpoint", baseUrl + "/oauth2/register");
       metadata.put("scopes_supported",
           new JSONArray(Arrays.asList("neo:read", "neo:write", "neo:process", "neo:report", "neo:*")));
       metadata.put("response_types_supported", new JSONArray(Arrays.asList("code")));
@@ -1418,7 +1418,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       + "});\n"
       + "\n"
       + "async function submitAuthorize(token) {\n"
-      + "  const authResp = await fetch(CTX + '/sws/oauth2/authorize', {\n"
+      + "  const authResp = await fetch(CTX + '/oauth2/authorize', {\n"
       + "    method: 'POST',\n"
       + "    headers: { 'Content-Type': 'application/json' },\n"
       + "    body: JSON.stringify({\n"
