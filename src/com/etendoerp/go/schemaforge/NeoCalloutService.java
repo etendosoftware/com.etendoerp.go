@@ -33,6 +33,7 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.application.window.servlet.CalloutServletConfig;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
@@ -707,6 +708,52 @@ public class NeoCalloutService {
    *   "messages": [ { "type": "WARNING", "text": "..." } ]
    * }
    */
+  /**
+   * For FK update fields that have a value but no _identifier, look up the display name
+   * from the DB so the frontend can show the correct label immediately.
+   */
+  private static void resolveIdentifiersForFkUpdates(JSONObject updates, Tab adTab) {
+    if (updates == null || adTab == null || adTab.getTable() == null) {
+      return;
+    }
+    try {
+      Entity dalEntity = ModelProvider.getInstance()
+          .getEntityByTableId(adTab.getTable().getId());
+      if (dalEntity == null) return;
+
+      Iterator<String> keys = updates.keys();
+      while (keys.hasNext()) {
+        String fieldName = keys.next();
+        JSONObject entry = updates.optJSONObject(fieldName);
+        if (entry == null || entry.has("_identifier")) continue;
+        Object val = entry.opt("value");
+        if (val == null || "".equals(val)) continue;
+        String strVal = String.valueOf(val);
+        // Only resolve for IDs (32-char hex or numeric)
+        if (!strVal.matches("[0-9A-Fa-f]{32}") && !strVal.matches("\\d+")) continue;
+
+        // Find the column for this property name
+        try {
+          Property prop = dalEntity.getProperty(fieldName);
+          if (prop == null || prop.getTargetEntity() == null) continue;
+          // Look up the record to get its identifier
+          BaseOBObject referenced = OBDal.getInstance().get(
+              prop.getTargetEntity().getName(), strVal);
+          if (referenced != null) {
+            String identifier = referenced.getIdentifier();
+            if (identifier != null && !identifier.isEmpty()) {
+              entry.put("_identifier", identifier);
+            }
+          }
+        } catch (Exception e) {
+          log.debug("Could not resolve _identifier for {}: {}", fieldName, e.getMessage());
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Error resolving FK identifiers: {}", e.getMessage());
+    }
+  }
+
   @SuppressWarnings("unchecked")
   static JSONObject transformResponse(JSONObject calloutResult, Tab adTab) {
     JSONObject response = new JSONObject();
@@ -806,6 +853,10 @@ public class NeoCalloutService {
           updates.getJSONObject(baseKey).put("_identifier", displayName);
         }
       }
+
+      // Resolve _identifier for FK fields where the callout only returned an ID.
+      // This avoids the frontend showing stale labels until the record is saved/reloaded.
+      resolveIdentifiersForFkUpdates(updates, adTab);
 
       response.put("updates", updates);
       response.put("combos", combos);

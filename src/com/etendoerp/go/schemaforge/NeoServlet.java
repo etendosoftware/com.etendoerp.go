@@ -23,8 +23,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -945,6 +947,20 @@ public class NeoServlet extends HttpBaseServlet {
           JSONObject filteredBody = fieldFilter.filterCreateRequest(requestBody);
           // Inject defaults for mandatory columns not in ETGO_SF_FIELD config
           NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+          // Execute callout cascade for header tabs only (level 0).
+          // Propagates derived values (e.g., BP → PaymentTerm, PriceList).
+          // Child tabs (lines) rely on the frontend /callout endpoint which has
+          // full parent context for correct resolution (price list, BP, etc.).
+          if (adTab != null && adTab.getTabLevel() != null && adTab.getTabLevel() == 0) {
+            Set<String> seqFields = new HashSet<>();
+            NeoDefaultsService.executeCalloutCascade(context, adTab, filteredBody, seqFields);
+            // Remove empty-string FK values left by callouts that couldn't resolve them
+            // (e.g., BP without sales payment term). This allows the second inject pass
+            // to attempt fallback defaults for those mandatory columns.
+            NeoDefaultsService.removeEmptyFkValues(filteredBody, adTab);
+            // Re-inject mandatory defaults for fields that callouts left empty
+            NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+          }
           // Wrap for DefaultJsonDataService: {"data": {fields, "_entityName": ..., "_new": true}}
           String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(filteredBody, dalEntityName, null);
           result = jsonService.add(params, wrappedBody);

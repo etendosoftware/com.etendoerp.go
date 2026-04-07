@@ -237,6 +237,11 @@ public class NeoDefaultsService {
       if (fromPrefs != null && !fromPrefs.isEmpty()) {
         return fromPrefs;
       }
+      // Fallback for doctype FK columns with no configured default — resolve from C_DocType table
+      String docTypeId = resolveDefaultDocTypeId(adColumn, ctx);
+      if (docTypeId != null) {
+        return docTypeId;
+      }
       return null;
     }
 
@@ -527,7 +532,21 @@ public class NeoDefaultsService {
       if (resolved == null) {
         resolved = resolveFromParentValues(col, parentValues);
       }
-      applyResolvedDefault(body, col, prop.getName(), resolved);
+      // Fallback for mandatory doctype columns with no resolved default
+      if (resolved == null) {
+        String docTypeId = resolveDefaultDocTypeId(col, ctx);
+        if (docTypeId != null) {
+          resolved = docTypeId;
+        }
+      }
+      // Last-resort fallback for any mandatory FK still unresolved — find a valid record
+      if (resolved == null && col.getDBColumnName().toUpperCase().endsWith("_ID")) {
+        String fallbackId = resolveFallbackFkDefault(col);
+        if (fallbackId != null) {
+          resolved = fallbackId;
+        }
+      }
+      applyResolvedDefault(body, col, prop.getName(), resolved, ctx);
     } catch (Exception e) {
       log.debug("Could not resolve mandatory default for {}: {}",
           col.getDBColumnName(), e.getMessage());
@@ -556,20 +575,328 @@ public class NeoDefaultsService {
 
   /**
    * Put the resolved default into the body, unless it is a legacy FK "0" default.
+   * For FK columns referencing C_DocType with "0" default, attempts to resolve the
+   * actual default document type from the database.
    */
   private static void applyResolvedDefault(JSONObject body, Column col,
-      String propName, Object resolved) throws Exception {
+      String propName, Object resolved, NeoContext ctx) throws Exception {
     if (resolved == null) {
       return;
     }
-    // Skip FK columns with legacy "0" default — OBDal cannot resolve "0" as an entity ID.
+    // FK columns with legacy "0" default — OBDal cannot resolve "0" as an entity ID.
+    // For doctype columns, try to resolve the actual default from C_DocType table.
     if ("0".equals(String.valueOf(resolved))
         && col.getDBColumnName().toUpperCase().endsWith("_ID")) {
+      String docTypeId = resolveDefaultDocTypeId(col, ctx);
+      if (docTypeId != null) {
+        body.put(propName, docTypeId);
+        log.debug("Resolved doctype default for {}: {}", propName, docTypeId);
+        return;
+      }
       log.debug("Skipping FK default '0' for {}", propName);
       return;
     }
     body.put(propName, resolved);
     log.debug("Injected mandatory default: {} = {}", propName, resolved);
+  }
+
+  /**
+   * Last-resort fallback: resolve a mandatory FK column by querying the referenced table
+   * for the first active record matching the current client. Prefers records marked as
+   * default (isDefault='Y') when such a column exists in the target table.
+   *
+   * @param col the mandatory FK column with no resolved default
+   * @return the record ID, or null if no fallback could be found
+   */
+  private static String resolveFallbackFkDefault(Column col) {
+    try {
+      // Determine the referenced table from the column's reference
+      org.openbravo.model.ad.datamodel.Table refTable = null;
+
+      // For TableDir references, the table name is derived from the column name
+      // (e.g., C_PaymentTerm_ID → C_PaymentTerm)
+      String dbColName = col.getDBColumnName();
+      if (dbColName.toUpperCase().endsWith("_ID")) {
+        String tableName = dbColName.substring(0, dbColName.length() - 3);
+        OBCriteria<org.openbravo.model.ad.datamodel.Table> tblCrit =
+            OBDal.getInstance().createCriteria(org.openbravo.model.ad.datamodel.Table.class);
+        tblCrit.add(Restrictions.eq("dBTableName", tableName));
+        tblCrit.setMaxResults(1);
+        refTable = (org.openbravo.model.ad.datamodel.Table) tblCrit.uniqueResult();
+      }
+
+      if (refTable == null) {
+        return null;
+      }
+
+      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+      String keyColumn = refTable.getDBTableName() + "_ID";
+
+      // Check if the target table has IsDefault and Name columns
+      boolean hasIsDefault = false;
+      boolean hasName = false;
+      for (Column c : refTable.getADColumnList()) {
+        String cn = c.getDBColumnName();
+        if ("IsDefault".equalsIgnoreCase(cn)) hasIsDefault = true;
+        if ("Name".equalsIgnoreCase(cn)) hasName = true;
+      }
+
+      StringBuilder sql = new StringBuilder();
+      sql.append("SELECT t.").append(keyColumn);
+      sql.append(" FROM ").append(refTable.getDBTableName()).append(" t");
+      sql.append(" WHERE t.IsActive = 'Y'");
+      sql.append(" AND t.AD_Client_ID = ?");
+      sql.append(" ORDER BY ");
+      if (hasIsDefault) {
+        sql.append("t.IsDefault DESC, ");
+      }
+      sql.append(hasName ? "t.Name ASC" : "t." + keyColumn + " ASC");
+
+      try (PreparedStatement ps = OBDal.getInstance().getConnection(false)
+          .prepareStatement(sql.toString() + " LIMIT 1")) {
+        ps.setString(1, clientId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            String id = rs.getString(1);
+            log.debug("Fallback FK default for {}: {} (table={})",
+                dbColName, id, refTable.getDBTableName());
+            return id;
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve fallback FK default for {}: {}",
+          col.getDBColumnName(), e.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * Remove empty-string values from the body for mandatory FK columns.
+   * Callouts may set FK fields to "" when they cannot resolve a value (e.g., BP without
+   * sales payment term). Removing these allows injectMandatoryDefaults to attempt
+   * a fallback resolution on the next pass.
+   */
+  public static void removeEmptyFkValues(JSONObject body, Tab adTab) {
+    if (body == null || adTab == null || adTab.getTable() == null) {
+      return;
+    }
+    try {
+      Entity dalEntity = ModelProvider.getInstance()
+          .getEntityByTableId(adTab.getTable().getId());
+      if (dalEntity == null) {
+        return;
+      }
+      for (Column col : adTab.getTable().getADColumnList()) {
+        if (!col.isActive() || !col.isMandatory()) {
+          continue;
+        }
+        String dbColName = col.getDBColumnName();
+        if (!dbColName.toUpperCase().endsWith("_ID")) {
+          continue;
+        }
+        Property prop = dalEntity.getPropertyByColumnName(dbColName);
+        if (prop == null || !body.has(prop.getName())) {
+          continue;
+        }
+        Object val = body.opt(prop.getName());
+        if (val instanceof String && ((String) val).trim().isEmpty()) {
+          body.remove(prop.getName());
+          log.debug("Removed empty FK value for mandatory field: {}", prop.getName());
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Error removing empty FK values: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Resolve a default C_DocType ID for a column that references the C_DocType table.
+   * Returns null if the column does not reference C_DocType or no suitable default is found.
+   *
+   * <p>The resolution strategy:
+   * <ol>
+   *   <li>Check if the column references C_DocType (by column name convention)</li>
+   *   <li>Determine the transaction type (sales vs. purchase) from the IsSOTrx column
+   *       default in the same table</li>
+   *   <li>Determine the document base type from the table name and transaction type</li>
+   *   <li>Query for the default doctype matching client, isSOTrx, and docbasetype</li>
+   * </ol>
+   *
+   * @param col the AD_Column to resolve a doctype default for
+   * @return the C_DocType_ID string, or null if not applicable or not found
+   */
+  private static String resolveDefaultDocTypeId(Column col, NeoContext ctx) {
+    String colName = col.getDBColumnName().toUpperCase();
+    // Only handle columns that reference C_DocType (naming convention: *DOCTYPE*_ID)
+    if (!colName.endsWith("_ID") || !colName.contains("DOCTYPE")) {
+      return null;
+    }
+
+    try {
+      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+
+      // Determine sales/purchase from the IsSOTrx column default in the same table
+      String isSOTrx = resolveIsSOTrxDefault(col.getTable(), ctx);
+
+      // Determine the document base type from the table context
+      String docBaseType = resolveDocBaseType(col.getTable().getDBTableName(), isSOTrx);
+      if (docBaseType == null) {
+        log.debug("Could not determine DocBaseType for table {} — skipping doctype resolution",
+            col.getTable().getDBTableName());
+        return null;
+      }
+
+      // Extract DocSubTypeSO constraint from the tab's HQL where clause if present.
+      String subTypeFilter = null;
+      String subTypeExclude = null;
+      boolean hasCtx = ctx != null && ctx.getSfEntity() != null && ctx.getSfEntity().getADTab() != null;
+      log.info("[NEO-DOCTYPE] resolveDefaultDocTypeId col={}, hasCtx={}, sfEntity={}, adTab={}",
+          colName,
+          hasCtx,
+          ctx != null && ctx.getSfEntity() != null ? ctx.getSfEntity().getName() : "null",
+          hasCtx ? ctx.getSfEntity().getADTab().getName() : "null");
+      if (hasCtx) {
+        String tabWhere = ctx.getSfEntity().getADTab().getHqlwhereclause();
+        log.info("[NEO-DOCTYPE] tabWhere={}", tabWhere);
+        if (tabWhere != null) {
+          java.util.regex.Matcher m = java.util.regex.Pattern
+              .compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'", java.util.regex.Pattern.CASE_INSENSITIVE)
+              .matcher(tabWhere);
+          if (m.find()) {
+            subTypeExclude = m.group(1);
+          } else {
+            m = java.util.regex.Pattern
+                .compile("sOSubType\\s+LIKE\\s+'(\\w+)'", java.util.regex.Pattern.CASE_INSENSITIVE)
+                .matcher(tabWhere);
+            if (m.find()) {
+              subTypeFilter = m.group(1);
+            }
+          }
+        }
+      }
+
+      // Query for the default document type, respecting the tab's subtype filter
+      StringBuilder sql = new StringBuilder();
+      sql.append("SELECT dt.C_DocType_ID FROM C_DocType dt ");
+      sql.append("WHERE dt.IsActive = 'Y' ");
+      sql.append("AND dt.AD_Client_ID = ? ");
+      sql.append("AND dt.DocBaseType = ? ");
+      sql.append("AND dt.IsSOTrx = ? ");
+      if (subTypeFilter != null) {
+        sql.append("AND dt.DocSubTypeSO = '").append(subTypeFilter).append("' ");
+      } else if (subTypeExclude != null) {
+        sql.append("AND (dt.DocSubTypeSO IS NULL OR dt.DocSubTypeSO != '")
+            .append(subTypeExclude).append("') ");
+      }
+      sql.append("ORDER BY dt.IsDefault DESC, dt.Name ASC");
+
+      try (PreparedStatement ps = OBDal.getInstance().getConnection(false)
+          .prepareStatement(sql.toString())) {
+        ps.setString(1, clientId);
+        ps.setString(2, docBaseType);
+        ps.setString(3, isSOTrx);
+
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            String docTypeId = rs.getString(1);
+            log.debug("Resolved default doctype for {} (DocBaseType={}, IsSOTrx={}): {}",
+                colName, docBaseType, isSOTrx, docTypeId);
+            return docTypeId;
+          }
+        }
+      }
+
+      log.debug("No matching doctype found for {} (DocBaseType={}, IsSOTrx={})",
+          colName, docBaseType, isSOTrx);
+    } catch (Exception e) {
+      log.debug("Could not resolve default doctype for {}: {}", colName, e.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * Determine the IsSOTrx default value from the table's columns.
+   * Looks for an IsSOTrx column and returns its default value ('Y' or 'N').
+   * Handles context variables like @IsSOTrx@ by resolving via Utility.getDefault.
+   * Falls back to 'Y' (sales) if no IsSOTrx column exists or cannot be resolved.
+   */
+  private static String resolveIsSOTrxDefault(
+      org.openbravo.model.ad.datamodel.Table table, NeoContext ctx) {
+    for (Column c : table.getADColumnList()) {
+      if ("IsSOTrx".equalsIgnoreCase(c.getDBColumnName())) {
+        String defaultVal = c.getDefaultValue();
+        if (defaultVal == null || defaultVal.trim().isEmpty()) {
+          return "Y";
+        }
+        defaultVal = defaultVal.trim();
+        // Literal 'Y' or 'N' — return directly
+        if ("Y".equals(defaultVal) || "'Y'".equals(defaultVal)) {
+          return "Y";
+        }
+        if ("N".equals(defaultVal) || "'N'".equals(defaultVal)) {
+          return "N";
+        }
+        // Context variable (e.g., @IsSOTrx@) — resolve via Utility.getDefault
+        if (defaultVal.contains("@") && ctx != null) {
+          try {
+            VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext());
+            DalConnectionProvider conn = new DalConnectionProvider(false);
+            String windowId = resolveWindowId(ctx.getSfEntity());
+            String resolved = Utility.getDefault(
+                conn, vars, "IsSOTrx", defaultVal, windowId, "");
+            if ("Y".equals(resolved) || "N".equals(resolved)) {
+              log.debug("Resolved IsSOTrx context var '{}' to '{}'", defaultVal, resolved);
+              return resolved;
+            }
+          } catch (Exception e) {
+            log.debug("Could not resolve IsSOTrx context var: {}", e.getMessage());
+          }
+        }
+        // Fallback
+        return "Y";
+      }
+    }
+    // Table has no IsSOTrx column — default to 'Y'
+    return "Y";
+  }
+
+  /**
+   * Map a table name and transaction type to the corresponding document base type.
+   * Covers the standard Etendo transactional tables.
+   *
+   * @param tableName the DB table name (e.g., "C_Order", "C_Invoice")
+   * @param isSOTrx   "Y" for sales, "N" for purchase
+   * @return the DocBaseType code (e.g., "SOO", "POO") or null if unknown
+   */
+  private static String resolveDocBaseType(String tableName, String isSOTrx) {
+    boolean isSales = "Y".equals(isSOTrx);
+    String upper = tableName.toUpperCase();
+
+    if ("C_ORDER".equals(upper)) {
+      return isSales ? "SOO" : "POO";
+    }
+    if ("C_INVOICE".equals(upper)) {
+      return isSales ? "ARI" : "API";
+    }
+    if ("M_INOUT".equals(upper)) {
+      return isSales ? "MMS" : "MMR";
+    }
+    if ("C_PAYMENT".equals(upper)) {
+      return isSales ? "ARR" : "APP";
+    }
+    if ("M_MOVEMENT".equals(upper)) {
+      return "MMM";
+    }
+    if ("M_INVENTORY".equals(upper)) {
+      return "MMI";
+    }
+    if ("C_BANKSTATEMENT".equals(upper)) {
+      return "CMB";
+    }
+
+    // Unknown table — cannot determine DocBaseType
+    return null;
   }
 
   /**
@@ -624,7 +951,7 @@ public class NeoDefaultsService {
    * @param seqFields    field names that are sequence previews (skip callouts for these)
    * @return aggregated callout results
    */
-  private static CalloutCascadeResult executeCalloutCascade(NeoContext ctx, Tab adTab,
+  public static CalloutCascadeResult executeCalloutCascade(NeoContext ctx, Tab adTab,
       JSONObject defaults, Set<String> seqFields) {
 
     CalloutCascadeResult result = new CalloutCascadeResult();
@@ -774,7 +1101,7 @@ public class NeoDefaultsService {
   /**
    * Aggregated result of the callout cascade execution.
    */
-  static class CalloutCascadeResult {
+  public static class CalloutCascadeResult {
     private final JSONObject updates = new JSONObject();
     private final JSONObject combos = new JSONObject();
     private final JSONArray messages = new JSONArray();
