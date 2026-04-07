@@ -20,6 +20,9 @@ package com.etendoerp.go.schemaforge;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.HashMap;
@@ -945,6 +948,8 @@ public class NeoServlet extends HttpBaseServlet {
           JSONObject filteredBody = fieldFilter.filterCreateRequest(requestBody);
           // Inject defaults for mandatory columns not in ETGO_SF_FIELD config
           NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+          // ProductPrice safety net: ensure create payload has required price fields/defaults
+          enrichProductPriceCreateDefaults(filteredBody, dalEntityName, parentIdValue);
           // Wrap for DefaultJsonDataService: {"data": {fields, "_entityName": ..., "_new": true}}
           String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(filteredBody, dalEntityName, null);
           result = jsonService.add(params, wrappedBody);
@@ -1039,6 +1044,79 @@ public class NeoServlet extends HttpBaseServlet {
       log.error("Error wrapping body for Smartclient format: {}", e.getMessage(), e);
       return "{}";
     }
+  }
+
+  private void enrichProductPriceCreateDefaults(JSONObject body, String dalEntityName,
+      String parentIdValue) {
+    if (body == null || !"ProductPrice".equals(dalEntityName)) {
+      return;
+    }
+
+    try {
+      if (StringUtils.isNotBlank(parentIdValue) && !body.has("product")) {
+        body.put("product", parentIdValue);
+      }
+
+      if (!body.has("priceLimit")) {
+        if (body.has("listPrice")) {
+          body.put("priceLimit", body.opt("listPrice"));
+        } else if (body.has("standardPrice")) {
+          body.put("priceLimit", body.opt("standardPrice"));
+        }
+      }
+
+      if (!body.has("priceListVersion")) {
+        String versionId = resolveDefaultSalesPriceListVersionId();
+        if (StringUtils.isNotBlank(versionId)) {
+          body.put("priceListVersion", versionId);
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not enrich ProductPrice defaults: {}", e.getMessage());
+    }
+  }
+
+  private String resolveDefaultSalesPriceListVersionId() {
+    OBContext obContext = OBContext.getOBContext();
+    if (obContext == null || obContext.getCurrentClient() == null) {
+      return null;
+    }
+
+    String clientId = obContext.getCurrentClient().getId();
+    String orgId = obContext.getCurrentOrganization() != null
+        ? obContext.getCurrentOrganization().getId()
+        : "0";
+
+    String sql = "SELECT plv.m_pricelist_version_id "
+        + "FROM m_pricelist_version plv "
+        + "JOIN m_pricelist pl ON pl.m_pricelist_id = plv.m_pricelist_id "
+        + "WHERE plv.isactive = 'Y' "
+        + "  AND pl.isactive = 'Y' "
+        + "  AND pl.issopricelist = 'Y' "
+        + "  AND plv.ad_client_id = ? "
+        + "  AND (plv.ad_org_id = '0' OR plv.ad_org_id = ?) "
+        + "ORDER BY CASE WHEN plv.ad_org_id = ? THEN 0 ELSE 1 END, plv.validfrom DESC";
+
+    try (Connection conn = OBDal.getInstance().getConnection();
+         PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, clientId);
+      ps.setString(2, orgId);
+      ps.setString(3, orgId);
+      ps.setMaxRows(1);
+
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          String id = rs.getString(1);
+          if (StringUtils.isNotBlank(id)) {
+            return id;
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve default sales price list version: {}", e.getMessage());
+    }
+
+    return null;
   }
 
   /**
