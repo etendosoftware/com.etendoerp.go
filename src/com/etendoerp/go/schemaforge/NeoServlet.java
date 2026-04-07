@@ -1013,15 +1013,13 @@ public class NeoServlet extends HttpBaseServlet {
   private void mapParentIdToFkColumn(JSONObject requestBody, Tab adTab,
       Entity dalEnt, String parentIdValue) throws Exception {
     for (Column col : adTab.getTable().getADColumnList()) {
-      if (col.isLinkToParentColumn() && col.isActive()) {
-        try {
-          Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
-          if (prop != null) {
-            requestBody.put(prop.getName(), parentIdValue);
-            return;
-          }
-        } catch (Exception ignored) {
-          // Not all columns resolve to DAL properties
+      if (!col.isLinkToParentColumn() || !col.isActive()) {
+        continue;
+      }
+      for (Property prop : dalEnt.getProperties()) {
+        if (StringUtils.equalsIgnoreCase(prop.getColumnName(), col.getDBColumnName())) {
+          requestBody.put(prop.getName(), parentIdValue);
+          return;
         }
       }
     }
