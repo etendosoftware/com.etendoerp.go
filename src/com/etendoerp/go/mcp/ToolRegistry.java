@@ -261,7 +261,7 @@ public class ToolRegistry {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp("Spec name", specNames));
     props.put("entity", stringProp("Entity name within the spec", true));
-    props.put("column", stringProp("Column name to get selector values for", true));
+    props.put("column", stringProp("Field name (e.g. 'businessPartner') or DB column name (e.g. 'C_BPartner_ID') to get selector values for", true));
     props.put("query", stringProp("Search query to filter selector values", false));
 
     return new McpToolDefinition(
@@ -279,7 +279,7 @@ public class ToolRegistry {
     return new McpToolDefinition(
         "neo_defaults",
         "Get default field values for creating a new record. "
-            + "Call this before neo_create to know which fields are pre-populated.",
+            + "Optional — neo_create auto-fills defaults, so only call this if you need to inspect default values before creating.",
         buildObjectSchema(props, List.of("spec", "entity")));
   }
 

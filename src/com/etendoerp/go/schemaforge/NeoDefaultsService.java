@@ -501,21 +501,133 @@ public class NeoDefaultsService {
           if (resolved != null) {
             body.put(propName, resolved);
             log.debug("Injected mandatory default: {} = {}", propName, resolved);
+            continue;
           }
         } catch (Exception e) {
           log.debug("Could not resolve mandatory default for {}: {}",
               col.getDBColumnName(), e.getMessage());
         }
+
+        // Fallback 1: session context variable (#ColumnName or ColumnName)
+        String dbCol = col.getDBColumnName();
+        String fromSession = vars.getSessionValue("#" + dbCol);
+        if (fromSession == null || fromSession.isEmpty()) {
+          fromSession = vars.getSessionValue(dbCol);
+        }
+        if (fromSession != null && !fromSession.isEmpty()) {
+          body.put(propName, fromSession);
+          log.debug("Injected from session context: {} = {}", propName, fromSession);
+          continue;
+        }
+
+        // Fallback 2: safe zero/false defaults for numeric and boolean columns
+        String refId = col.getReference() != null ? col.getReference().getId() : null;
+        if ("22".equals(refId) || "29".equals(refId) || "12".equals(refId) || "11".equals(refId)) {
+          body.put(propName, 0);
+          log.debug("Injected numeric zero default: {} = 0", propName);
+        } else if ("20".equals(refId)) {
+          body.put(propName, false);
+          log.debug("Injected boolean default: {} = false", propName);
+        }
       }
+
+      // Fallback 3: run callout cascade with all fields in body.
+      // Callouts configured in AD_Column derive dependent fields (e.g. BP → address,
+      // price list, payment terms) without hardcoding any field relationships.
+      executeCalloutCascadeForCreate(ctx, adTab, body);
+
     } catch (Exception e) {
       log.error("Error injecting mandatory defaults for tab {}: {}",
           adTab.getName(), e.getMessage(), e);
     }
   }
 
+  /**
+   * Run callout cascade on all fields present in the body during record creation.
+   * This derives dependent fields via AD-configured callouts (e.g. setting businessPartner
+   * triggers callouts that fill partnerAddress, priceList, paymentTerms, etc.)
+   * without hardcoding any field relationships.
+   */
+  private static void executeCalloutCascadeForCreate(NeoContext ctx, Tab adTab, JSONObject body) {
+    try {
+      Set<String> emptySeqFields = new HashSet<>();
+      CalloutCascadeResult cascadeResult = executeCalloutCascade(ctx, adTab, body, emptySeqFields);
+
+      if (cascadeResult != null && cascadeResult.hasResults()) {
+        log.info("[NEO-CREATE] Callout cascade derived {} field updates",
+            cascadeResult.updatedFieldCount());
+      }
+    } catch (Exception e) {
+      log.warn("[NEO-CREATE] Callout cascade failed (non-fatal): {}", e.getMessage());
+    }
+  }
+
   private static final String REF_TABLE = "18";
   private static final String REF_TABLEDIR = "19";
   private static final String REF_SEARCH = "30";
+  /**
+   * Resolve selector auxiliary values for a FK field.
+   * Finds the AD_Column for the given fieldName on this tab, then delegates to
+   * NeoSelectorService.resolveSelectorAuxForId to fetch aux values (_PSTD, _UOM, etc.).
+   */
+  private static JSONObject resolveSelectorAuxValues(Tab adTab, String fieldName,
+      String value, NeoContext ctx) {
+    if (adTab == null || fieldName == null || value == null || value.isEmpty()) {
+      log.info("[NEO-DEFAULTS] resolveSelectorAux: skipping field '{}' (null/empty)", fieldName);
+      return null;
+    }
+    try {
+      Entity entity = ModelProvider.getInstance()
+          .getEntityByTableId(adTab.getTable().getId());
+      if (entity == null) {
+        log.info("[NEO-DEFAULTS] resolveSelectorAux: no entity for tab '{}'", adTab.getName());
+        return null;
+      }
+
+      // Find the Property matching the fieldName (DAL property name).
+      Property prop = entity.getProperty(fieldName, false);
+      if (prop == null) {
+        log.info("[NEO-DEFAULTS] resolveSelectorAux: no property '{}' on entity '{}'",
+            fieldName, entity.getName());
+        return null;
+      }
+      if (prop.getColumnId() == null) {
+        log.info("[NEO-DEFAULTS] resolveSelectorAux: property '{}' has no columnId", fieldName);
+        return null;
+      }
+
+      // Only FK fields have selector aux values.
+      if (prop.isPrimitive()) {
+        log.debug("[NEO-DEFAULTS] resolveSelectorAux: '{}' is primitive, skipping", fieldName);
+        return null;
+      }
+
+      log.info("[NEO-DEFAULTS] resolveSelectorAux: '{}' is FK, columnId={}, value={}",
+          fieldName, prop.getColumnId(), value);
+
+      // Look up the AD_Column by ID.
+      Column adColumn = OBDal.getInstance().get(Column.class, prop.getColumnId());
+      if (adColumn == null) {
+        log.info("[NEO-DEFAULTS] resolveSelectorAux: AD_Column not found for id '{}'",
+            prop.getColumnId());
+        return null;
+      }
+
+      log.info("[NEO-DEFAULTS] resolveSelectorAux: calling resolveSelectorAuxForId for '{}' ref={}",
+          fieldName, adColumn.getReference() != null ? adColumn.getReference().getId() : "null");
+      JSONObject aux = NeoSelectorService.resolveSelectorAuxForId(adColumn, fieldName, value);
+      if (aux != null && aux.length() > 0) {
+        log.info("[NEO-DEFAULTS] Selector aux for '{}' (value={}): {}", fieldName, value, aux);
+      } else {
+        log.info("[NEO-DEFAULTS] resolveSelectorAux: no aux values returned for '{}'", fieldName);
+      }
+      return aux;
+    } catch (Exception e) {
+      log.warn("[NEO-DEFAULTS] Failed to resolve selector aux for field '{}': {}",
+          fieldName, e.getMessage(), e);
+      return null;
+    }
+  }
 
   /**
    * Check if a column is a FK reference (Table, TableDir, or Search).
@@ -634,6 +746,16 @@ public class NeoDefaultsService {
             calloutRequest.put("value", value);
             calloutRequest.put("formState", formState);
 
+            // Resolve selector auxiliary values for FK fields.
+            // Classic UI passes _PLIST, _PSTD, _PLIM, _UOM, _CURR from selector response.
+            // Without these, callouts like SL_Order_Product can't resolve prices.
+            JSONObject auxValues = resolveSelectorAuxValues(adTab, fieldName, value.toString(), ctx);
+            if (auxValues != null && auxValues.length() > 0) {
+              calloutRequest.put("auxiliaryValues", auxValues);
+              log.info("[NEO-DEFAULTS] Resolved {} aux values for field '{}'",
+                  auxValues.length(), fieldName);
+            }
+
             NeoResponse calloutResponse = NeoCalloutService.executeCallout(ctx, calloutRequest);
             if (calloutResponse == null || calloutResponse.getHttpStatus() != 200) {
               log.debug("[NEO-DEFAULTS] Callout for '{}' failed or returned non-200", fieldName);
@@ -677,10 +799,25 @@ public class NeoDefaultsService {
               }
             }
 
-            // Merge combos
+            // Merge combos — also apply selected values to defaults/body
             JSONObject combos = calloutBody.optJSONObject("combos");
             if (combos != null) {
               result.mergeCombos(combos);
+              Iterator<String> comboKeys = combos.keys();
+              while (comboKeys.hasNext()) {
+                String comboField = comboKeys.next();
+                JSONObject comboObj = combos.optJSONObject(comboField);
+                if (comboObj != null && comboObj.has("selected")) {
+                  Object selectedValue = comboObj.get("selected");
+                  if (selectedValue != null && !JSONObject.NULL.equals(selectedValue)) {
+                    Object oldValue = formState.opt(comboField);
+                    formState.put(comboField, selectedValue);
+                    defaults.put(comboField, selectedValue);
+                    log.debug("[NEO-DEFAULTS] Applied combo selected value: {} = {}",
+                        comboField, selectedValue);
+                  }
+                }
+              }
             }
 
             // Merge messages
@@ -737,6 +874,10 @@ public class NeoDefaultsService {
 
     boolean hasResults() {
       return updates.length() > 0 || combos.length() > 0 || messages.length() > 0;
+    }
+
+    int updatedFieldCount() {
+      return updates.length();
     }
 
     void mergeUpdates(JSONObject newUpdates) {

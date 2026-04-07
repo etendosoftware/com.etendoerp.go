@@ -497,6 +497,14 @@ public class NeoCalloutService {
         } else if (params.containsKey(inpParentKey)) {
           log.info("[NEO-CALLOUT] Parent key already set: {} = {}", inpParentKey, params.get(inpParentKey)[0]);
         }
+
+        // Load parent record fields and inject them as params.
+        // Classic Etendo UI sends ALL header fields when executing child-tab callouts.
+        // E.g., SL_Order_Product reads inpmPricelistId from the header to resolve prices.
+        String parentId = params.containsKey(inpParentKey) ? params.get(inpParentKey)[0] : null;
+        if (parentId != null && !parentId.isEmpty()) {
+          injectParentRecordFields(parentTab, parentId, params);
+        }
       }
     }
 
@@ -668,6 +676,64 @@ public class NeoCalloutService {
       }
     }
     return parent;
+  }
+
+  /**
+   * Load the parent record from DB and inject its column values as inp* params.
+   * Classic Etendo UI always sends header fields when executing child-tab callouts.
+   * Without these, callouts like SL_Order_Product can't resolve prices (needs M_PriceList_ID).
+   */
+  private static void injectParentRecordFields(Tab parentTab, String parentId,
+      Map<String, String[]> params) {
+    try {
+      Entity parentEntity = ModelProvider.getInstance()
+          .getEntityByTableId(parentTab.getTable().getId());
+      if (parentEntity == null) {
+        return;
+      }
+      Object parentRecord = OBDal.getInstance().get(parentEntity.getName(), parentId);
+      if (parentRecord == null) {
+        log.debug("[NEO-CALLOUT] Parent record not found: {} / {}", parentEntity.getName(), parentId);
+        return;
+      }
+      org.openbravo.base.structure.BaseOBObject bob =
+          (org.openbravo.base.structure.BaseOBObject) parentRecord;
+
+      int injected = 0;
+      for (Column col : parentTab.getTable().getADColumnList()) {
+        if (!col.isActive()) {
+          continue;
+        }
+        String dbColName = col.getDBColumnName();
+        String inpName = toInpName(dbColName);
+        // Don't overwrite params already set by formState or child-tab defaults
+        if (params.containsKey(inpName)) {
+          continue;
+        }
+        try {
+          Property prop = parentEntity.getPropertyByColumnName(dbColName);
+          if (prop == null) {
+            continue;
+          }
+          Object val = bob.get(prop.getName());
+          String strVal = "";
+          if (val != null) {
+            if (val instanceof org.openbravo.base.structure.BaseOBObject) {
+              strVal = ((org.openbravo.base.structure.BaseOBObject) val).getId().toString();
+            } else {
+              strVal = val.toString();
+            }
+          }
+          params.put(inpName, new String[]{ strVal });
+          injected++;
+        } catch (Exception e) {
+          log.debug("[NEO-CALLOUT] Could not read parent field {}: {}", dbColName, e.getMessage());
+        }
+      }
+      log.info("[NEO-CALLOUT] Injected {} parent record fields from {}", injected, parentEntity.getName());
+    } catch (Exception e) {
+      log.warn("[NEO-CALLOUT] Failed to inject parent record fields: {}", e.getMessage());
+    }
   }
 
   // ── Response transformation ────────────────────────────────────────
