@@ -90,6 +90,7 @@ public class NeoServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
   private static final String HOOK_ERROR_MSG = "An internal error occurred while processing the hook handler";
+  private static final String PRICE_LIMIT = "priceLimit";
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -1057,11 +1058,11 @@ public class NeoServlet extends HttpBaseServlet {
         body.put("product", parentIdValue);
       }
 
-      if (!body.has("priceLimit")) {
+      if (!body.has(PRICE_LIMIT)) {
         if (body.has("listPrice")) {
-          body.put("priceLimit", body.opt("listPrice"));
+          body.put(PRICE_LIMIT, body.opt("listPrice"));
         } else if (body.has("standardPrice")) {
-          body.put("priceLimit", body.opt("standardPrice"));
+          body.put(PRICE_LIMIT, body.opt("standardPrice"));
         }
       }
 
@@ -1097,8 +1098,8 @@ public class NeoServlet extends HttpBaseServlet {
         + "  AND (plv.ad_org_id = '0' OR plv.ad_org_id = ?) "
         + "ORDER BY CASE WHEN plv.ad_org_id = ? THEN 0 ELSE 1 END, plv.validfrom DESC";
 
-    try (Connection conn = OBDal.getInstance().getConnection();
-         PreparedStatement ps = conn.prepareStatement(sql)) {
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, clientId);
       ps.setString(2, orgId);
       ps.setString(3, orgId);
