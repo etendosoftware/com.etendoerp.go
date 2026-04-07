@@ -210,6 +210,29 @@ public class NeoDefaultsService {
 
     String dbColumnName = adColumn.getDBColumnName();
 
+    // NEO-specific overrides (IsActive, link-to-parent, sequences)
+    Object neoOverride = resolveNeoSpecificDefault(adColumn, parentId, vars, conn, windowId, ctx);
+    if (neoOverride != null) {
+      return neoOverride;
+    }
+
+    // Get the default value expression from AD_Column
+    String defaultExpr = adColumn.getDefaultValue();
+    if (defaultExpr == null || defaultExpr.trim().isEmpty()) {
+      return resolveFromPrefsOrDocType(adColumn, vars, conn, windowId, dbColumnName, ctx);
+    }
+
+    return resolveFromExpression(defaultExpr.trim(), adColumn, vars, conn, windowId, dbColumnName);
+  }
+
+  /**
+   * Resolve NEO-specific default overrides: IsActive, link-to-parent, and sequence fields.
+   * Returns null if no NEO-specific override applies.
+   */
+  private static Object resolveNeoSpecificDefault(Column adColumn, String parentId,
+      VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx) {
+    String dbColumnName = adColumn.getDBColumnName();
+
     // NEO-specific: IsActive always defaults to true
     if ("IsActive".equalsIgnoreCase(dbColumnName)) {
       return true;
@@ -228,25 +251,30 @@ public class NeoDefaultsService {
       }
     }
 
-    // Get the default value expression from AD_Column
-    String defaultExpr = adColumn.getDefaultValue();
-    if (defaultExpr == null || defaultExpr.trim().isEmpty()) {
-      // No column-level default, but Utility.getDefault also checks preferences
-      // which may provide a default for this column+window combination
-      String fromPrefs = Utility.getDefault(conn, vars, dbColumnName, "", windowId, "");
-      if (fromPrefs != null && !fromPrefs.isEmpty()) {
-        return fromPrefs;
-      }
-      // Fallback for doctype FK columns with no configured default — resolve from C_DocType table
-      String docTypeId = resolveDefaultDocTypeId(adColumn, ctx);
-      if (docTypeId != null) {
-        return docTypeId;
-      }
-      return null;
+    return null;
+  }
+
+  /**
+   * Resolve default from preferences or doctype when no column-level default expression exists.
+   */
+  private static Object resolveFromPrefsOrDocType(Column adColumn, VariablesSecureApp vars,
+      DalConnectionProvider conn, String windowId, String dbColumnName, NeoContext ctx) {
+    String fromPrefs = Utility.getDefault(conn, vars, dbColumnName, "", windowId, "");
+    if (fromPrefs != null && !fromPrefs.isEmpty()) {
+      return fromPrefs;
     }
+    String docTypeId = resolveDefaultDocTypeId(adColumn, ctx);
+    if (docTypeId != null) {
+      return docTypeId;
+    }
+    return null;
+  }
 
-    defaultExpr = defaultExpr.trim();
-
+  /**
+   * Resolve default from a column-level default expression (literal, SQL, context variable, etc.).
+   */
+  private static Object resolveFromExpression(String defaultExpr, Column adColumn,
+      VariablesSecureApp vars, DalConnectionProvider conn, String windowId, String dbColumnName) {
     // Handle empty-string literal
     if ("\"\"".equals(defaultExpr)) {
       return "";
@@ -677,35 +705,58 @@ public class NeoDefaultsService {
    * which may not match the tab's HQL filter (e.g., Standard Order instead of Quotation).
    * This method resolves the correct doctype based on the tab filter and overwrites both
    * documentType and transactionDocument in the body.
+   *
+   * @param body  the JSON request body to update with the correct doctype values
+   * @param adTab the AD_Tab containing the table with doctype columns
+   * @param ctx   the NeoContext with spec/entity info for doctype resolution
    */
   public static void reapplyDocTypeFromTabFilter(JSONObject body, Tab adTab, NeoContext ctx) {
     if (body == null || adTab == null || ctx == null) return;
     try {
-      // Find the DocTypeTarget column to resolve the correct doctype
-      for (Column col : adTab.getTable().getADColumnList()) {
-        if ("C_DocTypeTarget_ID".equalsIgnoreCase(col.getDBColumnName())) {
-          String correctId = resolveDefaultDocTypeId(col, ctx);
-          if (correctId != null) {
-            Entity dalEntity = ModelProvider.getInstance()
-                .getEntityByTableId(adTab.getTable().getId());
-            if (dalEntity != null) {
-              Property targetProp = dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID");
-              Property typeProp = dalEntity.getPropertyByColumnName("C_DocType_ID");
-              if (targetProp != null) {
-                body.put(targetProp.getName(), correctId);
-                log.debug("Reapplied transactionDocument={}", correctId);
-              }
-              if (typeProp != null) {
-                body.put(typeProp.getName(), correctId);
-                log.debug("Reapplied documentType={}", correctId);
-              }
-            }
-          }
-          break;
-        }
+      Column docTypeTargetCol = findDocTypeTargetColumn(adTab);
+      if (docTypeTargetCol == null) {
+        return;
+      }
+      String correctId = resolveDefaultDocTypeId(docTypeTargetCol, ctx);
+      if (correctId != null) {
+        applyDocTypeToBody(body, adTab, correctId);
       }
     } catch (Exception e) {
       log.debug("Error reapplying doctype: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Find the C_DocTypeTarget_ID column in the tab's table.
+   */
+  private static Column findDocTypeTargetColumn(Tab adTab) {
+    for (Column col : adTab.getTable().getADColumnList()) {
+      if ("C_DocTypeTarget_ID".equalsIgnoreCase(col.getDBColumnName())) {
+        return col;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Apply the resolved doctype ID to both transactionDocument and documentType properties.
+   */
+  private static void applyDocTypeToBody(JSONObject body, Tab adTab, String docTypeId)
+      throws Exception {
+    Entity dalEntity = ModelProvider.getInstance()
+        .getEntityByTableId(adTab.getTable().getId());
+    if (dalEntity == null) {
+      return;
+    }
+    Property targetProp = dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID");
+    Property typeProp = dalEntity.getPropertyByColumnName("C_DocType_ID");
+    if (targetProp != null) {
+      body.put(targetProp.getName(), docTypeId);
+      log.debug("Reapplied transactionDocument={}", docTypeId);
+    }
+    if (typeProp != null) {
+      body.put(typeProp.getName(), docTypeId);
+      log.debug("Reapplied documentType={}", docTypeId);
     }
   }
 
@@ -714,6 +765,9 @@ public class NeoDefaultsService {
    * Callouts may set FK fields to "" when they cannot resolve a value (e.g., BP without
    * sales payment term). Removing these allows injectMandatoryDefaults to attempt
    * a fallback resolution on the next pass.
+   *
+   * @param body  the JSON request body from which empty FK values will be removed
+   * @param adTab the AD_Tab containing the table with FK column definitions
    */
   public static void removeEmptyFkValues(JSONObject body, Tab adTab) {
     if (body == null || adTab == null || adTab.getTable() == null) {
@@ -726,25 +780,32 @@ public class NeoDefaultsService {
         return;
       }
       for (Column col : adTab.getTable().getADColumnList()) {
-        if (!col.isActive() || !col.isMandatory()) {
-          continue;
-        }
-        String dbColName = col.getDBColumnName();
-        if (!dbColName.toUpperCase().endsWith("_ID")) {
-          continue;
-        }
-        Property prop = dalEntity.getPropertyByColumnName(dbColName);
-        if (prop == null || !body.has(prop.getName())) {
-          continue;
-        }
-        Object val = body.opt(prop.getName());
-        if (val instanceof String && ((String) val).trim().isEmpty()) {
-          body.remove(prop.getName());
-          log.debug("Removed empty FK value for mandatory field: {}", prop.getName());
-        }
+        removeEmptyFkValueForColumn(body, col, dalEntity);
       }
     } catch (Exception e) {
       log.debug("Error removing empty FK values: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Remove the empty FK value for a single column if applicable.
+   */
+  private static void removeEmptyFkValueForColumn(JSONObject body, Column col, Entity dalEntity) {
+    if (!col.isActive() || !col.isMandatory()) {
+      return;
+    }
+    String dbColName = col.getDBColumnName();
+    if (!dbColName.toUpperCase().endsWith("_ID")) {
+      return;
+    }
+    Property prop = dalEntity.getPropertyByColumnName(dbColName);
+    if (prop == null || !body.has(prop.getName())) {
+      return;
+    }
+    Object val = body.opt(prop.getName());
+    if (val instanceof String && ((String) val).trim().isEmpty()) {
+      body.remove(prop.getName());
+      log.debug("Removed empty FK value for mandatory field: {}", prop.getName());
     }
   }
 
@@ -773,11 +834,7 @@ public class NeoDefaultsService {
 
     try {
       String clientId = OBContext.getOBContext().getCurrentClient().getId();
-
-      // Determine sales/purchase from the IsSOTrx column default in the same table
       String isSOTrx = resolveIsSOTrxDefault(col.getTable(), ctx);
-
-      // Determine the document base type from the table context
       String docBaseType = resolveDocBaseType(col.getTable().getDBTableName(), isSOTrx);
       if (docBaseType == null) {
         log.debug("Could not determine DocBaseType for table {} — skipping doctype resolution",
@@ -785,64 +842,96 @@ public class NeoDefaultsService {
         return null;
       }
 
-      // Extract DocSubTypeSO constraint from the tab's HQL where clause if present.
-      String subTypeFilter = null;
-      String subTypeExclude = null;
-      if (ctx != null && ctx.getSfEntity() != null && ctx.getSfEntity().getADTab() != null) {
-        String tabWhere = ctx.getSfEntity().getADTab().getHqlwhereclause();
-        if (tabWhere != null) {
-          java.util.regex.Matcher m = java.util.regex.Pattern
-              .compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'", java.util.regex.Pattern.CASE_INSENSITIVE)
-              .matcher(tabWhere);
-          if (m.find()) {
-            subTypeExclude = m.group(1);
-          } else {
-            m = java.util.regex.Pattern
-                .compile("sOSubType\\s+LIKE\\s+'(\\w+)'", java.util.regex.Pattern.CASE_INSENSITIVE)
-                .matcher(tabWhere);
-            if (m.find()) {
-              subTypeFilter = m.group(1);
-            }
-          }
-        }
-      }
+      // Extract DocSubTypeSO constraint from the tab's HQL where clause
+      String[] subTypeFilters = parseSubTypeFilters(ctx);
 
-      // Query for the default document type, respecting the tab's subtype filter
-      StringBuilder sql = new StringBuilder();
-      sql.append("SELECT dt.C_DocType_ID FROM C_DocType dt ");
-      sql.append("WHERE dt.IsActive = 'Y' ");
-      sql.append("AND dt.AD_Client_ID = ? ");
-      sql.append("AND dt.DocBaseType = ? ");
-      sql.append("AND dt.IsSOTrx = ? ");
-      if (subTypeFilter != null) {
-        sql.append("AND dt.DocSubTypeSO = '").append(subTypeFilter).append("' ");
-      } else if (subTypeExclude != null) {
-        sql.append("AND (dt.DocSubTypeSO IS NULL OR dt.DocSubTypeSO != '")
-            .append(subTypeExclude).append("') ");
-      }
-      sql.append("ORDER BY dt.IsDefault DESC, dt.Name ASC");
+      return queryDefaultDocType(clientId, docBaseType, isSOTrx,
+          subTypeFilters[0], subTypeFilters[1], colName);
 
-      try (PreparedStatement ps = OBDal.getInstance().getConnection(false)
-          .prepareStatement(sql.toString())) {
-        ps.setString(1, clientId);
-        ps.setString(2, docBaseType);
-        ps.setString(3, isSOTrx);
-
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            String docTypeId = rs.getString(1);
-            log.debug("Resolved default doctype for {} (DocBaseType={}, IsSOTrx={}): {}",
-                colName, docBaseType, isSOTrx, docTypeId);
-            return docTypeId;
-          }
-        }
-      }
-
-      log.debug("No matching doctype found for {} (DocBaseType={}, IsSOTrx={})",
-          colName, docBaseType, isSOTrx);
     } catch (Exception e) {
       log.debug("Could not resolve default doctype for {}: {}", colName, e.getMessage());
     }
+    return null;
+  }
+
+  /**
+   * Parse DocSubTypeSO filter and exclude values from the tab's HQL where clause.
+   * Returns a two-element array: [subTypeFilter, subTypeExclude], either may be null.
+   */
+  private static String[] parseSubTypeFilters(NeoContext ctx) {
+    String subTypeFilter = null;
+    String subTypeExclude = null;
+    if (ctx != null && ctx.getSfEntity() != null && ctx.getSfEntity().getADTab() != null) {
+      String tabWhere = ctx.getSfEntity().getADTab().getHqlwhereclause();
+      if (tabWhere != null) {
+        java.util.regex.Matcher m = java.util.regex.Pattern
+            .compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'",
+                java.util.regex.Pattern.CASE_INSENSITIVE)
+            .matcher(tabWhere);
+        if (m.find()) {
+          subTypeExclude = m.group(1);
+        } else {
+          m = java.util.regex.Pattern
+              .compile("sOSubType\\s+LIKE\\s+'(\\w+)'",
+                  java.util.regex.Pattern.CASE_INSENSITIVE)
+              .matcher(tabWhere);
+          if (m.find()) {
+            subTypeFilter = m.group(1);
+          }
+        }
+      }
+    }
+    return new String[] { subTypeFilter, subTypeExclude };
+  }
+
+  /**
+   * Query the C_DocType table for the default document type matching the given criteria.
+   * Uses PreparedStatement placeholders for all dynamic values to prevent SQL injection.
+   */
+  private static String queryDefaultDocType(String clientId, String docBaseType,
+      String isSOTrx, String subTypeFilter, String subTypeExclude, String colName)
+      throws Exception {
+    StringBuilder sql = new StringBuilder();
+    sql.append("SELECT dt.C_DocType_ID FROM C_DocType dt ");
+    sql.append("WHERE dt.IsActive = 'Y' ");
+    sql.append("AND dt.AD_Client_ID = ? ");
+    sql.append("AND dt.DocBaseType = ? ");
+    sql.append("AND dt.IsSOTrx = ? ");
+
+    int extraParams = 0;
+    if (subTypeFilter != null) {
+      sql.append("AND dt.DocSubTypeSO = ? ");
+      extraParams = 1;
+    } else if (subTypeExclude != null) {
+      sql.append("AND (dt.DocSubTypeSO IS NULL OR dt.DocSubTypeSO != ?) ");
+      extraParams = 2;
+    }
+    sql.append("ORDER BY dt.IsDefault DESC, dt.Name ASC");
+
+    try (PreparedStatement ps = OBDal.getInstance().getConnection(false)
+        .prepareStatement(sql.toString())) {
+      int paramIndex = 1;
+      ps.setString(paramIndex++, clientId);
+      ps.setString(paramIndex++, docBaseType);
+      ps.setString(paramIndex++, isSOTrx);
+      if (extraParams == 1) {
+        ps.setString(paramIndex, subTypeFilter);
+      } else if (extraParams == 2) {
+        ps.setString(paramIndex, subTypeExclude);
+      }
+
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          String docTypeId = rs.getString(1);
+          log.debug("Resolved default doctype for {} (DocBaseType={}, IsSOTrx={}): {}",
+              colName, docBaseType, isSOTrx, docTypeId);
+          return docTypeId;
+        }
+      }
+    }
+
+    log.debug("No matching doctype found for {} (DocBaseType={}, IsSOTrx={})",
+        colName, docBaseType, isSOTrx);
     return null;
   }
 
@@ -856,40 +945,72 @@ public class NeoDefaultsService {
       org.openbravo.model.ad.datamodel.Table table, NeoContext ctx) {
     for (Column c : table.getADColumnList()) {
       if ("IsSOTrx".equalsIgnoreCase(c.getDBColumnName())) {
-        String defaultVal = c.getDefaultValue();
-        if (defaultVal == null || defaultVal.trim().isEmpty()) {
-          return "Y";
-        }
-        defaultVal = defaultVal.trim();
-        // Literal 'Y' or 'N' — return directly
-        if ("Y".equals(defaultVal) || "'Y'".equals(defaultVal)) {
-          return "Y";
-        }
-        if ("N".equals(defaultVal) || "'N'".equals(defaultVal)) {
-          return "N";
-        }
-        // Context variable (e.g., @IsSOTrx@) — resolve via Utility.getDefault
-        if (defaultVal.contains("@") && ctx != null) {
-          try {
-            VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext());
-            DalConnectionProvider conn = new DalConnectionProvider(false);
-            String windowId = resolveWindowId(ctx.getSfEntity());
-            String resolved = Utility.getDefault(
-                conn, vars, "IsSOTrx", defaultVal, windowId, "");
-            if ("Y".equals(resolved) || "N".equals(resolved)) {
-              log.debug("Resolved IsSOTrx context var '{}' to '{}'", defaultVal, resolved);
-              return resolved;
-            }
-          } catch (Exception e) {
-            log.debug("Could not resolve IsSOTrx context var: {}", e.getMessage());
-          }
-        }
-        // Fallback
-        return "Y";
+        return resolveIsSOTrxFromColumn(c, ctx);
       }
     }
     // Table has no IsSOTrx column — default to 'Y'
     return "Y";
+  }
+
+  /**
+   * Resolve the IsSOTrx value from the column's default expression.
+   * Handles literal values, context variables, and fallback.
+   */
+  private static String resolveIsSOTrxFromColumn(Column col, NeoContext ctx) {
+    String defaultVal = col.getDefaultValue();
+    if (defaultVal == null || defaultVal.trim().isEmpty()) {
+      return "Y";
+    }
+    defaultVal = defaultVal.trim();
+
+    // Literal 'Y' or 'N' — return directly
+    String literal = parseIsSOTrxLiteral(defaultVal);
+    if (literal != null) {
+      return literal;
+    }
+
+    // Context variable (e.g., @IsSOTrx@) — resolve via Utility.getDefault
+    if (defaultVal.contains("@") && ctx != null) {
+      String resolved = resolveIsSOTrxFromContext(defaultVal, ctx);
+      if (resolved != null) {
+        return resolved;
+      }
+    }
+
+    // Fallback
+    return "Y";
+  }
+
+  /**
+   * Parse a literal IsSOTrx value. Returns "Y" or "N" if recognized, null otherwise.
+   */
+  private static String parseIsSOTrxLiteral(String value) {
+    if ("Y".equals(value) || "'Y'".equals(value)) {
+      return "Y";
+    }
+    if ("N".equals(value) || "'N'".equals(value)) {
+      return "N";
+    }
+    return null;
+  }
+
+  /**
+   * Resolve an IsSOTrx context variable expression via Utility.getDefault.
+   */
+  private static String resolveIsSOTrxFromContext(String defaultVal, NeoContext ctx) {
+    try {
+      VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext());
+      DalConnectionProvider conn = new DalConnectionProvider(false);
+      String windowId = resolveWindowId(ctx.getSfEntity());
+      String resolved = Utility.getDefault(conn, vars, "IsSOTrx", defaultVal, windowId, "");
+      if ("Y".equals(resolved) || "N".equals(resolved)) {
+        log.debug("Resolved IsSOTrx context var '{}' to '{}'", defaultVal, resolved);
+        return resolved;
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve IsSOTrx context var: {}", e.getMessage());
+    }
+    return null;
   }
 
   /**
@@ -988,24 +1109,7 @@ public class NeoDefaultsService {
     CalloutCascadeResult result = new CalloutCascadeResult();
 
     try {
-      // Collect fields that have callouts and non-null defaults
-      List<String> fieldsWithCallouts = new ArrayList<>();
-      Iterator<String> keys = defaults.keys();
-      while (keys.hasNext()) {
-        String fieldName = keys.next();
-        if (seqFields.contains(fieldName)) {
-          continue;
-        }
-        Object value = defaults.opt(fieldName);
-        if (value == null || JSONObject.NULL.equals(value)) {
-          continue;
-        }
-        NeoCalloutService.CalloutInfo info = NeoCalloutService.resolveCallout(adTab, fieldName);
-        if (info != null) {
-          fieldsWithCallouts.add(fieldName);
-        }
-      }
-
+      List<String> fieldsWithCallouts = collectFieldsWithCallouts(defaults, seqFields, adTab);
       if (fieldsWithCallouts.isEmpty()) {
         return result;
       }
@@ -1013,93 +1117,14 @@ public class NeoDefaultsService {
       log.info("[NEO-DEFAULTS] Callout cascade: {} fields have callouts: {}",
           fieldsWithCallouts.size(), fieldsWithCallouts);
 
-      // Build a running form state from current defaults
       JSONObject formState = new JSONObject(defaults.toString());
-
-      // Execute callouts up to MAX_CALLOUT_CHAIN_DEPTH iterations.
-      // Each iteration processes all pending fields. If a callout produces updates
-      // that affect other fields with callouts, those are queued for the next iteration.
       Set<String> pendingFields = new LinkedHashSet<>(fieldsWithCallouts);
       int depth = 0;
 
       while (!pendingFields.isEmpty() && depth < MAX_CALLOUT_CHAIN_DEPTH) {
         depth++;
-        Set<String> nextPending = new LinkedHashSet<>();
-
-        for (String fieldName : pendingFields) {
-          Object value = formState.opt(fieldName);
-          if (value == null || JSONObject.NULL.equals(value)) {
-            continue;
-          }
-
-          try {
-            JSONObject calloutRequest = new JSONObject();
-            calloutRequest.put("field", fieldName);
-            calloutRequest.put("value", value);
-            calloutRequest.put("formState", formState);
-
-            NeoResponse calloutResponse = NeoCalloutService.executeCallout(ctx, calloutRequest);
-            if (calloutResponse == null || calloutResponse.getHttpStatus() != 200) {
-              log.debug("[NEO-DEFAULTS] Callout for '{}' failed or returned non-200", fieldName);
-              continue;
-            }
-
-            JSONObject calloutBody = calloutResponse.getBody();
-            if (calloutBody == null) {
-              continue;
-            }
-
-            // Merge updates into form state and track which fields changed
-            JSONObject updates = calloutBody.optJSONObject("updates");
-            if (updates != null) {
-              result.mergeUpdates(updates);
-              Iterator<String> updateKeys = updates.keys();
-              while (updateKeys.hasNext()) {
-                String updatedField = updateKeys.next();
-                JSONObject updateObj = updates.optJSONObject(updatedField);
-                if (updateObj != null && updateObj.has("value")) {
-                  Object newValue = updateObj.get("value");
-                  Object oldValue = formState.opt(updatedField);
-
-                  formState.put(updatedField, newValue);
-                  defaults.put(updatedField, newValue);
-
-                  // If the updated field itself has a callout and the value changed,
-                  // queue it for the next iteration
-                  if (!valueChanged(oldValue, newValue)) {
-                    continue;
-                  }
-                  if (seqFields.contains(updatedField)) {
-                    continue;
-                  }
-                  NeoCalloutService.CalloutInfo nextInfo =
-                      NeoCalloutService.resolveCallout(adTab, updatedField);
-                  if (nextInfo != null) {
-                    nextPending.add(updatedField);
-                  }
-                }
-              }
-            }
-
-            // Merge combos
-            JSONObject combos = calloutBody.optJSONObject("combos");
-            if (combos != null) {
-              result.mergeCombos(combos);
-            }
-
-            // Merge messages
-            JSONArray messages = calloutBody.optJSONArray("messages");
-            if (messages != null) {
-              result.mergeMessages(messages);
-            }
-
-          } catch (Exception e) {
-            log.warn("[NEO-DEFAULTS] Callout cascade error for field '{}': {}",
-                fieldName, e.getMessage());
-          }
-        }
-
-        pendingFields = nextPending;
+        pendingFields = executeCascadeIteration(
+            pendingFields, ctx, adTab, formState, defaults, seqFields, result);
       }
 
       result.chainDepth = depth;
@@ -1114,6 +1139,137 @@ public class NeoDefaultsService {
     }
 
     return result;
+  }
+
+  /**
+   * Collect field names that have non-null defaults and configured callouts.
+   */
+  private static List<String> collectFieldsWithCallouts(JSONObject defaults,
+      Set<String> seqFields, Tab adTab) {
+    List<String> fieldsWithCallouts = new ArrayList<>();
+    Iterator<String> keys = defaults.keys();
+    while (keys.hasNext()) {
+      String fieldName = keys.next();
+      if (seqFields.contains(fieldName)) {
+        continue;
+      }
+      Object value = defaults.opt(fieldName);
+      if (value == null || JSONObject.NULL.equals(value)) {
+        continue;
+      }
+      NeoCalloutService.CalloutInfo info = NeoCalloutService.resolveCallout(adTab, fieldName);
+      if (info != null) {
+        fieldsWithCallouts.add(fieldName);
+      }
+    }
+    return fieldsWithCallouts;
+  }
+
+  /**
+   * Execute one iteration of the callout cascade, processing all pending fields.
+   * Returns the set of fields that need processing in the next iteration.
+   */
+  private static Set<String> executeCascadeIteration(Set<String> pendingFields,
+      NeoContext ctx, Tab adTab, JSONObject formState, JSONObject defaults,
+      Set<String> seqFields, CalloutCascadeResult result) {
+    Set<String> nextPending = new LinkedHashSet<>();
+
+    for (String fieldName : pendingFields) {
+      executeSingleCallout(fieldName, ctx, adTab, formState, defaults,
+          seqFields, result, nextPending);
+    }
+
+    return nextPending;
+  }
+
+  /**
+   * Execute a single callout for one field and merge results into the cascade state.
+   */
+  private static void executeSingleCallout(String fieldName, NeoContext ctx, Tab adTab,
+      JSONObject formState, JSONObject defaults, Set<String> seqFields,
+      CalloutCascadeResult result, Set<String> nextPending) {
+    Object value = formState.opt(fieldName);
+    if (value == null || JSONObject.NULL.equals(value)) {
+      return;
+    }
+
+    try {
+      JSONObject calloutRequest = new JSONObject();
+      calloutRequest.put("field", fieldName);
+      calloutRequest.put("value", value);
+      calloutRequest.put("formState", formState);
+
+      NeoResponse calloutResponse = NeoCalloutService.executeCallout(ctx, calloutRequest);
+      if (calloutResponse == null || calloutResponse.getHttpStatus() != 200) {
+        log.debug("[NEO-DEFAULTS] Callout for '{}' failed or returned non-200", fieldName);
+        return;
+      }
+
+      JSONObject calloutBody = calloutResponse.getBody();
+      if (calloutBody == null) {
+        return;
+      }
+
+      mergeCalloutResults(calloutBody, formState, defaults, seqFields, adTab, result, nextPending);
+
+    } catch (Exception e) {
+      log.warn("[NEO-DEFAULTS] Callout cascade error for field '{}': {}",
+          fieldName, e.getMessage());
+    }
+  }
+
+  /**
+   * Merge updates, combos, and messages from a callout response into the cascade state.
+   */
+  private static void mergeCalloutResults(JSONObject calloutBody, JSONObject formState,
+      JSONObject defaults, Set<String> seqFields, Tab adTab,
+      CalloutCascadeResult result, Set<String> nextPending) throws Exception {
+    JSONObject updates = calloutBody.optJSONObject("updates");
+    if (updates != null) {
+      result.mergeUpdates(updates);
+      mergeUpdatesIntoFormState(updates, formState, defaults, seqFields, adTab, nextPending);
+    }
+
+    JSONObject combos = calloutBody.optJSONObject("combos");
+    if (combos != null) {
+      result.mergeCombos(combos);
+    }
+
+    JSONArray messages = calloutBody.optJSONArray("messages");
+    if (messages != null) {
+      result.mergeMessages(messages);
+    }
+  }
+
+  /**
+   * Merge field updates into the form state and defaults, queuing changed fields
+   * that have callouts for the next cascade iteration.
+   */
+  private static void mergeUpdatesIntoFormState(JSONObject updates, JSONObject formState,
+      JSONObject defaults, Set<String> seqFields, Tab adTab,
+      Set<String> nextPending) throws Exception {
+    Iterator<String> updateKeys = updates.keys();
+    while (updateKeys.hasNext()) {
+      String updatedField = updateKeys.next();
+      JSONObject updateObj = updates.optJSONObject(updatedField);
+      if (updateObj == null || !updateObj.has("value")) {
+        continue;
+      }
+      Object newValue = updateObj.get("value");
+      Object oldValue = formState.opt(updatedField);
+
+      formState.put(updatedField, newValue);
+      defaults.put(updatedField, newValue);
+
+      if (!valueChanged(oldValue, newValue) || seqFields.contains(updatedField)) {
+        continue;
+      }
+      NeoCalloutService.CalloutInfo nextInfo =
+          NeoCalloutService.resolveCallout(adTab, updatedField);
+      if (nextInfo != null) {
+        nextPending.add(updatedField);
+      }
+    }
   }
 
   /**

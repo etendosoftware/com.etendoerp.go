@@ -845,183 +845,263 @@ public class NeoServlet extends HttpBaseServlet {
 
       String dalEntityName = adTab.getTable().getName();
       DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
-
-      // Build field filter from ETGO_SF_FIELD configuration (cached for this request)
       NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(
           context.getSfEntity(), dalEntityName);
 
-      Map<String, String> params = new HashMap<>();
-      params.put(JsonConstants.ENTITYNAME, dalEntityName);
-      params.put(JsonConstants.TAB_PARAMETER, adTab.getId());
-      params.put(JsonConstants.WINDOW_ID, adTab.getWindow().getId());
-      params.put(JsonConstants.NO_ACTIVE_FILTER, "true");
+      Map<String, String> params = buildBaseParams(context, adTab, dalEntityName);
+      buildWhereClause(params, adTab, context);
+      applyPaginationDefaults(params);
 
-      if (context.getRecordId() != null) {
-        params.put(JsonConstants.ID, context.getRecordId());
+      String result = dispatchCrudMethod(context, adTab, dalEntityName,
+          jsonService, fieldFilter, params);
+      if (result == null) {
+        return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+            "Unsupported method: " + context.getHttpMethod());
       }
 
-      // Copy query params (filters, pagination, sorting)
-      if (context.getQueryParams() != null) {
-        for (Map.Entry<String, String> entry : context.getQueryParams().entrySet()) {
-          params.put(entry.getKey(), entry.getValue());
-        }
+      // The dispatch methods return an error marker when validation fails
+      if (result.startsWith("__NEO_ERROR__:")) {
+        String[] parts = result.substring("__NEO_ERROR__:".length()).split(":", 2);
+        return NeoResponse.error(Integer.parseInt(parts[0]), parts[1]);
       }
 
-      // Build where clause: tab's own HQL + parent filter for child tabs
-      StringBuilder whereClause = new StringBuilder();
-
-      String parentId = context.getQueryParams() != null
-          ? context.getQueryParams().get("parentId")
-          : null;
-
-      String tabWhere = adTab.getHqlwhereclause();
-      if (StringUtils.isNotBlank(tabWhere)) {
-        // Substitute @PLACEHOLDER@ style tokens used in classic UI tab where clauses
-        // (e.g. @FIN_Payment_ID@) with the actual parentId so indirect parent-child
-        // relationships — where there is no direct FK to the parent table — work in NEO.
-        if (parentId != null && tabWhere.contains("@")) {
-          tabWhere = tabWhere.replaceAll("@[A-Za-z_]+@", "'" + parentId.replace("'", "''") + "'");
-        }
-        whereClause.append("(").append(tabWhere).append(")");
-      }
-      if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-        String parentFilter = NeoTypeCoercionHelper.buildParentWhereClause(adTab, parentId);
-        if (StringUtils.isNotBlank(parentFilter)) {
-          if (whereClause.length() > 0) {
-            whereClause.append(" and ");
-          }
-          whereClause.append("(").append(parentFilter).append(")");
-        }
-      }
-
-      if (whereClause.length() > 0) {
-        params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause.toString());
-        params.put(JsonConstants.USE_ALIAS, "true");
-      }
-
-      // Set pagination defaults if not provided
-      if (!params.containsKey(JsonConstants.STARTROW_PARAMETER)) {
-        params.put(JsonConstants.STARTROW_PARAMETER, "0");
-      }
-      if (!params.containsKey(JsonConstants.ENDROW_PARAMETER)) {
-        params.put(JsonConstants.ENDROW_PARAMETER, "100");
-      }
-
-      String result;
-      switch (context.getHttpMethod()) {
-        case "GET":
-          result = jsonService.fetch(params);
-          break;
-        case "POST": {
-          // Validate: POST must NOT have a recordId (creates don't target an existing record)
-          if (context.getRecordId() != null) {
-            return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-                "POST (create) must not include a record ID in the URL");
-          }
-          // Resolve parentId from body: map generic "parentId" to the actual FK property name
-          // (e.g., parentId → salesOrder for C_OrderLine, parentId → invoice for C_InvoiceLine)
-          JSONObject requestBody = context.getRequestBody();
-          String parentIdValue = null;
-          if (requestBody != null && requestBody.has("parentId")) {
-            parentIdValue = requestBody.getString("parentId");
-            requestBody.remove("parentId");
-            // Find the link-to-parent column and resolve its DAL property name
-            if (adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-              Entity dalEnt = ModelProvider.getInstance().getEntityByTableName(adTab.getTable().getDBTableName());
-              if (dalEnt != null) {
-                for (Column col : adTab.getTable().getADColumnList()) {
-                  if (col.isLinkToParentColumn() && col.isActive()) {
-                    try {
-                      Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
-                      if (prop != null) {
-                        requestBody.put(prop.getName(), parentIdValue);
-                        break;
-                      }
-                    } catch (Exception ignored) {}
-                  }
-                }
-              }
-            }
-          }
-          // Filter out non-included fields (allow read-only on create — callouts/defaults set them)
-          JSONObject filteredBody = fieldFilter.filterCreateRequest(requestBody);
-          // Inject defaults for mandatory columns not in ETGO_SF_FIELD config
-          NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
-          // Execute callout cascade for header tabs only (level 0).
-          // Propagates derived values (e.g., BP → PaymentTerm, PriceList).
-          // Child tabs (lines) rely on the frontend /callout endpoint which has
-          // full parent context for correct resolution (price list, BP, etc.).
-          if (adTab != null && adTab.getTabLevel() != null && adTab.getTabLevel() == 0) {
-            Set<String> seqFields = new HashSet<>();
-            NeoDefaultsService.executeCalloutCascade(context, adTab, filteredBody, seqFields);
-            // Callouts (e.g. SE_Order_Organization) may override doctype with a
-            // default that doesn't match the window's tab filter (e.g. Standard Order
-            // instead of Quotation). Re-apply the correct doctype after the cascade.
-            NeoDefaultsService.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
-            // Remove empty-string FK values left by callouts that couldn't resolve them
-            NeoDefaultsService.removeEmptyFkValues(filteredBody, adTab);
-            // Re-inject mandatory defaults for fields that callouts left empty
-            NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
-          }
-          // Wrap for DefaultJsonDataService: {"data": {fields, "_entityName": ..., "_new": true}}
-          String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(filteredBody, dalEntityName, null);
-          result = jsonService.add(params, wrappedBody);
-          break;
-        }
-        case "PUT":
-        case "PATCH": {
-          // Validate: PUT/PATCH require a recordId
-          if (context.getRecordId() == null) {
-            return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-                context.getHttpMethod() + " requires a record ID in the URL");
-          }
-          // Filter out non-included and read-only fields from request body
-          JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
-          // Wrap for DefaultJsonDataService: {"data": {fields, "_entityName": ..., "id": recordId}}
-          String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
-          result = jsonService.update(params, wrappedBody);
-          break;
-        }
-        case "DELETE":
-          result = jsonService.remove(params);
-          break;
-        default:
-          return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-              "Unsupported method: " + context.getHttpMethod());
-      }
-
-      JSONObject responseJson = new JSONObject(result);
-
-      // Check for error responses from DefaultJsonDataService
-      JSONObject innerResponse = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
-      if (innerResponse != null) {
-        int status = innerResponse.optInt(JsonConstants.RESPONSE_STATUS, 0);
-        if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
-          String errMsg = innerResponse.has(JsonConstants.RESPONSE_ERROR)
-              ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
-                  .optString("message", "Write operation failed")
-              : "Write operation failed";
-          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-              OBMessageUtils.messageBD(errMsg));
-        }
-        if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
-          // Return 400 with the full error details for validation errors
-          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
-        }
-      }
-
-      // Filter response to only include configured fields (for all methods)
-      fieldFilter.filterGetResponse(responseJson);
-
-      if ("GET".equals(context.getHttpMethod()) && context.getSfEntity() != null) {
-        NeoListIdentifierHelper.enrichListIdentifiers(responseJson, context.getSfEntity());
-      }
-
-      return NeoResponse.ok(responseJson);
+      return buildCrudResponse(result, context, fieldFilter);
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
     }
+  }
+
+  /**
+   * Build the base parameter map for DefaultJsonDataService operations.
+   */
+  private Map<String, String> buildBaseParams(NeoContext context, Tab adTab, String dalEntityName) {
+    Map<String, String> params = new HashMap<>();
+    params.put(JsonConstants.ENTITYNAME, dalEntityName);
+    params.put(JsonConstants.TAB_PARAMETER, adTab.getId());
+    params.put(JsonConstants.WINDOW_ID, adTab.getWindow().getId());
+    params.put(JsonConstants.NO_ACTIVE_FILTER, "true");
+
+    if (context.getRecordId() != null) {
+      params.put(JsonConstants.ID, context.getRecordId());
+    }
+
+    if (context.getQueryParams() != null) {
+      for (Map.Entry<String, String> entry : context.getQueryParams().entrySet()) {
+        params.put(entry.getKey(), entry.getValue());
+      }
+    }
+    return params;
+  }
+
+  /**
+   * Build and apply the where clause (tab HQL + parent filter) to the params map.
+   */
+  private void buildWhereClause(Map<String, String> params, Tab adTab, NeoContext context) {
+    StringBuilder whereClause = new StringBuilder();
+
+    String parentId = context.getQueryParams() != null
+        ? context.getQueryParams().get("parentId")
+        : null;
+
+    String tabWhere = adTab.getHqlwhereclause();
+    if (StringUtils.isNotBlank(tabWhere)) {
+      if (parentId != null && tabWhere.contains("@")) {
+        tabWhere = tabWhere.replaceAll("@[A-Za-z_]+@", "'" + parentId.replace("'", "''") + "'");
+      }
+      whereClause.append("(").append(tabWhere).append(")");
+    }
+    if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
+      String parentFilter = NeoTypeCoercionHelper.buildParentWhereClause(adTab, parentId);
+      if (StringUtils.isNotBlank(parentFilter)) {
+        if (whereClause.length() > 0) {
+          whereClause.append(" and ");
+        }
+        whereClause.append("(").append(parentFilter).append(")");
+      }
+    }
+
+    if (whereClause.length() > 0) {
+      params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause.toString());
+      params.put(JsonConstants.USE_ALIAS, "true");
+    }
+  }
+
+  /**
+   * Apply default pagination parameters if not provided by the client.
+   */
+  private void applyPaginationDefaults(Map<String, String> params) {
+    if (!params.containsKey(JsonConstants.STARTROW_PARAMETER)) {
+      params.put(JsonConstants.STARTROW_PARAMETER, "0");
+    }
+    if (!params.containsKey(JsonConstants.ENDROW_PARAMETER)) {
+      params.put(JsonConstants.ENDROW_PARAMETER, "100");
+    }
+  }
+
+  /**
+   * Dispatch to the appropriate CRUD operation based on the HTTP method.
+   * Returns the JSON result string, or null for unsupported methods.
+   * Returns a special "__NEO_ERROR__:status:message" string for validation errors.
+   */
+  private String dispatchCrudMethod(NeoContext context, Tab adTab, String dalEntityName,
+      DefaultJsonDataService jsonService, NeoFieldFilter fieldFilter,
+      Map<String, String> params) throws Exception {
+    switch (context.getHttpMethod()) {
+      case "GET":
+        return jsonService.fetch(params);
+      case "POST":
+        return handlePost(context, adTab, dalEntityName, jsonService, fieldFilter, params);
+      case "PUT":
+      case "PATCH":
+        return handlePutOrPatch(context, dalEntityName, jsonService, fieldFilter, params);
+      case "DELETE":
+        return jsonService.remove(params);
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * Handle POST (create) request: resolve parentId, filter body, inject defaults,
+   * execute callout cascade, and wrap for SmartClient.
+   */
+  private String handlePost(NeoContext context, Tab adTab, String dalEntityName,
+      DefaultJsonDataService jsonService, NeoFieldFilter fieldFilter,
+      Map<String, String> params) throws Exception {
+    if (context.getRecordId() != null) {
+      return "__NEO_ERROR__:" + HttpServletResponse.SC_BAD_REQUEST
+          + ":POST (create) must not include a record ID in the URL";
+    }
+
+    JSONObject requestBody = context.getRequestBody();
+    String parentIdValue = resolveAndMapParentId(requestBody, adTab);
+
+    JSONObject filteredBody = fieldFilter.filterCreateRequest(requestBody);
+    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+
+    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue);
+
+    String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(
+        filteredBody, dalEntityName, null);
+    return jsonService.add(params, wrappedBody);
+  }
+
+  /**
+   * Resolve the parentId from the request body and map it to the actual FK property name.
+   */
+  private String resolveAndMapParentId(JSONObject requestBody, Tab adTab) throws Exception {
+    if (requestBody == null || !requestBody.has("parentId")) {
+      return null;
+    }
+    String parentIdValue = requestBody.getString("parentId");
+    requestBody.remove("parentId");
+
+    if (adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
+      Entity dalEnt = ModelProvider.getInstance()
+          .getEntityByTableName(adTab.getTable().getDBTableName());
+      if (dalEnt != null) {
+        mapParentIdToFkColumn(requestBody, adTab, dalEnt, parentIdValue);
+      }
+    }
+    return parentIdValue;
+  }
+
+  /**
+   * Find the link-to-parent column and set the parentId value on its DAL property name.
+   */
+  private void mapParentIdToFkColumn(JSONObject requestBody, Tab adTab,
+      Entity dalEnt, String parentIdValue) throws Exception {
+    for (Column col : adTab.getTable().getADColumnList()) {
+      if (col.isLinkToParentColumn() && col.isActive()) {
+        try {
+          Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
+          if (prop != null) {
+            requestBody.put(prop.getName(), parentIdValue);
+            return;
+          }
+        } catch (Exception ignored) {
+          // Not all columns resolve to DAL properties
+        }
+      }
+    }
+  }
+
+  /**
+   * Execute the callout cascade for POST requests on header tabs (level 0).
+   */
+  private void executePostCalloutCascade(JSONObject filteredBody, Tab adTab,
+      NeoContext context, String parentIdValue) {
+    if (adTab == null || adTab.getTabLevel() == null || adTab.getTabLevel() != 0) {
+      return;
+    }
+    Set<String> seqFields = new HashSet<>();
+    NeoDefaultsService.executeCalloutCascade(context, adTab, filteredBody, seqFields);
+    NeoDefaultsService.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
+    NeoDefaultsService.removeEmptyFkValues(filteredBody, adTab);
+    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+  }
+
+  /**
+   * Handle PUT/PATCH (update) request: validate recordId, filter body, and wrap for SmartClient.
+   */
+  private String handlePutOrPatch(NeoContext context, String dalEntityName,
+      DefaultJsonDataService jsonService, NeoFieldFilter fieldFilter,
+      Map<String, String> params) throws Exception {
+    if (context.getRecordId() == null) {
+      return "__NEO_ERROR__:" + HttpServletResponse.SC_BAD_REQUEST
+          + ":" + context.getHttpMethod() + " requires a record ID in the URL";
+    }
+    JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
+    String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(
+        filteredBody, dalEntityName, context.getRecordId());
+    return jsonService.update(params, wrappedBody);
+  }
+
+  /**
+   * Build the final NeoResponse from the raw JSON result string.
+   * Checks for error/validation responses and applies field filtering.
+   */
+  private NeoResponse buildCrudResponse(String result, NeoContext context,
+      NeoFieldFilter fieldFilter) throws Exception {
+    JSONObject responseJson = new JSONObject(result);
+
+    NeoResponse errorResponse = checkForServiceErrors(responseJson);
+    if (errorResponse != null) {
+      return errorResponse;
+    }
+
+    fieldFilter.filterGetResponse(responseJson);
+
+    if ("GET".equals(context.getHttpMethod()) && context.getSfEntity() != null) {
+      NeoListIdentifierHelper.enrichListIdentifiers(responseJson, context.getSfEntity());
+    }
+
+    return NeoResponse.ok(responseJson);
+  }
+
+  /**
+   * Check the DefaultJsonDataService response for error or validation error status.
+   * Returns an error NeoResponse if found, null otherwise.
+   */
+  private NeoResponse checkForServiceErrors(JSONObject responseJson) throws Exception {
+    JSONObject innerResponse = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
+    if (innerResponse == null) {
+      return null;
+    }
+    int status = innerResponse.optInt(JsonConstants.RESPONSE_STATUS, 0);
+    if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
+      String errMsg = innerResponse.has(JsonConstants.RESPONSE_ERROR)
+          ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
+              .optString("message", "Write operation failed")
+          : "Write operation failed";
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          OBMessageUtils.messageBD(errMsg));
+    }
+    if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
+    }
+    return null;
   }
 
   /**

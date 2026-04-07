@@ -62,6 +62,8 @@ import org.openbravo.service.json.JsonConstants;
 public class NeoCalloutService {
 
   private static final Logger log = LogManager.getLogger(NeoCalloutService.class);
+  private static final String VALUE_KEY = "value";
+  private static final String IDENTIFIER_KEY = "_identifier";
 
   private NeoCalloutService() {
   }
@@ -78,7 +80,7 @@ public class NeoCalloutService {
       OBContext.setAdminMode();
       try {
         String fieldName = requestBody.getString("field");
-        Object value = requestBody.opt("value");
+        Object value = requestBody.opt(VALUE_KEY);
         JSONObject formState = requestBody.optJSONObject("formState");
         if (formState == null) {
           formState = new JSONObject();
@@ -724,33 +726,48 @@ public class NeoCalloutService {
       Iterator<String> keys = updates.keys();
       while (keys.hasNext()) {
         String fieldName = keys.next();
-        JSONObject entry = updates.optJSONObject(fieldName);
-        if (entry == null || entry.has("_identifier")) continue;
-        Object val = entry.opt("value");
-        if (val == null || "".equals(val)) continue;
-        String strVal = String.valueOf(val);
-        // Only resolve for IDs (32-char hex or numeric)
-        if (!strVal.matches("[0-9A-Fa-f]{32}") && !strVal.matches("\\d+")) continue;
-
-        // Find the column for this property name
-        try {
-          Property prop = dalEntity.getProperty(fieldName);
-          if (prop == null || prop.getTargetEntity() == null) continue;
-          // Look up the record to get its identifier
-          BaseOBObject referenced = OBDal.getInstance().get(
-              prop.getTargetEntity().getName(), strVal);
-          if (referenced != null) {
-            String identifier = referenced.getIdentifier();
-            if (identifier != null && !identifier.isEmpty()) {
-              entry.put("_identifier", identifier);
-            }
-          }
-        } catch (Exception e) {
-          log.debug("Could not resolve _identifier for {}: {}", fieldName, e.getMessage());
-        }
+        resolveIdentifierForField(updates.optJSONObject(fieldName), fieldName, dalEntity);
       }
     } catch (Exception e) {
       log.debug("Error resolving FK identifiers: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Resolve the _identifier for a single FK update field entry.
+   * Looks up the referenced record by ID and sets the display identifier.
+   */
+  private static void resolveIdentifierForField(JSONObject entry, String fieldName,
+      Entity dalEntity) {
+    if (entry == null || entry.has(IDENTIFIER_KEY)) {
+      return;
+    }
+    Object val = entry.opt(VALUE_KEY);
+    if (val == null || "".equals(val)) {
+      return;
+    }
+    String strVal = String.valueOf(val);
+    // Only resolve for IDs (32-char hex or numeric)
+    if (!strVal.matches("[0-9A-Fa-f]{32}") && !strVal.matches("\\d+")) {
+      return;
+    }
+
+    try {
+      Property prop = dalEntity.getProperty(fieldName);
+      if (prop == null || prop.getTargetEntity() == null) {
+        return;
+      }
+      // Look up the record to get its identifier
+      BaseOBObject referenced = OBDal.getInstance().get(
+          prop.getTargetEntity().getName(), strVal);
+      if (referenced != null) {
+        String identifier = referenced.getIdentifier();
+        if (identifier != null && !identifier.isEmpty()) {
+          entry.put(IDENTIFIER_KEY, identifier);
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve _identifier for {}: {}", fieldName, e.getMessage());
     }
   }
 
@@ -785,7 +802,7 @@ public class NeoCalloutService {
             || "SUCCESS".equals(key)) {
           JSONObject msg = new JSONObject();
           msg.put("type", key);
-          msg.put("text", fieldResult.optString("value", ""));
+          msg.put("text", fieldResult.optString(VALUE_KEY, ""));
           messages.put(msg);
           continue;
         }
@@ -803,7 +820,7 @@ public class NeoCalloutService {
           String baseClean = inpToCleanName(baseInpKey, adTab);
           // Store: we'll merge after the main loop
           if (!rDisplayNames.containsKey(baseClean)) {
-            rDisplayNames.put(baseClean, fieldResult.optString("value", ""));
+            rDisplayNames.put(baseClean, fieldResult.optString(VALUE_KEY, ""));
           }
           continue;
         }
@@ -815,8 +832,8 @@ public class NeoCalloutService {
         if (hasEntries) {
           // Combo update
           JSONObject comboObj = new JSONObject();
-          if (fieldResult.has("value")) {
-            comboObj.put("selected", fieldResult.opt("value"));
+          if (fieldResult.has(VALUE_KEY)) {
+            comboObj.put("selected", fieldResult.opt(VALUE_KEY));
           }
           JSONArray rawEntries = fieldResult.optJSONArray("entries");
           if (rawEntries != null) {
@@ -838,7 +855,7 @@ public class NeoCalloutService {
         } else {
           // Simple field update
           JSONObject updateObj = new JSONObject();
-          updateObj.put("value", fieldResult.opt("value"));
+          updateObj.put(VALUE_KEY, fieldResult.opt(VALUE_KEY));
           updates.put(cleanName, updateObj);
         }
       }
@@ -850,7 +867,7 @@ public class NeoCalloutService {
         String baseKey = rEntry.getKey();
         String displayName = rEntry.getValue();
         if (updates.has(baseKey) && StringUtils.isNotBlank(displayName)) {
-          updates.getJSONObject(baseKey).put("_identifier", displayName);
+          updates.getJSONObject(baseKey).put(IDENTIFIER_KEY, displayName);
         }
       }
 
