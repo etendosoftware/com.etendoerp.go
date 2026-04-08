@@ -42,6 +42,18 @@ public final class NeoTypeCoercionHelper {
   private NeoTypeCoercionHelper() {
   }
 
+  /**
+   * Wraps a filtered JSON body in the SmartClient format expected by the DAL servlet.
+   * <p>
+   * The body is coerced to the correct field types for the given entity, enriched with
+   * the entity name and – when provided – the record identifier, then wrapped in a
+   * top-level {@code data} object.
+   *
+   * @param filteredBody  the request body as a {@link JSONObject}, or {@code null} to use an empty object
+   * @param dalEntityName the DAL entity name used for type coercion
+   * @param recordId      the record identifier to embed, or {@code null} for new records
+   * @return the wrapped JSON string, or {@code "{}"} if an error occurs
+   */
   public static String wrapForSmartclient(JSONObject filteredBody, String dalEntityName,
       String recordId) {
     try {
@@ -62,6 +74,16 @@ public final class NeoTypeCoercionHelper {
     }
   }
 
+  /**
+   * Coerces the string values in {@code data} to their correct primitive Java types
+   * according to the DAL entity model.
+   * <p>
+   * Only fields whose DAL {@link Property} is primitive and whose value is a plain
+   * {@link String} are processed; all other fields are left unchanged.
+   *
+   * @param data          the {@link JSONObject} whose field values should be converted in place
+   * @param dalEntityName the DAL entity name used to look up property types
+   */
   @SuppressWarnings("unchecked")
   public static void coerceTypes(JSONObject data, String dalEntityName) {
     try {
@@ -90,6 +112,19 @@ public final class NeoTypeCoercionHelper {
     }
   }
 
+  /**
+   * Attempts to coerce a single string field value to its correct primitive type and
+   * stores the result in {@code coerced}.
+   * <p>
+   * Currently handles {@link java.math.BigDecimal} and {@link Long} properties. If the
+   * property is not found, is not primitive, or the conversion fails the field is silently
+   * skipped.
+   *
+   * @param entity  the DAL {@link Entity} that owns the field
+   * @param key     the field / property name
+   * @param strVal  the raw string value to convert
+   * @param coerced accumulator map where successfully coerced values are placed
+   */
   public static void coerceField(Entity entity, String key, String strVal,
       Map<String, Object> coerced) {
     try {
@@ -107,6 +142,18 @@ public final class NeoTypeCoercionHelper {
     }
   }
 
+  /**
+   * Builds an HQL {@code WHERE} clause fragment that constrains the child entity by its
+   * parent record.
+   * <p>
+   * The clause is constructed from the parent-property relationship defined between
+   * {@code childTab} and its immediate parent tab. Returns {@code null} when the
+   * relationship cannot be determined or an error occurs.
+   *
+   * @param childTab the child {@link Tab} whose parent relationship is resolved
+   * @param parentId the identifier of the parent record
+   * @return an HQL fragment such as {@code e.someProperty.id='...'}, or {@code null}
+   */
   public static String buildParentWhereClause(Tab childTab, String parentId) {
     if (childTab == null) {
       return null;

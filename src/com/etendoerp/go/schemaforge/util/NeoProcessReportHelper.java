@@ -50,6 +50,15 @@ public final class NeoProcessReportHelper {
   private NeoProcessReportHelper() {
   }
 
+  /**
+   * Resolves the Java qualifier for a report handler associated with a specific {@link SFSpec}.
+   * <p>
+   * It iterates through the entities linked to the specification and returns the first 
+   * non-blank Java qualifier found.
+   *
+   * @param spec the {@link SFSpec} to search for a report handler qualifier
+   * @return the first non-blank Java qualifier found, or {@code null} if none exist or an error occurs
+   */
   public static String resolveReportHandlerQualifier(SFSpec spec) {
     try {
       OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
@@ -68,6 +77,18 @@ public final class NeoProcessReportHelper {
     return null;
   }
 
+  /**
+   * Processes a request for a process specification and writes the result to the response.
+   * <p>
+   * This method resolves the {@link Process} linked to the {@link SFSpec}, reads the 
+   * request body, executes the process using {@link NeoProcessService}, and 
+   * writes the {@link NeoResponse} back to the HTTP response.
+   *
+   * @param spec     the {@link SFSpec} defining the process to execute
+   * @param request  the {@link HttpServletRequest} containing the process parameters
+   * @param response the {@link HttpServletResponse} where the output will be written
+   * @throws IOException if an error occurs while reading the request body or writing the response
+   */
   public static void handleProcessSpec(SFSpec spec, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     try {
@@ -91,6 +112,20 @@ public final class NeoProcessReportHelper {
     }
   }
 
+  /**
+   * Processes a request for a report specification and writes the generated report to 
+   * the response output stream.
+   * <p>
+   * This method resolves the {@link Process} linked to the {@link SFSpec}, reads the 
+   * requested export type and parameters, generates the report via 
+   * {@link NeoReportService}, and configures the HTTP response headers for a 
+   * file download.
+   *
+   * @param spec     the {@link SFSpec} defining the report to generate
+   * @param request  the {@link HttpServletRequest} containing report parameters and export type
+   * @param response the {@link HttpServletResponse} where the report will be written
+   * @throws IOException if an error occurs while reading the request body or writing to the response output stream
+   */
   public static void handleReportSpec(SFSpec spec, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     try {

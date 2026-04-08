@@ -61,6 +61,7 @@ public final class NeoDisplayLogicHelper {
       + "getValue: function(obj, key) { return obj != null ? obj[key] : null; }, "
       + "Date: { JSToOB: function(v) { return v; } } }, "
       + "Format: { date: '' } };";
+  public static final String CURRENT_VALUES = "currentValues";
 
   private NeoDisplayLogicHelper() {
   }
@@ -158,8 +159,8 @@ public final class NeoDisplayLogicHelper {
       }
       String contextPreamble = buildJsObjectPreamble("context", evalContext, true);
       @SuppressWarnings("unchecked")
-      Map<String, Object> currentValues = (Map<String, Object>) evalContext.get("currentValues");
-      String cvPreamble = buildJsObjectPreamble("currentValues", currentValues, false);
+      Map<String, Object> currentValues = (Map<String, Object>) evalContext.get(CURRENT_VALUES);
+      String cvPreamble = buildJsObjectPreamble(CURRENT_VALUES, currentValues, false);
       String fullScript = OB_UTILITIES_SHIM + "\n" + contextPreamble + "\n" + cvPreamble + "\n" + jsExpr;
       Object result = OBScriptEngine.getInstance().eval(fullScript, evalContext);
       return Boolean.TRUE.equals(result);
@@ -177,7 +178,7 @@ public final class NeoDisplayLogicHelper {
     if (map != null) {
       for (Map.Entry<String, Object> e : map.entrySet()) {
         String key = e.getKey();
-        if (skipSelf && ("context".equals(key) || "currentValues".equals(key))) {
+        if (skipSelf && ("context".equals(key) || CURRENT_VALUES.equals(key))) {
           continue;
         }
         Object val = e.getValue();
@@ -204,7 +205,7 @@ public final class NeoDisplayLogicHelper {
       Object value = fieldValues.opt(key);
       currentValues.put(key, value == JSONObject.NULL ? null : value);
     }
-    ctx.put("currentValues", currentValues);
+    ctx.put(CURRENT_VALUES, currentValues);
     ctx.putAll(currentValues);
     OBContext obCtx = OBContext.getOBContext();
     ctx.put("AD_Org_ID", obCtx.getCurrentOrganization().getId());
