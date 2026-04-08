@@ -45,8 +45,31 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  */
 public class SFUpsertSpec extends BaseWebhookService {
 
+  private static final String ERROR_KEY = "error";
+  private static final String WINDOW_SPEC_TYPE = "W";
+  private static final String PROCESS_SPEC_TYPE = "P";
+
   private static final Logger log = LogManager.getLogger(SFUpsertSpec.class);
 
+  /**
+   * Handles the webhook request to create or update an {@code ETGO_SF_Spec} record.
+   * <p>
+   * Reads the following parameters from {@code parameter}:
+   * <ul>
+   *   <li><b>Name</b> (required) – name of the spec.</li>
+   *   <li><b>ModuleID</b> (required) – ID of the module that owns the spec.</li>
+   *   <li><b>SpecType</b> (optional, default {@code W}) – {@code W} for Window or {@code P} for Process.</li>
+   *   <li><b>SpecID</b> (optional) – when provided, updates the existing spec instead of creating one.</li>
+   *   <li><b>WindowID</b> (required when SpecType is {@code W}).</li>
+   *   <li><b>ProcessID</b> (required when SpecType is {@code P}).</li>
+   *   <li><b>Description</b> (optional).</li>
+   * </ul>
+   * On success, {@code responseVars} will contain {@code message}, {@code SpecID} and {@code SpecType}.
+   * On error, {@code responseVars} will contain {@code error} with a human-readable message.
+   *
+   * @param parameter    map of incoming webhook parameters.
+   * @param responseVars map where the response values are written.
+   */
   @Override
   public void get(Map<String, String> parameter, Map<String, String> responseVars) {
     OBContext.setAdminMode();
@@ -65,76 +88,27 @@ public class SFUpsertSpec extends BaseWebhookService {
       String moduleId = parameter.get("ModuleID");
       String description = parameter.get("Description");
       String specType = parameter.get("SpecType");
-      if (specType == null || specType.isEmpty()) {
-        specType = "W";
-      }
+      specType = normalizeSpecType(specType);
 
-      if (!"W".equals(specType) && !"P".equals(specType)) {
-        responseVars.put("error", "Invalid SpecType: " + specType + ". Must be W or P.");
+      if (!isValidSpecType(specType)) {
+        putError(responseVars, "Invalid SpecType: " + specType + ". Must be W or P.");
         return;
       }
 
-      SFSpec spec;
-      if (specId != null && !specId.isEmpty()) {
-        spec = OBDal.getInstance().get(SFSpec.class, specId);
-        if (spec == null) {
-          responseVars.put("error", "Spec not found: " + specId);
-          return;
-        }
-      } else {
-        // Check for duplicate name
-        OBCriteria<SFSpec> dupCriteria = OBDal.getInstance().createCriteria(SFSpec.class);
-        dupCriteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, name));
-        dupCriteria.setMaxResults(1);
-        List<SFSpec> existing = dupCriteria.list();
-        if (!existing.isEmpty()) {
-          responseVars.put("error", "A spec with name '" + name + "' already exists (ID: " + existing.get(0).getId() + ")");
-          return;
-        }
-
-        spec =  OBProvider.getInstance().get(SFSpec.class);
-        spec.setNewOBObject(true);
-        spec.setClient(OBContext.getOBContext().getCurrentClient());
-        spec.setOrganization(OBContext.getOBContext().getCurrentOrganization());
-        spec.setActive(true);
-        spec.setCreatedBy(OBContext.getOBContext().getUser());
-        spec.setUpdatedBy(OBContext.getOBContext().getUser());
-        spec.setCreationDate(new Date());
-        spec.setUpdated(new Date());
+      SFSpec spec = loadSpec(specId, name, responseVars);
+      if (spec == null) {
+        return;
       }
 
       spec.setName(name);
       spec.setSpecType(specType);
 
-      if ("P".equals(specType)) {
-        if (processId == null || processId.isEmpty()) {
-          responseVars.put("error", "ProcessID is required when SpecType is P");
-          return;
-        }
-        Process process = OBDal.getInstance().get(Process.class, processId);
-        if (process == null) {
-          responseVars.put("error", "Process not found: " + processId);
-          return;
-        }
-        spec.setProcess(process);
-        spec.setADWindow(null);
-      } else {
-        if (windowId == null || windowId.isEmpty()) {
-          responseVars.put("error", "WindowID is required when SpecType is W");
-          return;
-        }
-        Window window = OBDal.getInstance().get(Window.class, windowId);
-        if (window == null) {
-          responseVars.put("error", "Window not found: " + windowId);
-          return;
-        }
-        spec.setADWindow(window);
-        spec.setProcess(null);
+      if (!applySpecType(spec, specType, processId, windowId, responseVars)) {
+        return;
       }
 
-      Module module = OBDal.getInstance().get(Module.class, moduleId);
+      Module module = loadModule(moduleId, responseVars);
       if (module == null) {
-        responseVars.put("error", "Module not found: " + moduleId);
         return;
       }
       spec.setADModule(module);
@@ -146,7 +120,7 @@ public class SFUpsertSpec extends BaseWebhookService {
       OBDal.getInstance().save(spec);
       OBDal.getInstance().flush();
 
-      String typeLabel = "P".equals(specType) ? "Process" : "Window";
+      String typeLabel = PROCESS_SPEC_TYPE.equals(specType) ? "Process" : "Window";
       log.info("Upserted ETGO_SF_Spec ({}): id={}, name={}", typeLabel, spec.getId(), name);
       responseVars.put("message", typeLabel + " Spec upserted with ID: " + spec.getId());
       responseVars.put("SpecID", spec.getId());
@@ -154,9 +128,175 @@ public class SFUpsertSpec extends BaseWebhookService {
 
     } catch (Exception e) {
       log.error("Error in SFUpsertSpec", e);
-      responseVars.put("error", e.getMessage());
+      putError(responseVars, e.getMessage());
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Returns {@code W} when {@code specType} is {@code null} or blank; otherwise returns the value as-is.
+   *
+   * @param specType raw spec type value from the request parameter.
+   * @return the normalized spec type, defaulting to {@link #WINDOW_SPEC_TYPE}.
+   */
+  private String normalizeSpecType(String specType) {
+    return (specType == null || specType.isEmpty()) ? WINDOW_SPEC_TYPE : specType;
+  }
+
+  /**
+   * Returns {@code true} when {@code specType} is either {@code W} or {@code P}.
+   *
+   * @param specType the spec type to validate.
+   * @return {@code true} if the spec type is supported.
+   */
+  private boolean isValidSpecType(String specType) {
+    return WINDOW_SPEC_TYPE.equals(specType) || PROCESS_SPEC_TYPE.equals(specType);
+  }
+
+  /**
+   * Loads an existing {@link SFSpec} by {@code specId}, or creates a new transient instance.
+   * <p>
+   * When {@code specId} is blank a duplicate-name check is performed; if a spec with the same name
+   * already exists an error is written to {@code responseVars} and {@code null} is returned.
+   *
+   * @param specId       ID of the spec to update, or blank/null to create a new one.
+   * @param name         name used for the duplicate check when creating.
+   * @param responseVars map where error messages are written on failure.
+   * @return the loaded or newly instantiated {@link SFSpec}, or {@code null} on error.
+   */
+  private SFSpec loadSpec(String specId, String name, Map<String, String> responseVars) {
+    if (hasText(specId)) {
+      SFSpec spec = OBDal.getInstance().get(SFSpec.class, specId);
+      if (spec == null) {
+        putError(responseVars, "Spec not found: " + specId);
+      }
+      return spec;
+    }
+
+    OBCriteria<SFSpec> dupCriteria = OBDal.getInstance().createCriteria(SFSpec.class);
+    dupCriteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, name));
+    dupCriteria.setMaxResults(1);
+    List<SFSpec> existing = dupCriteria.list();
+    if (!existing.isEmpty()) {
+      putError(responseVars, "A spec with name '" + name + "' already exists (ID: " + existing.get(0).getId() + ")");
+      return null;
+    }
+
+    SFSpec spec = OBProvider.getInstance().get(SFSpec.class);
+    spec.setNewOBObject(true);
+    spec.setClient(OBContext.getOBContext().getCurrentClient());
+    spec.setOrganization(OBContext.getOBContext().getCurrentOrganization());
+    spec.setActive(true);
+    spec.setCreatedBy(OBContext.getOBContext().getUser());
+    spec.setUpdatedBy(OBContext.getOBContext().getUser());
+    spec.setCreationDate(new Date());
+    spec.setUpdated(new Date());
+    return spec;
+  }
+
+  /**
+   * Delegates to {@link #applyProcessSpecType} or {@link #applyWindowSpecType} based on
+   * {@code specType}.
+   *
+   * @param spec         the spec being populated.
+   * @param specType     {@code W} or {@code P}.
+   * @param processId    ID of the process (used when {@code specType} is {@code P}).
+   * @param windowId     ID of the window (used when {@code specType} is {@code W}).
+   * @param responseVars map where error messages are written on failure.
+   * @return {@code true} if the spec type was applied successfully.
+   */
+  private boolean applySpecType(SFSpec spec, String specType, String processId, String windowId,
+      Map<String, String> responseVars) {
+    if (PROCESS_SPEC_TYPE.equals(specType)) {
+      return applyProcessSpecType(spec, processId, responseVars);
+    }
+    return applyWindowSpecType(spec, windowId, responseVars);
+  }
+
+  /**
+   * Assigns the {@link Process} identified by {@code processId} to {@code spec} and clears any
+   * previously linked window.
+   *
+   * @param spec         the spec to update.
+   * @param processId    ID of the process to link.
+   * @param responseVars map where error messages are written on failure.
+   * @return {@code true} if the process was found and linked successfully.
+   */
+  private boolean applyProcessSpecType(SFSpec spec, String processId, Map<String, String> responseVars) {
+    if (!hasText(processId)) {
+      putError(responseVars, "ProcessID is required when SpecType is P");
+      return false;
+    }
+
+    Process process = OBDal.getInstance().get(Process.class, processId);
+    if (process == null) {
+      putError(responseVars, "Process not found: " + processId);
+      return false;
+    }
+    spec.setProcess(process);
+    spec.setADWindow(null);
+    return true;
+  }
+
+  /**
+   * Assigns the {@link Window} identified by {@code windowId} to {@code spec} and clears any
+   * previously linked process.
+   *
+   * @param spec         the spec to update.
+   * @param windowId     ID of the window to link.
+   * @param responseVars map where error messages are written on failure.
+   * @return {@code true} if the window was found and linked successfully.
+   */
+  private boolean applyWindowSpecType(SFSpec spec, String windowId, Map<String, String> responseVars) {
+    if (!hasText(windowId)) {
+      putError(responseVars, "WindowID is required when SpecType is W");
+      return false;
+    }
+
+    Window window = OBDal.getInstance().get(Window.class, windowId);
+    if (window == null) {
+      putError(responseVars, "Window not found: " + windowId);
+      return false;
+    }
+    spec.setADWindow(window);
+    spec.setProcess(null);
+    return true;
+  }
+
+  /**
+   * Loads the {@link Module} identified by {@code moduleId}.
+   * Writes an error to {@code responseVars} and returns {@code null} when not found.
+   *
+   * @param moduleId     ID of the module to load.
+   * @param responseVars map where error messages are written on failure.
+   * @return the {@link Module}, or {@code null} if not found.
+   */
+  private Module loadModule(String moduleId, Map<String, String> responseVars) {
+    Module module = OBDal.getInstance().get(Module.class, moduleId);
+    if (module == null) {
+      putError(responseVars, "Module not found: " + moduleId);
+    }
+    return module;
+  }
+
+  /**
+   * Writes {@code message} into {@code responseVars} under the {@value #ERROR_KEY} key.
+   *
+   * @param responseVars map where the error message is stored.
+   * @param message      human-readable description of the error.
+   */
+  private void putError(Map<String, String> responseVars, String message) {
+    responseVars.put(ERROR_KEY, message);
+  }
+
+  /**
+   * Returns {@code true} when {@code value} is neither {@code null} nor empty.
+   *
+   * @param value the string to check.
+   * @return {@code true} if the string has content.
+   */
+  private boolean hasText(String value) {
+    return value != null && !value.isEmpty();
   }
 }

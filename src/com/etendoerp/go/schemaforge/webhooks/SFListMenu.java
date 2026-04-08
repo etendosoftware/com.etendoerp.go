@@ -44,6 +44,8 @@ public class SFListMenu extends BaseWebhookService {
 
   private static final Logger log = LogManager.getLogger(SFListMenu.class);
 
+  private static final String CHILDREN_KEY = "children";
+
   private static final String MENU_TREE_SQL =
       "WITH RECURSIVE menu_tree AS ("
       + "  SELECT tn.node_id, tn.parent_id, tn.seqno,"
@@ -98,6 +100,13 @@ public class SFListMenu extends BaseWebhookService {
 
   /**
    * Builds the full nested menu tree using a recursive CTE.
+   * <p>
+   * Iterates over flat rows returned by {@link #MENU_TREE_SQL}, creates a {@link JSONObject} for
+   * each menu node via {@link #buildNode(Object[])} and attaches it to the tree via
+   * {@link #attachToTree(Map, List, JSONObject, String)}.
+   *
+   * @return a {@link JSONObject} with a {@code tree} array and a {@code count} field.
+   * @throws Exception if the query or JSON assembly fails.
    */
   @SuppressWarnings("unchecked")
   private JSONObject buildMenuTree() throws Exception {
@@ -105,57 +114,15 @@ public class SFListMenu extends BaseWebhookService {
     NativeQuery<Object[]> nativeQuery = session.createNativeQuery(MENU_TREE_SQL);
     List<Object[]> rows = nativeQuery.getResultList();
 
-    // Index: node_id -> JSONObject (with children array)
     Map<String, JSONObject> nodeMap = new LinkedHashMap<>();
-    // Track root-level nodes
     List<JSONObject> roots = new ArrayList<>();
 
     for (Object[] row : rows) {
       String nodeId = str(row[0]);
       String parentId = str(row[1]);
-      String name = str(row[3]);
-      String isSummary = str(row[4]);
-      String action = str(row[5]);
-      String windowId = str(row[6]);
-      String processId = str(row[7]);
-      String formId = str(row[8]);
-
-      JSONObject node = new JSONObject();
-      node.put("id", nodeId);
-      node.put("name", name);
-      node.put("type", resolveType(isSummary, action));
-
-      if (windowId != null && !windowId.isEmpty()) {
-        node.put("windowId", windowId);
-      }
-      if (processId != null && !processId.isEmpty()) {
-        node.put("processId", processId);
-      }
-      if (formId != null && !formId.isEmpty()) {
-        node.put("formId", formId);
-      }
-
-      // Folders always get a children array
-      if ("Y".equals(isSummary)) {
-        node.put("children", new JSONArray());
-      }
-
+      JSONObject node = buildNode(row);
       nodeMap.put(nodeId, node);
-
-      // Attach to parent or mark as root
-      if ("0".equals(parentId) || !nodeMap.containsKey(parentId)) {
-        roots.add(node);
-      } else {
-        JSONObject parent = nodeMap.get(parentId);
-        if (parent.has("children")) {
-          parent.getJSONArray("children").put(node);
-        } else {
-          // Parent wasn't marked as folder but has children — add array
-          JSONArray children = new JSONArray();
-          children.put(node);
-          parent.put("children", children);
-        }
-      }
+      attachToTree(nodeMap, roots, node, parentId);
     }
 
     JSONArray treeArray = new JSONArray();
@@ -167,6 +134,76 @@ public class SFListMenu extends BaseWebhookService {
     result.put("tree", treeArray);
     result.put("count", rows.size());
     return result;
+  }
+
+  /**
+   * Builds a {@link JSONObject} representing a single menu node from a result row.
+   * <p>
+   * Folder nodes ({@code issummary = 'Y'}) receive an empty {@value #CHILDREN_KEY} array.
+   * Optional reference IDs ({@code windowId}, {@code processId}, {@code formId}) are only
+   * included when non-null and non-blank.
+   *
+   * @param row a result row from {@link #MENU_TREE_SQL} or {@link #SEARCH_SQL}.
+   * @return the assembled {@link JSONObject} for the node.
+   * @throws Exception if JSON assembly fails.
+   */
+  private JSONObject buildNode(Object[] row) throws Exception {
+    String nodeId   = str(row[0]);
+    String name      = str(row[3]);
+    String isSummary = str(row[4]);
+    String action    = str(row[5]);
+    String windowId  = str(row[6]);
+    String processId = str(row[7]);
+    String formId    = str(row[8]);
+
+    JSONObject node = new JSONObject();
+    node.put("id",   nodeId);
+    node.put("name", name);
+    node.put("type", resolveType(isSummary, action));
+
+    if (windowId != null && !windowId.isEmpty()) {
+      node.put("windowId", windowId);
+    }
+    if (processId != null && !processId.isEmpty()) {
+      node.put("processId", processId);
+    }
+    if (formId != null && !formId.isEmpty()) {
+      node.put("formId", formId);
+    }
+    if ("Y".equals(isSummary)) {
+      node.put(CHILDREN_KEY, new JSONArray());
+    }
+    return node;
+  }
+
+  /**
+   * Attaches {@code node} to the menu tree.
+   * <p>
+   * If {@code parentId} is {@code "0"} or the parent has not yet been indexed, the node is added
+   * to {@code roots}. Otherwise it is appended to the parent's {@value #CHILDREN_KEY} array,
+   * creating the array if the parent was not originally marked as a folder.
+   *
+   * @param nodeMap   index of already-processed nodes keyed by their ID.
+   * @param roots     accumulator for root-level nodes.
+   * @param node      the node to attach.
+   * @param parentId  parent node ID from the CTE result.
+   * @throws Exception if JSON access fails.
+   */
+  private void attachToTree(Map<String, JSONObject> nodeMap, List<JSONObject> roots,
+      JSONObject node, String parentId) throws Exception {
+    if ("0".equals(parentId) || !nodeMap.containsKey(parentId)) {
+      roots.add(node);
+      return;
+    }
+    JSONObject parent = nodeMap.get(parentId);
+    if (parent.has(CHILDREN_KEY)) {
+      parent.getJSONArray(CHILDREN_KEY).put(node);
+    } else {
+      // Parent wasn't marked as folder but has children — add array
+      JSONArray children = new JSONArray();
+      children.put(node);
+      parent.put(CHILDREN_KEY, children);
+    }
   }
 
   /**
