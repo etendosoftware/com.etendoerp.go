@@ -18,7 +18,6 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
-import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Enumeration;
@@ -61,11 +60,10 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoDiscoveryHelper;
 import com.etendoerp.go.schemaforge.util.NeoDisplayLogicHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
-import org.openbravo.client.application.ApplicationUtils;
-import org.openbravo.client.kernel.KernelUtils;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import com.etendoerp.go.schemaforge.util.NeoProcessReportHelper;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
@@ -89,6 +87,9 @@ public class NeoServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
   private static final String HOOK_ERROR_MSG = "An internal error occurred while processing the hook handler";
+  private static final String PATCH_METHOD = "PATCH";
+  private static final String PARENT_ID_KEY = "parentId";
+  private static final String NEO_ERROR_PREFIX = "__NEO_ERROR__:";
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -112,8 +113,8 @@ public class NeoServlet extends HttpBaseServlet {
 
   @Override
   public void service(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    if ("PATCH".equalsIgnoreCase(request.getMethod())) {
-      processRequest(request, response, "PATCH");
+    if (PATCH_METHOD.equalsIgnoreCase(request.getMethod())) {
+      processRequest(request, response, PATCH_METHOD);
     } else {
       try {
         super.service(request, response);
@@ -459,7 +460,7 @@ public class NeoServlet extends HttpBaseServlet {
         .endpointType(NeoEndpointType.CRUD)
         .build();
 
-    if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
+    if ("POST".equals(method) || "PUT".equals(method) || PATCH_METHOD.equals(method)) {
       try {
         String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
         if (StringUtils.isNotBlank(bodyStr)) {
@@ -619,7 +620,7 @@ public class NeoServlet extends HttpBaseServlet {
         return Boolean.TRUE.equals(entity.isPost());
       case "PUT":
         return Boolean.TRUE.equals(entity.isPut());
-      case "PATCH":
+      case PATCH_METHOD:
         return Boolean.TRUE.equals(entity.isPatch());
       case "DELETE":
         return Boolean.TRUE.equals(entity.isDelete());
@@ -836,450 +837,7 @@ public class NeoServlet extends HttpBaseServlet {
 
   private NeoResponse handleDefault(NeoContext context, HttpServletRequest request,
       HttpServletResponse response) {
-    try {
-      Tab adTab = context.getAdTab();
-      if (adTab == null) {
-        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-            "No AD_Tab linked to entity: " + context.getEntityName());
-      }
-
-      String dalEntityName = adTab.getTable().getName();
-      DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
-      NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(
-          context.getSfEntity(), dalEntityName);
-
-      Map<String, String> params = buildBaseParams(context, adTab, dalEntityName);
-      buildWhereClause(params, adTab, context);
-      applyPaginationDefaults(params);
-
-      String result = dispatchCrudMethod(context, adTab, dalEntityName,
-          jsonService, fieldFilter, params);
-      if (result == null) {
-        return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            "Unsupported method: " + context.getHttpMethod());
-      }
-
-      // The dispatch methods return an error marker when validation fails
-      if (result.startsWith("__NEO_ERROR__:")) {
-        String[] parts = result.substring("__NEO_ERROR__:".length()).split(":", 2);
-        return NeoResponse.error(Integer.parseInt(parts[0]), parts[1]);
-      }
-
-      return buildCrudResponse(result, context, fieldFilter);
-    } catch (Exception e) {
-      log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-    }
-  }
-
-  /**
-   * Build the base parameter map for DefaultJsonDataService operations.
-   */
-  private Map<String, String> buildBaseParams(NeoContext context, Tab adTab, String dalEntityName) {
-    Map<String, String> params = new HashMap<>();
-    params.put(JsonConstants.ENTITYNAME, dalEntityName);
-    params.put(JsonConstants.TAB_PARAMETER, adTab.getId());
-    params.put(JsonConstants.WINDOW_ID, adTab.getWindow().getId());
-    params.put(JsonConstants.NO_ACTIVE_FILTER, "true");
-
-    if (context.getRecordId() != null) {
-      params.put(JsonConstants.ID, context.getRecordId());
-    }
-
-    if (context.getQueryParams() != null) {
-      for (Map.Entry<String, String> entry : context.getQueryParams().entrySet()) {
-        params.put(entry.getKey(), entry.getValue());
-      }
-    }
-    return params;
-  }
-
-  /**
-   * Build and apply the where clause (tab HQL + parent filter) to the params map.
-   */
-  private void buildWhereClause(Map<String, String> params, Tab adTab, NeoContext context) {
-    StringBuilder whereClause = new StringBuilder();
-
-    String parentId = context.getQueryParams() != null
-        ? context.getQueryParams().get("parentId")
-        : null;
-
-    String tabWhere = adTab.getHqlwhereclause();
-    if (StringUtils.isNotBlank(tabWhere)) {
-      if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = tabWhere.replaceAll("@[A-Za-z_]+@", "'" + parentId.replace("'", "''") + "'");
-      }
-      whereClause.append("(").append(tabWhere).append(")");
-    }
-    if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-      String parentFilter = NeoTypeCoercionHelper.buildParentWhereClause(adTab, parentId);
-      if (StringUtils.isNotBlank(parentFilter)) {
-        if (whereClause.length() > 0) {
-          whereClause.append(" and ");
-        }
-        whereClause.append("(").append(parentFilter).append(")");
-      }
-    }
-
-    if (whereClause.length() > 0) {
-      params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause.toString());
-      params.put(JsonConstants.USE_ALIAS, "true");
-    }
-  }
-
-  /**
-   * Apply default pagination parameters if not provided by the client.
-   */
-  private void applyPaginationDefaults(Map<String, String> params) {
-    if (!params.containsKey(JsonConstants.STARTROW_PARAMETER)) {
-      params.put(JsonConstants.STARTROW_PARAMETER, "0");
-    }
-    if (!params.containsKey(JsonConstants.ENDROW_PARAMETER)) {
-      params.put(JsonConstants.ENDROW_PARAMETER, "100");
-    }
-  }
-
-  /**
-   * Dispatch to the appropriate CRUD operation based on the HTTP method.
-   * Returns the JSON result string, or null for unsupported methods.
-   * Returns a special "__NEO_ERROR__:status:message" string for validation errors.
-   */
-  private String dispatchCrudMethod(NeoContext context, Tab adTab, String dalEntityName,
-      DefaultJsonDataService jsonService, NeoFieldFilter fieldFilter,
-      Map<String, String> params) throws Exception {
-    switch (context.getHttpMethod()) {
-      case "GET":
-        return jsonService.fetch(params);
-      case "POST":
-        return handlePost(context, adTab, dalEntityName, jsonService, fieldFilter, params);
-      case "PUT":
-      case "PATCH":
-        return handlePutOrPatch(context, dalEntityName, jsonService, fieldFilter, params);
-      case "DELETE":
-        return jsonService.remove(params);
-      default:
-        return null;
-    }
-  }
-
-  /**
-   * Handle POST (create) request: resolve parentId, filter body, inject defaults,
-   * execute callout cascade, and wrap for SmartClient.
-   */
-  private String handlePost(NeoContext context, Tab adTab, String dalEntityName,
-      DefaultJsonDataService jsonService, NeoFieldFilter fieldFilter,
-      Map<String, String> params) throws Exception {
-    if (context.getRecordId() != null) {
-      return "__NEO_ERROR__:" + HttpServletResponse.SC_BAD_REQUEST
-          + ":POST (create) must not include a record ID in the URL";
-    }
-
-    JSONObject requestBody = context.getRequestBody();
-    String parentIdValue = resolveAndMapParentId(requestBody, adTab);
-
-    JSONObject filteredBody = fieldFilter.filterCreateRequest(requestBody);
-    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
-
-    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue);
-
-    String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(
-        filteredBody, dalEntityName, null);
-    return jsonService.add(params, wrappedBody);
-  }
-
-  /**
-   * Resolve the parentId from the request body and map it to the actual FK property name.
-   */
-  private String resolveAndMapParentId(JSONObject requestBody, Tab adTab) throws Exception {
-    if (requestBody == null || !requestBody.has("parentId")) {
-      return null;
-    }
-    String parentIdValue = requestBody.getString("parentId");
-    requestBody.remove("parentId");
-
-    if (adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-      Entity dalEnt = ModelProvider.getInstance()
-          .getEntityByTableName(adTab.getTable().getDBTableName());
-      if (dalEnt != null) {
-        mapParentIdToFkColumn(requestBody, adTab, dalEnt, parentIdValue);
-      }
-    }
-    return parentIdValue;
-  }
-
-  /**
-   * Find the link-to-parent column and set the parentId value on its DAL property name.
-   */
-  private void mapParentIdToFkColumn(JSONObject requestBody, Tab adTab,
-      Entity dalEnt, String parentIdValue) throws Exception {
-    for (Column col : adTab.getTable().getADColumnList()) {
-      if (!col.isLinkToParentColumn() || !col.isActive()) {
-        continue;
-      }
-      for (Property prop : dalEnt.getProperties()) {
-        if (StringUtils.equalsIgnoreCase(prop.getColumnName(), col.getDBColumnName())) {
-          requestBody.put(prop.getName(), parentIdValue);
-          return;
-        }
-      }
-    }
-  }
-
-  /**
-   * Execute the callout cascade for POST requests on header tabs (level 0).
-   */
-  private void executePostCalloutCascade(JSONObject filteredBody, Tab adTab,
-      NeoContext context, String parentIdValue) {
-    if (adTab == null || adTab.getTabLevel() == null || adTab.getTabLevel() != 0) {
-      return;
-    }
-    Set<String> seqFields = new HashSet<>();
-    NeoDefaultsService.executeCalloutCascade(context, adTab, filteredBody, seqFields);
-    NeoDefaultsService.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
-    NeoDefaultsService.removeEmptyFkValues(filteredBody, adTab);
-    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
-  }
-
-  /**
-   * Handle PUT/PATCH (update) request: validate recordId, filter body, and wrap for SmartClient.
-   */
-  private String handlePutOrPatch(NeoContext context, String dalEntityName,
-      DefaultJsonDataService jsonService, NeoFieldFilter fieldFilter,
-      Map<String, String> params) throws Exception {
-    if (context.getRecordId() == null) {
-      return "__NEO_ERROR__:" + HttpServletResponse.SC_BAD_REQUEST
-          + ":" + context.getHttpMethod() + " requires a record ID in the URL";
-    }
-    JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
-    String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(
-        filteredBody, dalEntityName, context.getRecordId());
-    return jsonService.update(params, wrappedBody);
-  }
-
-  /**
-   * Build the final NeoResponse from the raw JSON result string.
-   * Checks for error/validation responses and applies field filtering.
-   */
-  private NeoResponse buildCrudResponse(String result, NeoContext context,
-      NeoFieldFilter fieldFilter) throws Exception {
-    JSONObject responseJson = new JSONObject(result);
-
-    NeoResponse errorResponse = checkForServiceErrors(responseJson);
-    if (errorResponse != null) {
-      return errorResponse;
-    }
-
-    fieldFilter.filterGetResponse(responseJson);
-
-    if ("GET".equals(context.getHttpMethod()) && context.getSfEntity() != null) {
-      NeoListIdentifierHelper.enrichListIdentifiers(responseJson, context.getSfEntity());
-    }
-
-    return NeoResponse.ok(responseJson);
-  }
-
-  /**
-   * Check the DefaultJsonDataService response for error or validation error status.
-   * Returns an error NeoResponse if found, null otherwise.
-   */
-  private NeoResponse checkForServiceErrors(JSONObject responseJson) throws Exception {
-    JSONObject innerResponse = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
-    if (innerResponse == null) {
-      return null;
-    }
-    int status = innerResponse.optInt(JsonConstants.RESPONSE_STATUS, 0);
-    if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
-      String errMsg = innerResponse.has(JsonConstants.RESPONSE_ERROR)
-          ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
-              .optString("message", "Write operation failed")
-          : "Write operation failed";
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          OBMessageUtils.messageBD(errMsg));
-    }
-    if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
-    }
-    return null;
-  }
-
-  /**
-   * Wraps a flat JSON body into the structure expected by DefaultJsonDataService:
-   * {@code {"data": {fields..., "_entityName": dalEntityName, "id": recordId}}}
-   *
-   * <p>DefaultJsonDataService.getContentAsJSON() calls jsonObject.get("data"),
-   * so the content MUST be wrapped in a "data" envelope. Additionally,
-   * the "_entityName" property is required for OBDal to resolve the entity,
-   * and "id" is required for updates.</p>
-   *
-   * @param filteredBody the filtered request body (flat JSON from client)
-   * @param dalEntityName the DAL entity name (e.g. "Order")
-   * @param recordId the record ID for updates, or null for creates
-   * @return the wrapped JSON string ready for DefaultJsonDataService
-   */
-  private String wrapForSmartclient(JSONObject filteredBody, String dalEntityName,
-      String recordId) {
-    try {
-      JSONObject data = filteredBody != null ? filteredBody : new JSONObject();
-      data.put(JsonConstants.ENTITYNAME, dalEntityName);
-      if (recordId != null) {
-        data.put(JsonConstants.ID, recordId);
-      } else {
-        // Mark as new record for creates
-        data.put(JsonConstants.NEW_INDICATOR, true);
-      }
-
-      JSONObject wrapper = new JSONObject();
-      wrapper.put(JsonConstants.DATA, data);
-      return wrapper.toString();
-    } catch (Exception e) {
-      log.error("Error wrapping body for Smartclient format: {}", e.getMessage(), e);
-      return "{}";
-    }
-  }
-
-  /**
-   * Builds an HQL where clause fragment that filters a child tab's records
-   * by the parent record ID.
-   */
-  String buildParentWhereClause(Tab childTab, String parentId) {
-    if (childTab == null) {
-      return null;
-    }
-    try {
-      Tab parentTab = KernelUtils.getInstance().getParentTab(childTab);
-      if (parentTab == null) {
-        return null;
-      }
-
-      String parentProperty = ApplicationUtils.getParentProperty(childTab, parentTab);
-      if (StringUtils.isBlank(parentProperty)) {
-        return null;
-      }
-
-      Entity childEntity = ModelProvider.getInstance()
-          .getEntityByTableId(childTab.getTable().getId());
-      Property prop = childEntity.getProperty(parentProperty);
-
-      if (prop != null && !prop.isPrimitive()) {
-        return "e." + parentProperty + ".id='" + parentId.replace("'", "''") + "'";
-      } else {
-        return "e." + parentProperty + "='" + parentId.replace("'", "''") + "'";
-      }
-    } catch (Exception e) {
-      log.error("Error building parent where clause for tab '{}': {}",
-          childTab.getName(), e.getMessage(), e);
-      return null;
-    }
-  }
-
-  /**
-   * Check if a report spec has a NeoHandler qualifier on any of its entities.
-   * Returns the qualifier string if found, null otherwise.
-   * This allows report specs to use custom handlers instead of the standard Jasper flow.
-   */
-  private String resolveReportHandlerQualifier(SFSpec spec) {
-    try {
-      OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
-      criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
-      List<SFEntity> entities = criteria.list();
-      for (SFEntity entity : entities) {
-        String qualifier = entity.getJavaQualifier();
-        if (StringUtils.isNotBlank(qualifier)) {
-          return qualifier;
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Error checking report handler qualifier for spec '{}': {}", spec.getName(), e.getMessage());
-    }
-    return null;
-  }
-
-  /**
-   * Resolve the AD_Process linked to a process-type spec.
-   */
-  private Process resolveProcess(SFSpec spec) {
-    return spec.getProcess();
-  }
-
-  /**
-   * Handle a process-type spec POST. Reads the request body as JSON
-   * and delegates to NeoProcessService.
-   */
-  private void handleProcessSpec(SFSpec spec, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    try {
-      Process adProcess = resolveProcess(spec);
-      if (adProcess == null) {
-        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-            "Process spec has no linked AD_Process");
-        return;
-      }
-
-      // Read request body
-      JSONObject requestBody = null;
-      String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-      if (StringUtils.isNotBlank(bodyStr)) {
-        requestBody = new JSONObject(bodyStr);
-      }
-
-      // Delegate to NeoProcessService
-      NeoResponse result = NeoProcessService.executeProcess(adProcess, requestBody);
-      writeResponse(response, result);
-    } catch (Exception e) {
-      log.error("Error executing process spec '{}': {}", spec.getName(), e.getMessage(), e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Process execution error: " + e.getMessage());
-    }
-  }
-
-  /**
-   * Handle a report-type spec POST. Reads the request body for exportType and params,
-   * resolves report metadata, sets response headers, then streams the report output.
-   */
-  private void handleReportSpec(SFSpec spec, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    try {
-      Process adProcess = resolveProcess(spec);
-      if (adProcess == null) {
-        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-            "Report spec has no linked AD_Process");
-        return;
-      }
-
-      // Read request body
-      String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-      JSONObject body = StringUtils.isNotBlank(bodyStr)
-          ? new JSONObject(bodyStr) : new JSONObject();
-      String exportType = body.optString("exportType", "PDF");
-      JSONObject params = body.optJSONObject("params");
-      if (params == null) {
-        params = new JSONObject();
-      }
-
-      // Resolve metadata first (filename, content type)
-      NeoReportService.ReportMetadata meta =
-          NeoReportService.resolveReportMetadata(adProcess, exportType);
-
-      // Set response headers BEFORE writing to output stream
-      response.setStatus(HttpServletResponse.SC_OK);
-      response.setContentType(meta.getContentType());
-      response.setHeader("Content-Disposition",
-          "attachment; filename=\"" + meta.getFilename() + "\"");
-
-      // Generate report directly to response output stream
-      OutputStream out = response.getOutputStream();
-      NeoReportService.generateReport(adProcess, params, exportType, out);
-      out.flush();
-
-    } catch (Exception e) {
-      log.error("Error generating report for spec '{}': {}",
-          spec.getName(), e.getMessage(), e);
-      // Only send error if response not already committed
-      if (!response.isCommitted()) {
-        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-            "Report generation failed: " + e.getMessage());
-      }
-    }
+    return NeoCrudHelper.handleDefault(context);
   }
 
   private void writeResponse(HttpServletResponse response, NeoResponse neoResponse)
@@ -1459,7 +1017,7 @@ public class NeoServlet extends HttpBaseServlet {
             "Entity has no linked AD_Tab: " + pathInfo.entityName);
       }
 
-      String parentId = request.getParameter("parentId");
+      String parentId = request.getParameter(PARENT_ID_KEY);
 
       NeoContext ctx = NeoContext.builder()
           .specName(pathInfo.specName)
