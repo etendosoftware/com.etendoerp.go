@@ -1,3 +1,20 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
 package com.etendoerp.go.onboarding;
 
 import java.io.BufferedReader;
@@ -9,6 +26,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -56,6 +74,9 @@ public class OnboardingServlet extends HttpBaseServlet {
   private static final Logger log = LogManager.getLogger(OnboardingServlet.class);
 
   private static final String SYSTEM_ADMIN_ROLE_ID = "0";
+  private static final String SYSTEM_CLIENT_ID = "0";
+  private static final String SYSTEM_ORG_ID = "0";
+  private static final String SYSTEM_USER_ID = "100";
   private static final int TOTAL_STEPS = 6;
 
   // Clients to exclude from environment listing (System, F&B demo, QA Testing)
@@ -85,11 +106,16 @@ public class OnboardingServlet extends HttpBaseServlet {
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     setCorsHeaders(request, response);
     try {
-      authenticateJwt(request);
+      String currentRoleId = authenticateJwtAndGetRole(request);
       String action = request.getParameter("action");
       if ("environments".equals(action)) {
         sendEnvironments(response);
       } else if ("login".equals(action)) {
+        if (!isAdminRole(currentRoleId)) {
+          sendJsonError(response, HttpServletResponse.SC_FORBIDDEN,
+              "Unauthorized: System Administrator role required");
+          return;
+        }
         loginAsUser(request, response);
       } else {
         sendDescribe(response);
@@ -106,15 +132,23 @@ public class OnboardingServlet extends HttpBaseServlet {
 
   private void loginAsUser(HttpServletRequest request, HttpServletResponse response) throws Exception {
     String userId = request.getParameter("userId");
-    if (userId == null || userId.isEmpty()) {
+    if (StringUtils.isBlank(userId)) {
       sendJsonError(response, HttpServletResponse.SC_BAD_REQUEST, "userId parameter required");
       return;
     }
-    OBContext.setAdminMode(false);
+    OBContext.setAdminMode(true);
     try {
-      User loginUser = OBDal.getInstance().get(User.class, userId);
+      User loginUser = OBDal.getInstance().get(User.class, userId.trim());
       if (loginUser == null) {
         sendJsonError(response, HttpServletResponse.SC_NOT_FOUND, "User not found");
+        return;
+      }
+      if (!Boolean.TRUE.equals(loginUser.isActive())
+          || loginUser.getClient() == null
+          || SYSTEM_USER_ID.equals(loginUser.getId())
+          || SYSTEM_CLIENT_ID.equals(loginUser.getClient().getId())) {
+        sendJsonError(response, HttpServletResponse.SC_FORBIDDEN,
+            "Target user is not eligible for environment login");
         return;
       }
       String jwt = SecureWebServicesUtils.generateToken(loginUser);
@@ -130,13 +164,16 @@ public class OnboardingServlet extends HttpBaseServlet {
   }
 
   private void sendEnvironments(HttpServletResponse response) throws Exception {
-    OBContext.setAdminMode(false);
+    OBContext.setAdminMode(true);
     try {
       response.setContentType("application/json");
       response.setCharacterEncoding("UTF-8");
 
       Connection conn = OBDal.getInstance().getConnection();
       JSONArray environments = new JSONArray();
+      List<String> excludedClientIds = new ArrayList<>(EXCLUDED_CLIENT_IDS);
+      String excludedPlaceholders = String.join(",",
+          Collections.nCopies(excludedClientIds.size(), "?"));
 
       String sql = "SELECT DISTINCT ON (c.ad_client_id) c.ad_client_id, c.name, c.created, "
           + "o.ad_org_id, o.name AS org_name, "
@@ -144,12 +181,16 @@ public class OnboardingServlet extends HttpBaseServlet {
           + "FROM ad_client c "
           + "LEFT JOIN ad_org o ON o.ad_client_id = c.ad_client_id AND o.ad_org_id != '0' "
           + "LEFT JOIN ad_user u ON u.ad_client_id = c.ad_client_id "
-          + "AND u.ad_user_id != '100' AND u.username NOT LIKE '%.org' "
-          + "WHERE c.ad_client_id NOT IN ('" + String.join("','", EXCLUDED_CLIENT_IDS) + "') "
+          + "AND u.ad_user_id != ? AND u.username NOT LIKE '%.org' "
+          + "WHERE c.ad_client_id NOT IN (" + excludedPlaceholders + ") "
           + "ORDER BY c.ad_client_id, c.created DESC";
 
-      try (PreparedStatement ps = conn.prepareStatement(sql);
-           ResultSet rs = ps.executeQuery()) {
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, SYSTEM_USER_ID);
+        for (int index = 0; index < excludedClientIds.size(); index++) {
+          ps.setString(index + 2, excludedClientIds.get(index));
+        }
+        try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           JSONObject env = new JSONObject();
           env.put("clientId", rs.getString("ad_client_id"));
@@ -160,6 +201,7 @@ public class OnboardingServlet extends HttpBaseServlet {
           env.put("adminUser", rs.getString("username"));
           env.put("adminUserId", rs.getString("ad_user_id"));
           environments.put(env);
+        }
         }
       }
 
@@ -175,12 +217,18 @@ public class OnboardingServlet extends HttpBaseServlet {
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
     setCorsHeaders(request, response);
     try {
-      // 1. Authenticate (validates JWT is valid)
-      authenticateJwt(request);
+      // 1. Authenticate and validate caller privileges before switching context
+      String roleId = authenticateJwtAndGetRole(request);
+      if (!isAdminRole(roleId)) {
+        sendJsonError(response, HttpServletResponse.SC_FORBIDDEN,
+            "Unauthorized: System Administrator role required");
+        return;
+      }
 
       // 2. Switch to System Admin context for creating new clients
       // userId=100 (System), roleId=0 (System Administrator), clientId=0, orgId=0
-      OBContext.setOBContext("100", "0", "0", "0");
+      OBContext.setOBContext(SYSTEM_USER_ID, SYSTEM_ADMIN_ROLE_ID, SYSTEM_CLIENT_ID,
+          SYSTEM_ORG_ID);
       OBContext.setAdminMode(false);
 
       // 3. Parse request body

@@ -1,3 +1,20 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
 package com.etendoerp.go.onboarding.steps;
 
 import java.sql.Connection;
@@ -8,6 +25,7 @@ import java.util.List;
 import java.util.Set;
 
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -35,9 +53,12 @@ public class CreateRoleStep implements OnboardingStep {
 
   @Override
   public void execute(OnboardingContext ctx) throws Exception {
-    OBContext.setAdminMode(false);
+    OBContext.setAdminMode(true);
     try {
       Client client = OBDal.getInstance().get(Client.class, ctx.getClientId());
+      if (client == null) {
+        throw new OBException("Client not found with ID: " + ctx.getClientId());
+      }
       Organization orgZero = OBDal.getInstance().get(Organization.class, "0");
 
       // 1. Enable WebService on all roles for this client
@@ -60,11 +81,14 @@ public class CreateRoleStep implements OnboardingStep {
         }
       }
       if (roleId == null) {
-        throw new Exception("No role found for client " + ctx.getClientId());
+        throw new OBException("No role found for client " + ctx.getClientId());
       }
       ctx.setRoleId(roleId);
 
       Role role = OBDal.getInstance().get(Role.class, roleId);
+      if (role == null) {
+        throw new OBException("Role not found with ID: " + roleId);
+      }
 
       // 3. Get existing window access for this role (to avoid duplicates)
       Set<String> existingWindowIds = new HashSet<>();

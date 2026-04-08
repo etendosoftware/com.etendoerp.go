@@ -1,9 +1,27 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
 package com.etendoerp.go.onboarding.steps;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.InitialOrgSetup;
@@ -19,6 +37,8 @@ import com.etendoerp.go.onboarding.OnboardingStep;
  * org info, images, admin user, and role.
  */
 public class CreateOrgStep implements OnboardingStep {
+
+  private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
 
   @Override
   public String name() {
@@ -36,6 +56,9 @@ public class CreateOrgStep implements OnboardingStep {
 
     // Reload client in fresh session
     Client client = OBDal.getInstance().get(Client.class, ctx.getClientId());
+    if (client == null) {
+      throw new OBException("Client not found with ID: " + ctx.getClientId());
+    }
 
     // The org admin username is the main admin user with ".org" suffix
     // to avoid duplication with the client admin user
@@ -46,7 +69,7 @@ public class CreateOrgStep implements OnboardingStep {
     OBError result = orgSetup.createOrganization(
         ctx.getOrgName(),
         orgAdminUser,
-        "1",                  // org type "1" = Legal with accounting
+      LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID,
         "0",                  // parent org = root
         "",                   // no location yet
         ctx.getAdminPassword(),
@@ -58,14 +81,14 @@ public class CreateOrgStep implements OnboardingStep {
     );
 
     if ("Error".equals(result.getType())) {
-      throw new Exception("InitialOrgSetup failed: " + result.getMessage()
+      throw new OBException("InitialOrgSetup failed: " + result.getMessage()
           + "\nLog: " + orgSetup.getLog());
     }
 
     // Extract the created org ID
     String orgId = orgSetup.getOrgId();
     if (orgId == null || orgId.isEmpty()) {
-      throw new Exception("InitialOrgSetup succeeded but org ID not found");
+      throw new OBException("InitialOrgSetup succeeded but org ID not found");
     }
     ctx.setOrgId(orgId);
 
@@ -80,6 +103,9 @@ public class CreateOrgStep implements OnboardingStep {
           ctx.setOrgAdminUserId(rs.getString(1));
         }
       }
+    }
+    if (ctx.getOrgAdminUserId() == null) {
+      throw new OBException("Org admin user '" + orgAdminUser + "' not found after organization creation");
     }
   }
 }

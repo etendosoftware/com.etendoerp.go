@@ -1,11 +1,28 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
 package com.etendoerp.go.onboarding.steps;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.Year;
-import java.util.Date;
 
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -53,6 +70,12 @@ public class SeedReferenceDataStep implements OnboardingStep {
   public void execute(OnboardingContext ctx) throws Exception {
     Client client = OBDal.getInstance().get(Client.class, ctx.getClientId());
     Organization org = OBDal.getInstance().get(Organization.class, ctx.getOrgId());
+    if (client == null) {
+      throw new OBException("Client not found with ID: " + ctx.getClientId());
+    }
+    if (org == null) {
+      throw new OBException("Organization not found with ID: " + ctx.getOrgId());
+    }
 
     // 1. Resolve shared entities from client 0
     Currency currency = resolveCurrency(ctx.getCurrencyCode());
@@ -135,7 +158,7 @@ public class SeedReferenceDataStep implements OnboardingStep {
     criteria.setMaxResults(1);
     Currency currency = (Currency) criteria.uniqueResult();
     if (currency == null) {
-      throw new Exception("Currency not found for ISO code: " + isoCode);
+      throw new OBException("Currency not found for ISO code: " + isoCode);
     }
     return currency;
   }
@@ -146,7 +169,7 @@ public class SeedReferenceDataStep implements OnboardingStep {
     criteria.setMaxResults(1);
     Country country = (Country) criteria.uniqueResult();
     if (country == null) {
-      throw new Exception("Country not found for ISO code: " + isoCountryCode);
+      throw new OBException("Country not found for ISO code: " + isoCountryCode);
     }
     return country;
   }
@@ -157,7 +180,7 @@ public class SeedReferenceDataStep implements OnboardingStep {
     criteria.setMaxResults(1);
     UOM uom = (UOM) criteria.uniqueResult();
     if (uom == null) {
-      throw new Exception("UOM 'Unit' not found in system data");
+      throw new OBException("UOM 'Unit' not found in system data");
     }
     return uom;
   }
@@ -231,7 +254,7 @@ public class SeedReferenceDataStep implements OnboardingStep {
   }
 
   private void createOrgWarehouse(Client client, Organization org, Warehouse warehouse) {
-    OrgWarehouse orgWarehouse = new OrgWarehouse();
+    OrgWarehouse orgWarehouse = OBProvider.getInstance().get(OrgWarehouse.class);
     orgWarehouse.setNewOBObject(true);
     orgWarehouse.setClient(client);
     orgWarehouse.setOrganization(org);

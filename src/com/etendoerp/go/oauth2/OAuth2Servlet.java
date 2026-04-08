@@ -1,3 +1,20 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
 package com.etendoerp.go.oauth2;
 
 import java.io.BufferedReader;
@@ -26,6 +43,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.SequenceIdData;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -100,8 +118,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       + "(etgo_oauth2_client_id, ad_client_id, ad_org_id, isactive, "
       + "created, createdby, updated, updatedby, "
       + "name, client_identifier, client_secret_hash, ad_user_id, ad_role_id, scopes, ad_module_id) "
-      + "VALUES (get_uuid(), '0', '0', ?, now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, '0') "
-      + "RETURNING etgo_oauth2_client_id";
+      + "VALUES (?, '0', '0', ?, now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, '0')";
 
   private static final String SQL_UPDATE_CLIENT =
       "UPDATE etgo_oauth2_client SET name = ?, scopes = ?, ad_user_id = ?, ad_role_id = ?, "
@@ -143,8 +160,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       + "(etgo_oauth2_client_id, ad_client_id, ad_org_id, isactive, "
       + "created, createdby, updated, updatedby, "
       + "name, client_identifier, client_secret_hash, ad_user_id, ad_role_id, scopes, ad_module_id) "
-      + "VALUES (get_uuid(), '0', '0', 'Y', now(), '0', now(), '0', ?, ?, '', '0', '0', ?, '0') "
-      + "RETURNING etgo_oauth2_client_id, client_identifier";
+      + "VALUES (?, '0', '0', 'Y', now(), '0', now(), '0', ?, ?, '', '0', '0', ?, '0')";
 
   // --- CORS ---
 
@@ -441,24 +457,21 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String secretHash = OAuth2Utils.hashSecret(plainSecret);
 
       Connection conn = OBDal.getInstance().getConnection();
-      String generatedId;
+      String generatedId = SequenceIdData.getUUID();
 
       try (PreparedStatement ps = conn.prepareStatement(SQL_INSERT_CLIENT)) {
-        ps.setString(1, isActive ? "Y" : "N");   // isactive
-        ps.setString(2, adminUserId);             // createdby
-        ps.setString(3, adminUserId);             // updatedby
-        ps.setString(4, name.trim());             // name
-        ps.setString(5, clientIdentifier);        // client_identifier
-        ps.setString(6, secretHash);              // client_secret_hash
-        ps.setString(7, adUserId.trim());         // ad_user_id
-        ps.setString(8, adRoleId.trim());         // ad_role_id
-        ps.setString(9, scopes.trim());           // scopes
-        try (ResultSet rs = ps.executeQuery()) {
-          rs.next();
-          generatedId = rs.getString(1);
-        }
+        ps.setString(1, generatedId);             // etgo_oauth2_client_id
+        ps.setString(2, isActive ? "Y" : "N");   // isactive
+        ps.setString(3, adminUserId);             // createdby
+        ps.setString(4, adminUserId);             // updatedby
+        ps.setString(5, name.trim());             // name
+        ps.setString(6, clientIdentifier);        // client_identifier
+        ps.setString(7, secretHash);              // client_secret_hash
+        ps.setString(8, adUserId.trim());         // ad_user_id
+        ps.setString(9, adRoleId.trim());         // ad_role_id
+        ps.setString(10, scopes.trim());          // scopes
+        ps.executeUpdate();
       }
-      OBDal.getInstance().flush();
 
       JSONObject result = new JSONObject();
       result.put("id", generatedId);
@@ -525,7 +538,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
           return;
         }
       }
-      OBDal.getInstance().flush();
 
       JSONObject result = new JSONObject();
       result.put("id", id);
@@ -577,8 +589,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
             "Client not found: " + id);
         return;
       }
-
-      OBDal.getInstance().flush();
 
       JSONObject result = new JSONObject();
       result.put("deleted", true);
@@ -646,8 +656,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
         }
       }
 
-      OBDal.getInstance().flush();
-
       JSONObject result = new JSONObject();
       result.put("id", id);
       result.put("clientId", existing.getString("clientId"));
@@ -692,7 +700,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
         ps.setString(1, clientIdentifier.trim());
         rowsUpdated = ps.executeUpdate();
       }
-      OBDal.getInstance().flush();
 
       JSONObject result = new JSONObject();
       result.put("revoked", true);
@@ -1045,7 +1052,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
         ps.setString(3, tokenClient.id);
         ps.executeUpdate();
       }
-      OBDal.getInstance().flush();
       log.info("DCR client updated with user={}, role={}", codeData.userId, codeData.roleId);
 
       // Generate access token and refresh token
@@ -1209,18 +1215,15 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String clientIdentifier = OAuth2Utils.generateClientId();
 
       Connection conn = OBDal.getInstance().getConnection();
-      String generatedId;
+      String generatedId = SequenceIdData.getUUID();
 
       try (PreparedStatement ps = conn.prepareStatement(SQL_INSERT_DCR_CLIENT)) {
-        ps.setString(1, clientName);         // name
-        ps.setString(2, clientIdentifier);   // client_identifier
-        ps.setString(3, scopes);             // scopes
-        try (ResultSet rs = ps.executeQuery()) {
-          rs.next();
-          generatedId = rs.getString(1);
-        }
+        ps.setString(1, generatedId);        // etgo_oauth2_client_id
+        ps.setString(2, clientName);         // name
+        ps.setString(3, clientIdentifier);   // client_identifier
+        ps.setString(4, scopes);             // scopes
+        ps.executeUpdate();
       }
-      OBDal.getInstance().flush();
 
       // RFC 7591 response
       JSONObject result = new JSONObject();
@@ -1603,7 +1606,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
       ps.setTimestamp(8, expiresAt);          // expires_at
       ps.executeUpdate();
     }
-    OBDal.getInstance().flush();
   }
 
   // --- Scope helpers ---

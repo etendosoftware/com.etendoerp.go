@@ -1,8 +1,26 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
 package com.etendoerp.go.onboarding.steps;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -80,7 +98,7 @@ public class MarkOrgReadyStep implements OnboardingStep {
     // Resolve process by search key — never by hardcoded ID
     Process orgReadyProcess = resolveProcess(ORG_READY_PROCESS_SEARCH_KEY);
     if (orgReadyProcess == null) {
-      throw new Exception(
+      throw new OBException(
           "ORG_AS_READY process not found by search key '" + ORG_READY_PROCESS_SEARCH_KEY
               + "'. Ensure Etendo core reference data is loaded.");
     }
