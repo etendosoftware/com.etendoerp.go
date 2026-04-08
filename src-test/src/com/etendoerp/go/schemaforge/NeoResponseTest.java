@@ -65,21 +65,20 @@ public class NeoResponseTest {
     assertEquals(404, response.getHttpStatus());
     assertNotNull(response.getBody());
 
-    JSONObject error = response.getBody().getJSONObject("error");
-    assertEquals("Not Found", error.getString("message"));
-    assertEquals(404, error.getInt("status"));
+      JSONObject error = response.getBody().getJSONObject(ERROR);
+      assertEquals("Not Found", error.getString(MESSAGE));
+      assertEquals(404, error.getInt("status"));
   }
 
   @Test
   public void testErrorWithDifferentStatusCodes() throws JSONException {
     NeoResponse badRequest = NeoResponse.error(400, "Bad Request");
     assertEquals(400, badRequest.getHttpStatus());
-    assertEquals("Bad Request", badRequest.getBody().getJSONObject("error").getString("message"));
+      assertEquals("Bad Request", badRequest.getBody().getJSONObject(ERROR).getString(MESSAGE));
 
     NeoResponse serverError = NeoResponse.error(500, "Internal Server Error");
     assertEquals(500, serverError.getHttpStatus());
-    assertEquals("Internal Server Error",
-        serverError.getBody().getJSONObject("error").getString("message"));
+      assertEquals("Internal Server Error", serverError.getBody().getJSONObject(ERROR).getString(MESSAGE));
 
     NeoResponse unauthorized = NeoResponse.error(401, "Unauthorized");
     assertEquals(401, unauthorized.getHttpStatus());
@@ -115,7 +114,7 @@ public class NeoResponseTest {
         .withHeader("X-Key", "new");
 
     assertEquals(1, response.getHeaders().size());
-    assertEquals("new", response.getHeaders().get("X-Key"));
+      assertEquals("new", response.getHeaders().get(X_KEY));
   }
 
   @Test

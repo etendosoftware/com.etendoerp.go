@@ -31,6 +31,14 @@ import org.junit.Test;
  */
 public class NeoHandlerHookTest {
 
+  private static final String TEST_SPEC = "TestSpec";
+  private static final String HEADER = "Header";
+  private static final String SOURCE = "source";
+  private static final String DEFAULT = "default";
+  private static final String PRE_HOOK = "preHook";
+  private static final String AFTER_HOOK = "afterHook";
+  private static final String POST_HOOK = "postHook";
+
   /**
    * When handle() returns null and afterHandle() returns null,
    * the default service result should be used.
@@ -45,18 +53,18 @@ public class NeoHandlerHookTest {
     };
 
     NeoContext ctx = NeoContext.builder()
-        .specName("TestSpec")
-        .entityName("Header")
+          .specName(TEST_SPEC)
+          .entityName(HEADER)
         .httpMethod("GET")
         .endpointType(NeoEndpointType.DEFAULTS)
         .build();
 
     // Simulate the dispatch logic
-    NeoResponse defaultResult = NeoResponse.ok(new JSONObject().put("key", "defaultValue"));
+    NeoResponse defaultResult = NeoResponse.ok(new JSONObject().put("key", DEFAULT));
     NeoResponse finalResult = simulateDispatch(handler, ctx, defaultResult);
 
     assertEquals(200, finalResult.getHttpStatus());
-    assertEquals("defaultValue", finalResult.getBody().getString("key"));
+    assertEquals(DEFAULT, finalResult.getBody().getString("key"));
   }
 
   /**
@@ -65,7 +73,7 @@ public class NeoHandlerHookTest {
    */
   @Test
   public void testPreHookOverride() throws JSONException {
-    NeoResponse override = NeoResponse.ok(new JSONObject().put("source", "preHook"));
+    NeoResponse override = NeoResponse.ok(new JSONObject().put(SOURCE, PRE_HOOK));
 
     NeoHandler handler = new NeoHandler() {
       @Override
@@ -75,16 +83,16 @@ public class NeoHandlerHookTest {
     };
 
     NeoContext ctx = NeoContext.builder()
-        .specName("TestSpec")
-        .entityName("Header")
+          .specName(TEST_SPEC)
+          .entityName(HEADER)
         .httpMethod("POST")
         .endpointType(NeoEndpointType.CALLOUT)
         .build();
 
-    NeoResponse defaultResult = NeoResponse.ok(new JSONObject().put("source", "default"));
+    NeoResponse defaultResult = NeoResponse.ok(new JSONObject().put(SOURCE, DEFAULT));
     NeoResponse finalResult = simulateDispatch(handler, ctx, defaultResult);
 
-    assertEquals("preHook", finalResult.getBody().getString("source"));
+    assertEquals(PRE_HOOK, finalResult.getBody().getString(SOURCE));
   }
 
   /**
@@ -103,7 +111,7 @@ public class NeoHandlerHookTest {
       public NeoResponse afterHandle(NeoContext context) {
         try {
           JSONObject modified = new JSONObject();
-          modified.put("source", "postHook");
+          modified.put(SOURCE, POST_HOOK);
           modified.put("originalStatus", context.getPreviousResult().getHttpStatus());
           return NeoResponse.ok(modified);
         } catch (JSONException e) {
@@ -113,17 +121,17 @@ public class NeoHandlerHookTest {
     };
 
     NeoContext ctx = NeoContext.builder()
-        .specName("TestSpec")
-        .entityName("Header")
+          .specName(TEST_SPEC)
+          .entityName(HEADER)
         .httpMethod("GET")
         .endpointType(NeoEndpointType.SELECTOR)
         .fieldName("warehouse")
         .build();
 
-    NeoResponse defaultResult = NeoResponse.ok(new JSONObject().put("source", "default"));
+    NeoResponse defaultResult = NeoResponse.ok(new JSONObject().put(SOURCE, DEFAULT));
     NeoResponse finalResult = simulateDispatch(handler, ctx, defaultResult);
 
-    assertEquals("postHook", finalResult.getBody().getString("source"));
+    assertEquals(POST_HOOK, finalResult.getBody().getString(SOURCE));
     assertEquals(200, finalResult.getBody().getInt("originalStatus"));
   }
 
@@ -133,8 +141,8 @@ public class NeoHandlerHookTest {
    */
   @Test
   public void testAfterHandleOverridesPreHook() throws JSONException {
-    NeoResponse preResult = NeoResponse.ok(new JSONObject().put("source", "preHook"));
-    NeoResponse postResult = NeoResponse.ok(new JSONObject().put("source", "afterHook"));
+    NeoResponse preResult = NeoResponse.ok(new JSONObject().put(SOURCE, PRE_HOOK));
+    NeoResponse postResult = NeoResponse.ok(new JSONObject().put(SOURCE, AFTER_HOOK));
 
     NeoHandler handler = new NeoHandler() {
       @Override
@@ -149,17 +157,17 @@ public class NeoHandlerHookTest {
     };
 
     NeoContext ctx = NeoContext.builder()
-        .specName("TestSpec")
-        .entityName("Header")
+        .specName(TEST_SPEC)
+        .entityName(HEADER)
         .httpMethod("POST")
         .endpointType(NeoEndpointType.ACTION)
         .fieldName("docAction")
         .build();
 
-    NeoResponse defaultResult = NeoResponse.ok(new JSONObject().put("source", "default"));
+    NeoResponse defaultResult = NeoResponse.ok(new JSONObject().put(SOURCE, DEFAULT));
     NeoResponse finalResult = simulateDispatch(handler, ctx, defaultResult);
 
-    assertEquals("afterHook", finalResult.getBody().getString("source"));
+    assertEquals(AFTER_HOOK, finalResult.getBody().getString(SOURCE));
   }
 
   /**
@@ -180,8 +188,8 @@ public class NeoHandlerHookTest {
     };
 
     NeoContext ctx = NeoContext.builder()
-        .specName("TestSpec")
-        .entityName("Header")
+        .specName(TEST_SPEC)
+        .entityName(HEADER)
         .httpMethod("GET")
         .endpointType(NeoEndpointType.SELECTOR)
         .fieldName("businessPartner")
@@ -215,8 +223,8 @@ public class NeoHandlerHookTest {
     };
 
     NeoContext ctx = NeoContext.builder()
-        .specName("TestSpec")
-        .entityName("Header")
+        .specName(TEST_SPEC)
+        .entityName(HEADER)
         .httpMethod("POST")
         .endpointType(NeoEndpointType.EVALUATE_DISPLAY)
         .build();
@@ -236,7 +244,7 @@ public class NeoHandlerHookTest {
    */
   @Test
   public void testPreviousResultAvailableInPreHookAfterHandle() throws JSONException {
-    NeoResponse preResult = NeoResponse.ok(new JSONObject().put("source", "pre"));
+    NeoResponse preResult = NeoResponse.ok(new JSONObject().put(SOURCE, "pre"));
     final NeoResponse[] capturedPrevious = new NeoResponse[1];
 
     NeoHandler handler = new NeoHandler() {
@@ -253,20 +261,20 @@ public class NeoHandlerHookTest {
     };
 
     NeoContext ctx = NeoContext.builder()
-        .specName("TestSpec")
-        .entityName("Header")
+        .specName(TEST_SPEC)
+        .entityName(HEADER)
         .httpMethod("GET")
         .endpointType(NeoEndpointType.CRUD)
         .build();
 
-    NeoResponse defaultResult = NeoResponse.ok(new JSONObject().put("source", "default"));
+    NeoResponse defaultResult = NeoResponse.ok(new JSONObject().put(SOURCE, DEFAULT));
     NeoResponse finalResult = simulateDispatch(handler, ctx, defaultResult);
 
     // afterHandle returned null, so pre-hook result is kept
-    assertEquals("pre", finalResult.getBody().getString("source"));
+    assertEquals("pre", finalResult.getBody().getString(SOURCE));
     // previousResult was the pre-hook result
     assertNotNull(capturedPrevious[0]);
-    assertEquals("pre", capturedPrevious[0].getBody().getString("source"));
+    assertEquals("pre", capturedPrevious[0].getBody().getString(SOURCE));
   }
 
   /**
@@ -286,8 +294,8 @@ public class NeoHandlerHookTest {
       };
 
       NeoContext ctx = NeoContext.builder()
-          .specName("TestSpec")
-          .entityName("Header")
+          .specName(TEST_SPEC)
+          .entityName(HEADER)
           .httpMethod("GET")
           .endpointType(type)
           .build();
@@ -306,13 +314,13 @@ public class NeoHandlerHookTest {
     NeoHandler handler = new NeoHandler() {
       @Override
       public NeoResponse handle(NeoContext context) {
-        throw new RuntimeException("Simulated handler failure");
+        throw new IllegalStateException("Simulated handler failure");
       }
     };
 
     NeoContext ctx = NeoContext.builder()
-        .specName("TestSpec")
-        .entityName("Header")
+        .specName(TEST_SPEC)
+        .entityName(HEADER)
         .httpMethod("POST")
         .endpointType(NeoEndpointType.CALLOUT)
         .build();

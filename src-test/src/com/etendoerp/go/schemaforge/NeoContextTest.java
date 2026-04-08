@@ -35,6 +35,8 @@ import org.junit.Test;
  */
 public class NeoContextTest {
 
+  private static final String ENTITY = "Entity";
+
   @Test
   public void testBuilderWithAllFields() throws JSONException {
     JSONObject body = new JSONObject();
@@ -45,18 +47,18 @@ public class NeoContextTest {
     params.put("size", "10");
 
     NeoContext ctx = NeoContext.builder()
-        .specName("TestSpec")
-        .entityName("Product")
+        .specName(TEST_SPEC)
+        .entityName(PRODUCT)
         .httpMethod("GET")
-        .recordId("ABC123")
+        .recordId(ABC123)
         .requestBody(body)
         .queryParams(params)
         .build();
 
-    assertEquals("TestSpec", ctx.getSpecName());
-    assertEquals("Product", ctx.getEntityName());
+      assertEquals(TEST_SPEC, ctx.getSpecName());
+      assertEquals(PRODUCT, ctx.getEntityName());
     assertEquals("GET", ctx.getHttpMethod());
-    assertEquals("ABC123", ctx.getRecordId());
+      assertEquals(ABC123, ctx.getRecordId());
     assertEquals(body, ctx.getRequestBody());
     assertEquals(params, ctx.getQueryParams());
     assertNull(ctx.getAdTab());
@@ -67,13 +69,13 @@ public class NeoContextTest {
   @Test
   public void testBuilderWithMinimalFields() {
     NeoContext ctx = NeoContext.builder()
-        .specName("Spec1")
-        .entityName("Order")
+        .specName(SPEC_1)
+        .entityName(ORDER)
         .httpMethod("POST")
         .build();
 
-    assertEquals("Spec1", ctx.getSpecName());
-    assertEquals("Order", ctx.getEntityName());
+      assertEquals(SPEC_1, ctx.getSpecName());
+      assertEquals(ORDER, ctx.getEntityName());
     assertEquals("POST", ctx.getHttpMethod());
     assertNull(ctx.getRecordId());
     assertNull(ctx.getRequestBody());
@@ -112,24 +114,24 @@ public class NeoContextTest {
   @Test
   public void testToString() {
     NeoContext ctx = NeoContext.builder()
-        .specName("MySpec")
-        .entityName("Invoice")
+         .specName(MY_SPEC)
+         .entityName(INVOICE)
         .httpMethod("PUT")
-        .recordId("ID42")
+         .recordId(RECORD_ID)
         .build();
 
     String str = ctx.toString();
-    assertTrue(str.contains("MySpec"));
-    assertTrue(str.contains("Invoice"));
+        assertTrue(str.contains(MY_SPEC));
+        assertTrue(str.contains(INVOICE));
     assertTrue(str.contains("PUT"));
-    assertTrue(str.contains("ID42"));
+        assertTrue(str.contains(RECORD_ID));
   }
 
   @Test
   public void testToStringWithNullId() {
     NeoContext ctx = NeoContext.builder()
         .specName("Spec")
-        .entityName("Entity")
+      .entityName(ENTITY)
         .httpMethod("DELETE")
         .build();
 
@@ -141,7 +143,7 @@ public class NeoContextTest {
   public void testEmptyQueryParams() {
     NeoContext ctx = NeoContext.builder()
         .specName("Spec")
-        .entityName("Entity")
+      .entityName(ENTITY)
         .httpMethod("GET")
         .queryParams(Collections.emptyMap())
         .build();
@@ -156,7 +158,7 @@ public class NeoContextTest {
     for (String method : methods) {
       NeoContext ctx = NeoContext.builder()
           .specName("Spec")
-          .entityName("Entity")
+          .entityName(ENTITY)
           .httpMethod(method)
           .build();
       assertEquals(method, ctx.getHttpMethod());
@@ -167,7 +169,7 @@ public class NeoContextTest {
   public void testEndpointTypeViaBuilder() {
     NeoContext ctx = NeoContext.builder()
         .specName("Spec")
-        .entityName("Entity")
+      .entityName(ENTITY)
         .httpMethod("POST")
         .endpointType(NeoEndpointType.CALLOUT)
         .build();
@@ -178,7 +180,7 @@ public class NeoContextTest {
   public void testFieldNameViaBuilder() {
     NeoContext ctx = NeoContext.builder()
         .specName("Spec")
-        .entityName("Entity")
+      .entityName(ENTITY)
         .httpMethod("GET")
         .fieldName("warehouse")
         .build();
@@ -189,7 +191,7 @@ public class NeoContextTest {
   public void testEndpointTypeDefaultsToNull() {
     NeoContext ctx = NeoContext.builder()
         .specName("Spec")
-        .entityName("Entity")
+      .entityName(ENTITY)
         .httpMethod("GET")
         .build();
     assertNull(ctx.getEndpointType());
@@ -199,7 +201,7 @@ public class NeoContextTest {
   public void testFieldNameDefaultsToNull() {
     NeoContext ctx = NeoContext.builder()
         .specName("Spec")
-        .entityName("Entity")
+      .entityName(ENTITY)
         .httpMethod("GET")
         .build();
     assertNull(ctx.getFieldName());
@@ -227,7 +229,7 @@ public class NeoContextTest {
     };
     NeoContext ctx = NeoContext.builder()
         .specName("Spec")
-        .entityName("Entity")
+      .entityName(ENTITY)
         .httpMethod("GET")
         .build();
     assertNull(handler.afterHandle(ctx));
@@ -237,7 +239,7 @@ public class NeoContextTest {
   public void testToStringIncludesEndpointType() {
     NeoContext ctx = NeoContext.builder()
         .specName("Spec")
-        .entityName("Entity")
+      .entityName(ENTITY)
         .httpMethod("GET")
         .endpointType(NeoEndpointType.SELECTOR)
         .build();

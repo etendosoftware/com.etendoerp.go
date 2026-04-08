@@ -33,6 +33,12 @@ class NeoServletPathTest {
 
   private static final String SPEC_NAME = "mySpec";
   private static final String CALLOUT_PATH = "/Order/callout";
+  private static final String PRODUCT = "Product";
+  private static final String ABC123 = "ABC123";
+  private static final String ORDER = "Order";
+  private static final String ENTITY = "entity";
+  private static final String SPEC = "spec";
+  private static final String ID = "id";
 
   private NeoServlet servlet;
 
@@ -46,7 +52,7 @@ class NeoServletPathTest {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Product");
 
     assertEquals(SPEC_NAME, info.specName);
-    assertEquals("Product", info.entityName);
+      assertEquals(PRODUCT, info.entityName);
     assertNull(info.recordId);
   }
 
@@ -55,8 +61,8 @@ class NeoServletPathTest {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Product/ABC123");
 
     assertEquals(SPEC_NAME, info.specName);
-    assertEquals("Product", info.entityName);
-    assertEquals("ABC123", info.recordId);
+      assertEquals(PRODUCT, info.entityName);
+      assertEquals(ABC123, info.recordId);
   }
 
   @Test
@@ -64,8 +70,8 @@ class NeoServletPathTest {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/sales/Order/550e8400-e29b-41d4-a716-446655440000");
 
     assertEquals("sales", info.specName);
-    assertEquals("Order", info.entityName);
-    assertEquals("550e8400-e29b-41d4-a716-446655440000", info.recordId);
+      assertEquals(ORDER, info.entityName);
+      assertEquals("550e8400-e29b-41d4-a716-446655440000", info.recordId);
   }
 
   @Test
@@ -73,7 +79,7 @@ class NeoServletPathTest {
     NeoServlet.NeoPathInfo info = servlet.parsePath(SPEC_NAME + "/Product");
 
     assertEquals(SPEC_NAME, info.specName);
-    assertEquals("Product", info.entityName);
+      assertEquals(PRODUCT, info.entityName);
     assertNull(info.recordId);
   }
 
@@ -82,8 +88,8 @@ class NeoServletPathTest {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/spec/entity/id/extra/stuff");
 
     assertEquals("spec", info.specName);
-    assertEquals("entity", info.entityName);
-    assertEquals("id", info.recordId);
+      assertEquals(ENTITY, info.entityName);
+      assertEquals(ID, info.recordId);
   }
 
   /** Returns discovery mode (all nulls) when path is null. */
@@ -159,7 +165,7 @@ class NeoServletPathTest {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Product/selectors");
 
     assertEquals(SPEC_NAME, info.specName);
-    assertEquals("Product", info.entityName);
+    assertEquals(PRODUCT, info.entityName);
     assertTrue(info.isSelector);
     assertNull(info.selectorField);
     assertNull(info.recordId);
@@ -170,7 +176,7 @@ class NeoServletPathTest {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Product/selectors/C_BPartner_ID");
 
     assertEquals(SPEC_NAME, info.specName);
-    assertEquals("Product", info.entityName);
+    assertEquals(PRODUCT, info.entityName);
     assertTrue(info.isSelector);
     assertEquals("C_BPartner_ID", info.selectorField);
     assertNull(info.recordId);
@@ -181,9 +187,9 @@ class NeoServletPathTest {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Product/ABC123");
 
     assertEquals(SPEC_NAME, info.specName);
-    assertEquals("Product", info.entityName);
+    assertEquals(PRODUCT, info.entityName);
     assertFalse(info.isSelector);
-    assertEquals("ABC123", info.recordId);
+    assertEquals(ABC123, info.recordId);
   }
 
   @Test
@@ -191,7 +197,7 @@ class NeoServletPathTest {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Order/REC123/action");
 
     assertEquals(SPEC_NAME, info.specName);
-    assertEquals("Order", info.entityName);
+    assertEquals(ORDER, info.entityName);
     assertEquals("REC123", info.recordId);
     assertTrue(info.isAction);
     assertNull(info.actionName);
@@ -203,7 +209,7 @@ class NeoServletPathTest {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Order/REC123/action/DocAction");
 
     assertEquals(SPEC_NAME, info.specName);
-    assertEquals("Order", info.entityName);
+    assertEquals(ORDER, info.entityName);
     assertEquals("REC123", info.recordId);
     assertTrue(info.isAction);
     assertEquals("DocAction", info.actionName);
@@ -226,9 +232,9 @@ class NeoServletPathTest {
   void testParsePathNonActionSubPath() {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/spec/entity/id/other");
 
-    assertEquals("spec", info.specName);
-    assertEquals("entity", info.entityName);
-    assertEquals("id", info.recordId);
+    assertEquals(SPEC, info.specName);
+    assertEquals(ENTITY, info.entityName);
+    assertEquals(ID, info.recordId);
     assertFalse(info.isAction);
     assertNull(info.actionName);
   }
@@ -255,7 +261,7 @@ class NeoServletPathTest {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Order/evaluate-display");
 
     assertEquals(SPEC_NAME, info.specName);
-    assertEquals("Order", info.entityName);
+    assertEquals(ORDER, info.entityName);
     assertTrue(info.isEvaluateDisplay);
     assertNull(info.recordId);
     assertFalse(info.isSelector);
@@ -274,7 +280,7 @@ class NeoServletPathTest {
   void testParsePathRegularRecordIdNotEvaluateDisplay() {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Order/ABC123");
 
-    assertEquals("ABC123", info.recordId);
+    assertEquals(ABC123, info.recordId);
     assertFalse(info.isEvaluateDisplay);
   }
 
@@ -292,7 +298,7 @@ class NeoServletPathTest {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + CALLOUT_PATH);
 
     assertEquals(SPEC_NAME, info.specName);
-    assertEquals("Order", info.entityName);
+    assertEquals(ORDER, info.entityName);
     assertTrue(info.isCallout);
     assertNull(info.recordId);
     assertFalse(info.isSelector);
@@ -314,7 +320,7 @@ class NeoServletPathTest {
   void testParsePathRegularRecordIdNotCallout() {
     NeoServlet.NeoPathInfo info = servlet.parsePath("/" + SPEC_NAME + "/Order/ABC123");
 
-    assertEquals("ABC123", info.recordId);
+    assertEquals(ABC123, info.recordId);
     assertFalse(info.isCallout);
   }
 
