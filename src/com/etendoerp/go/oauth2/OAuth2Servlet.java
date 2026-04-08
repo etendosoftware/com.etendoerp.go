@@ -176,7 +176,9 @@ public class OAuth2Servlet extends HttpBaseServlet {
       handleListClients(request, response);
     } else if ("/authorize".equals(path) || "/authorize/".equals(path)) {
       handleAuthorizeGet(request, response);
-    } else if ("/metadata".equals(path) || "/metadata/".equals(path)) {
+    } else if ("/metadata".equals(path) || "/metadata/".equals(path)
+        || "/.well-known/oauth-authorization-server".equals(path)
+        || path == null || path.isEmpty() || "/".equals(path)) {
       handleMetadata(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, "invalid_request",
@@ -802,14 +804,23 @@ public class OAuth2Servlet extends HttpBaseServlet {
       return;
     }
 
-    // Serve the login HTML page with OAuth params embedded
-    response.setContentType("text/html;charset=UTF-8");
-    response.setStatus(HttpServletResponse.SC_OK);
-
-    String contextPath = request.getContextPath();
-    PrintWriter out = response.getWriter();
-    out.write(buildLoginPage(contextPath, clientId, redirectUri, codeChallenge, state, scope));
-    out.flush();
+    // Redirect to the PWA authorize page, forwarding all OAuth params.
+    // The PWA handles authentication (user is already logged in) and consent UI.
+    String appBase = resolveAppUrl(request);
+    StringBuilder appUrl = new StringBuilder(appBase)
+        .append("/authorize")
+        .append("?response_type=code")
+        .append("&client_id=").append(java.net.URLEncoder.encode(clientId, "UTF-8"))
+        .append("&redirect_uri=").append(java.net.URLEncoder.encode(redirectUri, "UTF-8"))
+        .append("&code_challenge=").append(java.net.URLEncoder.encode(codeChallenge, "UTF-8"))
+        .append("&code_challenge_method=S256");
+    if (state != null && !state.isEmpty()) {
+      appUrl.append("&state=").append(java.net.URLEncoder.encode(state, "UTF-8"));
+    }
+    if (scope != null && !scope.isEmpty()) {
+      appUrl.append("&scope=").append(java.net.URLEncoder.encode(scope, "UTF-8"));
+    }
+    response.sendRedirect(appUrl.toString());
   }
 
   /**
@@ -1239,7 +1250,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   // --- Authorization Server Metadata ---
 
   /**
-   * GET /sws/oauth2/metadata — Return OAuth2 Authorization Server Metadata (RFC 8414).
+   * GET /oauth2/metadata — Return OAuth2 Authorization Server Metadata (RFC 8414).
    */
   private void handleMetadata(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
@@ -1247,8 +1258,9 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String baseUrl = buildBaseUrl(request);
 
       JSONObject metadata = new JSONObject();
+      String appUrl = resolveAppUrl(request);
       metadata.put("issuer", baseUrl + "/oauth2");
-      metadata.put("authorization_endpoint", baseUrl + "/oauth2/authorize");
+      metadata.put("authorization_endpoint", appUrl + "/authorize");
       metadata.put("token_endpoint", baseUrl + "/oauth2/token");
       metadata.put("registration_endpoint", baseUrl + "/oauth2/register");
       metadata.put("scopes_supported",
@@ -1266,6 +1278,30 @@ public class OAuth2Servlet extends HttpBaseServlet {
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
           "Internal server error");
     }
+  }
+
+  /**
+   * Resolve the PWA app URL.
+   * Priority: Openbravo.properties (etgo.app.url) > env ETGO_APP_URL > request origin.
+   */
+  private String resolveAppUrl(HttpServletRequest request) {
+    String appUrl = null;
+    try {
+      appUrl = org.openbravo.base.session.OBPropertiesProvider.getInstance()
+          .getOpenbravoProperties().getProperty("etgo.app.url");
+    } catch (Exception e) {
+      log.debug("Could not read etgo.app.url from properties: {}", e.getMessage());
+    }
+    if (appUrl == null || appUrl.isEmpty()) {
+      appUrl = System.getenv("ETGO_APP_URL");
+    }
+    if (appUrl == null || appUrl.isEmpty()) {
+      appUrl = buildBaseUrl(request);
+    }
+    if (appUrl.endsWith("/")) {
+      appUrl = appUrl.substring(0, appUrl.length() - 1);
+    }
+    return appUrl;
   }
 
   /**

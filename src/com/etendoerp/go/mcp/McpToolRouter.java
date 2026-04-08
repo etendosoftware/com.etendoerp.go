@@ -530,9 +530,11 @@ public class McpToolRouter {
 
   // ── neo_schema ─────────────────────────────────────────────────────────
 
-  // AD_Reference IDs for selector types (FK references)
+  // AD_Reference ID for OBUISEL selectors (extends the base FK refs from NeoSelectorService)
+  private static final String REF_OBUISEL = "95E2A8B50A254B2AAE6774B8C2F28120";
   private static final java.util.Set<String> SELECTOR_REFS = new java.util.HashSet<>(
-      java.util.Arrays.asList("19", "18", "30", "95E2A8B50A254B2AAE6774B8C2F28120"));
+      java.util.Arrays.asList(NeoSelectorService.REF_TABLEDIR, NeoSelectorService.REF_TABLE,
+          NeoSelectorService.REF_SEARCH, REF_OBUISEL));
 
   // System/audit columns excluded from schema (auto-managed by Etendo)
   private static final java.util.Set<String> SYSTEM_COLUMNS = new java.util.HashSet<>(
@@ -687,8 +689,8 @@ public class McpToolRouter {
       case "28": return "button";
       case "17": return "list";
       case "13": return "id";
-      case "19": case "18": case "30":
-      case "95E2A8B50A254B2AAE6774B8C2F28120": return "foreignKey";
+      case "19": case "18": case "30": case "95E2A8B50A254B2AAE6774B8C2F28120":
+        return "foreignKey";
       default: return "string";
     }
   }

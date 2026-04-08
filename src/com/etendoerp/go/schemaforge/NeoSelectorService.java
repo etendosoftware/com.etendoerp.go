@@ -12,6 +12,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
@@ -47,10 +48,10 @@ public class NeoSelectorService {
   private static final int DEFAULT_LIMIT = 20;
   private static final int MAX_LIMIT = 100;
 
-  // AD_Reference base IDs for FK types
-  private static final String REF_TABLE = "18";
-  private static final String REF_TABLEDIR = "19";
-  private static final String REF_SEARCH = "30";
+  /** AD_Reference base IDs for FK types — shared across Neo* and MCP classes. */
+  public static final String REF_TABLE = "18";
+  public static final String REF_TABLEDIR = "19";
+  public static final String REF_SEARCH = "30";
 
   // Session-level params resolved server-side (should not appear in selectorParams)
   private static final java.util.Set<String> SESSION_PARAMS = new java.util.HashSet<>(
@@ -964,7 +965,7 @@ public class NeoSelectorService {
   private static SFEntity findEntity(String specId, String entityName) {
     OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
     criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_NAME, entityName));
+    criteria.add(Restrictions.ilike(SFEntity.PROPERTY_NAME, entityName, MatchMode.EXACT));
     criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
     criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
     criteria.setMaxResults(1);
@@ -1011,7 +1012,7 @@ public class NeoSelectorService {
     return refId;
   }
 
-  private static boolean isFkReference(String refId) {
+  public static boolean isFkReference(String refId) {
     return REF_TABLE.equals(refId) || REF_TABLEDIR.equals(refId)
         || REF_SEARCH.equals(refId);
   }
@@ -1180,8 +1181,10 @@ public class NeoSelectorService {
               sortNo != null ? sortNo : 0L));
         }
 
-        // Searchable properties
-        if (Boolean.TRUE.equals(sf.isSearchinsuggestionbox())) {
+        // Searchable properties — skip _identifier (virtual DAL property, not
+        // a real Hibernate-mapped property, causes QueryException in HQL)
+        if (Boolean.TRUE.equals(sf.isSearchinsuggestionbox())
+            && !prop.endsWith("_identifier")) {
           searchableProps.add(prop);
         }
       }
