@@ -31,35 +31,25 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 /**
- * NeoHandler that returns monthly revenue trend data for the dashboard widget.
- * Queries completed sales invoices (c_invoice) grouped by month, using the last
- * 12 months of available data anchored to the most recent invoice date.
+ * NeoHandler that returns the top 10 best-selling products by quantity
+ * for the dashboard widget. Queries completed sales invoice lines grouped
+ * by product, ordered by total quantity invoiced descending, including UOM.
  */
-@Named("widgetRevenueTrendHandler")
-public class WidgetRevenueTrendHandler implements NeoHandler {
+@Named("widgetBestSellersHandler")
+public class WidgetBestSellersHandler implements NeoHandler {
 
-  private static final Logger log = LogManager.getLogger(WidgetRevenueTrendHandler.class);
+  private static final Logger log = LogManager.getLogger(WidgetBestSellersHandler.class);
 
-  private static final String REVENUE_QUERY =
-      "WITH max_date AS ( "
-    + "  SELECT date_trunc('month', max(dateinvoiced)) AS last_month "
-    + "  FROM c_invoice "
-    + "  WHERE issotrx = 'Y' AND docstatus IN ('CO','CL') AND ad_client_id = :clientId "
-    + "), "
-    + "months AS ( "
-    + "  SELECT generate_series( "
-    + "    (SELECT last_month - interval '11 months' FROM max_date), "
-    + "    (SELECT last_month FROM max_date), "
-    + "    CAST('1 month' AS interval) "
-    + "  ) AS month "
-    + ") "
-    + "SELECT to_char(m.month, 'Mon') AS label, "
-    + "       COALESCE(SUM(i.grandtotal), 0) AS total "
-    + "FROM months m "
-    + "LEFT JOIN c_invoice i ON date_trunc('month', i.dateinvoiced) = m.month "
-    + "  AND i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId "
-    + "GROUP BY m.month, to_char(m.month, 'Mon') "
-    + "ORDER BY m.month";
+  private static final String BEST_SELLERS_QUERY =
+      "SELECT p.name, SUM(il.qtyinvoiced) AS qty, COALESCE(uom.name, '') AS uom "
+    + "FROM c_invoiceline il "
+    + "JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
+    + "JOIN m_product p ON p.m_product_id = il.m_product_id "
+    + "LEFT JOIN c_uom uom ON uom.c_uom_id = p.c_uom_id "
+    + "WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId "
+    + "GROUP BY p.m_product_id, p.name, uom.name "
+    + "ORDER BY SUM(il.qtyinvoiced) DESC "
+    + "LIMIT 10";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -75,27 +65,19 @@ public class WidgetRevenueTrendHandler implements NeoHandler {
         @SuppressWarnings("unchecked")
         NativeQuery<Object[]> query = OBDal.getInstance()
             .getSession()
-            .createNativeQuery(REVENUE_QUERY);
+            .createNativeQuery(BEST_SELLERS_QUERY);
         query.setParameter("clientId", clientId);
 
         List<Object[]> rows = query.list();
 
-        JSONArray labels = new JSONArray();
-        JSONArray values = new JSONArray();
-
-        for (Object[] row : rows) {
-          String label = ((String) row[0]).trim();
-          BigDecimal total = (BigDecimal) row[1];
-          labels.put(label);
-          values.put(total.longValue());
-        }
-
-        JSONObject trend = new JSONObject();
-        trend.put("labels", labels);
-        trend.put("values", values);
-
         JSONArray data = new JSONArray();
-        data.put(trend);
+        for (Object[] row : rows) {
+          JSONObject item = new JSONObject();
+          item.put("name", row[0]);
+          item.put("qty", ((BigDecimal) row[1]).longValue());
+          item.put("uom", row[2]);
+          data.put(item);
+        }
 
         JSONObject responseData = new JSONObject();
         responseData.put("data", data);
@@ -109,8 +91,8 @@ public class WidgetRevenueTrendHandler implements NeoHandler {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
-      log.error("Error building revenue trend data", e);
-      return NeoResponse.error(500, "Revenue trend handler failed: " + e.getMessage());
+      log.error("Error fetching best sellers", e);
+      return NeoResponse.error(500, "Best sellers handler failed: " + e.getMessage());
     }
   }
 }
