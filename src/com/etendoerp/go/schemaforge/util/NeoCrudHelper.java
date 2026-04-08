@@ -57,6 +57,9 @@ public class NeoCrudHelper {
 
   /**
    * Handle the default CRUD request lifecycle: build params, dispatch, parse response.
+   *
+   * @param context the NEO request context containing entity, method, body and query params
+   * @return a NeoResponse with the result or an error
    */
   public static NeoResponse handleDefault(NeoContext context) {
     try {
@@ -281,6 +284,12 @@ public class NeoCrudHelper {
   /**
    * Build the final NeoResponse from the raw JSON result string.
    * Checks for error/validation responses and applies field filtering.
+   *
+   * @param result      the raw JSON string returned by DefaultJsonDataService
+   * @param context     the NEO request context
+   * @param fieldFilter the field filter to apply to the response
+   * @return a NeoResponse with filtered data or an error
+   * @throws Exception if JSON parsing fails
    */
   public static NeoResponse buildCrudResponse(String result, NeoContext context,
       NeoFieldFilter fieldFilter) throws Exception {
