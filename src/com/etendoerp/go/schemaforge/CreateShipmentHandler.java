@@ -85,6 +85,7 @@ public class CreateShipmentHandler implements NeoHandler {
         createShipmentLines(shipment, order);
 
         OBDal.getInstance().flush();
+        OBDal.getInstance().getSession().refresh(shipment);
 
         JSONObject data = new JSONObject();
         data.put("id", shipment.getId());
