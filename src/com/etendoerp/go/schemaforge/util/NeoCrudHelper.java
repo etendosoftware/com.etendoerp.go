@@ -263,11 +263,13 @@ public class NeoCrudHelper {
   }
 
   /**
-   * Execute the callout cascade for POST requests on header tabs (level 0).
+   * Execute the callout cascade for POST requests on any tab level.
+   * Applies to both header (level 0) and line (level 1+) tabs so that callouts
+   * like SE_OrderLine_PriceList auto-fill price and tax when a product is selected.
    */
   static void executePostCalloutCascade(JSONObject filteredBody, Tab adTab,
       NeoContext context, String parentIdValue) {
-    if (adTab == null || adTab.getTabLevel() == null || adTab.getTabLevel() != 0) {
+    if (adTab == null) {
       return;
     }
     Set<String> seqFields = new HashSet<>();

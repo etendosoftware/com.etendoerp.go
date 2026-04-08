@@ -454,6 +454,18 @@ public class NeoDefaultsService {
     String warehouseId = obContext.getWarehouse() != null
         ? obContext.getWarehouse().getId() : "";
 
+    // When the session org is "*" (id=0), mandatory defaults like AD_Org_ID would resolve
+    // to "0" which OBDal rejects for business documents (C_Order, M_InOut, etc.).
+    // A role with "*" access has implicit access to all orgs, so we safely pick the
+    // first real org of the client to produce valid defaults.
+    if ("0".equals(orgId)) {
+      String realOrgId = resolveFirstOrgForClient(clientId);
+      if (realOrgId != null) {
+        orgId = realOrgId;
+        log.debug("Context org is '*' (0); resolved first real org {} for defaults", realOrgId);
+      }
+    }
+
     String cacheKey = userId + "|" + roleId + "|" + orgId + "|" + warehouseId;
     VariablesSecureApp cached = varsCache.getIfPresent(cacheKey);
     if (cached != null) {
@@ -1389,6 +1401,37 @@ public class NeoDefaultsService {
       }
     }
     return parentValues;
+  }
+
+  /**
+   * Returns the ID of the first active non-system organization for the given client.
+   * Used when the session context org is "0" (the "*" all-orgs pseudo-org) so that
+   * mandatory FK defaults like AD_Org_ID resolve to a real org rather than "0",
+   * which OBDal rejects for business documents.
+   *
+   * A role with access to "*" has implicit access to all orgs, so using any active
+   * org of the client is safe.
+   *
+   * @param clientId the AD_Client_ID of the current session
+   * @return the first org ID ordered by name, or null if none found
+   */
+  private static String resolveFirstOrgForClient(String clientId) {
+    try {
+      String sql = "SELECT AD_Org_ID FROM AD_Org"
+          + " WHERE AD_Client_ID = ? AND IsActive = 'Y' AND AD_Org_ID != '0'"
+          + " ORDER BY Name LIMIT 1";
+      try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
+        ps.setString(1, clientId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            return rs.getString(1);
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve first org for client {}: {}", clientId, e.getMessage());
+    }
+    return null;
   }
 
 }
