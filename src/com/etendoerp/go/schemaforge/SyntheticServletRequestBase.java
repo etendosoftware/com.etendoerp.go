@@ -51,94 +51,293 @@ public abstract class SyntheticServletRequestBase implements javax.servlet.http.
 
   // -- Content / IO --
 
-  @Override public String getCharacterEncoding() { return "UTF-8"; }
-  @Override public void setCharacterEncoding(String env) { }
-  @Override public int getContentLength() { return 0; }
-  @Override public long getContentLengthLong() { return 0; }
-  @Override public String getContentType() { return "application/json"; }
-  @Override public ServletInputStream getInputStream() { return null; }
-  @Override public BufferedReader getReader() { return null; }
+  @Override
+  public String getCharacterEncoding() {
+    return "UTF-8";
+  }
+
+  @Override
+  public void setCharacterEncoding(String env) {
+    // no-op
+  }
+
+  @Override
+  public int getContentLength() {
+    return 0;
+  }
+
+  @Override
+  public long getContentLengthLong() {
+    return 0;
+  }
+
+  @Override
+  public String getContentType() {
+    return "application/json";
+  }
+
+  @Override
+  public ServletInputStream getInputStream() {
+    return null;
+  }
+
+  @Override
+  public BufferedReader getReader() {
+    return null;
+  }
 
   // -- Protocol / network --
 
-  @Override public String getProtocol() { return "HTTP/1.1"; }
-  @Override public String getScheme() { return "http"; }
-  @Override public String getServerName() { return LOCALHOST; }
-  @Override public int getServerPort() { return 8080; }
-  @Override public String getRemoteAddr() { return "127.0.0.1"; }
-  @Override public String getRemoteHost() { return LOCALHOST; }
-  @Override public int getRemotePort() { return 0; }
-  @Override public String getLocalName() { return LOCALHOST; }
-  @Override public String getLocalAddr() { return "127.0.0.1"; }
-  @Override public int getLocalPort() { return 8080; }
+  @Override
+  public String getProtocol() {
+    return "HTTP/1.1";
+  }
+
+  @Override
+  public String getScheme() {
+    return "http";
+  }
+
+  @Override
+  public String getServerName() {
+    return LOCALHOST;
+  }
+
+  @Override
+  public int getServerPort() {
+    return 8080;
+  }
+
+  @Override
+  public String getRemoteAddr() {
+    return "127.0.0.1";
+  }
+
+  @Override
+  public String getRemoteHost() {
+    return LOCALHOST;
+  }
+
+  @Override
+  public int getRemotePort() {
+    return 0;
+  }
+
+  @Override
+  public String getLocalName() {
+    return LOCALHOST;
+  }
+
+  @Override
+  public String getLocalAddr() {
+    return "127.0.0.1";
+  }
+
+  @Override
+  public int getLocalPort() {
+    return 8080;
+  }
 
   // -- Locale --
 
-  @Override public Locale getLocale() { return Locale.US; }
-  @Override public Enumeration<Locale> getLocales() {
+  @Override
+  public Locale getLocale() {
+    return Locale.US;
+  }
+
+  @Override
+  public Enumeration<Locale> getLocales() {
     return Collections.enumeration(Collections.singletonList(Locale.US));
   }
 
   // -- Security / dispatcher --
 
-  @Override public boolean isSecure() { return false; }
-  @Override public RequestDispatcher getRequestDispatcher(String path) { return null; }
-  @Override public String getRealPath(String path) { return null; }
-  @Override public ServletContext getServletContext() { return null; }
+  @Override
+  public boolean isSecure() {
+    return false;
+  }
+
+  @Override
+  public RequestDispatcher getRequestDispatcher(String path) {
+    return null;
+  }
+
+  @Override
+  public String getRealPath(String path) {
+    return null;
+  }
+
+  @Override
+  public ServletContext getServletContext() {
+    return null;
+  }
 
   // -- Async --
 
-  @Override public AsyncContext startAsync() throws IllegalStateException { return null; }
-  @Override public AsyncContext startAsync(ServletRequest req, ServletResponse res) { return null; }
-  @Override public boolean isAsyncStarted() { return false; }
-  @Override public boolean isAsyncSupported() { return false; }
-  @Override public AsyncContext getAsyncContext() { return null; }
-  @Override public DispatcherType getDispatcherType() { return DispatcherType.REQUEST; }
+  @Override
+  public AsyncContext startAsync() throws IllegalStateException {
+    return null;
+  }
+
+  @Override
+  public AsyncContext startAsync(ServletRequest req, ServletResponse res) {
+    return null;
+  }
+
+  @Override
+  public boolean isAsyncStarted() {
+    return false;
+  }
+
+  @Override
+  public boolean isAsyncSupported() {
+    return false;
+  }
+
+  @Override
+  public AsyncContext getAsyncContext() {
+    return null;
+  }
+
+  @Override
+  public DispatcherType getDispatcherType() {
+    return DispatcherType.REQUEST;
+  }
 
   // -- Authentication --
 
-  @Override public String getAuthType() { return null; }
-  @Override public String getRemoteUser() { return null; }
-  @Override public boolean isUserInRole(String role) { return false; }
-  @Override public Principal getUserPrincipal() { return null; }
-  @Override public boolean authenticate(HttpServletResponse response) { return false; }
-  @Override public void login(String username, String password) { }
-  @Override public void logout() { }
+  @Override
+  public String getAuthType() {
+    return null;
+  }
+
+  @Override
+  public String getRemoteUser() {
+    return null;
+  }
+
+  @Override
+  public boolean isUserInRole(String role) {
+    return false;
+  }
+
+  @Override
+  public Principal getUserPrincipal() {
+    return null;
+  }
+
+  @Override
+  public boolean authenticate(HttpServletResponse response) {
+    return false;
+  }
+
+  @Override
+  public void login(String username, String password) {
+    // no-op
+  }
+
+  @Override
+  public void logout() {
+    // no-op
+  }
 
   // -- Cookies --
 
-  @Override public Cookie[] getCookies() { return null; }
+  @Override
+  public Cookie[] getCookies() {
+    return null;
+  }
 
   // -- Headers --
 
-  @Override public long getDateHeader(String name) { return -1; }
-  @Override public String getHeader(String name) { return null; }
-  @Override public Enumeration<String> getHeaders(String name) {
+  @Override
+  public long getDateHeader(String name) {
+    return -1;
+  }
+
+  @Override
+  public String getHeader(String name) {
+    return null;
+  }
+
+  @Override
+  public Enumeration<String> getHeaders(String name) {
     return Collections.emptyEnumeration();
   }
-  @Override public Enumeration<String> getHeaderNames() {
+
+  @Override
+  public Enumeration<String> getHeaderNames() {
     return Collections.emptyEnumeration();
   }
-  @Override public int getIntHeader(String name) { return -1; }
+
+  @Override
+  public int getIntHeader(String name) {
+    return -1;
+  }
 
   // -- URL / path --
 
-  @Override public String getPathInfo() { return null; }
-  @Override public String getPathTranslated() { return null; }
-  @Override public String getQueryString() { return null; }
+  @Override
+  public String getPathInfo() {
+    return null;
+  }
+
+  @Override
+  public String getPathTranslated() {
+    return null;
+  }
+
+  @Override
+  public String getQueryString() {
+    return null;
+  }
 
   // -- Session ID validation --
 
-  @Override public String getRequestedSessionId() { return null; }
-  @Override public String changeSessionId() { return null; }
-  @Override public boolean isRequestedSessionIdValid() { return false; }
-  @Override public boolean isRequestedSessionIdFromCookie() { return false; }
-  @Override public boolean isRequestedSessionIdFromURL() { return false; }
-  @Override public boolean isRequestedSessionIdFromUrl() { return false; }
+  @Override
+  public String getRequestedSessionId() {
+    return null;
+  }
+
+  @Override
+  public String changeSessionId() {
+    return null;
+  }
+
+  @Override
+  public boolean isRequestedSessionIdValid() {
+    return false;
+  }
+
+  @Override
+  public boolean isRequestedSessionIdFromCookie() {
+    return false;
+  }
+
+  @Override
+  public boolean isRequestedSessionIdFromURL() {
+    return false;
+  }
+
+  @Override
+  public boolean isRequestedSessionIdFromUrl() {
+    return false;
+  }
 
   // -- Multipart / upgrade --
 
-  @Override public Collection<Part> getParts() { return Collections.emptyList(); }
-  @Override public Part getPart(String name) { return null; }
-  @Override public <T extends HttpUpgradeHandler> T upgrade(Class<T> handlerClass) { return null; }
+  @Override
+  public Collection<Part> getParts() {
+    return Collections.emptyList();
+  }
+
+  @Override
+  public Part getPart(String name) {
+    return null;
+  }
+
+  @Override
+  public <T extends HttpUpgradeHandler> T upgrade(Class<T> handlerClass) {
+    return null;
+  }
 }
