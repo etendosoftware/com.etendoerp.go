@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version='1.0' encoding='UTF-8'?>
 <data>
 <C_TAXCATEGORY>
   <C_TAXCATEGORY_ID><![CDATA[828E8E40DD3C4FA6A4F531569D26A6AF]]></C_TAXCATEGORY_ID>
@@ -12,6 +12,7 @@
   <NAME><![CDATA[IVA Normal]]></NAME>
   <ISDEFAULT><![CDATA[N]]></ISDEFAULT>
   <ASBOM><![CDATA[N]]></ASBOM>
+  <EM_AEATSII_DECLARABLE><![CDATA[Y]]></EM_AEATSII_DECLARABLE>
 </C_TAXCATEGORY>
 
 </data>
