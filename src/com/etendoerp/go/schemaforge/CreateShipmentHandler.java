@@ -32,12 +32,14 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
+import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * NeoHandler that creates a Goods Shipment (ShipmentInOut) in Draft status
@@ -85,7 +87,6 @@ public class CreateShipmentHandler implements NeoHandler {
         createShipmentLines(shipment, order);
 
         OBDal.getInstance().flush();
-        OBDal.getInstance().getSession().refresh(shipment);
 
         JSONObject data = new JSONObject();
         data.put("id", shipment.getId());
@@ -127,7 +128,9 @@ public class CreateShipmentHandler implements NeoHandler {
     shipment.setMovementDate(new Date());
     shipment.setAccountingDate(new Date());
     shipment.setDocumentType(docType);
-    shipment.setDocumentNo("*");
+    String documentNo = Utility.getDocumentNo(
+        new DalConnectionProvider(false), order.getClient().getId(), "M_InOut", true);
+    shipment.setDocumentNo(StringUtils.isNotBlank(documentNo) ? documentNo : "*");
     shipment.setSalesTransaction(true);
     shipment.setSalesOrder(order);
     shipment.setProcessed(false);
