@@ -24,7 +24,18 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.HttpBaseServlet;
+import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.businessUtility.InitialClientSetup;
+import org.openbravo.erpCommon.businessUtility.InitialOrgSetup;
+import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.access.UserRoles;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.enterprise.Organization;
+import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * EtendoGo JWT Servlet — account management for platform users.
@@ -34,8 +45,10 @@ import org.openbravo.dal.service.OBDal;
  * Endpoints:
  *   POST /sws/go/register     — Create a new account (public, no auth)
  *   POST /sws/go/login        — Authenticate and get session token (public, no auth)
+ *   POST /sws/go/onboarding   — Create a new environment (requires session token, streams NDJSON)
  *   GET  /sws/go/me           — Get current account info (requires session token)
  *   GET  /sws/go/environments — List environments for the account (requires session token)
+ *   GET  /sws/go/login?userId=X — Get an Etendo JWT for an AD_User (requires session token + ownership)
  *
  * Auth model: session token in Authorization header ("Bearer <token>").
  * This is independent of Etendo's JWT auth — it uses ETGO_ACCOUNT.SESSION_TOKEN.
@@ -71,6 +84,23 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       "UPDATE etgo_account SET session_token = ?, updated = now() "
       + "WHERE etgo_account_id = ?";
 
+  /**
+   * SQL to find environments (AD_Client + admin user) linked to an account.
+   * The onboarding creates an AD_User with username = account email (or email+clientname).
+   * We find all clients where such a user exists (excluding system client '0').
+   */
+  private static final String SQL_FIND_ENVIRONMENTS_BY_EMAIL =
+      "SELECT c.ad_client_id, c.name AS client_name, "
+      + "o.ad_org_id, o.name AS org_name, "
+      + "u.ad_user_id, u.username AS admin_user "
+      + "FROM ad_user u "
+      + "JOIN ad_client c ON u.ad_client_id = c.ad_client_id "
+      + "LEFT JOIN ad_org o ON o.ad_client_id = c.ad_client_id AND o.value != '*' "
+      + "WHERE (u.username = ? OR u.username LIKE ? ) "
+      + "AND c.ad_client_id != '0' "
+      + "AND u.isactive = 'Y' AND c.isactive = 'Y' "
+      + "ORDER BY c.created";
+
   // --- CORS ---
 
   private void setCorsHeaders(HttpServletResponse response) {
@@ -101,6 +131,8 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       handleMe(request, response);
     } else if ("/environments".equals(path) || "/environments/".equals(path)) {
       handleEnvironments(request, response);
+    } else if ("/login".equals(path) || "/login/".equals(path)) {
+      handleEnvironmentLogin(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
     }
@@ -113,6 +145,8 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       handleRegister(request, response);
     } else if ("/login".equals(path) || "/login/".equals(path)) {
       handleLogin(request, response);
+    } else if ("/onboarding".equals(path) || "/onboarding/".equals(path)) {
+      handleOnboarding(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
     }
@@ -341,8 +375,8 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
   /**
    * GET /sws/go/environments
    * Header: Authorization: Bearer <session_token>
-   * Returns 200 with environments list. Currently always returns empty array.
-   * Future: query AD_Client records linked to this account.
+   * Returns 200 with environments linked to the account.
+   * Links via AD_User.username matching the account email.
    */
   private void handleEnvironments(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
@@ -355,23 +389,43 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
     Connection conn = OBDal.getInstance().getConnection();
     try {
-      // Verify token is valid
-      boolean valid = false;
+      // Verify token and get account email
+      String accountEmail = null;
       try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_ACCOUNT_BY_TOKEN)) {
         ps.setString(1, token);
         try (ResultSet rs = ps.executeQuery()) {
-          valid = rs.next();
+          if (rs.next()) {
+            accountEmail = rs.getString("email");
+          }
         }
       }
 
-      if (!valid) {
+      if (accountEmail == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
         return;
       }
 
-      JSONObject result = new JSONObject();
-      result.put("environments", new org.codehaus.jettison.json.JSONArray());
+      // Find environments linked to this account via AD_User.username
+      org.codehaus.jettison.json.JSONArray envArray = new org.codehaus.jettison.json.JSONArray();
+      try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_ENVIRONMENTS_BY_EMAIL)) {
+        ps.setString(1, accountEmail);
+        ps.setString(2, accountEmail + "+%");
+        try (ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) {
+            JSONObject env = new JSONObject();
+            env.put("clientId", rs.getString("ad_client_id"));
+            env.put("clientName", rs.getString("client_name"));
+            env.put("orgId", rs.getString("ad_org_id"));
+            env.put("orgName", rs.getString("org_name"));
+            env.put("adminUserId", rs.getString("ad_user_id"));
+            env.put("adminUser", rs.getString("admin_user"));
+            envArray.put(env);
+          }
+        }
+      }
 
+      JSONObject result = new JSONObject();
+      result.put("environments", envArray);
       writeResponse(response, HttpServletResponse.SC_OK, result);
 
     } catch (SQLException e) {
@@ -380,6 +434,527 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     } catch (JSONException e) {
       log.error("JSON error building /environments response", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+    }
+  }
+
+  /**
+   * GET /sws/go/login?userId={adUserId}
+   * Header: Authorization: Bearer <session_token>
+   * Returns an Etendo JWT for the given AD_User, if it belongs to the account.
+   */
+  private void handleEnvironmentLogin(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String token = extractBearerToken(request);
+    if (token == null) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
+          "Missing or invalid Authorization header");
+      return;
+    }
+
+    String userId = request.getParameter("userId");
+    if (userId == null || userId.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing userId parameter");
+      return;
+    }
+
+    Connection conn = OBDal.getInstance().getConnection();
+    try {
+      // Verify token and get account email
+      String accountEmail = null;
+      try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_ACCOUNT_BY_TOKEN)) {
+        ps.setString(1, token);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            accountEmail = rs.getString("email");
+          }
+        }
+      }
+
+      if (accountEmail == null) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
+        return;
+      }
+
+      // Verify the AD_User belongs to this account (username matches email)
+      boolean authorized = false;
+      try (PreparedStatement ps = conn.prepareStatement(
+          "SELECT username FROM ad_user WHERE ad_user_id = ? AND isactive = 'Y'")) {
+        ps.setString(1, userId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            String username = rs.getString("username");
+            authorized = accountEmail.equals(username)
+                || (username != null && username.startsWith(accountEmail + "+"));
+          }
+        }
+      }
+
+      if (!authorized) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN,
+            "User does not belong to this account");
+        return;
+      }
+
+      // Build roleList with orgList via SQL (avoids DAL session/cache issues)
+      String firstRoleId = null;
+      org.codehaus.jettison.json.JSONArray roleArray = new org.codehaus.jettison.json.JSONArray();
+      try (PreparedStatement ps = conn.prepareStatement(
+          "SELECT r.ad_role_id, r.name AS role_name "
+          + "FROM ad_user_roles ur "
+          + "JOIN ad_role r ON ur.ad_role_id = r.ad_role_id "
+          + "WHERE ur.ad_user_id = ? AND ur.isactive = 'Y' AND r.isactive = 'Y' "
+          + "ORDER BY r.created")) {
+        ps.setString(1, userId);
+        try (ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) {
+            String rId = rs.getString("ad_role_id");
+            if (firstRoleId == null) firstRoleId = rId;
+            JSONObject roleObj = new JSONObject();
+            roleObj.put("id", rId);
+            roleObj.put("name", rs.getString("role_name"));
+
+            // Get orgs for this role
+            org.codehaus.jettison.json.JSONArray orgArray = new org.codehaus.jettison.json.JSONArray();
+            try (PreparedStatement ps2 = conn.prepareStatement(
+                "SELECT o.ad_org_id, o.name AS org_name "
+                + "FROM ad_role_orgaccess roa "
+                + "JOIN ad_org o ON roa.ad_org_id = o.ad_org_id "
+                + "WHERE roa.ad_role_id = ? AND roa.isactive = 'Y' AND o.isactive = 'Y' "
+                + "ORDER BY o.name")) {
+              ps2.setString(1, rId);
+              try (ResultSet rs2 = ps2.executeQuery()) {
+                while (rs2.next()) {
+                  JSONObject orgObj = new JSONObject();
+                  orgObj.put("id", rs2.getString("ad_org_id"));
+                  orgObj.put("name", rs2.getString("org_name"));
+                  orgArray.put(orgObj);
+                }
+              }
+            }
+            roleObj.put("orgList", orgArray);
+            roleArray.put(roleObj);
+          }
+        }
+      }
+
+      // Generate Etendo JWT for the AD_User with explicit role
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      try {
+        User user = OBDal.getInstance().get(User.class, userId);
+        if (user == null) {
+          writeError(response, HttpServletResponse.SC_NOT_FOUND, "User not found");
+          return;
+        }
+        Role role = firstRoleId != null ? OBDal.getInstance().get(Role.class, firstRoleId) : null;
+        String jwtToken = SecureWebServicesUtils.generateToken(user, role);
+
+        JSONObject result = new JSONObject();
+        result.put("token", jwtToken);
+        result.put("roleList", roleArray);
+        writeResponse(response, HttpServletResponse.SC_OK, result);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+
+    } catch (SQLException e) {
+      log.error("Database error in /login", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Server error");
+    } catch (JSONException e) {
+      log.error("JSON error in /login", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+    } catch (Exception e) {
+      log.error("Token generation error in /login", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Token generation failed");
+    }
+  }
+
+  // --- Onboarding ---
+
+  /**
+   * SQL to resolve a currency ID from its ISO code (e.g. "EUR" → "102").
+   */
+  private static final String SQL_FIND_CURRENCY_BY_ISO =
+      "SELECT c_currency_id FROM c_currency WHERE iso_code = ?";
+
+  /**
+   * SQL to find the '*' organization that InitialClientSetup creates for a new client.
+   */
+  private static final String SQL_FIND_STAR_ORG =
+      "SELECT ad_org_id FROM ad_org WHERE ad_client_id = ? AND value = '*'";
+
+  /**
+   * SQL to find a client by name.
+   */
+  private static final String SQL_FIND_CLIENT_BY_NAME =
+      "SELECT ad_client_id FROM ad_client WHERE name = ?";
+
+  /**
+   * SQL to check if a non-'*' organization already exists for a client.
+   */
+  private static final String SQL_FIND_ORG_BY_CLIENT =
+      "SELECT ad_org_id, name FROM ad_org WHERE ad_client_id = ? AND value != '*'";
+
+  /**
+   * SQL to find the admin role and user created by InitialClientSetup for a client.
+   */
+  private static final String SQL_FIND_CLIENT_ADMIN =
+      "SELECT r.ad_role_id, u.ad_user_id "
+      + "FROM ad_role r "
+      + "JOIN ad_user_roles ur ON ur.ad_role_id = r.ad_role_id "
+      + "JOIN ad_user u ON ur.ad_user_id = u.ad_user_id "
+      + "WHERE r.ad_client_id = ? AND u.ad_user_id != '100' "
+      + "ORDER BY r.created LIMIT 1";
+
+  /**
+   * SQL to check if an AD_User with a given username already exists.
+   */
+  private static final String SQL_FIND_AD_USER_BY_USERNAME =
+      "SELECT ad_user_id FROM ad_user WHERE username = ?";
+
+
+  /**
+   * POST /sws/go/onboarding
+   * Header: Authorization: Bearer <session_token>
+   * Body: { "clientName": "...", "currency": "EUR", "language": "es_ES", "countryCode": "ES" }
+   *
+   * Creates a new Etendo environment (AD_Client + AD_Org) using the existing
+   * InitialClientSetup and InitialOrgSetup business utilities.
+   *
+   * Streams NDJSON progress lines to the frontend.
+   */
+  private void handleOnboarding(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String token = extractBearerToken(request);
+    if (token == null) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
+          "Missing or invalid Authorization header");
+      return;
+    }
+
+    // Authenticate and get account info
+    String accountEmail = null;
+    String accountName = null;
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_ACCOUNT_BY_TOKEN)) {
+      ps.setString(1, token);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (!rs.next()) {
+          writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
+          return;
+        }
+        accountEmail = rs.getString("email");
+        accountName = rs.getString("name");
+      }
+    } catch (SQLException e) {
+      log.error("Database error validating token for onboarding", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Server error");
+      return;
+    }
+
+    // Parse request body
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
+      return;
+    }
+
+    String clientName;
+    String currencyIso;
+    String language;
+    try {
+      clientName = body.getString("clientName").trim();
+      currencyIso = body.optString("currency", "EUR").trim();
+      language = body.optString("language", "en_US").trim();
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing required field: clientName");
+      return;
+    }
+
+    if (clientName.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "clientName must not be empty");
+      return;
+    }
+
+    // Resolve currency ISO code → ID
+    String currencyId = null;
+    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_CURRENCY_BY_ISO)) {
+      ps.setString(1, currencyIso.toUpperCase());
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          currencyId = rs.getString("c_currency_id");
+        }
+      }
+    } catch (SQLException e) {
+      log.error("Error resolving currency ISO: " + currencyIso, e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Server error");
+      return;
+    }
+    if (currencyId == null) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Unknown currency: " + currencyIso);
+      return;
+    }
+
+    // Set up NDJSON streaming
+    response.setStatus(HttpServletResponse.SC_OK);
+    response.setContentType("application/x-ndjson");
+    response.setCharacterEncoding("UTF-8");
+    response.setHeader("X-Content-Type-Options", "nosniff");
+    PrintWriter writer = response.getWriter();
+
+    // Generate a random password for the admin user
+    String adminPassword = UUID.randomUUID().toString().substring(0, 12);
+
+    try {
+      // Step 1: Set up admin context
+      sendProgress(writer, "setup", "in_progress", "Setting up admin context...");
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+
+      VariablesSecureApp vars = new VariablesSecureApp("0", "0", "0", "0", language);
+      sendProgress(writer, "setup", "done", "Admin context ready");
+
+      // Step 2: Create client (idempotent — skip if already exists)
+      sendProgress(writer, "client", "in_progress",
+          "Creating client: " + clientName + "...");
+
+      String newClientId = null;
+      // Check if client already exists (retry scenario)
+      try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_CLIENT_BY_NAME)) {
+        ps.setString(1, clientName);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            newClientId = rs.getString("ad_client_id");
+          }
+        }
+      }
+
+      if (newClientId != null) {
+        // Client exists — verify it's complete (has '*' org)
+        boolean hasStarOrg = false;
+        try (PreparedStatement ps2 = conn.prepareStatement(SQL_FIND_STAR_ORG)) {
+          ps2.setString(1, newClientId);
+          try (ResultSet rs2 = ps2.executeQuery()) {
+            hasStarOrg = rs2.next();
+          }
+        }
+        if (!hasStarOrg) {
+          // Client exists but is incomplete (failed mid-creation) — cannot resume
+          sendProgress(writer, "client", "error",
+              "Client '" + clientName + "' exists but is incomplete. Use a different name.");
+          sendFinalResult(writer, false,
+              "A previous attempt left '" + clientName + "' in an incomplete state. Please choose a different company name.");
+          return;
+        }
+        sendProgress(writer, "client", "done",
+            "Client already exists, resuming...");
+      } else {
+        // Check if AD_User with this email already exists (leftover from a failed attempt)
+        String clientUser = accountEmail;
+        try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_AD_USER_BY_USERNAME)) {
+          ps.setString(1, accountEmail);
+          try (ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) {
+              // User exists — derive a unique username for this client
+              clientUser = accountEmail + "+" + clientName.toLowerCase().replaceAll("[^a-z0-9]", "");
+            }
+          }
+        }
+
+        // Create new client
+        InitialClientSetup ics = new InitialClientSetup();
+        OBError clientResult = ics.createClient(
+            vars,
+            currencyId,
+            clientName,      // client name
+            clientUser,      // client user (unique per client)
+            adminPassword,   // generated password
+            "",              // no modules (reference data)
+            "Account",       // account text
+            "Calendar",      // calendar text
+            false,           // no accounting
+            null,            // no CoA file
+            false, false, false, false, false  // no dimensions
+        );
+
+        if (!"Success".equals(clientResult.getType())) {
+          String errorMsg = clientResult.getMessage() != null
+              ? clientResult.getMessage() : "Client creation failed";
+          sendProgress(writer, "client", "error", errorMsg);
+          sendFinalResult(writer, false, errorMsg);
+          return;
+        }
+        sendProgress(writer, "client", "done", "Client created successfully");
+      }
+
+      // Re-initialize DAL session — createClient() calls commitAndClose() internally
+      // which closes the pooled connection and DAL session.
+      // We need a fresh OBContext pointing to the new client for InitialOrgSetup.
+      conn = OBDal.getInstance().getConnection();
+
+      // Look up the client ID (needed whether we just created it or it already existed)
+      if (newClientId == null) {
+        try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_CLIENT_BY_NAME)) {
+          ps.setString(1, clientName);
+          try (ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) {
+              newClientId = rs.getString("ad_client_id");
+            }
+          }
+        }
+      }
+
+      if (newClientId == null) {
+        sendProgress(writer, "organization", "error", "Could not find client");
+        sendFinalResult(writer, false, "Client was created but could not be found");
+        return;
+      }
+
+      // Re-establish OBContext for the new client so DAL queries
+      // (especially getOrgTree) can find client-specific data.
+      // Must use the client's own admin role/user — system admin ("0") can't read new client data.
+      String adminRoleId = null;
+      String adminUserId = null;
+      try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_CLIENT_ADMIN)) {
+        ps.setString(1, newClientId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            adminRoleId = rs.getString("ad_role_id");
+            adminUserId = rs.getString("ad_user_id");
+          }
+        }
+      }
+      if (adminRoleId == null || adminUserId == null) {
+        sendProgress(writer, "organization", "error", "Could not find admin role for new client");
+        sendFinalResult(writer, false, "Admin role not found — client may be incomplete");
+        return;
+      }
+
+      // Find the '*' org for the new client
+      String starOrgId = null;
+      try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_STAR_ORG)) {
+        ps.setString(1, newClientId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            starOrgId = rs.getString("ad_org_id");
+          }
+        }
+      }
+      if (starOrgId == null) {
+        starOrgId = "0";
+      }
+
+      OBContext.setOBContext(adminUserId, adminRoleId, newClientId, starOrgId);
+      OBContext.setAdminMode(true);
+
+      // Step 3: Create organization (idempotent — skip if already exists)
+      sendProgress(writer, "organization", "in_progress",
+          "Creating organization: " + clientName + "...");
+
+      // Check if a non-'*' org already exists for this client
+      boolean orgExists = false;
+      try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_ORG_BY_CLIENT)) {
+        ps.setString(1, newClientId);
+        try (ResultSet rs = ps.executeQuery()) {
+          orgExists = rs.next();
+        }
+      }
+
+      if (orgExists) {
+        sendProgress(writer, "organization", "done",
+            "Organization already exists, resuming...");
+      } else {
+        // Get the Client entity for InitialOrgSetup
+        Client newClient = OBDal.getInstance().get(Client.class, newClientId);
+        if (newClient == null) {
+          sendProgress(writer, "organization", "error", "Could not load client entity");
+          sendFinalResult(writer, false, "Client entity not found in DAL");
+          return;
+        }
+
+        // Create organization (starOrgId already resolved above)
+        InitialOrgSetup ios = new InitialOrgSetup(newClient);
+        OBError orgResult = ios.createOrganization(
+            clientName,      // org name = client name
+            "",              // no org user — already created by client step
+            "0",             // org type: 0 = Organization
+            starOrgId,       // parent org = the '*' org
+            null,            // no location
+            "",              // no password — no user being created
+            "",              // no modules
+            false,           // no accounting
+            null,            // no CoA file
+            currencyId,      // currency
+            false, false, false, false, false  // no dimensions
+        );
+
+        if (!"Success".equals(orgResult.getType())) {
+          String errorMsg = orgResult.getMessage() != null
+              ? orgResult.getMessage() : "Organization creation failed";
+          sendProgress(writer, "organization", "error", errorMsg);
+          sendFinalResult(writer, false, errorMsg);
+          return;
+        }
+        sendProgress(writer, "organization", "done", "Organization created successfully");
+      }
+
+      // Step 5: Finalize (createClient/createOrganization handle their own commits)
+      sendProgress(writer, "finalize", "in_progress", "Finalizing setup...");
+      sendProgress(writer, "finalize", "done", "Environment ready");
+
+      // Send final success result
+      sendFinalResult(writer, true, "Environment created successfully");
+
+    } catch (Exception e) {
+      log.error("Onboarding failed", e);
+      try {
+        OBDal.getInstance().rollbackAndClose();
+      } catch (Exception rollbackEx) {
+        log.error("Rollback failed", rollbackEx);
+      }
+      sendProgress(writer, "error", "error", "Onboarding failed: " + e.getMessage());
+      sendFinalResult(writer, false, "Onboarding failed: " + e.getMessage());
+    } finally {
+      OBContext.restorePreviousMode();
+      writer.flush();
+    }
+  }
+
+  /**
+   * Write a NDJSON progress line.
+   */
+  private void sendProgress(PrintWriter writer, String step, String status, String message) {
+    try {
+      JSONObject progress = new JSONObject();
+      progress.put("type", "progress");
+      progress.put("step", step);
+      progress.put("status", status);
+      progress.put("message", message);
+      progress.put("timestamp", Instant.now().toString());
+      writer.println(progress.toString());
+      writer.flush();
+    } catch (JSONException e) {
+      log.warn("Error writing progress", e);
+    }
+  }
+
+  /**
+   * Write the final NDJSON result line.
+   */
+  private void sendFinalResult(PrintWriter writer, boolean success, String message) {
+    try {
+      JSONObject result = new JSONObject();
+      result.put("type", "result");
+      result.put("success", success);
+      result.put("message", message);
+      result.put("timestamp", Instant.now().toString());
+      writer.println(result.toString());
+      writer.flush();
+    } catch (JSONException e) {
+      log.warn("Error writing final result", e);
     }
   }
 

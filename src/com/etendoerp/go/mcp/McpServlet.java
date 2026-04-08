@@ -140,15 +140,21 @@ public class McpServlet extends HttpServlet {
 
   /**
    * Handle GET /sws/mcp — return server info for discovery.
-   * MCP Streamable HTTP clients may GET the endpoint to check capabilities.
+   * Also handles GET /sws/mcp/.well-known/oauth-protected-resource for RFC 9728.
    */
   @Override
   protected void doGet(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     setCorsHeaders(response);
     response.setContentType(CONTENT_TYPE_JSON);
-    response.setStatus(HttpServletResponse.SC_OK);
 
+    String pathInfo = request.getPathInfo();
+    if ("/.well-known/oauth-protected-resource".equals(pathInfo)) {
+      handleResourceMetadata(request, response);
+      return;
+    }
+
+    response.setStatus(HttpServletResponse.SC_OK);
     try {
       JSONObject info = new JSONObject();
       info.put("name", SERVER_NAME);
@@ -159,6 +165,38 @@ public class McpServlet extends HttpServlet {
     } catch (JSONException e) {
       response.getWriter().write("{\"name\":\"" + SERVER_NAME + "\"}");
     }
+  }
+
+  /**
+   * Serve OAuth2 Protected Resource Metadata (RFC 9728).
+   * MCP clients use this to discover the authorization server.
+   */
+  private void handleResourceMetadata(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String baseUrl = buildBaseUrl(request);
+    response.setStatus(HttpServletResponse.SC_OK);
+    try {
+      JSONObject meta = new JSONObject();
+      meta.put("resource", baseUrl + "/sws/mcp");
+      meta.put("authorization_servers", new JSONArray()
+          .put(baseUrl + "/oauth2"));
+      meta.put("scopes_supported", new JSONArray()
+          .put("neo:read").put("neo:write").put("neo:process").put("neo:report").put("neo:*"));
+      meta.put("bearer_methods_supported", new JSONArray().put("header"));
+      response.getWriter().write(meta.toString());
+    } catch (JSONException e) {
+      response.getWriter().write("{\"resource\":\"" + baseUrl + "/sws/mcp\"}");
+    }
+  }
+
+  private String buildBaseUrl(HttpServletRequest request) {
+    String scheme = request.getScheme();
+    String host = request.getServerName();
+    int port = request.getServerPort();
+    String contextPath = request.getContextPath();
+    boolean defaultPort = ("http".equals(scheme) && port == 80)
+        || ("https".equals(scheme) && port == 443);
+    return scheme + "://" + host + (defaultPort ? "" : ":" + port) + contextPath;
   }
 
   // ── Authentication ─────────────────────────────────────────────────────
@@ -184,7 +222,7 @@ public class McpServlet extends HttpServlet {
     // Inline validation
     String authHeader = request.getHeader("Authorization");
     if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      sendJsonError(response, HttpServletResponse.SC_UNAUTHORIZED,
+      sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
           "Missing Authorization: Bearer <token> header");
       return null;
     }
@@ -214,7 +252,7 @@ public class McpServlet extends HttpServlet {
           "neo:*");
     } catch (Exception e) {
       log.warn("Both OAuth2 and JWT authentication failed for MCP request");
-      sendJsonError(response, HttpServletResponse.SC_UNAUTHORIZED,
+      sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
           "Invalid or expired token (OAuth2 and JWT both failed)");
       return null;
     }
@@ -400,13 +438,14 @@ public class McpServlet extends HttpServlet {
     return new HashSet<>(Arrays.asList(scopes.trim().split("\\s+")));
   }
 
-  private void sendJsonError(HttpServletResponse response, int status, String message)
-      throws IOException {
+  private void sendJsonError(HttpServletRequest request, HttpServletResponse response,
+      int status, String message) throws IOException {
     response.setStatus(status);
     response.setContentType(CONTENT_TYPE_JSON);
     if (status == HttpServletResponse.SC_UNAUTHORIZED) {
+      String metaUrl = buildBaseUrl(request) + "/sws/mcp/.well-known/oauth-protected-resource";
       response.setHeader("WWW-Authenticate",
-          "Bearer resource_metadata=\"/.well-known/oauth-protected-resource\"");
+          "Bearer resource_metadata=\"" + metaUrl + "\"");
     }
     response.getWriter().write("{\"error\":\"" + escapeJson(message) + "\"}");
   }

@@ -64,8 +64,9 @@ public class OAuth2Filter implements Filter {
     HttpServletRequest httpReq = (HttpServletRequest) request;
     HttpServletResponse httpResp = (HttpServletResponse) response;
 
-    // Allow CORS preflight requests through without authentication
-    if ("OPTIONS".equalsIgnoreCase(httpReq.getMethod())) {
+    // Allow CORS preflight and GET (discovery) requests through without authentication
+    String method = httpReq.getMethod();
+    if ("OPTIONS".equalsIgnoreCase(method) || "GET".equalsIgnoreCase(method)) {
       chain.doFilter(request, response);
       return;
     }
@@ -73,14 +74,14 @@ public class OAuth2Filter implements Filter {
     String authHeader = httpReq.getHeader(AUTH_HEADER);
 
     if (authHeader == null || !authHeader.startsWith(BEARER_PREFIX)) {
-      sendError(httpResp, HttpServletResponse.SC_UNAUTHORIZED,
+      sendError(httpReq, httpResp, HttpServletResponse.SC_UNAUTHORIZED,
           "invalid_request", "Missing or malformed Authorization header. Expected: Bearer <token>");
       return;
     }
 
     String bearerToken = authHeader.substring(BEARER_PREFIX.length()).trim();
     if (bearerToken.isEmpty()) {
-      sendError(httpResp, HttpServletResponse.SC_UNAUTHORIZED,
+      sendError(httpReq, httpResp, HttpServletResponse.SC_UNAUTHORIZED,
           "invalid_request", "Bearer token is empty");
       return;
     }
@@ -98,7 +99,7 @@ public class OAuth2Filter implements Filter {
       }
 
       if (tokenInfo.errorCode != null) {
-        sendError(httpResp, HttpServletResponse.SC_UNAUTHORIZED,
+        sendError(httpReq, httpResp, HttpServletResponse.SC_UNAUTHORIZED,
             "invalid_token", tokenInfo.errorDesc);
         return;
       }
@@ -116,7 +117,7 @@ public class OAuth2Filter implements Filter {
 
     } catch (Exception e) {
       log.error("Error during OAuth2 token validation", e);
-      sendError(httpResp, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+      sendError(httpReq, httpResp, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "server_error", "Internal server error during token validation");
     }
   }
@@ -202,20 +203,32 @@ public class OAuth2Filter implements Filter {
     }
   }
 
-  private void sendError(HttpServletResponse response, int statusCode,
+  private void sendError(HttpServletRequest request, HttpServletResponse response, int statusCode,
       String error, String errorDescription) throws IOException {
     response.setStatus(statusCode);
     response.setContentType(CONTENT_TYPE_JSON);
     if (statusCode == HttpServletResponse.SC_UNAUTHORIZED) {
+      String metaUrl = buildResourceMetadataUrl(request);
       response.setHeader("WWW-Authenticate",
           "Bearer error=\"" + error + "\","
-          + " resource_metadata=\"/.well-known/oauth-protected-resource\"");
+          + " resource_metadata=\"" + metaUrl + "\"");
     }
     try (PrintWriter writer = response.getWriter()) {
       writer.write("{\"error\":\"" + escapeJson(error)
           + "\",\"error_description\":\"" + escapeJson(errorDescription) + "\"}");
       writer.flush();
     }
+  }
+
+  private String buildResourceMetadataUrl(HttpServletRequest request) {
+    String scheme = request.getScheme();
+    String host = request.getServerName();
+    int port = request.getServerPort();
+    String contextPath = request.getContextPath();
+    boolean defaultPort = ("http".equals(scheme) && port == 80)
+        || ("https".equals(scheme) && port == 443);
+    return scheme + "://" + host + (defaultPort ? "" : ":" + port)
+        + contextPath + "/sws/mcp/.well-known/oauth-protected-resource";
   }
 
   private String escapeJson(String value) {

@@ -560,6 +560,22 @@ public class NeoCalloutService {
    * Utility.getDefault can resolve context variables like @#AD_Org_ID@, @IsSOTrx@, etc.
    */
   private static VariablesSecureApp buildCalloutVars(OBContext obCtx, Tab adTab) {
+    VariablesSecureApp vars = buildVars(obCtx);
+
+    // Set window-level isSOTrx so expressions like @IsSOTrx@ resolve correctly
+    if (adTab != null && adTab.getWindow() != null) {
+      String soTrx = Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
+      vars.setSessionValue("isSOTrx", soTrx);
+    }
+
+    return vars;
+  }
+
+  /**
+   * Build a VariablesSecureApp from OBContext with full session population.
+   * Shared by NeoCalloutService and NeoDefaultsService.
+   */
+  static VariablesSecureApp buildVars(OBContext obCtx) {
     String userId = obCtx.getUser().getId();
     String clientId = obCtx.getCurrentClient().getId();
     String orgId = obCtx.getCurrentOrganization().getId();
@@ -582,12 +598,7 @@ public class NeoCalloutService {
       vars.setSessionValue("#AD_Role_ID", roleId);
       vars.setSessionValue("#AD_Language", lang);
       vars.setSessionValue("#M_Warehouse_ID", warehouseId);
-    }
-
-    // Set window-level isSOTrx so expressions like @IsSOTrx@ resolve correctly
-    if (adTab.getWindow() != null) {
-      String soTrx = Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
-      vars.setSessionValue("isSOTrx", soTrx);
+      vars.setSessionValue("#User_Client", "'" + clientId + "','0'");
     }
 
     return vars;

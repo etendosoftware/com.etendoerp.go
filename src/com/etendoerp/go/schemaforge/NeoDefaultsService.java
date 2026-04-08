@@ -20,7 +20,6 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
-import org.openbravo.base.secureApp.LoginUtils;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -378,20 +377,12 @@ public class NeoDefaultsService {
 
   /**
    * Build a VariablesSecureApp from OBContext, fully populated with ALL session variables.
-   * Results are cached by user+role+org+warehouse key to avoid the overhead of
-   * {@link LoginUtils#fillSessionArguments} (multiple DB queries) on every request.
-   *
-   * <p>Delegates to {@link LoginUtils#fillSessionArguments} — the same method that Etendo's
-   * classic login uses. This ensures all context variables ($C_Currency_ID, $C_AcctSchema_ID,
-   * $Element_*, preferences, accounting dimensions, etc.) are resolved identically to the
-   * classic UI, without hardcoding individual variables.</p>
+   * Delegates to {@link NeoCalloutService#buildVars} and adds caching + #Date.
    */
   private static VariablesSecureApp buildVariablesSecureApp(OBContext obContext) {
     String userId = obContext.getUser().getId();
-    String clientId = obContext.getCurrentClient().getId();
-    String orgId = obContext.getCurrentOrganization().getId();
     String roleId = obContext.getRole().getId();
-    String lang = obContext.getLanguage().getLanguage();
+    String orgId = obContext.getCurrentOrganization().getId();
     String warehouseId = obContext.getWarehouse() != null
         ? obContext.getWarehouse().getId() : "";
 
@@ -401,26 +392,9 @@ public class NeoDefaultsService {
       return cached;
     }
 
-    VariablesSecureApp vars = new VariablesSecureApp(userId, clientId, orgId, roleId, lang);
-    DalConnectionProvider conn = new DalConnectionProvider(false);
-
-    try {
-      LoginUtils.fillSessionArguments(conn, vars, userId, lang, "N",
-          roleId, clientId, orgId, warehouseId);
-    } catch (Exception e) {
-      log.warn("LoginUtils.fillSessionArguments failed, falling back to minimal setup: {}",
-          e.getMessage());
-      // Minimal fallback — at least set the basics so simple literals resolve
-      vars.setSessionValue("#AD_User_ID", userId);
-      vars.setSessionValue("#AD_Client_ID", clientId);
-      vars.setSessionValue("#AD_Org_ID", orgId);
-      vars.setSessionValue("#AD_Role_ID", roleId);
-      vars.setSessionValue("#AD_Language", lang);
-      vars.setSessionValue("#M_Warehouse_ID", warehouseId);
-      vars.setSessionValue("#User_Client", "'" + clientId + "','0'");
-      vars.setSessionValue("#Date",
-          new SimpleDateFormat(DATE_FORMAT).format(new Date()));
-    }
+    VariablesSecureApp vars = NeoCalloutService.buildVars(obContext);
+    vars.setSessionValue("#Date",
+        new SimpleDateFormat(DATE_FORMAT).format(new Date()));
 
     varsCache.put(cacheKey, vars);
     return vars;
@@ -562,9 +536,6 @@ public class NeoDefaultsService {
     }
   }
 
-  private static final String REF_TABLE = "18";
-  private static final String REF_TABLEDIR = "19";
-  private static final String REF_SEARCH = "30";
   /**
    * Resolve selector auxiliary values for a FK field.
    * Finds the AD_Column for the given fieldName on this tab, then delegates to
@@ -573,69 +544,35 @@ public class NeoDefaultsService {
   private static JSONObject resolveSelectorAuxValues(Tab adTab, String fieldName,
       String value, NeoContext ctx) {
     if (adTab == null || fieldName == null || value == null || value.isEmpty()) {
-      log.info("[NEO-DEFAULTS] resolveSelectorAux: skipping field '{}' (null/empty)", fieldName);
       return null;
     }
     try {
       Entity entity = ModelProvider.getInstance()
           .getEntityByTableId(adTab.getTable().getId());
       if (entity == null) {
-        log.info("[NEO-DEFAULTS] resolveSelectorAux: no entity for tab '{}'", adTab.getName());
         return null;
       }
 
-      // Find the Property matching the fieldName (DAL property name).
       Property prop = entity.getProperty(fieldName, false);
-      if (prop == null) {
-        log.info("[NEO-DEFAULTS] resolveSelectorAux: no property '{}' on entity '{}'",
-            fieldName, entity.getName());
-        return null;
-      }
-      if (prop.getColumnId() == null) {
-        log.info("[NEO-DEFAULTS] resolveSelectorAux: property '{}' has no columnId", fieldName);
+      if (prop == null || prop.getColumnId() == null || prop.isPrimitive()) {
         return null;
       }
 
-      // Only FK fields have selector aux values.
-      if (prop.isPrimitive()) {
-        log.debug("[NEO-DEFAULTS] resolveSelectorAux: '{}' is primitive, skipping", fieldName);
-        return null;
-      }
-
-      log.info("[NEO-DEFAULTS] resolveSelectorAux: '{}' is FK, columnId={}, value={}",
-          fieldName, prop.getColumnId(), value);
-
-      // Look up the AD_Column by ID.
       Column adColumn = OBDal.getInstance().get(Column.class, prop.getColumnId());
       if (adColumn == null) {
-        log.info("[NEO-DEFAULTS] resolveSelectorAux: AD_Column not found for id '{}'",
-            prop.getColumnId());
         return null;
       }
 
-      log.info("[NEO-DEFAULTS] resolveSelectorAux: calling resolveSelectorAuxForId for '{}' ref={}",
-          fieldName, adColumn.getReference() != null ? adColumn.getReference().getId() : "null");
       JSONObject aux = NeoSelectorService.resolveSelectorAuxForId(adColumn, fieldName, value);
       if (aux != null && aux.length() > 0) {
-        log.info("[NEO-DEFAULTS] Selector aux for '{}' (value={}): {}", fieldName, value, aux);
-      } else {
-        log.info("[NEO-DEFAULTS] resolveSelectorAux: no aux values returned for '{}'", fieldName);
+        log.info("[NEO-DEFAULTS] Selector aux for '{}': {}", fieldName, aux);
       }
       return aux;
     } catch (Exception e) {
       log.warn("[NEO-DEFAULTS] Failed to resolve selector aux for field '{}': {}",
-          fieldName, e.getMessage(), e);
+          fieldName, e.getMessage());
       return null;
     }
-  }
-
-  /**
-   * Check if a column is a FK reference (Table, TableDir, or Search).
-   * Used to detect sentinel values like "0" that are not valid entity IDs.
-   */
-  private static boolean isFkColumn(Column col) {
-    String refId = col.getReference() != null ? col.getReference().getId() : null;
-    return REF_TABLE.equals(refId) || REF_TABLEDIR.equals(refId) || REF_SEARCH.equals(refId);
   }
 
   /**
