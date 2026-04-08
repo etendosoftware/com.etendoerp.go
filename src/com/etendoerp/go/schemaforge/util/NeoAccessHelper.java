@@ -41,6 +41,12 @@ public final class NeoAccessHelper {
   private NeoAccessHelper() {
   }
 
+  /**
+   * Checks whether the current role has access to the given AD window.
+   *
+   * @param windowId the ID of the AD window to check
+   * @return {@code true} if the current role has an active window-access record, or if the role is the system administrator role
+   */
   public static boolean hasWindowAccess(String windowId) {
     String roleId = OBContext.getOBContext().getRole().getId();
     if ("0".equals(roleId)) {
@@ -54,6 +60,12 @@ public final class NeoAccessHelper {
     return !criteria.list().isEmpty();
   }
 
+  /**
+   * Checks whether the current role has access to the given AD process.
+   *
+   * @param processId the ID of the AD process to check
+   * @return {@code true} if the current role has an active process-access record, or if the role is the system administrator role
+   */
   public static boolean hasProcessAccess(String processId) {
     String roleId = OBContext.getOBContext().getRole().getId();
     if ("0".equals(roleId)) {
@@ -67,6 +79,11 @@ public final class NeoAccessHelper {
     return !criteria.list().isEmpty();
   }
 
+  /**
+   * Resolves the default post (accounting) process used for the Posted button.
+   *
+   * @return the default {@code Process} instance, or {@code null} if it cannot be found
+   */
   public static org.openbravo.client.application.Process resolveDefaultPostProcess() {
     try {
       return OBDal.getInstance().get(
@@ -77,6 +94,12 @@ public final class NeoAccessHelper {
     }
   }
 
+  /**
+   * Returns the AD process linked to the given spec.
+   *
+   * @param spec the Schema Forge spec whose associated process is needed
+   * @return the {@link org.openbravo.model.ad.ui.Process} configured on the spec, or {@code null} if none
+   */
   public static Process resolveProcess(SFSpec spec) {
     return spec.getProcess();
   }

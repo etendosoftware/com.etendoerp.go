@@ -32,6 +32,12 @@ public class NeoResponse {
   private JSONObject body;
   private Map<String, String> headers;
 
+  /**
+   * Creates a NeoResponse with the given HTTP status and JSON body.
+   *
+   * @param httpStatus the HTTP status code (e.g. 200, 404)
+   * @param body       the JSON response body, or {@code null} for empty responses
+   */
   public NeoResponse(int httpStatus, JSONObject body) {
     this.httpStatus = httpStatus;
     this.body = body;
@@ -50,23 +56,54 @@ public class NeoResponse {
     return headers;
   }
 
+  /**
+   * Adds a response header and returns this response for chaining.
+   *
+   * @param name  the header name
+   * @param value the header value
+   * @return this NeoResponse
+   */
   public NeoResponse withHeader(String name, String value) {
     this.headers.put(name, value);
     return this;
   }
 
+  /**
+   * Creates a 200 OK response with the given data payload.
+   *
+   * @param data the JSON response data
+   * @return a NeoResponse with HTTP 200
+   */
   public static NeoResponse ok(JSONObject data) {
     return new NeoResponse(200, data);
   }
 
+  /**
+   * Creates a 201 Created response with the given data payload.
+   *
+   * @param data the JSON representation of the created resource
+   * @return a NeoResponse with HTTP 201
+   */
   public static NeoResponse created(JSONObject data) {
     return new NeoResponse(201, data);
   }
 
+  /**
+   * Creates a 204 No Content response with no body.
+   *
+   * @return a NeoResponse with HTTP 204 and null body
+   */
   public static NeoResponse noContent() {
     return new NeoResponse(204, null);
   }
 
+  /**
+   * Creates an error response with the given status code and plain-text message.
+   *
+   * @param status  the HTTP status code (e.g. 400, 404, 500)
+   * @param message the human-readable error message
+   * @return a NeoResponse with a JSON error body containing the status and message
+   */
   public static NeoResponse error(int status, String message) {
     try {
       JSONObject errorBody = new JSONObject();
@@ -81,7 +118,11 @@ public class NeoResponse {
   }
 
   /**
-   * Create an error response with a full JSON body (e.g. validation error details).
+   * Creates an error response with a full JSON body (e.g. validation error details).
+   *
+   * @param status the HTTP status code
+   * @param body   the pre-built JSON error body
+   * @return a NeoResponse with the given status and JSON body
    */
   public static NeoResponse error(int status, JSONObject body) {
     return new NeoResponse(status, body);

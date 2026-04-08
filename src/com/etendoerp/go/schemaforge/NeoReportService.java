@@ -62,6 +62,12 @@ public class NeoReportService {
     private final String filename;
     private final String contentType;
 
+    /**
+     * Creates a ReportMetadata holding the resolved filename and content-type for a report output.
+     *
+     * @param filename    the resolved output filename (e.g. "report.pdf")
+     * @param contentType the MIME type of the report output (e.g. "application/pdf")
+     */
     public ReportMetadata(String filename, String contentType) {
       this.filename = filename;
       this.contentType = contentType;
