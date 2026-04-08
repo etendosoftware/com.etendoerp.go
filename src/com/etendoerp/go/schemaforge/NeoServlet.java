@@ -89,7 +89,7 @@ public class NeoServlet extends HttpBaseServlet {
   private static final String HOOK_ERROR_MSG = "An internal error occurred while processing the hook handler";
   private static final String PATCH_METHOD = "PATCH";
   private static final String PARENT_ID_KEY = "parentId";
-  private static final String NEO_ERROR_PREFIX = "__NEO_ERROR__:";
+
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {

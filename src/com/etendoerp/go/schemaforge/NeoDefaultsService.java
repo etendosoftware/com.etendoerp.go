@@ -79,6 +79,7 @@ public class NeoDefaultsService {
 
   private static final Logger log = LogManager.getLogger(NeoDefaultsService.class);
   private static final String DATE_FORMAT = "yyyy-MM-dd";
+  private static final String VALUE_KEY = "value";
   private static final int MAX_CALLOUT_CHAIN_DEPTH = 5;
   private static final java.util.regex.Pattern SUBTYPE_NOT_LIKE_PATTERN =
       java.util.regex.Pattern.compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'",
@@ -1204,7 +1205,7 @@ public class NeoDefaultsService {
     try {
       JSONObject calloutRequest = new JSONObject();
       calloutRequest.put("field", fieldName);
-      calloutRequest.put("value", value);
+      calloutRequest.put(VALUE_KEY, value);
       calloutRequest.put("formState", formState);
 
       NeoResponse calloutResponse = NeoCalloutService.executeCallout(ctx, calloutRequest);
@@ -1260,10 +1261,10 @@ public class NeoDefaultsService {
     while (updateKeys.hasNext()) {
       String updatedField = updateKeys.next();
       JSONObject updateObj = updates.optJSONObject(updatedField);
-      if (updateObj == null || !updateObj.has("value")) {
+      if (updateObj == null || !updateObj.has(VALUE_KEY)) {
         continue;
       }
-      Object newValue = updateObj.get("value");
+      Object newValue = updateObj.get(VALUE_KEY);
       Object oldValue = formState.opt(updatedField);
 
       formState.put(updatedField, newValue);
