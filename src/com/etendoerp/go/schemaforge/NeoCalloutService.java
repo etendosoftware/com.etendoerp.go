@@ -33,6 +33,7 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.application.window.servlet.CalloutServletConfig;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
@@ -61,17 +62,8 @@ import org.openbravo.service.json.JsonConstants;
 public class NeoCalloutService {
 
   private static final Logger log = LogManager.getLogger(NeoCalloutService.class);
-
-  /** JSON key for the field value in callout requests and responses. */
-  private static final String VALUE = "value";
-  /** JSON key for the field updates map in callout responses. */
-  private static final String UPDATES = "updates";
-  /** JSON key for the combo options map in callout responses. */
-  private static final String COMBOS = "combos";
-  /** JSON key for the messages array in callout responses. */
-  private static final String MESSAGES = "messages";
-  /** JSON key for the entries array in combo field results. */
-  private static final String ENTRIES = "entries";
+  private static final String VALUE_KEY = "value";
+  private static final String IDENTIFIER_KEY = "_identifier";
 
   private NeoCalloutService() {
   }
@@ -88,7 +80,7 @@ public class NeoCalloutService {
       OBContext.setAdminMode();
       try {
         String fieldName = requestBody.getString("field");
-        Object value = requestBody.opt(VALUE);
+        Object value = requestBody.opt(VALUE_KEY);
         JSONObject formState = requestBody.optJSONObject("formState");
         if (formState == null) {
           formState = new JSONObject();
@@ -104,9 +96,9 @@ public class NeoCalloutService {
           log.info("[NEO-CALLOUT] No callout found for field '{}' on tab '{}'",
               fieldName, adTab.getName());
           JSONObject emptyResponse = new JSONObject();
-          emptyResponse.put(UPDATES, new JSONObject());
-          emptyResponse.put(COMBOS, new JSONObject());
-          emptyResponse.put(MESSAGES, new JSONArray());
+          emptyResponse.put("updates", new JSONObject());
+          emptyResponse.put("combos", new JSONObject());
+          emptyResponse.put("messages", new JSONArray());
           return NeoResponse.ok(emptyResponse);
         }
         log.info("[NEO-CALLOUT] Found callout '{}' for field '{}' (inp: {}, column: {})",
@@ -290,9 +282,6 @@ public class NeoCalloutService {
    *   DocumentNo     -> inpdocumentno
    *   IsActive       -> inpisactive
    *   M_Warehouse_ID -> inpmWarehouseId
-   *
-   * @param columnName the raw DB column name to transform
-   * @return the column name prefixed with "inp" and transformed to camelCase
    */
   public static String toInpName(String columnName) {
     return "inp" + transformColumnName(columnName);
@@ -721,6 +710,67 @@ public class NeoCalloutService {
    *   "messages": [ { "type": "WARNING", "text": "..." } ]
    * }
    */
+  /**
+   * For FK update fields that have a value but no _identifier, look up the display name
+   * from the DB so the frontend can show the correct label immediately.
+   */
+  private static void resolveIdentifiersForFkUpdates(JSONObject updates, Tab adTab) {
+    if (updates == null || adTab == null || adTab.getTable() == null) {
+      return;
+    }
+    try {
+      Entity dalEntity = ModelProvider.getInstance()
+          .getEntityByTableId(adTab.getTable().getId());
+      if (dalEntity == null) return;
+
+      Iterator<String> keys = updates.keys();
+      while (keys.hasNext()) {
+        String fieldName = keys.next();
+        resolveIdentifierForField(updates.optJSONObject(fieldName), fieldName, dalEntity);
+      }
+    } catch (Exception e) {
+      log.debug("Error resolving FK identifiers: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Resolve the _identifier for a single FK update field entry.
+   * Looks up the referenced record by ID and sets the display identifier.
+   */
+  private static void resolveIdentifierForField(JSONObject entry, String fieldName,
+      Entity dalEntity) {
+    if (entry == null || entry.has(IDENTIFIER_KEY)) {
+      return;
+    }
+    Object val = entry.opt(VALUE_KEY);
+    if (val == null || "".equals(val)) {
+      return;
+    }
+    String strVal = String.valueOf(val);
+    // Only resolve for IDs (32-char hex or numeric)
+    if (!strVal.matches("[0-9A-Fa-f]{32}") && !strVal.matches("\\d+")) {
+      return;
+    }
+
+    try {
+      Property prop = dalEntity.getProperty(fieldName);
+      if (prop == null || prop.getTargetEntity() == null) {
+        return;
+      }
+      // Look up the record to get its identifier
+      BaseOBObject referenced = OBDal.getInstance().get(
+          prop.getTargetEntity().getName(), strVal);
+      if (referenced != null) {
+        String identifier = referenced.getIdentifier();
+        if (identifier != null && !identifier.isEmpty()) {
+          entry.put(IDENTIFIER_KEY, identifier);
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve _identifier for {}: {}", fieldName, e.getMessage());
+    }
+  }
+
   @SuppressWarnings("unchecked")
   static JSONObject transformResponse(JSONObject calloutResult, Tab adTab) {
     JSONObject response = new JSONObject();
@@ -732,9 +782,9 @@ public class NeoCalloutService {
       Map<String, String> rDisplayNames = new java.util.HashMap<>();
 
       if (calloutResult == null) {
-        response.put(UPDATES, updates);
-        response.put(COMBOS, combos);
-        response.put(MESSAGES, messages);
+        response.put("updates", updates);
+        response.put("combos", combos);
+        response.put("messages", messages);
         return response;
       }
 
@@ -752,7 +802,7 @@ public class NeoCalloutService {
             || "SUCCESS".equals(key)) {
           JSONObject msg = new JSONObject();
           msg.put("type", key);
-          msg.put("text", fieldResult.optString(VALUE, ""));
+          msg.put("text", fieldResult.optString(VALUE_KEY, ""));
           messages.put(msg);
           continue;
         }
@@ -770,22 +820,22 @@ public class NeoCalloutService {
           String baseClean = inpToCleanName(baseInpKey, adTab);
           // Store: we'll merge after the main loop
           if (!rDisplayNames.containsKey(baseClean)) {
-            rDisplayNames.put(baseClean, fieldResult.optString(VALUE, ""));
+            rDisplayNames.put(baseClean, fieldResult.optString(VALUE_KEY, ""));
           }
           continue;
         }
 
         // Determine if this is a combo update (has entries) or simple field update
-        boolean hasEntries = fieldResult.has(ENTRIES);
+        boolean hasEntries = fieldResult.has("entries");
         String cleanName = inpToCleanName(key, adTab);
 
         if (hasEntries) {
           // Combo update
           JSONObject comboObj = new JSONObject();
-          if (fieldResult.has(VALUE)) {
-            comboObj.put("selected", fieldResult.opt(VALUE));
+          if (fieldResult.has(VALUE_KEY)) {
+            comboObj.put("selected", fieldResult.opt(VALUE_KEY));
           }
-          JSONArray rawEntries = fieldResult.optJSONArray(ENTRIES);
+          JSONArray rawEntries = fieldResult.optJSONArray("entries");
           if (rawEntries != null) {
             JSONArray cleanEntries = new JSONArray();
             for (int i = 0; i < rawEntries.length(); i++) {
@@ -799,13 +849,13 @@ public class NeoCalloutService {
                 cleanEntries.put(cleanEntry);
               }
             }
-            comboObj.put(ENTRIES, cleanEntries);
+            comboObj.put("entries", cleanEntries);
           }
           combos.put(cleanName, comboObj);
         } else {
           // Simple field update
           JSONObject updateObj = new JSONObject();
-          updateObj.put(VALUE, fieldResult.opt(VALUE));
+          updateObj.put(VALUE_KEY, fieldResult.opt(VALUE_KEY));
           updates.put(cleanName, updateObj);
         }
       }
@@ -817,13 +867,17 @@ public class NeoCalloutService {
         String baseKey = rEntry.getKey();
         String displayName = rEntry.getValue();
         if (updates.has(baseKey) && StringUtils.isNotBlank(displayName)) {
-          updates.getJSONObject(baseKey).put("_identifier", displayName);
+          updates.getJSONObject(baseKey).put(IDENTIFIER_KEY, displayName);
         }
       }
 
-      response.put(UPDATES, updates);
-      response.put(COMBOS, combos);
-      response.put(MESSAGES, messages);
+      // Resolve _identifier for FK fields where the callout only returned an ID.
+      // This avoids the frontend showing stale labels until the record is saved/reloaded.
+      resolveIdentifiersForFkUpdates(updates, adTab);
+
+      response.put("updates", updates);
+      response.put("combos", combos);
+      response.put("messages", messages);
 
     } catch (Exception e) {
       log.error("Error transforming callout response: {}", e.getMessage(), e);
