@@ -18,6 +18,8 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.BufferedReader;
+import java.security.Principal;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Enumeration;
 import java.util.Locale;
@@ -29,11 +31,15 @@ import javax.servlet.ServletContext;
 import javax.servlet.ServletInputStream;
 import javax.servlet.ServletRequest;
 import javax.servlet.ServletResponse;
+import javax.servlet.http.Cookie;
+import javax.servlet.http.HttpServletResponse;
+import javax.servlet.http.HttpUpgradeHandler;
+import javax.servlet.http.Part;
 
 /**
  * Abstract base class that provides safe no-op defaults for all
- * {@link javax.servlet.ServletRequest} methods that are not relevant
- * to the synthetic callout execution context.
+ * {@link javax.servlet.ServletRequest} and {@link javax.servlet.http.HttpServletRequest}
+ * methods that are not relevant to the synthetic callout execution context.
  * <p>
  * Subclasses only need to override the methods that carry real behaviour.
  * </p>
@@ -43,7 +49,7 @@ public abstract class SyntheticServletRequestBase implements javax.servlet.http.
   /** Local hostname constant used for synthetic network metadata. */
   protected static final String LOCALHOST = "localhost";
 
-  // -- Content --
+  // -- Content / IO --
 
   @Override public String getCharacterEncoding() { return "UTF-8"; }
   @Override public void setCharacterEncoding(String env) { }
@@ -88,4 +94,51 @@ public abstract class SyntheticServletRequestBase implements javax.servlet.http.
   @Override public boolean isAsyncSupported() { return false; }
   @Override public AsyncContext getAsyncContext() { return null; }
   @Override public DispatcherType getDispatcherType() { return DispatcherType.REQUEST; }
+
+  // -- Authentication --
+
+  @Override public String getAuthType() { return null; }
+  @Override public String getRemoteUser() { return null; }
+  @Override public boolean isUserInRole(String role) { return false; }
+  @Override public Principal getUserPrincipal() { return null; }
+  @Override public boolean authenticate(HttpServletResponse response) { return false; }
+  @Override public void login(String username, String password) { }
+  @Override public void logout() { }
+
+  // -- Cookies --
+
+  @Override public Cookie[] getCookies() { return null; }
+
+  // -- Headers --
+
+  @Override public long getDateHeader(String name) { return -1; }
+  @Override public String getHeader(String name) { return null; }
+  @Override public Enumeration<String> getHeaders(String name) {
+    return Collections.emptyEnumeration();
+  }
+  @Override public Enumeration<String> getHeaderNames() {
+    return Collections.emptyEnumeration();
+  }
+  @Override public int getIntHeader(String name) { return -1; }
+
+  // -- URL / path --
+
+  @Override public String getPathInfo() { return null; }
+  @Override public String getPathTranslated() { return null; }
+  @Override public String getQueryString() { return null; }
+
+  // -- Session ID validation --
+
+  @Override public String getRequestedSessionId() { return null; }
+  @Override public String changeSessionId() { return null; }
+  @Override public boolean isRequestedSessionIdValid() { return false; }
+  @Override public boolean isRequestedSessionIdFromCookie() { return false; }
+  @Override public boolean isRequestedSessionIdFromURL() { return false; }
+  @Override public boolean isRequestedSessionIdFromUrl() { return false; }
+
+  // -- Multipart / upgrade --
+
+  @Override public Collection<Part> getParts() { return Collections.emptyList(); }
+  @Override public Part getPart(String name) { return null; }
+  @Override public <T extends HttpUpgradeHandler> T upgrade(Class<T> handlerClass) { return null; }
 }

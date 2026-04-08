@@ -30,14 +30,13 @@ import javax.servlet.http.HttpSession;
  * <p>
  * Provides request parameters from a {@link Map} and session attributes for
  * OBContext values (user, role, org, client, warehouse). All HTTP/Servlet
- * no-op stubs are inherited from {@link SyntheticHttpRequestBase} and
- * {@link SyntheticServletRequestBase}.
+ * no-op stubs are inherited from {@link SyntheticServletRequestBase}.
  * </p>
  * Used by {@code NeoCalloutService} to build a synthetic request that
  * {@code SimpleCallout} and {@code VariablesSecureApp} can consume without a
  * real HTTP request.
  */
-public class SyntheticHttpServletRequest extends SyntheticHttpRequestBase {
+public class SyntheticHttpServletRequest extends SyntheticServletRequestBase {
 
   private final Map<String, String[]> parameters;
   private final Map<String, Object> attributes;
