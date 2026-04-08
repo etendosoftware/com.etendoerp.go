@@ -87,24 +87,7 @@ public final class NeoDiscoveryHelper {
         if (!isSpecAccessible(spec)) {
           continue;
         }
-        String specType = spec.getSpecType();
-        Window specWindow = spec.getADWindow();
-        JSONObject specObj = new JSONObject();
-        specObj.put("id", spec.getId());
-        specObj.put("name", spec.getName());
-        specObj.put("type", specType);
-        specObj.put("description", spec.getDescription());
-        if ("W".equals(specType)) {
-          if (specWindow != null) specObj.put("windowId", specWindow.getId());
-          specObj.put("entities", buildEntitySummaryArray(spec.getId()));
-        } else if ("P".equals(specType) || "R".equals(specType)) {
-          Process adProcess = NeoAccessHelper.resolveProcess(spec);
-          if (adProcess != null) specObj.put("processId", adProcess.getId());
-          if ("R".equals(specType)) specObj.put("isReport", true);
-        }
-        Module specModule = spec.getADModule();
-        if (specModule != null) specObj.put("moduleId", specModule.getId());
-        specsArray.put(specObj);
+        specsArray.put(buildSpecObject(spec));
       }
       JSONObject result = new JSONObject();
       result.put("specs", specsArray);
@@ -113,6 +96,35 @@ public final class NeoDiscoveryHelper {
       log.error("Error in discovery endpoint: {}", e.getMessage(), e);
       return NeoResponse.error(500, "Discovery error: " + e.getMessage());
     }
+  }
+
+  /**
+   * Builds a JSON object representing a single {@link SFSpec} entry for the discovery response,
+   * including its type-specific fields (window ID, entities, process ID, report flag, module ID).
+   *
+   * @param spec the {@link SFSpec} to serialise
+   * @return a {@link JSONObject} with the spec's discovery fields
+   * @throws Exception if a database or JSON error occurs
+   */
+  private static JSONObject buildSpecObject(SFSpec spec) throws Exception {
+    String specType = spec.getSpecType();
+    JSONObject specObj = new JSONObject();
+    specObj.put("id", spec.getId());
+    specObj.put("name", spec.getName());
+    specObj.put("type", specType);
+    specObj.put("description", spec.getDescription());
+    if ("W".equals(specType)) {
+      Window specWindow = spec.getADWindow();
+      if (specWindow != null) specObj.put("windowId", specWindow.getId());
+      specObj.put("entities", buildEntitySummaryArray(spec.getId()));
+    } else if ("P".equals(specType) || "R".equals(specType)) {
+      Process adProcess = NeoAccessHelper.resolveProcess(spec);
+      if (adProcess != null) specObj.put("processId", adProcess.getId());
+      if ("R".equals(specType)) specObj.put("isReport", true);
+    }
+    Module specModule = spec.getADModule();
+    if (specModule != null) specObj.put("moduleId", specModule.getId());
+    return specObj;
   }
 
   /**

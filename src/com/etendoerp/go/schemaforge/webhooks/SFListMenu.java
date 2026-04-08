@@ -25,6 +25,7 @@ import java.util.Map;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
@@ -128,15 +129,9 @@ public class SFListMenu extends BaseWebhookService {
       node.put("name", name);
       node.put("type", resolveType(isSummary, action));
 
-      if (windowId != null && !windowId.isEmpty()) {
-        node.put("windowId", windowId);
-      }
-      if (processId != null && !processId.isEmpty()) {
-        node.put("processId", processId);
-      }
-      if (formId != null && !formId.isEmpty()) {
-        node.put("formId", formId);
-      }
+      putIfNotEmpty(node, "windowId", windowId);
+      putIfNotEmpty(node, "processId", processId);
+      putIfNotEmpty(node, "formId", formId);
 
       // Folders always get a children array
       if ("Y".equals(isSummary)) {
@@ -197,15 +192,9 @@ public class SFListMenu extends BaseWebhookService {
       item.put("name", name);
       item.put("type", resolveType(isSummary, action));
 
-      if (windowId != null && !windowId.isEmpty()) {
-        item.put("windowId", windowId);
-      }
-      if (processId != null && !processId.isEmpty()) {
-        item.put("processId", processId);
-      }
-      if (formId != null && !formId.isEmpty()) {
-        item.put("formId", formId);
-      }
+      putIfNotEmpty(item, "windowId", windowId);
+      putIfNotEmpty(item, "processId", processId);
+      putIfNotEmpty(item, "formId", formId);
 
       items.put(item);
     }
@@ -214,6 +203,16 @@ public class SFListMenu extends BaseWebhookService {
     result.put("tree", items);
     result.put("count", items.length());
     return result;
+  }
+
+  /**
+   * Adds {@code key}/{@code value} to {@code obj} only when {@code value} is non-null and non-empty,
+   * avoiding spurious null entries in the JSON output.
+   */
+  private static void putIfNotEmpty(JSONObject obj, String key, String value) throws JSONException {
+    if (value != null && !value.isEmpty()) {
+      obj.put(key, value);
+    }
   }
 
   /**
