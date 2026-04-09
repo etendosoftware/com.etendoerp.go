@@ -109,8 +109,6 @@ public class CreateOrgStep implements OnboardingStep {
       if (ctx.getOrgAdminUserId() == null) {
         throw new OBException("Org admin user '" + orgAdminUser + "' not found after organization creation");
       }
-    } catch (OnboardingStepException e) {
-      throw e;
     } catch (Exception e) {
       throw new OnboardingStepException(e.getMessage(), e);
     }

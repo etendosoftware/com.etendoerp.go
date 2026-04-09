@@ -93,8 +93,6 @@ public class MarkOrgReadyStep implements OnboardingStep {
       }
 
       OBDal.getInstance().flush();
-    } catch (OnboardingStepException e) {
-      throw e;
     } catch (Exception e) {
       throw new OnboardingStepException(e.getMessage(), e);
     }

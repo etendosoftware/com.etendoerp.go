@@ -105,8 +105,6 @@ public class CreateClientStep implements OnboardingStep {
       } finally {
         OBContext.restorePreviousMode();
       }
-    } catch (OnboardingStepException e) {
-      throw e;
     } catch (Exception e) {
       throw new OnboardingStepException(e.getMessage(), e);
     }

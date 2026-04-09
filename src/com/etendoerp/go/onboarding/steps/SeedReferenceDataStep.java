@@ -152,8 +152,6 @@ public class SeedReferenceDataStep implements OnboardingStep {
       OBDal.getInstance().save(org);
 
       OBDal.getInstance().flush();
-    } catch (OnboardingStepException e) {
-      throw e;
     } catch (Exception e) {
       throw new OnboardingStepException(e.getMessage(), e);
     }

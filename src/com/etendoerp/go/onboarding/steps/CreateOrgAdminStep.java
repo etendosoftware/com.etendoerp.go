@@ -64,8 +64,6 @@ public class CreateOrgAdminStep implements OnboardingStep {
       OBDal.getInstance().save(user);
 
       ctx.setOrgAdminUserId(user.getId());
-    } catch (OnboardingStepException e) {
-      throw e;
     } catch (Exception e) {
       throw new OnboardingStepException(e.getMessage(), e);
     }
