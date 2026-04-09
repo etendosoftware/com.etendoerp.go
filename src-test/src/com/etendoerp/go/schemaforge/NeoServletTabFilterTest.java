@@ -43,7 +43,7 @@ public class NeoServletTabFilterTest {
    */
   @Test
   public void testBuildParentWhereClauseWithNullTab() {
-    String result = NeoTypeCoercionHelper.buildParentWhereClause(null, "ABC123");
+    NeoTypeCoercionHelper.ParentFilter result = NeoTypeCoercionHelper.buildParentWhereClause(null, "ABC123");
     assertNull(result, "Should return null when tab is null");
   }
 

@@ -138,22 +138,55 @@ public final class NeoTypeCoercionHelper {
   }
 
   /**
+   * Represents an HQL parent-filter fragment paired with its parameter value.
+   *
+   * <p>The {@link #hql} field uses a {@code :neoParentId} named placeholder to express
+   * parameter-binding intent. Call {@link #resolveForStringApi()} when the consumer only
+   * accepts a flat HQL string (e.g. {@code DefaultJsonDataService.fetch()} via
+   * {@code WHERE_AND_FILTER_CLAUSE}), which does not support named parameters.
+   * That substitution is safe because {@link #paramValue} is pre-validated to contain
+   * only {@code [A-Za-z0-9-]} characters before this object is constructed.</p>
+   */
+  public static class ParentFilter {
+    /** HQL predicate using a {@code :neoParentId} named placeholder. */
+    public final String hql;
+    /** Pre-validated parent ID value — only {@code [A-Za-z0-9-]} characters. */
+    public final String paramValue;
+
+    public ParentFilter(String hql, String paramValue) {
+      this.hql = hql;
+      this.paramValue = paramValue;
+    }
+
+    /**
+     * Resolves the filter fragment to a plain string for APIs that do not support
+     * named HQL parameters (e.g. {@code DefaultJsonDataService WHERE_AND_FILTER_CLAUSE}).
+     * Safe because {@link #paramValue} is pre-validated to {@code [A-Za-z0-9-]} only.
+     *
+     * @return the HQL predicate with the parameter value substituted literally
+     */
+    public String resolveForStringApi() {
+      return hql.replace(":neoParentId", "'" + paramValue + "'");
+    }
+  }
+
+  /**
    * Builds an HQL {@code WHERE} clause fragment that filters child records by their parent
    * reference, resolving the parent-link property from the AD tab hierarchy.
    *
    * @param childTab the child {@link Tab} whose parent relationship should be resolved;
    *                 if {@code null}, returns {@code null}
-   * @param parentId the ID of the parent record to filter by; single quotes are escaped
-   * @return an HQL predicate string such as {@code "e.salesOrder.id='123'"} or
-   *         {@code "e.salesOrder='123'"} depending on whether the property is an association,
-   *         or {@code null} if the parent tab or parent property cannot be resolved
+   * @param parentId the ID of the parent record to filter by; must match {@code [A-Za-z0-9-]}
+   * @return a {@link ParentFilter} containing the HQL fragment with a {@code :neoParentId}
+   *         placeholder and the validated parameter value, or {@code null} if the parent
+   *         tab or parent property cannot be resolved
    */
-  public static String buildParentWhereClause(Tab childTab, String parentId) {
+  public static ParentFilter buildParentWhereClause(Tab childTab, String parentId) {
     if (childTab == null) {
       return null;
     }
-    // Validate parentId to prevent HQL injection via concatenation.
-    // Etendo IDs are 32-char hex, UUID with hyphens, or legacy numeric strings.
+    // Validate parentId to prevent HQL injection. Etendo IDs are 32-char hex,
+    // UUID with hyphens, or legacy numeric strings — all matched by [A-Za-z0-9-].
     if (parentId != null && !parentId.matches("[A-Za-z0-9\\-]+")) {
       log.warn("Rejected parentId with unexpected format: '{}'", parentId);
       return null;
@@ -170,11 +203,10 @@ public final class NeoTypeCoercionHelper {
       Entity childEntity = ModelProvider.getInstance()
           .getEntityByTableId(childTab.getTable().getId());
       Property prop = childEntity.getProperty(parentProperty);
-      if (prop != null && !prop.isPrimitive()) {
-        return "e." + parentProperty + ".id='" + parentId.replace("'", "''") + "'";
-      } else {
-        return "e." + parentProperty + "='" + parentId.replace("'", "''") + "'";
-      }
+      String hql = (prop != null && !prop.isPrimitive())
+          ? "e." + parentProperty + ".id = :neoParentId"
+          : "e." + parentProperty + " = :neoParentId";
+      return new ParentFilter(hql, parentId);
     } catch (Exception e) {
       log.error("Error building parent where clause for tab '{}': {}",
           childTab.getName(), e.getMessage(), e);

@@ -868,12 +868,15 @@ public class NeoServlet extends HttpBaseServlet {
         whereClause.append("(").append(tabWhere).append(")");
       }
       if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-        String parentFilter = NeoTypeCoercionHelper.buildParentWhereClause(adTab, parentId);
-        if (StringUtils.isNotBlank(parentFilter)) {
+        NeoTypeCoercionHelper.ParentFilter parentFilter =
+            NeoTypeCoercionHelper.buildParentWhereClause(adTab, parentId);
+        if (parentFilter != null) {
           if (whereClause.length() > 0) {
             whereClause.append(" and ");
           }
-          whereClause.append("(").append(parentFilter).append(")");
+          // resolveForStringApi() is used here because DefaultJsonDataService only
+          // accepts a flat HQL string — named parameters are not supported by that API.
+          whereClause.append("(").append(parentFilter.resolveForStringApi()).append(")");
         }
       }
 

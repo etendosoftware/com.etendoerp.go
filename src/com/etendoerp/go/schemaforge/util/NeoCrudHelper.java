@@ -144,12 +144,13 @@ public class NeoCrudHelper {
       whereClause.append("(").append(tabWhere).append(")");
     }
     if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-      String parentFilter = NeoTypeCoercionHelper.buildParentWhereClause(adTab, parentId);
-      if (StringUtils.isNotBlank(parentFilter)) {
+      NeoTypeCoercionHelper.ParentFilter parentFilter =
+          NeoTypeCoercionHelper.buildParentWhereClause(adTab, parentId);
+      if (parentFilter != null) {
         if (whereClause.length() > 0) {
           whereClause.append(" and ");
         }
-        whereClause.append("(").append(parentFilter).append(")");
+        whereClause.append("(").append(parentFilter.resolveForStringApi()).append(")");
       }
     }
 
