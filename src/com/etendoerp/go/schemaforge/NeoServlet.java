@@ -24,11 +24,11 @@ import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.ad.access.ProcessAccess;
-import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
+
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -765,32 +765,14 @@ public class NeoServlet extends HttpBaseServlet {
    * Check if the current role has access to the given window.
    */
   private boolean hasWindowAccess(String windowId) {
-    String roleId = OBContext.getOBContext().getRole().getId();
-    if ("0".equals(roleId)) {
-      return true;
-    }
-    OBCriteria<WindowAccess> criteria = OBDal.getInstance().createCriteria(WindowAccess.class);
-    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_WINDOW + ".id", windowId));
-    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ROLE + ".id", roleId));
-    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ACTIVE, true));
-    criteria.setMaxResults(1);
-    return !criteria.list().isEmpty();
+    return NeoAccessHelper.hasWindowAccess(windowId);
   }
 
   /**
    * Check if the current role has access to the given process.
    */
   private boolean hasProcessAccess(String processId) {
-    String roleId = OBContext.getOBContext().getRole().getId();
-    if ("0".equals(roleId)) {
-      return true;
-    }
-    OBCriteria<ProcessAccess> criteria = OBDal.getInstance().createCriteria(ProcessAccess.class);
-    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_PROCESS + ".id", processId));
-    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ROLE + ".id", roleId));
-    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ACTIVE, true));
-    criteria.setMaxResults(1);
-    return !criteria.list().isEmpty();
+    return NeoAccessHelper.hasProcessAccess(processId);
   }
 
   /**

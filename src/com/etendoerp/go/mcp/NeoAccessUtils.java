@@ -17,17 +17,13 @@
 
 package com.etendoerp.go.mcp;
 
-import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
-import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.ad.access.ProcessAccess;
-import org.openbravo.model.ad.access.WindowAccess;
-
-import org.hibernate.criterion.Restrictions;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
- * RBAC access check utilities, extracted from NeoServlet for reuse across
- * the NEO Headless servlet and the MCP tool registry.
+ * RBAC access check utilities for the MCP tool registry.
+ * <p>
+ * Delegates to {@link NeoAccessHelper} — the canonical implementation shared
+ * across the NEO Headless servlet and MCP layers.
  * <p>
  * Checks are based on AD_Window_Access / AD_Process_Access records for the
  * current role. The System Administrator role (id "0") bypasses all checks.
@@ -45,16 +41,7 @@ public final class NeoAccessUtils {
    * @return true if the role has an active WindowAccess record, or is System Admin
    */
   public static boolean hasWindowAccess(String windowId) {
-    String roleId = OBContext.getOBContext().getRole().getId();
-    if ("0".equals(roleId)) {
-      return true;
-    }
-    OBCriteria<WindowAccess> criteria = OBDal.getInstance().createCriteria(WindowAccess.class);
-    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_WINDOW + ".id", windowId));
-    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ROLE + ".id", roleId));
-    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ACTIVE, true));
-    criteria.setMaxResults(1);
-    return !criteria.list().isEmpty();
+    return NeoAccessHelper.hasWindowAccess(windowId);
   }
 
   /**
@@ -64,15 +51,6 @@ public final class NeoAccessUtils {
    * @return true if the role has an active ProcessAccess record, or is System Admin
    */
   public static boolean hasProcessAccess(String processId) {
-    String roleId = OBContext.getOBContext().getRole().getId();
-    if ("0".equals(roleId)) {
-      return true;
-    }
-    OBCriteria<ProcessAccess> criteria = OBDal.getInstance().createCriteria(ProcessAccess.class);
-    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_PROCESS + ".id", processId));
-    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ROLE + ".id", roleId));
-    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ACTIVE, true));
-    criteria.setMaxResults(1);
-    return !criteria.list().isEmpty();
+    return NeoAccessHelper.hasProcessAccess(processId);
   }
 }

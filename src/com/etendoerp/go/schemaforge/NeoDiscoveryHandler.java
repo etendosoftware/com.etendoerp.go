@@ -17,11 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -31,20 +27,17 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.ad.access.ProcessAccess;
-import org.openbravo.model.ad.access.WindowAccess;
-import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.module.Module;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
-import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoDiscoveryHelper;
 
 /**
  * Handles discovery and spec-describe endpoints for NEO Headless.
@@ -55,18 +48,6 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 class NeoDiscoveryHandler {
 
   private static final Logger log = LogManager.getLogger(NeoDiscoveryHandler.class);
-
-  private static final String TYPE_STRING = "string";
-
-  private static final Set<String> SELECTOR_REFS = new HashSet<>();
-  static {
-    SELECTOR_REFS.add(NeoSelectorService.REF_TABLEDIR);
-    SELECTOR_REFS.add(NeoSelectorService.REF_TABLE);
-    SELECTOR_REFS.add(NeoSelectorService.REF_SEARCH);
-    SELECTOR_REFS.add(NeoSelectorService.REF_OBUISEL);
-  }
-
-  private static final Pattern VALIDATION_PARAM_PATTERN = Pattern.compile("@(\\w+)@");
 
   private final NeoServlet servlet;
 
@@ -108,11 +89,11 @@ class NeoDiscoveryHandler {
     String specType = spec.getSpecType();
     if ("W".equals(specType)) {
       Window specWindow = spec.getADWindow();
-      return specWindow == null || hasWindowAccess(specWindow.getId());
+      return specWindow == null || NeoAccessHelper.hasWindowAccess(specWindow.getId());
     }
     if ("P".equals(specType) || "R".equals(specType)) {
       Process adProcess = spec.getProcess();
-      return adProcess == null || hasProcessAccess(adProcess.getId());
+      return adProcess == null || NeoAccessHelper.hasProcessAccess(adProcess.getId());
     }
     return true;
   }
@@ -204,184 +185,20 @@ class NeoDiscoveryHandler {
    * Build a summary of entities for the discovery endpoint (name + methods only).
    */
   private JSONArray buildEntitySummaryArray(String specId) throws Exception {
-    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-    criteria.addOrder(Order.asc(SFEntity.PROPERTY_SEQNO));
-    List<SFEntity> entities = criteria.list();
-
-    JSONArray arr = new JSONArray();
-    for (SFEntity entity : entities) {
-      JSONObject obj = new JSONObject();
-      obj.put("name", entity.getName());
-      obj.put("methods", buildMethodsArray(entity));
-      arr.put(obj);
-    }
-    return arr;
+    return NeoDiscoveryHelper.buildEntitySummaryArray(specId);
   }
 
   /**
    * Build a JSON array of enabled HTTP methods for an entity.
    */
   private JSONArray buildMethodsArray(SFEntity entity) {
-    JSONArray methods = new JSONArray();
-    if (Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID())) {
-      methods.put("GET");
-    }
-    if (Boolean.TRUE.equals(entity.isPost())) {
-      methods.put("POST");
-    }
-    if (Boolean.TRUE.equals(entity.isPut())) {
-      methods.put("PUT");
-    }
-    if (Boolean.TRUE.equals(entity.isPatch())) {
-      methods.put("PATCH");
-    }
-    if (Boolean.TRUE.equals(entity.isDelete())) {
-      methods.put("DELETE");
-    }
-    return methods;
+    return NeoDiscoveryHelper.buildMethodsArray(entity);
   }
 
   /**
    * Build the fields array for a given entity, resolving AD_Column metadata.
    */
   private JSONArray buildFieldsArray(String entityId) throws Exception {
-    OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
-    criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
-    criteria.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
-    criteria.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
-    criteria.addOrder(Order.asc(SFField.PROPERTY_SEQNO));
-    List<SFField> fields = criteria.list();
-
-    JSONArray arr = new JSONArray();
-    for (SFField field : fields) {
-      Column column = field.getADColumn();
-      if (column == null) {
-        continue;
-      }
-
-      String refId = column.getReference() != null
-          ? (String) column.getReference().getId() : null;
-
-      JSONObject fieldObj = new JSONObject();
-      fieldObj.put("id", field.getId());
-      fieldObj.put("columnId", column.getId());
-      fieldObj.put("name", column.getDBColumnName());
-      fieldObj.put("label", column.getName());
-      fieldObj.put("columnType", mapReferenceToType(refId));
-      fieldObj.put("readOnly", Boolean.TRUE.equals(field.isReadOnly()));
-      fieldObj.put("included", Boolean.TRUE.equals(field.isIncluded()));
-      fieldObj.put("required", column.isMandatory());
-
-      boolean hasSelector = isSelectorReference(refId);
-      fieldObj.put("hasSelector", hasSelector);
-      if (hasSelector) {
-        fieldObj.put("selectorType", mapSelectorType(refId));
-        JSONArray selectorParams = extractValidationParams(column);
-        if (selectorParams.length() > 0) {
-          fieldObj.put("selectorParams", selectorParams);
-        }
-      }
-
-      arr.put(fieldObj);
-    }
-    return arr;
-  }
-
-  private boolean isSelectorReference(String refId) {
-    return refId != null && SELECTOR_REFS.contains(refId);
-  }
-
-  /**
-   * Extract parameter names from a column's validation rule.
-   * Validation rules use @ColumnName@ as placeholders for dependent fields.
-   */
-  private JSONArray extractValidationParams(Column column) {
-    JSONArray params = new JSONArray();
-    org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
-    if (valRule == null || valRule.getValidationCode() == null) {
-      return params;
-    }
-    Set<String> seen = new HashSet<>();
-    Matcher m = VALIDATION_PARAM_PATTERN.matcher(valRule.getValidationCode());
-    while (m.find()) {
-      String param = m.group(1);
-      if (!seen.contains(param)) {
-        params.put(param);
-        seen.add(param);
-      }
-    }
-    return params;
-  }
-
-  private String mapSelectorType(String refId) {
-    if (refId == null) return null;
-    switch (refId) {
-      case "19": return "TableDir";
-      case "18": return "Table";
-      case "30": return "Search";
-      case NeoSelectorService.REF_OBUISEL: return "OBUISEL";
-      default: return null;
-    }
-  }
-
-  /**
-   * Map AD_Reference_ID to a simple type name for the discovery API.
-   */
-  private String mapReferenceToType(String refId) {
-    if (refId == null) return TYPE_STRING;
-    switch (refId) {
-      case "10": case "14": case "34": // String, Text, Memo
-        return TYPE_STRING;
-      case "11": case "22": case "29": case "12": // Integer, Number, Quantity, Amount
-      case "800008": case "800019": // GeneralQuantity, Price
-        return "number";
-      case "20": // YesNo
-        return "boolean";
-      case "15": // Date
-        return "date";
-      case "16": // DateTime
-        return "datetime";
-      case "24": // Time
-        return "time";
-      case "28": // Button
-        return "button";
-      case "17": // List
-        return "list";
-      case "13": // ID
-        return "id";
-      default:
-        return TYPE_STRING;
-    }
-  }
-
-  // ── Access checks (duplicated here so handlers are self-contained) ────
-
-  private boolean hasWindowAccess(String windowId) {
-    String roleId = OBContext.getOBContext().getRole().getId();
-    if ("0".equals(roleId)) {
-      return true;
-    }
-    OBCriteria<WindowAccess> criteria = OBDal.getInstance().createCriteria(WindowAccess.class);
-    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_WINDOW + ".id", windowId));
-    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ROLE + ".id", roleId));
-    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ACTIVE, true));
-    criteria.setMaxResults(1);
-    return !criteria.list().isEmpty();
-  }
-
-  private boolean hasProcessAccess(String processId) {
-    String roleId = OBContext.getOBContext().getRole().getId();
-    if ("0".equals(roleId)) {
-      return true;
-    }
-    OBCriteria<ProcessAccess> criteria = OBDal.getInstance().createCriteria(ProcessAccess.class);
-    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_PROCESS + ".id", processId));
-    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ROLE + ".id", roleId));
-    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ACTIVE, true));
-    criteria.setMaxResults(1);
-    return !criteria.list().isEmpty();
+    return NeoDiscoveryHelper.buildFieldsArray(entityId);
   }
 }

@@ -53,7 +53,6 @@ import com.etendoerp.go.schemaforge.NeoReportService;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
-import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
@@ -569,33 +568,11 @@ public class McpToolRouter {
   }
 
   static String mapColumnTypeStatic(String refId) {
-    if (refId == null) return McpConstants.TYPE_STRING;
-    switch (refId) {
-      case "10": case "14": case "34": return McpConstants.TYPE_STRING;
-      case "11": case "22": case "29": case "12":
-      case "800008": case "800019": return "number";
-      case "20": return "boolean";
-      case "15": return "date";
-      case "16": return "datetime";
-      case "24": return "time";
-      case "28": return "button";
-      case "17": return "list";
-      case "13": return "id";
-      case "19": case "18": case "30": case NeoSelectorService.REF_OBUISEL:
-        return "foreignKey";
-      default: return McpConstants.TYPE_STRING;
-    }
+    return McpToolRouterSupport.mapColumnType(refId);
   }
 
   static String mapSelectorTypeStatic(String refId) {
-    if (refId == null) return null;
-    switch (refId) {
-      case "19": return "TableDir";
-      case "18": return "Table";
-      case "30": return "Search";
-      case NeoSelectorService.REF_OBUISEL: return "OBUISEL";
-      default: return null;
-    }
+    return McpToolRouterSupport.mapSelectorType(refId);
   }
 
   // ── Process execution ─────────────────────────────────────────────────
@@ -1003,44 +980,9 @@ public class McpToolRouter {
 
   /**
    * Build entity summary array for a spec (used by neo_discover).
-   * Same logic as NeoServlet.buildEntitySummaryArray().
    */
   private JSONArray buildEntitySummaryArray(String specId) throws Exception {
-    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-    criteria.addOrder(Order.asc(SFEntity.PROPERTY_SEQNO));
-    List<SFEntity> entities = criteria.list();
-
-    JSONArray arr = new JSONArray();
-    for (SFEntity entity : entities) {
-      JSONObject obj = new JSONObject();
-      obj.put("name", entity.getName());
-      obj.put("methods", buildMethodsArray(entity));
-      arr.put(obj);
-    }
-    return arr;
-  }
-
-  private JSONArray buildMethodsArray(SFEntity entity) {
-    JSONArray methods = new JSONArray();
-    if (Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID())) {
-      methods.put("GET");
-    }
-    if (Boolean.TRUE.equals(entity.isPost())) {
-      methods.put("POST");
-    }
-    if (Boolean.TRUE.equals(entity.isPut())) {
-      methods.put("PUT");
-    }
-    if (Boolean.TRUE.equals(entity.isPatch())) {
-      methods.put("PATCH");
-    }
-    if (Boolean.TRUE.equals(entity.isDelete())) {
-      methods.put("DELETE");
-    }
-    return methods;
+    return McpToolRouterSupport.buildEntitySummaryArray(specId);
   }
 
   // ── MCP content formatting ────────────────────────────────────────────
