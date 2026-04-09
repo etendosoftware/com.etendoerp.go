@@ -104,6 +104,16 @@ public class NeoDefaultsService {
   /**
    * Resolve default values for all included fields of an entity.
    *
+   * <p>Uses a two-pass approach to mirror Etendo Classic's FormInitializationComponent behavior:
+   * <ol>
+   *   <li>Pass 1 — all non-sequence fields (including doctype columns like C_DocTypeTarget_ID)
+   *   <li>Pass 2 — sequence/DocumentNo fields, using the doctypes resolved in pass 1
+   * </ol>
+   * Classic processes C_DocTypeTarget_ID before DocumentNo and writes the result back to
+   * RequestContext so that UIDefinition.getFieldProperties can read the correct doctype when
+   * calling Utility.getDocumentNo. We reproduce the same ordering guarantee here by deferring
+   * sequence fields to a second pass after all doctype defaults are known.
+   *
    * @param ctx      the NeoContext with spec/entity/tab info
    * @param parentId optional parent record ID for child entities
    * @return NeoResponse with defaults map and metadata
@@ -134,15 +144,22 @@ public class NeoDefaultsService {
         // Resolve the DAL entity once for property name lookup (same names as GET responses)
         Entity dalEntity = resolveDalEntity(ctx.getSfEntity());
 
+        // --- Pass 1: non-sequence fields (doctype columns included) ---
+        // Sequence fields are deferred so that when we compute DocumentNo in pass 2 we can
+        // pass the already-resolved C_DocTypeTarget_ID / C_DocType_ID values to
+        // Utility.getDocumentNo — exactly as FormInitializationComponent does.
+        List<SFField> sequenceSFFields = new ArrayList<>();
         for (SFField sfField : fields) {
           Column adColumn = sfField.getADColumn();
           if (adColumn == null) {
             continue;
           }
+          if (isSequenceField(adColumn)) {
+            sequenceSFFields.add(sfField);  // defer to pass 2
+            continue;
+          }
 
           String dbColumnName = adColumn.getDBColumnName();
-          // Use OBDal property name (e.g., "orderDate" for DateOrdered, "businessPartner"
-          // for C_BPartner_ID) — matches GET response keys and frontend field keys
           String propertyName = resolvePropertyName(dalEntity, dbColumnName);
 
           try {
@@ -152,15 +169,37 @@ public class NeoDefaultsService {
               defaults.put(propertyName, resolvedValue);
               // For FK fields, also inject $_identifier so selectors display the label, not the ID
               tryInjectIdentifier(defaults, dalEntity, propertyName, resolvedValue);
-
-              // Track sequence fields (wrapped in angle brackets by Utility.getDocumentNo)
-              if (isSequenceField(adColumn) && resolvedValue instanceof String
-                  && ((String) resolvedValue).startsWith("<")) {
-                sequenceFields.put(propertyName);
-              }
             }
           } catch (Exception e) {
             log.debug("Could not resolve default for column {}: {}",
+                dbColumnName, e.getMessage());
+            unresolvedFields.put(propertyName);
+          }
+        }
+
+        // --- Pass 2: sequence/DocumentNo fields with doctype from pass 1 ---
+        // Reads C_DocTypeTarget_ID and C_DocType_ID from the defaults already built,
+        // then calls Utility.getDocumentNo(conn, vars, windowId, tableName,
+        //   docTypeTargetId, docTypeId, false, false)
+        // — the same call that UIDefinition.getFieldProperties line 210 makes.
+        String[] docTypeIds = resolveDocTypeIdsFromDefaults(defaults, dalEntity);
+        String docTypeTargetId = docTypeIds[0];
+        String docTypeId = docTypeIds[1];
+
+        for (SFField sfField : sequenceSFFields) {
+          Column adColumn = sfField.getADColumn();
+          String dbColumnName = adColumn.getDBColumnName();
+          String propertyName = resolvePropertyName(dalEntity, dbColumnName);
+
+          try {
+            String preview = resolveSequencePreviewWithDocType(
+                adColumn, vars, conn, windowId, docTypeTargetId, docTypeId);
+            if (preview != null) {
+              defaults.put(propertyName, preview);
+              sequenceFields.put(propertyName);
+            }
+          } catch (Exception e) {
+            log.debug("Could not generate sequence preview for {}: {}",
                 dbColumnName, e.getMessage());
             unresolvedFields.put(propertyName);
           }
@@ -296,9 +335,29 @@ public class NeoDefaultsService {
 
   /**
    * Resolve default from preferences or doctype when no column-level default expression exists.
+   *
+   * <p>For doctype columns (*DOCTYPE*_ID), Utility.getDefault is intentionally skipped and
+   * replaced with Utility.getPreference. LoginUtils.fillSessionArguments stores an arbitrary
+   * C_DocType record in the session variable {@code #C_DocTypeTarget_ID} (the first isDefault='Y'
+   * row from DefaultValuesData, with no stable ORDER BY). Utility.getDefault reads that session
+   * variable and returns a wrong doctype (e.g. "Inventory Move" instead of "AR Invoice").
+   * Utility.getPreference only checks real AD_Preference records (P|window|col and P|col keys),
+   * which are window-scoped and therefore correct. After the preference check, the context-aware
+   * resolveDefaultDocTypeId is used as fallback.</p>
    */
   private static Object resolveFromPrefsOrDocType(Column adColumn, VariablesSecureApp vars,
       DalConnectionProvider conn, String windowId, String dbColumnName, NeoContext ctx) {
+    String colUpper = dbColumnName.toUpperCase();
+    if (colUpper.endsWith("_ID") && colUpper.contains("DOCTYPE")) {
+      // For doctype columns skip Utility.getDefault entirely and resolve from DB context.
+      // Utility.getDefault reads #C_DocTypeTarget_ID (set by LoginUtils to an arbitrary default
+      // from DefaultValuesData — e.g. "Inventory Move") and Utility.getPreference may return
+      // stale AD_Preference values pointing to deleted doctypes.
+      // Classic validates preferences against the filtered combo list; we cannot replicate that
+      // here, so we go straight to resolveDefaultDocTypeId which queries c_doctype live with the
+      // correct docBaseType, isSOTrx and org filters.
+      return resolveDefaultDocTypeId(adColumn, ctx);
+    }
     String fromPrefs = Utility.getDefault(conn, vars, dbColumnName, "", windowId, "");
     if (fromPrefs != null && !fromPrefs.isEmpty()) {
       return fromPrefs;
@@ -357,15 +416,74 @@ public class NeoDefaultsService {
   }
 
   /**
+   * Generate a sequence preview using the doctype IDs already resolved in pass 1.
+   *
+   * <p>Mirrors UIDefinition.getFieldProperties line 210 exactly:
+   * {@code Utility.getDocumentNo(conn, vars, windowId, tableName, docTypeTarget, docType, false, false)}
+   * Classic reads docTypeTarget from RequestContext (set when C_DocTypeTarget_ID was processed
+   * before DocumentNo). We pass those values explicitly after resolving them in pass 1.
+   */
+  private static String resolveSequencePreviewWithDocType(Column adColumn,
+      VariablesSecureApp vars, DalConnectionProvider conn, String windowId,
+      String docTypeTargetId, String docTypeId) {
+    try {
+      String tableName = adColumn.getTable().getDBTableName();
+      String docNo = Utility.getDocumentNo(conn, vars, windowId, tableName,
+          docTypeTargetId, docTypeId, false, false);
+      if (docNo != null && !docNo.isEmpty()) {
+        return "<" + docNo + ">";
+      }
+      return null;
+    } catch (Exception e) {
+      log.debug("Could not generate sequence preview for {}: {}",
+          adColumn.getDBColumnName(), e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Extract resolved C_DocTypeTarget_ID and C_DocType_ID values from the defaults built in pass 1.
+   * Returns a two-element array: [docTypeTargetId, docTypeId], either may be empty string.
+   */
+  private static String[] resolveDocTypeIdsFromDefaults(JSONObject defaults, Entity dalEntity) {
+    String docTypeTargetId = "";
+    String docTypeId = "";
+    if (dalEntity != null) {
+      try {
+        Property p = dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID");
+        if (p != null) {
+          docTypeTargetId = defaults.optString(p.getName(), "");
+        }
+      } catch (Exception ignored) {
+      }
+      try {
+        Property p = dalEntity.getPropertyByColumnName("C_DocType_ID");
+        if (p != null) {
+          String candidate = defaults.optString(p.getName(), "");
+          // Skip the legacy "0" placeholder — it is not a real doctype ID
+          if (!"0".equals(candidate)) {
+            docTypeId = candidate;
+          }
+        }
+      } catch (Exception ignored) {
+      }
+    }
+    return new String[]{ docTypeTargetId, docTypeId };
+  }
+
+  /**
    * Generate a preview of the next sequence value without consuming it.
    * Uses Utility.getDocumentNo with updateNext=false for a real preview.
    * Returns the value wrapped in angle brackets (e.g., "<1000234>").
+   *
+   * @deprecated Use {@link #resolveSequencePreviewWithDocType} from resolveDefaults pass 2.
+   *   This method passes empty doctype strings and is only kept for callers outside the
+   *   two-pass defaults flow (e.g., injectMandatoryDefaults).
    */
   private static String resolveSequencePreview(Column adColumn, VariablesSecureApp vars,
       DalConnectionProvider conn, String windowId, NeoContext ctx) {
     try {
       String tableName = adColumn.getTable().getDBTableName();
-      // At init time we don't know the document type yet, so pass empty strings
       String docNo = Utility.getDocumentNo(conn, vars, windowId, tableName, "", "", false, false);
       if (docNo != null && !docNo.isEmpty()) {
         return "<" + docNo + ">";

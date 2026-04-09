@@ -29,18 +29,18 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 /**
- * NeoHandler that registers a payment against a Sales Invoice installment.
+ * NeoHandler that registers a payment against a Purchase Invoice installment.
  * Invoked as:
- *   POST /sws/neo/sales-invoice/header/{invoiceId}/action/registerPayment
- *   POST /sws/neo/sales-invoice/header/{invoiceId}/action/invoicePayments
- *   POST /sws/neo/sales-invoice/header/{invoiceId}/action/invoiceAccounts
+ *   POST /sws/neo/purchase-invoice/header/{invoiceId}/action/registerPayment
+ *   POST /sws/neo/purchase-invoice/header/{invoiceId}/action/invoicePayments
+ *   POST /sws/neo/purchase-invoice/header/{invoiceId}/action/invoiceAccounts
  *
  * All logic is delegated to {@link PaymentRegistrationService}.
  */
-@Named("registerPaymentHandler")
-public class RegisterPaymentHandler implements NeoHandler {
+@Named("registerPaymentOutHandler")
+public class RegisterPaymentOutHandler implements NeoHandler {
 
-  private static final Logger log = LogManager.getLogger(RegisterPaymentHandler.class);
+  private static final Logger log = LogManager.getLogger(RegisterPaymentOutHandler.class);
   private static final String ACTION_NAME = "registerPayment";
   private static final String LIST_ACTION = "invoicePayments";
   private static final String ACCOUNTS_ACTION = "invoiceAccounts";
@@ -57,7 +57,7 @@ public class RegisterPaymentHandler implements NeoHandler {
     }
 
     if (ACCOUNTS_ACTION.equals(fieldName)) {
-      return PaymentRegistrationService.handleListAccounts(context, true);
+      return PaymentRegistrationService.handleListAccounts(context, false);
     }
 
     if (!ACTION_NAME.equals(fieldName) || !"POST".equals(context.getHttpMethod())) {
@@ -89,7 +89,7 @@ public class RegisterPaymentHandler implements NeoHandler {
       OBContext.setAdminMode(true);
       try {
         return PaymentRegistrationService.doRegisterPayment(
-            invoiceId, scheduleId, strAmount, strDate, accountId, true);
+            invoiceId, scheduleId, strAmount, strDate, accountId, false);
       } finally {
         OBContext.restorePreviousMode();
       }
