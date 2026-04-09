@@ -27,7 +27,9 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
@@ -51,56 +53,27 @@ public class NeoCrudHelper {
   private static final Logger log = LogManager.getLogger(NeoCrudHelper.class);
   private static final String PARENT_ID_KEY = "parentId";
   private static final String NEO_ERROR_PREFIX = "__NEO_ERROR__:";
+  /**
+   * Internal-only HQL predicate — stripped from HTTP request params in {@link #buildBaseParams}
+   * to prevent HQL injection. Trusted internal code (e.g. hooks) may still inject it into the
+   * params map after {@code buildBaseParams} returns, and the where-clause builder will consume it.
+   */
+  public static final String NEO_WHERE_PARAM = "_neoWhere";
 
   private NeoCrudHelper() {
   }
 
   /**
-   * Handle the default CRUD request lifecycle: build params, dispatch, parse response.
+   * Builds the base parameter map required by {@code DefaultJsonDataService} operations.
+   * Includes entity name, tab ID, window ID, and active-record filter; also copies any
+   * additional query parameters (filters, pagination, sorting) from the request context.
    *
-   * @param context the NEO request context containing entity, method, body and query params
-   * @return a NeoResponse with the result or an error
+   * @param context        the current NEO request context, used to read the record ID and query params
+   * @param adTab          the AD_Tab linked to the entity, used to resolve tab and window IDs
+   * @param dalEntityName  the DAL entity name (e.g. {@code "Order"}) required by DefaultJsonDataService
+   * @return a mutable parameter map ready to be passed to {@code DefaultJsonDataService} fetch/add/update/remove
    */
-  public static NeoResponse handleDefault(NeoContext context) {
-    try {
-      Tab adTab = context.getAdTab();
-      if (adTab == null) {
-        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-            "No AD_Tab linked to entity: " + context.getEntityName());
-      }
-
-      String dalEntityName = adTab.getTable().getName();
-      DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
-      NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(
-          context.getSfEntity(), dalEntityName);
-
-      Map<String, String> params = buildBaseParams(context, adTab, dalEntityName);
-      buildWhereClause(params, adTab, context);
-      applyPaginationDefaults(params);
-
-      String result = dispatchCrudMethod(context, adTab, dalEntityName,
-          jsonService, fieldFilter, params);
-      if (result == null) {
-        return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            "Unsupported method: " + context.getHttpMethod());
-      }
-
-      if (result.startsWith(NEO_ERROR_PREFIX)) {
-        String[] parts = result.substring(NEO_ERROR_PREFIX.length()).split(":", 2);
-        return NeoResponse.error(Integer.parseInt(parts[0]), parts[1]);
-      }
-
-      return buildCrudResponse(result, context, fieldFilter);
-    } catch (Exception e) {
-      log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-    }
-  }
-
-  /**
-   * Build the base parameter map for DefaultJsonDataService operations.
-   */
-  static Map<String, String> buildBaseParams(NeoContext context, Tab adTab, String dalEntityName) {
+  public static Map<String, String> buildBaseParams(NeoContext context, Tab adTab, String dalEntityName) {
     Map<String, String> params = new HashMap<>();
     params.put(JsonConstants.ENTITYNAME, dalEntityName);
     params.put(JsonConstants.TAB_PARAMETER, adTab.getId());
@@ -113,13 +86,15 @@ public class NeoCrudHelper {
 
     if (context.getQueryParams() != null) {
       for (Map.Entry<String, String> entry : context.getQueryParams().entrySet()) {
-        params.put(entry.getKey(), entry.getValue());
+        // _neoWhere is an internal-only predicate injected by hooks/handlers after params are built.
+        // Stripping it here prevents HQL injection via HTTP request parameters.
+        if (!NEO_WHERE_PARAM.equals(entry.getKey())) {
+          params.put(entry.getKey(), entry.getValue());
+        }
       }
     }
     return params;
   }
-
-  private static final String NEO_WHERE_PARAM = "_neoWhere";
 
   /**
    * Build and apply the where clause (tab HQL + parent filter + client base filter) to the params map.
@@ -136,17 +111,18 @@ public class NeoCrudHelper {
     String tabWhere = adTab.getHqlwhereclause();
     if (StringUtils.isNotBlank(tabWhere)) {
       if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = tabWhere.replaceAll("@[A-Za-z_]+@", "'" + parentId.replace("'", "''") + "'");
+        tabWhere = tabWhere.replaceAll("@[A-Za-z_.]+@", "'" + parentId.replace("'", "''") + "'");
       }
       whereClause.append("(").append(tabWhere).append(")");
     }
     if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-      String parentFilter = NeoTypeCoercionHelper.buildParentWhereClause(adTab, parentId);
-      if (StringUtils.isNotBlank(parentFilter)) {
+      NeoTypeCoercionHelper.ParentFilter parentFilter =
+          NeoTypeCoercionHelper.buildParentWhereClause(adTab, parentId);
+      if (parentFilter != null) {
         if (whereClause.length() > 0) {
           whereClause.append(" and ");
         }
-        whereClause.append("(").append(parentFilter).append(")");
+        whereClause.append("(").append(parentFilter.resolveForStringApi()).append(")");
       }
     }
 
@@ -225,9 +201,24 @@ public class NeoCrudHelper {
   }
 
   /**
-   * Resolve the parentId from the request body and map it to the actual FK property name.
+   * Resolves the {@code parentId} field from the request body and maps it to the actual
+   * DAL FK property name of the child entity (e.g. {@code parentId} → {@code salesOrder}
+   * for {@code C_OrderLine}).
+   *
+   * <p>The generic {@code "parentId"} key is removed from {@code requestBody} and replaced
+   * with the property name resolved by scanning the tab's link-to-parent column. If the tab
+   * is a header (level 0) or no matching column is found, only the removal is performed.
+   *
+   * @param requestBody the mutable request JSON; may be {@code null} (returns {@code null})
+   * @param adTab       the AD_Tab of the child entity; must not be {@code null}
+   * @return the raw parentId string extracted from the body, or {@code null} if absent
+   * @throws OBException  if {@code adTab} is {@code null}
+   * @throws JSONException if the JSON body cannot be read or written
    */
-  static String resolveAndMapParentId(JSONObject requestBody, Tab adTab) throws Exception {
+  public static String resolveAndMapParentId(JSONObject requestBody, Tab adTab) throws JSONException {
+    if (adTab == null) {
+      throw new OBException("resolveAndMapParentId: adTab must not be null");
+    }
     if (requestBody == null || !requestBody.has(PARENT_ID_KEY)) {
       return null;
     }
@@ -248,7 +239,7 @@ public class NeoCrudHelper {
    * Find the link-to-parent column and set the parentId value on its DAL property name.
    */
   static void mapParentIdToFkColumn(JSONObject requestBody, Tab adTab,
-      Entity dalEnt, String parentIdValue) throws Exception {
+      Entity dalEnt, String parentIdValue) throws JSONException {
     for (Column col : adTab.getTable().getADColumnList()) {
       if (!col.isLinkToParentColumn() || !col.isActive()) {
         continue;
@@ -263,7 +254,11 @@ public class NeoCrudHelper {
   }
 
   /**
-   * Execute the callout cascade for POST requests on header tabs (level 0).
+   * Execute the callout cascade for POST requests on header tabs (tabLevel == 0) only.
+   * Line tabs are excluded because the cascade does not have selector auxiliary values
+   * (e.g., product_PSTD, product_PLIST) available at save time, which would cause
+   * price callouts like SL_Order_Product to return 0 and overwrite the user-entered price.
+   * The frontend callout (triggered on field change) handles price auto-fill for lines.
    */
   static void executePostCalloutCascade(JSONObject filteredBody, Tab adTab,
       NeoContext context, String parentIdValue) {
