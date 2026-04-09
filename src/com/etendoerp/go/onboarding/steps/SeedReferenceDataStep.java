@@ -68,89 +68,95 @@ public class SeedReferenceDataStep implements OnboardingStep {
   }
 
   @Override
-  public void execute(OnboardingContext ctx) throws Exception {
-    Client client = OBDal.getInstance().get(Client.class, ctx.getClientId());
-    Organization org = OBDal.getInstance().get(Organization.class, ctx.getOrgId());
-    if (client == null) {
-      throw new OBException("Client not found with ID: " + ctx.getClientId());
+  public void execute(OnboardingContext ctx) throws OnboardingStepException {
+    try {
+      Client client = OBDal.getInstance().get(Client.class, ctx.getClientId());
+      Organization org = OBDal.getInstance().get(Organization.class, ctx.getOrgId());
+      if (client == null) {
+        throw new OBException("Client not found with ID: " + ctx.getClientId());
+      }
+      if (org == null) {
+        throw new OBException("Organization not found with ID: " + ctx.getOrgId());
+      }
+
+      // 1. Resolve shared entities from client 0
+      Currency currency = resolveCurrency(ctx.getCurrencyCode());
+      Country country = resolveCountry(ctx.getCountryCode());
+      UOM uom = resolveUOM();
+
+      // 2. Create locations
+      Location whLocation = createLocation(client, org, country, "WH Street", null);
+      createLocation(client, org, country, "Street 123", "Springfield");
+
+      // 3. Create calendar with years and periods
+      Calendar calendar = createCalendar(client, org);
+      int currentYear = Year.now().getValue();
+      createYearWithPeriods(client, org, calendar, currentYear);
+      createYearWithPeriods(client, org, calendar, currentYear + 1);
+      ctx.setCalendarId(calendar.getId());
+
+      // 4. Create warehouse and link to org
+      Warehouse warehouse = createWarehouse(client, org, whLocation);
+      createOrgWarehouse(client, org, warehouse);
+      ctx.setWarehouseId(warehouse.getId());
+
+      // 5. Create price lists (sales + purchase) with versions
+      PriceList salesPL = createPriceList(client, org, currency, "Default Sales", true);
+      PriceListVersion salesPLV = createPriceListVersion(client, org, salesPL);
+      ctx.setPriceListSalesId(salesPL.getId());
+
+      PriceList purchasePL = createPriceList(client, org, currency, "Default Supplier Price List",
+          false);
+      PriceListVersion purchasePLV = createPriceListVersion(client, org, purchasePL);
+      ctx.setPriceListPurchaseId(purchasePL.getId());
+
+      // 6. Create BP categories
+      createBPCategory(client, org, "CUS_T1", "Customer - Tier 1");
+      createBPCategory(client, org, "SUP", "Supplier");
+
+      // 7. Create product category
+      ProductCategory productCategory = createProductCategory(client, org);
+      ctx.setProductCategoryId(productCategory.getId());
+
+      // 8. Create tax category and tax rate
+      TaxCategory taxCategory = createTaxCategory(client, org);
+      createTaxRate(client, org, taxCategory);
+      ctx.setTaxCategoryId(taxCategory.getId());
+
+      // 9. Create product with prices in both price list versions
+      Product product = createProduct(client, org, uom, productCategory, taxCategory);
+      createProductPrice(client, org, salesPLV, product, new BigDecimal("10"));
+      createProductPrice(client, org, purchasePLV, product, new BigDecimal("7"));
+
+      // 10. Create financial accounts (cash + bank)
+      FIN_FinancialAccount cashAccount = createFinancialAccount(client, org, currency,
+          "Default FinAcc - Cash", "C");
+      FIN_FinancialAccount bankAccount = createFinancialAccount(client, org, currency,
+          "Default FinAcc - Bank", "B");
+      ctx.setFinancialAccountId(cashAccount.getId());
+
+      // 11. Create payment methods
+      FIN_PaymentMethod cashMethod = createPaymentMethod(client, org, "Cash", "DEP", "WIT");
+      FIN_PaymentMethod bankMethod = createPaymentMethod(client, org, "Bank Transfer", null, null);
+
+      // 12. Link payment methods to financial accounts (4 combinations)
+      createFinAccPaymentMethod(client, org, cashAccount, cashMethod, "DEP", "WIT");
+      createFinAccPaymentMethod(client, org, cashAccount, bankMethod, null, null);
+      createFinAccPaymentMethod(client, org, bankAccount, cashMethod, "DEP", "WIT");
+      createFinAccPaymentMethod(client, org, bankAccount, bankMethod, null, null);
+
+      // 13. Update org with calendar, currency, and period control
+      org.setCalendar(calendar);
+      org.setCurrency(currency);
+      org.setAllowPeriodControl(true);
+      OBDal.getInstance().save(org);
+
+      OBDal.getInstance().flush();
+    } catch (OnboardingStepException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new OnboardingStepException(e.getMessage(), e);
     }
-    if (org == null) {
-      throw new OBException("Organization not found with ID: " + ctx.getOrgId());
-    }
-
-    // 1. Resolve shared entities from client 0
-    Currency currency = resolveCurrency(ctx.getCurrencyCode());
-    Country country = resolveCountry(ctx.getCountryCode());
-    UOM uom = resolveUOM();
-
-    // 2. Create locations
-    Location whLocation = createLocation(client, org, country, "WH Street", null);
-    createLocation(client, org, country, "Street 123", "Springfield");
-
-    // 3. Create calendar with years and periods
-    Calendar calendar = createCalendar(client, org);
-    int currentYear = Year.now().getValue();
-    createYearWithPeriods(client, org, calendar, currentYear);
-    createYearWithPeriods(client, org, calendar, currentYear + 1);
-    ctx.setCalendarId(calendar.getId());
-
-    // 4. Create warehouse and link to org
-    Warehouse warehouse = createWarehouse(client, org, whLocation);
-    createOrgWarehouse(client, org, warehouse);
-    ctx.setWarehouseId(warehouse.getId());
-
-    // 5. Create price lists (sales + purchase) with versions
-    PriceList salesPL = createPriceList(client, org, currency, "Default Sales", true);
-    PriceListVersion salesPLV = createPriceListVersion(client, org, salesPL);
-    ctx.setPriceListSalesId(salesPL.getId());
-
-    PriceList purchasePL = createPriceList(client, org, currency, "Default Supplier Price List",
-        false);
-    PriceListVersion purchasePLV = createPriceListVersion(client, org, purchasePL);
-    ctx.setPriceListPurchaseId(purchasePL.getId());
-
-    // 6. Create BP categories
-    createBPCategory(client, org, "CUS_T1", "Customer - Tier 1");
-    createBPCategory(client, org, "SUP", "Supplier");
-
-    // 7. Create product category
-    ProductCategory productCategory = createProductCategory(client, org);
-    ctx.setProductCategoryId(productCategory.getId());
-
-    // 8. Create tax category and tax rate
-    TaxCategory taxCategory = createTaxCategory(client, org);
-    createTaxRate(client, org, taxCategory);
-    ctx.setTaxCategoryId(taxCategory.getId());
-
-    // 9. Create product with prices in both price list versions
-    Product product = createProduct(client, org, uom, productCategory, taxCategory);
-    createProductPrice(client, org, salesPLV, product, new BigDecimal("10"));
-    createProductPrice(client, org, purchasePLV, product, new BigDecimal("7"));
-
-    // 10. Create financial accounts (cash + bank)
-    FIN_FinancialAccount cashAccount = createFinancialAccount(client, org, currency,
-        "Default FinAcc - Cash", "C");
-    FIN_FinancialAccount bankAccount = createFinancialAccount(client, org, currency,
-        "Default FinAcc - Bank", "B");
-    ctx.setFinancialAccountId(cashAccount.getId());
-
-    // 11. Create payment methods
-    FIN_PaymentMethod cashMethod = createPaymentMethod(client, org, "Cash", "DEP", "WIT");
-    FIN_PaymentMethod bankMethod = createPaymentMethod(client, org, "Bank Transfer", null, null);
-
-    // 12. Link payment methods to financial accounts (4 combinations)
-    createFinAccPaymentMethod(client, org, cashAccount, cashMethod, "DEP", "WIT");
-    createFinAccPaymentMethod(client, org, cashAccount, bankMethod, null, null);
-    createFinAccPaymentMethod(client, org, bankAccount, cashMethod, "DEP", "WIT");
-    createFinAccPaymentMethod(client, org, bankAccount, bankMethod, null, null);
-
-    // 13. Update org with calendar, currency, and period control
-    org.setCalendar(calendar);
-    org.setCurrency(currency);
-    org.setAllowPeriodControl(true);
-    OBDal.getInstance().save(org);
-
-    OBDal.getInstance().flush();
   }
 
   private Currency resolveCurrency(String isoCode) throws Exception {

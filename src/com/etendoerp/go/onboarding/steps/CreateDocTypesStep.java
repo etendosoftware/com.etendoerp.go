@@ -72,48 +72,54 @@ public class CreateDocTypesStep implements OnboardingStep {
   }
 
   @Override
-  public void execute(OnboardingContext ctx) throws Exception {
-    Client client = OBDal.getInstance().get(Client.class, ctx.getClientId());
-    Organization org = OBDal.getInstance().get(Organization.class, ctx.getOrgId());
-    if (client == null) {
-      throw new OBException("Client not found with ID: " + ctx.getClientId());
+  public void execute(OnboardingContext ctx) throws OnboardingStepException {
+    try {
+      Client client = OBDal.getInstance().get(Client.class, ctx.getClientId());
+      Organization org = OBDal.getInstance().get(Organization.class, ctx.getOrgId());
+      if (client == null) {
+        throw new OBException("Client not found with ID: " + ctx.getClientId());
+      }
+      if (org == null) {
+        throw new OBException("Organization not found with ID: " + ctx.getOrgId());
+      }
+
+      // 1. Create GL categories
+      GLCategory glNone = createGLCategory(client, org, GL_CATEGORY_NONE, "D");
+      GLCategory glARInvoice = createGLCategory(client, org, GL_CATEGORY_AR_INVOICE, "D");
+      GLCategory glAPInvoice = createGLCategory(client, org, GL_CATEGORY_AP_INVOICE, "D");
+      GLCategory glMaterial = createGLCategory(client, org, "Material Management", "D");
+
+      // 2. Create sequences and document types
+      Sequence seqSO = createSequence(client, org, "Standard Order", "SO/", 50000L);
+      createDocumentType(client, org,
+        new DocumentTypeDefinition("Standard Order", "SOO", true, "SO"), seqSO, glNone);
+
+      Sequence seqPO = createSequence(client, org, "Purchase Order", "PO/", 800000L);
+      createDocumentType(client, org,
+        new DocumentTypeDefinition("Purchase Order", "POO", false, null), seqPO, glNone);
+
+      Sequence seqARI = createSequence(client, org, GL_CATEGORY_AR_INVOICE, "ARI/", 100000L);
+      createDocumentType(client, org,
+        new DocumentTypeDefinition(GL_CATEGORY_AR_INVOICE, "ARI", true, null), seqARI,
+        glARInvoice);
+
+      Sequence seqAPI = createSequence(client, org, GL_CATEGORY_AP_INVOICE, "API/", 200000L);
+      createDocumentType(client, org,
+        new DocumentTypeDefinition(GL_CATEGORY_AP_INVOICE, "API", false, null), seqAPI,
+        glAPInvoice);
+
+      Sequence seqMMS = createSequence(client, org, "MM Shipment", "MMS/", 500000L);
+      createDocumentType(client, org,
+        new DocumentTypeDefinition("MM Shipment", "MMS", true, null), seqMMS, glMaterial);
+
+      Sequence seqMMR = createSequence(client, org, "MM Receipt", "MMR/", 600000L);
+      createDocumentType(client, org,
+        new DocumentTypeDefinition("MM Receipt", "MMR", false, null), seqMMR, glMaterial);
+    } catch (OnboardingStepException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new OnboardingStepException(e.getMessage(), e);
     }
-    if (org == null) {
-      throw new OBException("Organization not found with ID: " + ctx.getOrgId());
-    }
-
-    // 1. Create GL categories
-    GLCategory glNone = createGLCategory(client, org, GL_CATEGORY_NONE, "D");
-    GLCategory glARInvoice = createGLCategory(client, org, GL_CATEGORY_AR_INVOICE, "D");
-    GLCategory glAPInvoice = createGLCategory(client, org, GL_CATEGORY_AP_INVOICE, "D");
-    GLCategory glMaterial = createGLCategory(client, org, "Material Management", "D");
-
-    // 2. Create sequences and document types
-    Sequence seqSO = createSequence(client, org, "Standard Order", "SO/", 50000L);
-    createDocumentType(client, org,
-      new DocumentTypeDefinition("Standard Order", "SOO", true, "SO"), seqSO, glNone);
-
-    Sequence seqPO = createSequence(client, org, "Purchase Order", "PO/", 800000L);
-    createDocumentType(client, org,
-      new DocumentTypeDefinition("Purchase Order", "POO", false, null), seqPO, glNone);
-
-    Sequence seqARI = createSequence(client, org, GL_CATEGORY_AR_INVOICE, "ARI/", 100000L);
-    createDocumentType(client, org,
-      new DocumentTypeDefinition(GL_CATEGORY_AR_INVOICE, "ARI", true, null), seqARI,
-      glARInvoice);
-
-    Sequence seqAPI = createSequence(client, org, GL_CATEGORY_AP_INVOICE, "API/", 200000L);
-    createDocumentType(client, org,
-      new DocumentTypeDefinition(GL_CATEGORY_AP_INVOICE, "API", false, null), seqAPI,
-      glAPInvoice);
-
-    Sequence seqMMS = createSequence(client, org, "MM Shipment", "MMS/", 500000L);
-    createDocumentType(client, org,
-      new DocumentTypeDefinition("MM Shipment", "MMS", true, null), seqMMS, glMaterial);
-
-    Sequence seqMMR = createSequence(client, org, "MM Receipt", "MMR/", 600000L);
-    createDocumentType(client, org,
-      new DocumentTypeDefinition("MM Receipt", "MMR", false, null), seqMMR, glMaterial);
   }
 
   private GLCategory createGLCategory(Client client, Organization org, String name,
