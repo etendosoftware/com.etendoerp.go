@@ -3,15 +3,10 @@ package com.etendoerp.go.schemaforge;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -20,10 +15,8 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.http.entity.ContentType;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.MatchMode;
-import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.base.exception.OBException;
@@ -41,20 +34,12 @@ import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
-import org.openbravo.model.ad.module.Module;
 import org.openbravo.model.ad.ui.Window;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
-import org.openbravo.base.expression.OBScriptEngine;
-import org.openbravo.base.secureApp.VariablesSecureApp;
-import org.openbravo.client.application.DynamicExpressionParser;
-import org.openbravo.erpCommon.utility.Utility;
-import org.openbravo.service.db.DalConnectionProvider;
-import org.openbravo.model.ad.ui.Field;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.data.SFEntity;
-import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -76,29 +61,15 @@ public class NeoServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
 
-  /**
-   * Minimal shim for SmartClient functions used by DynamicExpressionParser output.
-   * DynamicExpressionParser generates JS like:
-   *   OB.Utilities.getValue(currentValues, 'documentStatus') === 'CO'
-   *   OB.Utilities.Date.JSToOB(OB.Utilities.getValue(currentValues,'orderDate'), OB.Format.date)
-   *
-   * These functions don't exist in a bare Rhino context. The shim provides:
-   *   - getValue(obj, key) -> obj[key] (null-safe property accessor)
-   *   - Date.JSToOB(value, format) -> value (pass-through; display logic only compares strings)
-   *   - OB.Format.date -> empty string (unused by pass-through JSToOB)
-   */
-  private static final String OB_UTILITIES_SHIM =
-      "var OB = { Utilities: { "
-      + "getValue: function(obj, key) { return obj != null ? obj[key] : null; }, "
-      + "Date: { JSToOB: function(v) { return v; } } }, "
-      + "Format: { date: '' } };";
-
   private static final String METHOD_DELETE = "DELETE";
   private static final String METHOD_PATCH = "PATCH";
   private static final String PARAM_PARENT_ID = "parentId";
-  private static final String TYPE_STRING = "string";
   private static final String ERR_ENTITY_NOT_FOUND = "Entity not found: ";
   private static final String ERR_NO_LINKED_TAB = "Entity has no linked AD_Tab: ";
+
+  private final NeoDiscoveryHandler discoveryHandler = new NeoDiscoveryHandler(this);
+  private final NeoButtonHandler buttonHandler = new NeoButtonHandler();
+  private final NeoDisplayLogicHandler displayLogicHandler = new NeoDisplayLogicHandler();
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -171,7 +142,7 @@ public class NeoServlet extends HttpBaseServlet {
               "Discovery endpoint only supports GET");
           return;
         }
-        handleDiscovery(response);
+        discoveryHandler.handleDiscovery(response);
         return;
       }
 
@@ -211,7 +182,7 @@ public class NeoServlet extends HttpBaseServlet {
    */
   private void handleProcessSpecRequest(SFSpec spec, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
-    Process adProcess = resolveProcess(spec);
+    Process adProcess = spec.getProcess();
     if (adProcess != null && !hasProcessAccess(adProcess.getId())) {
       sendError(response, HttpServletResponse.SC_FORBIDDEN,
           "Access denied to process for current role");
@@ -240,7 +211,20 @@ public class NeoServlet extends HttpBaseServlet {
    */
   private void handleReportSpecRequest(SFSpec spec, NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws Exception {
-    String reportHandlerQualifier = resolveReportHandlerQualifier(spec);
+    // Check for a custom NeoHandler qualifier on any entity of this report spec
+    String reportHandlerQualifier = null;
+    try {
+      OBCriteria<SFEntity> qCriteria = OBDal.getInstance().createCriteria(SFEntity.class);
+      qCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
+      for (SFEntity qEntity : qCriteria.list()) {
+        if (StringUtils.isNotBlank(qEntity.getJavaQualifier())) {
+          reportHandlerQualifier = qEntity.getJavaQualifier();
+          break;
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Error checking report handler qualifier for spec '{}': {}", spec.getName(), e.getMessage());
+    }
     if (reportHandlerQualifier != null) {
       JSONObject requestBody = null;
       String bodyStr = new String(request.getInputStream().readAllBytes(),
@@ -262,7 +246,7 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
     }
-    Process adReportProcess = resolveProcess(spec);
+    Process adReportProcess = spec.getProcess();
     if (adReportProcess != null && !hasProcessAccess(adReportProcess.getId())) {
       sendError(response, HttpServletResponse.SC_FORBIDDEN,
           "Access denied to report for current role");
@@ -304,7 +288,7 @@ public class NeoServlet extends HttpBaseServlet {
             "Spec describe only supports GET");
         return;
       }
-      handleSpecDescribe(response, spec);
+      discoveryHandler.handleSpecDescribe(response, spec);
       return;
     }
     if (handleWindowSubEndpoint(spec, pathInfo, method, request, response)) {
@@ -340,7 +324,7 @@ public class NeoServlet extends HttpBaseServlet {
       }
       NeoResponse actionResult = dispatchWithHooks(spec, pathInfo.entityName,
           NeoEndpointType.ACTION, pathInfo.actionName, method,
-          () -> handleButtonAction(spec, pathInfo, method, request));
+          () -> buttonHandler.handleButtonAction(spec, pathInfo, method, request));
       writeResponse(response, actionResult);
       return true;
     }
@@ -352,7 +336,7 @@ public class NeoServlet extends HttpBaseServlet {
       }
       NeoResponse evalResult = dispatchWithHooks(spec, pathInfo.entityName,
           NeoEndpointType.EVALUATE_DISPLAY, null, method,
-          () -> handleEvaluateDisplay(spec, pathInfo, request));
+          () -> displayLogicHandler.handleEvaluateDisplay(spec, pathInfo, request));
       writeResponse(response, evalResult);
       return true;
     }
@@ -395,12 +379,18 @@ public class NeoServlet extends HttpBaseServlet {
           "Entity not found in spec: " + pathInfo.entityName);
       return;
     }
-    if (!isMethodEnabled(entity, method)) {
+    boolean methodEnabled = "GET".equals(method)
+        ? (Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID()))
+        : "POST".equals(method) ? Boolean.TRUE.equals(entity.isPost())
+        : "PUT".equals(method) ? Boolean.TRUE.equals(entity.isPut())
+        : METHOD_PATCH.equals(method) ? Boolean.TRUE.equals(entity.isPatch())
+        : METHOD_DELETE.equals(method) && Boolean.TRUE.equals(entity.isDelete());
+    if (!methodEnabled) {
       sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
           method + " not enabled for " + pathInfo.entityName);
       return;
     }
-    Tab adTab = getAdTab(entity);
+    Tab adTab = entity.getADTab();
     Map<String, String> queryParams = extractQueryParams(request);
     NeoContext neoContext = NeoContext.builder()
         .specName(pathInfo.specName)
@@ -557,34 +547,6 @@ public class NeoServlet extends HttpBaseServlet {
     return results.isEmpty() ? null : results.get(0);
   }
 
-  /**
-   * Check if the given HTTP method is enabled on the entity.
-   */
-  private boolean isMethodEnabled(SFEntity entity, String method) {
-    switch (method) {
-      case "GET":
-        return Boolean.TRUE.equals(entity.isGet())
-            || Boolean.TRUE.equals(entity.isGetByID());
-      case "POST":
-        return Boolean.TRUE.equals(entity.isPost());
-      case "PUT":
-        return Boolean.TRUE.equals(entity.isPut());
-      case METHOD_PATCH:
-        return Boolean.TRUE.equals(entity.isPatch());
-      case METHOD_DELETE:
-        return Boolean.TRUE.equals(entity.isDelete());
-      default:
-        return false;
-    }
-  }
-
-  /**
-   * Get the AD_Tab linked to the entity.
-   */
-  private Tab getAdTab(SFEntity entity) {
-    return entity.getADTab();
-  }
-
   private Map<String, String> extractQueryParams(HttpServletRequest request) {
     Map<String, String> params = new HashMap<>();
     Enumeration<String> names = request.getParameterNames();
@@ -677,7 +639,7 @@ public class NeoServlet extends HttpBaseServlet {
     }
 
     // Build hook context
-    Tab adTab = (entity != null) ? getAdTab(entity) : null;
+    Tab adTab = (entity != null) ? entity.getADTab() : null;
     NeoContext hookCtx = NeoContext.builder()
         .specName(spec.getName())
         .entityName(entityName)
@@ -758,9 +720,24 @@ public class NeoServlet extends HttpBaseServlet {
         ? context.getQueryParams().get(PARAM_PARENT_ID)
         : null;
 
-    String whereClause = buildWhereClause(adTab, parentId);
-    if (StringUtils.isNotBlank(whereClause)) {
-      params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause);
+    // Build HQL where clause from tab filter + parent filter
+    StringBuilder where = new StringBuilder();
+    String tabWhere = adTab.getHqlwhereclause();
+    if (StringUtils.isNotBlank(tabWhere)) {
+      if (parentId != null && tabWhere.contains("@")) {
+        tabWhere = tabWhere.replaceAll("@[A-Za-z_]+@", "'" + parentId.replace("'", "''") + "'");
+      }
+      where.append("(").append(tabWhere).append(")");
+    }
+    if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
+      String parentFilter = resolveParentFilter(adTab, parentId);
+      if (StringUtils.isNotBlank(parentFilter)) {
+        if (where.length() > 0) where.append(" and ");
+        where.append("(").append(parentFilter).append(")");
+      }
+    }
+    if (where.length() > 0) {
+      params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, where.toString());
       params.put(JsonConstants.USE_ALIAS, "true");
     }
 
@@ -771,30 +748,6 @@ public class NeoServlet extends HttpBaseServlet {
       params.put(JsonConstants.ENDROW_PARAMETER, "100");
     }
     return params;
-  }
-
-  /**
-   * Builds the HQL where clause combining the tab's own HQL filter and the parent filter.
-   */
-  private String buildWhereClause(Tab adTab, String parentId) {
-    StringBuilder whereClause = new StringBuilder();
-    String tabWhere = adTab.getHqlwhereclause();
-    if (StringUtils.isNotBlank(tabWhere)) {
-      if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = tabWhere.replaceAll("@[A-Za-z_]+@", "'" + parentId.replace("'", "''") + "'");
-      }
-      whereClause.append("(").append(tabWhere).append(")");
-    }
-    if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-      String parentFilter = buildParentWhereClause(adTab, parentId);
-      if (StringUtils.isNotBlank(parentFilter)) {
-        if (whereClause.length() > 0) {
-          whereClause.append(" and ");
-        }
-        whereClause.append("(").append(parentFilter).append(")");
-      }
-    }
-    return whereClause.toString();
   }
 
   /**
@@ -820,7 +773,21 @@ public class NeoServlet extends HttpBaseServlet {
           parentIdValue = requestBody.getString(PARAM_PARENT_ID);
           requestBody.remove(PARAM_PARENT_ID);
           if (adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-            injectParentIdIntoBody(requestBody, adTab, parentIdValue);
+            // Map generic "parentId" to the actual FK property name on the child entity
+            Entity dalEnt = ModelProvider.getInstance()
+                .getEntityByTableName(adTab.getTable().getDBTableName());
+            if (dalEnt != null) {
+              for (Column col : adTab.getTable().getADColumnList()) {
+                if (col.isLinkToParentColumn() && col.isActive()) {
+                  try {
+                    Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
+                    if (prop != null) { requestBody.put(prop.getName(), parentIdValue); break; }
+                  } catch (Exception ex) {
+                    log.debug("Could not resolve parent column for '{}': {}", col.getDBColumnName(), ex.getMessage());
+                  }
+                }
+              }
+            }
           }
         }
         JSONObject filteredBody = fieldFilter.filterWriteRequest(requestBody);
@@ -849,35 +816,22 @@ public class NeoServlet extends HttpBaseServlet {
     }
 
     JSONObject responseJson = new JSONObject(result);
-    NeoResponse serviceError = checkServiceErrorResponse(responseJson);
-    if (serviceError != null) {
-      return serviceError;
+    JSONObject innerResponse = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
+    if (innerResponse != null) {
+      int status = innerResponse.optInt(JsonConstants.RESPONSE_STATUS, 0);
+      if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
+        String errMsg = innerResponse.has(JsonConstants.RESPONSE_ERROR)
+            ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
+                .optString("message", "Write operation failed")
+            : "Write operation failed";
+        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errMsg);
+      }
+      if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
+      }
     }
     fieldFilter.filterGetResponse(responseJson);
     return NeoResponse.ok(responseJson);
-  }
-
-  /**
-   * Checks the JSON response from DefaultJsonDataService for failure or validation error status.
-   * Returns an error NeoResponse if found, null if the response is successful.
-   */
-  private NeoResponse checkServiceErrorResponse(JSONObject responseJson) throws Exception {
-    JSONObject innerResponse = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
-    if (innerResponse == null) {
-      return null;
-    }
-    int status = innerResponse.optInt(JsonConstants.RESPONSE_STATUS, 0);
-    if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
-      String errMsg = innerResponse.has(JsonConstants.RESPONSE_ERROR)
-          ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
-              .optString("message", "Write operation failed")
-          : "Write operation failed";
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errMsg);
-    }
-    if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
-    }
-    return null;
   }
 
   /**
@@ -916,92 +870,24 @@ public class NeoServlet extends HttpBaseServlet {
   }
 
   /**
-   * Resolves the DAL property name for the link-to-parent column and injects
-   * the parentId value into the request body under that property name.
-   * This maps the generic "parentId" field to the actual FK property
-   * (e.g., parentId -> salesOrder for C_OrderLine).
+   * Resolves the HQL filter expression that constrains child tab records by parent record ID.
    */
-  private void injectParentIdIntoBody(JSONObject requestBody, Tab adTab, String parentIdValue) {
-    Entity dalEnt = ModelProvider.getInstance()
-        .getEntityByTableName(adTab.getTable().getDBTableName());
-    if (dalEnt == null) {
-      return;
-    }
-    for (Column col : adTab.getTable().getADColumnList()) {
-      if (col.isLinkToParentColumn() && col.isActive()) {
-        try {
-          Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
-          if (prop != null) {
-            requestBody.put(prop.getName(), parentIdValue);
-            break;
-          }
-        } catch (Exception e) {
-          log.debug("Could not resolve parent column property for '{}': {}",
-              col.getDBColumnName(), e.getMessage());
-        }
-      }
-    }
-  }
-
-  /**
-   * Builds an HQL where clause fragment that filters a child tab's records
-   * by the parent record ID.
-   */
-  private String buildParentWhereClause(Tab childTab, String parentId) {
+  private String resolveParentFilter(Tab childTab, String parentId) {
     try {
       Tab parentTab = KernelUtils.getInstance().getParentTab(childTab);
-      if (parentTab == null) {
-        return null;
-      }
-
+      if (parentTab == null) return null;
       String parentProperty = ApplicationUtils.getParentProperty(childTab, parentTab);
-      if (StringUtils.isBlank(parentProperty)) {
-        return null;
-      }
-
-      Entity childEntity = ModelProvider.getInstance()
-          .getEntityByTableId(childTab.getTable().getId());
+      if (StringUtils.isBlank(parentProperty)) return null;
+      Entity childEntity = ModelProvider.getInstance().getEntityByTableId(childTab.getTable().getId());
       Property prop = childEntity.getProperty(parentProperty);
-
-      if (prop != null && !prop.isPrimitive()) {
-        return "e." + parentProperty + ".id='" + parentId.replace("'", "''") + "'";
-      } else {
-        return "e." + parentProperty + "='" + parentId.replace("'", "''") + "'";
-      }
+      String escaped = parentId.replace("'", "''");
+      return (prop != null && !prop.isPrimitive())
+          ? "e." + parentProperty + ".id='" + escaped + "'"
+          : "e." + parentProperty + "='" + escaped + "'";
     } catch (Exception e) {
-      log.error("Error building parent where clause for tab '{}': {}",
-          childTab.getName(), e.getMessage(), e);
+      log.error("Error resolving parent filter for tab '{}': {}", childTab.getName(), e.getMessage(), e);
       return null;
     }
-  }
-
-  /**
-   * Check if a report spec has a NeoHandler qualifier on any of its entities.
-   * Returns the qualifier string if found, null otherwise.
-   * This allows report specs to use custom handlers instead of the standard Jasper flow.
-   */
-  private String resolveReportHandlerQualifier(SFSpec spec) {
-    try {
-      OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
-      criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
-      List<SFEntity> entities = criteria.list();
-      for (SFEntity entity : entities) {
-        String qualifier = entity.getJavaQualifier();
-        if (StringUtils.isNotBlank(qualifier)) {
-          return qualifier;
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Error checking report handler qualifier for spec '{}': {}", spec.getName(), e.getMessage());
-    }
-    return null;
-  }
-
-  /**
-   * Resolve the AD_Process linked to a process-type spec.
-   */
-  private Process resolveProcess(SFSpec spec) {
-    return spec.getProcess();
   }
 
   /**
@@ -1011,7 +897,7 @@ public class NeoServlet extends HttpBaseServlet {
   private void handleProcessSpec(SFSpec spec, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     try {
-      Process adProcess = resolveProcess(spec);
+      Process adProcess = spec.getProcess();
       if (adProcess == null) {
         sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
             "Process spec has no linked AD_Process");
@@ -1042,7 +928,7 @@ public class NeoServlet extends HttpBaseServlet {
   private void handleReportSpec(SFSpec spec, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     try {
-      Process adProcess = resolveProcess(spec);
+      Process adProcess = spec.getProcess();
       if (adProcess == null) {
         sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
             "Report spec has no linked AD_Process");
@@ -1085,7 +971,7 @@ public class NeoServlet extends HttpBaseServlet {
     }
   }
 
-  private void writeResponse(HttpServletResponse response, NeoResponse neoResponse)
+  void writeResponse(HttpServletResponse response, NeoResponse neoResponse)
       throws IOException {
     if (neoResponse == null) {
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
@@ -1105,153 +991,6 @@ public class NeoServlet extends HttpBaseServlet {
     }
   }
 
-  /**
-   * Handle button action requests.
-   * GET with no actionName: list available button actions for the entity.
-   * POST with actionName: execute the button process for a specific record.
-   */
-  private NeoResponse handleButtonAction(SFSpec spec,
-      NeoPathInfo pathInfo, String method, HttpServletRequest request) {
-    try {
-      SFEntity entity = findEntity(spec.getId(), pathInfo.entityName);
-      if (entity == null) {
-        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
-            "Entity not found in spec: " + pathInfo.entityName);
-      }
-      if ("GET".equals(method) && pathInfo.actionName == null) {
-        return listButtonActions(entity.getId());
-      }
-      if ("POST".equals(method) && pathInfo.actionName != null) {
-        return executeButtonAction(entity.getId(), pathInfo, request);
-      }
-      if ("GET".equals(method)) {
-        return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            "Use POST to execute an action, GET is only for listing actions");
-      }
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "POST requires an action name: /{spec}/{entity}/{recordId}/action/{columnName}");
-    } catch (Exception e) {
-      log.error("Error handling button action: {}", e.getMessage(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Action error: " + e.getMessage());
-    }
-  }
-
-  /**
-   * Lists all button-type actions available on an entity.
-   * Returns a JSON array of action objects with columnName, processType, and processName.
-   */
-  private NeoResponse listButtonActions(String entityId) throws Exception {
-    OBCriteria<SFField> fieldCriteria = OBDal.getInstance().createCriteria(SFField.class);
-    fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
-    fieldCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-    fieldCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    List<SFField> fields = fieldCriteria.list();
-
-    JSONArray actions = new JSONArray();
-    for (SFField field : fields) {
-      JSONObject actionObj = buildButtonActionObject(field);
-      if (actionObj != null) {
-        actions.put(actionObj);
-      }
-    }
-    JSONObject responseBody = new JSONObject();
-    responseBody.put("actions", actions);
-    return NeoResponse.ok(responseBody);
-  }
-
-  /**
-   * Builds a button action JSON object for a given field.
-   * Returns null if the field's column is not a button-type with an associated process.
-   */
-  private JSONObject buildButtonActionObject(SFField field) throws Exception {
-    Column column = field.getADColumn();
-    if (column == null || column.getReference() == null
-        || !"28".equals((String) column.getReference().getId())) {
-      return null;
-    }
-    Process classicProcess = column.getProcess();
-    Object obuiappProcess = column.getOBUIAPPProcess();
-    if (classicProcess == null && obuiappProcess == null) {
-      return null;
-    }
-    JSONObject actionObj = new JSONObject();
-    actionObj.put("columnName", column.getDBColumnName());
-    if (obuiappProcess != null) {
-      actionObj.put("processType", "OBUIAPP");
-      org.openbravo.client.application.Process obuiProc =
-          (org.openbravo.client.application.Process) obuiappProcess;
-      actionObj.put("processName", obuiProc.getName() != null ? obuiProc.getName() : "");
-    } else {
-      actionObj.put("processType", "Classic");
-      actionObj.put("processName", classicProcess.getName() != null ? classicProcess.getName() : "");
-    }
-    return actionObj;
-  }
-
-  /**
-   * Executes a specific button action by column name.
-   * Resolves the target column, validates it is a button with a process,
-   * checks access, reads request body, and delegates to NeoProcessService.
-   */
-  private NeoResponse executeButtonAction(String entityId, NeoPathInfo pathInfo,
-      HttpServletRequest request) throws Exception {
-    OBCriteria<SFField> fieldCriteria = OBDal.getInstance().createCriteria(SFField.class);
-    fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
-    fieldCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-    fieldCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    List<SFField> fields = fieldCriteria.list();
-
-    Column targetColumn = null;
-    for (SFField field : fields) {
-      Column column = field.getADColumn();
-      if (column != null && pathInfo.actionName.equals(column.getDBColumnName())) {
-        targetColumn = column;
-        break;
-      }
-    }
-    if (targetColumn == null) {
-      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
-          "Action not found: " + pathInfo.actionName);
-    }
-    if (targetColumn.getReference() == null
-        || !"28".equals((String) targetColumn.getReference().getId())) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Field is not a button: " + pathInfo.actionName);
-    }
-    Process adProcess = resolveButtonProcess(targetColumn);
-    if (adProcess == null && targetColumn.getOBUIAPPProcess() == null) {
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "No process linked to button: " + pathInfo.actionName);
-    }
-    if (adProcess == null) {
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Button process not supported (OBUIAPP-only process without classic fallback): "
-              + pathInfo.actionName);
-    }
-    if (!hasProcessAccess(adProcess.getId())) {
-      return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
-          "Access denied to process for current role");
-    }
-    String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-    JSONObject params = StringUtils.isNotBlank(bodyStr) ? new JSONObject(bodyStr) : new JSONObject();
-    params.put("recordId", pathInfo.recordId);
-    return NeoProcessService.executeProcess(adProcess, params);
-  }
-
-  /**
-   * Resolves the AD_Process for a button column, preferring classic process over OBUIAPP.
-   * Returns null if only an OBUIAPP process exists without a classic fallback.
-   */
-  private Process resolveButtonProcess(Column targetColumn) {
-    Process adProcess = targetColumn.getProcess();
-    if (adProcess == null && targetColumn.getOBUIAPPProcess() != null) {
-      // OBUIAPP-only: attempt classic process lookup as fallback
-      adProcess = targetColumn.getProcess();
-    }
-    return adProcess;
-  }
-
   private NeoResponse handleSelector(String specId,
       NeoPathInfo pathInfo, HttpServletRequest request) {
     if (pathInfo.selectorField == null) {
@@ -1260,8 +999,10 @@ public class NeoServlet extends HttpBaseServlet {
     }
     // Query a specific selector
     String search = request.getParameter("q");
-    int limit = parseIntParam(request, "limit", 20);
-    int offset = parseIntParam(request, "offset", 0);
+    int limit = 20;
+    int offset = 0;
+    try { limit = Integer.parseInt(request.getParameter("limit")); } catch (Exception ignored) { }
+    try { offset = Integer.parseInt(request.getParameter("offset")); } catch (Exception ignored) { }
 
     // Collect context params (all query params except q, limit, offset)
     Map<String, String> contextParams = new HashMap<>();
@@ -1277,18 +1018,6 @@ public class NeoServlet extends HttpBaseServlet {
     return NeoSelectorService.querySelector(
         specId, pathInfo.entityName, pathInfo.selectorField,
         search, limit, offset, contextParams);
-  }
-
-  private int parseIntParam(HttpServletRequest request, String name, int defaultValue) {
-    String val = request.getParameter(name);
-    if (val == null) {
-      return defaultValue;
-    }
-    try {
-      return Integer.parseInt(val);
-    } catch (NumberFormatException e) {
-      return defaultValue;
-    }
   }
 
   /**
@@ -1321,527 +1050,6 @@ public class NeoServlet extends HttpBaseServlet {
     criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ACTIVE, true));
     criteria.setMaxResults(1);
     return !criteria.list().isEmpty();
-  }
-
-  // ── Discovery endpoints ──────────────────────────────────────────────
-
-  /**
-   * Handle GET /sws/neo/ — list all active specs the current user can access.
-   */
-  private void handleDiscovery(HttpServletResponse response) throws IOException {
-    try {
-      OBCriteria<SFSpec> specCriteria = OBDal.getInstance().createCriteria(SFSpec.class);
-      specCriteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
-      List<SFSpec> allSpecs = specCriteria.list();
-
-      JSONArray specsArray = new JSONArray();
-      for (SFSpec spec : allSpecs) {
-        if (!hasSpecAccess(spec)) {
-          continue;
-        }
-        specsArray.put(buildSpecSummaryObject(spec));
-      }
-
-      JSONObject result = new JSONObject();
-      result.put("specs", specsArray);
-      writeResponse(response, NeoResponse.ok(result));
-    } catch (Exception e) {
-      log.error("Error in discovery endpoint: {}", e.getMessage(), e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Discovery error: " + e.getMessage());
-    }
-  }
-
-  /**
-   * Returns true if the current user has access to the given spec (window, process, or report).
-   */
-  private boolean hasSpecAccess(SFSpec spec) {
-    String specType = spec.getSpecType();
-    if ("W".equals(specType)) {
-      Window specWindow = spec.getADWindow();
-      return specWindow == null || hasWindowAccess(specWindow.getId());
-    }
-    if ("P".equals(specType) || "R".equals(specType)) {
-      Process adProcess = resolveProcess(spec);
-      return adProcess == null || hasProcessAccess(adProcess.getId());
-    }
-    return true;
-  }
-
-  /**
-   * Builds the discovery summary JSON object for a single spec.
-   * Includes id, name, type, description, module, and type-specific fields.
-   */
-  private JSONObject buildSpecSummaryObject(SFSpec spec) throws Exception {
-    String specType = spec.getSpecType();
-    JSONObject specObj = new JSONObject();
-    specObj.put("id", spec.getId());
-    specObj.put("name", spec.getName());
-    specObj.put("type", specType);
-    specObj.put("description", spec.getDescription());
-
-    if ("W".equals(specType)) {
-      Window specWindow = spec.getADWindow();
-      if (specWindow != null) specObj.put("windowId", specWindow.getId());
-      specObj.put("entities", buildEntitySummaryArray(spec.getId()));
-    } else if ("P".equals(specType) || "R".equals(specType)) {
-      Process adProcess = resolveProcess(spec);
-      if (adProcess != null) specObj.put("processId", adProcess.getId());
-      if ("R".equals(specType)) specObj.put("isReport", true);
-    }
-
-    Module specModule = spec.getADModule();
-    if (specModule != null) specObj.put("moduleId", specModule.getId());
-    return specObj;
-  }
-
-  /**
-   * Handle GET /sws/neo/{specName} — describe a window spec with entities and fields.
-   */
-  private void handleSpecDescribe(HttpServletResponse response, SFSpec spec)
-      throws IOException {
-    try {
-      String specId = spec.getId();
-      String specType = spec.getSpecType();
-
-      JSONObject result = new JSONObject();
-      result.put("id", spec.getId());
-      result.put("name", spec.getName());
-      result.put("type", specType);
-      result.put("description", spec.getDescription());
-      Module specModule = spec.getADModule();
-      if (specModule != null) result.put("moduleId", specModule.getId());
-
-      // Query entities for this spec
-      OBCriteria<SFEntity> entityCriteria = OBDal.getInstance()
-          .createCriteria(SFEntity.class);
-      entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
-      entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
-      entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-      entityCriteria.addOrder(Order.asc(SFEntity.PROPERTY_SEQNO));
-      List<SFEntity> entities = entityCriteria.list();
-
-      JSONArray entitiesArray = new JSONArray();
-      for (SFEntity entity : entities) {
-        JSONObject entityObj = new JSONObject();
-        entityObj.put("id", entity.getId());
-        entityObj.put("name", entity.getName());
-        entityObj.put("methods", buildMethodsArray(entity));
-
-        // Resolve tab and include metadata
-        Tab adTab = getAdTab(entity);
-        if (adTab != null) {
-          entityObj.put("tabLevel", adTab.getTabLevel());
-          entityObj.put("tabId", adTab.getId());
-        }
-
-        // Method flags for editing
-        entityObj.put("isGet", Boolean.TRUE.equals(entity.isGet()));
-        entityObj.put("isGetbyid", Boolean.TRUE.equals(entity.isGetByID()));
-        entityObj.put("isPost", Boolean.TRUE.equals(entity.isPost()));
-        entityObj.put("isPut", Boolean.TRUE.equals(entity.isPut()));
-        entityObj.put("isPatch", Boolean.TRUE.equals(entity.isPatch()));
-        entityObj.put("isDelete", Boolean.TRUE.equals(entity.isDelete()));
-
-        // Build fields array
-        entityObj.put("fields", buildFieldsArray(entity.getId()));
-        entitiesArray.put(entityObj);
-      }
-
-      result.put("entities", entitiesArray);
-      writeResponse(response, NeoResponse.ok(result));
-    } catch (Exception e) {
-      log.error("Error describing spec '{}': {}", spec.getName(), e.getMessage(), e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Spec describe error: " + e.getMessage());
-    }
-  }
-
-  /**
-   * Build a summary of entities for the discovery endpoint (name + methods only).
-   */
-  private JSONArray buildEntitySummaryArray(String specId) throws Exception {
-    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-    criteria.addOrder(Order.asc(SFEntity.PROPERTY_SEQNO));
-    List<SFEntity> entities = criteria.list();
-
-    JSONArray arr = new JSONArray();
-    for (SFEntity entity : entities) {
-      JSONObject obj = new JSONObject();
-      obj.put("name", entity.getName());
-      obj.put("methods", buildMethodsArray(entity));
-      arr.put(obj);
-    }
-    return arr;
-  }
-
-  /**
-   * Build a JSON array of enabled HTTP methods for an entity.
-   */
-  private JSONArray buildMethodsArray(SFEntity entity) {
-    JSONArray methods = new JSONArray();
-    if (Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID())) {
-      methods.put("GET");
-    }
-    if (Boolean.TRUE.equals(entity.isPost())) {
-      methods.put("POST");
-    }
-    if (Boolean.TRUE.equals(entity.isPut())) {
-      methods.put("PUT");
-    }
-    if (Boolean.TRUE.equals(entity.isPatch())) {
-      methods.put(METHOD_PATCH);
-    }
-    if (Boolean.TRUE.equals(entity.isDelete())) {
-      methods.put(METHOD_DELETE);
-    }
-    return methods;
-  }
-
-  /**
-   * Build the fields array for a given entity, resolving AD_Column metadata.
-   */
-  private JSONArray buildFieldsArray(String entityId) throws Exception {
-    OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
-    criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-    criteria.addOrder(Order.asc(SFEntity.PROPERTY_SEQNO));
-    List<SFField> fields = criteria.list();
-
-    JSONArray arr = new JSONArray();
-    for (SFField field : fields) {
-      Column column = field.getADColumn();
-      if (column == null) {
-        continue;
-      }
-
-      String refId = column.getReference() != null
-          ? (String) column.getReference().getId() : null;
-
-      JSONObject fieldObj = new JSONObject();
-      fieldObj.put("id", field.getId());
-      fieldObj.put("columnId", column.getId());
-      fieldObj.put("name", column.getDBColumnName());
-      fieldObj.put("label", column.getName());
-      fieldObj.put("columnType", mapReferenceToType(refId));
-      fieldObj.put("readOnly", Boolean.TRUE.equals(field.isReadOnly()));
-      fieldObj.put("included", Boolean.TRUE.equals(field.isIncluded()));
-      fieldObj.put("required", column.isMandatory());
-
-      boolean hasSelector = isSelectorReference(refId);
-      fieldObj.put("hasSelector", hasSelector);
-      if (hasSelector) {
-        fieldObj.put("selectorType", mapSelectorType(refId));
-        // Extract dependent params from column's validation rule
-        JSONArray selectorParams = extractValidationParams(column);
-        if (selectorParams.length() > 0) {
-          fieldObj.put("selectorParams", selectorParams);
-        }
-      }
-
-      arr.put(fieldObj);
-    }
-    return arr;
-  }
-
-  private static final Set<String> SELECTOR_REFS = new HashSet<>();
-  static {
-    SELECTOR_REFS.add("19"); // TableDir
-    SELECTOR_REFS.add("18"); // Table
-    SELECTOR_REFS.add("30"); // Search
-    SELECTOR_REFS.add("95E2A8B50A254B2AAE6774B8C2F28120"); // OBUISEL
-  }
-
-  private boolean isSelectorReference(String refId) {
-    return refId != null && SELECTOR_REFS.contains(refId);
-  }
-
-  private static final Pattern VALIDATION_PARAM_PATTERN = Pattern.compile("@(\\w+)@");
-
-  /**
-   * Extract parameter names from a column's validation rule.
-   * Validation rules use @ColumnName@ as placeholders for dependent fields.
-   */
-  private JSONArray extractValidationParams(Column column) {
-    JSONArray params = new JSONArray();
-    org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
-    if (valRule == null || valRule.getValidationCode() == null) {
-      return params;
-    }
-    Set<String> seen = new HashSet<>();
-    Matcher m = VALIDATION_PARAM_PATTERN.matcher(valRule.getValidationCode());
-    while (m.find()) {
-      String param = m.group(1);
-      if (!seen.contains(param)) {
-        params.put(param);
-        seen.add(param);
-      }
-    }
-    return params;
-  }
-
-  private String mapSelectorType(String refId) {
-    if (refId == null) return null;
-    switch (refId) {
-      case "19": return "TableDir";
-      case "18": return "Table";
-      case "30": return "Search";
-      case "95E2A8B50A254B2AAE6774B8C2F28120": return "OBUISEL";
-      default: return null;
-    }
-  }
-
-  /**
-   * Map AD_Reference_ID to a simple type name for the discovery API.
-   */
-  private String mapReferenceToType(String refId) {
-    if (refId == null) return TYPE_STRING;
-    switch (refId) {
-      case "10": case "14": case "34": // String, Text, Memo
-        return TYPE_STRING;
-      case "11": case "22": case "29": case "12": // Integer, Number, Quantity, Amount
-      case "800008": case "800019": // GeneralQuantity, Price
-        return "number";
-      case "20": // YesNo
-        return "boolean";
-      case "15": // Date
-        return "date";
-      case "16": // DateTime
-        return "datetime";
-      case "24": // Time
-        return "time";
-      case "28": // Button
-        return "button";
-      case "17": // List
-        return "list";
-      case "13": // ID
-        return "id";
-      default:
-        return TYPE_STRING;
-    }
-  }
-
-  /**
-   * Evaluates displayLogic and readOnlyLogic expressions for all fields of a tab.
-   * Uses Etendo's DynamicExpressionParser to resolve session variables, preferences,
-   * accounting dimensions, auxiliary inputs, and server-expanded macros.
-   * Injects an OB.Utilities shim so the SmartClient-dependent JS output can be
-   * evaluated by bare Rhino/OBScriptEngine.
-   *
-   * POST /sws/neo/{specName}/{entityName}/evaluate-display
-   */
-  private NeoResponse handleEvaluateDisplay(SFSpec spec,
-      NeoPathInfo pathInfo, HttpServletRequest request) {
-    try {
-      // Find entity
-      SFEntity sfEntity = findEntity(spec.getId(), pathInfo.entityName);
-      if (sfEntity == null) {
-        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
-            ERR_ENTITY_NOT_FOUND + pathInfo.entityName);
-      }
-
-      Tab tab = sfEntity.getADTab();
-      if (tab == null) {
-        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-            ERR_NO_LINKED_TAB + pathInfo.entityName);
-      }
-
-      // Parse request body
-      JSONObject fieldValues = parseFieldValuesFromRequest(request);
-      if (fieldValues == null) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid request body");
-      }
-
-      // Build evaluation context and evaluate all fields
-      Map<String, Object> evalContext = buildEvalContext(fieldValues);
-      JSONObject result = evaluateAllFieldExpressions(tab, evalContext);
-      return NeoResponse.ok(result);
-
-    } catch (Exception e) {
-      log.error("Error evaluating display logic for {}/{}", pathInfo.specName,
-          pathInfo.entityName, e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Error evaluating display logic: " + e.getMessage());
-    }
-  }
-
-  /**
-   * Evaluates displayLogic and readOnlyLogic for all active fields in the given tab.
-   * Returns a JSON object with "visibility" and "readOnly" maps keyed by DAL property name.
-   */
-  private JSONObject evaluateAllFieldExpressions(Tab tab, Map<String, Object> evalContext)
-      throws Exception {
-    JSONObject visibility = new JSONObject();
-    JSONObject readOnly = new JSONObject();
-    for (Field field : tab.getADFieldList()) {
-      if (!field.isActive()) {
-        continue;
-      }
-      String propertyName = getPropertyName(field);
-      String displayLogic = field.getDisplayLogic();
-      if (displayLogic != null && !displayLogic.trim().isEmpty()) {
-        visibility.put(propertyName, evaluateExpression(displayLogic, tab, field, evalContext));
-      }
-      Column column = field.getColumn();
-      if (column != null) {
-        String readOnlyLogic = column.getReadOnlyLogic();
-        if (readOnlyLogic != null && !readOnlyLogic.trim().isEmpty()) {
-          readOnly.put(propertyName, evaluateExpression(readOnlyLogic, tab, field, evalContext));
-        }
-      }
-    }
-    JSONObject result = new JSONObject();
-    result.put("visibility", visibility);
-    result.put("readOnly", readOnly);
-    return result;
-  }
-
-  /**
-   * Evaluates a single display logic or readOnly logic expression.
-   * 4-step pipeline: preprocess -> parse -> shim -> eval.
-   *
-   * @param expression   the raw AD expression
-   * @param tab          the AD_Tab for context resolution
-   * @param field        the AD_Field for field-type detection (may be null for tab-level)
-   * @param evalContext  the evaluation context with field values and session data
-   * @return evaluation result; on failure: true for display (show), true for readOnly (lock)
-   */
-  private boolean evaluateExpression(String expression, Tab tab, Field field,
-      Map<String, Object> evalContext) {
-    try {
-      // Step 1: Replace system preferences and macros (static, pre-parser)
-      String preprocessed = DynamicExpressionParser
-          .replaceSystemPreferencesInDisplayLogic(expression);
-
-      // Step 2: Parse expression -- resolves session vars, auxiliary inputs,
-      // field references, accounting dimensions
-      DynamicExpressionParser parser =
-          new DynamicExpressionParser(preprocessed, tab, field);
-      String jsExpr = parser.getJSExpression();
-
-      // Step 3: Prepend OB.Utilities shim so Rhino can evaluate
-      // SmartClient-dependent code (OB.Utilities.getValue, OB.Utilities.Date.JSToOB)
-      String fullScript = OB_UTILITIES_SHIM + "\n" + jsExpr;
-
-      // Step 4: Evaluate using Rhino (sandboxed)
-      Object result = OBScriptEngine.getInstance().eval(fullScript, evalContext);
-      return Boolean.TRUE.equals(result);
-
-    } catch (Exception e) {
-      log.warn("Failed to evaluate expression: {} for field: {}",
-          expression, field != null ? field.getName() : "tab-level", e);
-      // Safe defaults: true for both — show the field (visible) and lock it (read-only)
-      return true;
-    }
-  }
-
-  /**
-   * Parses the "fieldValues" object from the request body for evaluate-display requests.
-   * Returns an empty JSONObject if the body is absent or has no "fieldValues" key.
-   * Returns null if the body is present but unparseable (signals a 400 error to the caller).
-   */
-  private JSONObject parseFieldValuesFromRequest(HttpServletRequest request) {
-    try {
-      String body = new String(
-          request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-      if (body == null || body.trim().isEmpty()) {
-        return new JSONObject();
-      }
-      JSONObject bodyJson = new JSONObject(body);
-      return bodyJson.has("fieldValues")
-          ? bodyJson.getJSONObject("fieldValues")
-          : new JSONObject();
-    } catch (Exception e) {
-      log.debug("Failed to parse evaluate-display request body: {}", e.getMessage());
-      return null;
-    }
-  }
-
-  /**
-   * Builds the evaluation context from request field values and session data.
-   * Field values are stored both as top-level entries (for context.xxx references)
-   * and under "currentValues" key (for OB.Utilities.getValue(currentValues, 'xxx')).
-   */
-  private Map<String, Object> buildEvalContext(JSONObject fieldValues) {
-    Map<String, Object> ctx = new HashMap<>();
-
-    // Convert fieldValues to a Map that Rhino can access as "currentValues"
-    Map<String, Object> currentValues = new HashMap<>();
-    @SuppressWarnings("unchecked")
-    java.util.Iterator<String> keys = fieldValues.keys();
-    while (keys.hasNext()) {
-      String key = keys.next();
-      Object value = fieldValues.opt(key);
-      currentValues.put(key, value == JSONObject.NULL ? null : value);
-    }
-    ctx.put("currentValues", currentValues);
-
-    // Also add field values at top level for auxiliary inputs and session vars
-    // that resolve to context.xxx (not OB.Utilities.getValue)
-    ctx.putAll(currentValues);
-
-    // Add session context
-    OBContext obCtx = OBContext.getOBContext();
-    ctx.put("AD_Org_ID", obCtx.getCurrentOrganization().getId());
-    ctx.put("AD_Client_ID", obCtx.getCurrentClient().getId());
-    ctx.put("AD_Role_ID", obCtx.getRole().getId());
-    ctx.put("AD_User_ID", obCtx.getUser().getId());
-
-    // Resolve $Element_* accounting dimension preferences.
-    // DynamicExpressionParser generates JS referencing context.$Element_XX
-    // for displayLogic expressions like @$Element_MC@='Y'.
-    try {
-      DalConnectionProvider conn = new DalConnectionProvider(false);
-      VariablesSecureApp vars = new VariablesSecureApp(
-          obCtx.getUser().getId(),
-          obCtx.getCurrentClient().getId(),
-          obCtx.getCurrentOrganization().getId(),
-          obCtx.getRole().getId(),
-          obCtx.getLanguage().getLanguage());
-      String[] elements = { "MC", "AY", "OT", "AS", "CC", "U1", "U2", "PJ", "BU", "PR" };
-      for (String el : elements) {
-        String key = "$Element_" + el;
-        String value = Utility.getContext(conn, vars, key, "");
-        ctx.put(key, value);
-      }
-    } catch (Exception e) {
-      log.debug("Could not resolve $Element_* preferences: {}", e.getMessage());
-    }
-
-    // Add a "context" object alias so DynamicExpressionParser's JS output
-    // (context.xxx references) can resolve against our eval context
-    ctx.put("context", ctx);
-
-    return ctx;
-  }
-
-  /**
-   * Maps a Field to its DAL property name, matching NeoFieldFilter conventions.
-   * Uses ModelProvider to resolve Column -> Entity -> Property -> name.
-   *
-   * Examples:
-   *   C_BPARTNER_ID  -> businessPartner
-   *   DOCSTATUS      -> documentStatus
-   *   GRANDTOTAL     -> grandTotalAmount
-   */
-  private String getPropertyName(Field field) {
-    Column column = field.getColumn();
-    if (column == null) {
-      return field.getName();
-    }
-    Entity dalEntity = ModelProvider.getInstance()
-        .getEntityByTableId(column.getTable().getId());
-    if (dalEntity != null) {
-      Property prop = dalEntity.getPropertyByColumnName(column.getDBColumnName());
-      if (prop != null) {
-        return prop.getName();
-      }
-    }
-    return column.getDBColumnName();
   }
 
   /**
@@ -1947,7 +1155,7 @@ public class NeoServlet extends HttpBaseServlet {
     }
   }
 
-  private void sendError(HttpServletResponse response, int status, String message)
+  void sendError(HttpServletResponse response, int status, String message)
       throws IOException {
     NeoResponse errorResponse = NeoResponse.error(status, message);
     writeResponse(response, errorResponse);

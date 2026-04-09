@@ -1,7 +1,6 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -18,7 +17,6 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
@@ -40,6 +38,9 @@ import com.etendoerp.go.schemaforge.data.SFField;
  *
  * Only serves selectors for fields that are included (IsIncluded = Y)
  * in the ETGO_SF_Field configuration.
+ *
+ * Query construction helpers live in {@link SelectorQueryBuilder}.
+ * Auxiliary field resolution helpers live in {@link SelectorAuxResolver}.
  */
 public class NeoSelectorService {
 
@@ -53,19 +54,9 @@ public class NeoSelectorService {
   public static final String REF_TABLEDIR = "19";
   public static final String REF_SEARCH = "30";
 
-  // SQL fragment constants (used in HQL/SQL construction)
-  private static final String SQL_AND = " AND ";
-  private static final String SQL_WHERE = " WHERE ";
-
   // JSON field name constants
   private static final String PARAM_SEARCH = "search";
   private static final String FIELD_LABEL = "label";
-  private static final String FIELD_ITEMS = "items";
-  private static final String FIELD_COLUMNS = "columns";
-  private static final String FIELD_TOTAL_COUNT = "totalCount";
-  private static final String FIELD_LIMIT = "limit";
-  private static final String FIELD_OFFSET = "offset";
-  private static final String FIELD_HAS_MORE = "hasMore";
 
   // Session-level params resolved server-side (should not appear in selectorParams)
   private static final java.util.Set<String> SESSION_PARAMS = new java.util.HashSet<>(
@@ -306,7 +297,8 @@ public class NeoSelectorService {
       }
 
       // Resolve validation rule filter from context params
-      String validationFilter = resolveValidationFilter(column, meta.entityName, contextParams);
+      String validationFilter = SelectorQueryBuilder.resolveValidationFilter(
+          column, meta.entityName, contextParams);
 
       // Build and execute query
       if (meta.isRich) {
@@ -336,7 +328,7 @@ public class NeoSelectorService {
     // Apply validation rule filter (resolved from context params)
     if (StringUtils.isNotBlank(validationFilter)) {
       if (hql.length() > 0) {
-        hql.append(SQL_AND);
+        hql.append(SelectorQueryBuilder.SQL_AND);
       }
       hql.append(validationFilter);
     }
@@ -344,7 +336,7 @@ public class NeoSelectorService {
     // Search filter on display property
     if (StringUtils.isNotBlank(search)) {
       if (hql.length() > 0) {
-        hql.append(SQL_AND);
+        hql.append(SelectorQueryBuilder.SQL_AND);
       }
       hql.append("lower(e.").append(meta.displayProperty)
           .append(") LIKE :search");
@@ -384,7 +376,7 @@ public class NeoSelectorService {
       items.put(item);
     }
 
-    return buildSelectorResponse(items, new JSONArray(), totalCount, limit, offset);
+    return SelectorQueryBuilder.buildSelectorResponse(items, new JSONArray(), totalCount, limit, offset);
   }
 
   /**
@@ -399,7 +391,7 @@ public class NeoSelectorService {
     // Custom query flag set but no HQL defined: fall through to standard query
 
     String alias = "e";
-    String whereStr = buildRichQueryWhereClause(meta, search, validationFilter, alias);
+    String whereStr = SelectorQueryBuilder.buildRichQueryWhereClause(meta, search, validationFilter, alias);
     boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
 
     // Count query
@@ -420,7 +412,7 @@ public class NeoSelectorService {
     dataQuery.setMaxResult(limit);
     dataQuery.setFirstResult(offset);
 
-    JSONArray columns = buildGridColumnMetadata(meta.gridFields);
+    JSONArray columns = SelectorQueryBuilder.buildGridColumnMetadata(meta.gridFields);
 
     Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
     JSONArray items = new JSONArray();
@@ -435,82 +427,11 @@ public class NeoSelectorService {
         Object value = resolvePropertyValue(bob, fieldMeta.property, entityDef);
         item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
       }
-      appendAuxFields(item, bob, meta.auxFields);
+      SelectorAuxResolver.appendAuxFields(item, bob, meta.auxFields);
       items.put(item);
     }
 
-    return buildSelectorResponse(items, columns, totalCount, limit, offset);
-  }
-
-  /**
-   * Build the OBQuery where-string for a standard rich (OBUISEL) query.
-   * Incorporates the OBUISEL where clause, validation filter, and search predicate.
-   * Returns "as e [where ...]" ready to pass to {@link OBDal#createQuery}.
-   */
-  private static String buildRichQueryWhereClause(SelectorMeta meta,
-      String search, String validationFilter, String alias) {
-    StringBuilder hql = new StringBuilder();
-
-    if (StringUtils.isNotBlank(meta.whereClause)) {
-      hql.append(resolveObuiselParams(meta.whereClause));
-    }
-
-    if (StringUtils.isNotBlank(validationFilter)) {
-      if (hql.length() > 0) {
-        hql.append(SQL_AND);
-      }
-      hql.append(validationFilter);
-    }
-
-    if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
-      if (hql.length() > 0) {
-        hql.append(SQL_AND);
-      }
-      hql.append("(");
-      for (int i = 0; i < meta.searchableProperties.size(); i++) {
-        if (i > 0) {
-          hql.append(" OR ");
-        }
-        hql.append("lower(COALESCE(cast(").append(alias).append(".")
-            .append(meta.searchableProperties.get(i)).append(" as string), '')) LIKE :search");
-      }
-      hql.append(")");
-    }
-
-    return hql.length() > 0
-        ? "as " + alias + " where " + hql
-        : "as " + alias;
-  }
-
-  /**
-   * Build the column-metadata JSONArray from a list of grid field descriptors.
-   */
-  private static JSONArray buildGridColumnMetadata(List<RichFieldMeta> gridFields)
-      throws Exception {
-    JSONArray columns = new JSONArray();
-    for (RichFieldMeta fieldMeta : gridFields) {
-      JSONObject col = new JSONObject();
-      col.put("name", fieldMeta.propertyKey);
-      col.put(FIELD_LABEL, fieldMeta.label);
-      col.put("sortNo", fieldMeta.sortNo);
-      columns.put(col);
-    }
-    return columns;
-  }
-
-  /**
-   * Build the standard paginated selector response JSON.
-   */
-  private static NeoResponse buildSelectorResponse(JSONArray items, JSONArray columns,
-      int totalCount, int limit, int offset) throws Exception {
-    JSONObject result = new JSONObject();
-    result.put(FIELD_ITEMS, items);
-    result.put(FIELD_COLUMNS, columns);
-    result.put(FIELD_TOTAL_COUNT, totalCount);
-    result.put(FIELD_LIMIT, limit);
-    result.put(FIELD_OFFSET, offset);
-    result.put(FIELD_HAS_MORE, (offset + limit) < totalCount);
-    return NeoResponse.ok(result);
+    return SelectorQueryBuilder.buildSelectorResponse(items, columns, totalCount, limit, offset);
   }
 
   /**
@@ -536,14 +457,14 @@ public class NeoSelectorService {
     String fromOnwards = rawHql.substring(fromIdx);
 
     // Build the FROM…WHERE…filters portion
-    String fromClause = buildCustomHqlFromClause(
+    String fromClause = SelectorQueryBuilder.buildCustomHqlFromClause(
         fromOnwards, alias, meta, validationFilter, search);
     boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
 
     // Parse SELECT column aliases to build a name→index map
     String selectPart = rawHql.substring(0, fromIdx).trim();
     String[] selectExprs = selectPart.replaceFirst("(?i)^select\\s+", "").split(",");
-    Map<String, Integer> colIndexMap = buildSelectColumnIndexMap(selectExprs);
+    Map<String, Integer> colIndexMap = SelectorQueryBuilder.buildSelectColumnIndexMap(selectExprs);
 
     // Count query
     String countHql = "SELECT COUNT(" + alias + ")" + fromClause;
@@ -564,8 +485,8 @@ public class NeoSelectorService {
     dataQuery.setMaxResults(limit);
     dataQuery.setFirstResult(offset);
 
-    Integer idColIdx = resolveIdColumnIndex(meta, alias, colIndexMap, selectExprs);
-    JSONArray columns = buildGridColumnMetadata(meta.gridFields);
+    Integer idColIdx = SelectorQueryBuilder.resolveIdColumnIndex(meta, alias, colIndexMap, selectExprs);
+    JSONArray columns = SelectorQueryBuilder.buildGridColumnMetadata(meta.gridFields);
 
     Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
     JSONArray items = new JSONArray();
@@ -574,12 +495,12 @@ public class NeoSelectorService {
       Object[] row = (rawRow instanceof Object[]) ? (Object[]) rawRow : new Object[]{ rawRow };
       JSONObject item = new JSONObject();
 
-      String recordId = extractRecordId(row, idColIdx);
+      String recordId = SelectorQueryBuilder.extractRecordId(row, idColIdx);
       item.put("id", recordId);
       entityIds.add(recordId);
       item.put(FIELD_LABEL,
-          extractDisplayLabel(row, colIndexMap, meta.displayProperty, entityDef, recordId));
-      mapGridFieldsToItem(item, row, colIndexMap, meta.gridFields);
+          SelectorQueryBuilder.extractDisplayLabel(row, colIndexMap, meta.displayProperty, entityDef, recordId));
+      SelectorQueryBuilder.mapGridFieldsToItem(item, row, colIndexMap, meta.gridFields);
       items.put(item);
     }
 
@@ -587,194 +508,10 @@ public class NeoSelectorService {
     boolean hasHqlOnlyAux = meta.auxFields.stream()
         .anyMatch(af -> StringUtils.isBlank(af.property) && StringUtils.isNotBlank(af.hqlAlias));
     if (hasHqlOnlyAux && !entityIds.isEmpty()) {
-      resolveAuxFieldsViaHql(items, entityIds, rawHql, fromIdx, alias, meta);
+      SelectorAuxResolver.resolveAuxFieldsViaHql(items, entityIds, rawHql, fromIdx, alias, meta);
     }
 
-    return buildSelectorResponse(items, columns, totalCount, limit, offset);
-  }
-
-  /**
-   * Build the FROM-onwards HQL fragment for a custom-HQL selector query.
-   * Appends the OBUISEL where clause, validation filter, readable-orgs filter,
-   * and (if applicable) a search predicate across the selector's searchable properties.
-   *
-   * @return the complete FROM clause string, ready to use in COUNT and data queries
-   */
-  private static String buildCustomHqlFromClause(String fromOnwards, String alias,
-      SelectorMeta meta, String validationFilter, String search) {
-    StringBuilder baseHql = new StringBuilder(fromOnwards);
-    boolean hasWhere = Pattern.compile("\\sWHERE\\s", Pattern.CASE_INSENSITIVE)
-        .matcher(fromOnwards).find();
-
-    if (StringUtils.isNotBlank(meta.whereClause)) {
-      baseHql.append(hasWhere ? SQL_AND : SQL_WHERE);
-      baseHql.append(resolveObuiselParams(meta.whereClause));
-      hasWhere = true;
-    }
-
-    if (StringUtils.isNotBlank(validationFilter)) {
-      baseHql.append(hasWhere ? SQL_AND : SQL_WHERE);
-      baseHql.append(validationFilter);
-      hasWhere = true;
-    }
-
-    hasWhere = appendReadableOrgsFilter(baseHql, alias, hasWhere);
-    appendCustomSearchFilter(baseHql, meta.searchableProperties, alias, search, hasWhere);
-
-    return baseHql.toString();
-  }
-
-  /**
-   * Append a readable-organizations IN filter to an HQL builder.
-   * Reads the current organizations from {@link OBContext} and appends
-   * {@code alias.organization.id IN ('org1', 'org2', ...)} if any exist.
-   *
-   * @return {@code true} if a WHERE clause is now present (was already present, or was just added)
-   */
-  private static boolean appendReadableOrgsFilter(StringBuilder hql, String alias,
-      boolean hasWhere) {
-    String[] readableOrgs = OBContext.getOBContext().getReadableOrganizations();
-    if (readableOrgs == null || readableOrgs.length == 0) {
-      return hasWhere;
-    }
-    hql.append(hasWhere ? SQL_AND : SQL_WHERE);
-    hql.append(alias).append(".organization.id IN (");
-    for (int i = 0; i < readableOrgs.length; i++) {
-      if (i > 0) {
-        hql.append(", ");
-      }
-      hql.append("'").append(readableOrgs[i]).append("'");
-    }
-    hql.append(")");
-    return true;
-  }
-
-  /**
-   * Append a full-text search predicate across all searchable properties.
-   * Emits an OR clause: {@code (lower(COALESCE(cast(alias.prop as string), '')) LIKE :search)}.
-   * No-op when {@code search} is blank or {@code searchableProps} is empty.
-   */
-  private static void appendCustomSearchFilter(StringBuilder hql,
-      List<String> searchableProps, String alias, String search, boolean hasWhere) {
-    if (StringUtils.isBlank(search) || searchableProps.isEmpty()) {
-      return;
-    }
-    hql.append(hasWhere ? SQL_AND : SQL_WHERE).append("(");
-    for (int i = 0; i < searchableProps.size(); i++) {
-      if (i > 0) {
-        hql.append(" OR ");
-      }
-      hql.append("lower(COALESCE(cast(").append(alias).append(".")
-          .append(searchableProps.get(i)).append(" as string), '')) LIKE :search");
-    }
-    hql.append(")");
-  }
-
-  /**
-   * Build a column-alias to index map from an array of SELECT expression strings.
-   * Handles "expr as alias" notation and bare "table.column" expressions.
-   */
-  private static Map<String, Integer> buildSelectColumnIndexMap(String[] selectExprs) {
-    Map<String, Integer> colIndexMap = new HashMap<>();
-    for (int i = 0; i < selectExprs.length; i++) {
-      String expr = selectExprs[i].trim();
-      String colAlias;
-      java.util.regex.Matcher asMatcher = Pattern.compile("\\s+as\\s+(\\w+)\\s*$",
-          Pattern.CASE_INSENSITIVE).matcher(expr);
-      if (asMatcher.find()) {
-        colAlias = asMatcher.group(1);
-      } else {
-        int dotIdx = expr.lastIndexOf('.');
-        colAlias = dotIdx >= 0 ? expr.substring(dotIdx + 1).trim() : expr.trim();
-      }
-      colIndexMap.put(colAlias.toLowerCase(), i);
-    }
-    return colIndexMap;
-  }
-
-  /**
-   * Resolve the column index that holds the record ID in a custom HQL SELECT result.
-   * Checks the value property alias, then "id", then scans for "{alias}.id" prefix.
-   */
-  private static Integer resolveIdColumnIndex(SelectorMeta meta, String alias,
-      Map<String, Integer> colIndexMap, String[] selectExprs) {
-    String valuePropLower = (meta.valueProperty != null ? meta.valueProperty : "id").toLowerCase();
-    Integer idColIdx = colIndexMap.get(valuePropLower);
-    if (idColIdx == null) {
-      idColIdx = colIndexMap.get("id");
-    }
-    if (idColIdx == null) {
-      String idPrefix = alias.toLowerCase() + ".id";
-      for (int i = 0; i < selectExprs.length; i++) {
-        if (selectExprs[i].trim().toLowerCase().startsWith(idPrefix)) {
-          idColIdx = i;
-          break;
-        }
-      }
-    }
-    return idColIdx;
-  }
-
-  /**
-   * Extract and normalize the record ID from an HQL Object[] row.
-   * Handles BaseOBObject, composite 64-char UUIDs, and plain string values.
-   */
-  private static String extractRecordId(Object[] row, Integer idColIdx) {
-    Object idVal = (idColIdx != null && idColIdx < row.length) ? row[idColIdx] : row[0];
-    String recordId = idVal instanceof BaseOBObject
-        ? ((BaseOBObject) idVal).getId().toString()
-        : String.valueOf(idVal);
-    // OBUISEL selectors may return composite IDs (e.g., warehouseId + productId = 64 hex chars).
-    // Etendo entity UUIDs are always 32 hex chars. Extract the actual entity ID (last 32 chars).
-    if (recordId != null && recordId.length() == 64 && recordId.matches("[0-9A-Fa-f]{64}")) {
-      recordId = recordId.substring(32);
-    }
-    return recordId;
-  }
-
-  /**
-   * Extract the display label from an HQL Object[] row.
-   * Falls back to loading the entity by ID if the label column is missing or empty.
-   */
-  private static String extractDisplayLabel(Object[] row, Map<String, Integer> colIndexMap,
-      String displayProperty, Entity entityDef, String recordId) {
-    String label = "";
-    Integer displayIdx = colIndexMap.get(displayProperty.toLowerCase());
-    if (displayIdx == null) {
-      displayIdx = colIndexMap.get("productname");
-    }
-    if (displayIdx != null && displayIdx < row.length) {
-      Object dispVal = row[displayIdx];
-      label = dispVal != null ? dispVal.toString() : "";
-    }
-    if (label.isEmpty()) {
-      try {
-        BaseOBObject entity = OBDal.getInstance().get(entityDef.getName(), recordId);
-        if (entity != null) label = entity.getIdentifier();
-      } catch (Exception ignored) {
-        // Ignored: fallback handled below
-      }
-    }
-    return label;
-  }
-
-  /**
-   * Map rich selector grid fields from an HQL Object[] row into a JSON item.
-   * Resolves BaseOBObject values to their identifier strings.
-   */
-  private static void mapGridFieldsToItem(JSONObject item, Object[] row,
-      Map<String, Integer> colIndexMap, List<RichFieldMeta> gridFields) throws Exception {
-    for (RichFieldMeta fieldMeta : gridFields) {
-      Integer colIdx = colIndexMap.get(fieldMeta.propertyKey.toLowerCase());
-      if (colIdx != null && colIdx < row.length) {
-        Object value = row[colIdx];
-        if (value instanceof BaseOBObject) {
-          item.put(fieldMeta.propertyKey, ((BaseOBObject) value).getIdentifier());
-        } else {
-          item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
-        }
-      }
-    }
+    return SelectorQueryBuilder.buildSelectorResponse(items, columns, totalCount, limit, offset);
   }
 
   /**
@@ -808,278 +545,6 @@ public class NeoSelectorService {
     }
   }
 
-  /**
-   * Resolve auxiliary field values for a given entity object.
-   * Uses the DAL property path from the selector field to navigate the entity graph.
-   * For list properties (e.g., businessPartnerLocationList), returns the first entry's ID.
-   */
-  private static void appendAuxFields(JSONObject item, BaseOBObject bob,
-      List<AuxFieldMeta> auxFields) {
-    if (auxFields == null || auxFields.isEmpty()) {
-      return;
-    }
-    try {
-      JSONObject aux = new JSONObject();
-      for (AuxFieldMeta af : auxFields) {
-        Object auxVal = resolveAuxFieldValue(bob, af);
-        if (auxVal != null) {
-          aux.put(af.suffix, auxVal.toString());
-        }
-      }
-      if (aux.length() > 0) {
-        item.put("_aux", aux);
-      }
-    } catch (Exception e) {
-      log.debug("Error resolving aux fields for {}: {}", bob.getId(), e.getMessage());
-    }
-  }
-
-  /**
-   * Resolve a single auxiliary field value from a BaseOBObject.
-   * Navigates the DAL property path. For FK/list properties, returns the ID.
-   */
-  private static Object resolveAuxFieldValue(BaseOBObject bob, AuxFieldMeta af) {
-    // Try DAL property path if available
-    if (StringUtils.isNotBlank(af.property)) {
-      try {
-        String[] parts = af.property.split("\\.");
-        Object current = bob;
-        for (String part : parts) {
-          if (current == null) {
-            return null;
-          }
-          if (current instanceof BaseOBObject) {
-            current = ((BaseOBObject) current).get(part);
-          } else {
-            return current;
-          }
-        }
-        if (current instanceof BaseOBObject) {
-          return ((BaseOBObject) current).getId();
-        }
-        if (current instanceof List) {
-          List<?> list = (List<?>) current;
-          if (!list.isEmpty() && list.get(0) instanceof BaseOBObject) {
-            return ((BaseOBObject) list.get(0)).getId();
-          }
-        }
-        return current;
-      } catch (Exception e) {
-        log.debug("Could not resolve aux property {} on {}: {}",
-            af.property, bob.getId(), e.getMessage());
-      }
-    }
-    // No property path — aux value must be resolved via HQL (see resolveAuxFieldsViaHql)
-    return null;
-  }
-
-  /**
-   * Resolve auxiliary field values that lack a DAL property by re-executing
-   * the original OBUISEL custom HQL SELECT for the already-fetched entity IDs.
-   *
-   * The original HQL includes computed/joined columns (e.g., "bploc.id as locationid")
-   * that are not accessible via DAL. This method:
-   * 1. Parses the SELECT clause to build an alias→position map
-   * 2. Finds the position of the entity ID column (by valueFieldAlias or entity alias + ".id")
-   * 3. Executes the original SELECT with an IN(:ids) filter as Object[]
-   * 4. Merges the aux values back into the item JSONArray by matching IDs
-   */
-  @SuppressWarnings("unchecked")
-  private static void resolveAuxFieldsViaHql(JSONArray items, List<String> entityIds,
-      String rawHql, int fromIdx, String entityAlias, SelectorMeta meta) {
-    try {
-      String selectClause = rawHql.substring(0, fromIdx);
-      String fromOnwards = rawHql.substring(fromIdx);
-
-      // Parse ordered alias list from SELECT: "expr as aliasname"
-      List<String> aliases = parseSelectAliases(selectClause);
-      if (aliases.isEmpty()) {
-        log.debug("Could not parse SELECT aliases from custom HQL");
-        return;
-      }
-
-      int idPos = findIdPositionInAliases(aliases, meta.valueProperty);
-      if (idPos < 0) {
-        log.debug("Could not find ID column in custom HQL SELECT aliases: {}", aliases);
-        return;
-      }
-
-      Map<String, Integer> auxAliasPos = buildHqlAuxAliasPositionMap(meta.auxFields, aliases);
-      if (auxAliasPos.isEmpty()) {
-        return;
-      }
-
-      // Build and execute the aux query filtered by the already-fetched IDs
-      String auxHql = buildAuxIdListQuery(selectClause + fromOnwards, entityAlias);
-      auxHql = resolveObuiselParams(auxHql);
-
-      org.hibernate.query.Query<Object[]> auxQuery = OBDal.getInstance()
-          .getSession().createQuery(auxHql, Object[].class);
-      auxQuery.setParameterList("auxIds", entityIds);
-
-      Map<String, JSONObject> auxMap = buildAuxResultMap(auxQuery.list(), idPos, auxAliasPos);
-      mergeAuxIntoItems(items, auxMap);
-
-    } catch (Exception e) {
-      log.warn("Could not resolve aux fields via HQL: {}", e.getMessage());
-    }
-  }
-
-  /**
-   * Parse the ordered list of lowercase alias names from a SELECT clause.
-   * Handles optional DISTINCT and "expr as alias" notation.
-   */
-  private static List<String> parseSelectAliases(String selectClause) {
-    java.util.regex.Matcher aliasMatcher = Pattern.compile(
-        "(?:,|SELECT(?:\\s+DISTINCT)?)\\s+(.+?)\\s+[Aa][Ss]\\s+(\\w+)",
-        Pattern.DOTALL).matcher(selectClause);
-    List<String> aliases = new ArrayList<>();
-    while (aliasMatcher.find()) {
-      aliases.add(aliasMatcher.group(2).toLowerCase());
-    }
-    return aliases;
-  }
-
-  /**
-   * Find the position of the ID column in a SELECT alias list.
-   * Checks the value-property alias first, then falls back to short aliases ending in "id".
-   * Returns -1 if not found.
-   */
-  private static int findIdPositionInAliases(List<String> aliases, String valueProperty) {
-    String valueAlias = valueProperty != null ? valueProperty.toLowerCase() : "id";
-    int idPos = aliases.indexOf(valueAlias);
-    if (idPos >= 0) {
-      return idPos;
-    }
-    for (int i = 0; i < aliases.size(); i++) {
-      if (aliases.get(i).endsWith("id") && aliases.get(i).length() <= 6) {
-        return i;
-      }
-    }
-    return -1;
-  }
-
-  /**
-   * Build a suffix→column-position map for auxiliary fields that have an HQL alias
-   * but no DAL property path.
-   */
-  private static Map<String, Integer> buildHqlAuxAliasPositionMap(
-      List<AuxFieldMeta> auxFields, List<String> aliases) {
-    Map<String, Integer> auxAliasPos = new java.util.HashMap<>();
-    for (AuxFieldMeta af : auxFields) {
-      if (StringUtils.isBlank(af.property) && StringUtils.isNotBlank(af.hqlAlias)) {
-        int pos = aliases.indexOf(af.hqlAlias.toLowerCase());
-        if (pos >= 0) {
-          auxAliasPos.put(af.suffix, pos);
-        }
-      }
-    }
-    return auxAliasPos;
-  }
-
-  /**
-   * Prepare an HQL query string from a raw HQL by stripping ORDER BY and appending
-   * an IN(:auxIds) entity ID filter, ready for aux-field resolution.
-   */
-  private static String buildAuxIdListQuery(String rawHql, String entityAlias) {
-    // Remove ORDER BY (not needed for aux lookup)
-    int orderByIdx = rawHql.toUpperCase().lastIndexOf("ORDER BY");
-    String hql = orderByIdx > 0 ? rawHql.substring(0, orderByIdx) : rawHql;
-
-    boolean hasWhere = Pattern.compile("\\sWHERE\\s", Pattern.CASE_INSENSITIVE)
-        .matcher(hql).find();
-    return hql + (hasWhere ? SQL_AND : SQL_WHERE) + entityAlias + ".id IN (:auxIds)";
-  }
-
-  /**
-   * Build an ID-to-aux-values map from HQL Object[] query results.
-   */
-  private static Map<String, JSONObject> buildAuxResultMap(List<Object[]> rows,
-      int idPos, Map<String, Integer> auxAliasPos) throws Exception {
-    Map<String, JSONObject> auxMap = new java.util.HashMap<>();
-    for (Object[] row : rows) {
-      if (row.length <= idPos || row[idPos] == null) {
-        continue;
-      }
-      String rowId = row[idPos].toString();
-      JSONObject aux = new JSONObject();
-      for (Map.Entry<String, Integer> entry : auxAliasPos.entrySet()) {
-        int pos = entry.getValue();
-        if (pos < row.length && row[pos] != null) {
-          aux.put(entry.getKey(), row[pos].toString());
-        }
-      }
-      if (aux.length() > 0) {
-        auxMap.put(rowId, aux);
-      }
-    }
-    return auxMap;
-  }
-
-  /**
-   * Merge auxiliary field values from auxMap into the corresponding items in the JSONArray.
-   * Merges with any existing {@code _aux} object already present on the item.
-   */
-  @SuppressWarnings("unchecked")
-  private static void mergeAuxIntoItems(JSONArray items, Map<String, JSONObject> auxMap)
-      throws Exception {
-    for (int i = 0; i < items.length(); i++) {
-      JSONObject item = items.getJSONObject(i);
-      String itemId = item.optString("id");
-      JSONObject aux = auxMap.get(itemId);
-      if (aux == null) {
-        continue;
-      }
-      JSONObject existing = item.optJSONObject("_aux");
-      if (existing != null) {
-        java.util.Iterator<String> auxKeysIter = aux.keys();
-        while (auxKeysIter.hasNext()) {
-          String key = auxKeysIter.next();
-          existing.put(key, aux.get(key));
-        }
-      } else {
-        item.put("_aux", aux);
-      }
-    }
-  }
-
-  /** Pattern matching @param@ placeholders in OBUISEL clauses. */
-  private static final Pattern PARAM_PATTERN = Pattern.compile("@([A-Za-z_]+)@");
-
-  /**
-   * Replace @param@ placeholders in OBUISEL where/HQL clauses with values from OBContext.
-   * Known context params (AD_Org_ID, AD_Client_ID, AD_User_ID, AD_Role_ID) are resolved
-   * case-insensitively. Unknown params (e.g. @inpmWarehouseId@) that depend on form context
-   * are replaced with NULL since NEO selectors don't have that context yet.
-   */
-  private static String resolveObuiselParams(String whereClause) {
-    OBContext ctx = OBContext.getOBContext();
-    java.util.Map<String, String> knownParams = new java.util.HashMap<>();
-    knownParams.put("ad_org_id", "'" + ctx.getCurrentOrganization().getId() + "'");
-    knownParams.put("ad_client_id", "'" + ctx.getCurrentClient().getId() + "'");
-    knownParams.put("ad_user_id", "'" + ctx.getUser().getId() + "'");
-    knownParams.put("ad_role_id", "'" + ctx.getRole().getId() + "'");
-    // Common aliases
-    knownParams.put("client", "'" + ctx.getCurrentClient().getId() + "'");
-
-    java.util.regex.Matcher m = PARAM_PATTERN.matcher(whereClause);
-    StringBuffer sb = new StringBuffer();
-    while (m.find()) {
-      String paramName = m.group(1);
-      String resolved = knownParams.get(paramName.toLowerCase());
-      if (resolved != null) {
-        m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(resolved));
-      } else {
-        // Unknown context param — replace with NULL so the condition
-        // evaluates safely rather than crashing with '@' parse error
-        log.debug("Unresolved OBUISEL param @{}@ replaced with NULL", paramName);
-        m.appendReplacement(sb, "NULL");
-      }
-    }
-    m.appendTail(sb);
-    return sb.toString();
-  }
-
   // ---- Resolution helpers ----
 
   private static SFEntity findEntity(String specId, String entityName) {
@@ -1105,7 +570,6 @@ public class NeoSelectorService {
     List<SFField> results = criteria.list();
     return results.isEmpty() ? null : results.get(0);
   }
-
 
   /**
    * Get the base reference ID (18, 19, or 30) checking parent references.
@@ -1301,20 +765,6 @@ public class NeoSelectorService {
     }
   }
 
-  /** Container for the three field lists produced by classifySelectorFields. */
-  private static class ObuiselFieldLists {
-    final List<RichFieldMeta> gridFields;
-    final List<String> searchableProps;
-    final List<AuxFieldMeta> auxFields;
-
-    ObuiselFieldLists(List<RichFieldMeta> gridFields, List<String> searchableProps,
-        List<AuxFieldMeta> auxFields) {
-      this.gridFields = gridFields;
-      this.searchableProps = searchableProps;
-      this.auxFields = auxFields;
-    }
-  }
-
   /**
    * Classify a list of OBUISEL selector fields into grid columns, searchable properties,
    * and auxiliary output fields.
@@ -1500,301 +950,6 @@ public class NeoSelectorService {
     return "id";
   }
 
-  // Matches @Param@ and @#Param@ (session-level variables in Etendo)
-  private static final Pattern VALIDATION_PARAM = Pattern.compile("@#?(\\w+)@");
-
-  // SQL functions that have no HQL equivalent and must cause a clause to be skipped
-  private static final Pattern SQL_ONLY_FUNCTIONS = Pattern.compile(
-      "AD_ISORGINCLUDED|AD_ISCHILDORGINCLUDED", Pattern.CASE_INSENSITIVE);
-
-  /**
-   * Resolve the column's validation rule into an HQL filter using context params.
-   *
-   * Validation rules are SQL-style clauses like:
-   *   C_DocType.DocBaseType IN ('SOO', 'POO') AND C_DocType.IsSOTrx='@IsSOTrx@'
-   *   AND (AD_ISORGINCLUDED(@AD_Org_ID@, ...) <> '-1' OR ...)
-   *
-   * This method applies a best-effort strategy:
-   * 1. Splits the validation code into top-level AND clauses
-   * 2. For each clause, checks if all @Param@ placeholders can be resolved
-   * 3. Includes clauses where all params are available (or that have no params)
-   * 4. Skips clauses with unresolvable params or SQL-only functions
-   * 5. Converts TABLE.COLUMN references to DAL property paths (e.property)
-   *
-   * This ensures static filters (e.g., DocBaseType IN ('POO')) are always applied
-   * even when context-dependent clauses cannot be resolved.
-   */
-  private static String resolveValidationFilter(Column column, String targetEntityName,
-      Map<String, String> contextParams) {
-    org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
-    if (valRule == null || StringUtils.isBlank(valRule.getValidationCode())) {
-      return null;
-    }
-
-    String code = valRule.getValidationCode().trim();
-
-    // Build combined param map: session variables + caller-provided context params
-    Map<String, String> allParams = new java.util.HashMap<>();
-    OBContext ctx = OBContext.getOBContext();
-    allParams.put("AD_Org_ID", ctx.getCurrentOrganization().getId());
-    allParams.put("AD_Client_ID", ctx.getCurrentClient().getId());
-    allParams.put("AD_User_ID", ctx.getUser().getId());
-    allParams.put("AD_Role_ID", ctx.getRole().getId());
-    if (contextParams != null) {
-      allParams.putAll(contextParams);
-    }
-
-    // Split into top-level AND clauses, respecting parentheses depth
-    List<String> clauses = splitTopLevelAnd(code);
-
-    List<String> resolvedClauses = new ArrayList<>();
-    for (String clause : clauses) {
-      String trimmed = clause.trim();
-      if (StringUtils.isBlank(trimmed)) {
-        continue;
-      }
-
-      // Skip clauses containing SQL-only functions (no HQL equivalent)
-      if (SQL_ONLY_FUNCTIONS.matcher(trimmed).find()) {
-        log.debug("Skipping validation clause with SQL-only function: {}", trimmed);
-        continue;
-      }
-
-      // Check if all @Param@ in this clause can be resolved
-      Matcher paramMatcher = VALIDATION_PARAM.matcher(trimmed);
-      boolean allResolvable = true;
-      while (paramMatcher.find()) {
-        String paramName = paramMatcher.group(1);
-        if (!allParams.containsKey(paramName)) {
-          allResolvable = false;
-          break;
-        }
-      }
-      if (!allResolvable) {
-        log.debug("Skipping validation clause with unresolvable params: {}", trimmed);
-        continue;
-      }
-
-      // Replace @Param@ and @#Param@ with sanitized values
-      StringBuffer resolved = new StringBuffer();
-      paramMatcher = VALIDATION_PARAM.matcher(trimmed);
-      while (paramMatcher.find()) {
-        String paramName = paramMatcher.group(1);
-        String value = allParams.get(paramName).replace("'", "''");
-        paramMatcher.appendReplacement(resolved,
-            Matcher.quoteReplacement("'" + value + "'"));
-      }
-      paramMatcher.appendTail(resolved);
-
-      resolvedClauses.add(resolved.toString());
-    }
-
-    if (resolvedClauses.isEmpty()) {
-      return null;
-    }
-
-    // Join resolved clauses back with AND
-    String joined = String.join(SQL_AND, resolvedClauses);
-
-    // Convert SQL TABLE.COLUMN references to HQL e.property paths
-    String hqlFilter = convertSqlToHql(joined, targetEntityName);
-    return hqlFilter;
-  }
-
-  /**
-   * Split a SQL WHERE clause into top-level AND segments.
-   * Respects parentheses nesting so that "A AND (B OR C AND D) AND E"
-   * splits into ["A", "(B OR C AND D)", "E"], not into inner parts.
-   */
-  private static List<String> splitTopLevelAnd(String code) {
-    List<String> parts = new ArrayList<>();
-    int depth = 0;
-    int start = 0;
-    String upper = code.toUpperCase();
-
-    for (int i = 0; i < code.length(); i++) {
-      char c = code.charAt(i);
-      if (c == '(') {
-        depth++;
-      } else if (c == ')') {
-        depth--;
-      } else if (depth == 0 && i + 3 < code.length()) {
-        // Check for top-level AND (preceded/followed by whitespace or newline)
-        if (upper.substring(i, i + 3).equals("AND")
-            && (i == 0 || !Character.isLetterOrDigit(code.charAt(i - 1)))
-            && !Character.isLetterOrDigit(code.charAt(i + 3))) {
-          parts.add(code.substring(start, i).trim());
-          start = i + 3;
-        }
-      }
-    }
-    // Add the last segment
-    String last = code.substring(start).trim();
-    if (!last.isEmpty()) {
-      parts.add(last);
-    }
-    return parts;
-  }
-
-  /**
-   * Convert a SQL-style validation clause to HQL.
-   * Replaces TABLE.COLUMN with e.dalProperty, handling FK columns (_ID -> .id).
-   * Also converts bare column names (without table prefix) to e.property paths.
-   *
-   * Example: "C_DocType.DocBaseType IN ('POO')" -> "e.documentType IN ('POO')"
-   * Example: "docsubtypeso like 'OB'" -> "e.sOSubType like 'OB'"
-   */
-  private static String convertSqlToHql(String sqlClause, String targetEntityName) {
-    try {
-      Entity targetEntity = ModelProvider.getInstance().getEntity(targetEntityName);
-      if (targetEntity == null) {
-        return sqlClause;
-      }
-
-      String tableName = targetEntity.getTableName();
-
-      // Step 1: Replace TABLE.COLUMN patterns with e.property
-      Pattern tableColPattern = Pattern.compile(
-          Pattern.quote(tableName) + "\\.(\\w+)", Pattern.CASE_INSENSITIVE);
-      Matcher m = tableColPattern.matcher(sqlClause);
-
-      StringBuffer result = new StringBuffer();
-      while (m.find()) {
-        String dbColName = m.group(1);
-        String replacement = resolveColumnToHql(targetEntity, dbColName);
-        m.appendReplacement(result, Matcher.quoteReplacement(replacement));
-      }
-      m.appendTail(result);
-      String afterTableRef = result.toString();
-
-      // Step 2: Replace bare column names that are NOT already prefixed with "e."
-      // Match word tokens that could be column names (not inside quotes, not SQL keywords)
-      Pattern bareColPattern = Pattern.compile("(?<![.'\"])\\b(\\w+)\\b(?!\\s*\\()");
-      m = bareColPattern.matcher(afterTableRef);
-      result = new StringBuffer();
-      java.util.Set<String> sqlKeywords = new java.util.HashSet<>(java.util.Arrays.asList(
-          "AND", "OR", "NOT", "IN", "IS", "NULL", "LIKE", "BETWEEN",
-          "COALESCE", "CAST", "AS", "SELECT", "FROM", "WHERE", "ORDER", "BY",
-          "ASC", "DESC", "TRUE", "FALSE", "ESCAPE", "e"));
-      while (m.find()) {
-        String token = m.group(1);
-        // Skip SQL keywords, string literals, numbers, and already-resolved "e." references
-        if (sqlKeywords.contains(token.toUpperCase())
-            || token.matches("\\d+")
-            || (m.start() > 0 && afterTableRef.charAt(m.start() - 1) == '.')) {
-          continue;
-        }
-        try {
-          Property prop = targetEntity.getPropertyByColumnName(token);
-          if (prop != null) {
-            String replacement = resolveColumnToHql(targetEntity, token);
-            m.appendReplacement(result, Matcher.quoteReplacement(replacement));
-          }
-        } catch (Exception ignored) {
-          // Not a column name, leave as-is
-        }
-      }
-      m.appendTail(result);
-      return result.toString();
-    } catch (Exception e) {
-      log.warn("Could not convert SQL to HQL for entity {}: {}", targetEntityName, e.getMessage());
-      return sqlClause;
-    }
-  }
-
-  /**
-   * Resolve a single DB column name to an HQL "e.property" path.
-   */
-  private static String resolveColumnToHql(Entity targetEntity, String dbColName) {
-    Property prop = targetEntity.getPropertyByColumnName(dbColName);
-    if (prop != null) {
-      if (!prop.isPrimitive() && prop.getTargetEntity() != null) {
-        return "e." + prop.getName() + ".id";
-      }
-      return "e." + prop.getName();
-    }
-    return "e." + dbColName;
-  }
-
-  /**
-   * Holds resolved target metadata for a selector.
-   */
-  private static class SelectorMeta {
-    final String entityName;
-    final String displayProperty;
-    final String whereClause;
-    final boolean isRich;
-    final boolean isCustomQuery;
-    final String valueProperty;
-    final List<RichFieldMeta> gridFields;
-    final List<String> searchableProperties;
-    final String customHql;
-    final String entityAlias;
-    final List<AuxFieldMeta> auxFields;
-
-    /** Constructor for simple selectors (TableDir, Table, Search). */
-    SelectorMeta(String entityName, String displayProperty, String whereClause) {
-      this(entityName, displayProperty, whereClause,
-          false, false, "id",
-          new ArrayList<>(), new ArrayList<>(),
-          null, "e", new ArrayList<>());
-    }
-
-    /** Constructor for rich (OBUISEL) selectors. */
-    SelectorMeta(String entityName, String displayProperty, String whereClause,
-        boolean isRich, boolean isCustomQuery, String valueProperty,
-        List<RichFieldMeta> gridFields, List<String> searchableProperties,
-        String customHql, String entityAlias, List<AuxFieldMeta> auxFields) {
-      this.entityName = entityName;
-      this.displayProperty = displayProperty;
-      this.whereClause = whereClause;
-      this.isRich = isRich;
-      this.isCustomQuery = isCustomQuery;
-      this.valueProperty = valueProperty;
-      this.gridFields = gridFields;
-      this.searchableProperties = searchableProperties;
-      this.customHql = customHql;
-      this.entityAlias = entityAlias;
-      this.auxFields = auxFields;
-    }
-  }
-
-  /**
-   * Metadata for a single field in a rich selector grid.
-   */
-  private static class RichFieldMeta {
-    final String propertyKey;  // last segment of property path
-    final String label;        // display name
-    final String property;     // full DAL property path
-    final long sortNo;
-
-    RichFieldMeta(String propertyKey, String label, String property, long sortNo) {
-      this.propertyKey = propertyKey;
-      this.label = label;
-      this.property = property;
-      this.sortNo = sortNo;
-    }
-  }
-
-  /**
-   * Metadata for an auxiliary output field in an OBUISEL selector.
-   * Auxiliary fields are defined with isOutField=Y and a SUFFIX (e.g., "_LOC").
-   * They provide extra data (like a default location ID) alongside the selected value.
-   */
-  private static class AuxFieldMeta {
-    final String suffix;              // e.g., "_LOC", "_CON"
-    final String hqlAlias;            // e.g., "locationid" (from displayColumnAlias)
-    final String name;                // display name of the field
-    final String property;            // DAL property path (if available)
-
-    AuxFieldMeta(String suffix, String hqlAlias, String name, String property) {
-      this.suffix = suffix;
-      this.hqlAlias = hqlAlias;
-      this.name = name;
-      this.property = property;
-    }
-  }
-
   /**
    * Resolve selector auxiliary values (_aux) for a specific record ID.
    * Used by the callout cascade to provide aux values (prices, UOM, currency)
@@ -1819,11 +974,11 @@ public class NeoSelectorService {
 
       // For rich (OBUISEL) selectors with custom HQL, query via HQL
       if (meta.isRich && meta.isCustomQuery && StringUtils.isNotBlank(meta.customHql)) {
-        return resolveAuxViaHql(meta, fieldName, recordId);
+        return SelectorAuxResolver.resolveAuxViaHql(meta, fieldName, recordId);
       }
 
       // For DAL-resolvable aux fields, load the entity and read properties.
-      BaseOBObject bob = loadEntityForAux(meta, recordId);
+      BaseOBObject bob = SelectorAuxResolver.loadEntityForAux(meta, recordId);
       if (bob == null) {
         log.debug("No record found in {} for value {} (valueProperty={})",
             meta.entityName, recordId, meta.valueProperty);
@@ -1832,7 +987,7 @@ public class NeoSelectorService {
 
       JSONObject result = new JSONObject();
       for (AuxFieldMeta af : meta.auxFields) {
-        Object auxVal = resolveAuxFieldValue(bob, af);
+        Object auxVal = SelectorAuxResolver.resolveAuxFieldValue(bob, af);
         if (auxVal != null) {
           result.put(fieldName + af.suffix, auxVal.toString());
         }
@@ -1844,113 +999,5 @@ public class NeoSelectorService {
           fieldName, recordId, e.getMessage());
       return null;
     }
-  }
-
-  /**
-   * Load the entity object needed to resolve DAL aux field values.
-   * If valueProperty is "id", loads directly. Otherwise, queries by property value.
-   */
-  private static BaseOBObject loadEntityForAux(SelectorMeta meta, String recordId) {
-    if ("id".equals(meta.valueProperty)) {
-      return (BaseOBObject) OBDal.getInstance().get(meta.entityName, recordId);
-    }
-    // Query by the value property path (e.g., "product.id" for ProductByPriceAndWarehouse)
-    try {
-      String hql = "from " + meta.entityName + " where " + meta.valueProperty + " = :val";
-      org.hibernate.query.Query<?> q = OBDal.getInstance().getSession().createQuery(hql);
-      q.setParameter("val", recordId);
-      q.setMaxResults(1);
-      List<?> results = q.list();
-      if (!results.isEmpty()) {
-        return (BaseOBObject) results.get(0);
-      }
-    } catch (Exception e) {
-      log.debug("Could not query {} by {}: {}", meta.entityName, meta.valueProperty, e.getMessage());
-    }
-    return null;
-  }
-
-  /**
-   * Resolve aux values via the original OBUISEL custom HQL for a single record.
-   */
-  @SuppressWarnings("unchecked")
-  private static JSONObject resolveAuxViaHql(SelectorMeta meta, String fieldName,
-      String recordId) {
-    try {
-      String hql = meta.customHql;
-      String selectClause = hql.substring(0, hql.toUpperCase().indexOf(" FROM "));
-      String[] selectParts = selectClause.replaceFirst("(?i)^\\s*select\\s+", "").split(",");
-      Map<String, Integer> aliasPos = buildAuxAliasPositionMap(selectParts);
-
-      String fullHql = buildAuxHqlWithIdFilter(hql, selectClause, meta.entityAlias);
-      return executeAuxHqlQuery(fullHql, recordId, aliasPos, meta.auxFields, fieldName);
-
-    } catch (Exception e) {
-      log.debug("Could not resolve aux via HQL for {}: {}", fieldName, e.getMessage());
-      return null;
-    }
-  }
-
-  /**
-   * Build an alias-to-index map from the SELECT parts of a custom HQL clause.
-   */
-  private static Map<String, Integer> buildAuxAliasPositionMap(String[] selectParts) {
-    Map<String, Integer> aliasPos = new java.util.HashMap<>();
-    for (int i = 0; i < selectParts.length; i++) {
-      String part = selectParts[i].trim();
-      int asIdx = part.toLowerCase().lastIndexOf(" as ");
-      if (asIdx >= 0) {
-        String alias = part.substring(asIdx + 4).trim().replace("\"", "");
-        aliasPos.put(alias.toLowerCase(), i);
-      }
-    }
-    return aliasPos;
-  }
-
-  /**
-   * Append an entity ID filter to the HQL and return the full query string.
-   */
-  private static String buildAuxHqlWithIdFilter(String hql, String selectClause,
-      String entityAlias) {
-    String fromClause = hql.substring(hql.toUpperCase().indexOf(" FROM "));
-    String fullHql = selectClause + fromClause;
-    if (fullHql.toUpperCase().contains(SQL_WHERE)) {
-      fullHql += SQL_AND + entityAlias + ".id = :recordId";
-    } else {
-      fullHql += SQL_WHERE + entityAlias + ".id = :recordId";
-    }
-    return fullHql;
-  }
-
-  /**
-   * Execute an aux HQL query and map results to a JSON object keyed by fieldName + suffix.
-   */
-  private static JSONObject executeAuxHqlQuery(String fullHql, String recordId,
-      Map<String, Integer> aliasPos, List<AuxFieldMeta> auxFields,
-      String fieldName) throws Exception {
-    org.hibernate.query.Query<?> query = OBDal.getInstance().getSession().createQuery(fullHql);
-    query.setParameter("recordId", recordId);
-    query.setMaxResults(1);
-
-    List<?> results = query.list();
-    if (results.isEmpty()) {
-      return null;
-    }
-
-    Object row = results.get(0);
-    Object[] cols = row instanceof Object[] ? (Object[]) row : new Object[]{ row };
-
-    JSONObject result = new JSONObject();
-    for (AuxFieldMeta af : auxFields) {
-      Integer pos = aliasPos.get(af.hqlAlias.toLowerCase());
-      if (pos != null && pos < cols.length && cols[pos] != null) {
-        Object val = cols[pos];
-        if (val instanceof BaseOBObject) {
-          val = ((BaseOBObject) val).getId();
-        }
-        result.put(fieldName + af.suffix, val.toString());
-      }
-    }
-    return result.length() > 0 ? result : null;
   }
 }
