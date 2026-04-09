@@ -147,6 +147,7 @@ public class NeoCalloutService {
         // Transform the callout result to REST format
         JSONObject restResponse = transformResponse(calloutResult, adTab);
         log.info("[NEO-CALLOUT] Transformed response: {}", restResponse.toString().substring(0, Math.min(500, restResponse.toString().length())));
+
         return NeoResponse.ok(restResponse);
 
       } finally {
@@ -396,7 +397,16 @@ public class NeoCalloutService {
 
     // Inject essential context params from OBContext (security boundary — always authoritative)
     OBContext obCtx = OBContext.getOBContext();
-    params.put("inpadOrgId", new String[]{ obCtx.getCurrentOrganization().getId() });
+    String calloutOrgId = obCtx.getCurrentOrganization().getId();
+    // When logged in with "*" org (id=0), resolve the first real org so callouts like
+    // SE_OrderLine_PriceList can find the correct price list for the client.
+    if ("0".equals(calloutOrgId)) {
+      String realOrgId = NeoDefaultsService.resolveFirstOrgForClient(obCtx.getCurrentClient().getId());
+      if (realOrgId != null) {
+        calloutOrgId = realOrgId;
+      }
+    }
+    params.put("inpadOrgId", new String[]{ calloutOrgId });
     params.put("inpadClientId", new String[]{ obCtx.getCurrentClient().getId() });
     String isSOTrx = adTab.getWindow() != null
         && Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
@@ -464,6 +474,12 @@ public class NeoCalloutService {
         params.put(inpKey, new String[]{ val });
       }
     }
+
+    // Re-assert the real org AFTER formState mapping, because formState may contain
+    // adOrgId="0" (the * org) which maps to inpadOrgId and overwrites our earlier fix.
+    // This authoritative override ensures callouts like SE_OrderLine_PriceList always
+    // receive a real org, not the pseudo-org "0".
+    params.put("inpadOrgId", new String[]{ calloutOrgId });
 
     // Fill missing columns with their AD defaults so callouts see all fields.
     // In the classic UI every form field is present in the callout request, even on a new
@@ -559,6 +575,15 @@ public class NeoCalloutService {
     String lang = obCtx.getLanguage().getLanguage();
     String warehouseId = obCtx.getWarehouse() != null
         ? obCtx.getWarehouse().getId() : "";
+
+    // When logged in with "*" org (id=0), resolve the first real org so that
+    // @#AD_Org_ID@ expressions inside callouts resolve to a valid org.
+    if ("0".equals(orgId)) {
+      String realOrgId = NeoDefaultsService.resolveFirstOrgForClient(clientId);
+      if (realOrgId != null) {
+        orgId = realOrgId;
+      }
+    }
 
     VariablesSecureApp vars = new VariablesSecureApp(userId, clientId, orgId, roleId, lang);
     DalConnectionProvider conn = new DalConnectionProvider(false);
@@ -935,4 +960,5 @@ public class NeoCalloutService {
     }
     return stripped;
   }
+
 }
