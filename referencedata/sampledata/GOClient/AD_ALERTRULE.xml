@@ -1,0 +1,387 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<data>
+<AD_ALERTRULE>
+  <AD_ALERTRULE_ID><![CDATA[09B5AF60D1FE4D3CB57C24CF79B09866]]></AD_ALERTRULE_ID>
+  <AD_CLIENT_ID><![CDATA[802509E12436405C86BA1FD5B1DF508C]]></AD_CLIENT_ID>
+  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+  <CREATED><![CDATA[2026-04-07 14:12:42.891]]></CREATED>
+  <CREATEDBY><![CDATA[100]]></CREATEDBY>
+  <UPDATED><![CDATA[2026-04-07 14:12:42.891]]></UPDATED>
+  <UPDATEDBY><![CDATA[100]]></UPDATEDBY>
+  <NAME><![CDATA[Avg Cost configuration issue. RFC Shipment with no original]]></NAME>
+  <AD_TAB_ID><![CDATA[180]]></AD_TAB_ID>
+  <SQL><![CDATA[SELECT DISTINCT iol.m_product_id as referencekey_id, '0' as ad_role_id, null as ad_user_id, 'The product ' || p.name || ' has Returned Shipments without a related original shipment and does not have a Purchase PriceList nor Standard Cost defined.' as description, 'Y' as isactive, iol.ad_org_id as ad_org_id, iol.ad_client_id as ad_client_id, now() as created, '0' as createdBy, now() as updated, '0' as updatedBy, p.name as RECORD_ID
+FROM m_inoutline iol
+  JOIN m_inout io ON iol.m_inout_id = io.m_inout_id AND io.issotrx = 'Y' AND io.docstatus = 'CO'
+  JOIN m_product p ON iol.m_product_id = p.m_product_id
+  JOIN m_transaction t ON iol.m_inoutline_id = t.m_inoutline_id
+  JOIN c_bpartner bp ON io.c_bpartner_id = bp.c_bpartner_id
+  JOIN c_doctype dt ON io.c_doctype_id = dt.c_doctype_id AND dt.isreturn = 'Y'
+  JOIN m_costing_rule cr ON ad_isorgincluded(io.ad_org_id, cr.ad_org_id, io.ad_client_id) >= 0 AND cr.datefrom <= t.trxprocessdate AND cr.dateto > t.trxprocessdate
+  JOIN m_costing_algorithm ca ON cr.m_costing_algorithm_id = ca.m_costing_algorithm_id AND ca.classname = 'org.openbravo.costing.AverageAlgorithm'
+  LEFT JOIN c_orderline ol ON iol.c_orderline_id = ol.c_orderline_id
+WHERE (iol.c_orderline_id IS NULL OR ol.m_inoutline_id IS NULL)
+  AND NOT EXISTS (SELECT 1 FROM m_costing c
+    WHERE c.m_product_id = iol.m_product_id AND c.costtype IN ( 'STA', 'AVA') AND c.datefrom <= t.trxprocessdate AND c.dateto > t.trxprocessdate)
+  AND NOT EXISTS (SELECT 1 FROM m_productprice pp
+    JOIN m_pricelist_version ppv ON pp.m_pricelist_version_id = ppv.m_pricelist_version_id
+    JOIN m_pricelist pl ON pl.m_pricelist_id = ppv.m_pricelist_id
+    WHERE pp.m_product_id = iol.m_product_id
+      AND (bp.po_pricelist_id = ppv.m_pricelist_id OR (bp.po_pricelist_id IS NULL AND pl.issopricelist = 'N'))
+      AND ppv.validfrom <= t.trxprocessdate)]]></SQL>
+  <TYPE><![CDATA[D]]></TYPE>
+</AD_ALERTRULE>
+
+<AD_ALERTRULE>
+  <AD_ALERTRULE_ID><![CDATA[36080A439B564021A2523283A760577A]]></AD_ALERTRULE_ID>
+  <AD_CLIENT_ID><![CDATA[802509E12436405C86BA1FD5B1DF508C]]></AD_CLIENT_ID>
+  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+  <CREATED><![CDATA[2026-04-07 14:12:42.893]]></CREATED>
+  <CREATEDBY><![CDATA[100]]></CREATEDBY>
+  <UPDATED><![CDATA[2026-04-07 14:12:42.893]]></UPDATED>
+  <UPDATEDBY><![CDATA[100]]></UPDATEDBY>
+  <NAME><![CDATA[Avg Cost configuration issue. Receipts without related Order]]></NAME>
+  <AD_TAB_ID><![CDATA[180]]></AD_TAB_ID>
+  <SQL><![CDATA[SELECT DISTINCT iol.m_product_id as referencekey_id, '0' as ad_role_id, null as ad_user_id, 'The product ' || p.name || ' has Receipts without a related Purchase Order and does not have a Purchase PriceList nor Standard Cost defined.' as description, 'Y' as isactive, iol.ad_org_id as ad_org_id, iol.ad_client_id as ad_client_id, now() as created, '0' as createdBy, now() as updated, '0' as updatedBy, p.name as RECORD_ID
+FROM m_inoutline iol
+JOIN m_inout io ON iol.m_inout_id = io.m_inout_id AND io.issotrx = 'N' AND io.docstatus = 'CO'
+JOIN m_transaction t ON iol.m_inoutline_id = t.m_inoutline_id
+JOIN c_bpartner bp ON io.c_bpartner_id = bp.c_bpartner_id
+JOIN m_product p ON iol.m_product_id = p.m_product_id
+JOIN m_costing_rule cr ON ad_isorgincluded(io.ad_org_id, cr.ad_org_id, io.ad_client_id) >= 0 AND cr.datefrom <= t.trxprocessdate AND cr.dateto > t.trxprocessdate
+JOIN m_costing_algorithm ca ON cr.m_costing_algorithm_id = ca.m_costing_algorithm_id AND ca.classname = 'org.openbravo.costing.AverageAlgorithm'
+WHERE NOT EXISTS (SELECT 1 FROM m_matchpo mp WHERE mp.m_inoutline_id = iol.m_inoutline_id AND mp.c_orderline_id IS NOT NULL)
+AND NOT EXISTS (SELECT 1 FROM m_costing c WHERE c.m_product_id = iol.m_product_id AND c.costtype IN ('STA', 'AVA') AND c.datefrom <= t.trxprocessdate AND c.dateto > t.trxprocessdate)
+AND NOT EXISTS (SELECT 1 FROM m_productprice pp
+JOIN m_pricelist_version ppv ON pp.m_pricelist_version_id = ppv.m_pricelist_version_id
+JOIN m_pricelist pl ON pl.m_pricelist_id = ppv.m_pricelist_id
+WHERE pp.m_product_id = iol.m_product_id AND (bp.po_pricelist_id = ppv.m_pricelist_id OR (bp.po_pricelist_id IS NULL AND pl.issopricelist = 'N')) AND ppv.validfrom <= t.trxprocessdate)
+AND NOT EXISTS (SELECT 1 FROM c_orderline ol JOIN c_order o ON ol.c_order_id = o.c_order_id AND o.issotrx = 'N' AND o.processed = 'Y'
+WHERE ol.m_product_id = iol.m_product_id AND o.c_bpartner_id = bp.c_bpartner_id AND ad_isorgincluded(o.ad_org_id, cr.ad_org_id, io.ad_client_id) >= 0)]]></SQL>
+  <TYPE><![CDATA[D]]></TYPE>
+</AD_ALERTRULE>
+
+<AD_ALERTRULE>
+  <AD_ALERTRULE_ID><![CDATA[37AE323EAAB5481E9F356581696DBA51]]></AD_ALERTRULE_ID>
+  <AD_CLIENT_ID><![CDATA[802509E12436405C86BA1FD5B1DF508C]]></AD_CLIENT_ID>
+  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+  <CREATED><![CDATA[2026-04-07 14:12:42.516]]></CREATED>
+  <CREATEDBY><![CDATA[100]]></CREATEDBY>
+  <UPDATED><![CDATA[2026-04-07 14:12:42.516]]></UPDATED>
+  <UPDATEDBY><![CDATA[100]]></UPDATEDBY>
+  <NAME><![CDATA[Business Partner with no Tax Location Address]]></NAME>
+  <AD_TAB_ID><![CDATA[220]]></AD_TAB_ID>
+  <SQL><![CDATA[select bp.c_bpartner_id AS REFERENCEKEY_ID,
+ '0' AS AD_ROLE_ID,
+ NULL AS AD_USER_ID,
+ 'Business Partner: "' || AD_COLUMN_IDENTIFIER('C_BPartner', bp.C_BPARTNER_ID, 'en_US')
+ || '" has defined different country addresses. Please define one of them as Tax Location' AS DESCRIPTION,
+ 'Y' AS ISACTIVE,
+ bp.AD_ORG_ID AS AD_ORG_ID, 
+ bp.AD_CLIENT_ID AS AD_CLIENT_ID, 
+ now() AS CREATED,  
+ '0' AS CREATEDBY,  
+ now() AS UPDATED,
+ '0' AS UPDATEDBY,
+ AD_COLUMN_IDENTIFIER('C_BPartner', bp.C_BPARTNER_ID, 'en_US') AS RECORD_ID
+from c_bpartner bp
+where not exists (select 1 
+              from c_bpartner_location bpl0 
+              where bpl0.c_bpartner_id = bp.c_bpartner_id
+              and bpl0.istaxlocation = 'Y'
+              ) 
+and exists (select 1 
+              from c_bpartner_location bpl 
+              inner join c_location l on (bpl.c_location_id = l.c_location_id)
+              where bpl.c_bpartner_id = bp.c_bpartner_id
+              group by bpl.c_bpartner_id
+              having count(distinct(l.c_country_id)) > 1
+            )]]></SQL>
+  <TYPE><![CDATA[D]]></TYPE>
+</AD_ALERTRULE>
+
+<AD_ALERTRULE>
+  <AD_ALERTRULE_ID><![CDATA[7D7B5AECABB34298BF5B6E47A86FD0DC]]></AD_ALERTRULE_ID>
+  <AD_CLIENT_ID><![CDATA[802509E12436405C86BA1FD5B1DF508C]]></AD_CLIENT_ID>
+  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+  <ISACTIVE><![CDATA[N]]></ISACTIVE>
+  <CREATED><![CDATA[2026-04-07 14:12:42.996]]></CREATED>
+  <CREATEDBY><![CDATA[100]]></CREATEDBY>
+  <UPDATED><![CDATA[2026-04-07 14:12:42.996]]></UPDATED>
+  <UPDATEDBY><![CDATA[100]]></UPDATEDBY>
+  <NAME><![CDATA[Wrong Purchase Order Payment Plan]]></NAME>
+  <AD_TAB_ID><![CDATA[294]]></AD_TAB_ID>
+  <SQL><![CDATA[select distinct ad_column_identifier('C_Order', fin_payment_schedule.c_order_id, 'en_US') as record_id, 
+fin_payment_schedule.c_order_id  as referencekey_id, 0 as ad_role_id, null as ad_user_id, 
+'This order needs to be checked due to wrong payment info.' as description, 'Y' as isActive, 
+fin_payment_schedule.ad_org_id, fin_payment_schedule.ad_client_id, now() as created, 0 as createdBy, now() as updated, 0 as updatedBy 
+from c_order, fin_payment_schedule, fin_payment_scheduledetail 
+where c_order.c_order_id = fin_payment_schedule.c_order_id 
+and fin_payment_schedule.fin_payment_schedule_id = fin_payment_scheduledetail.fin_payment_schedule_order 
+and fin_payment_scheduledetail.iscanceled = 'N' 
+and fin_payment_scheduledetail.fin_payment_detail_id IS NOT NULL 
+and c_order.issotrx = 'N' 
+group by fin_payment_schedule.ad_org_id, fin_payment_schedule.ad_client_id, c_order.issotrx,
+fin_payment_schedule.fin_payment_schedule_id, fin_payment_schedule.c_order_id, fin_payment_schedule.paidamt 
+having fin_payment_schedule.paidamt <> sum(fin_payment_scheduledetail.amount + coalesce(fin_payment_scheduledetail.writeoffamt,0)) 
+order by 1]]></SQL>
+  <TYPE><![CDATA[D]]></TYPE>
+</AD_ALERTRULE>
+
+<AD_ALERTRULE>
+  <AD_ALERTRULE_ID><![CDATA[7F3831D3C7C547DA9ED871756AC3BBEF]]></AD_ALERTRULE_ID>
+  <AD_CLIENT_ID><![CDATA[802509E12436405C86BA1FD5B1DF508C]]></AD_CLIENT_ID>
+  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+  <ISACTIVE><![CDATA[N]]></ISACTIVE>
+  <CREATED><![CDATA[2026-04-07 14:12:42.999]]></CREATED>
+  <CREATEDBY><![CDATA[100]]></CREATEDBY>
+  <UPDATED><![CDATA[2026-04-07 14:12:42.999]]></UPDATED>
+  <UPDATEDBY><![CDATA[100]]></UPDATEDBY>
+  <NAME><![CDATA[Wrong Sales Order Payment Plan]]></NAME>
+  <AD_TAB_ID><![CDATA[186]]></AD_TAB_ID>
+  <SQL><![CDATA[select distinct ad_column_identifier('C_Order', fin_payment_schedule.c_order_id, 'en_US') as record_id, 
+fin_payment_schedule.c_order_id  as referencekey_id, 0 as ad_role_id, null as ad_user_id, 
+'This order needs to be checked due to wrong payment info.' as description, 'Y' as isActive, 
+fin_payment_schedule.ad_org_id, fin_payment_schedule.ad_client_id, now() as created, 0 as createdBy, now() as updated, 0 as updatedBy 
+from c_order, fin_payment_schedule, fin_payment_scheduledetail 
+where c_order.c_order_id = fin_payment_schedule.c_order_id 
+and fin_payment_schedule.fin_payment_schedule_id = fin_payment_scheduledetail.fin_payment_schedule_order 
+and fin_payment_scheduledetail.iscanceled = 'N' 
+and fin_payment_scheduledetail.fin_payment_detail_id IS NOT NULL 
+and c_order.issotrx = 'Y' 
+group by fin_payment_schedule.ad_org_id, fin_payment_schedule.ad_client_id, c_order.issotrx,
+fin_payment_schedule.fin_payment_schedule_id, fin_payment_schedule.c_order_id, fin_payment_schedule.paidamt 
+having fin_payment_schedule.paidamt <> sum(fin_payment_scheduledetail.amount + coalesce(fin_payment_scheduledetail.writeoffamt,0)) 
+order by 1]]></SQL>
+  <TYPE><![CDATA[D]]></TYPE>
+</AD_ALERTRULE>
+
+<AD_ALERTRULE>
+  <AD_ALERTRULE_ID><![CDATA[A1FB0C9A1E57405091CE261FB3E96DAC]]></AD_ALERTRULE_ID>
+  <AD_CLIENT_ID><![CDATA[802509E12436405C86BA1FD5B1DF508C]]></AD_CLIENT_ID>
+  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+  <CREATED><![CDATA[2026-04-07 14:12:42.894]]></CREATED>
+  <CREATEDBY><![CDATA[100]]></CREATEDBY>
+  <UPDATED><![CDATA[2026-04-07 14:12:42.894]]></UPDATED>
+  <UPDATEDBY><![CDATA[100]]></UPDATEDBY>
+  <NAME><![CDATA[Avg Cost configuration issue.Negative Internal Consumption]]></NAME>
+  <AD_TAB_ID><![CDATA[180]]></AD_TAB_ID>
+  <SQL><![CDATA[SELECT DISTINCT il.m_product_id as referencekey_id, '0' as ad_role_id, null as ad_user_id,
+  'The product ' || p.name || ' has Negative Internal Consumptions and does not have a Purchase PriceList nor Standard Cost defined.' as description,
+  'Y' as isactive, il.ad_org_id as ad_org_id, il.ad_client_id as ad_client_id,
+  now() as created, '0' as createdBy, now() as updated, '0' as updatedBy,
+  ad_column_identifier('M_Product', p.m_product_id, 'en_US') as RECORD_ID
+FROM m_internal_consumptionline il
+  JOIN m_internal_consumption i ON i.m_internal_consumption_id = il.m_internal_consumption_id
+  JOIN m_transaction t ON il.m_internal_consumptionline_id = t.m_internal_consumptionline_id
+  JOIN m_product p ON il.m_product_id = p.m_product_id
+  JOIN m_costing_rule cr ON ad_isorgincluded(i.ad_org_id, cr.ad_org_id, i.ad_client_id) >= 0 AND cr.datefrom <= t.trxprocessdate AND cr.dateto > t.trxprocessdate
+  JOIN m_costing_algorithm ca ON cr.m_costing_algorithm_id = ca.m_costing_algorithm_id AND ca.classname = 'org.openbravo.costing.AverageAlgorithm'
+WHERE t.movementqty > 0
+  AND NOT EXISTS (SELECT 1 FROM m_costing c
+    WHERE c.m_product_id = il.m_product_id AND c.costtype IN ( 'STA', 'AVA') AND c.datefrom <= t.trxprocessdate AND c.dateto > t.trxprocessdate)
+  AND NOT EXISTS (SELECT 1 FROM m_productprice pp
+                              JOIN m_pricelist_version ppv ON pp.m_pricelist_version_id = ppv.m_pricelist_version_id
+                              JOIN m_pricelist pl ON pl.m_pricelist_id = ppv.m_pricelist_id
+                  WHERE pp.m_product_id = il.m_product_id
+                    AND pl.issopricelist = 'N'
+                    AND ppv.validfrom <= t.trxprocessdate)]]></SQL>
+  <TYPE><![CDATA[D]]></TYPE>
+</AD_ALERTRULE>
+
+<AD_ALERTRULE>
+  <AD_ALERTRULE_ID><![CDATA[A72D356950CE4B41ACC281C31C335785]]></AD_ALERTRULE_ID>
+  <AD_CLIENT_ID><![CDATA[802509E12436405C86BA1FD5B1DF508C]]></AD_CLIENT_ID>
+  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+  <CREATED><![CDATA[2026-04-07 14:12:42.895]]></CREATED>
+  <CREATEDBY><![CDATA[100]]></CREATEDBY>
+  <UPDATED><![CDATA[2026-04-07 14:12:42.895]]></UPDATED>
+  <UPDATEDBY><![CDATA[100]]></UPDATEDBY>
+  <NAME><![CDATA[Avg Cost configuration issue. Incoming Physical Inventory]]></NAME>
+  <AD_TAB_ID><![CDATA[180]]></AD_TAB_ID>
+  <SQL><![CDATA[SELECT DISTINCT il.m_product_id as referencekey_id, '0' as ad_role_id, null as ad_user_id,
+  'The product ' || p.name || ' has Incoming Physical Inventory and does not have a Purchase PriceList nor Standard Cost defined.' as description,
+  'Y' as isactive, il.ad_org_id as ad_org_id, il.ad_client_id as ad_client_id,
+  now() as created, '0' as createdBy, now() as updated, '0' as updatedBy,
+  ad_column_identifier('M_Product', p.m_product_id, 'en_US') as RECORD_ID
+FROM m_inventoryline il
+    JOIN m_inventory i ON i.m_inventory_id = il.m_inventory_id
+    JOIN m_transaction t ON il.m_inventoryline_id = t.m_inventoryline_id
+    JOIN m_product p on p.m_product_id = il.m_product_id
+WHERE t.movementqty > 0
+  AND NOT EXISTS (SELECT 1 FROM m_costing
+                  WHERE m_costing.m_product_id = il.m_product_id AND m_costing.costtype = 'STA' AND m_costing.datefrom <= t.trxprocessdate AND m_costing.dateto > t.trxprocessdate)
+  AND NOT EXISTS (SELECT 1 FROM m_productprice pp
+                    JOIN m_pricelist_version ppv ON pp.m_pricelist_version_id = ppv.m_pricelist_version_id
+                    JOIN m_pricelist pl ON pl.m_pricelist_id = ppv.m_pricelist_id
+                  WHERE pp.m_product_id = il.m_product_id AND pl.issopricelist = 'N' AND ppv.validfrom <= t.trxprocessdate)
+  AND EXISTS (SELECT 1 FROM m_costing_rule cr
+                JOIN m_costing_algorithm ca ON cr.m_costing_algorithm_id = ca.m_costing_algorithm_id AND ca.classname LIKE 'org.openbravo.costing.AverageAlgorithm'
+              WHERE (ad_isorgincluded(il.ad_org_id, cr.ad_org_id, i.ad_client_id) >= 0 OR ad_isorgincluded(cr.ad_org_id, il.ad_org_id, i.ad_client_id) >= 0)
+                AND cr.datefrom <= t.trxprocessdate AND cr.dateto > t.trxprocessdate)
+  AND NOT EXISTS (SELECT 1 FROM m_costing
+                  WHERE m_costing.m_product_id = il.m_product_id AND m_costing.costtype = 'AVA' AND m_costing.datefrom <= t.trxprocessdate AND m_costing.dateto > t.trxprocessdate)]]></SQL>
+  <TYPE><![CDATA[D]]></TYPE>
+</AD_ALERTRULE>
+
+<AD_ALERTRULE>
+  <AD_ALERTRULE_ID><![CDATA[BD07156AA7EE4FB2B95B3F3A6D63296F]]></AD_ALERTRULE_ID>
+  <AD_CLIENT_ID><![CDATA[802509E12436405C86BA1FD5B1DF508C]]></AD_CLIENT_ID>
+  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+  <CREATED><![CDATA[2026-04-07 14:12:42.896]]></CREATED>
+  <CREATEDBY><![CDATA[100]]></CREATEDBY>
+  <UPDATED><![CDATA[2026-04-07 14:12:42.896]]></UPDATED>
+  <UPDATEDBY><![CDATA[100]]></UPDATEDBY>
+  <NAME><![CDATA[Avg Cost configuration issue.Cancel Ship. with no original]]></NAME>
+  <AD_TAB_ID><![CDATA[180]]></AD_TAB_ID>
+  <SQL><![CDATA[SELECT DISTINCT iol.m_product_id as referencekey_id, '0' as ad_role_id, null as ad_user_id, 'The product ' || p.name || ' has Cancelation Shipments without a related original shipment and does not have a Purchase PriceList nor Standard Cost defined.' as description, 'Y' as isactive, iol.ad_org_id as ad_org_id, iol.ad_client_id as ad_client_id, now() as created, '0' as createdBy, now() as updated, '0' as updatedBy, p.name as RECORD_ID
+FROM m_inoutline iol
+  JOIN m_inout io ON iol.m_inout_id = io.m_inout_id AND io.issotrx = 'Y' AND io.docstatus = 'VO'
+  JOIN m_product p ON iol.m_product_id = p.m_product_id
+  JOIN m_transaction t ON iol.m_inoutline_id = t.m_inoutline_id
+  JOIN c_bpartner bp ON io.c_bpartner_id = bp.c_bpartner_id
+  JOIN c_doctype dt ON io.c_doctype_id = dt.c_doctype_id AND dt.isreturn = 'N'
+  JOIN m_costing_rule cr ON ad_isorgincluded(io.ad_org_id, cr.ad_org_id, io.ad_client_id) >= 0 AND cr.datefrom <= t.trxprocessdate AND cr.dateto > t.trxprocessdate
+  JOIN m_costing_algorithm ca ON cr.m_costing_algorithm_id = ca.m_costing_algorithm_id AND ca.classname = 'org.openbravo.costing.AverageAlgorithm'
+WHERE (iol.canceled_inoutline_id IS NULL AND iol.movementqty < 0)
+  AND NOT EXISTS (SELECT 1 FROM m_costing c
+    WHERE c.m_product_id = iol.m_product_id AND c.costtype IN ( 'STA', 'AVA') AND c.datefrom <= t.trxprocessdate AND c.dateto > t.trxprocessdate)
+  AND NOT EXISTS (SELECT 1 FROM m_productprice pp
+                              JOIN m_pricelist_version ppv ON pp.m_pricelist_version_id = ppv.m_pricelist_version_id
+                              JOIN m_pricelist pl ON pl.m_pricelist_id = ppv.m_pricelist_id
+                  WHERE pp.m_product_id = iol.m_product_id
+                    AND (bp.po_pricelist_id = ppv.m_pricelist_id OR (bp.po_pricelist_id IS NULL AND pl.issopricelist = 'N'))
+                    AND ppv.validfrom <= t.trxprocessdate)]]></SQL>
+  <TYPE><![CDATA[D]]></TYPE>
+</AD_ALERTRULE>
+
+<AD_ALERTRULE>
+  <AD_ALERTRULE_ID><![CDATA[C43620EE5D79410CAA6B1F0B103C7F22]]></AD_ALERTRULE_ID>
+  <AD_CLIENT_ID><![CDATA[802509E12436405C86BA1FD5B1DF508C]]></AD_CLIENT_ID>
+  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+  <CREATED><![CDATA[2026-04-07 14:12:42.899]]></CREATED>
+  <CREATEDBY><![CDATA[100]]></CREATEDBY>
+  <UPDATED><![CDATA[2026-04-07 14:12:42.899]]></UPDATED>
+  <UPDATEDBY><![CDATA[100]]></UPDATEDBY>
+  <NAME><![CDATA[Avg Cost configuration issue.Negative Shipment]]></NAME>
+  <AD_TAB_ID><![CDATA[180]]></AD_TAB_ID>
+  <SQL><![CDATA[SELECT DISTINCT iol.m_product_id as referencekey_id, '0' as ad_role_id, null as ad_user_id, 'The product ' || p.name || ' has Negative Shipments and does not have a Purchase PriceList nor Standard Cost defined.' as description, 'Y' as isactive, iol.ad_org_id as ad_org_id, iol.ad_client_id as ad_client_id, now() as created, '0' as createdBy, now() as updated, '0' as updatedBy, p.name as RECORD_ID
+FROM m_inoutline iol
+  JOIN m_inout io ON iol.m_inout_id = io.m_inout_id AND io.issotrx = 'Y' AND io.docstatus = 'CO'
+  JOIN m_product p ON iol.m_product_id = p.m_product_id
+  JOIN m_transaction t ON iol.m_inoutline_id = t.m_inoutline_id
+  JOIN c_bpartner bp ON io.c_bpartner_id = bp.c_bpartner_id
+  JOIN c_doctype dt ON io.c_doctype_id = dt.c_doctype_id AND dt.isreturn = 'N'
+  JOIN m_costing_rule cr ON ad_isorgincluded(io.ad_org_id, cr.ad_org_id, io.ad_client_id) >= 0 AND cr.datefrom <= t.trxprocessdate AND cr.dateto > t.trxprocessdate
+  JOIN m_costing_algorithm ca ON cr.m_costing_algorithm_id = ca.m_costing_algorithm_id AND ca.classname = 'org.openbravo.costing.AverageAlgorithm'
+WHERE iol.movementqty < 0
+  AND NOT EXISTS (SELECT 1 FROM m_costing c
+    WHERE c.m_product_id = iol.m_product_id AND c.costtype IN ( 'STA', 'AVA') AND c.datefrom <= t.trxprocessdate AND c.dateto > t.trxprocessdate)
+  AND NOT EXISTS (SELECT 1 FROM m_productprice pp
+                              JOIN m_pricelist_version ppv ON pp.m_pricelist_version_id = ppv.m_pricelist_version_id
+                              JOIN m_pricelist pl ON pl.m_pricelist_id = ppv.m_pricelist_id
+                  WHERE pp.m_product_id = iol.m_product_id
+                    AND (bp.po_pricelist_id = ppv.m_pricelist_id OR (bp.po_pricelist_id IS NULL AND pl.issopricelist = 'N'))
+                    AND ppv.validfrom <= t.trxprocessdate)
+]]></SQL>
+  <TYPE><![CDATA[D]]></TYPE>
+</AD_ALERTRULE>
+
+<AD_ALERTRULE>
+  <AD_ALERTRULE_ID><![CDATA[E59B5B5048C04EF5A0261C7B963A875D]]></AD_ALERTRULE_ID>
+  <AD_CLIENT_ID><![CDATA[802509E12436405C86BA1FD5B1DF508C]]></AD_CLIENT_ID>
+  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+  <ISACTIVE><![CDATA[Y]]></ISACTIVE>
+  <CREATED><![CDATA[2026-04-07 14:12:42.519]]></CREATED>
+  <CREATEDBY><![CDATA[100]]></CREATEDBY>
+  <UPDATED><![CDATA[2026-04-07 14:12:42.519]]></UPDATED>
+  <UPDATEDBY><![CDATA[100]]></UPDATEDBY>
+  <NAME><![CDATA[Business Partner with several Tax Location Addresses]]></NAME>
+  <AD_TAB_ID><![CDATA[220]]></AD_TAB_ID>
+  <SQL><![CDATA[select bp.c_bpartner_id AS REFERENCEKEY_ID,
+ '0' AS AD_ROLE_ID,
+ NULL AS AD_USER_ID,
+ 'Business Partner: "' || AD_COLUMN_IDENTIFIER('C_BPartner', bp.C_BPARTNER_ID, 'en_US')
+ || '" has defined different countries as Tax Location. Only one country should be defined as Tax Location' AS DESCRIPTION,
+ 'Y' AS ISACTIVE,
+ bp.AD_ORG_ID AS AD_ORG_ID, 
+ bp.AD_CLIENT_ID AS AD_CLIENT_ID, 
+ now() AS CREATED,  
+ '0' AS CREATEDBY,  
+ now() AS UPDATED,
+ '0' AS UPDATEDBY,
+ AD_COLUMN_IDENTIFIER('C_BPartner', bp.C_BPARTNER_ID, 'en_US') AS RECORD_ID
+from c_bpartner bp
+where exists (select 1 
+              from c_bpartner_location bpl 
+              inner join c_location l on (bpl.c_location_id = l.c_location_id)
+              where bpl.c_bpartner_id = bp.c_bpartner_id
+              and bpl.istaxlocation = 'Y'
+              group by bpl.c_bpartner_id, bpl.istaxlocation
+              having count(distinct(l.c_country_id)) > 1
+              )]]></SQL>
+  <TYPE><![CDATA[D]]></TYPE>
+</AD_ALERTRULE>
+
+<AD_ALERTRULE>
+  <AD_ALERTRULE_ID><![CDATA[F4EB0B136EC84E73AE6B1B7C2F8F01EC]]></AD_ALERTRULE_ID>
+  <AD_CLIENT_ID><![CDATA[802509E12436405C86BA1FD5B1DF508C]]></AD_CLIENT_ID>
+  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+  <ISACTIVE><![CDATA[N]]></ISACTIVE>
+  <CREATED><![CDATA[2026-04-07 14:12:43.001]]></CREATED>
+  <CREATEDBY><![CDATA[100]]></CREATEDBY>
+  <UPDATED><![CDATA[2026-04-07 14:12:43.001]]></UPDATED>
+  <UPDATEDBY><![CDATA[100]]></UPDATEDBY>
+  <NAME><![CDATA[Wrong Sales Invoice Payment Plan]]></NAME>
+  <AD_TAB_ID><![CDATA[263]]></AD_TAB_ID>
+  <SQL><![CDATA[select distinct ad_column_identifier('c_invoice', fin_payment_schedule.c_invoice_id, 'en_US') as record_id, 
+fin_payment_schedule.c_invoice_id  as referencekey_id, 0 as ad_role_id, null as ad_user_id, 
+'This invoice needs to be reactivated and processed again due to wrong payment info.' as description, 'Y' as isActive, 
+fin_payment_schedule.ad_org_id, fin_payment_schedule.ad_client_id, now() as created, 0 as createdBy, now() as updated, 0 as updatedBy 
+from c_invoice, fin_payment_schedule, fin_payment_scheduledetail 
+where c_invoice.c_invoice_id = fin_payment_schedule.c_invoice_id 
+and fin_payment_schedule.fin_payment_schedule_id = fin_payment_scheduledetail.fin_payment_schedule_invoice 
+and fin_payment_scheduledetail.iscanceled = 'N' 
+and c_invoice.issotrx = 'Y' 
+group by fin_payment_schedule.ad_org_id, fin_payment_schedule.ad_client_id, c_invoice.issotrx, 
+fin_payment_schedule.fin_payment_schedule_id, fin_payment_schedule.c_invoice_id, fin_payment_schedule.amount 
+having fin_payment_schedule.amount <> sum(fin_payment_scheduledetail.amount + coalesce(fin_payment_scheduledetail.writeoffamt,0)) 
+order by 1]]></SQL>
+  <TYPE><![CDATA[D]]></TYPE>
+</AD_ALERTRULE>
+
+<AD_ALERTRULE>
+  <AD_ALERTRULE_ID><![CDATA[FB29D12BB3D344E482DA6C3FC3262C48]]></AD_ALERTRULE_ID>
+  <AD_CLIENT_ID><![CDATA[802509E12436405C86BA1FD5B1DF508C]]></AD_CLIENT_ID>
+  <AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>
+  <ISACTIVE><![CDATA[N]]></ISACTIVE>
+  <CREATED><![CDATA[2026-04-07 14:12:43.002]]></CREATED>
+  <CREATEDBY><![CDATA[100]]></CREATEDBY>
+  <UPDATED><![CDATA[2026-04-07 14:12:43.002]]></UPDATED>
+  <UPDATEDBY><![CDATA[100]]></UPDATEDBY>
+  <NAME><![CDATA[Wrong Purchase Invoice Payment Plan]]></NAME>
+  <AD_TAB_ID><![CDATA[290]]></AD_TAB_ID>
+  <SQL><![CDATA[select distinct ad_column_identifier('c_invoice', fin_payment_schedule.c_invoice_id, 'en_US') as record_id, 
+fin_payment_schedule.c_invoice_id  as referencekey_id, 0 as ad_role_id, null as ad_user_id, 
+'This invoice needs to be reactivated and processed again due to wrong payment info.' as description, 'Y' as isActive, 
+fin_payment_schedule.ad_org_id, fin_payment_schedule.ad_client_id, now() as created, 0 as createdBy, now() as updated, 0 as updatedBy 
+from c_invoice, fin_payment_schedule, fin_payment_scheduledetail 
+where c_invoice.c_invoice_id = fin_payment_schedule.c_invoice_id 
+and fin_payment_schedule.fin_payment_schedule_id = fin_payment_scheduledetail.fin_payment_schedule_invoice 
+and fin_payment_scheduledetail.iscanceled = 'N' 
+and c_invoice.issotrx = 'N' 
+group by fin_payment_schedule.ad_org_id, fin_payment_schedule.ad_client_id, c_invoice.issotrx, 
+fin_payment_schedule.fin_payment_schedule_id, fin_payment_schedule.c_invoice_id, fin_payment_schedule.amount 
+having fin_payment_schedule.amount <> sum(fin_payment_scheduledetail.amount + coalesce(fin_payment_scheduledetail.writeoffamt,0)) 
+order by 1]]></SQL>
+  <TYPE><![CDATA[D]]></TYPE>
+</AD_ALERTRULE>
+
+</data>

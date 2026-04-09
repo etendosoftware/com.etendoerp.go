@@ -29,10 +29,13 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.module.Module;
+import org.openbravo.model.ad.system.Language;
+import org.openbravo.model.ad.ui.ElementTrl;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
@@ -49,7 +52,11 @@ public final class NeoDiscoveryHelper {
 
   private static final Logger log = LogManager.getLogger(NeoDiscoveryHelper.class);
 
+  /** JSON-friendly type name for string/text AD reference types. */
+  private static final String TYPE_STRING = "string";
+
   private static final Set<String> SELECTOR_REFS = new HashSet<>();
+
   static {
     SELECTOR_REFS.add("19"); // TableDir
     SELECTOR_REFS.add("18"); // Table
@@ -62,6 +69,13 @@ public final class NeoDiscoveryHelper {
   private NeoDiscoveryHelper() {
   }
 
+  /**
+   * Handles the discovery endpoint by listing all active specs the current user has access to,
+   * including their type, linked window or process IDs, and entity summaries.
+   *
+   * @return a {@link NeoResponse} containing a JSON object with a {@code specs} array,
+   *         or an error response if the operation fails
+   */
   public static NeoResponse handleDiscovery() {
     try {
       OBCriteria<SFSpec> specCriteria = OBDal.getInstance().createCriteria(SFSpec.class);
@@ -70,34 +84,10 @@ public final class NeoDiscoveryHelper {
 
       JSONArray specsArray = new JSONArray();
       for (SFSpec spec : allSpecs) {
-        String specType = spec.getSpecType();
-        Window specWindow = spec.getADWindow();
-        if ("W".equals(specType)) {
-          if (specWindow != null && !NeoAccessHelper.hasWindowAccess(specWindow.getId())) {
-            continue;
-          }
-        } else if ("P".equals(specType) || "R".equals(specType)) {
-          Process adProcess = NeoAccessHelper.resolveProcess(spec);
-          if (adProcess != null && !NeoAccessHelper.hasProcessAccess(adProcess.getId())) {
-            continue;
-          }
+        if (!isSpecAccessible(spec)) {
+          continue;
         }
-        JSONObject specObj = new JSONObject();
-        specObj.put("id", spec.getId());
-        specObj.put("name", spec.getName());
-        specObj.put("type", specType);
-        specObj.put("description", spec.getDescription());
-        if ("W".equals(specType)) {
-          if (specWindow != null) specObj.put("windowId", specWindow.getId());
-          specObj.put("entities", buildEntitySummaryArray(spec.getId()));
-        } else if ("P".equals(specType) || "R".equals(specType)) {
-          Process adProcess = NeoAccessHelper.resolveProcess(spec);
-          if (adProcess != null) specObj.put("processId", adProcess.getId());
-          if ("R".equals(specType)) specObj.put("isReport", true);
-        }
-        Module specModule = spec.getADModule();
-        if (specModule != null) specObj.put("moduleId", specModule.getId());
-        specsArray.put(specObj);
+        specsArray.put(buildSpecObject(spec));
       }
       JSONObject result = new JSONObject();
       result.put("specs", specsArray);
@@ -108,6 +98,43 @@ public final class NeoDiscoveryHelper {
     }
   }
 
+  /**
+   * Builds a JSON object representing a single {@link SFSpec} entry for the discovery response,
+   * including its type-specific fields (window ID, entities, process ID, report flag, module ID).
+   *
+   * @param spec the {@link SFSpec} to serialise
+   * @return a {@link JSONObject} with the spec's discovery fields
+   * @throws Exception if a database or JSON error occurs
+   */
+  private static JSONObject buildSpecObject(SFSpec spec) throws Exception {
+    String specType = spec.getSpecType();
+    JSONObject specObj = new JSONObject();
+    specObj.put("id", spec.getId());
+    specObj.put("name", spec.getName());
+    specObj.put("type", specType);
+    specObj.put("description", spec.getDescription());
+    if ("W".equals(specType)) {
+      Window specWindow = spec.getADWindow();
+      if (specWindow != null) specObj.put("windowId", specWindow.getId());
+      specObj.put("entities", buildEntitySummaryArray(spec.getId()));
+    } else if ("P".equals(specType) || "R".equals(specType)) {
+      Process adProcess = NeoAccessHelper.resolveProcess(spec);
+      if (adProcess != null) specObj.put("processId", adProcess.getId());
+      if ("R".equals(specType)) specObj.put("isReport", true);
+    }
+    Module specModule = spec.getADModule();
+    if (specModule != null) specObj.put("moduleId", specModule.getId());
+    return specObj;
+  }
+
+  /**
+   * Handles the spec-describe endpoint by returning the full structure of a given spec,
+   * including all active included entities, their HTTP methods, tab metadata, and fields.
+   *
+   * @param spec the {@link SFSpec} to describe
+   * @return a {@link NeoResponse} containing a JSON object with the spec details and entities,
+   *         or an error response if the operation fails
+   */
   public static NeoResponse handleSpecDescribe(SFSpec spec) {
     try {
       String specId = spec.getId();
@@ -155,6 +182,14 @@ public final class NeoDiscoveryHelper {
     }
   }
 
+  /**
+   * Builds a summary JSON array of active included entities belonging to the given spec,
+   * each entry containing the entity name and its supported HTTP methods.
+   *
+   * @param specId the ID of the {@link SFSpec} whose entities should be summarised
+   * @return a {@link JSONArray} of entity summary objects ordered by sequence number
+   * @throws Exception if a database or JSON error occurs
+   */
   public static JSONArray buildEntitySummaryArray(String specId) throws Exception {
     OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
     criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
@@ -172,6 +207,13 @@ public final class NeoDiscoveryHelper {
     return arr;
   }
 
+  /**
+   * Builds a JSON array of HTTP method strings (GET, POST, PUT, PATCH, DELETE) enabled
+   * on the given entity according to its boolean flags.
+   *
+   * @param entity the {@link SFEntity} whose method flags should be inspected
+   * @return a {@link JSONArray} containing the enabled HTTP method names
+   */
   public static JSONArray buildMethodsArray(SFEntity entity) {
     JSONArray methods = new JSONArray();
     if (Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID())) {
@@ -192,7 +234,16 @@ public final class NeoDiscoveryHelper {
     return methods;
   }
 
+  /**
+   * Builds a JSON array of field descriptors for all active included fields belonging to the
+   * given entity, including column type, selector metadata, and validation parameters.
+   *
+   * @param entityId the ID of the {@link SFEntity} whose fields should be described
+   * @return a {@link JSONArray} of field descriptor objects ordered by sequence number
+   * @throws Exception if a database or JSON error occurs
+   */
   public static JSONArray buildFieldsArray(String entityId) throws Exception {
+    Language lang = OBContext.getOBContext().getLanguage();
     OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
     criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
     criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
@@ -211,7 +262,7 @@ public final class NeoDiscoveryHelper {
       fieldObj.put("id", field.getId());
       fieldObj.put("columnId", column.getId());
       fieldObj.put("name", column.getDBColumnName());
-      fieldObj.put("label", column.getName());
+      fieldObj.put("label", getTranslatedColumnLabel(column, lang));
       fieldObj.put("columnType", mapReferenceToType(refId));
       fieldObj.put("readOnly", Boolean.TRUE.equals(field.isReadOnly()));
       fieldObj.put("included", Boolean.TRUE.equals(field.isIncluded()));
@@ -230,10 +281,46 @@ public final class NeoDiscoveryHelper {
     return arr;
   }
 
+  private static boolean isSpecAccessible(SFSpec spec) {
+    String specType = spec.getSpecType();
+    if ("W".equals(specType)) {
+      Window specWindow = spec.getADWindow();
+      return specWindow == null || NeoAccessHelper.hasWindowAccess(specWindow.getId());
+    }
+    if ("P".equals(specType) || "R".equals(specType)) {
+      Process adProcess = NeoAccessHelper.resolveProcess(spec);
+      return adProcess == null || NeoAccessHelper.hasProcessAccess(adProcess.getId());
+    }
+    return true;
+  }
+
+  /**
+   * Resolve the translated name for a column's AD_Element for the given language.
+   * Falls back to the English column name if no translation is found.
+   */
+  private static String getTranslatedColumnLabel(Column column, Language lang) {
+    if (column.getApplicationElement() == null || lang == null) {
+      return column.getName();
+    }
+    OBCriteria<ElementTrl> criteria = OBDal.getInstance().createCriteria(ElementTrl.class);
+    criteria.add(Restrictions.eq(ElementTrl.PROPERTY_APPLICATIONELEMENT, column.getApplicationElement()));
+    criteria.add(Restrictions.eq(ElementTrl.PROPERTY_LANGUAGE, lang));
+    criteria.setMaxResults(1);
+    ElementTrl trl = (ElementTrl) criteria.uniqueResult();
+    return (trl != null && trl.getName() != null) ? trl.getName() : column.getName();
+  }
+
   private static boolean isSelectorReference(String refId) {
     return refId != null && SELECTOR_REFS.contains(refId);
   }
 
+  /**
+   * Extracts the unique context parameter tokens (e.g. {@code @PARAM@}) referenced in the
+   * column's validation rule code, returning them as a JSON array of plain strings.
+   *
+   * @param column the AD {@link Column} whose validation rule should be inspected
+   * @return a {@link JSONArray} of unique parameter name strings, empty if none are found
+   */
   public static JSONArray extractValidationParams(Column column) {
     JSONArray params = new JSONArray();
     org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
@@ -252,24 +339,50 @@ public final class NeoDiscoveryHelper {
     return params;
   }
 
+  /**
+   * Maps an AD reference ID to its human-readable selector type label.
+   *
+   * @param refId the AD reference ID to map (e.g. {@code "19"} for TableDir)
+   * @return the selector type string ({@code "TableDir"}, {@code "Table"}, {@code "Search"},
+   *         or {@code "OBUISEL"}), or {@code null} if the reference is not a known selector type
+   */
   public static String mapSelectorType(String refId) {
     if (refId == null) return null;
     switch (refId) {
-      case "19": return "TableDir";
-      case "18": return "Table";
-      case "30": return "Search";
-      case "95E2A8B50A254B2AAE6774B8C2F28120": return "OBUISEL";
-      default: return null;
+      case "19":
+        return "TableDir";
+      case "18":
+        return "Table";
+      case "30":
+        return "Search";
+      case "95E2A8B50A254B2AAE6774B8C2F28120":
+        return "OBUISEL";
+      default:
+        return null;
     }
   }
 
+  /**
+   * Maps an AD reference ID to a simplified JSON-friendly type name used in field descriptors.
+   *
+   * @param refId the AD reference ID to map; may be {@code null}
+   * @return a type string such as {@code "string"}, {@code "number"}, {@code "boolean"},
+   *         {@code "date"}, {@code "datetime"}, {@code "time"}, {@code "list"}, {@code "id"},
+   *         or {@code "button"}; defaults to {@code "string"} for unknown references
+   */
   public static String mapReferenceToType(String refId) {
-    if (refId == null) return "string";
+    if (refId == null) return TYPE_STRING;
     switch (refId) {
-      case "10": case "14": case "34":
-        return "string";
-      case "11": case "22": case "29": case "12":
-      case "800008": case "800019":
+      case "10":
+      case "14":
+      case "34":
+        return TYPE_STRING;
+      case "11":
+      case "22":
+      case "29":
+      case "12":
+      case "800008":
+      case "800019":
         return "number";
       case "20":
         return "boolean";
@@ -286,7 +399,7 @@ public final class NeoDiscoveryHelper {
       case "13":
         return "id";
       default:
-        return "string";
+        return TYPE_STRING;
     }
   }
 }

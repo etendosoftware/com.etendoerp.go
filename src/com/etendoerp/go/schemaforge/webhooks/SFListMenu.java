@@ -25,6 +25,7 @@ import java.util.Map;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
@@ -43,6 +44,9 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
 public class SFListMenu extends BaseWebhookService {
 
   private static final Logger log = LogManager.getLogger(SFListMenu.class);
+
+  /** JSON key used for the nested children array in menu tree nodes. */
+  private static final String CHILDREN = "children";
 
   private static final String MENU_TREE_SQL =
       "WITH RECURSIVE menu_tree AS ("
@@ -125,19 +129,13 @@ public class SFListMenu extends BaseWebhookService {
       node.put("name", name);
       node.put("type", resolveType(isSummary, action));
 
-      if (windowId != null && !windowId.isEmpty()) {
-        node.put("windowId", windowId);
-      }
-      if (processId != null && !processId.isEmpty()) {
-        node.put("processId", processId);
-      }
-      if (formId != null && !formId.isEmpty()) {
-        node.put("formId", formId);
-      }
+      putIfNotEmpty(node, "windowId", windowId);
+      putIfNotEmpty(node, "processId", processId);
+      putIfNotEmpty(node, "formId", formId);
 
       // Folders always get a children array
       if ("Y".equals(isSummary)) {
-        node.put("children", new JSONArray());
+        node.put(CHILDREN, new JSONArray());
       }
 
       nodeMap.put(nodeId, node);
@@ -147,13 +145,13 @@ public class SFListMenu extends BaseWebhookService {
         roots.add(node);
       } else {
         JSONObject parent = nodeMap.get(parentId);
-        if (parent.has("children")) {
-          parent.getJSONArray("children").put(node);
+        if (parent.has(CHILDREN)) {
+          parent.getJSONArray(CHILDREN).put(node);
         } else {
           // Parent wasn't marked as folder but has children — add array
           JSONArray children = new JSONArray();
           children.put(node);
-          parent.put("children", children);
+          parent.put(CHILDREN, children);
         }
       }
     }
@@ -194,15 +192,9 @@ public class SFListMenu extends BaseWebhookService {
       item.put("name", name);
       item.put("type", resolveType(isSummary, action));
 
-      if (windowId != null && !windowId.isEmpty()) {
-        item.put("windowId", windowId);
-      }
-      if (processId != null && !processId.isEmpty()) {
-        item.put("processId", processId);
-      }
-      if (formId != null && !formId.isEmpty()) {
-        item.put("formId", formId);
-      }
+      putIfNotEmpty(item, "windowId", windowId);
+      putIfNotEmpty(item, "processId", processId);
+      putIfNotEmpty(item, "formId", formId);
 
       items.put(item);
     }
@@ -211,6 +203,16 @@ public class SFListMenu extends BaseWebhookService {
     result.put("tree", items);
     result.put("count", items.length());
     return result;
+  }
+
+  /**
+   * Adds {@code key}/{@code value} to {@code obj} only when {@code value} is non-null and non-empty,
+   * avoiding spurious null entries in the JSON output.
+   */
+  private static void putIfNotEmpty(JSONObject obj, String key, String value) throws JSONException {
+    if (value != null && !value.isEmpty()) {
+      obj.put(key, value);
+    }
   }
 
   /**
