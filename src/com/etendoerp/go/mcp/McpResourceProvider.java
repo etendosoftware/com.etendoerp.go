@@ -51,7 +51,6 @@ public class McpResourceProvider {
   private static final String FIELD_DESCRIPTION = "description";
   private static final String FIELD_MIME_TYPE = "mimeType";
   private static final String FIELD_PROCESS_NAME = "processName";
-  private static final String TYPE_STRING = "string";
   private static final String MIME_TYPE_JSON = "application/json";
   private static final String URI_SPECS = "neo://specs";
   private static final String URI_SPECS_PREFIX = URI_SPECS + "/";

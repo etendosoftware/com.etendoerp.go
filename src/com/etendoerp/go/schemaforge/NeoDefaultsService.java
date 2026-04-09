@@ -452,12 +452,13 @@ public class NeoDefaultsService {
       VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext());
       DalConnectionProvider conn = new DalConnectionProvider(false);
       String windowId = ctx.getSfEntity() != null ? resolveWindowId(ctx.getSfEntity()) : "";
+      MandatoryDefaultContext mCtx = new MandatoryDefaultContext(parentId, vars, conn, windowId, ctx);
 
       for (Column col : adTab.getTable().getADColumnList()) {
         if (!col.isActive() || !col.isMandatory()) {
           continue;
         }
-        injectMandatoryDefaultForColumn(body, dalEntity, col, parentId, vars, conn, windowId, ctx);
+        injectMandatoryDefaultForColumn(body, dalEntity, col, mCtx);
       }
 
       // Fallback 3: run callout cascade with all fields in body.
@@ -472,12 +473,32 @@ public class NeoDefaultsService {
   }
 
   /**
+   * Bundles the resolution infrastructure needed for mandatory default injection.
+   * Passed as a single parameter instead of 5 separate arguments.
+   */
+  private static class MandatoryDefaultContext {
+    final String parentId;
+    final VariablesSecureApp vars;
+    final DalConnectionProvider conn;
+    final String windowId;
+    final NeoContext neoCtx;
+
+    MandatoryDefaultContext(String parentId, VariablesSecureApp vars,
+        DalConnectionProvider conn, String windowId, NeoContext neoCtx) {
+      this.parentId = parentId;
+      this.vars = vars;
+      this.conn = conn;
+      this.windowId = windowId;
+      this.neoCtx = neoCtx;
+    }
+  }
+
+  /**
    * Attempt to inject a mandatory default value for a single column into the body.
    * Tries field default resolution first, then session context, then safe numeric/boolean fallback.
    */
   private static void injectMandatoryDefaultForColumn(JSONObject body, Entity dalEntity,
-      Column col, String parentId, VariablesSecureApp vars, DalConnectionProvider conn,
-      String windowId, NeoContext ctx) {
+      Column col, MandatoryDefaultContext mCtx) {
     try {
       Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
       if (prop == null) {
@@ -489,10 +510,10 @@ public class NeoDefaultsService {
         return;
       }
 
-      if (tryResolveFieldDefault(body, propName, col, parentId, vars, conn, windowId, ctx)) {
+      if (tryResolveFieldDefault(body, propName, col, mCtx)) {
         return;
       }
-      if (tryInjectFromSession(body, propName, col.getDBColumnName(), vars)) {
+      if (tryInjectFromSession(body, propName, col.getDBColumnName(), mCtx.vars)) {
         return;
       }
       injectSafeTypeDefault(body, propName, col);
@@ -507,10 +528,10 @@ public class NeoDefaultsService {
    * Returns true if a value was injected, false otherwise.
    */
   private static boolean tryResolveFieldDefault(JSONObject body, String propName, Column col,
-      String parentId, VariablesSecureApp vars, DalConnectionProvider conn, String windowId,
-      NeoContext ctx) {
+      MandatoryDefaultContext mCtx) {
     try {
-      Object resolved = resolveFieldDefault(col, parentId, vars, conn, windowId, ctx);
+      Object resolved = resolveFieldDefault(col, mCtx.parentId, mCtx.vars, mCtx.conn,
+          mCtx.windowId, mCtx.neoCtx);
       if (resolved != null) {
         body.put(propName, resolved);
         log.debug("Injected mandatory default: {} = {}", propName, resolved);
@@ -701,14 +722,15 @@ public class NeoDefaultsService {
       while (!pendingFields.isEmpty() && depth < MAX_CALLOUT_CHAIN_DEPTH) {
         depth++;
         Set<String> nextPending = new LinkedHashSet<>();
+        CalloutFieldContext cCtx = new CalloutFieldContext(formState, defaults, seqFields,
+            result, nextPending);
 
         for (String fieldName : pendingFields) {
           Object value = formState.opt(fieldName);
           if (value == null || JSONObject.NULL.equals(value)) {
             continue;
           }
-          processCalloutForField(ctx, adTab, fieldName, value, formState, defaults,
-              seqFields, result, nextPending);
+          processCalloutForField(ctx, adTab, fieldName, value, cCtx);
         }
 
         pendingFields = nextPending;
@@ -753,13 +775,33 @@ public class NeoDefaultsService {
   }
 
   /**
+   * Bundles the mutable cascade state threaded through the callout cascade loop.
+   * Groups formState, defaults, seqFields, result, and nextPending into one object.
+   */
+  private static class CalloutFieldContext {
+    final JSONObject formState;
+    final JSONObject defaults;
+    final Set<String> seqFields;
+    final CalloutCascadeResult result;
+    final Set<String> nextPending;
+
+    CalloutFieldContext(JSONObject formState, JSONObject defaults, Set<String> seqFields,
+        CalloutCascadeResult result, Set<String> nextPending) {
+      this.formState = formState;
+      this.defaults = defaults;
+      this.seqFields = seqFields;
+      this.result = result;
+      this.nextPending = nextPending;
+    }
+  }
+
+  /**
    * Execute the callout for a single field and merge the results into the running state.
    */
   private static void processCalloutForField(NeoContext ctx, Tab adTab, String fieldName,
-      Object value, JSONObject formState, JSONObject defaults, Set<String> seqFields,
-      CalloutCascadeResult result, Set<String> nextPending) {
+      Object value, CalloutFieldContext cCtx) {
     try {
-      JSONObject calloutRequest = buildCalloutRequest(adTab, fieldName, value, formState);
+      JSONObject calloutRequest = buildCalloutRequest(adTab, fieldName, value, cCtx.formState);
       NeoResponse calloutResponse = NeoCalloutService.executeCallout(ctx, calloutRequest);
       if (calloutResponse == null || calloutResponse.getHttpStatus() != 200) {
         log.debug("[NEO-DEFAULTS] Callout for '{}' failed or returned non-200", fieldName);
@@ -771,12 +813,13 @@ public class NeoDefaultsService {
         return;
       }
 
-      mergeCalloutUpdates(calloutBody, formState, defaults, seqFields, adTab, result, nextPending);
-      mergeCalloutCombos(calloutBody, formState, defaults, result);
+      mergeCalloutUpdates(calloutBody, cCtx.formState, cCtx.defaults, cCtx.seqFields,
+          adTab, cCtx.result, cCtx.nextPending);
+      mergeCalloutCombos(calloutBody, cCtx.formState, cCtx.defaults, cCtx.result);
 
       JSONArray messages = calloutBody.optJSONArray("messages");
       if (messages != null) {
-        result.mergeMessages(messages);
+        cCtx.result.mergeMessages(messages);
       }
 
     } catch (Exception e) {

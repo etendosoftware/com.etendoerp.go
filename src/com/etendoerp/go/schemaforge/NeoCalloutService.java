@@ -64,6 +64,7 @@ public class NeoCalloutService {
   private static final Logger log = LogManager.getLogger(NeoCalloutService.class);
   private static final String VALUE_KEY = "value";
   private static final String IDENTIFIER_KEY = "_identifier";
+  private static final String FIELD_ENTRIES = "entries";
 
   private NeoCalloutService() {
   }
@@ -378,6 +379,204 @@ public class NeoCalloutService {
    * Maps form state keys to inp* format and adds callout metadata params.
    * Loads columns once and builds a lookup map for efficient resolution.
    */
+  /**
+   * Holder for the three column-lookup maps and the full column list for a tab.
+   * Built once and shared across form-state mapping, default-filling, and aux-value resolution.
+   */
+  private static class ColumnLookupMaps {
+    final Map<String, String> propertyNameToInp = new HashMap<>();
+    final Map<String, String> cleanNameToInp = new HashMap<>();
+    final Map<String, String> dbNameToInp = new HashMap<>();
+    List<Column> columns = Collections.emptyList();
+  }
+
+  /**
+   * Build the column lookup maps for the given tab's table.
+   * Returns an empty holder (all maps empty, columns empty list) if the tab has no table.
+   */
+  private static ColumnLookupMaps buildColumnLookupMaps(Tab adTab) {
+    ColumnLookupMaps maps = new ColumnLookupMaps();
+    if (adTab.getTable() == null) {
+      return maps;
+    }
+    String tableId = adTab.getTable().getId();
+    Entity dalEntity = null;
+    try {
+      dalEntity = ModelProvider.getInstance().getEntityByTableId(tableId);
+    } catch (Exception e) {
+      log.debug("Could not resolve DAL entity for table: {}", e.getMessage());
+    }
+    OBCriteria<Column> colCriteria = OBDal.getInstance().createCriteria(Column.class);
+    colCriteria.add(Restrictions.eq(Column.PROPERTY_TABLE + ".id", tableId));
+    colCriteria.add(Restrictions.eq(Column.PROPERTY_ACTIVE, true));
+    maps.columns = colCriteria.list();
+    for (Column col : maps.columns) {
+      String dbColName = col.getDBColumnName();
+      String inpName = toInpName(dbColName);
+      maps.dbNameToInp.put(dbColName.toLowerCase(), inpName);
+      maps.cleanNameToInp.put(toCleanFieldName(dbColName).toLowerCase(), inpName);
+      if (dalEntity != null) {
+        try {
+          Property prop = dalEntity.getPropertyByColumnName(dbColName);
+          if (prop != null) {
+            maps.propertyNameToInp.put(prop.getName().toLowerCase(), inpName);
+          }
+        } catch (Exception ignored) {
+          // Not all columns have DAL properties
+        }
+      }
+    }
+    return maps;
+  }
+
+  /**
+   * Map form state fields to their inp* parameter names and add them to params.
+   * Skips $_identifier companion keys and never overwrites the trigger field.
+   */
+  @SuppressWarnings("unchecked")
+  private static void mapFormStateToParams(JSONObject formState, String inpFieldName,
+      ColumnLookupMaps maps, Map<String, String[]> params) {
+    if (formState == null) {
+      return;
+    }
+    Iterator<String> keys = formState.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      // Skip $_identifier companion keys
+      if (key.contains("$_identifier")) {
+        continue;
+      }
+      String val = formState.optString(key, "");
+      // Try OBDal property name first, then fall back to clean/db names
+      String inpKey = maps.propertyNameToInp.get(key.toLowerCase());
+      if (inpKey == null) {
+        inpKey = resolveToInpName(key, maps.dbNameToInp, maps.cleanNameToInp);
+      }
+      // Never overwrite the trigger field — its value comes from the `value` parameter
+      if (inpKey.equals(inpFieldName)) {
+        continue;
+      }
+      params.put(inpKey, new String[]{ val });
+    }
+  }
+
+  /**
+   * Fill any column not yet in params with its AD default value.
+   * Classic Etendo UI sends every field in callout requests; NEO's formState may be sparse.
+   */
+  private static void fillMissingColumnDefaults(Tab adTab, OBContext obCtx,
+      List<Column> columns, Map<String, String[]> params) {
+    if (adTab.getTable() == null) {
+      return;
+    }
+    try {
+      VariablesSecureApp vars = buildCalloutVars(obCtx, adTab);
+      DalConnectionProvider conn = new DalConnectionProvider(false);
+      String windowId = adTab.getWindow() != null ? adTab.getWindow().getId() : "";
+      for (Column col : columns) {
+        String inpName = toInpName(col.getDBColumnName());
+        if (params.containsKey(inpName)) {
+          continue;
+        }
+        String resolved = resolveColumnDefault(conn, vars, col, windowId);
+        params.put(inpName, new String[]{ resolved });
+      }
+    } catch (Exception e) {
+      log.warn("Could not fill callout defaults: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Resolve a single column's default value using Utility.getDefault.
+   * Returns empty string if resolution fails.
+   */
+  private static String resolveColumnDefault(DalConnectionProvider conn,
+      VariablesSecureApp vars, Column col, String windowId) {
+    try {
+      String defaultExpr = col.getDefaultValue();
+      String resolved = Utility.getDefault(conn, vars, col.getDBColumnName(),
+          defaultExpr != null ? defaultExpr.trim() : "", windowId, "");
+      return resolved != null ? resolved : "";
+    } catch (Exception e) {
+      log.debug("Could not resolve default for column {}: {}",
+          col.getDBColumnName(), e.getMessage());
+      return "";
+    }
+  }
+
+  /**
+   * For child tabs, inject the parent record ID and all parent fields into params.
+   * Classic Etendo UI sends ALL header fields when executing child-tab callouts.
+   */
+  private static void injectParentTabParams(Tab adTab, JSONObject formState,
+      Map<String, String[]> params) {
+    Long tabLevel = adTab.getTabLevel();
+    log.info("[NEO-CALLOUT] Tab '{}' level={}, formState has id={}", adTab.getName(), tabLevel,
+        formState != null && formState.has("id"));
+    if (tabLevel == null || tabLevel <= 0 || formState == null) {
+      return;
+    }
+    Tab parentTab = findParentTab(adTab);
+    log.info("[NEO-CALLOUT] Parent tab: {}", parentTab != null ? parentTab.getName() : "null");
+    if (parentTab == null || parentTab.getTable() == null) {
+      return;
+    }
+    String parentKeyCol = parentTab.getTable().getDBTableName() + "_ID";
+    String inpParentKey = toInpName(parentKeyCol);
+    log.info("[NEO-CALLOUT] Parent key: {} -> {}, already in params: {}",
+        parentKeyCol, inpParentKey, params.containsKey(inpParentKey));
+    injectParentId(formState, inpParentKey, params);
+    String parentId = params.containsKey(inpParentKey) ? params.get(inpParentKey)[0] : null;
+    if (parentId != null && !parentId.isEmpty()) {
+      injectParentRecordFields(parentTab, parentId, params);
+    }
+  }
+
+  /**
+   * Inject the parent record ID into params if not already set to a non-empty value.
+   */
+  private static void injectParentId(JSONObject formState, String inpParentKey,
+      Map<String, String[]> params) {
+    String existingVal = params.containsKey(inpParentKey) ? params.get(inpParentKey)[0] : "";
+    if (formState.has("id") && (existingVal == null || existingVal.isEmpty())) {
+      String parentId = formState.optString("id", "");
+      params.put(inpParentKey, new String[]{ parentId });
+      log.info("[NEO-CALLOUT] Injected parent ID: {} = {}", inpParentKey, parentId);
+    } else if (params.containsKey(inpParentKey)) {
+      log.info("[NEO-CALLOUT] Parent key already set: {} = {}", inpParentKey,
+          params.get(inpParentKey)[0]);
+    }
+  }
+
+  /**
+   * Map auxiliary selector values (e.g., businessPartner_LOC -> inpcBpartnerId_LOC) into params.
+   * These are extra values from OBUISEL selectors that callouts may depend on.
+   */
+  @SuppressWarnings("unchecked")
+  private static void mapAuxValuesToParams(JSONObject auxValues, ColumnLookupMaps maps,
+      Map<String, String[]> params) {
+    if (auxValues == null) {
+      return;
+    }
+    Iterator<String> auxKeys = auxValues.keys();
+    while (auxKeys.hasNext()) {
+      String key = auxKeys.next();   // e.g., "businessPartner_LOC"
+      String auxVal = auxValues.optString(key, "");
+      // Split into base field name + suffix
+      int suffixStart = key.lastIndexOf('_');
+      if (suffixStart > 0) {
+        String baseName = key.substring(0, suffixStart);  // "businessPartner"
+        String suffix = key.substring(suffixStart);        // "_LOC"
+        // Resolve base field to inp format
+        String inpBase = maps.propertyNameToInp.get(baseName.toLowerCase());
+        if (inpBase == null) {
+          inpBase = resolveToInpName(baseName, maps.dbNameToInp, maps.cleanNameToInp);
+        }
+        params.put(inpBase + suffix, new String[]{ auxVal });
+      }
+    }
+  }
+
   private static Map<String, String[]> buildRequestParams(Tab adTab,
       String fieldName, Object value, JSONObject formState, String inpFieldName,
       JSONObject auxValues) {
@@ -405,151 +604,20 @@ public class NeoCalloutService {
       params.put("inpmWarehouseId", new String[]{ obCtx.getWarehouse().getId() });
     }
 
-    // Build column lookup maps (once, for all form state keys and default resolution)
-    // Include OBDal property names for mapping frontend keys (e.g., "orderDate" -> "inpdateordered")
-    Map<String, String> propertyNameToInp = new HashMap<>();
-    Map<String, String> cleanNameToInp = new HashMap<>();
-    Map<String, String> dbNameToInp = new HashMap<>();
-    List<Column> columns = Collections.emptyList();
-    if (adTab.getTable() != null) {
-      String tableId = adTab.getTable().getId();
-      Entity dalEntity = null;
-      try {
-        dalEntity = ModelProvider.getInstance().getEntityByTableId(tableId);
-      } catch (Exception e) {
-        log.debug("Could not resolve DAL entity for table: {}", e.getMessage());
-      }
-      OBCriteria<Column> colCriteria = OBDal.getInstance().createCriteria(Column.class);
-      colCriteria.add(Restrictions.eq(Column.PROPERTY_TABLE + ".id", tableId));
-      colCriteria.add(Restrictions.eq(Column.PROPERTY_ACTIVE, true));
-      columns = colCriteria.list();
-      for (Column col : columns) {
-        String dbColName = col.getDBColumnName();
-        String inpName = toInpName(dbColName);
-        dbNameToInp.put(dbColName.toLowerCase(), inpName);
-        cleanNameToInp.put(toCleanFieldName(dbColName).toLowerCase(), inpName);
-        // Map OBDal property name (what the frontend sends)
-        if (dalEntity != null) {
-          try {
-            Property prop = dalEntity.getPropertyByColumnName(dbColName);
-            if (prop != null) {
-              propertyNameToInp.put(prop.getName().toLowerCase(), inpName);
-            }
-          } catch (Exception ignored) {
-            // Not all columns have DAL properties
-          }
-        }
-      }
-    }
+    // Build column lookup maps once (for form-state mapping, default-filling, aux-value resolution)
+    ColumnLookupMaps maps = buildColumnLookupMaps(adTab);
 
-    // Map form state fields to inp* parameters.
-    // IMPORTANT: do not overwrite the trigger field (inpFieldName) — the `value` param
-    // is authoritative. The formState may contain a stale value (e.g., search query text
-    // instead of the selected ID).
-    if (formState != null) {
-      @SuppressWarnings("unchecked")
-      Iterator<String> keys = formState.keys();
-      while (keys.hasNext()) {
-        String key = keys.next();
-        // Skip $_identifier companion keys
-        if (key.contains("$_identifier")) continue;
-        String val = formState.optString(key, "");
-        // Try OBDal property name first, then fall back to clean/db names
-        String inpKey = propertyNameToInp.get(key.toLowerCase());
-        if (inpKey == null) {
-          inpKey = resolveToInpName(key, dbNameToInp, cleanNameToInp);
-        }
-        // Never overwrite the trigger field — its value comes from the `value` parameter
-        if (inpKey.equals(inpFieldName)) continue;
-        params.put(inpKey, new String[]{ val });
-      }
-    }
+    // Map form state fields to inp* parameters (skips trigger field and $_identifier keys)
+    mapFormStateToParams(formState, inpFieldName, maps, params);
 
-    // Fill missing columns with their AD defaults so callouts see all fields.
-    // In the classic UI every form field is present in the callout request, even on a new
-    // record. NEO's formState may be sparse (only defaults + user input), so we fill the
-    // gaps using Utility.getDefault — the same resolver the classic UI uses.
-    if (adTab.getTable() != null) {
-      try {
-        VariablesSecureApp vars = buildCalloutVars(obCtx, adTab);
-        DalConnectionProvider conn = new DalConnectionProvider(false);
-        String windowId = adTab.getWindow() != null ? adTab.getWindow().getId() : "";
-        for (Column col : columns) {
-          String inpName = toInpName(col.getDBColumnName());
-          if (params.containsKey(inpName)) {
-            continue;
-          }
-          String resolved = "";
-          try {
-            String defaultExpr = col.getDefaultValue();
-            resolved = Utility.getDefault(conn, vars, col.getDBColumnName(),
-                defaultExpr != null ? defaultExpr.trim() : "", windowId, "");
-          } catch (Exception e) {
-            log.debug("Could not resolve default for column {}: {}",
-                col.getDBColumnName(), e.getMessage());
-          }
-          params.put(inpName, new String[]{ resolved != null ? resolved : "" });
-        }
-      } catch (Exception e) {
-        log.warn("Could not fill callout defaults: {}", e.getMessage());
-      }
-    }
+    // Fill missing columns with their AD defaults so callouts see all fields
+    fillMissingColumnDefaults(adTab, obCtx, maps.columns, params);
 
-    // For child tabs, inject the parent record ID so callouts can access the parent entity.
-    // E.g., SL_Order_Product reads inpcOrderId to get the order's price list.
-    Long tabLevel = adTab.getTabLevel();
-    log.info("[NEO-CALLOUT] Tab '{}' level={}, formState has id={}", adTab.getName(), tabLevel,
-        formState != null && formState.has("id"));
-    if (tabLevel != null && tabLevel > 0 && formState != null) {
-      Tab parentTab = findParentTab(adTab);
-      log.info("[NEO-CALLOUT] Parent tab: {}", parentTab != null ? parentTab.getName() : "null");
-      if (parentTab != null && parentTab.getTable() != null) {
-        String parentKeyCol = parentTab.getTable().getDBTableName() + "_ID";
-        String inpParentKey = toInpName(parentKeyCol);
-        log.info("[NEO-CALLOUT] Parent key: {} -> {}, already in params: {}", parentKeyCol, inpParentKey, params.containsKey(inpParentKey));
-        // The frontend passes the parent header's "id" in formState
-        // Override even if already set (defaults may have resolved it to empty)
-        String existingVal = params.containsKey(inpParentKey) ? params.get(inpParentKey)[0] : "";
-        if (formState.has("id") && (existingVal == null || existingVal.isEmpty())) {
-          String parentId = formState.optString("id", "");
-          params.put(inpParentKey, new String[]{ parentId });
-          log.info("[NEO-CALLOUT] Injected parent ID: {} = {}", inpParentKey, parentId);
-        } else if (params.containsKey(inpParentKey)) {
-          log.info("[NEO-CALLOUT] Parent key already set: {} = {}", inpParentKey, params.get(inpParentKey)[0]);
-        }
-
-        // Load parent record fields and inject them as params.
-        // Classic Etendo UI sends ALL header fields when executing child-tab callouts.
-        // E.g., SL_Order_Product reads inpmPricelistId from the header to resolve prices.
-        String parentId = params.containsKey(inpParentKey) ? params.get(inpParentKey)[0] : null;
-        if (parentId != null && !parentId.isEmpty()) {
-          injectParentRecordFields(parentTab, parentId, params);
-        }
-      }
-    }
+    // For child tabs, inject the parent record ID and fields
+    injectParentTabParams(adTab, formState, params);
 
     // Process auxiliary values (e.g., businessPartner_LOC -> inpcBpartnerId_LOC)
-    // These are extra values from OBUISEL selectors that callouts may depend on.
-    if (auxValues != null) {
-      @SuppressWarnings("unchecked")
-      Iterator<String> auxKeys = auxValues.keys();
-      while (auxKeys.hasNext()) {
-        String key = auxKeys.next();   // e.g., "businessPartner_LOC"
-        String auxVal = auxValues.optString(key, "");
-        // Split into base field name + suffix
-        int suffixStart = key.lastIndexOf('_');
-        if (suffixStart > 0) {
-          String baseName = key.substring(0, suffixStart);  // "businessPartner"
-          String suffix = key.substring(suffixStart);        // "_LOC"
-          // Resolve base field to inp format
-          String inpBase = propertyNameToInp.get(baseName.toLowerCase());
-          if (inpBase == null) {
-            inpBase = resolveToInpName(baseName, dbNameToInp, cleanNameToInp);
-          }
-          params.put(inpBase + suffix, new String[]{ auxVal });
-        }
-      }
-    }
+    mapAuxValuesToParams(auxValues, maps, params);
 
     return params;
   }
@@ -977,7 +1045,7 @@ public class NeoCalloutService {
   private static void classifyFieldUpdate(String key, JSONObject fieldResult, Tab adTab,
       JSONObject updates, JSONObject combos) throws Exception {
     String cleanName = inpToCleanName(key, adTab);
-    if (fieldResult.has("entries")) {
+    if (fieldResult.has(FIELD_ENTRIES)) {
       combos.put(cleanName, buildComboEntry(fieldResult));
     } else {
       JSONObject updateObj = new JSONObject();
@@ -995,7 +1063,7 @@ public class NeoCalloutService {
     if (fieldResult.has(VALUE_KEY)) {
       comboObj.put("selected", fieldResult.opt(VALUE_KEY));
     }
-    JSONArray rawEntries = fieldResult.optJSONArray("entries");
+    JSONArray rawEntries = fieldResult.optJSONArray(FIELD_ENTRIES);
     if (rawEntries != null) {
       JSONArray cleanEntries = new JSONArray();
       for (int i = 0; i < rawEntries.length(); i++) {
@@ -1007,7 +1075,7 @@ public class NeoCalloutService {
           cleanEntries.put(cleanEntry);
         }
       }
-      comboObj.put("entries", cleanEntries);
+      comboObj.put(FIELD_ENTRIES, cleanEntries);
     }
     return comboObj;
   }

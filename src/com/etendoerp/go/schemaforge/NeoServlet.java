@@ -186,7 +186,7 @@ public class NeoServlet extends HttpBaseServlet {
       // Route by spec type
       String specType = spec.getSpecType();
       if ("P".equals(specType)) {
-        handleProcessSpecRequest(spec, pathInfo, method, request, response);
+        handleProcessSpecRequest(spec, method, request, response);
         return;
       }
       if ("R".equals(specType)) {
@@ -209,7 +209,7 @@ public class NeoServlet extends HttpBaseServlet {
    * Handles process-type spec requests (specType = "P").
    * Checks process access, describes on GET, executes on POST.
    */
-  private void handleProcessSpecRequest(SFSpec spec, NeoPathInfo pathInfo, String method,
+  private void handleProcessSpecRequest(SFSpec spec, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     Process adProcess = resolveProcess(spec);
     if (adProcess != null && !hasProcessAccess(adProcess.getId())) {
@@ -307,68 +307,80 @@ public class NeoServlet extends HttpBaseServlet {
       handleSpecDescribe(response, spec);
       return;
     }
+    if (handleWindowSubEndpoint(spec, pathInfo, method, request, response)) {
+      return;
+    }
+    // CRUD entity handling
+    handleWindowEntityCrud(spec, pathInfo, method, request, response);
+  }
+
+  /**
+   * Routes window sub-endpoint requests (selectors, actions, evaluate-display, callout, defaults).
+   * Returns true if the request was handled by a sub-endpoint, false if it should fall through to CRUD.
+   */
+  private boolean handleWindowSubEndpoint(SFSpec spec, NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws Exception {
     if (pathInfo.isSelector) {
       if (!"GET".equals(method)) {
         sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
             "Selectors only support GET");
-        return;
+        return true;
       }
       NeoResponse selectorResult = dispatchWithHooks(spec, pathInfo.entityName,
           NeoEndpointType.SELECTOR, pathInfo.selectorField, method,
           () -> handleSelector(spec.getId(), pathInfo, request));
       writeResponse(response, selectorResult);
-      return;
+      return true;
     }
     if (pathInfo.isAction) {
       if (!"POST".equals(method) && !"GET".equals(method)) {
         sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
             "Actions support GET (list) and POST (execute)");
-        return;
+        return true;
       }
       NeoResponse actionResult = dispatchWithHooks(spec, pathInfo.entityName,
           NeoEndpointType.ACTION, pathInfo.actionName, method,
           () -> handleButtonAction(spec, pathInfo, method, request));
       writeResponse(response, actionResult);
-      return;
+      return true;
     }
     if (pathInfo.isEvaluateDisplay) {
       if (!"POST".equals(method)) {
         sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
             "Method not allowed. Use POST.");
-        return;
+        return true;
       }
       NeoResponse evalResult = dispatchWithHooks(spec, pathInfo.entityName,
           NeoEndpointType.EVALUATE_DISPLAY, null, method,
           () -> handleEvaluateDisplay(spec, pathInfo, request));
       writeResponse(response, evalResult);
-      return;
+      return true;
     }
     if (pathInfo.isCallout) {
       if (!"POST".equals(method)) {
         sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
             "Callout endpoint only supports POST");
-        return;
+        return true;
       }
       NeoResponse calloutResult = dispatchWithHooks(spec, pathInfo.entityName,
           NeoEndpointType.CALLOUT, null, method,
           () -> handleCallout(spec, pathInfo, request));
       writeResponse(response, calloutResult);
-      return;
+      return true;
     }
     if (pathInfo.isDefaults) {
       if (!"GET".equals(method)) {
         sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
             "Defaults endpoint only supports GET");
-        return;
+        return true;
       }
       NeoResponse defaultsResult = dispatchWithHooks(spec, pathInfo.entityName,
           NeoEndpointType.DEFAULTS, null, method,
           () -> handleDefaults(spec, pathInfo, request));
       writeResponse(response, defaultsResult);
-      return;
+      return true;
     }
-    // CRUD entity handling
-    handleWindowEntityCrud(spec, pathInfo, method, request, response);
+    return false;
   }
 
   /**
@@ -1138,32 +1150,43 @@ public class NeoServlet extends HttpBaseServlet {
 
     JSONArray actions = new JSONArray();
     for (SFField field : fields) {
-      Column column = field.getADColumn();
-      if (column == null || column.getReference() == null
-          || !"28".equals((String) column.getReference().getId())) {
-        continue;
+      JSONObject actionObj = buildButtonActionObject(field);
+      if (actionObj != null) {
+        actions.put(actionObj);
       }
-      Process classicProcess = column.getProcess();
-      Object obuiappProcess = column.getOBUIAPPProcess();
-      if (classicProcess == null && obuiappProcess == null) {
-        continue;
-      }
-      JSONObject actionObj = new JSONObject();
-      actionObj.put("columnName", column.getDBColumnName());
-      if (obuiappProcess != null) {
-        actionObj.put("processType", "OBUIAPP");
-        org.openbravo.client.application.Process obuiProc =
-            (org.openbravo.client.application.Process) obuiappProcess;
-        actionObj.put("processName", obuiProc.getName() != null ? obuiProc.getName() : "");
-      } else {
-        actionObj.put("processType", "Classic");
-        actionObj.put("processName", classicProcess.getName() != null ? classicProcess.getName() : "");
-      }
-      actions.put(actionObj);
     }
     JSONObject responseBody = new JSONObject();
     responseBody.put("actions", actions);
     return NeoResponse.ok(responseBody);
+  }
+
+  /**
+   * Builds a button action JSON object for a given field.
+   * Returns null if the field's column is not a button-type with an associated process.
+   */
+  private JSONObject buildButtonActionObject(SFField field) throws Exception {
+    Column column = field.getADColumn();
+    if (column == null || column.getReference() == null
+        || !"28".equals((String) column.getReference().getId())) {
+      return null;
+    }
+    Process classicProcess = column.getProcess();
+    Object obuiappProcess = column.getOBUIAPPProcess();
+    if (classicProcess == null && obuiappProcess == null) {
+      return null;
+    }
+    JSONObject actionObj = new JSONObject();
+    actionObj.put("columnName", column.getDBColumnName());
+    if (obuiappProcess != null) {
+      actionObj.put("processType", "OBUIAPP");
+      org.openbravo.client.application.Process obuiProc =
+          (org.openbravo.client.application.Process) obuiappProcess;
+      actionObj.put("processName", obuiProc.getName() != null ? obuiProc.getName() : "");
+    } else {
+      actionObj.put("processType", "Classic");
+      actionObj.put("processName", classicProcess.getName() != null ? classicProcess.getName() : "");
+    }
+    return actionObj;
   }
 
   /**
