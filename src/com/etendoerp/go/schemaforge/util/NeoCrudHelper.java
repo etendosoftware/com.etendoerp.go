@@ -265,7 +265,19 @@ public class NeoCrudHelper {
     if (adTab == null || adTab.getTabLevel() == null || adTab.getTabLevel() != 0) {
       return;
     }
+    // Detect sequence preview fields already in the body (values wrapped in angle brackets,
+    // e.g. "<1000371>"). The callout cascade must not overwrite these — the real sequence
+    // number is consumed by DefaultJsonDataService.add() when it detects the brackets.
     Set<String> seqFields = new HashSet<>();
+    for (String key : filteredBody.keySet()) {
+      Object val = filteredBody.opt(key);
+      if (val instanceof String) {
+        String s = (String) val;
+        if (s.startsWith("<") && s.endsWith(">") && s.length() > 2) {
+          seqFields.add(key);
+        }
+      }
+    }
     NeoDefaultsService.executeCalloutCascade(context, adTab, filteredBody, seqFields);
     NeoDefaultsService.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
     NeoDefaultsService.removeEmptyFkValues(filteredBody, adTab);
