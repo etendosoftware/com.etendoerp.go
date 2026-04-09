@@ -87,7 +87,7 @@ public class ProductPriceHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
-    if (ctx.getEndpointType() != NeoEndpointType.CRUD) {
+    if (ctx == null || ctx.getEndpointType() != NeoEndpointType.CRUD) {
       return null;
     }
 
@@ -195,11 +195,12 @@ public class ProductPriceHandler implements NeoHandler {
           String algoCode = row[7] != null ? String.valueOf(row[7]) : "S";
           item.put("algorithm",                        algoCode);
           item.put("algorithm$_identifier",            "S".equals(algoCode) ? "Standard" : algoCode);
+          // issopricelist is a CHAR(1) Etendo boolean — 'Y'/'N', not a Java boolean
           item.put("priceListVersion$salesPriceList",  "Y".equals(String.valueOf(row[8])));
           item.put("priceList$_identifier",            row[9]);
           item.put("_identifier",                      row[10]);
-          item.put("currencySymbol",                   row[11] != null ? String.valueOf(row[11]) : "€");
-          item.put("currencyIso",                      row[12] != null ? String.valueOf(row[12]) : "EUR");
+          item.put("currencySymbol",                   row[11] != null ? String.valueOf(row[11]) : null);
+          item.put("currencyIso",                      row[12] != null ? String.valueOf(row[12]) : null);
           item.put("_entityName",                      "PricingProductPrice");
           data.put(item);
         }
