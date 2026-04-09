@@ -115,8 +115,6 @@ public class CreateDocTypesStep implements OnboardingStep {
       Sequence seqMMR = createSequence(client, org, "MM Receipt", "MMR/", 600000L);
       createDocumentType(client, org,
         new DocumentTypeDefinition("MM Receipt", "MMR", false, null), seqMMR, glMaterial);
-    } catch (OnboardingStepException e) {
-      throw e;
     } catch (Exception e) {
       throw new OnboardingStepException(e.getMessage(), e);
     }
