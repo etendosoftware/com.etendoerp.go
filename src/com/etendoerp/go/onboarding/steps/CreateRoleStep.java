@@ -20,6 +20,7 @@ package com.etendoerp.go.onboarding.steps;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -108,7 +109,7 @@ public class CreateRoleStep implements OnboardingStep {
   }
 
   private void grantWindowAccess(Connection conn, Client client,
-      Organization orgZero, Role role) throws Exception {
+      Organization orgZero, Role role) throws SQLException {
     Set<String> existing = queryExistingIds(conn,
         "SELECT ad_window_id FROM ad_window_access WHERE ad_role_id = ?", role.getId());
 
@@ -131,7 +132,7 @@ public class CreateRoleStep implements OnboardingStep {
   }
 
   private void grantProcessAccess(Connection conn, Client client,
-      Organization orgZero, Role role) throws Exception {
+      Organization orgZero, Role role) throws SQLException {
     Set<String> existing = queryExistingIds(conn,
         "SELECT ad_process_id FROM ad_process_access WHERE ad_role_id = ?", role.getId());
 
@@ -153,7 +154,7 @@ public class CreateRoleStep implements OnboardingStep {
   }
 
   private Set<String> queryExistingIds(Connection conn, String sql, String roleId)
-      throws Exception {
+      throws SQLException {
     Set<String> ids = new HashSet<>();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, roleId);
