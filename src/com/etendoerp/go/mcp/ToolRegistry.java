@@ -440,6 +440,16 @@ public class ToolRegistry {
     return prop;
   }
 
+  private Map<String, Object> stringProp(String description, boolean required) {
+    Map<String, Object> prop = new LinkedHashMap<>();
+    prop.put("type", McpConstants.TYPE_STRING);
+    prop.put(McpConstants.KEY_DESCRIPTION, description);
+    if (!required) {
+      prop.put("optional", true);
+    }
+    return prop;
+  }
+
   private Map<String, Object> enumProp(String description, List<String> values) {
     Map<String, Object> prop = new LinkedHashMap<>();
     prop.put("type", McpConstants.TYPE_STRING);

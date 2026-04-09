@@ -888,16 +888,16 @@ public class NeoServlet extends HttpBaseServlet {
    * Parsed path components.
    */
   public static class NeoPathInfo {
-    final String specName;
-    final String entityName;
-    final String recordId;
-    final boolean isSelector;
-    final String selectorField;
-    final boolean isAction;
-    final String actionName;
-    final boolean isEvaluateDisplay;
-    final boolean isCallout;
-    final boolean isDefaults;
+    public final String specName;
+    public final String entityName;
+    public final String recordId;
+    public final boolean isSelector;
+    public final String selectorField;
+    public final boolean isAction;
+    public final String actionName;
+    public final boolean isEvaluateDisplay;
+    public final boolean isCallout;
+    public final boolean isDefaults;
 
     NeoPathInfo(String specName, String entityName, String recordId) {
       this(specName, entityName, recordId, false, null, false, null, false, false, false);

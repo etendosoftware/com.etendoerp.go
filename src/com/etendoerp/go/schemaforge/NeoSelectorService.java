@@ -1,6 +1,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
@@ -608,6 +609,31 @@ public class NeoSelectorService {
   public static boolean isFkReference(String refId) {
     return REF_TABLE.equals(refId) || REF_TABLEDIR.equals(refId)
         || REF_SEARCH.equals(refId);
+  }
+
+  /**
+   * Load all active list entries for an AD_Reference of type List (17).
+   *
+   * @param referenceId the AD_Reference_Value_ID of the List reference
+   * @return Map from searchKey (e.g. "GENERIC") to display name (e.g. "Use Generic Account No.")
+   */
+  @SuppressWarnings("unchecked")
+  public static Map<String, String> getListLabels(String referenceId) {
+    Map<String, String> labels = new HashMap<>();
+    try {
+      OBCriteria<org.openbravo.model.ad.domain.List> crit = OBDal.getInstance()
+          .createCriteria(org.openbravo.model.ad.domain.List.class);
+      crit.add(Restrictions.eq(
+          org.openbravo.model.ad.domain.List.PROPERTY_REFERENCE + ".id", referenceId));
+      crit.add(Restrictions.eq(
+          org.openbravo.model.ad.domain.List.PROPERTY_ACTIVE, true));
+      for (org.openbravo.model.ad.domain.List item : crit.list()) {
+        labels.put(item.getSearchKey(), item.getName());
+      }
+    } catch (Exception e) {
+      log.debug("Could not load list labels for reference {}: {}", referenceId, e.getMessage());
+    }
+    return labels;
   }
 
   /**
