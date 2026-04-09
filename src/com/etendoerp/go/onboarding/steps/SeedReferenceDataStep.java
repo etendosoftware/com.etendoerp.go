@@ -52,6 +52,7 @@ import org.openbravo.model.pricing.pricelist.ProductPrice;
 
 import com.etendoerp.go.onboarding.OnboardingContext;
 import com.etendoerp.go.onboarding.OnboardingStep;
+import com.etendoerp.go.onboarding.OnboardingStepException;
 
 /**
  * Creates all reference data for a new client/organization in strict dependency order.

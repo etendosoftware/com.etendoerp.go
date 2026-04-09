@@ -37,6 +37,7 @@ import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.onboarding.OnboardingContext;
 import com.etendoerp.go.onboarding.OnboardingStep;
+import com.etendoerp.go.onboarding.OnboardingStepException;
 
 /**
  * Finalizes the organization by:
@@ -59,38 +60,44 @@ public class MarkOrgReadyStep implements OnboardingStep {
   }
 
   @Override
-  public void execute(OnboardingContext ctx) throws Exception {
-    String orgId = ctx.getOrgId();
-    String clientId = ctx.getClientId();
-    String clientAdminUserId = ctx.getClientAdminUserId();
-    String orgAdminUserId = ctx.getOrgAdminUserId();
+  public void execute(OnboardingContext ctx) throws OnboardingStepException {
+    try {
+      String orgId = ctx.getOrgId();
+      String clientId = ctx.getClientId();
+      String clientAdminUserId = ctx.getClientAdminUserId();
+      String orgAdminUserId = ctx.getOrgAdminUserId();
 
-    // 1. Flush pending DAL state before PL/SQL call
-    OBDal.getInstance().flush();
+      // 1. Flush pending DAL state before PL/SQL call
+      OBDal.getInstance().flush();
 
-    // 2. Execute ORG_AS_READY process via PInstanceProcessData + ProcessRunner
-    executeOrgAsReadyProcess(orgId, clientId, clientAdminUserId);
+      // 2. Execute ORG_AS_READY process via PInstanceProcessData + ProcessRunner
+      executeOrgAsReadyProcess(orgId, clientId, clientAdminUserId);
 
-    // 3. Mark org as ready in DAL (defensive — process should have done this, but keeps state consistent)
-    Organization org = OBDal.getInstance().get(Organization.class, orgId);
-    if (org != null && !Boolean.TRUE.equals(org.isReady())) {
-      org.setReady(true);
-      OBDal.getInstance().save(org);
-    }
-
-    // 4. Set default language on admin users
-    if (ctx.getLanguageCode() != null) {
-      Language language = resolveLanguage(ctx.getLanguageCode());
-      if (language != null) {
-        setDefaultLanguage(clientAdminUserId, language);
-        setDefaultLanguage(orgAdminUserId, language);
-      } else {
-        log.warn("Language not found for code '{}' — skipping default language assignment",
-            ctx.getLanguageCode());
+      // 3. Mark org as ready in DAL (defensive — process should have done this, but keeps state consistent)
+      Organization org = OBDal.getInstance().get(Organization.class, orgId);
+      if (org != null && !Boolean.TRUE.equals(org.isReady())) {
+        org.setReady(true);
+        OBDal.getInstance().save(org);
       }
-    }
 
-    OBDal.getInstance().flush();
+      // 4. Set default language on admin users
+      if (ctx.getLanguageCode() != null) {
+        Language language = resolveLanguage(ctx.getLanguageCode());
+        if (language != null) {
+          setDefaultLanguage(clientAdminUserId, language);
+          setDefaultLanguage(orgAdminUserId, language);
+        } else {
+          log.warn("Language not found for code '{}' — skipping default language assignment",
+              ctx.getLanguageCode());
+        }
+      }
+
+      OBDal.getInstance().flush();
+    } catch (OnboardingStepException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new OnboardingStepException(e.getMessage(), e);
+    }
   }
 
   private void executeOrgAsReadyProcess(String orgId, String clientId, String userId)

@@ -27,6 +27,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.onboarding.OnboardingContext;
 import com.etendoerp.go.onboarding.OnboardingStep;
+import com.etendoerp.go.onboarding.OnboardingStepException;
 
 /**
  * Creates the organization-level admin user, scoped to the newly created organization.
@@ -41,26 +42,32 @@ public class CreateOrgAdminStep implements OnboardingStep {
   }
 
   @Override
-  public void execute(OnboardingContext ctx) throws Exception {
-    Client client = OBDal.getInstance().get(Client.class, ctx.getClientId());
-    if (client == null) {
-      throw new OBException("Client not found with ID: " + ctx.getClientId());
-    }
-    Organization org = OBDal.getInstance().get(Organization.class, ctx.getOrgId());
-    if (org == null) {
-      throw new OBException("Organization not found with ID: " + ctx.getOrgId());
-    }
+  public void execute(OnboardingContext ctx) throws OnboardingStepException {
+    try {
+      Client client = OBDal.getInstance().get(Client.class, ctx.getClientId());
+      if (client == null) {
+        throw new OBException("Client not found with ID: " + ctx.getClientId());
+      }
+      Organization org = OBDal.getInstance().get(Organization.class, ctx.getOrgId());
+      if (org == null) {
+        throw new OBException("Organization not found with ID: " + ctx.getOrgId());
+      }
 
-    User user = OBProvider.getInstance().get(User.class);
-    user.setNewOBObject(true);
-    user.setClient(client);
-    user.setOrganization(org);
-    user.setUsername(ctx.getAdminUser() + ".org");
-    user.setEmail(ctx.getAdminUser());
-    user.setName(ctx.getOrgName() + " Admin");
-    user.setPassword(PasswordHash.generateHash(ctx.getAdminPassword()));
-    OBDal.getInstance().save(user);
+      User user = OBProvider.getInstance().get(User.class);
+      user.setNewOBObject(true);
+      user.setClient(client);
+      user.setOrganization(org);
+      user.setUsername(ctx.getAdminUser() + ".org");
+      user.setEmail(ctx.getAdminUser());
+      user.setName(ctx.getOrgName() + " Admin");
+      user.setPassword(PasswordHash.generateHash(ctx.getAdminPassword()));
+      OBDal.getInstance().save(user);
 
-    ctx.setOrgAdminUserId(user.getId());
+      ctx.setOrgAdminUserId(user.getId());
+    } catch (OnboardingStepException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new OnboardingStepException(e.getMessage(), e);
+    }
   }
 }

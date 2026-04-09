@@ -18,22 +18,17 @@
 package com.etendoerp.go.onboarding;
 
 /**
- * Contract for an individual onboarding action in the environment creation workflow.
+ * Thrown when an onboarding step fails to complete successfully.
  */
-public interface OnboardingStep {
+public class OnboardingStepException extends Exception {
 
-  /**
-   * Returns the display name used in onboarding progress events.
-   *
-   * @return step name shown to the client while onboarding runs
-   */
-  String name();
+  private static final long serialVersionUID = 1L;
 
-  /**
-   * Executes the onboarding action, updating the shared context as needed.
-   *
-   * @param ctx mutable onboarding context shared across the step chain
-   * @throws OnboardingStepException when the step cannot complete successfully
-   */
-  void execute(OnboardingContext ctx) throws OnboardingStepException;
+  public OnboardingStepException(String message) {
+    super(message);
+  }
+
+  public OnboardingStepException(String message, Throwable cause) {
+    super(message, cause);
+  }
 }

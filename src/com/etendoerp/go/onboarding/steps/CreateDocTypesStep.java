@@ -28,6 +28,7 @@ import org.openbravo.model.financialmgmt.gl.GLCategory;
 
 import com.etendoerp.go.onboarding.OnboardingContext;
 import com.etendoerp.go.onboarding.OnboardingStep;
+import com.etendoerp.go.onboarding.OnboardingStepException;
 
 /**
  * Creates GL categories, document types, and auto-numbering sequences for the new client.

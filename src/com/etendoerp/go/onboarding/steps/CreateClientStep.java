@@ -32,6 +32,7 @@ import org.openbravo.model.common.currency.Currency;
 
 import com.etendoerp.go.onboarding.OnboardingContext;
 import com.etendoerp.go.onboarding.OnboardingStep;
+import com.etendoerp.go.onboarding.OnboardingStepException;
 
 /**
  * Creates a new AD_Client using Etendo's built-in InitialClientSetup.
@@ -46,62 +47,68 @@ public class CreateClientStep implements OnboardingStep {
   }
 
   @Override
-  public void execute(OnboardingContext ctx) throws Exception {
-    // 1. Resolve currency ID from ISO code
-    String currencyId = resolveCurrencyId(ctx.getCurrencyCode());
-    ctx.setCurrencyId(currencyId);
-
-    // 2. Build VariablesSecureApp without HTTP request
-    // userId=100 (System), clientId=0, orgId=0
-    VariablesSecureApp vars = new VariablesSecureApp("100", "0", "0");
-
-    // 3. Use InitialClientSetup to create client + trees + clientInfo + images + role + user
-    InitialClientSetup clientSetup = new InitialClientSetup();
-    OBError result = clientSetup.createClient(
-        vars,
-        currencyId,
-        ctx.getClientName(),
-        ctx.getAdminUser(),
-        ctx.getAdminPassword(),
-        "",      // no reference data modules
-        "",      // no account text
-        "",      // no calendar text
-        false,   // do NOT create accounting
-        null,    // no COA file
-        false, false, false, false, false  // no BP, Product, Project, Campaign, SalesRegion
-    );
-
-    if ("Error".equals(result.getType())) {
-      throw new OBException("InitialClientSetup failed: " + result.getMessage()
-          + "\nLog: " + clientSetup.getLog());
-    }
-
-    // 4. Extract the created client ID from session variable set by InitialClientSetup
-    String clientId = StringUtils.trimToNull(vars.getSessionValue("AD_Client_ID"));
-    if (clientId == null) {
-      throw new OBException("InitialClientSetup succeeded but client ID not found in session");
-    }
-    ctx.setClientId(clientId);
-
-    // 5. Find the client admin user bypassing readable client filters via DAL
+  public void execute(OnboardingContext ctx) throws OnboardingStepException {
     try {
-      OBContext.setAdminMode(true);
-      Client client = OBDal.getInstance().get(Client.class, clientId);
-      if (client == null) {
-        throw new OBException("Client not found with ID: " + clientId);
+      // 1. Resolve currency ID from ISO code
+      String currencyId = resolveCurrencyId(ctx.getCurrencyCode());
+      ctx.setCurrencyId(currencyId);
+
+      // 2. Build VariablesSecureApp without HTTP request
+      // userId=100 (System), clientId=0, orgId=0
+      VariablesSecureApp vars = new VariablesSecureApp("100", "0", "0");
+
+      // 3. Use InitialClientSetup to create client + trees + clientInfo + images + role + user
+      InitialClientSetup clientSetup = new InitialClientSetup();
+      OBError result = clientSetup.createClient(
+          vars,
+          currencyId,
+          ctx.getClientName(),
+          ctx.getAdminUser(),
+          ctx.getAdminPassword(),
+          "",      // no reference data modules
+          "",      // no account text
+          "",      // no calendar text
+          false,   // do NOT create accounting
+          null,    // no COA file
+          false, false, false, false, false  // no BP, Product, Project, Campaign, SalesRegion
+      );
+
+      if ("Error".equals(result.getType())) {
+        throw new OBException("InitialClientSetup failed: " + result.getMessage()
+            + "\nLog: " + clientSetup.getLog());
       }
-      OBCriteria<User> userCriteria = OBDal.getInstance().createCriteria(User.class);
-      userCriteria.add(Restrictions.eq(User.PROPERTY_USERNAME, ctx.getAdminUser()));
-      userCriteria.add(Restrictions.eq(User.PROPERTY_CLIENT, client));
-      userCriteria.setFilterOnReadableClients(false);
-      User user = (User) userCriteria.uniqueResult();
-      if (user == null) {
-        throw new OBException(
-            "Admin user '" + ctx.getAdminUser() + "' not found after client creation");
+
+      // 4. Extract the created client ID from session variable set by InitialClientSetup
+      String clientId = StringUtils.trimToNull(vars.getSessionValue("AD_Client_ID"));
+      if (clientId == null) {
+        throw new OBException("InitialClientSetup succeeded but client ID not found in session");
       }
-      ctx.setClientAdminUserId(user.getId());
-    } finally {
-      OBContext.restorePreviousMode();
+      ctx.setClientId(clientId);
+
+      // 5. Find the client admin user bypassing readable client filters via DAL
+      try {
+        OBContext.setAdminMode(true);
+        Client client = OBDal.getInstance().get(Client.class, clientId);
+        if (client == null) {
+          throw new OBException("Client not found with ID: " + clientId);
+        }
+        OBCriteria<User> userCriteria = OBDal.getInstance().createCriteria(User.class);
+        userCriteria.add(Restrictions.eq(User.PROPERTY_USERNAME, ctx.getAdminUser()));
+        userCriteria.add(Restrictions.eq(User.PROPERTY_CLIENT, client));
+        userCriteria.setFilterOnReadableClients(false);
+        User user = (User) userCriteria.uniqueResult();
+        if (user == null) {
+          throw new OBException(
+              "Admin user '" + ctx.getAdminUser() + "' not found after client creation");
+        }
+        ctx.setClientAdminUserId(user.getId());
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (OnboardingStepException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new OnboardingStepException(e.getMessage(), e);
     }
   }
 
