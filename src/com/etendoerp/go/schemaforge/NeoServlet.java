@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -90,6 +91,8 @@ public class NeoServlet extends HttpBaseServlet {
   // Etendo record IDs: 32-char hex, UUID with hyphens, or legacy numeric strings
   private static final java.util.regex.Pattern VALID_ID_PATTERN =
       java.util.regex.Pattern.compile("[A-Za-z0-9\\-]+");
+  private static final String KEY_UPDATES = "updates";
+  private static final String KEY_COMBOS = "combos";
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -1138,13 +1141,65 @@ public class NeoServlet extends HttpBaseServlet {
           .obContext(OBContext.getOBContext())
           .build();
 
-      // Delegate to callout service
-      return NeoCalloutService.executeCallout(neoContext, requestBody);
+      // Execute the callout
+      NeoResponse calloutResult = NeoCalloutService.executeCallout(neoContext, requestBody);
+
+      // Cascade: if the callout set fields that have further callouts (e.g., SL_Order_Product
+      // sets tax+grossUnitPrice for gross-price lists → SL_Order_Amt derives unitPrice),
+      // chain those callouts and merge the results back into the response.
+      // This is done here (not in NeoCalloutService) to avoid recursion when
+      // executeSingleCallout calls NeoCalloutService.executeCallout internally.
+      if (calloutResult.getHttpStatus() == 200 && calloutResult.getBody() != null) {
+        String fieldName = requestBody.optString("field", "");
+        JSONObject formState = requestBody.optJSONObject("formState");
+        NeoDefaultsService.CalloutCascadeResult cascade =
+            NeoDefaultsService.cascadeInteractiveCallout(neoContext, tab, fieldName, formState, calloutResult.getBody());
+        if (cascade.hasResults()) {
+          mergeCalloutResponse(calloutResult.getBody(), cascade.toJSON());
+          log.debug("[NEO-CALLOUT] Cascade merged additional fields into response");
+        }
+      }
+
+      return calloutResult;
     } catch (Exception e) {
       log.error("Error handling callout for {}/{}: {}",
           pathInfo.specName, pathInfo.entityName, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Callout error: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Merge cascade results into an existing REST callout response.
+   * Does not overwrite fields already set by the initial callout.
+   */
+  private void mergeCalloutResponse(JSONObject base, JSONObject addition) {
+    try {
+      mergeJsonSection(base, addition, KEY_UPDATES);
+      mergeJsonSection(base, addition, KEY_COMBOS);
+    } catch (Exception e) {
+      log.debug("[NEO-CALLOUT] Failed to merge cascade results: {}", e.getMessage());
+    }
+  }
+
+  private static void mergeJsonSection(JSONObject base, JSONObject addition, String sectionKey)
+      throws org.codehaus.jettison.json.JSONException {
+    JSONObject addSection = addition.optJSONObject(sectionKey);
+    if (addSection == null) {
+      return;
+    }
+    JSONObject baseSection = base.optJSONObject(sectionKey);
+    if (baseSection == null) {
+      base.put(sectionKey, addSection);
+      return;
+    }
+    @SuppressWarnings("unchecked")
+    Iterator<String> keys = addSection.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if (!baseSection.has(key)) {
+        baseSection.put(key, addSection.get(key));
+      }
     }
   }
 

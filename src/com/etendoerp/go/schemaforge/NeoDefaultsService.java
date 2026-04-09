@@ -81,6 +81,7 @@ public class NeoDefaultsService {
   private static final String DATE_FORMAT = "yyyy-MM-dd";
   private static final String VALUE_KEY = "value";
   private static final int MAX_CALLOUT_CHAIN_DEPTH = 5;
+  private static final String KEY_UPDATES = "updates";
   private static final java.util.regex.Pattern SUBTYPE_NOT_LIKE_PATTERN =
       java.util.regex.Pattern.compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'",
           java.util.regex.Pattern.CASE_INSENSITIVE);
@@ -453,6 +454,18 @@ public class NeoDefaultsService {
     String lang = obContext.getLanguage().getLanguage();
     String warehouseId = obContext.getWarehouse() != null
         ? obContext.getWarehouse().getId() : "";
+
+    // When the session org is "*" (id=0), mandatory defaults like AD_Org_ID would resolve
+    // to "0" which OBDal rejects for business documents (C_Order, M_InOut, etc.).
+    // A role with "*" access has implicit access to all orgs, so we safely pick the
+    // first real org of the client to produce valid defaults.
+    if ("0".equals(orgId)) {
+      String realOrgId = resolveFirstOrgForClient(clientId);
+      if (realOrgId != null) {
+        orgId = realOrgId;
+        log.debug("Context org is '*' (0); resolved first real org {} for defaults", realOrgId);
+      }
+    }
 
     String cacheKey = userId + "|" + roleId + "|" + orgId + "|" + warehouseId;
     VariablesSecureApp cached = varsCache.getIfPresent(cacheKey);
@@ -1151,6 +1164,98 @@ public class NeoDefaultsService {
   }
 
   /**
+   * Cascade callouts starting from the result of an interactive field-change callout.
+   *
+   * When a callout (e.g., SL_Order_Product) returns fields that themselves have callouts
+   * (e.g., tax → SL_Order_Amt), this method chains those secondary callouts so the
+   * frontend receives a fully-resolved result in a single request.
+   *
+   * Typical case: gross price lists (istaxincluded=Y).
+   *   SL_Order_Product sets tax + grossUnitPrice (not unitPrice).
+   *   SL_Order_Amt is then cascaded for tax → derives unitPrice from grossUnitPrice - taxes.
+   *
+   * @param ctx              the NeoContext (spec/entity/tab)
+   * @param adTab            the AD_Tab for callout resolution
+   * @param triggerField     the original field that was changed by the user (excluded from cascade)
+   * @param originalFormState the form state that was sent with the original callout request
+   * @param calloutResponse  the REST response from the initial callout (with "updates" / "combos")
+   * @return aggregated cascade results (to be merged into the original callout response)
+   */
+  public static CalloutCascadeResult cascadeInteractiveCallout(
+      NeoContext ctx, Tab adTab, String triggerField,
+      JSONObject originalFormState, JSONObject calloutResponse) {
+
+    CalloutCascadeResult result = new CalloutCascadeResult();
+    if (ctx == null || adTab == null || calloutResponse == null) {
+      return result;
+    }
+
+    try {
+      // Build a working formState: original fields + values set by the initial callout
+      JSONObject cascadeFormState = new JSONObject(
+          originalFormState != null ? originalFormState.toString() : "{}");
+
+      // Collect fields returned by the initial callout that have further callouts
+      Set<String> skipFields = new HashSet<>();
+      skipFields.add(triggerField);
+
+      Set<String> pendingFields = collectCalloutPendingFields(
+          calloutResponse, cascadeFormState, skipFields, adTab);
+
+      if (pendingFields.isEmpty()) {
+        return result;
+      }
+
+      log.debug("[NEO-CALLOUT] Interactive cascade: {} field(s) queued after '{}': {}",
+          pendingFields.size(), triggerField, pendingFields);
+
+      int depth = 0;
+      while (!pendingFields.isEmpty() && depth < MAX_CALLOUT_CHAIN_DEPTH) {
+        depth++;
+        pendingFields = executeCascadeIteration(
+            pendingFields, ctx, adTab, cascadeFormState, cascadeFormState, skipFields, result);
+      }
+
+    } catch (Exception e) {
+      log.warn("[NEO-CALLOUT] Interactive cascade failed for trigger '{}': {}",
+          triggerField, e.getMessage(), e);
+    }
+
+    return result;
+  }
+
+  /**
+   * Collect fields from a callout response that have further callouts, updating cascadeFormState.
+   */
+  private static Set<String> collectCalloutPendingFields(JSONObject calloutResponse,
+      JSONObject cascadeFormState, Set<String> skipFields, Tab adTab)
+      throws org.codehaus.jettison.json.JSONException {
+    Set<String> pendingFields = new LinkedHashSet<>();
+    JSONObject updates = calloutResponse.optJSONObject(KEY_UPDATES);
+    if (updates == null) {
+      return pendingFields;
+    }
+    @SuppressWarnings("unchecked")
+    Iterator<String> keys = updates.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      JSONObject entry = updates.optJSONObject(key);
+      if (entry == null) {
+        continue;
+      }
+      Object val = entry.opt(VALUE_KEY);
+      if (val == null || JSONObject.NULL.equals(val) || "".equals(String.valueOf(val))) {
+        continue;
+      }
+      cascadeFormState.put(key, val);
+      if (!skipFields.contains(key) && NeoCalloutService.resolveCallout(adTab, key) != null) {
+        pendingFields.add(key);
+      }
+    }
+    return pendingFields;
+  }
+
+  /**
    * Collect field names that have non-null defaults and configured callouts.
    */
   private static List<String> collectFieldsWithCallouts(JSONObject defaults,
@@ -1389,6 +1494,37 @@ public class NeoDefaultsService {
       }
     }
     return parentValues;
+  }
+
+  /**
+   * Returns the ID of the first active non-system organization for the given client.
+   * Used when the session context org is "0" (the "*" all-orgs pseudo-org) so that
+   * mandatory FK defaults like AD_Org_ID resolve to a real org rather than "0",
+   * which OBDal rejects for business documents.
+   *
+   * A role with access to "*" has implicit access to all orgs, so using any active
+   * org of the client is safe.
+   *
+   * @param clientId the AD_Client_ID of the current session
+   * @return the first org ID ordered by name, or null if none found
+   */
+  public static String resolveFirstOrgForClient(String clientId) {
+    try {
+      String sql = "SELECT AD_Org_ID FROM AD_Org"
+          + " WHERE AD_Client_ID = ? AND IsActive = 'Y' AND AD_Org_ID != '0'"
+          + " ORDER BY Name LIMIT 1";
+      try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
+        ps.setString(1, clientId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            return rs.getString(1);
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve first org for client {}: {}", clientId, e.getMessage());
+    }
+    return null;
   }
 
 }
