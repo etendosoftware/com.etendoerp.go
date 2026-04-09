@@ -29,7 +29,7 @@ import org.junit.jupiter.api.Test;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
- * Unit tests for {@link NeoServlet} tab filtering logic.
+ * Unit tests for tab filtering logic used by NEO Headless.
  *
  * Note: Tests that require a running DAL (e.g., verifying HQL where clause
  * application or parent property resolution) must be run as integration tests

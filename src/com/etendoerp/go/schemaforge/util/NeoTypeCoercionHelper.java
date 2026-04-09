@@ -153,6 +153,12 @@ public final class NeoTypeCoercionHelper {
     /** Pre-validated parent ID value — only {@code [A-Za-z0-9-]} characters. */
     public final String paramValue;
 
+    /**
+     * Creates a parent filter fragment.
+     *
+     * @param hql        HQL predicate string using the {@code :neoParentId} named placeholder
+     * @param paramValue pre-validated parent ID value (only {@code [A-Za-z0-9-]} characters)
+     */
     public ParentFilter(String hql, String paramValue) {
       this.hql = hql;
       this.paramValue = paramValue;

@@ -126,8 +126,12 @@ public class NeoCrudHelper {
     return params;
   }
 
+  private static final String NEO_WHERE_PARAM = "_neoWhere";
+
   /**
-   * Build and apply the where clause (tab HQL + parent filter) to the params map.
+   * Build and apply the where clause (tab HQL + parent filter + client base filter) to the params map.
+   * Supports a special {@code _neoWhere} query parameter that injects an additional HQL predicate,
+   * merged with the tab's own HQL filter clause and any parent filter.
    */
   static void buildWhereClause(Map<String, String> params, Tab adTab, NeoContext context) {
     StringBuilder whereClause = new StringBuilder();
@@ -152,6 +156,14 @@ public class NeoCrudHelper {
         }
         whereClause.append("(").append(parentFilter.resolveForStringApi()).append(")");
       }
+    }
+
+    String neoWhere = params.remove(NEO_WHERE_PARAM);
+    if (StringUtils.isNotBlank(neoWhere)) {
+      if (whereClause.length() > 0) {
+        whereClause.append(" and ");
+      }
+      whereClause.append("(").append(neoWhere).append(")");
     }
 
     if (whereClause.length() > 0) {
