@@ -81,6 +81,7 @@ public class NeoDefaultsService {
   private static final String DATE_FORMAT = "yyyy-MM-dd";
   private static final String VALUE_KEY = "value";
   private static final int MAX_CALLOUT_CHAIN_DEPTH = 5;
+  private static final String KEY_UPDATES = "updates";
   private static final java.util.regex.Pattern SUBTYPE_NOT_LIKE_PATTERN =
       java.util.regex.Pattern.compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'",
           java.util.regex.Pattern.CASE_INSENSITIVE);
@@ -1195,25 +1196,11 @@ public class NeoDefaultsService {
           originalFormState != null ? originalFormState.toString() : "{}");
 
       // Collect fields returned by the initial callout that have further callouts
-      Set<String> pendingFields = new LinkedHashSet<>();
       Set<String> skipFields = new HashSet<>();
       skipFields.add(triggerField);
 
-      JSONObject updates = calloutResponse.optJSONObject("updates");
-      if (updates != null) {
-        Iterator<String> keys = updates.keys();
-        while (keys.hasNext()) {
-          String key = keys.next();
-          JSONObject entry = updates.optJSONObject(key);
-          if (entry == null) continue;
-          Object val = entry.opt(VALUE_KEY);
-          if (val == null || JSONObject.NULL.equals(val) || "".equals(String.valueOf(val))) continue;
-          cascadeFormState.put(key, val);
-          if (!skipFields.contains(key) && NeoCalloutService.resolveCallout(adTab, key) != null) {
-            pendingFields.add(key);
-          }
-        }
-      }
+      Set<String> pendingFields = collectCalloutPendingFields(
+          calloutResponse, cascadeFormState, skipFields, adTab);
 
       if (pendingFields.isEmpty()) {
         return result;
@@ -1235,6 +1222,37 @@ public class NeoDefaultsService {
     }
 
     return result;
+  }
+
+  /**
+   * Collect fields from a callout response that have further callouts, updating cascadeFormState.
+   */
+  private static Set<String> collectCalloutPendingFields(JSONObject calloutResponse,
+      JSONObject cascadeFormState, Set<String> skipFields, Tab adTab)
+      throws org.codehaus.jettison.json.JSONException {
+    Set<String> pendingFields = new LinkedHashSet<>();
+    JSONObject updates = calloutResponse.optJSONObject(KEY_UPDATES);
+    if (updates == null) {
+      return pendingFields;
+    }
+    @SuppressWarnings("unchecked")
+    Iterator<String> keys = updates.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      JSONObject entry = updates.optJSONObject(key);
+      if (entry == null) {
+        continue;
+      }
+      Object val = entry.opt(VALUE_KEY);
+      if (val == null || JSONObject.NULL.equals(val) || "".equals(String.valueOf(val))) {
+        continue;
+      }
+      cascadeFormState.put(key, val);
+      if (!skipFields.contains(key) && NeoCalloutService.resolveCallout(adTab, key) != null) {
+        pendingFields.add(key);
+      }
+    }
+    return pendingFields;
   }
 
   /**

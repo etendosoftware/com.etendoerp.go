@@ -90,6 +90,8 @@ public class NeoServlet extends HttpBaseServlet {
   private static final String HOOK_ERROR_MSG = "An internal error occurred while processing the hook handler";
   private static final String PATCH_METHOD = "PATCH";
   private static final String PARENT_ID_KEY = "parentId";
+  private static final String KEY_UPDATES = "updates";
+  private static final String KEY_COMBOS = "combos";
 
 
   @Override
@@ -1022,40 +1024,31 @@ public class NeoServlet extends HttpBaseServlet {
    */
   private void mergeCalloutResponse(JSONObject base, JSONObject addition) {
     try {
-      JSONObject addUpdates = addition.optJSONObject("updates");
-      if (addUpdates != null) {
-        JSONObject baseUpdates = base.optJSONObject("updates");
-        if (baseUpdates == null) {
-          base.put("updates", addUpdates);
-        } else {
-          @SuppressWarnings("unchecked")
-          Iterator<String> keys = addUpdates.keys();
-          while (keys.hasNext()) {
-            String key = keys.next();
-            if (!baseUpdates.has(key)) {
-              baseUpdates.put(key, addUpdates.get(key));
-            }
-          }
-        }
-      }
-      JSONObject addCombos = addition.optJSONObject("combos");
-      if (addCombos != null) {
-        JSONObject baseCombos = base.optJSONObject("combos");
-        if (baseCombos == null) {
-          base.put("combos", addCombos);
-        } else {
-          @SuppressWarnings("unchecked")
-          Iterator<String> keys = addCombos.keys();
-          while (keys.hasNext()) {
-            String key = keys.next();
-            if (!baseCombos.has(key)) {
-              baseCombos.put(key, addCombos.get(key));
-            }
-          }
-        }
-      }
+      mergeJsonSection(base, addition, KEY_UPDATES);
+      mergeJsonSection(base, addition, KEY_COMBOS);
     } catch (Exception e) {
       log.debug("[NEO-CALLOUT] Failed to merge cascade results: {}", e.getMessage());
+    }
+  }
+
+  private static void mergeJsonSection(JSONObject base, JSONObject addition, String sectionKey)
+      throws org.codehaus.jettison.json.JSONException {
+    JSONObject addSection = addition.optJSONObject(sectionKey);
+    if (addSection == null) {
+      return;
+    }
+    JSONObject baseSection = base.optJSONObject(sectionKey);
+    if (baseSection == null) {
+      base.put(sectionKey, addSection);
+      return;
+    }
+    @SuppressWarnings("unchecked")
+    Iterator<String> keys = addSection.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if (!baseSection.has(key)) {
+        baseSection.put(key, addSection.get(key));
+      }
     }
   }
 

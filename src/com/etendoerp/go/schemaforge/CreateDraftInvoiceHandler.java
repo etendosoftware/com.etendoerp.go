@@ -67,6 +67,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   private static final String SPEC_GOODS_SHIPMENT = "goods-shipment";
   private static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String PARAM_SHIPMENT_IDS = "shipmentIds";
+  private static final String ERR_RECORD_ID_REQUIRED = ERR_RECORD_ID_REQUIRED;
+  private static final String KEY_RESPONSE = "response";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -92,7 +94,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
     String recordId = context.getRecordId();
     if (StringUtils.isBlank(recordId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Record ID is required");
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
     }
 
     String specName = context.getSpecName();
@@ -126,7 +128,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         responseData.put("data", data);
 
         JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
+        wrapper.put(KEY_RESPONSE, responseData);
 
         return NeoResponse.created(wrapper);
       } finally {
@@ -156,7 +158,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           ids.add(recordId);
         }
         if (ids.isEmpty()) {
-          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Record ID is required");
+          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
         }
 
         List<Invoice> drafts = findExistingDrafts(ids, specName);
@@ -181,7 +183,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         JSONObject responseData = new JSONObject();
         responseData.put("data", data);
         JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
+        wrapper.put(KEY_RESPONSE, responseData);
         return new NeoResponse(200, wrapper);
       } finally {
         OBContext.restorePreviousMode();
@@ -199,7 +201,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   private NeoResponse handleList(NeoContext context) {
     String recordId = context.getRecordId();
     if (StringUtils.isBlank(recordId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Record ID is required");
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
     }
     try {
       OBContext.setAdminMode(true);
@@ -247,7 +249,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         JSONObject responseData = new JSONObject();
         responseData.put("data", arr);
         JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
+        wrapper.put(KEY_RESPONSE, responseData);
         return new NeoResponse(200, wrapper);
       } finally {
         OBContext.restorePreviousMode();
