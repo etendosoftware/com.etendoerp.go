@@ -55,9 +55,12 @@ import org.openbravo.model.pricing.pricelist.PriceListVersion;
 public class ProductPriceHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ProductPriceHandler.class);
-  private static final String PRICE_LIMIT = "priceLimit"; 
+  private static final String PRICE_LIMIT = "priceLimit";
   private static final String PRICE_LIST_VERSION_FIELD = "priceListVersion";
   private static final String PRICE_LIST_VERSION_COLUMN = "M_PriceList_Version_ID";
+  private static final String PRODUCT_FIELD = "product";
+  private static final String STANDARD_PRICE_FIELD = "standardPrice";
+  private static final String LIST_PRICE_FIELD = "listPrice";
 
   private static final String PRICE_LIST_SQL = ""
       + "SELECT "
@@ -127,27 +130,7 @@ public class ProductPriceHandler implements NeoHandler {
       OBContext.setAdminMode();
       try {
         for (int i = 0; i < items.length(); i++) {
-          JSONObject item = items.optJSONObject(i);
-          if (item == null) {
-            continue;
-          }
-
-          String versionId = item.optString("id", null);
-          if (StringUtils.isBlank(versionId)) {
-            continue;
-          }
-
-          PriceListVersion plv = OBDal.getInstance().get(PriceListVersion.class, versionId);
-          if (plv == null || plv.getPriceList() == null) {
-            continue;
-          }
-
-          PriceList pl = plv.getPriceList();
-          boolean isSales = Boolean.TRUE.equals(pl.isSalesPriceList());
-          item.put("salesPriceList", isSales);
-          item.put("priceListVersion$salesPriceList", isSales);
-          item.put("priceList", pl.getId());
-          item.put("priceList$_identifier", pl.getIdentifier());
+          enrichSelectorItem(items.optJSONObject(i));
         }
       } finally {
         OBContext.restorePreviousMode();
@@ -158,6 +141,26 @@ public class ProductPriceHandler implements NeoHandler {
     }
 
     return previous;
+  }
+
+  private void enrichSelectorItem(JSONObject item) throws Exception {
+    if (item == null) {
+      return;
+    }
+    String versionId = item.optString("id", null);
+    if (StringUtils.isBlank(versionId)) {
+      return;
+    }
+    PriceListVersion plv = OBDal.getInstance().get(PriceListVersion.class, versionId);
+    if (plv == null || plv.getPriceList() == null) {
+      return;
+    }
+    PriceList pl = plv.getPriceList();
+    boolean isSales = Boolean.TRUE.equals(pl.isSalesPriceList());
+    item.put("salesPriceList", isSales);
+    item.put("priceListVersion$salesPriceList", isSales);
+    item.put("priceList", pl.getId());
+    item.put("priceList$_identifier", pl.getIdentifier());
   }
 
   /**
@@ -183,12 +186,12 @@ public class ProductPriceHandler implements NeoHandler {
         for (Object[] row : rows) {
           JSONObject item = new JSONObject();
           item.put("id",                               row[0]);
-          item.put("product",                          row[1]);
-          item.put("priceListVersion",                 row[2]);
+          item.put(PRODUCT_FIELD,                      row[1]);
+          item.put(PRICE_LIST_VERSION_FIELD,           row[2]);
           item.put("priceListVersion$_identifier",     row[3]);
-          item.put("standardPrice",                    toBigDecimal(row[4]));
-          item.put("listPrice",                        toBigDecimal(row[5]));
-          item.put("priceLimit",                       toBigDecimal(row[6]));
+          item.put(STANDARD_PRICE_FIELD,               toBigDecimal(row[4]));
+          item.put(LIST_PRICE_FIELD,                   toBigDecimal(row[5]));
+          item.put(PRICE_LIMIT,                        toBigDecimal(row[6]));
           String algoCode = row[7] != null ? String.valueOf(row[7]) : "S";
           item.put("algorithm",                        algoCode);
           item.put("algorithm$_identifier",            "S".equals(algoCode) ? "Standard" : algoCode);
@@ -234,22 +237,22 @@ public class ProductPriceHandler implements NeoHandler {
     try {
       String parentId = ctx.getQueryParams() != null
           ? (String) ctx.getQueryParams().get("parentId") : null;
-      if (StringUtils.isNotBlank(parentId) && !body.has("product")) {
-        body.put("product", parentId);
+      if (StringUtils.isNotBlank(parentId) && !body.has(PRODUCT_FIELD)) {
+        body.put(PRODUCT_FIELD, parentId);
       }
 
       if (!body.has(PRICE_LIMIT)) {
-        if (body.has("listPrice")) {
-          body.put(PRICE_LIMIT, body.opt("listPrice"));
-        } else if (body.has("standardPrice")) {
-          body.put(PRICE_LIMIT, body.opt("standardPrice"));
+        if (body.has(LIST_PRICE_FIELD)) {
+          body.put(PRICE_LIMIT, body.opt(LIST_PRICE_FIELD));
+        } else if (body.has(STANDARD_PRICE_FIELD)) {
+          body.put(PRICE_LIMIT, body.opt(STANDARD_PRICE_FIELD));
         }
       }
 
-      if (!body.has("priceListVersion")) {
+      if (!body.has(PRICE_LIST_VERSION_FIELD)) {
         String versionId = resolveDefaultSalesPriceListVersionId(ctx.getObContext());
         if (StringUtils.isNotBlank(versionId)) {
-          body.put("priceListVersion", versionId);
+          body.put(PRICE_LIST_VERSION_FIELD, versionId);
         }
       }
     } catch (Exception e) {
