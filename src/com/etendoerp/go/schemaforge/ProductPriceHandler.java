@@ -21,7 +21,7 @@ import java.util.List;
 
 import javax.inject.Named;
 
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -80,7 +80,7 @@ public class ProductPriceHandler implements NeoHandler {
       + "FROM m_productprice pp "
       + "JOIN m_pricelist_version plv ON plv.m_pricelist_version_id = pp.m_pricelist_version_id "
       + "JOIN m_pricelist pl          ON pl.m_pricelist_id = plv.m_pricelist_id "
-      + "JOIN c_currency c            ON c.c_currency_id = pl.c_currency_id "
+      + "LEFT JOIN c_currency c       ON c.c_currency_id = pl.c_currency_id "
       + "WHERE pp.m_product_id = :productId "
       + "  AND pp.isactive = 'Y' "
       + "ORDER BY pl.issopricelist DESC, plv.name";
