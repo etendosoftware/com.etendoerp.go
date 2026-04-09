@@ -61,28 +61,8 @@ class SelectorAuxResolver {
     // Try DAL property path if available
     if (StringUtils.isNotBlank(af.property)) {
       try {
-        String[] parts = af.property.split("\\.");
-        Object current = bob;
-        for (String part : parts) {
-          if (current == null) {
-            return null;
-          }
-          if (current instanceof BaseOBObject) {
-            current = ((BaseOBObject) current).get(part);
-          } else {
-            return current;
-          }
-        }
-        if (current instanceof BaseOBObject) {
-          return ((BaseOBObject) current).getId();
-        }
-        if (current instanceof List) {
-          List<?> list = (List<?>) current;
-          if (!list.isEmpty() && list.get(0) instanceof BaseOBObject) {
-            return ((BaseOBObject) list.get(0)).getId();
-          }
-        }
-        return current;
+        Object leaf = navigatePropertyPath(bob, af.property.split("\\."));
+        return extractLeafValue(leaf);
       } catch (Exception e) {
         log.debug("Could not resolve aux property {} on {}: {}",
             af.property, bob.getId(), e.getMessage());
@@ -90,6 +70,43 @@ class SelectorAuxResolver {
     }
     // No property path — aux value must be resolved via HQL (see resolveAuxFieldsViaHql)
     return null;
+  }
+
+  /**
+   * Navigate a dot-split property path on a BaseOBObject, returning the final value.
+   * Returns {@code null} as soon as a segment resolves to null.
+   * Returns the current object early if it is no longer a BaseOBObject mid-path.
+   */
+  private static Object navigatePropertyPath(BaseOBObject bob, String[] parts) {
+    Object current = bob;
+    for (String part : parts) {
+      if (current == null) {
+        return null;
+      }
+      if (current instanceof BaseOBObject) {
+        current = ((BaseOBObject) current).get(part);
+      } else {
+        return current;
+      }
+    }
+    return current;
+  }
+
+  /**
+   * Extract the final value from a leaf node after property-path navigation.
+   * BaseOBObject → its ID; List (of BaseOBObject) → ID of the first element; otherwise as-is.
+   */
+  private static Object extractLeafValue(Object leaf) {
+    if (leaf instanceof BaseOBObject) {
+      return ((BaseOBObject) leaf).getId();
+    }
+    if (leaf instanceof List) {
+      List<?> list = (List<?>) leaf;
+      if (!list.isEmpty() && list.get(0) instanceof BaseOBObject) {
+        return ((BaseOBObject) list.get(0)).getId();
+      }
+    }
+    return leaf;
   }
 
   /**

@@ -303,68 +303,93 @@ public class NeoServlet extends HttpBaseServlet {
    * Returns true if the request was handled by a sub-endpoint, false if it should fall through to CRUD.
    */
   private boolean handleWindowSubEndpoint(SFSpec spec, NeoPathInfo pathInfo, String method,
-      HttpServletRequest request, HttpServletResponse response) throws Exception {
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
     if (pathInfo.isSelector) {
-      if (!"GET".equals(method)) {
-        sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            "Selectors only support GET");
-        return true;
-      }
-      NeoResponse selectorResult = dispatchWithHooks(spec, pathInfo.entityName,
-          NeoEndpointType.SELECTOR, pathInfo.selectorField, method,
-          () -> handleSelector(spec.getId(), pathInfo, request));
-      writeResponse(response, selectorResult);
-      return true;
+      return handleSelectorSubEndpoint(spec, pathInfo, method, request, response);
     }
     if (pathInfo.isAction) {
-      if (!"POST".equals(method) && !"GET".equals(method)) {
-        sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            "Actions support GET (list) and POST (execute)");
-        return true;
-      }
-      NeoResponse actionResult = dispatchWithHooks(spec, pathInfo.entityName,
-          NeoEndpointType.ACTION, pathInfo.actionName, method,
-          () -> buttonHandler.handleButtonAction(spec, pathInfo, method, request));
-      writeResponse(response, actionResult);
-      return true;
+      return handleActionSubEndpoint(spec, pathInfo, method, request, response);
     }
     if (pathInfo.isEvaluateDisplay) {
-      if (!"POST".equals(method)) {
-        sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            "Method not allowed. Use POST.");
-        return true;
-      }
-      NeoResponse evalResult = dispatchWithHooks(spec, pathInfo.entityName,
-          NeoEndpointType.EVALUATE_DISPLAY, null, method,
-          () -> displayLogicHandler.handleEvaluateDisplay(spec, pathInfo, request));
-      writeResponse(response, evalResult);
-      return true;
+      return handleEvaluateDisplaySubEndpoint(spec, pathInfo, method, request, response);
     }
     if (pathInfo.isCallout) {
-      if (!"POST".equals(method)) {
-        sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            "Callout endpoint only supports POST");
-        return true;
-      }
-      NeoResponse calloutResult = dispatchWithHooks(spec, pathInfo.entityName,
-          NeoEndpointType.CALLOUT, null, method,
-          () -> handleCallout(spec, pathInfo, request));
-      writeResponse(response, calloutResult);
-      return true;
+      return handleCalloutSubEndpoint(spec, pathInfo, method, request, response);
     }
     if (pathInfo.isDefaults) {
-      if (!"GET".equals(method)) {
-        sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            "Defaults endpoint only supports GET");
-        return true;
-      }
-      NeoResponse defaultsResult = dispatchWithHooks(spec, pathInfo.entityName,
-          NeoEndpointType.DEFAULTS, null, method,
-          () -> handleDefaults(spec, pathInfo, request));
-      writeResponse(response, defaultsResult);
-      return true;
+      return handleDefaultsSubEndpoint(spec, pathInfo, method, request, response);
     }
     return false;
+  }
+
+  private boolean handleSelectorSubEndpoint(SFSpec spec, NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!"GET".equals(method)) {
+      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Selectors only support GET");
+      return true;
+    }
+    NeoResponse selectorResult = dispatchWithHooks(spec, pathInfo.entityName,
+        NeoEndpointType.SELECTOR, pathInfo.selectorField, method,
+        () -> handleSelector(spec.getId(), pathInfo, request));
+    writeResponse(response, selectorResult);
+    return true;
+  }
+
+  private boolean handleActionSubEndpoint(SFSpec spec, NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!"POST".equals(method) && !"GET".equals(method)) {
+      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Actions support GET (list) and POST (execute)");
+      return true;
+    }
+    NeoResponse actionResult = dispatchWithHooks(spec, pathInfo.entityName,
+        NeoEndpointType.ACTION, pathInfo.actionName, method,
+        () -> buttonHandler.handleButtonAction(spec, pathInfo, method, request));
+    writeResponse(response, actionResult);
+    return true;
+  }
+
+  private boolean handleEvaluateDisplaySubEndpoint(SFSpec spec, NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!"POST".equals(method)) {
+      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Method not allowed. Use POST.");
+      return true;
+    }
+    NeoResponse evalResult = dispatchWithHooks(spec, pathInfo.entityName,
+        NeoEndpointType.EVALUATE_DISPLAY, null, method,
+        () -> displayLogicHandler.handleEvaluateDisplay(spec, pathInfo, request));
+    writeResponse(response, evalResult);
+    return true;
+  }
+
+  private boolean handleCalloutSubEndpoint(SFSpec spec, NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!"POST".equals(method)) {
+      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Callout endpoint only supports POST");
+      return true;
+    }
+    NeoResponse calloutResult = dispatchWithHooks(spec, pathInfo.entityName,
+        NeoEndpointType.CALLOUT, null, method,
+        () -> handleCallout(spec, pathInfo, request));
+    writeResponse(response, calloutResult);
+    return true;
+  }
+
+  private boolean handleDefaultsSubEndpoint(SFSpec spec, NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!"GET".equals(method)) {
+      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Defaults endpoint only supports GET");
+      return true;
+    }
+    NeoResponse defaultsResult = dispatchWithHooks(spec, pathInfo.entityName,
+        NeoEndpointType.DEFAULTS, null, method,
+        () -> handleDefaults(spec, pathInfo, request));
+    writeResponse(response, defaultsResult);
+    return true;
   }
 
   /**
@@ -379,12 +404,7 @@ public class NeoServlet extends HttpBaseServlet {
           "Entity not found in spec: " + pathInfo.entityName);
       return;
     }
-    boolean methodEnabled = "GET".equals(method)
-        ? (Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID()))
-        : "POST".equals(method) ? Boolean.TRUE.equals(entity.isPost())
-        : "PUT".equals(method) ? Boolean.TRUE.equals(entity.isPut())
-        : METHOD_PATCH.equals(method) ? Boolean.TRUE.equals(entity.isPatch())
-        : METHOD_DELETE.equals(method) && Boolean.TRUE.equals(entity.isDelete());
+    boolean methodEnabled = isMethodEnabled(method, entity);
     if (!methodEnabled) {
       sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
           method + " not enabled for " + pathInfo.entityName);
@@ -404,37 +424,74 @@ public class NeoServlet extends HttpBaseServlet {
         .endpointType(NeoEndpointType.CRUD)
         .build();
     if ("POST".equals(method) || "PUT".equals(method) || METHOD_PATCH.equals(method)) {
-      try {
-        String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-        if (StringUtils.isNotBlank(bodyStr)) {
-          neoContext = NeoContext.builder()
-              .specName(neoContext.getSpecName())
-              .entityName(neoContext.getEntityName())
-              .httpMethod(neoContext.getHttpMethod())
-              .recordId(neoContext.getRecordId())
-              .requestBody(new JSONObject(bodyStr))
-              .queryParams(neoContext.getQueryParams())
-              .adTab(neoContext.getAdTab())
-              .sfEntity(neoContext.getSfEntity())
-              .obContext(neoContext.getObContext())
-              .endpointType(neoContext.getEndpointType())
-              .build();
-        }
-      } catch (Exception e) {
-        sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body: " + e.getMessage());
+      neoContext = parseAndAttachRequestBody(neoContext, request, response);
+      if (neoContext == null) {
         return;
       }
     }
-    String javaQualifier = entity.getJavaQualifier();
-    NeoResponse neoResponse;
-    if (StringUtils.isNotBlank(javaQualifier)) {
-      neoResponse = handleWithHooks(javaQualifier, neoContext, request, response);
-    } else {
-      neoResponse = handleDefault(neoContext, request, response);
-    }
+    NeoResponse neoResponse = dispatchCrudRequest(entity, neoContext, request, response);
     if (neoResponse != null) {
       writeResponse(response, neoResponse);
     }
+  }
+
+  /**
+   * Reads the HTTP request body, parses it as JSON, and returns a new NeoContext with the body
+   * attached. Returns null and sends a 400 error response if the body is malformed.
+   */
+  private NeoContext parseAndAttachRequestBody(NeoContext neoContext,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    try {
+      String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+      if (StringUtils.isBlank(bodyStr)) {
+        return neoContext;
+      }
+      return NeoContext.builder()
+          .specName(neoContext.getSpecName())
+          .entityName(neoContext.getEntityName())
+          .httpMethod(neoContext.getHttpMethod())
+          .recordId(neoContext.getRecordId())
+          .requestBody(new JSONObject(bodyStr))
+          .queryParams(neoContext.getQueryParams())
+          .adTab(neoContext.getAdTab())
+          .sfEntity(neoContext.getSfEntity())
+          .obContext(neoContext.getObContext())
+          .endpointType(neoContext.getEndpointType())
+          .build();
+    } catch (Exception e) {
+      sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body: " + e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Dispatches a CRUD request to the appropriate handler (hooked or default).
+   */
+  private NeoResponse dispatchCrudRequest(SFEntity entity, NeoContext neoContext,
+      HttpServletRequest request, HttpServletResponse response) {
+    String javaQualifier = entity.getJavaQualifier();
+    if (StringUtils.isNotBlank(javaQualifier)) {
+      return handleWithHooks(javaQualifier, neoContext, request, response);
+    }
+    return handleDefault(neoContext, request, response);
+  }
+
+  /**
+   * Returns true if the given HTTP method is enabled on the entity's configuration.
+   */
+  private boolean isMethodEnabled(String method, SFEntity entity) {
+    if ("GET".equals(method)) {
+      return Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID());
+    } else if ("POST".equals(method)) {
+      return Boolean.TRUE.equals(entity.isPost());
+    } else if ("PUT".equals(method)) {
+      return Boolean.TRUE.equals(entity.isPut());
+    } else if (METHOD_PATCH.equals(method)) {
+      return Boolean.TRUE.equals(entity.isPatch());
+    } else if (METHOD_DELETE.equals(method)) {
+      return Boolean.TRUE.equals(entity.isDelete());
+    }
+    return false;
   }
 
   private void authenticateJwt(HttpServletRequest request) throws Exception {
@@ -720,7 +777,15 @@ public class NeoServlet extends HttpBaseServlet {
         ? context.getQueryParams().get(PARAM_PARENT_ID)
         : null;
 
-    // Build HQL where clause from tab filter + parent filter
+    applyWhereClause(params, adTab, parentId);
+    applyPaginationDefaults(params);
+    return params;
+  }
+
+  /**
+   * Builds the HQL where clause from the tab filter and parent filter, and adds it to params.
+   */
+  private void applyWhereClause(Map<String, String> params, Tab adTab, String parentId) {
     StringBuilder where = new StringBuilder();
     String tabWhere = adTab.getHqlwhereclause();
     if (StringUtils.isNotBlank(tabWhere)) {
@@ -732,7 +797,9 @@ public class NeoServlet extends HttpBaseServlet {
     if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
       String parentFilter = resolveParentFilter(adTab, parentId);
       if (StringUtils.isNotBlank(parentFilter)) {
-        if (where.length() > 0) where.append(" and ");
+        if (where.length() > 0) {
+          where.append(" and ");
+        }
         where.append("(").append(parentFilter).append(")");
       }
     }
@@ -740,14 +807,18 @@ public class NeoServlet extends HttpBaseServlet {
       params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, where.toString());
       params.put(JsonConstants.USE_ALIAS, "true");
     }
+  }
 
+  /**
+   * Applies default pagination parameters if not already provided by the caller.
+   */
+  private void applyPaginationDefaults(Map<String, String> params) {
     if (!params.containsKey(JsonConstants.STARTROW_PARAMETER)) {
       params.put(JsonConstants.STARTROW_PARAMETER, "0");
     }
     if (!params.containsKey(JsonConstants.ENDROW_PARAMETER)) {
       params.put(JsonConstants.ENDROW_PARAMETER, "100");
     }
-    return params;
   }
 
   /**
@@ -763,48 +834,20 @@ public class NeoServlet extends HttpBaseServlet {
         result = jsonService.fetch(params);
         break;
       case "POST": {
-        if (context.getRecordId() != null) {
-          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-              "POST (create) must not include a record ID in the URL");
+        NeoResponse earlyError = validatePostRequest(context);
+        if (earlyError != null) {
+          return earlyError;
         }
-        JSONObject requestBody = context.getRequestBody();
-        String parentIdValue = null;
-        if (requestBody != null && requestBody.has(PARAM_PARENT_ID)) {
-          parentIdValue = requestBody.getString(PARAM_PARENT_ID);
-          requestBody.remove(PARAM_PARENT_ID);
-          if (adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-            // Map generic "parentId" to the actual FK property name on the child entity
-            Entity dalEnt = ModelProvider.getInstance()
-                .getEntityByTableName(adTab.getTable().getDBTableName());
-            if (dalEnt != null) {
-              for (Column col : adTab.getTable().getADColumnList()) {
-                if (col.isLinkToParentColumn() && col.isActive()) {
-                  try {
-                    Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
-                    if (prop != null) { requestBody.put(prop.getName(), parentIdValue); break; }
-                  } catch (Exception ex) {
-                    log.debug("Could not resolve parent column for '{}': {}", col.getDBColumnName(), ex.getMessage());
-                  }
-                }
-              }
-            }
-          }
-        }
-        JSONObject filteredBody = fieldFilter.filterWriteRequest(requestBody);
-        NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
-        String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
-        result = jsonService.add(params, wrappedBody);
+        result = executePostCreate(context, adTab, dalEntityName, fieldFilter, jsonService, params);
         break;
       }
       case "PUT":
       case METHOD_PATCH: {
-        if (context.getRecordId() == null) {
-          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-              context.getHttpMethod() + " requires a record ID in the URL");
+        NeoResponse earlyError = validateUpdateRequest(context);
+        if (earlyError != null) {
+          return earlyError;
         }
-        JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
-        String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
-        result = jsonService.update(params, wrappedBody);
+        result = executeUpdate(context, dalEntityName, fieldFilter, jsonService, params);
         break;
       }
       case METHOD_DELETE:
@@ -816,22 +859,114 @@ public class NeoServlet extends HttpBaseServlet {
     }
 
     JSONObject responseJson = new JSONObject(result);
-    JSONObject innerResponse = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
-    if (innerResponse != null) {
-      int status = innerResponse.optInt(JsonConstants.RESPONSE_STATUS, 0);
-      if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
-        String errMsg = innerResponse.has(JsonConstants.RESPONSE_ERROR)
-            ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
-                .optString("message", "Write operation failed")
-            : "Write operation failed";
-        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errMsg);
-      }
-      if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
-      }
+    NeoResponse errorResponse = checkJsonServiceResponse(responseJson);
+    if (errorResponse != null) {
+      return errorResponse;
     }
     fieldFilter.filterGetResponse(responseJson);
     return NeoResponse.ok(responseJson);
+  }
+
+  /**
+   * Validates a POST request. Returns an error NeoResponse if invalid, null if the request is OK.
+   */
+  private NeoResponse validatePostRequest(NeoContext context) {
+    if (context.getRecordId() != null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "POST (create) must not include a record ID in the URL");
+    }
+    return null;
+  }
+
+  /**
+   * Validates a PUT/PATCH request. Returns an error NeoResponse if invalid, null if OK.
+   */
+  private NeoResponse validateUpdateRequest(NeoContext context) {
+    if (context.getRecordId() == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          context.getHttpMethod() + " requires a record ID in the URL");
+    }
+    return null;
+  }
+
+  /**
+   * Validates the response for error/validation-error status codes.
+   * Returns an error NeoResponse if a failure is detected, or null if the response is OK.
+   */
+  private NeoResponse checkJsonServiceResponse(JSONObject responseJson) throws Exception {
+    JSONObject innerResponse = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
+    if (innerResponse == null) {
+      return null;
+    }
+    int status = innerResponse.optInt(JsonConstants.RESPONSE_STATUS, 0);
+    if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
+      String errMsg = innerResponse.has(JsonConstants.RESPONSE_ERROR)
+          ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
+              .optString("message", "Write operation failed")
+          : "Write operation failed";
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errMsg);
+    }
+    if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
+    }
+    return null;
+  }
+
+  /**
+   * Executes the POST (create) JSON service operation and returns the raw result string.
+   */
+  private String executePostCreate(NeoContext context, Tab adTab, String dalEntityName,
+      NeoFieldFilter fieldFilter, DefaultJsonDataService jsonService,
+      Map<String, String> params) throws Exception {
+    JSONObject requestBody = context.getRequestBody();
+    String parentIdValue = null;
+    if (requestBody != null && requestBody.has(PARAM_PARENT_ID)) {
+      parentIdValue = requestBody.getString(PARAM_PARENT_ID);
+      requestBody.remove(PARAM_PARENT_ID);
+      injectParentIdAsProperty(adTab, requestBody, parentIdValue);
+    }
+    JSONObject filteredBody = fieldFilter.filterWriteRequest(requestBody);
+    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+    String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
+    return jsonService.add(params, wrappedBody);
+  }
+
+  /**
+   * Maps the generic "parentId" value to the actual FK property name on the child entity.
+   */
+  private void injectParentIdAsProperty(Tab adTab, JSONObject requestBody, String parentIdValue) {
+    if (adTab.getTabLevel() == null || adTab.getTabLevel() <= 0) {
+      return;
+    }
+    Entity dalEnt = ModelProvider.getInstance()
+        .getEntityByTableName(adTab.getTable().getDBTableName());
+    if (dalEnt == null) {
+      return;
+    }
+    for (Column col : adTab.getTable().getADColumnList()) {
+      if (col.isLinkToParentColumn() && col.isActive()) {
+        try {
+          Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
+          if (prop != null) {
+            requestBody.put(prop.getName(), parentIdValue);
+            break;
+          }
+        } catch (Exception ex) {
+          log.debug("Could not resolve parent column for '{}': {}", col.getDBColumnName(), ex.getMessage());
+        }
+      }
+    }
+  }
+
+  /**
+   * Executes the PUT/PATCH (update) JSON service operation and returns the raw result string.
+   */
+  private String executeUpdate(NeoContext context, String dalEntityName,
+      NeoFieldFilter fieldFilter, DefaultJsonDataService jsonService,
+      Map<String, String> params) throws Exception {
+    JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
+    String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
+    return jsonService.update(params, wrappedBody);
   }
 
   /**
@@ -1001,8 +1136,16 @@ public class NeoServlet extends HttpBaseServlet {
     String search = request.getParameter("q");
     int limit = 20;
     int offset = 0;
-    try { limit = Integer.parseInt(request.getParameter("limit")); } catch (Exception ignored) { }
-    try { offset = Integer.parseInt(request.getParameter("offset")); } catch (Exception ignored) { }
+    try {
+      limit = Integer.parseInt(request.getParameter("limit"));
+    } catch (NumberFormatException ignored) {
+      // Use default limit if the parameter is absent or not a valid integer
+    }
+    try {
+      offset = Integer.parseInt(request.getParameter("offset"));
+    } catch (NumberFormatException ignored) {
+      // Use default offset if the parameter is absent or not a valid integer
+    }
 
     // Collect context params (all query params except q, limit, offset)
     Map<String, String> contextParams = new HashMap<>();

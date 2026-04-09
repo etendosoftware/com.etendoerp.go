@@ -35,7 +35,6 @@ class SelectorQueryBuilder {
   static final String SQL_AND = " AND ";
   static final String SQL_WHERE = " WHERE ";
 
-  private static final String PARAM_SEARCH = "search";
   private static final String FIELD_LABEL = "label";
   private static final String FIELD_ITEMS = "items";
   private static final String FIELD_COLUMNS = "columns";
@@ -371,61 +370,15 @@ class SelectorQueryBuilder {
     }
 
     String code = valRule.getValidationCode().trim();
-
-    // Build combined param map: session variables + caller-provided context params
-    Map<String, String> allParams = new java.util.HashMap<>();
-    OBContext ctx = OBContext.getOBContext();
-    allParams.put("AD_Org_ID", ctx.getCurrentOrganization().getId());
-    allParams.put("AD_Client_ID", ctx.getCurrentClient().getId());
-    allParams.put("AD_User_ID", ctx.getUser().getId());
-    allParams.put("AD_Role_ID", ctx.getRole().getId());
-    if (contextParams != null) {
-      allParams.putAll(contextParams);
-    }
-
-    // Split into top-level AND clauses, respecting parentheses depth
+    Map<String, String> allParams = buildValidationParamMap(contextParams);
     List<String> clauses = splitTopLevelAnd(code);
 
     List<String> resolvedClauses = new ArrayList<>();
     for (String clause : clauses) {
-      String trimmed = clause.trim();
-      if (StringUtils.isBlank(trimmed)) {
-        continue;
+      String resolved = resolveValidationClause(clause.trim(), allParams);
+      if (resolved != null) {
+        resolvedClauses.add(resolved);
       }
-
-      // Skip clauses containing SQL-only functions (no HQL equivalent)
-      if (SQL_ONLY_FUNCTIONS.matcher(trimmed).find()) {
-        log.debug("Skipping validation clause with SQL-only function: {}", trimmed);
-        continue;
-      }
-
-      // Check if all @Param@ in this clause can be resolved
-      Matcher paramMatcher = VALIDATION_PARAM.matcher(trimmed);
-      boolean allResolvable = true;
-      while (paramMatcher.find()) {
-        String paramName = paramMatcher.group(1);
-        if (!allParams.containsKey(paramName)) {
-          allResolvable = false;
-          break;
-        }
-      }
-      if (!allResolvable) {
-        log.debug("Skipping validation clause with unresolvable params: {}", trimmed);
-        continue;
-      }
-
-      // Replace @Param@ and @#Param@ with sanitized values
-      StringBuffer resolved = new StringBuffer();
-      paramMatcher = VALIDATION_PARAM.matcher(trimmed);
-      while (paramMatcher.find()) {
-        String paramName = paramMatcher.group(1);
-        String value = allParams.get(paramName).replace("'", "''");
-        paramMatcher.appendReplacement(resolved,
-            Matcher.quoteReplacement("'" + value + "'"));
-      }
-      paramMatcher.appendTail(resolved);
-
-      resolvedClauses.add(resolved.toString());
     }
 
     if (resolvedClauses.isEmpty()) {
@@ -437,6 +390,58 @@ class SelectorQueryBuilder {
 
     // Convert SQL TABLE.COLUMN references to HQL e.property paths
     return convertSqlToHql(joined, targetEntityName);
+  }
+
+  /**
+   * Build combined param map from OBContext session variables and caller-provided params.
+   */
+  private static Map<String, String> buildValidationParamMap(Map<String, String> contextParams) {
+    Map<String, String> allParams = new java.util.HashMap<>();
+    OBContext ctx = OBContext.getOBContext();
+    allParams.put("AD_Org_ID", ctx.getCurrentOrganization().getId());
+    allParams.put("AD_Client_ID", ctx.getCurrentClient().getId());
+    allParams.put("AD_User_ID", ctx.getUser().getId());
+    allParams.put("AD_Role_ID", ctx.getRole().getId());
+    if (contextParams != null) {
+      allParams.putAll(contextParams);
+    }
+    return allParams;
+  }
+
+  /**
+   * Attempt to resolve a single validation AND-clause by substituting all @Param@ references.
+   * Returns the resolved clause string, or {@code null} if the clause should be skipped
+   * (SQL-only function detected, or a param cannot be resolved).
+   */
+  private static String resolveValidationClause(String trimmed, Map<String, String> allParams) {
+    if (StringUtils.isBlank(trimmed)) {
+      return null;
+    }
+
+    // Skip clauses containing SQL-only functions (no HQL equivalent)
+    if (SQL_ONLY_FUNCTIONS.matcher(trimmed).find()) {
+      log.debug("Skipping validation clause with SQL-only function: {}", trimmed);
+      return null;
+    }
+
+    // Check if all @Param@ in this clause can be resolved
+    Matcher paramMatcher = VALIDATION_PARAM.matcher(trimmed);
+    while (paramMatcher.find()) {
+      if (!allParams.containsKey(paramMatcher.group(1))) {
+        log.debug("Skipping validation clause with unresolvable params: {}", trimmed);
+        return null;
+      }
+    }
+
+    // Replace @Param@ and @#Param@ with sanitized values
+    StringBuffer resolved = new StringBuffer();
+    paramMatcher = VALIDATION_PARAM.matcher(trimmed);
+    while (paramMatcher.find()) {
+      String value = allParams.get(paramMatcher.group(1)).replace("'", "''");
+      paramMatcher.appendReplacement(resolved, Matcher.quoteReplacement("'" + value + "'"));
+    }
+    paramMatcher.appendTail(resolved);
+    return resolved.toString();
   }
 
   /**
@@ -456,14 +461,13 @@ class SelectorQueryBuilder {
         depth++;
       } else if (c == ')') {
         depth--;
-      } else if (depth == 0 && i + 3 < code.length()) {
-        // Check for top-level AND (preceded/followed by whitespace or newline)
-        if (upper.substring(i, i + 3).equals("AND")
-            && (i == 0 || !Character.isLetterOrDigit(code.charAt(i - 1)))
-            && !Character.isLetterOrDigit(code.charAt(i + 3))) {
-          parts.add(code.substring(start, i).trim());
-          start = i + 3;
-        }
+      } else if (depth == 0 && i + 3 < code.length()
+          && upper.substring(i, i + 3).equals("AND")
+          && (i == 0 || !Character.isLetterOrDigit(code.charAt(i - 1)))
+          && !Character.isLetterOrDigit(code.charAt(i + 3))) {
+        // Top-level AND (preceded/followed by non-alphanumeric character)
+        parts.add(code.substring(start, i).trim());
+        start = i + 3;
       }
     }
     // Add the last segment
@@ -522,21 +526,31 @@ class SelectorQueryBuilder {
             || (m.start() > 0 && afterTableRef.charAt(m.start() - 1) == '.')) {
           continue;
         }
-        try {
-          Property prop = targetEntity.getPropertyByColumnName(token);
-          if (prop != null) {
-            String replacement = resolveColumnToHql(targetEntity, token);
-            m.appendReplacement(result, Matcher.quoteReplacement(replacement));
-          }
-        } catch (Exception ignored) {
-          // Not a column name, leave as-is
-        }
+        replaceBareColumnToken(m, result, targetEntity, token);
       }
       m.appendTail(result);
       return result.toString();
     } catch (Exception e) {
       log.warn("Could not convert SQL to HQL for entity {}: {}", targetEntityName, e.getMessage());
       return sqlClause;
+    }
+  }
+
+  /**
+   * Attempt to replace a bare column token in the HQL result buffer.
+   * Looks up the token as a DB column name and, if found, appends the HQL replacement.
+   * If the token is not a known column or an exception is thrown, no replacement is appended.
+   */
+  private static void replaceBareColumnToken(Matcher m, StringBuffer result,
+      Entity targetEntity, String token) {
+    try {
+      Property prop = targetEntity.getPropertyByColumnName(token);
+      if (prop != null) {
+        String replacement = resolveColumnToHql(targetEntity, token);
+        m.appendReplacement(result, Matcher.quoteReplacement(replacement));
+      }
+    } catch (Exception ignored) {
+      // Not a column name, leave as-is
     }
   }
 

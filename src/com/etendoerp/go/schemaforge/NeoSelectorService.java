@@ -744,19 +744,17 @@ public class NeoSelectorService {
       // Sort grid fields by sortNo
       gridFields.sort((a, b) -> Long.compare(a.sortNo, b.sortNo));
 
-      return new SelectorMeta(
-          targetEntity.getName(),
-          displayProp,
-          whereClause,
-          true, // isRich
-          isCustom,
-          valueProp,
-          gridFields,
-          searchableProps,
-          customHql,
-          entityAlias,
-          auxFields
-      );
+      return new SelectorMeta.Builder(targetEntity.getName(), displayProp)
+          .whereClause(whereClause)
+          .isRich(true)
+          .isCustomQuery(isCustom)
+          .valueProperty(valueProp)
+          .gridFields(gridFields)
+          .searchableProperties(searchableProps)
+          .customHql(customHql)
+          .entityAlias(entityAlias)
+          .auxFields(auxFields)
+          .build();
 
     } catch (Exception e) {
       log.warn("Could not resolve OBUISEL_Selector {}: {}",
