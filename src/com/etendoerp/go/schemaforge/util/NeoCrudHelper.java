@@ -61,42 +61,6 @@ public class NeoCrudHelper {
    * @param context the NEO request context containing entity, method, body and query params
    * @return a NeoResponse with the result or an error
    */
-  public static NeoResponse handleDefault(NeoContext context) {
-    try {
-      Tab adTab = context.getAdTab();
-      if (adTab == null) {
-        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-            "No AD_Tab linked to entity: " + context.getEntityName());
-      }
-
-      String dalEntityName = adTab.getTable().getName();
-      DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
-      NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(
-          context.getSfEntity(), dalEntityName);
-
-      Map<String, String> params = buildBaseParams(context, adTab, dalEntityName);
-      buildWhereClause(params, adTab, context);
-      applyPaginationDefaults(params);
-
-      String result = dispatchCrudMethod(context, adTab, dalEntityName,
-          jsonService, fieldFilter, params);
-      if (result == null) {
-        return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-            "Unsupported method: " + context.getHttpMethod());
-      }
-
-      if (result.startsWith(NEO_ERROR_PREFIX)) {
-        String[] parts = result.substring(NEO_ERROR_PREFIX.length()).split(":", 2);
-        return NeoResponse.error(Integer.parseInt(parts[0]), parts[1]);
-      }
-
-      return buildCrudResponse(result, context, fieldFilter);
-    } catch (Exception e) {
-      log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-    }
-  }
-
   /**
    * Builds the base parameter map required by {@code DefaultJsonDataService} operations.
    * Includes entity name, tab ID, window ID, and active-record filter; also copies any
@@ -235,7 +199,7 @@ public class NeoCrudHelper {
   /**
    * Resolve the parentId from the request body and map it to the actual FK property name.
    */
-  static String resolveAndMapParentId(JSONObject requestBody, Tab adTab) throws Exception {
+  public static String resolveAndMapParentId(JSONObject requestBody, Tab adTab) throws Exception {
     if (requestBody == null || !requestBody.has(PARENT_ID_KEY)) {
       return null;
     }

@@ -22,8 +22,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 
 import javax.servlet.http.HttpServletRequest;
@@ -38,14 +40,10 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.base.model.Entity;
-import org.openbravo.base.model.ModelProvider;
-import org.openbravo.base.model.Property;
 import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
@@ -880,6 +878,16 @@ public class NeoServlet extends HttpBaseServlet {
         }
       }
 
+      // Allow callers to inject an additional HQL predicate via _neoWhere (e.g. from hooks or
+      // custom handlers). Consumed here so it is not passed as a raw query param downstream.
+      String neoWhere = params.remove("_neoWhere");
+      if (StringUtils.isNotBlank(neoWhere)) {
+        if (whereClause.length() > 0) {
+          whereClause.append(" and ");
+        }
+        whereClause.append("(").append(neoWhere).append(")");
+      }
+
       if (whereClause.length() > 0) {
         params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause.toString());
         params.put(JsonConstants.USE_ALIAS, "true");
@@ -907,16 +915,21 @@ public class NeoServlet extends HttpBaseServlet {
           // Resolve parentId from body: map generic "parentId" to the actual FK property name
           // (e.g., parentId → salesOrder for C_OrderLine, parentId → invoice for C_InvoiceLine)
           JSONObject requestBody = context.getRequestBody();
-          String parentIdValue = null;
-          if (requestBody != null && requestBody.has(PARENT_ID_KEY)) {
-            parentIdValue = requestBody.getString(PARENT_ID_KEY);
-            requestBody.remove(PARENT_ID_KEY);
-            injectParentIdProperty(requestBody, adTab, parentIdValue);
-          }
+          String parentIdValue = NeoCrudHelper.resolveAndMapParentId(requestBody, adTab);
           // Filter out non-included fields (allow read-only on create — callouts/defaults set them)
           JSONObject filteredBody = fieldFilter.filterCreateRequest(requestBody);
           // Inject defaults for mandatory columns not in ETGO_SF_FIELD config
           NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+          // For header tabs (level 0): run callout cascade to derive field values (e.g. docType,
+          // business partner defaults), then re-apply tab filter, remove empty FKs, and re-inject
+          // mandatory defaults after callout mutations.
+          if (adTab.getTabLevel() != null && adTab.getTabLevel() == 0) {
+            Set<String> seqFields = new HashSet<>();
+            NeoDefaultsService.executeCalloutCascade(context, adTab, filteredBody, seqFields);
+            NeoDefaultsService.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
+            NeoDefaultsService.removeEmptyFkValues(filteredBody, adTab);
+            NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+          }
           // Wrap in SmartClient envelope for DefaultJsonDataService (data + _entityName + _new)
           String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(filteredBody, dalEntityName, null);
           result = jsonService.add(params, wrappedBody);
@@ -975,34 +988,6 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-    }
-  }
-
-  /**
-   * Resolves the DAL property name for the link-to-parent column and injects
-   * the parentId value into the request body under that property name.
-   */
-  private void injectParentIdProperty(JSONObject requestBody, Tab adTab, String parentIdValue) {
-    if (adTab.getTabLevel() == null || adTab.getTabLevel() <= 0) {
-      return;
-    }
-    Entity dalEnt = ModelProvider.getInstance().getEntityByTableName(adTab.getTable().getDBTableName());
-    if (dalEnt == null) {
-      return;
-    }
-    for (Column col : adTab.getTable().getADColumnList()) {
-      if (col.isLinkToParentColumn() && col.isActive()) {
-        try {
-          Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
-          if (prop != null) {
-            requestBody.put(prop.getName(), parentIdValue);
-            break;
-          }
-        } catch (Exception e) {
-          log.debug("Could not resolve DAL property for column '{}': {}",
-              col.getDBColumnName(), e.getMessage());
-        }
-      }
     }
   }
 
