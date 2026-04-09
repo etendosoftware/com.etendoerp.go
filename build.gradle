@@ -61,8 +61,11 @@ sourceSets {
 * Ex: implementation "com.sun.mail:javax.mail:1.6.2"
 */
 dependencies {
-    implementation('com.etendoerp:openapi:[2.5.0,)')
-    implementation('com.etendoerp:webhookevents:[2.6.1,)')
+    implementation('com.etendoerp:openapi:[3.0.0,)')
+    implementation('com.etendoerp:webhookevents:[3.0.0,)')
+    implementation('com.etendoerp:copilot.extensions:[4.0.0,)')
+    implementation('com.etendoerp:localization.spain.extensions:[4.0.0,)')
+    implementation('com.etendoerp:docker:[3.0.0,)')
     compileOnly 'io.swagger.core.v3:swagger-models:2.1.13'
     compileOnly 'org.apache.commons:commons-lang3:3.12.0'
     testImplementation 'junit:junit:4.13.2'

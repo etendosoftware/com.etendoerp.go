@@ -47,6 +47,16 @@ public final class NeoImageHelper {
   private NeoImageHelper() {
   }
 
+  /**
+   * Dispatches an image request to either the GET (retrieve image bytes) or POST (upload image)
+   * handler based on the HTTP method, writing the result directly to the servlet response.
+   *
+   * @param imageId  the ID of the {@link Image} record to retrieve; used only for GET requests
+   * @param method   the HTTP method string ({@code "GET"} or {@code "POST"})
+   * @param request  the HTTP servlet request, used to read the POST body
+   * @param response the HTTP servlet response to which the image data or JSON result is written
+   * @throws IOException if an I/O error occurs while reading the request or writing the response
+   */
   public static void handleImageRequest(String imageId, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     try {

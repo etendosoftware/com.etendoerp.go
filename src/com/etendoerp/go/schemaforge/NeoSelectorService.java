@@ -39,7 +39,6 @@ import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.application.ApplicationUtils;
 import org.openbravo.client.kernel.KernelUtils;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
@@ -76,11 +75,12 @@ public class NeoSelectorService {
   private static final String REF_SEARCH = "30";
   private static final String REF_LIST = "17";
 
+  /** Active Directory organization identifier field name. */
+  private static final String AD_ORG_ID = "AD_Org_ID";
+
   // Session-level params resolved server-side (should not appear in selectorParams)
   private static final java.util.Set<String> SESSION_PARAMS = new java.util.HashSet<>(
-      java.util.Arrays.asList("AD_Org_ID", "AD_Client_ID", "AD_User_ID", "AD_Role_ID"));
-
-  private static final String AD_ORG_ID = "AD_Org_ID";
+      java.util.Arrays.asList(AD_ORG_ID, "AD_Client_ID", "AD_User_ID", "AD_Role_ID"));
   private static final String SQL_AND = " AND ";
   private static final String SQL_WHERE = " WHERE ";
   private static final String SQL_ORDER_BY = "ORDER BY";
@@ -112,6 +112,10 @@ public class NeoSelectorService {
   /**
    * List all available selectors for an entity.
    * Only returns fields that are included and have a FK reference type.
+   *
+   * @param specId     the ETGO_SF_Spec ID
+   * @param entityName the entity name within the spec
+   * @return a NeoResponse with the list of selector field descriptors, or an error response
    */
   @SuppressWarnings("unchecked")
   public static NeoResponse listSelectors(String specId, String entityName) {
@@ -233,12 +237,14 @@ public class NeoSelectorService {
   /**
    * Query selector values for a specific FK field.
    *
-   * @param specId     the ETGO_SF_Spec ID
-   * @param entityName the entity name within the spec
-   * @param columnName the DB column name (e.g., C_BPartner_ID)
-   * @param search     optional search text (filters on display property)
-   * @param limit      page size (default 20, max 100)
-   * @param offset     page offset (default 0)
+   * @param specId        the ETGO_SF_Spec ID
+   * @param entityName    the entity name within the spec
+   * @param columnName    the DB column name (e.g., C_BPartner_ID)
+   * @param search        optional search text (filters on display property)
+   * @param limit         page size (default 20, max 100)
+   * @param offset        page offset (default 0)
+   * @param contextParams additional key/value context used to filter selector values
+   * @return a NeoResponse with the matching selector records, or an error response
    */
   @SuppressWarnings("unchecked")
   public static NeoResponse querySelector(String specId, String entityName,
@@ -2168,29 +2174,35 @@ public class NeoSelectorService {
     }
     try {
       OBContext ctx = OBContext.getOBContext();
-      if (ctx == null || ctx.getCurrentOrganization() == null) {
+      if (ctx == null) {
         return null;
       }
-      String activeOrgId = ctx.getCurrentOrganization().getId();
-      OrganizationStructureProvider osp = ctx.getOrganizationStructureProvider();
-      java.util.Set<String> naturalTree = osp.getNaturalTree(activeOrgId);
-      naturalTree.add("0"); // always include the * org
-      if (naturalTree.isEmpty()) {
+      // Use readable organizations (matches Classic Etendo combo behavior) rather than
+      // the narrower natural tree, so that master data in sibling orgs (e.g. C_BPartner_Location
+      // in F&B España visible from F&B US session) is not incorrectly filtered out.
+      String[] readableOrgs = ctx.getReadableOrganizations();
+      if (readableOrgs == null || readableOrgs.length == 0) {
         return null;
       }
-      StringBuilder filter = new StringBuilder(alias).append(".organization.id IN (");
-      boolean first = true;
-      for (String orgId : naturalTree) {
-        if (!first) {
-          filter.append(", ");
+      // Always include org '0' (the system/shared org) so that master data defined at the
+      // '*' org level (e.g., taxes, price lists, UoMs shared across all orgs of a client)
+      // is visible in selectors regardless of which org the user is currently working in.
+      boolean hasSystemOrg = false;
+      for (String org : readableOrgs) {
+        if ("0".equals(org)) {
+          hasSystemOrg = true;
+          break;
         }
-        filter.append("'").append(orgId).append("'");
-        first = false;
       }
-      filter.append(")");
-      return filter.toString();
+      if (!hasSystemOrg) {
+        String[] withSystemOrg = new String[readableOrgs.length + 1];
+        System.arraycopy(readableOrgs, 0, withSystemOrg, 0, readableOrgs.length);
+        withSystemOrg[readableOrgs.length] = "0";
+        readableOrgs = withSystemOrg;
+      }
+      return buildOrganizationFilter(alias, readableOrgs);
     } catch (Exception e) {
-      log.warn("Could not build natural org filter for entity {}: {}", entityName, e.getMessage());
+      log.warn("Could not build org filter for entity {}: {}", entityName, e.getMessage());
       return null;
     }
   }

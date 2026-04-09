@@ -33,6 +33,7 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.application.window.servlet.CalloutServletConfig;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
@@ -61,6 +62,8 @@ import org.openbravo.service.json.JsonConstants;
 public class NeoCalloutService {
 
   private static final Logger log = LogManager.getLogger(NeoCalloutService.class);
+  private static final String VALUE_KEY = "value";
+  private static final String IDENTIFIER_KEY = "_identifier";
 
   private NeoCalloutService() {
   }
@@ -77,7 +80,7 @@ public class NeoCalloutService {
       OBContext.setAdminMode();
       try {
         String fieldName = requestBody.getString("field");
-        Object value = requestBody.opt("value");
+        Object value = requestBody.opt(VALUE_KEY);
         JSONObject formState = requestBody.optJSONObject("formState");
         if (formState == null) {
           formState = new JSONObject();
@@ -144,6 +147,7 @@ public class NeoCalloutService {
         // Transform the callout result to REST format
         JSONObject restResponse = transformResponse(calloutResult, adTab);
         log.info("[NEO-CALLOUT] Transformed response: {}", restResponse.toString().substring(0, Math.min(500, restResponse.toString().length())));
+
         return NeoResponse.ok(restResponse);
 
       } finally {
@@ -393,7 +397,16 @@ public class NeoCalloutService {
 
     // Inject essential context params from OBContext (security boundary — always authoritative)
     OBContext obCtx = OBContext.getOBContext();
-    params.put("inpadOrgId", new String[]{ obCtx.getCurrentOrganization().getId() });
+    String calloutOrgId = obCtx.getCurrentOrganization().getId();
+    // When logged in with "*" org (id=0), resolve the first real org so callouts like
+    // SE_OrderLine_PriceList can find the correct price list for the client.
+    if ("0".equals(calloutOrgId)) {
+      String realOrgId = NeoDefaultsService.resolveFirstOrgForClient(obCtx.getCurrentClient().getId());
+      if (realOrgId != null) {
+        calloutOrgId = realOrgId;
+      }
+    }
+    params.put("inpadOrgId", new String[]{ calloutOrgId });
     params.put("inpadClientId", new String[]{ obCtx.getCurrentClient().getId() });
     String isSOTrx = adTab.getWindow() != null
         && Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
@@ -461,6 +474,12 @@ public class NeoCalloutService {
         params.put(inpKey, new String[]{ val });
       }
     }
+
+    // Re-assert the real org AFTER formState mapping, because formState may contain
+    // adOrgId="0" (the * org) which maps to inpadOrgId and overwrites our earlier fix.
+    // This authoritative override ensures callouts like SE_OrderLine_PriceList always
+    // receive a real org, not the pseudo-org "0".
+    params.put("inpadOrgId", new String[]{ calloutOrgId });
 
     // Fill missing columns with their AD defaults so callouts see all fields.
     // In the classic UI every form field is present in the callout request, even on a new
@@ -556,6 +575,15 @@ public class NeoCalloutService {
     String lang = obCtx.getLanguage().getLanguage();
     String warehouseId = obCtx.getWarehouse() != null
         ? obCtx.getWarehouse().getId() : "";
+
+    // When logged in with "*" org (id=0), resolve the first real org so that
+    // @#AD_Org_ID@ expressions inside callouts resolve to a valid org.
+    if ("0".equals(orgId)) {
+      String realOrgId = NeoDefaultsService.resolveFirstOrgForClient(clientId);
+      if (realOrgId != null) {
+        orgId = realOrgId;
+      }
+    }
 
     VariablesSecureApp vars = new VariablesSecureApp(userId, clientId, orgId, roleId, lang);
     DalConnectionProvider conn = new DalConnectionProvider(false);
@@ -707,6 +735,67 @@ public class NeoCalloutService {
    *   "messages": [ { "type": "WARNING", "text": "..." } ]
    * }
    */
+  /**
+   * For FK update fields that have a value but no _identifier, look up the display name
+   * from the DB so the frontend can show the correct label immediately.
+   */
+  private static void resolveIdentifiersForFkUpdates(JSONObject updates, Tab adTab) {
+    if (updates == null || adTab == null || adTab.getTable() == null) {
+      return;
+    }
+    try {
+      Entity dalEntity = ModelProvider.getInstance()
+          .getEntityByTableId(adTab.getTable().getId());
+      if (dalEntity == null) return;
+
+      Iterator<String> keys = updates.keys();
+      while (keys.hasNext()) {
+        String fieldName = keys.next();
+        resolveIdentifierForField(updates.optJSONObject(fieldName), fieldName, dalEntity);
+      }
+    } catch (Exception e) {
+      log.debug("Error resolving FK identifiers: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Resolve the _identifier for a single FK update field entry.
+   * Looks up the referenced record by ID and sets the display identifier.
+   */
+  private static void resolveIdentifierForField(JSONObject entry, String fieldName,
+      Entity dalEntity) {
+    if (entry == null || entry.has(IDENTIFIER_KEY)) {
+      return;
+    }
+    Object val = entry.opt(VALUE_KEY);
+    if (val == null || "".equals(val)) {
+      return;
+    }
+    String strVal = String.valueOf(val);
+    // Only resolve for IDs (32-char hex or numeric)
+    if (!strVal.matches("[0-9A-Fa-f]{32}") && !strVal.matches("\\d+")) {
+      return;
+    }
+
+    try {
+      Property prop = dalEntity.getProperty(fieldName);
+      if (prop == null || prop.getTargetEntity() == null) {
+        return;
+      }
+      // Look up the record to get its identifier
+      BaseOBObject referenced = OBDal.getInstance().get(
+          prop.getTargetEntity().getName(), strVal);
+      if (referenced != null) {
+        String identifier = referenced.getIdentifier();
+        if (identifier != null && !identifier.isEmpty()) {
+          entry.put(IDENTIFIER_KEY, identifier);
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve _identifier for {}: {}", fieldName, e.getMessage());
+    }
+  }
+
   @SuppressWarnings("unchecked")
   static JSONObject transformResponse(JSONObject calloutResult, Tab adTab) {
     JSONObject response = new JSONObject();
@@ -738,7 +827,7 @@ public class NeoCalloutService {
             || "SUCCESS".equals(key)) {
           JSONObject msg = new JSONObject();
           msg.put("type", key);
-          msg.put("text", fieldResult.optString("value", ""));
+          msg.put("text", fieldResult.optString(VALUE_KEY, ""));
           messages.put(msg);
           continue;
         }
@@ -756,7 +845,7 @@ public class NeoCalloutService {
           String baseClean = inpToCleanName(baseInpKey, adTab);
           // Store: we'll merge after the main loop
           if (!rDisplayNames.containsKey(baseClean)) {
-            rDisplayNames.put(baseClean, fieldResult.optString("value", ""));
+            rDisplayNames.put(baseClean, fieldResult.optString(VALUE_KEY, ""));
           }
           continue;
         }
@@ -768,8 +857,8 @@ public class NeoCalloutService {
         if (hasEntries) {
           // Combo update
           JSONObject comboObj = new JSONObject();
-          if (fieldResult.has("value")) {
-            comboObj.put("selected", fieldResult.opt("value"));
+          if (fieldResult.has(VALUE_KEY)) {
+            comboObj.put("selected", fieldResult.opt(VALUE_KEY));
           }
           JSONArray rawEntries = fieldResult.optJSONArray("entries");
           if (rawEntries != null) {
@@ -791,7 +880,7 @@ public class NeoCalloutService {
         } else {
           // Simple field update
           JSONObject updateObj = new JSONObject();
-          updateObj.put("value", fieldResult.opt("value"));
+          updateObj.put(VALUE_KEY, fieldResult.opt(VALUE_KEY));
           updates.put(cleanName, updateObj);
         }
       }
@@ -803,9 +892,13 @@ public class NeoCalloutService {
         String baseKey = rEntry.getKey();
         String displayName = rEntry.getValue();
         if (updates.has(baseKey) && StringUtils.isNotBlank(displayName)) {
-          updates.getJSONObject(baseKey).put("_identifier", displayName);
+          updates.getJSONObject(baseKey).put(IDENTIFIER_KEY, displayName);
         }
       }
+
+      // Resolve _identifier for FK fields where the callout only returned an ID.
+      // This avoids the frontend showing stale labels until the record is saved/reloaded.
+      resolveIdentifiersForFkUpdates(updates, adTab);
 
       response.put("updates", updates);
       response.put("combos", combos);
@@ -867,4 +960,5 @@ public class NeoCalloutService {
     }
     return stripped;
   }
+
 }
