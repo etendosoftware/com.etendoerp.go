@@ -18,11 +18,13 @@
 package com.etendoerp.go.mcp;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.Property;
@@ -39,7 +41,133 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 
 final class McpToolRouterSupport {
 
+  private static final String REF_OBUISEL = "95E2A8B50A254B2AAE6774B8C2F28120";
+
   private McpToolRouterSupport() {
+  }
+
+  static SFSpec findActiveSpecByName(String specName) {
+    OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
+    criteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, specName));
+    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    criteria.setMaxResults(1);
+    List<SFSpec> results = criteria.list();
+    if (results.isEmpty()) {
+      throw new IllegalArgumentException("Spec not found: " + specName);
+    }
+    return results.get(0);
+  }
+
+  static SFEntity findIncludedEntity(String specId, String entityName) {
+    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_NAME, entityName));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
+    criteria.setMaxResults(1);
+    List<SFEntity> results = criteria.list();
+    if (results.isEmpty()) {
+      throw new IllegalArgumentException("Entity not found: " + entityName);
+    }
+    return results.get(0);
+  }
+
+  static List<SFEntity> listIncludedEntities(String specId) {
+    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
+    criteria.addOrder(Order.asc(SFEntity.PROPERTY_SEQNO));
+    return criteria.list();
+  }
+
+  static JSONArray buildEntitySummaryArray(String specId) throws JSONException {
+    JSONArray entities = new JSONArray();
+    for (SFEntity entity : listIncludedEntities(specId)) {
+      JSONObject item = new JSONObject();
+      item.put("name", entity.getName());
+      item.put("methods", buildMethodsArray(entity));
+      entities.put(item);
+    }
+    return entities;
+  }
+
+  static JSONArray buildMethodsArray(SFEntity entity) {
+    JSONArray methods = new JSONArray();
+    if (Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID())) {
+      methods.put("GET");
+    }
+    if (Boolean.TRUE.equals(entity.isPost())) {
+      methods.put("POST");
+    }
+    if (Boolean.TRUE.equals(entity.isPut())) {
+      methods.put("PUT");
+    }
+    if (Boolean.TRUE.equals(entity.isPatch())) {
+      methods.put("PATCH");
+    }
+    if (Boolean.TRUE.equals(entity.isDelete())) {
+      methods.put("DELETE");
+    }
+    return methods;
+  }
+
+  static String mapColumnType(String refId) {
+    if (refId == null) {
+      return McpConstants.TYPE_STRING;
+    }
+    switch (refId) {
+      case "10":
+      case "14":
+      case "34":
+        return McpConstants.TYPE_STRING;
+      case "11":
+      case "22":
+      case "29":
+      case "12":
+      case "800008":
+      case "800019":
+        return "number";
+      case "20":
+        return "boolean";
+      case "15":
+        return "date";
+      case "16":
+        return "datetime";
+      case "24":
+        return "time";
+      case "28":
+        return "button";
+      case "17":
+        return "list";
+      case "13":
+        return "id";
+      case "19":
+      case "18":
+      case "30":
+      case REF_OBUISEL:
+        return "foreignKey";
+      default:
+        return McpConstants.TYPE_STRING;
+    }
+  }
+
+  static String mapSelectorType(String refId) {
+    if (refId == null) {
+      return null;
+    }
+    switch (refId) {
+      case "19":
+        return "TableDir";
+      case "18":
+        return "Table";
+      case "30":
+        return "Search";
+      case REF_OBUISEL:
+        return "OBUISEL";
+      default:
+        return null;
+    }
   }
 
   static boolean hasSpecAccess(SFSpec spec, String specType) {
@@ -133,7 +261,7 @@ final class McpToolRouterSupport {
     fieldObj.put("name", resolvePropertyName(dalEntity, dbColName));
     fieldObj.put("column", dbColName);
     fieldObj.put("label", col.getName());
-    fieldObj.put("type", McpToolRouter.mapColumnTypeStatic(refId));
+    fieldObj.put("type", mapColumnType(refId));
     fieldObj.put("required", col.isMandatory());
     fieldObj.put("readOnly", isReadOnlyColumn(adTab, col));
     addDefaultExpression(fieldObj, col);
@@ -181,7 +309,7 @@ final class McpToolRouterSupport {
       java.util.Set<String> selectorRefs) throws JSONException {
     if (refId != null && selectorRefs.contains(refId)) {
       fieldObj.put("hasSelector", true);
-      fieldObj.put("selectorType", McpToolRouter.mapSelectorTypeStatic(refId));
+      fieldObj.put("selectorType", mapSelectorType(refId));
     }
   }
 

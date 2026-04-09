@@ -53,6 +53,20 @@ public class NeoSelectorService {
   public static final String REF_TABLEDIR = "19";
   public static final String REF_SEARCH = "30";
 
+  // SQL fragment constants (used in HQL/SQL construction)
+  private static final String SQL_AND = " AND ";
+  private static final String SQL_WHERE = " WHERE ";
+
+  // JSON field name constants
+  private static final String PARAM_SEARCH = "search";
+  private static final String FIELD_LABEL = "label";
+  private static final String FIELD_ITEMS = "items";
+  private static final String FIELD_COLUMNS = "columns";
+  private static final String FIELD_TOTAL_COUNT = "totalCount";
+  private static final String FIELD_LIMIT = "limit";
+  private static final String FIELD_OFFSET = "offset";
+  private static final String FIELD_HAS_MORE = "hasMore";
+
   // Session-level params resolved server-side (should not appear in selectorParams)
   private static final java.util.Set<String> SESSION_PARAMS = new java.util.HashSet<>(
       java.util.Arrays.asList("AD_Org_ID", "AD_Client_ID", "AD_User_ID", "AD_Role_ID"));
@@ -100,52 +114,7 @@ public class NeoSelectorService {
           continue;
         }
 
-        JSONObject item = new JSONObject();
-        item.put("columnName", column.getDBColumnName());
-        if (meta.isRich) {
-          item.put("referenceType", "OBUISEL");
-          item.put("type", "rich");
-        } else {
-          item.put("referenceType", refId.equals(REF_TABLE) ? "Table"
-              : refId.equals(REF_TABLEDIR) ? "TableDir" : "Search");
-          item.put("type", "simple");
-        }
-        item.put("targetEntity", meta.entityName);
-        item.put("displayProperty", meta.displayProperty);
-
-        // Include auxiliary field info if present
-        if (meta.auxFields != null && !meta.auxFields.isEmpty()) {
-          JSONArray auxArray = new JSONArray();
-          for (AuxFieldMeta af : meta.auxFields) {
-            JSONObject auxItem = new JSONObject();
-            auxItem.put("suffix", af.suffix);
-            auxItem.put("name", af.name);
-            auxArray.put(auxItem);
-          }
-          item.put("auxFields", auxArray);
-        }
-
-        // Include selectorParams from validation rule (only non-session params)
-        org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
-        if (valRule != null && StringUtils.isNotBlank(valRule.getValidationCode())) {
-          JSONArray params = new JSONArray();
-          // Use a pattern that captures the optional # prefix to identify session params
-          Pattern paramExtract = Pattern.compile("@(#?)(\\w+)@");
-          Matcher m = paramExtract.matcher(valRule.getValidationCode());
-          java.util.Set<String> seen = new java.util.HashSet<>();
-          while (m.find()) {
-            boolean isSession = "#".equals(m.group(1));
-            String param = m.group(2);
-            // Skip session-level params (resolved server-side) and standard context params
-            if (!isSession && !SESSION_PARAMS.contains(param) && seen.add(param)) {
-              params.put(param);
-            }
-          }
-          if (params.length() > 0) {
-            item.put("selectorParams", params);
-          }
-        }
-
+        JSONObject item = buildSelectorItem(column, refId, meta);
         selectors.put(item);
       }
 
@@ -158,6 +127,84 @@ public class NeoSelectorService {
       log.error("Error listing selectors for {}", entityName, e);
       return NeoResponse.error(500, e.getMessage());
     }
+  }
+
+  /**
+   * Build the JSON descriptor object for a single selector field.
+   * Extracts reference type, aux fields, and selector params from the column metadata.
+   */
+  private static JSONObject buildSelectorItem(Column column, String refId,
+      SelectorMeta meta) throws Exception {
+    JSONObject item = new JSONObject();
+    item.put("columnName", column.getDBColumnName());
+    if (meta.isRich) {
+      item.put("referenceType", "OBUISEL");
+      item.put("type", "rich");
+    } else {
+      String referenceType;
+      if (refId.equals(REF_TABLE)) {
+        referenceType = "Table";
+      } else if (refId.equals(REF_TABLEDIR)) {
+        referenceType = "TableDir";
+      } else {
+        referenceType = "Search";
+      }
+      item.put("referenceType", referenceType);
+      item.put("type", "simple");
+    }
+    item.put("targetEntity", meta.entityName);
+    item.put("displayProperty", meta.displayProperty);
+
+    if (meta.auxFields != null && !meta.auxFields.isEmpty()) {
+      JSONArray auxArray = buildAuxFieldsArray(meta.auxFields);
+      item.put("auxFields", auxArray);
+    }
+
+    JSONArray params = extractSelectorParams(column);
+    if (params.length() > 0) {
+      item.put("selectorParams", params);
+    }
+    return item;
+  }
+
+  /**
+   * Build the JSON array describing auxiliary output fields for a selector.
+   */
+  private static JSONArray buildAuxFieldsArray(List<AuxFieldMeta> auxFields) throws Exception {
+    JSONArray auxArray = new JSONArray();
+    for (AuxFieldMeta af : auxFields) {
+      JSONObject auxItem = new JSONObject();
+      auxItem.put("suffix", af.suffix);
+      auxItem.put("name", af.name);
+      auxArray.put(auxItem);
+    }
+    return auxArray;
+  }
+
+  /**
+   * Extract non-session {@code @Param@} references from the column's validation rule.
+   * Session-level params (prefixed with {@code #}) and standard context params are excluded.
+   *
+   * @param column the AD_Column whose validation rule is inspected
+   * @return JSONArray of resolvable parameter names; empty if none
+   */
+  private static JSONArray extractSelectorParams(Column column) {
+    JSONArray params = new JSONArray();
+    org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
+    if (valRule == null || StringUtils.isBlank(valRule.getValidationCode())) {
+      return params;
+    }
+    Pattern paramExtract = Pattern.compile("@(#?)(\\w+)@");
+    Matcher m = paramExtract.matcher(valRule.getValidationCode());
+    java.util.Set<String> seen = new java.util.HashSet<>();
+    while (m.find()) {
+      boolean isSession = "#".equals(m.group(1));
+      String param = m.group(2);
+      if (!isSession && !SESSION_PARAMS.contains(param) && seen.add(param)) {
+        params.put(param);
+      }
+    }
+    return params;
   }
 
   /**
@@ -223,6 +270,7 @@ public class NeoSelectorService {
    * @param limit        page size (default 20, max 100)
    * @param offset       page offset (default 0)
    * @param contextParams context parameters for validation rule resolution
+   * @return a {@link NeoResponse} with the paginated selector items, or an error response
    */
   public static NeoResponse querySelectorByColumn(Column column, String columnName,
       String search, int limit, int offset, Map<String, String> contextParams) {
@@ -281,7 +329,7 @@ public class NeoSelectorService {
     // Apply validation rule filter (resolved from context params)
     if (StringUtils.isNotBlank(validationFilter)) {
       if (hql.length() > 0) {
-        hql.append(" AND ");
+        hql.append(SQL_AND);
       }
       hql.append(validationFilter);
     }
@@ -289,7 +337,7 @@ public class NeoSelectorService {
     // Search filter on display property
     if (StringUtils.isNotBlank(search)) {
       if (hql.length() > 0) {
-        hql.append(" AND ");
+        hql.append(SQL_AND);
       }
       hql.append("lower(e.").append(meta.displayProperty)
           .append(") LIKE :search");
@@ -302,7 +350,7 @@ public class NeoSelectorService {
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
         .createQuery(meta.entityName, whereStr);
     if (StringUtils.isNotBlank(search)) {
-      countQuery.setNamedParameter("search",
+      countQuery.setNamedParameter(PARAM_SEARCH,
           "%" + search.toLowerCase() + "%");
     }
     int totalCount = countQuery.count();
@@ -314,7 +362,7 @@ public class NeoSelectorService {
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance()
         .createQuery(meta.entityName, dataWhere);
     if (StringUtils.isNotBlank(search)) {
-      dataQuery.setNamedParameter("search",
+      dataQuery.setNamedParameter(PARAM_SEARCH,
           "%" + search.toLowerCase() + "%");
     }
     dataQuery.setMaxResult(limit);
@@ -325,17 +373,17 @@ public class NeoSelectorService {
     for (BaseOBObject bob : dataQuery.list()) {
       JSONObject item = new JSONObject();
       item.put("id", bob.getId());
-      item.put("label", bob.getIdentifier());
+      item.put(FIELD_LABEL, bob.getIdentifier());
       items.put(item);
     }
 
     JSONObject result = new JSONObject();
-    result.put("items", items);
-    result.put("columns", new JSONArray());
-    result.put("totalCount", totalCount);
-    result.put("limit", limit);
-    result.put("offset", offset);
-    result.put("hasMore", (offset + limit) < totalCount);
+    result.put(FIELD_ITEMS, items);
+    result.put(FIELD_COLUMNS, new JSONArray());
+    result.put(FIELD_TOTAL_COUNT, totalCount);
+    result.put(FIELD_LIMIT, limit);
+    result.put(FIELD_OFFSET, offset);
+    result.put(FIELD_HAS_MORE, (offset + limit) < totalCount);
     return NeoResponse.ok(result);
   }
 
@@ -362,7 +410,7 @@ public class NeoSelectorService {
     // Apply validation rule filter (resolved from context params)
     if (StringUtils.isNotBlank(validationFilter)) {
       if (hql.length() > 0) {
-        hql.append(" AND ");
+        hql.append(SQL_AND);
       }
       hql.append(validationFilter);
     }
@@ -370,7 +418,7 @@ public class NeoSelectorService {
     // Search filter: OR across all searchable properties
     if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
       if (hql.length() > 0) {
-        hql.append(" AND ");
+        hql.append(SQL_AND);
       }
       hql.append("(");
       for (int i = 0; i < meta.searchableProperties.size(); i++) {
@@ -393,7 +441,7 @@ public class NeoSelectorService {
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
         .createQuery(meta.entityName, whereStr);
     if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
-      countQuery.setNamedParameter("search",
+      countQuery.setNamedParameter(PARAM_SEARCH,
           "%" + search.toLowerCase() + "%");
     }
     int totalCount = countQuery.count();
@@ -405,7 +453,7 @@ public class NeoSelectorService {
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance()
         .createQuery(meta.entityName, dataWhere);
     if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
-      dataQuery.setNamedParameter("search",
+      dataQuery.setNamedParameter(PARAM_SEARCH,
           "%" + search.toLowerCase() + "%");
     }
     dataQuery.setMaxResult(limit);
@@ -416,7 +464,7 @@ public class NeoSelectorService {
     for (RichFieldMeta fieldMeta : meta.gridFields) {
       JSONObject col = new JSONObject();
       col.put("name", fieldMeta.propertyKey);
-      col.put("label", fieldMeta.label);
+      col.put(FIELD_LABEL, fieldMeta.label);
       col.put("sortNo", fieldMeta.sortNo);
       columns.put(col);
     }
@@ -429,7 +477,7 @@ public class NeoSelectorService {
     for (BaseOBObject bob : dataQuery.list()) {
       JSONObject item = new JSONObject();
       item.put("id", bob.getId());
-      item.put("label", bob.getIdentifier());
+      item.put(FIELD_LABEL, bob.getIdentifier());
       entityIds.add(bob.getId().toString());
 
       // Add all grid fields
@@ -445,12 +493,12 @@ public class NeoSelectorService {
     }
 
     JSONObject result = new JSONObject();
-    result.put("items", items);
-    result.put("columns", columns);
-    result.put("totalCount", totalCount);
-    result.put("limit", limit);
-    result.put("offset", offset);
-    result.put("hasMore", (offset + limit) < totalCount);
+    result.put(FIELD_ITEMS, items);
+    result.put(FIELD_COLUMNS, columns);
+    result.put(FIELD_TOTAL_COUNT, totalCount);
+    result.put(FIELD_LIMIT, limit);
+    result.put(FIELD_OFFSET, offset);
+    result.put(FIELD_HAS_MORE, (offset + limit) < totalCount);
     return NeoResponse.ok(result);
   }
 
@@ -490,14 +538,14 @@ public class NeoSelectorService {
     // Apply where clause from OBUISEL_Selector config with @param@ substitution
     if (StringUtils.isNotBlank(meta.whereClause)) {
       String resolved = resolveObuiselParams(meta.whereClause);
-      baseHql.append(hasWhere ? " AND " : " WHERE ");
+      baseHql.append(hasWhere ? SQL_AND : SQL_WHERE);
       baseHql.append(resolved);
       hasWhere = true;
     }
 
     // Apply validation rule filter (resolved from context params)
     if (StringUtils.isNotBlank(validationFilter)) {
-      baseHql.append(hasWhere ? " AND " : " WHERE ");
+      baseHql.append(hasWhere ? SQL_AND : SQL_WHERE);
       baseHql.append(validationFilter);
       hasWhere = true;
     }
@@ -506,7 +554,7 @@ public class NeoSelectorService {
     OBContext ctx = OBContext.getOBContext();
     String[] readableOrgs = ctx.getReadableOrganizations();
     if (readableOrgs != null && readableOrgs.length > 0) {
-      baseHql.append(hasWhere ? " AND " : " WHERE ");
+      baseHql.append(hasWhere ? SQL_AND : SQL_WHERE);
       baseHql.append(alias).append(".organization.id IN (");
       for (int i = 0; i < readableOrgs.length; i++) {
         if (i > 0) {
@@ -521,7 +569,7 @@ public class NeoSelectorService {
     // Search filter across searchable properties
     boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
     if (hasSearch) {
-      baseHql.append(hasWhere ? " AND " : " WHERE ");
+      baseHql.append(hasWhere ? SQL_AND : SQL_WHERE);
       baseHql.append("(");
       for (int i = 0; i < meta.searchableProperties.size(); i++) {
         if (i > 0) {
@@ -543,33 +591,15 @@ public class NeoSelectorService {
 
     // Parse the original SELECT column aliases to build a name→index map
     String selectPart = rawHql.substring(0, fromIdx).trim();
-    // Remove "select " prefix
-    String selectBody = selectPart.replaceFirst("(?i)^select\\s+", "");
-    String[] selectExprs = selectBody.split(",");
-    Map<String, Integer> colIndexMap = new HashMap<>();
-    for (int i = 0; i < selectExprs.length; i++) {
-      String expr = selectExprs[i].trim();
-      // Extract alias: "pp.standardPrice as standardPrice" → "standardPrice"
-      // or "e.id as id" → "id", or just "e.name" → "name"
-      String colAlias;
-      java.util.regex.Matcher asMatcher = Pattern.compile("\\s+as\\s+(\\w+)\\s*$",
-          Pattern.CASE_INSENSITIVE).matcher(expr);
-      if (asMatcher.find()) {
-        colAlias = asMatcher.group(1);
-      } else {
-        // No "as" — use the last part after "."
-        int dotIdx = expr.lastIndexOf('.');
-        colAlias = dotIdx >= 0 ? expr.substring(dotIdx + 1).trim() : expr.trim();
-      }
-      colIndexMap.put(colAlias.toLowerCase(), i);
-    }
+    String[] selectExprs = selectPart.replaceFirst("(?i)^select\\s+", "").split(",");
+    Map<String, Integer> colIndexMap = buildSelectColumnIndexMap(selectExprs);
 
     // Count query
     String countHql = "SELECT COUNT(" + alias + ")" + fromClause;
     org.hibernate.query.Query<Long> countQuery = OBDal.getInstance()
         .getSession().createQuery(countHql, Long.class);
     if (hasSearch) {
-      countQuery.setParameter("search", "%" + search.toLowerCase() + "%");
+      countQuery.setParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
     }
     int totalCount = countQuery.uniqueResult().intValue();
 
@@ -579,35 +609,20 @@ public class NeoSelectorService {
     org.hibernate.query.Query<?> dataQuery = OBDal.getInstance()
         .getSession().createQuery(dataHql);
     if (hasSearch) {
-      dataQuery.setParameter("search", "%" + search.toLowerCase() + "%");
+      dataQuery.setParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
     }
     dataQuery.setMaxResults(limit);
     dataQuery.setFirstResult(offset);
 
     // Determine which column index holds the ID (from valueProp, default "id")
-    String valuePropLower = (meta.valueProperty != null ? meta.valueProperty : "id").toLowerCase();
-    Integer idColIdx = colIndexMap.get(valuePropLower);
-    if (idColIdx == null) {
-      idColIdx = colIndexMap.get("id");
-    }
-    // Third fallback: scan SELECT expressions for {alias}.id (e.g., "bp.id as bpid")
-    if (idColIdx == null) {
-      String idPrefix = alias.toLowerCase() + ".id";
-      for (int i = 0; i < selectExprs.length; i++) {
-        String expr = selectExprs[i].trim().toLowerCase();
-        if (expr.startsWith(idPrefix)) {
-          idColIdx = i;
-          break;
-        }
-      }
-    }
+    Integer idColIdx = resolveIdColumnIndex(meta, alias, colIndexMap, selectExprs);
 
     // Build column metadata
     JSONArray columns = new JSONArray();
     for (RichFieldMeta fieldMeta : meta.gridFields) {
       JSONObject col = new JSONObject();
       col.put("name", fieldMeta.propertyKey);
-      col.put("label", fieldMeta.label);
+      col.put(FIELD_LABEL, fieldMeta.label);
       col.put("sortNo", fieldMeta.sortNo);
       columns.put(col);
     }
@@ -621,57 +636,14 @@ public class NeoSelectorService {
       Object[] row = (rawRow instanceof Object[]) ? (Object[]) rawRow : new Object[]{ rawRow };
       JSONObject item = new JSONObject();
 
-      // Extract ID from the valueProp column
-      String recordId;
-      if (idColIdx != null && idColIdx < row.length) {
-        Object idVal = row[idColIdx];
-        recordId = idVal instanceof BaseOBObject ? ((BaseOBObject) idVal).getId().toString()
-            : String.valueOf(idVal);
-      } else {
-        // Fallback: try first column
-        Object idVal = row[0];
-        recordId = idVal instanceof BaseOBObject ? ((BaseOBObject) idVal).getId().toString()
-            : String.valueOf(idVal);
-      }
-      // OBUISEL selectors may return composite IDs (e.g., warehouseId + productId = 64 hex chars).
-      // Etendo entity UUIDs are always 32 hex chars. Extract the actual entity ID (last 32 chars).
-      if (recordId != null && recordId.length() == 64 && recordId.matches("[0-9A-Fa-f]{64}")) {
-        recordId = recordId.substring(32);
-      }
+      String recordId = extractRecordId(row, idColIdx);
       item.put("id", recordId);
       entityIds.add(recordId);
 
-      // Extract display label from the entity alias column or displayProperty
-      String label = "";
-      Integer displayIdx = colIndexMap.get(meta.displayProperty.toLowerCase());
-      if (displayIdx == null) {
-        displayIdx = colIndexMap.get("productname");
-      }
-      if (displayIdx != null && displayIdx < row.length) {
-        Object dispVal = row[displayIdx];
-        label = dispVal != null ? dispVal.toString() : "";
-      }
-      // If still empty, try to load the entity to get its identifier
-      if (label.isEmpty()) {
-        try {
-          BaseOBObject entity = OBDal.getInstance().get(entityDef.getName(), recordId);
-          if (entity != null) label = entity.getIdentifier();
-        } catch (Exception ignored) {}
-      }
-      item.put("label", label);
+      String label = extractDisplayLabel(row, colIndexMap, meta.displayProperty, entityDef, recordId);
+      item.put(FIELD_LABEL, label);
 
-      // Map grid fields by matching column alias → index
-      for (RichFieldMeta fieldMeta : meta.gridFields) {
-        Integer colIdx = colIndexMap.get(fieldMeta.propertyKey.toLowerCase());
-        if (colIdx != null && colIdx < row.length) {
-          Object value = row[colIdx];
-          if (value instanceof BaseOBObject) {
-            item.put(fieldMeta.propertyKey, ((BaseOBObject) value).getIdentifier());
-          } else {
-            item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
-          }
-        }
-      }
+      mapGridFieldsToItem(item, row, colIndexMap, meta.gridFields);
 
       items.put(item);
     }
@@ -686,13 +658,120 @@ public class NeoSelectorService {
     }
 
     JSONObject result = new JSONObject();
-    result.put("items", items);
-    result.put("columns", columns);
-    result.put("totalCount", totalCount);
-    result.put("limit", limit);
-    result.put("offset", offset);
-    result.put("hasMore", (offset + limit) < totalCount);
+    result.put(FIELD_ITEMS, items);
+    result.put(FIELD_COLUMNS, columns);
+    result.put(FIELD_TOTAL_COUNT, totalCount);
+    result.put(FIELD_LIMIT, limit);
+    result.put(FIELD_OFFSET, offset);
+    result.put(FIELD_HAS_MORE, (offset + limit) < totalCount);
     return NeoResponse.ok(result);
+  }
+
+  /**
+   * Build a column-alias to index map from an array of SELECT expression strings.
+   * Handles "expr as alias" notation and bare "table.column" expressions.
+   */
+  private static Map<String, Integer> buildSelectColumnIndexMap(String[] selectExprs) {
+    Map<String, Integer> colIndexMap = new HashMap<>();
+    for (int i = 0; i < selectExprs.length; i++) {
+      String expr = selectExprs[i].trim();
+      String colAlias;
+      java.util.regex.Matcher asMatcher = Pattern.compile("\\s+as\\s+(\\w+)\\s*$",
+          Pattern.CASE_INSENSITIVE).matcher(expr);
+      if (asMatcher.find()) {
+        colAlias = asMatcher.group(1);
+      } else {
+        int dotIdx = expr.lastIndexOf('.');
+        colAlias = dotIdx >= 0 ? expr.substring(dotIdx + 1).trim() : expr.trim();
+      }
+      colIndexMap.put(colAlias.toLowerCase(), i);
+    }
+    return colIndexMap;
+  }
+
+  /**
+   * Resolve the column index that holds the record ID in a custom HQL SELECT result.
+   * Checks the value property alias, then "id", then scans for "{alias}.id" prefix.
+   */
+  private static Integer resolveIdColumnIndex(SelectorMeta meta, String alias,
+      Map<String, Integer> colIndexMap, String[] selectExprs) {
+    String valuePropLower = (meta.valueProperty != null ? meta.valueProperty : "id").toLowerCase();
+    Integer idColIdx = colIndexMap.get(valuePropLower);
+    if (idColIdx == null) {
+      idColIdx = colIndexMap.get("id");
+    }
+    if (idColIdx == null) {
+      String idPrefix = alias.toLowerCase() + ".id";
+      for (int i = 0; i < selectExprs.length; i++) {
+        if (selectExprs[i].trim().toLowerCase().startsWith(idPrefix)) {
+          idColIdx = i;
+          break;
+        }
+      }
+    }
+    return idColIdx;
+  }
+
+  /**
+   * Extract and normalize the record ID from an HQL Object[] row.
+   * Handles BaseOBObject, composite 64-char UUIDs, and plain string values.
+   */
+  private static String extractRecordId(Object[] row, Integer idColIdx) {
+    Object idVal = (idColIdx != null && idColIdx < row.length) ? row[idColIdx] : row[0];
+    String recordId = idVal instanceof BaseOBObject
+        ? ((BaseOBObject) idVal).getId().toString()
+        : String.valueOf(idVal);
+    // OBUISEL selectors may return composite IDs (e.g., warehouseId + productId = 64 hex chars).
+    // Etendo entity UUIDs are always 32 hex chars. Extract the actual entity ID (last 32 chars).
+    if (recordId != null && recordId.length() == 64 && recordId.matches("[0-9A-Fa-f]{64}")) {
+      recordId = recordId.substring(32);
+    }
+    return recordId;
+  }
+
+  /**
+   * Extract the display label from an HQL Object[] row.
+   * Falls back to loading the entity by ID if the label column is missing or empty.
+   */
+  private static String extractDisplayLabel(Object[] row, Map<String, Integer> colIndexMap,
+      String displayProperty, Entity entityDef, String recordId) {
+    String label = "";
+    Integer displayIdx = colIndexMap.get(displayProperty.toLowerCase());
+    if (displayIdx == null) {
+      displayIdx = colIndexMap.get("productname");
+    }
+    if (displayIdx != null && displayIdx < row.length) {
+      Object dispVal = row[displayIdx];
+      label = dispVal != null ? dispVal.toString() : "";
+    }
+    if (label.isEmpty()) {
+      try {
+        BaseOBObject entity = OBDal.getInstance().get(entityDef.getName(), recordId);
+        if (entity != null) label = entity.getIdentifier();
+      } catch (Exception ignored) {
+        // Ignored: fallback handled below
+      }
+    }
+    return label;
+  }
+
+  /**
+   * Map rich selector grid fields from an HQL Object[] row into a JSON item.
+   * Resolves BaseOBObject values to their identifier strings.
+   */
+  private static void mapGridFieldsToItem(JSONObject item, Object[] row,
+      Map<String, Integer> colIndexMap, List<RichFieldMeta> gridFields) throws Exception {
+    for (RichFieldMeta fieldMeta : gridFields) {
+      Integer colIdx = colIndexMap.get(fieldMeta.propertyKey.toLowerCase());
+      if (colIdx != null && colIdx < row.length) {
+        Object value = row[colIdx];
+        if (value instanceof BaseOBObject) {
+          item.put(fieldMeta.propertyKey, ((BaseOBObject) value).getIdentifier());
+        } else {
+          item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
+        }
+      }
+    }
   }
 
   /**
@@ -868,7 +947,7 @@ public class NeoSelectorService {
       // Add/append WHERE clause to filter by entity IDs
       boolean auxHasWhere = Pattern.compile("\\sWHERE\\s", Pattern.CASE_INSENSITIVE)
           .matcher(auxHql).find();
-      auxHql += (auxHasWhere ? " AND " : " WHERE ")
+      auxHql += (auxHasWhere ? SQL_AND : SQL_WHERE)
           + entityAlias + ".id IN (:auxIds)";
 
       // Resolve @param@ placeholders
@@ -878,48 +957,66 @@ public class NeoSelectorService {
           .getSession().createQuery(auxHql, Object[].class);
       auxQuery.setParameterList("auxIds", entityIds);
 
-      // 6. Build ID→aux map from results
-      Map<String, JSONObject> auxMap = new java.util.HashMap<>();
-      for (Object[] row : auxQuery.list()) {
-        if (row.length <= idPos || row[idPos] == null) {
-          continue;
-        }
-        String rowId = row[idPos].toString();
-        JSONObject aux = new JSONObject();
-        for (Map.Entry<String, Integer> entry : auxAliasPos.entrySet()) {
-          int pos = entry.getValue();
-          if (pos < row.length && row[pos] != null) {
-            aux.put(entry.getKey(), row[pos].toString());
-          }
-        }
-        if (aux.length() > 0) {
-          auxMap.put(rowId, aux);
-        }
-      }
+      // 6. Build ID→aux map from query results
+      Map<String, JSONObject> auxMap = buildAuxResultMap(auxQuery.list(), idPos, auxAliasPos);
 
       // 7. Merge back into items
-      for (int i = 0; i < items.length(); i++) {
-        JSONObject item = items.getJSONObject(i);
-        String itemId = item.optString("id");
-        JSONObject aux = auxMap.get(itemId);
-        if (aux != null) {
-          // Merge with any existing _aux from DAL-resolved fields
-          JSONObject existing = item.optJSONObject("_aux");
-          if (existing != null) {
-            @SuppressWarnings("unchecked")
-            java.util.Iterator<String> auxKeysIter = aux.keys();
-            while (auxKeysIter.hasNext()) {
-              String key = auxKeysIter.next();
-              existing.put(key, aux.get(key));
-            }
-          } else {
-            item.put("_aux", aux);
-          }
-        }
-      }
+      mergeAuxIntoItems(items, auxMap);
 
     } catch (Exception e) {
       log.warn("Could not resolve aux fields via HQL: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Build an ID-to-aux-values map from HQL Object[] query results.
+   */
+  private static Map<String, JSONObject> buildAuxResultMap(List<Object[]> rows,
+      int idPos, Map<String, Integer> auxAliasPos) throws Exception {
+    Map<String, JSONObject> auxMap = new java.util.HashMap<>();
+    for (Object[] row : rows) {
+      if (row.length <= idPos || row[idPos] == null) {
+        continue;
+      }
+      String rowId = row[idPos].toString();
+      JSONObject aux = new JSONObject();
+      for (Map.Entry<String, Integer> entry : auxAliasPos.entrySet()) {
+        int pos = entry.getValue();
+        if (pos < row.length && row[pos] != null) {
+          aux.put(entry.getKey(), row[pos].toString());
+        }
+      }
+      if (aux.length() > 0) {
+        auxMap.put(rowId, aux);
+      }
+    }
+    return auxMap;
+  }
+
+  /**
+   * Merge auxiliary field values from auxMap into the corresponding items in the JSONArray.
+   * Merges with any existing {@code _aux} object already present on the item.
+   */
+  @SuppressWarnings("unchecked")
+  private static void mergeAuxIntoItems(JSONArray items, Map<String, JSONObject> auxMap)
+      throws Exception {
+    for (int i = 0; i < items.length(); i++) {
+      JSONObject item = items.getJSONObject(i);
+      String itemId = item.optString("id");
+      JSONObject aux = auxMap.get(itemId);
+      if (aux == null) {
+        continue;
+      }
+      JSONObject existing = item.optJSONObject("_aux");
+      if (existing != null) {
+        java.util.Iterator<String> auxKeysIter = aux.keys();
+        while (auxKeysIter.hasNext()) {
+          String key = auxKeysIter.next();
+          existing.put(key, aux.get(key));
+        }
+      } else {
+        item.put("_aux", aux);
+      }
     }
   }
 
@@ -1012,6 +1109,13 @@ public class NeoSelectorService {
     return refId;
   }
 
+  /**
+   * Returns {@code true} if the given AD_Reference ID represents a classic FK reference type
+   * (Table=18, TableDir=19, or Search=30).
+   *
+   * @param refId the AD_Reference ID to check
+   * @return {@code true} if the reference is a FK type, {@code false} otherwise
+   */
   public static boolean isFkReference(String refId) {
     return REF_TABLE.equals(refId) || REF_TABLEDIR.equals(refId)
         || REF_SEARCH.equals(refId);
@@ -1143,51 +1247,12 @@ public class NeoSelectorService {
         whereClause = null;
       }
 
-      // Load selector fields
+      // Load and classify selector fields
       List<SelectorField> selectorFields = selector.getOBUISELSelectorFieldList();
-
-      List<RichFieldMeta> gridFields = new ArrayList<>();
-      List<String> searchableProps = new ArrayList<>();
-      List<AuxFieldMeta> auxFields = new ArrayList<>();
-
-      for (SelectorField sf : selectorFields) {
-        if (!Boolean.TRUE.equals(sf.isActive())) {
-          continue;
-        }
-        String prop = sf.getProperty();
-
-        // Auxiliary output fields (isOutField=Y with a suffix like "_LOC")
-        if (Boolean.TRUE.equals(sf.isOutfield())
-            && StringUtils.isNotBlank(sf.getSuffix())) {
-          String alias = sf.getDisplayColumnAlias();
-          auxFields.add(new AuxFieldMeta(
-              sf.getSuffix(),
-              alias != null ? alias.toLowerCase() : null,
-              sf.getName(),
-              prop));
-          // Aux fields may or may not have a property; continue processing
-        }
-
-        if (StringUtils.isBlank(prop)) {
-          continue;
-        }
-
-        // Grid columns
-        if (Boolean.TRUE.equals(sf.isShowingrid())) {
-          String propKey = getLastSegment(prop);
-          Long sortNo = sf.getSortno();
-          gridFields.add(new RichFieldMeta(
-              propKey, sf.getName(), prop,
-              sortNo != null ? sortNo : 0L));
-        }
-
-        // Searchable properties — skip _identifier (virtual DAL property, not
-        // a real Hibernate-mapped property, causes QueryException in HQL)
-        if (Boolean.TRUE.equals(sf.isSearchinsuggestionbox())
-            && !prop.endsWith("_identifier")) {
-          searchableProps.add(prop);
-        }
-      }
+      ObuiselFieldLists fieldLists = classifySelectorFields(selectorFields);
+      List<RichFieldMeta> gridFields = fieldLists.gridFields;
+      List<String> searchableProps = fieldLists.searchableProps;
+      List<AuxFieldMeta> auxFields = fieldLists.auxFields;
 
       // Sort grid fields by sortNo
       gridFields.sort((a, b) -> Long.compare(a.sortNo, b.sortNo));
@@ -1211,6 +1276,64 @@ public class NeoSelectorService {
           selector.getName(), e.getMessage());
       return null;
     }
+  }
+
+  /** Container for the three field lists produced by classifySelectorFields. */
+  private static class ObuiselFieldLists {
+    final List<RichFieldMeta> gridFields;
+    final List<String> searchableProps;
+    final List<AuxFieldMeta> auxFields;
+
+    ObuiselFieldLists(List<RichFieldMeta> gridFields, List<String> searchableProps,
+        List<AuxFieldMeta> auxFields) {
+      this.gridFields = gridFields;
+      this.searchableProps = searchableProps;
+      this.auxFields = auxFields;
+    }
+  }
+
+  /**
+   * Classify a list of OBUISEL selector fields into grid columns, searchable properties,
+   * and auxiliary output fields.
+   */
+  private static ObuiselFieldLists classifySelectorFields(List<SelectorField> selectorFields) {
+    List<RichFieldMeta> gridFields = new ArrayList<>();
+    List<String> searchableProps = new ArrayList<>();
+    List<AuxFieldMeta> auxFields = new ArrayList<>();
+
+    for (SelectorField sf : selectorFields) {
+      if (!Boolean.TRUE.equals(sf.isActive())) {
+        continue;
+      }
+      String prop = sf.getProperty();
+
+      if (Boolean.TRUE.equals(sf.isOutfield()) && StringUtils.isNotBlank(sf.getSuffix())) {
+        String alias = sf.getDisplayColumnAlias();
+        auxFields.add(new AuxFieldMeta(
+            sf.getSuffix(),
+            alias != null ? alias.toLowerCase() : null,
+            sf.getName(),
+            prop));
+      }
+
+      if (StringUtils.isBlank(prop)) {
+        continue;
+      }
+
+      if (Boolean.TRUE.equals(sf.isShowingrid())) {
+        String propKey = getLastSegment(prop);
+        Long sortNo = sf.getSortno();
+        gridFields.add(new RichFieldMeta(propKey, sf.getName(), prop,
+            sortNo != null ? sortNo : 0L));
+      }
+
+      // Skip _identifier: virtual DAL property, not Hibernate-mapped, causes QueryException
+      if (Boolean.TRUE.equals(sf.isSearchinsuggestionbox())
+          && !prop.endsWith("_identifier")) {
+        searchableProps.add(prop);
+      }
+    }
+    return new ObuiselFieldLists(gridFields, searchableProps, auxFields);
   }
 
   /**
@@ -1436,7 +1559,7 @@ public class NeoSelectorService {
     }
 
     // Join resolved clauses back with AND
-    String joined = String.join(" AND ", resolvedClauses);
+    String joined = String.join(SQL_AND, resolvedClauses);
 
     // Convert SQL TABLE.COLUMN references to HQL e.property paths
     String hqlFilter = convertSqlToHql(joined, targetEntityName);
@@ -1665,26 +1788,7 @@ public class NeoSelectorService {
       }
 
       // For DAL-resolvable aux fields, load the entity and read properties.
-      // If valueProperty != "id" (e.g., "product.id" for ProductByPriceAndWarehouse),
-      // we need to query by that property instead of OBDal.get(entityName, id).
-      BaseOBObject bob = null;
-      if ("id".equals(meta.valueProperty)) {
-        bob = (BaseOBObject) OBDal.getInstance().get(meta.entityName, recordId);
-      } else {
-        // Query by the value property path (e.g., "product.id")
-        try {
-          String hql = "from " + meta.entityName + " where " + meta.valueProperty + " = :val";
-          org.hibernate.query.Query<?> q = OBDal.getInstance().getSession().createQuery(hql);
-          q.setParameter("val", recordId);
-          q.setMaxResults(1);
-          List<?> results = q.list();
-          if (!results.isEmpty()) {
-            bob = (BaseOBObject) results.get(0);
-          }
-        } catch (Exception e) {
-          log.debug("Could not query {} by {}: {}", meta.entityName, meta.valueProperty, e.getMessage());
-        }
-      }
+      BaseOBObject bob = loadEntityForAux(meta, recordId);
       if (bob == null) {
         log.debug("No record found in {} for value {} (valueProperty={})",
             meta.entityName, recordId, meta.valueProperty);
@@ -1708,6 +1812,30 @@ public class NeoSelectorService {
   }
 
   /**
+   * Load the entity object needed to resolve DAL aux field values.
+   * If valueProperty is "id", loads directly. Otherwise, queries by property value.
+   */
+  private static BaseOBObject loadEntityForAux(SelectorMeta meta, String recordId) {
+    if ("id".equals(meta.valueProperty)) {
+      return (BaseOBObject) OBDal.getInstance().get(meta.entityName, recordId);
+    }
+    // Query by the value property path (e.g., "product.id" for ProductByPriceAndWarehouse)
+    try {
+      String hql = "from " + meta.entityName + " where " + meta.valueProperty + " = :val";
+      org.hibernate.query.Query<?> q = OBDal.getInstance().getSession().createQuery(hql);
+      q.setParameter("val", recordId);
+      q.setMaxResults(1);
+      List<?> results = q.list();
+      if (!results.isEmpty()) {
+        return (BaseOBObject) results.get(0);
+      }
+    } catch (Exception e) {
+      log.debug("Could not query {} by {}: {}", meta.entityName, meta.valueProperty, e.getMessage());
+    }
+    return null;
+  }
+
+  /**
    * Resolve aux values via the original OBUISEL custom HQL for a single record.
    */
   @SuppressWarnings("unchecked")
@@ -1715,68 +1843,79 @@ public class NeoSelectorService {
       String recordId) {
     try {
       String hql = meta.customHql;
-      // Parse SELECT clause to build alias→position map
       String selectClause = hql.substring(0, hql.toUpperCase().indexOf(" FROM "));
       String[] selectParts = selectClause.replaceFirst("(?i)^\\s*select\\s+", "").split(",");
+      Map<String, Integer> aliasPos = buildAuxAliasPositionMap(selectParts);
 
-      java.util.Map<String, Integer> aliasPos = new java.util.HashMap<>();
-      for (int i = 0; i < selectParts.length; i++) {
-        String part = selectParts[i].trim();
-        int asIdx = part.toLowerCase().lastIndexOf(" as ");
-        if (asIdx >= 0) {
-          String alias = part.substring(asIdx + 4).trim().replace("\"", "");
-          aliasPos.put(alias.toLowerCase(), i);
-        }
-      }
-
-      // Find the ID position (entity alias + ".id")
-      String idAlias = meta.entityAlias + ".id";
-      int idPos = -1;
-      for (int i = 0; i < selectParts.length; i++) {
-        String part = selectParts[i].trim();
-        if (part.contains(idAlias) || part.toLowerCase().endsWith(" as id")) {
-          idPos = i;
-          break;
-        }
-      }
-
-      // Add ID filter to the query
-      String fromClause = hql.substring(hql.toUpperCase().indexOf(" FROM "));
-      String fullHql = selectClause + fromClause;
-      if (fullHql.toUpperCase().contains(" WHERE ")) {
-        fullHql += " AND " + meta.entityAlias + ".id = :recordId";
-      } else {
-        fullHql += " WHERE " + meta.entityAlias + ".id = :recordId";
-      }
-
-      org.hibernate.query.Query<?> query = OBDal.getInstance().getSession().createQuery(fullHql);
-      query.setParameter("recordId", recordId);
-      query.setMaxResults(1);
-
-      List<?> results = query.list();
-      if (results.isEmpty()) {
-        return null;
-      }
-
-      Object row = results.get(0);
-      Object[] cols = row instanceof Object[] ? (Object[]) row : new Object[]{ row };
-
-      JSONObject result = new JSONObject();
-      for (AuxFieldMeta af : meta.auxFields) {
-        Integer pos = aliasPos.get(af.hqlAlias.toLowerCase());
-        if (pos != null && pos < cols.length && cols[pos] != null) {
-          Object val = cols[pos];
-          if (val instanceof BaseOBObject) {
-            val = ((BaseOBObject) val).getId();
-          }
-          result.put(fieldName + af.suffix, val.toString());
-        }
-      }
-      return result.length() > 0 ? result : null;
+      String fullHql = buildAuxHqlWithIdFilter(hql, selectClause, meta.entityAlias);
+      return executeAuxHqlQuery(fullHql, recordId, aliasPos, meta.auxFields, fieldName);
 
     } catch (Exception e) {
       log.debug("Could not resolve aux via HQL for {}: {}", fieldName, e.getMessage());
       return null;
     }
+  }
+
+  /**
+   * Build an alias-to-index map from the SELECT parts of a custom HQL clause.
+   */
+  private static Map<String, Integer> buildAuxAliasPositionMap(String[] selectParts) {
+    Map<String, Integer> aliasPos = new java.util.HashMap<>();
+    for (int i = 0; i < selectParts.length; i++) {
+      String part = selectParts[i].trim();
+      int asIdx = part.toLowerCase().lastIndexOf(" as ");
+      if (asIdx >= 0) {
+        String alias = part.substring(asIdx + 4).trim().replace("\"", "");
+        aliasPos.put(alias.toLowerCase(), i);
+      }
+    }
+    return aliasPos;
+  }
+
+  /**
+   * Append an entity ID filter to the HQL and return the full query string.
+   */
+  private static String buildAuxHqlWithIdFilter(String hql, String selectClause,
+      String entityAlias) {
+    String fromClause = hql.substring(hql.toUpperCase().indexOf(" FROM "));
+    String fullHql = selectClause + fromClause;
+    if (fullHql.toUpperCase().contains(" WHERE ")) {
+      fullHql += SQL_AND + entityAlias + ".id = :recordId";
+    } else {
+      fullHql += SQL_WHERE + entityAlias + ".id = :recordId";
+    }
+    return fullHql;
+  }
+
+  /**
+   * Execute an aux HQL query and map results to a JSON object keyed by fieldName + suffix.
+   */
+  private static JSONObject executeAuxHqlQuery(String fullHql, String recordId,
+      Map<String, Integer> aliasPos, List<AuxFieldMeta> auxFields,
+      String fieldName) throws Exception {
+    org.hibernate.query.Query<?> query = OBDal.getInstance().getSession().createQuery(fullHql);
+    query.setParameter("recordId", recordId);
+    query.setMaxResults(1);
+
+    List<?> results = query.list();
+    if (results.isEmpty()) {
+      return null;
+    }
+
+    Object row = results.get(0);
+    Object[] cols = row instanceof Object[] ? (Object[]) row : new Object[]{ row };
+
+    JSONObject result = new JSONObject();
+    for (AuxFieldMeta af : auxFields) {
+      Integer pos = aliasPos.get(af.hqlAlias.toLowerCase());
+      if (pos != null && pos < cols.length && cols[pos] != null) {
+        Object val = cols[pos];
+        if (val instanceof BaseOBObject) {
+          val = ((BaseOBObject) val).getId();
+        }
+        result.put(fieldName + af.suffix, val.toString());
+      }
+    }
+    return result.length() > 0 ? result : null;
   }
 }

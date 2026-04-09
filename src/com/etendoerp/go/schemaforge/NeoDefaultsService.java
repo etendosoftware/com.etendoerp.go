@@ -60,6 +60,7 @@ public class NeoDefaultsService {
   private static final Logger log = LogManager.getLogger(NeoDefaultsService.class);
   private static final String DATE_FORMAT = "yyyy-MM-dd";
   private static final int MAX_CALLOUT_CHAIN_DEPTH = 5;
+  private static final String FIELD_VALUE = "value";
 
   // Cache VariablesSecureApp per user+role+org+warehouse combination to avoid calling
   // LoginUtils.fillSessionArguments (multiple DB queries) on every request.
@@ -456,53 +457,7 @@ public class NeoDefaultsService {
         if (!col.isActive() || !col.isMandatory()) {
           continue;
         }
-
-        // Resolve the DAL property name
-        Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-        if (prop == null) {
-          continue;
-        }
-
-        String propName = prop.getName();
-        // Skip if already present in the body (user or field-filter provided it)
-        if (body.has(propName)) {
-          continue;
-        }
-
-        // Resolve using the same logic as the /defaults endpoint
-        try {
-          Object resolved = resolveFieldDefault(col, parentId, vars, conn, windowId, ctx);
-          if (resolved != null) {
-            body.put(propName, resolved);
-            log.debug("Injected mandatory default: {} = {}", propName, resolved);
-            continue;
-          }
-        } catch (Exception e) {
-          log.debug("Could not resolve mandatory default for {}: {}",
-              col.getDBColumnName(), e.getMessage());
-        }
-
-        // Fallback 1: session context variable (#ColumnName or ColumnName)
-        String dbCol = col.getDBColumnName();
-        String fromSession = vars.getSessionValue("#" + dbCol);
-        if (fromSession == null || fromSession.isEmpty()) {
-          fromSession = vars.getSessionValue(dbCol);
-        }
-        if (fromSession != null && !fromSession.isEmpty()) {
-          body.put(propName, fromSession);
-          log.debug("Injected from session context: {} = {}", propName, fromSession);
-          continue;
-        }
-
-        // Fallback 2: safe zero/false defaults for numeric and boolean columns
-        String refId = col.getReference() != null ? col.getReference().getId() : null;
-        if ("22".equals(refId) || "29".equals(refId) || "12".equals(refId) || "11".equals(refId)) {
-          body.put(propName, 0);
-          log.debug("Injected numeric zero default: {} = 0", propName);
-        } else if ("20".equals(refId)) {
-          body.put(propName, false);
-          log.debug("Injected boolean default: {} = false", propName);
-        }
+        injectMandatoryDefaultForColumn(body, dalEntity, col, parentId, vars, conn, windowId, ctx);
       }
 
       // Fallback 3: run callout cascade with all fields in body.
@@ -513,6 +468,99 @@ public class NeoDefaultsService {
     } catch (Exception e) {
       log.error("Error injecting mandatory defaults for tab {}: {}",
           adTab.getName(), e.getMessage(), e);
+    }
+  }
+
+  /**
+   * Attempt to inject a mandatory default value for a single column into the body.
+   * Tries field default resolution first, then session context, then safe numeric/boolean fallback.
+   */
+  private static void injectMandatoryDefaultForColumn(JSONObject body, Entity dalEntity,
+      Column col, String parentId, VariablesSecureApp vars, DalConnectionProvider conn,
+      String windowId, NeoContext ctx) {
+    try {
+      Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
+      if (prop == null) {
+        return;
+      }
+      String propName = prop.getName();
+      // Skip if already present in the body (user or field-filter provided it)
+      if (body.has(propName)) {
+        return;
+      }
+
+      if (tryResolveFieldDefault(body, propName, col, parentId, vars, conn, windowId, ctx)) {
+        return;
+      }
+      if (tryInjectFromSession(body, propName, col.getDBColumnName(), vars)) {
+        return;
+      }
+      injectSafeTypeDefault(body, propName, col);
+    } catch (Exception e) {
+      log.debug("Could not process mandatory column {}: {}",
+          col.getDBColumnName(), e.getMessage());
+    }
+  }
+
+  /**
+   * Try to resolve the field default using the standard resolution logic.
+   * Returns true if a value was injected, false otherwise.
+   */
+  private static boolean tryResolveFieldDefault(JSONObject body, String propName, Column col,
+      String parentId, VariablesSecureApp vars, DalConnectionProvider conn, String windowId,
+      NeoContext ctx) {
+    try {
+      Object resolved = resolveFieldDefault(col, parentId, vars, conn, windowId, ctx);
+      if (resolved != null) {
+        body.put(propName, resolved);
+        log.debug("Injected mandatory default: {} = {}", propName, resolved);
+        return true;
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve mandatory default for {}: {}",
+          col.getDBColumnName(), e.getMessage());
+    }
+    return false;
+  }
+
+  /**
+   * Try to inject a value from session context variables (#ColumnName or ColumnName).
+   * Returns true if a value was found and injected, false otherwise.
+   */
+  private static boolean tryInjectFromSession(JSONObject body, String propName,
+      String dbColName, VariablesSecureApp vars) {
+    try {
+      String fromSession = vars.getSessionValue("#" + dbColName);
+      if (fromSession == null || fromSession.isEmpty()) {
+        fromSession = vars.getSessionValue(dbColName);
+      }
+      if (fromSession != null && !fromSession.isEmpty()) {
+        body.put(propName, fromSession);
+        log.debug("Injected from session context: {} = {}", propName, fromSession);
+        return true;
+      }
+    } catch (Exception e) {
+      log.debug("Could not read session value for {}: {}", dbColName, e.getMessage());
+    }
+    return false;
+  }
+
+  /**
+   * Inject a safe zero or false default for numeric and boolean columns (Fallback 2).
+   * Leaves other column types untouched.
+   */
+  private static void injectSafeTypeDefault(JSONObject body, String propName, Column col) {
+    try {
+      String refId = col.getReference() != null ? col.getReference().getId() : null;
+      if ("22".equals(refId) || "29".equals(refId) || "12".equals(refId) || "11".equals(refId)) {
+        body.put(propName, 0);
+        log.debug("Injected numeric zero default: {} = 0", propName);
+      } else if ("20".equals(refId)) {
+        body.put(propName, false);
+        log.debug("Injected boolean default: {} = false", propName);
+      }
+    } catch (Exception e) {
+      log.debug("Could not inject safe type default for {}: {}", propName, e.getMessage());
     }
   }
 
@@ -542,7 +590,7 @@ public class NeoDefaultsService {
    * NeoSelectorService.resolveSelectorAuxForId to fetch aux values (_PSTD, _UOM, etc.).
    */
   private static JSONObject resolveSelectorAuxValues(Tab adTab, String fieldName,
-      String value, NeoContext ctx) {
+      String value) {
     if (adTab == null || fieldName == null || value == null || value.isEmpty()) {
       return null;
     }
@@ -633,24 +681,7 @@ public class NeoDefaultsService {
     CalloutCascadeResult result = new CalloutCascadeResult();
 
     try {
-      // Collect fields that have callouts and non-null defaults
-      List<String> fieldsWithCallouts = new ArrayList<>();
-      Iterator<String> keys = defaults.keys();
-      while (keys.hasNext()) {
-        String fieldName = keys.next();
-        if (seqFields.contains(fieldName)) {
-          continue;
-        }
-        Object value = defaults.opt(fieldName);
-        if (value == null || JSONObject.NULL.equals(value)) {
-          continue;
-        }
-        NeoCalloutService.CalloutInfo info = NeoCalloutService.resolveCallout(adTab, fieldName);
-        if (info != null) {
-          fieldsWithCallouts.add(fieldName);
-        }
-      }
-
+      List<String> fieldsWithCallouts = collectFieldsWithCallouts(defaults, seqFields, adTab);
       if (fieldsWithCallouts.isEmpty()) {
         return result;
       }
@@ -676,97 +707,8 @@ public class NeoDefaultsService {
           if (value == null || JSONObject.NULL.equals(value)) {
             continue;
           }
-
-          try {
-            JSONObject calloutRequest = new JSONObject();
-            calloutRequest.put("field", fieldName);
-            calloutRequest.put("value", value);
-            calloutRequest.put("formState", formState);
-
-            // Resolve selector auxiliary values for FK fields.
-            // Classic UI passes _PLIST, _PSTD, _PLIM, _UOM, _CURR from selector response.
-            // Without these, callouts like SL_Order_Product can't resolve prices.
-            JSONObject auxValues = resolveSelectorAuxValues(adTab, fieldName, value.toString(), ctx);
-            if (auxValues != null && auxValues.length() > 0) {
-              calloutRequest.put("auxiliaryValues", auxValues);
-              log.info("[NEO-DEFAULTS] Resolved {} aux values for field '{}'",
-                  auxValues.length(), fieldName);
-            }
-
-            NeoResponse calloutResponse = NeoCalloutService.executeCallout(ctx, calloutRequest);
-            if (calloutResponse == null || calloutResponse.getHttpStatus() != 200) {
-              log.debug("[NEO-DEFAULTS] Callout for '{}' failed or returned non-200", fieldName);
-              continue;
-            }
-
-            JSONObject calloutBody = calloutResponse.getBody();
-            if (calloutBody == null) {
-              continue;
-            }
-
-            // Merge updates into form state and track which fields changed
-            JSONObject updates = calloutBody.optJSONObject("updates");
-            if (updates != null) {
-              result.mergeUpdates(updates);
-              Iterator<String> updateKeys = updates.keys();
-              while (updateKeys.hasNext()) {
-                String updatedField = updateKeys.next();
-                JSONObject updateObj = updates.optJSONObject(updatedField);
-                if (updateObj != null && updateObj.has("value")) {
-                  Object newValue = updateObj.get("value");
-                  Object oldValue = formState.opt(updatedField);
-
-                  formState.put(updatedField, newValue);
-                  defaults.put(updatedField, newValue);
-
-                  // If the updated field itself has a callout and the value changed,
-                  // queue it for the next iteration
-                  if (!valueChanged(oldValue, newValue)) {
-                    continue;
-                  }
-                  if (seqFields.contains(updatedField)) {
-                    continue;
-                  }
-                  NeoCalloutService.CalloutInfo nextInfo =
-                      NeoCalloutService.resolveCallout(adTab, updatedField);
-                  if (nextInfo != null) {
-                    nextPending.add(updatedField);
-                  }
-                }
-              }
-            }
-
-            // Merge combos — also apply selected values to defaults/body
-            JSONObject combos = calloutBody.optJSONObject("combos");
-            if (combos != null) {
-              result.mergeCombos(combos);
-              Iterator<String> comboKeys = combos.keys();
-              while (comboKeys.hasNext()) {
-                String comboField = comboKeys.next();
-                JSONObject comboObj = combos.optJSONObject(comboField);
-                if (comboObj != null && comboObj.has("selected")) {
-                  Object selectedValue = comboObj.get("selected");
-                  if (selectedValue != null && !JSONObject.NULL.equals(selectedValue)) {
-                    Object oldValue = formState.opt(comboField);
-                    formState.put(comboField, selectedValue);
-                    defaults.put(comboField, selectedValue);
-                    log.debug("[NEO-DEFAULTS] Applied combo selected value: {} = {}",
-                        comboField, selectedValue);
-                  }
-                }
-              }
-            }
-
-            // Merge messages
-            JSONArray messages = calloutBody.optJSONArray("messages");
-            if (messages != null) {
-              result.mergeMessages(messages);
-            }
-
-          } catch (Exception e) {
-            log.warn("[NEO-DEFAULTS] Callout cascade error for field '{}': {}",
-                fieldName, e.getMessage());
-          }
+          processCalloutForField(ctx, adTab, fieldName, value, formState, defaults,
+              seqFields, result, nextPending);
         }
 
         pendingFields = nextPending;
@@ -784,6 +726,143 @@ public class NeoDefaultsService {
     }
 
     return result;
+  }
+
+  /**
+   * Collect all fields from the defaults map that have a callout configured
+   * and a non-null value, excluding sequence preview fields.
+   */
+  private static List<String> collectFieldsWithCallouts(JSONObject defaults,
+      Set<String> seqFields, Tab adTab) {
+    List<String> fieldsWithCallouts = new ArrayList<>();
+    Iterator<String> keys = defaults.keys();
+    while (keys.hasNext()) {
+      String fieldName = keys.next();
+      if (seqFields.contains(fieldName)) {
+        continue;
+      }
+      Object value = defaults.opt(fieldName);
+      if (value == null || JSONObject.NULL.equals(value)) {
+        continue;
+      }
+      if (NeoCalloutService.resolveCallout(adTab, fieldName) != null) {
+        fieldsWithCallouts.add(fieldName);
+      }
+    }
+    return fieldsWithCallouts;
+  }
+
+  /**
+   * Execute the callout for a single field and merge the results into the running state.
+   */
+  private static void processCalloutForField(NeoContext ctx, Tab adTab, String fieldName,
+      Object value, JSONObject formState, JSONObject defaults, Set<String> seqFields,
+      CalloutCascadeResult result, Set<String> nextPending) {
+    try {
+      JSONObject calloutRequest = buildCalloutRequest(adTab, fieldName, value, formState);
+      NeoResponse calloutResponse = NeoCalloutService.executeCallout(ctx, calloutRequest);
+      if (calloutResponse == null || calloutResponse.getHttpStatus() != 200) {
+        log.debug("[NEO-DEFAULTS] Callout for '{}' failed or returned non-200", fieldName);
+        return;
+      }
+
+      JSONObject calloutBody = calloutResponse.getBody();
+      if (calloutBody == null) {
+        return;
+      }
+
+      mergeCalloutUpdates(calloutBody, formState, defaults, seqFields, adTab, result, nextPending);
+      mergeCalloutCombos(calloutBody, formState, defaults, result);
+
+      JSONArray messages = calloutBody.optJSONArray("messages");
+      if (messages != null) {
+        result.mergeMessages(messages);
+      }
+
+    } catch (Exception e) {
+      log.warn("[NEO-DEFAULTS] Callout cascade error for field '{}': {}", fieldName, e.getMessage());
+    }
+  }
+
+  /**
+   * Build the callout request JSON, including auxiliary selector values if available.
+   */
+  private static JSONObject buildCalloutRequest(Tab adTab, String fieldName, Object value,
+      JSONObject formState) throws Exception {
+    JSONObject calloutRequest = new JSONObject();
+    calloutRequest.put("field", fieldName);
+    calloutRequest.put(FIELD_VALUE, value);
+    calloutRequest.put("formState", formState);
+
+    // Resolve selector auxiliary values for FK fields.
+    // Classic UI passes _PLIST, _PSTD, _PLIM, _UOM, _CURR from selector response.
+    // Without these, callouts like SL_Order_Product can't resolve prices.
+    JSONObject auxValues = resolveSelectorAuxValues(adTab, fieldName, value.toString());
+    if (auxValues != null && auxValues.length() > 0) {
+      calloutRequest.put("auxiliaryValues", auxValues);
+      log.info("[NEO-DEFAULTS] Resolved {} aux values for field '{}'",
+          auxValues.length(), fieldName);
+    }
+    return calloutRequest;
+  }
+
+  /**
+   * Merge callout update results into the running form state and defaults.
+   * Fields whose value changed and have their own callout are added to nextPending.
+   */
+  private static void mergeCalloutUpdates(JSONObject calloutBody, JSONObject formState,
+      JSONObject defaults, Set<String> seqFields, Tab adTab,
+      CalloutCascadeResult result, Set<String> nextPending) throws Exception {
+    JSONObject updates = calloutBody.optJSONObject("updates");
+    if (updates == null) {
+      return;
+    }
+    result.mergeUpdates(updates);
+    Iterator<String> updateKeys = updates.keys();
+    while (updateKeys.hasNext()) {
+      String updatedField = updateKeys.next();
+      JSONObject updateObj = updates.optJSONObject(updatedField);
+      if (updateObj == null || !updateObj.has(FIELD_VALUE)) {
+        continue;
+      }
+      Object newValue = updateObj.get(FIELD_VALUE);
+      Object oldValue = formState.opt(updatedField);
+      formState.put(updatedField, newValue);
+      defaults.put(updatedField, newValue);
+
+      // Queue the updated field for the next iteration if its value changed and it has a callout
+      if (valueChanged(oldValue, newValue) && !seqFields.contains(updatedField)
+          && NeoCalloutService.resolveCallout(adTab, updatedField) != null) {
+        nextPending.add(updatedField);
+      }
+    }
+  }
+
+  /**
+   * Merge callout combo results into the running form state and defaults.
+   * Applies the selected combo value so subsequent callouts see it.
+   */
+  private static void mergeCalloutCombos(JSONObject calloutBody, JSONObject formState,
+      JSONObject defaults, CalloutCascadeResult result) throws Exception {
+    JSONObject combos = calloutBody.optJSONObject("combos");
+    if (combos == null) {
+      return;
+    }
+    result.mergeCombos(combos);
+    Iterator<String> comboKeys = combos.keys();
+    while (comboKeys.hasNext()) {
+      String comboField = comboKeys.next();
+      JSONObject comboObj = combos.optJSONObject(comboField);
+      if (comboObj == null || !comboObj.has("selected")) {
+        continue;
+      }
+      Object selectedValue = comboObj.get("selected");
+      if (selectedValue != null && !JSONObject.NULL.equals(selectedValue)) {
+        formState.put(comboField, selectedValue);
+        defaults.put(comboField, selectedValue);
+        log.debug("[NEO-DEFAULTS] Applied combo selected value: {} = {}", comboField, selectedValue);
+      }
+    }
   }
 
   /**

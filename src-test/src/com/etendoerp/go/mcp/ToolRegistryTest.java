@@ -17,26 +17,33 @@ import org.junit.Test;
  */
 public class ToolRegistryTest {
 
+  private static final String INVOICES = "invoices";
+
+  /** Tests that a single-dash kebab string is converted to snake_case correctly. */
   @Test
   public void testKebabToSnakeSimple() {
     assertEquals("complete_order", ToolRegistry.kebabToSnake("complete-order"));
   }
 
+  /** Tests that a multi-dash kebab string is converted to snake_case correctly. */
   @Test
   public void testKebabToSnakeMultipleDashes() {
     assertEquals("sales_order_lines", ToolRegistry.kebabToSnake("sales-order-lines"));
   }
 
+  /** Tests that a string with no dashes passes through kebabToSnake unchanged. */
   @Test
   public void testKebabToSnakeNoDashes() {
-    assertEquals("invoices", ToolRegistry.kebabToSnake("invoices"));
+    assertEquals(INVOICES, ToolRegistry.kebabToSnake(INVOICES));
   }
 
+  /** Tests that a single-character segment kebab string is converted to snake_case correctly. */
   @Test
   public void testKebabToSnakeSingleChar() {
     assertEquals("a_b", ToolRegistry.kebabToSnake("a-b"));
   }
 
+  /** Tests that McpToolDefinition getters return the values provided at construction. */
   @Test
   public void testMcpToolDefinitionGetters() {
     Map<String, Object> schema = Map.of("type", "object");
@@ -47,6 +54,7 @@ public class ToolRegistryTest {
     assertEquals(schema, tool.getInputSchema());
   }
 
+  /** Tests that a null input schema is normalized to an empty map by McpToolDefinition. */
   @Test
   public void testMcpToolDefinitionNullSchema() {
     McpToolDefinition tool = new McpToolDefinition("neo_discover", "Discover specs", null);
@@ -55,21 +63,25 @@ public class ToolRegistryTest {
     assertTrue(tool.getInputSchema().isEmpty());
   }
 
+  /** Tests that a single-underscore snake_case string is converted to kebab-case correctly. */
   @Test
   public void testSnakeToKebabSimple() {
     assertEquals("complete-order", ToolRegistry.snakeToKebab("complete_order"));
   }
 
+  /** Tests that a multi-underscore snake_case string is converted to kebab-case correctly. */
   @Test
   public void testSnakeToKebabMultipleUnderscores() {
     assertEquals("sales-order-lines", ToolRegistry.snakeToKebab("sales_order_lines"));
   }
 
+  /** Tests that a string with no underscores passes through snakeToKebab unchanged. */
   @Test
   public void testSnakeToKebabNoUnderscores() {
-    assertEquals("invoices", ToolRegistry.snakeToKebab("invoices"));
+    assertEquals(INVOICES, ToolRegistry.snakeToKebab(INVOICES));
   }
 
+  /** Tests that McpToolDefinition.toString() includes the tool name and description. */
   @Test
   public void testMcpToolDefinitionToString() {
     McpToolDefinition tool = new McpToolDefinition("neo_get", "Get record", Collections.emptyMap());

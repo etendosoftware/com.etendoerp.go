@@ -18,17 +18,23 @@ import org.junit.Test;
  */
 public class McpToolRouterTest {
 
+  private static final String FIELD_CONTENT = "content";
+  private static final String SPEC_SALES_ORDER = "sales-order";
+  private static final String TOOL_NEO_LIST = "neo_list";
+  private static final String TOOL_COMPLETE_ORDER = "complete_order";
+
   // ── wrapAsTextContent ──────────────────────────────────────────────────
 
+  /** Tests that wrapAsTextContent produces a valid MCP text content structure. */
   @Test
   public void testWrapAsTextContentStructure() throws Exception {
     JSONObject result = McpToolRouter.wrapAsTextContent("hello world");
 
     assertNotNull(result);
-    assertTrue(result.has("content"));
+    assertTrue(result.has(FIELD_CONTENT));
     assertFalse(result.has("isError"));
 
-    JSONArray content = result.getJSONArray("content");
+    JSONArray content = result.getJSONArray(FIELD_CONTENT);
     assertEquals(1, content.length());
 
     JSONObject block = content.getJSONObject(0);
@@ -36,26 +42,28 @@ public class McpToolRouterTest {
     assertEquals("hello world", block.getString("text"));
   }
 
+  /** Tests that wrapAsTextContent preserves embedded JSON text verbatim. */
   @Test
   public void testWrapAsTextContentWithJson() throws Exception {
     String jsonText = "{\"records\": 5}";
     JSONObject result = McpToolRouter.wrapAsTextContent(jsonText);
 
-    JSONArray content = result.getJSONArray("content");
+    JSONArray content = result.getJSONArray(FIELD_CONTENT);
     assertEquals(jsonText, content.getJSONObject(0).getString("text"));
   }
 
   // ── wrapAsErrorContent ─────────────────────────────────────────────────
 
+  /** Tests that wrapAsErrorContent sets isError flag and wraps the message. */
   @Test
   public void testWrapAsErrorContentStructure() throws Exception {
     JSONObject result = McpToolRouter.wrapAsErrorContent("Something failed");
 
     assertNotNull(result);
-    assertTrue(result.has("content"));
+    assertTrue(result.has(FIELD_CONTENT));
     assertTrue(result.getBoolean("isError"));
 
-    JSONArray content = result.getJSONArray("content");
+    JSONArray content = result.getJSONArray(FIELD_CONTENT);
     assertEquals(1, content.length());
 
     JSONObject block = content.getJSONObject(0);
@@ -65,55 +73,57 @@ public class McpToolRouterTest {
 
   // ── ToolRegistry.resolveSpecName ───────────────────────────────────────
 
+  /** Tests that resolveSpecName returns the spec argument for all CRUD tool names. */
   @Test
   public void testResolveSpecNameForCrudTool() throws Exception {
     JSONObject args = new JSONObject();
-    args.put("spec", "sales-order");
+    args.put("spec", SPEC_SALES_ORDER);
     args.put("entity", "header");
 
-    assertEquals("sales-order", ToolRegistry.resolveSpecName("neo_list", args));
-    assertEquals("sales-order", ToolRegistry.resolveSpecName("neo_get", args));
-    assertEquals("sales-order", ToolRegistry.resolveSpecName("neo_create", args));
-    assertEquals("sales-order", ToolRegistry.resolveSpecName("neo_update", args));
-    assertEquals("sales-order", ToolRegistry.resolveSpecName("neo_delete", args));
-    assertEquals("sales-order", ToolRegistry.resolveSpecName("neo_selectors", args));
-    assertEquals("sales-order", ToolRegistry.resolveSpecName("neo_defaults", args));
+    assertEquals(SPEC_SALES_ORDER, ToolRegistry.resolveSpecName(TOOL_NEO_LIST, args));
+    assertEquals(SPEC_SALES_ORDER, ToolRegistry.resolveSpecName("neo_get", args));
+    assertEquals(SPEC_SALES_ORDER, ToolRegistry.resolveSpecName("neo_create", args));
+    assertEquals(SPEC_SALES_ORDER, ToolRegistry.resolveSpecName("neo_update", args));
+    assertEquals(SPEC_SALES_ORDER, ToolRegistry.resolveSpecName("neo_delete", args));
+    assertEquals(SPEC_SALES_ORDER, ToolRegistry.resolveSpecName("neo_selectors", args));
+    assertEquals(SPEC_SALES_ORDER, ToolRegistry.resolveSpecName("neo_defaults", args));
   }
 
+  /** Tests that resolveSpecName returns null for the discover tool which needs no spec. */
   @Test
   public void testResolveSpecNameForDiscoverTool() {
-    // neo_discover is a CRUD tool but doesn't need a spec
     assertNull(ToolRegistry.resolveSpecName("neo_discover", null));
   }
 
+  /** Tests that resolveSpecName converts snake_case process tool names to kebab-case. */
   @Test
   public void testResolveSpecNameForProcessTool() {
-    // Process tool name is snake_case of spec name
-    assertEquals("complete-order", ToolRegistry.resolveSpecName("complete_order", null));
+    assertEquals("complete-order", ToolRegistry.resolveSpecName(TOOL_COMPLETE_ORDER, null));
     assertEquals("validate-invoice", ToolRegistry.resolveSpecName("validate_invoice", null));
   }
 
+  /** Tests that resolveSpecName strips the generate_ prefix for report tools. */
   @Test
   public void testResolveSpecNameForReportTool() {
-    // Report tool: strip "generate_" and convert to kebab
     assertEquals("invoice-report",
         ToolRegistry.resolveSpecName("generate_invoice_report", null));
     assertEquals("sales-summary",
         ToolRegistry.resolveSpecName("generate_sales_summary", null));
   }
 
+  /** Tests that resolveSpecName returns null for CRUD tools with missing arguments. */
   @Test
   public void testResolveSpecNameForCrudToolWithoutSpec() {
-    // CRUD tool with null arguments returns null
-    assertNull(ToolRegistry.resolveSpecName("neo_list", null));
+    assertNull(ToolRegistry.resolveSpecName(TOOL_NEO_LIST, null));
   }
 
   // ── ToolRegistry.isCrudTool ────────────────────────────────────────────
 
+  /** Tests that isCrudTool returns true for all known CRUD tool names. */
   @Test
   public void testIsCrudToolTrue() {
     assertTrue(ToolRegistry.isCrudTool("neo_discover"));
-    assertTrue(ToolRegistry.isCrudTool("neo_list"));
+    assertTrue(ToolRegistry.isCrudTool(TOOL_NEO_LIST));
     assertTrue(ToolRegistry.isCrudTool("neo_get"));
     assertTrue(ToolRegistry.isCrudTool("neo_create"));
     assertTrue(ToolRegistry.isCrudTool("neo_update"));
@@ -122,9 +132,10 @@ public class McpToolRouterTest {
     assertTrue(ToolRegistry.isCrudTool("neo_defaults"));
   }
 
+  /** Tests that isCrudTool returns false for process, report, and unknown tool names. */
   @Test
   public void testIsCrudToolFalse() {
-    assertFalse(ToolRegistry.isCrudTool("complete_order"));
+    assertFalse(ToolRegistry.isCrudTool(TOOL_COMPLETE_ORDER));
     assertFalse(ToolRegistry.isCrudTool("generate_invoice_report"));
     assertFalse(ToolRegistry.isCrudTool("neo_other"));
     assertFalse(ToolRegistry.isCrudTool(""));
@@ -132,9 +143,10 @@ public class McpToolRouterTest {
 
   // ── ToolRegistry.snakeToKebab ─────────────────────────────────────────
 
+  /** Tests that snakeToKebab correctly converts underscores to hyphens. */
   @Test
   public void testSnakeToKebab() {
-    assertEquals("complete-order", ToolRegistry.snakeToKebab("complete_order"));
+    assertEquals("complete-order", ToolRegistry.snakeToKebab(TOOL_COMPLETE_ORDER));
     assertEquals("sales-order-lines", ToolRegistry.snakeToKebab("sales_order_lines"));
     assertEquals("invoices", ToolRegistry.snakeToKebab("invoices"));
   }

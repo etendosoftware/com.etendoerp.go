@@ -17,9 +17,7 @@
 
 package com.etendoerp.go.mcp;
 
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -58,15 +56,6 @@ public class McpResourceProvider {
   private static final String URI_SPECS = "neo://specs";
   private static final String URI_SPECS_PREFIX = URI_SPECS + "/";
   private static final String URI_PROCESSES_PREFIX = "neo://processes/";
-
-  // AD_Reference IDs for selector types
-  private static final Set<String> SELECTOR_REFS = new HashSet<>();
-  static {
-    SELECTOR_REFS.add("19"); // TableDir
-    SELECTOR_REFS.add("18"); // Table
-    SELECTOR_REFS.add("30"); // Search
-    SELECTOR_REFS.add("95E2A8B50A254B2AAE6774B8C2F28120"); // OBUISEL
-  }
 
   /**
    * List all available MCP resources.
@@ -204,7 +193,7 @@ public class McpResourceProvider {
    * Read neo://specs/{specName} — full spec schema with entities and their fields.
    */
   private JSONObject readSpec(String specName) throws Exception {
-    SFSpec spec = findSpecByName(specName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
 
     JSONObject result = new JSONObject();
     result.put("name", spec.getName());
@@ -227,15 +216,8 @@ public class McpResourceProvider {
     }
 
     // Query entities
-    OBCriteria<SFEntity> entityCriteria = OBDal.getInstance().createCriteria(SFEntity.class);
-    entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
-    entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
-    entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-    entityCriteria.addOrder(Order.asc(SFEntity.PROPERTY_SEQNO));
-    List<SFEntity> entities = entityCriteria.list();
-
     JSONArray entitiesArray = new JSONArray();
-    for (SFEntity entity : entities) {
+    for (SFEntity entity : McpToolRouterSupport.listIncludedEntities(spec.getId())) {
       JSONObject entityObj = buildEntityJson(entity, true);
       entitiesArray.put(entityObj);
     }
@@ -248,21 +230,8 @@ public class McpResourceProvider {
    * Read neo://specs/{specName}/{entityName} — detailed view of a single entity.
    */
   private JSONObject readEntity(String specName, String entityName) throws Exception {
-    SFSpec spec = findSpecByName(specName);
-
-    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_NAME, entityName));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
-    criteria.setMaxResults(1);
-    List<SFEntity> entities = criteria.list();
-
-    if (entities.isEmpty()) {
-      throw new IllegalArgumentException(
-          "Entity '" + entityName + "' not found in spec '" + specName + "'");
-    }
-
-    SFEntity entity = entities.get(0);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity entity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
     JSONObject result = buildEntityJson(entity, true);
     result.put("specName", specName);
     result.put("specType", spec.getSpecType());
@@ -273,7 +242,7 @@ public class McpResourceProvider {
    * Read neo://processes/{specName} — process parameters and metadata.
    */
   private JSONObject readProcess(String specName) throws Exception {
-    SFSpec spec = findSpecByName(specName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     String specType = spec.getSpecType();
 
     if (!"P".equals(specType) && !"R".equals(specType)) {
@@ -333,23 +302,6 @@ public class McpResourceProvider {
   // ── Helpers ─────────────────────────────────────────────────────────────
 
   /**
-   * Find an active SFSpec by name.
-   *
-   * @throws IllegalArgumentException if spec not found
-   */
-  private SFSpec findSpecByName(String specName) {
-    OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, specName));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    criteria.setMaxResults(1);
-    List<SFSpec> results = criteria.list();
-    if (results.isEmpty()) {
-      throw new IllegalArgumentException("Spec not found: " + specName);
-    }
-    return results.get(0);
-  }
-
-  /**
    * Build a JSON representation of an entity, optionally including its fields.
    */
   private JSONObject buildEntityJson(SFEntity entity, boolean includeFields) throws Exception {
@@ -358,23 +310,7 @@ public class McpResourceProvider {
     obj.put("isIncluded", Boolean.TRUE.equals(entity.isIncluded()));
 
     // HTTP methods
-    JSONArray methods = new JSONArray();
-    if (Boolean.TRUE.equals(entity.isGet()) || Boolean.TRUE.equals(entity.isGetByID())) {
-      methods.put("GET");
-    }
-    if (Boolean.TRUE.equals(entity.isPost())) {
-      methods.put("POST");
-    }
-    if (Boolean.TRUE.equals(entity.isPut())) {
-      methods.put("PUT");
-    }
-    if (Boolean.TRUE.equals(entity.isPatch())) {
-      methods.put("PATCH");
-    }
-    if (Boolean.TRUE.equals(entity.isDelete())) {
-      methods.put("DELETE");
-    }
-    obj.put("methods", methods);
+    obj.put("methods", McpToolRouterSupport.buildMethodsArray(entity));
 
     if (includeFields) {
       obj.put("fields", buildFieldsArray(entity.getId()));
@@ -408,7 +344,7 @@ public class McpResourceProvider {
       JSONObject fieldObj = new JSONObject();
       fieldObj.put("name", column.getDBColumnName());
       fieldObj.put("label", column.getName());
-      fieldObj.put("type", mapReferenceToType(refId));
+      fieldObj.put("type", McpToolRouterSupport.mapColumnType(refId));
       fieldObj.put("readOnly", Boolean.TRUE.equals(field.isReadOnly()));
       fieldObj.put("required", column.isMandatory());
 
@@ -419,10 +355,10 @@ public class McpResourceProvider {
       }
 
       // Selector info for FK references
-      boolean hasSelector = refId != null && SELECTOR_REFS.contains(refId);
+      boolean hasSelector = McpToolRouterSupport.mapSelectorType(refId) != null;
       if (hasSelector) {
         fieldObj.put("hasSelector", true);
-        fieldObj.put("selectorType", mapSelectorType(refId));
+        fieldObj.put("selectorType", McpToolRouterSupport.mapSelectorType(refId));
       }
 
       arr.put(fieldObj);
@@ -430,52 +366,4 @@ public class McpResourceProvider {
     return arr;
   }
 
-  /**
-   * Map AD_Reference_ID to a simple type name.
-   * Mirrors the mapping in NeoServlet for consistency.
-   */
-  private String mapReferenceToType(String refId) {
-    if (refId == null) {
-      return TYPE_STRING;
-    }
-    switch (refId) {
-      case "10": case "14": case "34":
-        return TYPE_STRING;
-      case "11": case "22": case "29": case "12":
-      case "800008": case "800019":
-        return "number";
-      case "20":
-        return "boolean";
-      case "15":
-        return "date";
-      case "16":
-        return "datetime";
-      case "24":
-        return "time";
-      case "28":
-        return "button";
-      case "17":
-        return "list";
-      case "13":
-        return "id";
-      default:
-        return TYPE_STRING;
-    }
-  }
-
-  /**
-   * Map AD_Reference_ID to a selector type label.
-   */
-  private String mapSelectorType(String refId) {
-    if (refId == null) {
-      return null;
-    }
-    switch (refId) {
-      case "19": return "TableDir";
-      case "18": return "Table";
-      case "30": return "Search";
-      case "95E2A8B50A254B2AAE6774B8C2F28120": return "OBUISEL";
-      default: return null;
-    }
-  }
 }

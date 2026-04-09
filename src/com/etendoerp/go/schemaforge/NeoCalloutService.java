@@ -738,33 +738,52 @@ public class NeoCalloutService {
         String dbColName = col.getDBColumnName();
         String inpName = toInpName(dbColName);
         // Don't overwrite params already set by formState or child-tab defaults
-        if (params.containsKey(inpName)) {
-          continue;
-        }
-        try {
-          Property prop = parentEntity.getPropertyByColumnName(dbColName);
-          if (prop == null) {
-            continue;
-          }
-          Object val = bob.get(prop.getName());
-          String strVal = "";
-          if (val != null) {
-            if (val instanceof org.openbravo.base.structure.BaseOBObject) {
-              strVal = ((org.openbravo.base.structure.BaseOBObject) val).getId().toString();
-            } else {
-              strVal = val.toString();
-            }
-          }
-          params.put(inpName, new String[]{ strVal });
+        if (!params.containsKey(inpName)
+            && injectSingleParentField(params, parentEntity, bob, dbColName, inpName)) {
           injected++;
-        } catch (Exception e) {
-          log.debug("[NEO-CALLOUT] Could not read parent field {}: {}", dbColName, e.getMessage());
         }
       }
       log.info("[NEO-CALLOUT] Injected {} parent record fields from {}", injected, parentEntity.getName());
     } catch (Exception e) {
       log.warn("[NEO-CALLOUT] Failed to inject parent record fields: {}", e.getMessage());
     }
+  }
+
+  /**
+   * Resolve and inject a single parent record field into the params map.
+   * Returns true if the field was successfully injected, false otherwise.
+   */
+  private static boolean injectSingleParentField(Map<String, String[]> params,
+      Entity parentEntity, org.openbravo.base.structure.BaseOBObject bob,
+      String dbColName, String inpName) {
+    try {
+      Property prop = parentEntity.getPropertyByColumnName(dbColName);
+      if (prop == null) {
+        return false;
+      }
+      Object val = bob.get(prop.getName());
+      String strVal = resolveFieldValueAsString(val);
+      params.put(inpName, new String[]{ strVal });
+      return true;
+    } catch (Exception e) {
+      log.debug("[NEO-CALLOUT] Could not read parent field {}: {}", dbColName, e.getMessage());
+      return false;
+    }
+  }
+
+  /**
+   * Convert a field value to its string representation.
+   * For FK references (BaseOBObject), returns the record ID.
+   * For null values, returns an empty string.
+   */
+  private static String resolveFieldValueAsString(Object val) {
+    if (val == null) {
+      return "";
+    }
+    if (val instanceof org.openbravo.base.structure.BaseOBObject) {
+      return ((org.openbravo.base.structure.BaseOBObject) val).getId().toString();
+    }
+    return val.toString();
   }
 
   // ── Response transformation ────────────────────────────────────────
@@ -865,88 +884,9 @@ public class NeoCalloutService {
         return response;
       }
 
-      Iterator<String> keys = calloutResult.keys();
-      while (keys.hasNext()) {
-        String key = keys.next();
-        JSONObject fieldResult = calloutResult.optJSONObject(key);
-        if (fieldResult == null) {
-          continue;
-        }
+      classifyCalloutFields(calloutResult, adTab, updates, combos, messages, rDisplayNames);
 
-        // Handle special keys
-        if ("MESSAGE".equals(key) || "WARNING".equals(key)
-            || "ERROR".equals(key) || "INFO".equals(key)
-            || "SUCCESS".equals(key)) {
-          JSONObject msg = new JSONObject();
-          msg.put("type", key);
-          msg.put("text", fieldResult.optString(VALUE_KEY, ""));
-          messages.put(msg);
-          continue;
-        }
-
-        // Skip JSEXECUTE (not applicable in REST context)
-        if ("JSEXECUTE".equals(key)) {
-          continue;
-        }
-
-        // Handle _R suffix keys (display representation for combo fields).
-        // E.g., "inpcDoctypetargetId_R" contains the label for "inpcDoctypetargetId".
-        // Store them temporarily and merge after the main loop.
-        if (key.endsWith("_R")) {
-          String baseInpKey = key.substring(0, key.length() - 2);
-          String baseClean = inpToCleanName(baseInpKey, adTab);
-          // Store: we'll merge after the main loop
-          if (!rDisplayNames.containsKey(baseClean)) {
-            rDisplayNames.put(baseClean, fieldResult.optString(VALUE_KEY, ""));
-          }
-          continue;
-        }
-
-        // Determine if this is a combo update (has entries) or simple field update
-        boolean hasEntries = fieldResult.has("entries");
-        String cleanName = inpToCleanName(key, adTab);
-
-        if (hasEntries) {
-          // Combo update
-          JSONObject comboObj = new JSONObject();
-          if (fieldResult.has(VALUE_KEY)) {
-            comboObj.put("selected", fieldResult.opt(VALUE_KEY));
-          }
-          JSONArray rawEntries = fieldResult.optJSONArray("entries");
-          if (rawEntries != null) {
-            JSONArray cleanEntries = new JSONArray();
-            for (int i = 0; i < rawEntries.length(); i++) {
-              JSONObject rawEntry = rawEntries.optJSONObject(i);
-              if (rawEntry != null && rawEntry.length() > 0) {
-                JSONObject cleanEntry = new JSONObject();
-                cleanEntry.put("id",
-                    rawEntry.optString(JsonConstants.ID, ""));
-                cleanEntry.put("identifier",
-                    rawEntry.optString(JsonConstants.IDENTIFIER, ""));
-                cleanEntries.put(cleanEntry);
-              }
-            }
-            comboObj.put("entries", cleanEntries);
-          }
-          combos.put(cleanName, comboObj);
-        } else {
-          // Simple field update
-          JSONObject updateObj = new JSONObject();
-          updateObj.put(VALUE_KEY, fieldResult.opt(VALUE_KEY));
-          updates.put(cleanName, updateObj);
-        }
-      }
-
-      // Merge _R display names as _identifier into their base field update entries.
-      // E.g., "inpcDoctypetargetId_R" → "Purchase Order" merges into
-      // transactionDocument: { value: "...", _identifier: "Purchase Order" }
-      for (Map.Entry<String, String> rEntry : rDisplayNames.entrySet()) {
-        String baseKey = rEntry.getKey();
-        String displayName = rEntry.getValue();
-        if (updates.has(baseKey) && StringUtils.isNotBlank(displayName)) {
-          updates.getJSONObject(baseKey).put(IDENTIFIER_KEY, displayName);
-        }
-      }
+      mergeRDisplayNames(rDisplayNames, updates);
 
       // Resolve _identifier for FK fields where the callout only returned an ID.
       // This avoids the frontend showing stale labels until the record is saved/reloaded.
@@ -966,6 +906,126 @@ public class NeoCalloutService {
     }
 
     return response;
+  }
+
+  /**
+   * Iterate over all fields in the raw callout result and classify them into
+   * updates, combos, messages, or _R display-name entries.
+   */
+  @SuppressWarnings("unchecked")
+  private static void classifyCalloutFields(JSONObject calloutResult, Tab adTab,
+      JSONObject updates, JSONObject combos, JSONArray messages,
+      Map<String, String> rDisplayNames) throws Exception {
+    Iterator<String> keys = calloutResult.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      JSONObject fieldResult = calloutResult.optJSONObject(key);
+      if (fieldResult == null) {
+        continue;
+      }
+      if (isMessageKey(key)) {
+        messages.put(buildMessageEntry(key, fieldResult));
+        continue;
+      }
+      if ("JSEXECUTE".equals(key)) {
+        // Not applicable in REST context
+        continue;
+      }
+      if (key.endsWith("_R")) {
+        collectRDisplayName(key, fieldResult, adTab, rDisplayNames);
+        continue;
+      }
+      classifyFieldUpdate(key, fieldResult, adTab, updates, combos);
+    }
+  }
+
+  /**
+   * Return true if the key represents a message-level response (WARNING, ERROR, etc.).
+   */
+  private static boolean isMessageKey(String key) {
+    return "MESSAGE".equals(key) || "WARNING".equals(key)
+        || "ERROR".equals(key) || "INFO".equals(key) || "SUCCESS".equals(key);
+  }
+
+  /**
+   * Build a message JSON entry from a message-level field result.
+   */
+  private static JSONObject buildMessageEntry(String type, JSONObject fieldResult) throws Exception {
+    JSONObject msg = new JSONObject();
+    msg.put("type", type);
+    msg.put("text", fieldResult.optString(VALUE_KEY, ""));
+    return msg;
+  }
+
+  /**
+   * Store a _R display name entry for later merging into the base field's _identifier.
+   * E.g., "inpcDoctypetargetId_R" → "Purchase Order" is stored for "transactionDocument".
+   */
+  private static void collectRDisplayName(String key, JSONObject fieldResult, Tab adTab,
+      Map<String, String> rDisplayNames) {
+    String baseInpKey = key.substring(0, key.length() - 2);
+    String baseClean = inpToCleanName(baseInpKey, adTab);
+    if (!rDisplayNames.containsKey(baseClean)) {
+      rDisplayNames.put(baseClean, fieldResult.optString(VALUE_KEY, ""));
+    }
+  }
+
+  /**
+   * Classify a field result as either a combo update (has entries) or a simple field update,
+   * and add it to the appropriate output map.
+   */
+  private static void classifyFieldUpdate(String key, JSONObject fieldResult, Tab adTab,
+      JSONObject updates, JSONObject combos) throws Exception {
+    String cleanName = inpToCleanName(key, adTab);
+    if (fieldResult.has("entries")) {
+      combos.put(cleanName, buildComboEntry(fieldResult));
+    } else {
+      JSONObject updateObj = new JSONObject();
+      updateObj.put(VALUE_KEY, fieldResult.opt(VALUE_KEY));
+      updates.put(cleanName, updateObj);
+    }
+  }
+
+  /**
+   * Build a clean combo entry from the raw callout combo field result.
+   * Maps entries to {id, identifier} pairs.
+   */
+  private static JSONObject buildComboEntry(JSONObject fieldResult) throws Exception {
+    JSONObject comboObj = new JSONObject();
+    if (fieldResult.has(VALUE_KEY)) {
+      comboObj.put("selected", fieldResult.opt(VALUE_KEY));
+    }
+    JSONArray rawEntries = fieldResult.optJSONArray("entries");
+    if (rawEntries != null) {
+      JSONArray cleanEntries = new JSONArray();
+      for (int i = 0; i < rawEntries.length(); i++) {
+        JSONObject rawEntry = rawEntries.optJSONObject(i);
+        if (rawEntry != null && rawEntry.length() > 0) {
+          JSONObject cleanEntry = new JSONObject();
+          cleanEntry.put("id", rawEntry.optString(JsonConstants.ID, ""));
+          cleanEntry.put("identifier", rawEntry.optString(JsonConstants.IDENTIFIER, ""));
+          cleanEntries.put(cleanEntry);
+        }
+      }
+      comboObj.put("entries", cleanEntries);
+    }
+    return comboObj;
+  }
+
+  /**
+   * Merge _R display names as _identifier into their base field update entries.
+   * E.g., "inpcDoctypetargetId_R" → "Purchase Order" merges into
+   * transactionDocument: { value: "...", _identifier: "Purchase Order" }
+   */
+  private static void mergeRDisplayNames(Map<String, String> rDisplayNames,
+      JSONObject updates) throws Exception {
+    for (Map.Entry<String, String> rEntry : rDisplayNames.entrySet()) {
+      String baseKey = rEntry.getKey();
+      String displayName = rEntry.getValue();
+      if (updates.has(baseKey) && StringUtils.isNotBlank(displayName)) {
+        updates.getJSONObject(baseKey).put(IDENTIFIER_KEY, displayName);
+      }
+    }
   }
 
   /**

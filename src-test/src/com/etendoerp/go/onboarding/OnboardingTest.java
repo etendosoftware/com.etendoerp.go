@@ -30,8 +30,27 @@ import org.junit.Test;
  */
 public class OnboardingTest {
 
+  private static final String STEP_1 = "Step1";
+  private static final String STEP_2 = "Step2";
+  private static final String STEP_3 = "Step3";
+  private static final String FIELD_DESCRIPTION = "description";
+  private static final String FIELD_FIELDS = "fields";
+  private static final String FIELD_TYPE = "type";
+  private static final String FIELD_REQUIRED = "required";
+  private static final String TYPE_STRING = "string";
+
+  private static final class SimulatedStepFailureException extends Exception {
+
+    private SimulatedStepFailureException(String message) {
+      super(message);
+    }
+  }
+
   // ── OnboardingContext tests ──────────────────────────────────────────
 
+  /**
+   * Verifies that input fields start unset in a new onboarding context.
+   */
   @Test
   public void testContextInputFieldsInitiallyNull() {
     OnboardingContext ctx = new OnboardingContext();
@@ -45,6 +64,9 @@ public class OnboardingTest {
     assertNull("countryCode should be null initially", ctx.getCountryCode());
   }
 
+  /**
+   * Verifies that generated identifiers start unset in a new onboarding context.
+   */
   @Test
   public void testContextAccumulatedIdsInitiallyNull() {
     OnboardingContext ctx = new OnboardingContext();
@@ -64,6 +86,9 @@ public class OnboardingTest {
     assertNull("taxCategoryId should be null initially", ctx.getTaxCategoryId());
   }
 
+  /**
+   * Verifies getters and setters for onboarding input values.
+   */
   @Test
   public void testContextInputSettersAndGetters() {
     OnboardingContext ctx = new OnboardingContext();
@@ -85,6 +110,9 @@ public class OnboardingTest {
     assertEquals("US", ctx.getCountryCode());
   }
 
+  /**
+   * Verifies getters and setters for accumulated onboarding identifiers.
+   */
   @Test
   public void testContextAccumulatedIdSettersAndGetters() {
     OnboardingContext ctx = new OnboardingContext();
@@ -118,6 +146,11 @@ public class OnboardingTest {
 
   // ── OnboardingStep chain tests ───────────────────────────────────────
 
+  /**
+   * Verifies that onboarding steps execute in insertion order and update shared context.
+    *
+    * @throws Exception if any simulated onboarding step fails unexpectedly
+   */
   @Test
   public void testStepChainExecutesInOrder() throws Exception {
     List<String> executionLog = new ArrayList<>();
@@ -125,12 +158,12 @@ public class OnboardingTest {
     OnboardingStep step1 = new OnboardingStep() {
       @Override
       public String name() {
-        return "Step1";
+        return STEP_1;
       }
 
       @Override
       public void execute(OnboardingContext ctx) {
-        executionLog.add("Step1");
+        executionLog.add(STEP_1);
         ctx.setClientId("CLIENT_FROM_STEP1");
       }
     };
@@ -138,12 +171,12 @@ public class OnboardingTest {
     OnboardingStep step2 = new OnboardingStep() {
       @Override
       public String name() {
-        return "Step2";
+        return STEP_2;
       }
 
       @Override
       public void execute(OnboardingContext ctx) {
-        executionLog.add("Step2");
+        executionLog.add(STEP_2);
         ctx.setOrgId("ORG_FROM_STEP2");
       }
     };
@@ -151,12 +184,12 @@ public class OnboardingTest {
     OnboardingStep step3 = new OnboardingStep() {
       @Override
       public String name() {
-        return "Step3";
+        return STEP_3;
       }
 
       @Override
       public void execute(OnboardingContext ctx) {
-        executionLog.add("Step3");
+        executionLog.add(STEP_3);
         ctx.setRoleId("ROLE_FROM_STEP3");
       }
     };
@@ -173,9 +206,9 @@ public class OnboardingTest {
 
     // Verify execution order
     assertEquals(3, executionLog.size());
-    assertEquals("Step1", executionLog.get(0));
-    assertEquals("Step2", executionLog.get(1));
-    assertEquals("Step3", executionLog.get(2));
+    assertEquals(STEP_1, executionLog.get(0));
+    assertEquals(STEP_2, executionLog.get(1));
+    assertEquals(STEP_3, executionLog.get(2));
 
     // Verify context accumulated IDs from all steps
     assertEquals("CLIENT_FROM_STEP1", ctx.getClientId());
@@ -183,6 +216,11 @@ public class OnboardingTest {
     assertEquals("ROLE_FROM_STEP3", ctx.getRoleId());
   }
 
+  /**
+   * Verifies that state produced by one onboarding step is visible to subsequent steps.
+    *
+    * @throws Exception if a simulated step fails unexpectedly
+   */
   @Test
   public void testStepChainContextAccumulatesAcrossSteps() throws Exception {
     // Step 1 sets clientId, step 2 reads clientId and sets orgId
@@ -220,6 +258,9 @@ public class OnboardingTest {
     assertEquals("O_C_ABC123", ctx.getOrgId());
   }
 
+  /**
+   * Verifies that step names are exposed as expected for progress reporting.
+   */
   @Test
   public void testStepNameReturnsExpectedValue() {
     OnboardingStep step = new OnboardingStep() {
@@ -239,6 +280,9 @@ public class OnboardingTest {
 
   // ── Step failure / rollback simulation tests ─────────────────────────
 
+  /**
+   * Verifies that a failing step stops the simulated onboarding loop.
+   */
   @Test
   public void testStepFailureStopsExecution() {
     List<String> executionLog = new ArrayList<>();
@@ -251,7 +295,7 @@ public class OnboardingTest {
 
       @Override
       public void execute(OnboardingContext ctx) {
-        executionLog.add("Step1");
+        executionLog.add(STEP_1);
         ctx.setClientId("C001");
       }
     };
@@ -264,7 +308,7 @@ public class OnboardingTest {
 
       @Override
       public void execute(OnboardingContext ctx) {
-        executionLog.add("Step2");
+        executionLog.add(STEP_2);
         ctx.setOrgId("O001");
       }
     };
@@ -277,8 +321,8 @@ public class OnboardingTest {
 
       @Override
       public void execute(OnboardingContext ctx) throws Exception {
-        executionLog.add("Step3");
-        throw new RuntimeException("Simulated failure in step 3");
+        executionLog.add(STEP_3);
+        throw new SimulatedStepFailureException("Simulated failure in step 3");
       }
     };
 
@@ -319,9 +363,9 @@ public class OnboardingTest {
 
     // Steps 1 and 2 executed, step 3 started but failed, step 4 never ran
     assertEquals(3, executionLog.size());
-    assertTrue("Step1 should have executed", executionLog.contains("Step1"));
-    assertTrue("Step2 should have executed", executionLog.contains("Step2"));
-    assertTrue("Step3 should have started", executionLog.contains("Step3"));
+    assertTrue("Step1 should have executed", executionLog.contains(STEP_1));
+    assertTrue("Step2 should have executed", executionLog.contains(STEP_2));
+    assertTrue("Step3 should have started", executionLog.contains(STEP_3));
 
     // Step 4 was NOT executed
     assertEquals("Step4 should not have executed", false, executionLog.contains("Step4"));
@@ -336,6 +380,9 @@ public class OnboardingTest {
     assertNull("roleId should not be set (step 4 never ran)", ctx.getRoleId());
   }
 
+  /**
+   * Verifies that a failure in the first step prevents all subsequent execution.
+   */
   @Test
   public void testStepFailureAtFirstStep() {
     List<String> executionLog = new ArrayList<>();
@@ -348,7 +395,7 @@ public class OnboardingTest {
 
       @Override
       public void execute(OnboardingContext ctx) throws Exception {
-        throw new RuntimeException("Immediate failure");
+        throw new SimulatedStepFailureException("Immediate failure");
       }
     };
 
@@ -386,6 +433,11 @@ public class OnboardingTest {
     assertNull("No IDs should be set", ctx.getClientId());
   }
 
+  /**
+   * Verifies that a fully successful step chain completes without failures.
+    *
+    * @throws Exception if any generated test step fails unexpectedly
+   */
   @Test
   public void testAllStepsSucceedNoException() throws Exception {
     List<String> executionLog = new ArrayList<>();
@@ -429,6 +481,11 @@ public class OnboardingTest {
    * We reconstruct the describe logic here since sendDescribe is private and doGet
    * requires authentication (OBDal). This validates the contract of the describe response.
    */
+  /**
+   * Verifies the top-level describe payload returned by the onboarding endpoint.
+   *
+   * @throws Exception if JSON assembly fails during the test
+   */
   @Test
   public void testDescribeJsonContainsAllRequiredFields() throws Exception {
     // Reproduce the describe structure from OnboardingServlet.sendDescribe()
@@ -437,17 +494,22 @@ public class OnboardingTest {
     assertEquals("/sws/neo/onboarding", describe.getString("endpoint"));
     assertEquals("POST", describe.getString("method"));
     assertTrue("description should be non-empty",
-        describe.getString("description").length() > 0);
+        describe.getString(FIELD_DESCRIPTION).length() > 0);
 
-    JSONArray fields = describe.getJSONArray("fields");
+    JSONArray fields = describe.getJSONArray(FIELD_FIELDS);
     assertNotNull("fields array should exist", fields);
     assertEquals("Should have 7 fields", 7, fields.length());
   }
 
+  /**
+   * Verifies that every onboarding describe field is present and fully defined.
+    *
+    * @throws Exception if JSON assembly fails during the test
+   */
   @Test
   public void testDescribeFieldDefinitionsComplete() throws Exception {
     JSONObject describe = buildDescribeJson();
-    JSONArray fields = describe.getJSONArray("fields");
+    JSONArray fields = describe.getJSONArray(FIELD_FIELDS);
 
     // Verify all expected field names are present
     List<String> expectedNames = new ArrayList<>();
@@ -465,28 +527,33 @@ public class OnboardingTest {
       actualNames.add(field.getString("name"));
 
       // Each field should have type, required, and description
-      assertEquals("All fields should be type string", "string", field.getString("type"));
-      assertTrue("All fields should be required", field.getBoolean("required"));
+        assertEquals("All fields should be type string", TYPE_STRING, field.getString(FIELD_TYPE));
+        assertTrue("All fields should be required", field.getBoolean(FIELD_REQUIRED));
       assertTrue("All fields should have a description",
-          field.getString("description").length() > 0);
+          field.getString(FIELD_DESCRIPTION).length() > 0);
     }
 
     assertEquals("Field names should match expected", expectedNames, actualNames);
   }
 
+  /**
+   * Verifies the structure of each field entry in the onboarding describe payload.
+    *
+    * @throws Exception if JSON assembly fails during the test
+   */
   @Test
   public void testDescribeFieldDefStructure() throws Exception {
     // Verify each field definition has exactly 4 keys: name, type, required, description
     JSONObject describe = buildDescribeJson();
-    JSONArray fields = describe.getJSONArray("fields");
+    JSONArray fields = describe.getJSONArray(FIELD_FIELDS);
 
     for (int i = 0; i < fields.length(); i++) {
       JSONObject field = fields.getJSONObject(i);
       assertEquals("Each field should have 4 properties", 4, field.length());
       assertTrue("Field should have 'name'", field.has("name"));
-      assertTrue("Field should have 'type'", field.has("type"));
-      assertTrue("Field should have 'required'", field.has("required"));
-      assertTrue("Field should have 'description'", field.has("description"));
+      assertTrue("Field should have 'type'", field.has(FIELD_TYPE));
+      assertTrue("Field should have 'required'", field.has(FIELD_REQUIRED));
+      assertTrue("Field should have 'description'", field.has(FIELD_DESCRIPTION));
     }
   }
 
@@ -500,33 +567,38 @@ public class OnboardingTest {
     JSONObject describe = new JSONObject();
     describe.put("endpoint", "/sws/neo/onboarding");
     describe.put("method", "POST");
-    describe.put("description", "Create a new client environment with organization, users, "
+    describe.put(FIELD_DESCRIPTION, "Create a new client environment with organization, users, "
         + "roles, and reference data");
 
     JSONArray fields = new JSONArray();
-    fields.put(fieldDef("clientName", "string", true, "Name for the new client"));
-    fields.put(fieldDef("orgName", "string", true, "Name for the main organization"));
-    fields.put(fieldDef("adminUser", "string", true, "Username for the client administrator"));
-    fields.put(fieldDef("adminPassword", "string", true,
+    fields.put(fieldDef("clientName", TYPE_STRING, true, "Name for the new client"));
+    fields.put(fieldDef("orgName", TYPE_STRING, true, "Name for the main organization"));
+    fields.put(fieldDef("adminUser", TYPE_STRING, true, "Username for the client administrator"));
+    fields.put(fieldDef("adminPassword", TYPE_STRING, true,
         "Password for the client administrator"));
-    fields.put(fieldDef("currency", "string", true,
+    fields.put(fieldDef("currency", TYPE_STRING, true,
         "ISO 4217 currency code (e.g., USD, EUR)"));
-    fields.put(fieldDef("language", "string", true,
+    fields.put(fieldDef("language", TYPE_STRING, true,
         "Language code (e.g., en_US, es_ES)"));
-    fields.put(fieldDef("countryCode", "string", true,
+    fields.put(fieldDef("countryCode", TYPE_STRING, true,
         "ISO 3166-1 alpha-2 country code (e.g., US, ES)"));
-    describe.put("fields", fields);
+    describe.put(FIELD_FIELDS, fields);
 
     return describe;
   }
 
+  /**
+   * Builds a single field definition object for use in describe payload tests.
+   *
+   * @throws Exception if JSON construction fails
+   */
   private JSONObject fieldDef(String name, String type, boolean required, String description)
       throws Exception {
     JSONObject field = new JSONObject();
     field.put("name", name);
-    field.put("type", type);
-    field.put("required", required);
-    field.put("description", description);
+    field.put(FIELD_TYPE, type);
+    field.put(FIELD_REQUIRED, required);
+    field.put(FIELD_DESCRIPTION, description);
     return field;
   }
 }
