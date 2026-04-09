@@ -39,7 +39,6 @@ import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.application.ApplicationUtils;
 import org.openbravo.client.kernel.KernelUtils;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
@@ -2175,29 +2174,35 @@ public class NeoSelectorService {
     }
     try {
       OBContext ctx = OBContext.getOBContext();
-      if (ctx == null || ctx.getCurrentOrganization() == null) {
+      if (ctx == null) {
         return null;
       }
-      String activeOrgId = ctx.getCurrentOrganization().getId();
-      OrganizationStructureProvider osp = ctx.getOrganizationStructureProvider();
-      java.util.Set<String> naturalTree = osp.getNaturalTree(activeOrgId);
-      naturalTree.add("0"); // always include the * org
-      if (naturalTree.isEmpty()) {
+      // Use readable organizations (matches Classic Etendo combo behavior) rather than
+      // the narrower natural tree, so that master data in sibling orgs (e.g. C_BPartner_Location
+      // in F&B España visible from F&B US session) is not incorrectly filtered out.
+      String[] readableOrgs = ctx.getReadableOrganizations();
+      if (readableOrgs == null || readableOrgs.length == 0) {
         return null;
       }
-      StringBuilder filter = new StringBuilder(alias).append(".organization.id IN (");
-      boolean first = true;
-      for (String orgId : naturalTree) {
-        if (!first) {
-          filter.append(", ");
+      // Always include org '0' (the system/shared org) so that master data defined at the
+      // '*' org level (e.g., taxes, price lists, UoMs shared across all orgs of a client)
+      // is visible in selectors regardless of which org the user is currently working in.
+      boolean hasSystemOrg = false;
+      for (String org : readableOrgs) {
+        if ("0".equals(org)) {
+          hasSystemOrg = true;
+          break;
         }
-        filter.append("'").append(orgId).append("'");
-        first = false;
       }
-      filter.append(")");
-      return filter.toString();
+      if (!hasSystemOrg) {
+        String[] withSystemOrg = new String[readableOrgs.length + 1];
+        System.arraycopy(readableOrgs, 0, withSystemOrg, 0, readableOrgs.length);
+        withSystemOrg[readableOrgs.length] = "0";
+        readableOrgs = withSystemOrg;
+      }
+      return buildOrganizationFilter(alias, readableOrgs);
     } catch (Exception e) {
-      log.warn("Could not build natural org filter for entity {}: {}", entityName, e.getMessage());
+      log.warn("Could not build org filter for entity {}: {}", entityName, e.getMessage());
       return null;
     }
   }

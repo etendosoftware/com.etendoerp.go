@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -987,13 +988,74 @@ public class NeoServlet extends HttpBaseServlet {
           .obContext(OBContext.getOBContext())
           .build();
 
-      // Delegate to callout service
-      return NeoCalloutService.executeCallout(neoContext, requestBody);
+      // Execute the callout
+      NeoResponse calloutResult = NeoCalloutService.executeCallout(neoContext, requestBody);
+
+      // Cascade: if the callout set fields that have further callouts (e.g., SL_Order_Product
+      // sets tax+grossUnitPrice for gross-price lists → SL_Order_Amt derives unitPrice),
+      // chain those callouts and merge the results back into the response.
+      // This is done here (not in NeoCalloutService) to avoid recursion when
+      // executeSingleCallout calls NeoCalloutService.executeCallout internally.
+      if (calloutResult.getHttpStatus() == 200 && calloutResult.getBody() != null) {
+        String fieldName = requestBody.optString("field", "");
+        JSONObject formState = requestBody.optJSONObject("formState");
+        NeoDefaultsService.CalloutCascadeResult cascade =
+            NeoDefaultsService.cascadeInteractiveCallout(neoContext, tab, fieldName, formState, calloutResult.getBody());
+        if (cascade.hasResults()) {
+          mergeCalloutResponse(calloutResult.getBody(), cascade.toJSON());
+          log.info("[NEO-CALLOUT] Cascade merged additional fields into response");
+        }
+      }
+
+      return calloutResult;
     } catch (Exception e) {
       log.error("Error handling callout for {}/{}: {}",
           pathInfo.specName, pathInfo.entityName, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Callout error: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Merge cascade results into an existing REST callout response.
+   * Does not overwrite fields already set by the initial callout.
+   */
+  private void mergeCalloutResponse(JSONObject base, JSONObject addition) {
+    try {
+      JSONObject addUpdates = addition.optJSONObject("updates");
+      if (addUpdates != null) {
+        JSONObject baseUpdates = base.optJSONObject("updates");
+        if (baseUpdates == null) {
+          base.put("updates", addUpdates);
+        } else {
+          @SuppressWarnings("unchecked")
+          Iterator<String> keys = addUpdates.keys();
+          while (keys.hasNext()) {
+            String key = keys.next();
+            if (!baseUpdates.has(key)) {
+              baseUpdates.put(key, addUpdates.get(key));
+            }
+          }
+        }
+      }
+      JSONObject addCombos = addition.optJSONObject("combos");
+      if (addCombos != null) {
+        JSONObject baseCombos = base.optJSONObject("combos");
+        if (baseCombos == null) {
+          base.put("combos", addCombos);
+        } else {
+          @SuppressWarnings("unchecked")
+          Iterator<String> keys = addCombos.keys();
+          while (keys.hasNext()) {
+            String key = keys.next();
+            if (!baseCombos.has(key)) {
+              baseCombos.put(key, addCombos.get(key));
+            }
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("[NEO-CALLOUT] Failed to merge cascade results: {}", e.getMessage());
     }
   }
 

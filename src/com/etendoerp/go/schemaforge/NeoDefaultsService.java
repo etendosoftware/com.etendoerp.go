@@ -1163,6 +1163,81 @@ public class NeoDefaultsService {
   }
 
   /**
+   * Cascade callouts starting from the result of an interactive field-change callout.
+   *
+   * When a callout (e.g., SL_Order_Product) returns fields that themselves have callouts
+   * (e.g., tax → SL_Order_Amt), this method chains those secondary callouts so the
+   * frontend receives a fully-resolved result in a single request.
+   *
+   * Typical case: gross price lists (istaxincluded=Y).
+   *   SL_Order_Product sets tax + grossUnitPrice (not unitPrice).
+   *   SL_Order_Amt is then cascaded for tax → derives unitPrice from grossUnitPrice - taxes.
+   *
+   * @param ctx              the NeoContext (spec/entity/tab)
+   * @param adTab            the AD_Tab for callout resolution
+   * @param triggerField     the original field that was changed by the user (excluded from cascade)
+   * @param originalFormState the form state that was sent with the original callout request
+   * @param calloutResponse  the REST response from the initial callout (with "updates" / "combos")
+   * @return aggregated cascade results (to be merged into the original callout response)
+   */
+  public static CalloutCascadeResult cascadeInteractiveCallout(
+      NeoContext ctx, Tab adTab, String triggerField,
+      JSONObject originalFormState, JSONObject calloutResponse) {
+
+    CalloutCascadeResult result = new CalloutCascadeResult();
+    if (ctx == null || adTab == null || calloutResponse == null) {
+      return result;
+    }
+
+    try {
+      // Build a working formState: original fields + values set by the initial callout
+      JSONObject cascadeFormState = new JSONObject(
+          originalFormState != null ? originalFormState.toString() : "{}");
+
+      // Collect fields returned by the initial callout that have further callouts
+      Set<String> pendingFields = new LinkedHashSet<>();
+      Set<String> skipFields = new HashSet<>();
+      skipFields.add(triggerField);
+
+      JSONObject updates = calloutResponse.optJSONObject("updates");
+      if (updates != null) {
+        Iterator<String> keys = updates.keys();
+        while (keys.hasNext()) {
+          String key = keys.next();
+          JSONObject entry = updates.optJSONObject(key);
+          if (entry == null) continue;
+          Object val = entry.opt(VALUE_KEY);
+          if (val == null || JSONObject.NULL.equals(val) || "".equals(String.valueOf(val))) continue;
+          cascadeFormState.put(key, val);
+          if (!skipFields.contains(key) && NeoCalloutService.resolveCallout(adTab, key) != null) {
+            pendingFields.add(key);
+          }
+        }
+      }
+
+      if (pendingFields.isEmpty()) {
+        return result;
+      }
+
+      log.debug("[NEO-CALLOUT] Interactive cascade: {} field(s) queued after '{}': {}",
+          pendingFields.size(), triggerField, pendingFields);
+
+      int depth = 0;
+      while (!pendingFields.isEmpty() && depth < MAX_CALLOUT_CHAIN_DEPTH) {
+        depth++;
+        pendingFields = executeCascadeIteration(
+            pendingFields, ctx, adTab, cascadeFormState, cascadeFormState, skipFields, result);
+      }
+
+    } catch (Exception e) {
+      log.debug("[NEO-CALLOUT] Interactive cascade failed for trigger '{}': {}",
+          triggerField, e.getMessage());
+    }
+
+    return result;
+  }
+
+  /**
    * Collect field names that have non-null defaults and configured callouts.
    */
   private static List<String> collectFieldsWithCallouts(JSONObject defaults,
@@ -1415,7 +1490,7 @@ public class NeoDefaultsService {
    * @param clientId the AD_Client_ID of the current session
    * @return the first org ID ordered by name, or null if none found
    */
-  private static String resolveFirstOrgForClient(String clientId) {
+  public static String resolveFirstOrgForClient(String clientId) {
     try {
       String sql = "SELECT AD_Org_ID FROM AD_Org"
           + " WHERE AD_Client_ID = ? AND IsActive = 'Y' AND AD_Org_ID != '0'"

@@ -62,6 +62,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(CreateDraftInvoiceHandler.class);
   private static final String ACTION_NAME = "createDraftInvoice";
   private static final String CHECK_ACTION = "checkDraftInvoice";
+  private static final String LIST_ACTION  = "listInvoices";
 
   private static final String SPEC_GOODS_SHIPMENT = "goods-shipment";
   private static final String FIELD_DOCUMENT_NO = "documentNo";
@@ -75,9 +76,14 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
     String fieldName = context.getFieldName();
 
-    // GET/POST checkDraftInvoice — returns existing draft info without creating
+    // GET checkDraftInvoice — returns existing draft info without creating
     if (CHECK_ACTION.equals(fieldName) && ("GET".equals(context.getHttpMethod()) || "POST".equals(context.getHttpMethod()))) {
       return handleCheck(context);
+    }
+
+    // GET listInvoices — returns ALL invoices linked to the order via invoice lines
+    if (LIST_ACTION.equals(fieldName) && "GET".equals(context.getHttpMethod())) {
+      return handleList(context);
     }
 
     if (!ACTION_NAME.equals(fieldName) || !"POST".equals(context.getHttpMethod())) {
@@ -185,6 +191,73 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     }
   }
 
+  /**
+   * Returns ALL invoices linked to the given sales order via invoice lines.
+   * This works even when C_Invoice.C_Order_ID is not set (e.g. invoices created
+   * from classic Etendo UI that link via C_InvoiceLine.C_OrderLine_ID).
+   */
+  private NeoResponse handleList(NeoContext context) {
+    String recordId = context.getRecordId();
+    if (StringUtils.isBlank(recordId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Record ID is required");
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        // Find invoices via order lines (covers all creation flows)
+        String hql = "SELECT DISTINCT i FROM Invoice i JOIN i.invoiceLineList il " +
+            "WHERE il.salesOrderLine.salesOrder.id = :orderId " +
+            "AND i.salesTransaction = true " +
+            "ORDER BY i.invoiceDate DESC";
+        List<Invoice> invoices = OBDal.getInstance().getSession()
+            .createQuery(hql, Invoice.class)
+            .setParameter("orderId", recordId)
+            .setMaxResults(100)
+            .list();
+
+        // Also include invoices with C_Order_ID set directly (created via our action)
+        // that may not have lines (edge case: empty invoice)
+        String hqlDirect = "FROM Invoice i WHERE i.salesOrder.id = :orderId " +
+            "AND i.salesTransaction = true ORDER BY i.invoiceDate DESC";
+        List<Invoice> directInvoices = OBDal.getInstance().getSession()
+            .createQuery(hqlDirect, Invoice.class)
+            .setParameter("orderId", recordId)
+            .setMaxResults(100)
+            .list();
+
+        // Merge both lists, deduplicate by ID
+        java.util.Map<String, Invoice> merged = new java.util.LinkedHashMap<>();
+        for (Invoice i : invoices) merged.put(i.getId(), i);
+        for (Invoice i : directInvoices) merged.putIfAbsent(i.getId(), i);
+
+        JSONArray arr = new JSONArray();
+        for (Invoice inv : merged.values()) {
+          JSONObject item = new JSONObject();
+          item.put("id", inv.getId());
+          item.put(FIELD_DOCUMENT_NO, inv.getDocumentNo());
+          item.put("documentStatus", inv.getDocumentStatus());
+          item.put("grandTotalAmount",
+              inv.getGrandTotalAmount() != null ? inv.getGrandTotalAmount() : 0);
+          if (inv.getInvoiceDate() != null) {
+            item.put("invoiceDate", inv.getInvoiceDate().toString());
+          }
+          arr.put(item);
+        }
+
+        JSONObject responseData = new JSONObject();
+        responseData.put("data", arr);
+        JSONObject wrapper = new JSONObject();
+        wrapper.put("response", responseData);
+        return new NeoResponse(200, wrapper);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("Error listing invoices for order {}: {}", recordId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    }
+  }
+
   private List<Invoice> findExistingDrafts(List<String> recordIds, String specName) {
     if (recordIds.isEmpty()) return java.util.Collections.emptyList();
     String hql;
@@ -280,6 +353,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       Map<String, BigDecimal> lineOverrides) {
     boolean hasOverrides = !lineOverrides.isEmpty();
     long lineNo = 10;
+    int addedLines = 0;
     for (OrderLine ol : order.getOrderLineList()) {
       BigDecimal qty = resolveOrderLineQty(ol, hasOverrides, lineOverrides);
       if (qty == null) {
@@ -287,6 +361,10 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       }
       createOrderInvoiceLine(invoice, ol, qty, lineNo);
       lineNo += 10;
+      addedLines++;
+    }
+    if (addedLines == 0) {
+      throw new OBException("No hay líneas a facturar en este pedido");
     }
   }
 
@@ -295,9 +373,14 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     if (!ol.isActive() || (hasOverrides && !lineOverrides.containsKey(ol.getId()))) {
       return null;
     }
-    BigDecimal delivered = ol.getDeliveredQuantity() != null ? ol.getDeliveredQuantity() : BigDecimal.ZERO;
+    if (ol.getProduct() == null) {
+      return null; // skip non-product lines (financial/description)
+    }
+    BigDecimal ordered  = ol.getOrderedQuantity()  != null ? ol.getOrderedQuantity()  : BigDecimal.ZERO;
     BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
-    BigDecimal maxQty = delivered.subtract(invoiced);
+    // Invoice ordered - already-invoiced quantity, regardless of delivery status.
+    // This keeps frontend (totalOrder - totalInvoiced) and backend in sync.
+    BigDecimal maxQty = ordered.subtract(invoiced);
     if (maxQty.compareTo(BigDecimal.ZERO) <= 0) {
       return null;
     }

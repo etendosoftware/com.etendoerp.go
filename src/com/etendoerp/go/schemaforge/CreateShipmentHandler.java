@@ -146,8 +146,21 @@ public class CreateShipmentHandler implements NeoHandler {
     }
 
     long lineNo = 10;
+    int addedLines = 0;
     for (OrderLine orderLine : order.getOrderLineList()) {
       if (!orderLine.isActive()) {
+        continue;
+      }
+      // Skip lines without product or UOM (financial/description lines)
+      if (orderLine.getProduct() == null || orderLine.getUOM() == null) {
+        continue;
+      }
+      java.math.BigDecimal orderedQty = orderLine.getOrderedQuantity();
+      java.math.BigDecimal deliveredQty = orderLine.getDeliveredQuantity() != null
+          ? orderLine.getDeliveredQuantity() : java.math.BigDecimal.ZERO;
+      java.math.BigDecimal pendingQty = orderedQty != null
+          ? orderedQty.subtract(deliveredQty) : java.math.BigDecimal.ZERO;
+      if (pendingQty.compareTo(java.math.BigDecimal.ZERO) <= 0) {
         continue;
       }
 
@@ -159,12 +172,16 @@ public class CreateShipmentHandler implements NeoHandler {
       line.setProduct(orderLine.getProduct());
       line.setUOM(orderLine.getUOM());
       line.setStorageBin(defaultLocator);
-      line.setMovementQuantity(orderLine.getOrderedQuantity());
+      line.setMovementQuantity(pendingQty);
       line.setSalesOrderLine(orderLine);
       line.setDescription(orderLine.getDescription());
 
       OBDal.getInstance().save(line);
       lineNo += 10;
+      addedLines++;
+    }
+    if (addedLines == 0) {
+      throw new OBException("No hay líneas pendientes de entrega en este pedido");
     }
   }
 
