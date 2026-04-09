@@ -36,11 +36,13 @@ final class ProductHandlerUtils {
    */
   static NeoResponse buildListResponse(JSONArray data) {
     try {
+      JSONArray safeData = (data != null) ? data : new JSONArray();
+      int size = safeData.length();
       JSONObject inner = new JSONObject();
-      inner.put("data",      data);
+      inner.put("data",      safeData);
       inner.put("startRow",  0);
-      inner.put("endRow",    data.length());
-      inner.put("totalRows", data.length());
+      inner.put("endRow",    size);
+      inner.put("totalRows", size);
       inner.put("status",    0);
       JSONObject body = new JSONObject();
       body.put("response", inner);
