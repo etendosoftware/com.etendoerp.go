@@ -40,7 +40,7 @@ public class WidgetRevenueTrendHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(WidgetRevenueTrendHandler.class);
 
-  private static final String REVENUE_QUERY =
+  private static final String TREND_QUERY =
       "WITH max_date AS ( "
     + "  SELECT date_trunc('month', max(dateinvoiced)) AS last_month "
     + "  FROM c_invoice "
@@ -54,10 +54,12 @@ public class WidgetRevenueTrendHandler implements NeoHandler {
     + "  ) AS month "
     + ") "
     + "SELECT to_char(m.month, 'Mon') AS label, "
-    + "       COALESCE(SUM(i.grandtotal), 0) AS total "
+    + "       COALESCE(SUM(CASE WHEN i.issotrx = 'Y' THEN i.grandtotal ELSE 0 END), 0) AS revenue_total, "
+    + "       COALESCE(SUM(CASE WHEN i.issotrx = 'N' THEN i.grandtotal ELSE 0 END), 0) AS expense_total "
     + "FROM months m "
     + "LEFT JOIN c_invoice i ON date_trunc('month', i.dateinvoiced) = m.month "
-    + "  AND i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId "
+    + "  AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId "
+    + "  AND i.issotrx IN ('Y','N') "
     + "GROUP BY m.month, to_char(m.month, 'Mon') "
     + "ORDER BY m.month";
 
@@ -75,24 +77,28 @@ public class WidgetRevenueTrendHandler implements NeoHandler {
         @SuppressWarnings("unchecked")
         NativeQuery<Object[]> query = OBDal.getInstance()
             .getSession()
-            .createNativeQuery(REVENUE_QUERY);
+            .createNativeQuery(TREND_QUERY);
         query.setParameter("clientId", clientId);
 
         List<Object[]> rows = query.list();
 
         JSONArray labels = new JSONArray();
         JSONArray values = new JSONArray();
+        JSONArray expenseValues = new JSONArray();
 
         for (Object[] row : rows) {
           String label = ((String) row[0]).trim();
-          BigDecimal total = (BigDecimal) row[1];
+          BigDecimal revenueTotal = (BigDecimal) row[1];
+          BigDecimal expenseTotal = (BigDecimal) row[2];
           labels.put(label);
-          values.put(total.longValue());
+          values.put(revenueTotal.longValue());
+          expenseValues.put(expenseTotal.longValue());
         }
 
         JSONObject trend = new JSONObject();
         trend.put("labels", labels);
         trend.put("values", values);
+        trend.put("expenseValues", expenseValues);
 
         JSONArray data = new JSONArray();
         data.put(trend);
