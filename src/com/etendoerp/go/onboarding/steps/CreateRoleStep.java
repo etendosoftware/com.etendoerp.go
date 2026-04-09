@@ -92,66 +92,11 @@ public class CreateRoleStep implements OnboardingStep {
           throw new OBException("Role not found with ID: " + roleId);
         }
 
-        // 3. Get existing window access for this role (to avoid duplicates)
-        Set<String> existingWindowIds = new HashSet<>();
-        try (PreparedStatement ps = conn.prepareStatement(
-            "SELECT ad_window_id FROM ad_window_access WHERE ad_role_id = ?")) {
-          ps.setString(1, roleId);
-          try (ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-              existingWindowIds.add(rs.getString(1));
-            }
-          }
-        }
+        // 3-4. Grant WindowAccess for NEO window specs
+        grantWindowAccess(conn, client, orgZero, role);
 
-        // 4. Grant WindowAccess for NEO window specs not already granted
-        OBCriteria<SFSpec> windowSpecs = OBDal.getInstance().createCriteria(SFSpec.class);
-        windowSpecs.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-        windowSpecs.add(Restrictions.eq(SFSpec.PROPERTY_SPECTYPE, "W"));
-        windowSpecs.setFilterOnReadableClients(false);
-        List<SFSpec> windowSpecList = windowSpecs.list();
-        for (SFSpec spec : windowSpecList) {
-          if (spec.getADWindow() != null && !existingWindowIds.contains(spec.getADWindow().getId())) {
-            WindowAccess wa = OBProvider.getInstance().get(WindowAccess.class);
-            wa.setNewOBObject(true);
-            wa.setClient(client);
-            wa.setOrganization(orgZero);
-            wa.setRole(role);
-            wa.setWindow(spec.getADWindow());
-            wa.setEditableField(true);
-            OBDal.getInstance().save(wa);
-          }
-        }
-
-        // 5. Get existing process access (to avoid duplicates)
-        Set<String> existingProcessIds = new HashSet<>();
-        try (PreparedStatement ps = conn.prepareStatement(
-            "SELECT ad_process_id FROM ad_process_access WHERE ad_role_id = ?")) {
-          ps.setString(1, roleId);
-          try (ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-              existingProcessIds.add(rs.getString(1));
-            }
-          }
-        }
-
-        // 6. Grant ProcessAccess for NEO process specs not already granted
-        OBCriteria<SFSpec> processSpecs = OBDal.getInstance().createCriteria(SFSpec.class);
-        processSpecs.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-        processSpecs.add(Restrictions.eq(SFSpec.PROPERTY_SPECTYPE, "P"));
-        processSpecs.setFilterOnReadableClients(false);
-        List<SFSpec> processSpecList = processSpecs.list();
-        for (SFSpec spec : processSpecList) {
-          if (spec.getProcess() != null && !existingProcessIds.contains(spec.getProcess().getId())) {
-            ProcessAccess pa = OBProvider.getInstance().get(ProcessAccess.class);
-            pa.setNewOBObject(true);
-            pa.setClient(client);
-            pa.setOrganization(orgZero);
-            pa.setRole(role);
-            pa.setProcess(spec.getProcess());
-            OBDal.getInstance().save(pa);
-          }
-        }
+        // 5-6. Grant ProcessAccess for NEO process specs
+        grantProcessAccess(conn, client, orgZero, role);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -160,5 +105,64 @@ public class CreateRoleStep implements OnboardingStep {
     } catch (Exception e) {
       throw new OnboardingStepException(e.getMessage(), e);
     }
+  }
+
+  private void grantWindowAccess(Connection conn, Client client,
+      Organization orgZero, Role role) throws Exception {
+    Set<String> existing = queryExistingIds(conn,
+        "SELECT ad_window_id FROM ad_window_access WHERE ad_role_id = ?", role.getId());
+
+    OBCriteria<SFSpec> specs = OBDal.getInstance().createCriteria(SFSpec.class);
+    specs.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    specs.add(Restrictions.eq(SFSpec.PROPERTY_SPECTYPE, "W"));
+    specs.setFilterOnReadableClients(false);
+    for (SFSpec spec : specs.list()) {
+      if (spec.getADWindow() != null && !existing.contains(spec.getADWindow().getId())) {
+        WindowAccess wa = OBProvider.getInstance().get(WindowAccess.class);
+        wa.setNewOBObject(true);
+        wa.setClient(client);
+        wa.setOrganization(orgZero);
+        wa.setRole(role);
+        wa.setWindow(spec.getADWindow());
+        wa.setEditableField(true);
+        OBDal.getInstance().save(wa);
+      }
+    }
+  }
+
+  private void grantProcessAccess(Connection conn, Client client,
+      Organization orgZero, Role role) throws Exception {
+    Set<String> existing = queryExistingIds(conn,
+        "SELECT ad_process_id FROM ad_process_access WHERE ad_role_id = ?", role.getId());
+
+    OBCriteria<SFSpec> specs = OBDal.getInstance().createCriteria(SFSpec.class);
+    specs.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    specs.add(Restrictions.eq(SFSpec.PROPERTY_SPECTYPE, "P"));
+    specs.setFilterOnReadableClients(false);
+    for (SFSpec spec : specs.list()) {
+      if (spec.getProcess() != null && !existing.contains(spec.getProcess().getId())) {
+        ProcessAccess pa = OBProvider.getInstance().get(ProcessAccess.class);
+        pa.setNewOBObject(true);
+        pa.setClient(client);
+        pa.setOrganization(orgZero);
+        pa.setRole(role);
+        pa.setProcess(spec.getProcess());
+        OBDal.getInstance().save(pa);
+      }
+    }
+  }
+
+  private Set<String> queryExistingIds(Connection conn, String sql, String roleId)
+      throws Exception {
+    Set<String> ids = new HashSet<>();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, roleId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          ids.add(rs.getString(1));
+        }
+      }
+    }
+    return ids;
   }
 }
