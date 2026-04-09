@@ -887,7 +887,7 @@ public class NeoServlet extends HttpBaseServlet {
   /**
    * Parsed path components.
    */
-  static class NeoPathInfo {
+  public static class NeoPathInfo {
     final String specName;
     final String entityName;
     final String recordId;
