@@ -183,7 +183,7 @@ class SelectorAuxResolver {
    */
   static List<String> parseSelectAliases(String selectClause) {
     java.util.regex.Matcher aliasMatcher = Pattern.compile(
-        "(?:,|SELECT(?:\\s+DISTINCT)?)\\s+(.+?)\\s+[Aa][Ss]\\s+(\\w+)",
+        "(?:,|SELECT(?:\\s++DISTINCT)?)\\s++(.+?)\\s++[Aa][Ss]\\s++(\\w+)",
         Pattern.DOTALL).matcher(selectClause);
     List<String> aliases = new ArrayList<>();
     while (aliasMatcher.find()) {

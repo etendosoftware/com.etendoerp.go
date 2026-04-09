@@ -229,7 +229,7 @@ class SelectorQueryBuilder {
     for (int i = 0; i < selectExprs.length; i++) {
       String expr = selectExprs[i].trim();
       String colAlias;
-      java.util.regex.Matcher asMatcher = Pattern.compile("\\s+as\\s+(\\w+)\\s*$",
+      java.util.regex.Matcher asMatcher = Pattern.compile("\\s++as\\s++(\\w++)\\s*+$",
           Pattern.CASE_INSENSITIVE).matcher(expr);
       if (asMatcher.find()) {
         colAlias = asMatcher.group(1);
