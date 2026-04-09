@@ -518,8 +518,66 @@ public class NeoServlet extends HttpBaseServlet {
     }
 
     OBContext context = SecureWebServicesUtils.createContext(userId, roleId, orgId, warehouseId, clientId);
+    // The JWT warehouse may have been set to an inaccessible warehouse by the token generator
+    // (SecureWebServicesUtils.getWarehouse() falls back to warehouseList.get(0) when the user
+    // has no default, without filtering by client). Validate it against the user's readable orgs;
+    // if inaccessible, find the first warehouse the user can actually access.
+    if (context.getWarehouse() != null) {
+      String whOrgId = context.getWarehouse().getOrganization().getId();
+      boolean accessible = false;
+      for (String readableOrg : context.getReadableOrganizations()) {
+        if (readableOrg.equals(whOrgId)) {
+          accessible = true;
+          break;
+        }
+      }
+      if (!accessible) {
+        log.warn("JWT warehouse '{}' (org='{}') is not in user '{}' readable orgs — resolving accessible warehouse",
+            warehouseId, whOrgId, userId);
+        String correctedWarehouseId = findAccessibleWarehouse(context);
+        context = SecureWebServicesUtils.createContext(userId, roleId, orgId, correctedWarehouseId, clientId);
+      }
+    }
     OBContext.setOBContext(context);
     OBContext.setOBContextInSession(request, context);
+  }
+
+  /**
+   * Finds the first warehouse accessible to the current user: active, same client, and belonging
+   * to one of the user's readable organizations. Returns {@code null} if none is found, in which
+   * case the context will be created without a warehouse and warehouse defaults will be empty.
+   */
+  private static String findAccessibleWarehouse(OBContext ctx) {
+    try {
+      OBContext.setAdminMode(true);
+      Set<String> readableOrgs = new java.util.HashSet<>(
+          java.util.Arrays.asList(ctx.getReadableOrganizations()));
+      OBCriteria<org.openbravo.model.common.enterprise.Warehouse> crit =
+          OBDal.getInstance().createCriteria(org.openbravo.model.common.enterprise.Warehouse.class);
+      crit.add(Restrictions.eq(
+          org.openbravo.model.common.enterprise.Warehouse.PROPERTY_CLIENT,
+          ctx.getCurrentClient()));
+      crit.add(Restrictions.eq(
+          org.openbravo.model.common.enterprise.Warehouse.PROPERTY_ACTIVE, true));
+      crit.setMaxResults(50);
+      for (org.openbravo.model.common.enterprise.Warehouse wh : crit.list()) {
+        String whOrgId = wh.getOrganization().getId();
+        if (readableOrgs.contains(whOrgId)) {
+          log.debug("Resolved accessible warehouse '{}' (org='{}') for user '{}'",
+              wh.getId(), whOrgId, ctx.getUser().getId());
+          return wh.getId();
+        }
+      }
+      log.warn("No accessible warehouse found for user '{}' client '{}'",
+          ctx.getUser().getId(), ctx.getCurrentClient().getId());
+      return null;
+    } catch (Exception e) {
+      log.error("Error finding accessible warehouse for user '{}': {}",
+          ctx.getUser().getId(), e.getMessage(), e);
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /**
