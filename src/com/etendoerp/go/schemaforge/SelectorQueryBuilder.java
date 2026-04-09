@@ -228,18 +228,30 @@ class SelectorQueryBuilder {
     Map<String, Integer> colIndexMap = new HashMap<>();
     for (int i = 0; i < selectExprs.length; i++) {
       String expr = selectExprs[i].trim();
-      String colAlias;
-      java.util.regex.Matcher asMatcher = Pattern.compile("\\s++as\\s++(\\w++)\\s*+$",
-          Pattern.CASE_INSENSITIVE).matcher(expr);
-      if (asMatcher.find()) {
-        colAlias = asMatcher.group(1);
-      } else {
-        int dotIdx = expr.lastIndexOf('.');
-        colAlias = dotIdx >= 0 ? expr.substring(dotIdx + 1).trim() : expr.trim();
-      }
+      String colAlias = extractAlias(expr);
       colIndexMap.put(colAlias.toLowerCase(), i);
     }
     return colIndexMap;
+  }
+
+  /**
+   * Extract the column alias from a SELECT expression string.
+   * Handles "expr as alias" notation (case-insensitive) and bare "table.column" expressions.
+   * Uses string parsing instead of regex to avoid ReDoS risk with find().
+   */
+  private static String extractAlias(String expr) {
+    // Search for " as " (case-insensitive) — last occurrence to handle nested expressions
+    String lower = expr.toLowerCase();
+    int asIdx = lower.lastIndexOf(" as ");
+    if (asIdx >= 0) {
+      String afterAs = expr.substring(asIdx + 4).trim();
+      if (!afterAs.isEmpty()) {
+        return afterAs;
+      }
+    }
+    // Fallback: use the part after the last dot, or the whole expression
+    int dotIdx = expr.lastIndexOf('.');
+    return dotIdx >= 0 ? expr.substring(dotIdx + 1).trim() : expr.trim();
   }
 
   /**
