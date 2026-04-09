@@ -53,8 +53,12 @@ public class NeoCrudHelper {
   private static final Logger log = LogManager.getLogger(NeoCrudHelper.class);
   private static final String PARENT_ID_KEY = "parentId";
   private static final String NEO_ERROR_PREFIX = "__NEO_ERROR__:";
-  /** Internal-only HQL predicate param — stripped from HTTP request params to prevent injection. */
-  static final String NEO_WHERE_PARAM = "_neoWhere";
+  /**
+   * Internal-only HQL predicate — stripped from HTTP request params in {@link #buildBaseParams}
+   * to prevent HQL injection. Trusted internal code (e.g. hooks) may still inject it into the
+   * params map after {@code buildBaseParams} returns, and the where-clause builder will consume it.
+   */
+  public static final String NEO_WHERE_PARAM = "_neoWhere";
 
   private NeoCrudHelper() {
   }

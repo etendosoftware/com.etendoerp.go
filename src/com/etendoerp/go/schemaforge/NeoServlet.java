@@ -881,8 +881,9 @@ public class NeoServlet extends HttpBaseServlet {
         }
       }
 
-      // Allow callers to inject an additional HQL predicate via _neoWhere (e.g. from hooks or
-      // custom handlers). Consumed here so it is not passed as a raw query param downstream.
+      // _neoWhere is an internal extension point: buildBaseParams strips it from HTTP query params
+      // (HQL injection prevention), but trusted internal code (hooks, custom handlers) may add it
+      // to the params map after buildBaseParams returns. Consumed here before passing to the service.
       String neoWhere = params.remove(NeoCrudHelper.NEO_WHERE_PARAM);
       if (StringUtils.isNotBlank(neoWhere)) {
         if (whereClause.length() > 0) {
