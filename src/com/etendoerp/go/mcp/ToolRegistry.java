@@ -69,15 +69,10 @@ public class ToolRegistry {
    */
   public List<McpToolDefinition> generateTools(Set<String> scopes) {
     List<McpToolDefinition> tools = new ArrayList<>();
-
-    boolean hasAll = scopes.contains("neo:*");
-    boolean canRead = hasAll || scopes.contains("neo:read");
-    boolean canWrite = hasAll || scopes.contains("neo:write");
-    boolean canProcess = hasAll || scopes.contains("neo:process");
-    boolean canReport = hasAll || scopes.contains("neo:report");
+    ScopePermissions permissions = resolvePermissions(scopes);
 
     // Always add neo_discover if user can read
-    if (canRead) {
+    if (permissions.canRead) {
       tools.add(buildDiscoverTool());
     }
 
@@ -91,58 +86,74 @@ public class ToolRegistry {
     List<String> accessibleWindowSpecs = new ArrayList<>();
 
     for (SFSpec spec : specs) {
-      try {
-        String specType = spec.getSpecType();
-        String specName = spec.getName();
-
-        if ("W".equals(specType)) {
-          Window window = spec.getADWindow();
-          if (window != null && !NeoAccessUtils.hasWindowAccess(window.getId())) {
-            continue;
-          }
-          accessibleWindowSpecs.add(specName);
-
-        } else if ("P".equals(specType)) {
-          Process adProcess = spec.getProcess();
-          if (adProcess != null && !NeoAccessUtils.hasProcessAccess(adProcess.getId())) {
-            continue;
-          }
-          if (canProcess) {
-            tools.add(buildProcessTool(specName, spec));
-          }
-
-        } else if ("R".equals(specType)) {
-          Process adProcess = spec.getProcess();
-          if (adProcess != null && !NeoAccessUtils.hasProcessAccess(adProcess.getId())) {
-            continue;
-          }
-          if (canReport) {
-            tools.add(buildReportTool(specName, spec));
-          }
-        }
-      } catch (Exception e) {
-        log.warn("Error generating tools for spec '{}': {}", spec.getName(), e.getMessage());
-      }
+      processSpec(spec, accessibleWindowSpecs, tools, permissions);
     }
 
     // Register CRUD tools once with enum of accessible spec names
-    if (!accessibleWindowSpecs.isEmpty()) {
-      if (canRead) {
-        tools.add(buildListTool(accessibleWindowSpecs));
-        tools.add(buildGetTool(accessibleWindowSpecs));
-        tools.add(buildSelectorsTool(accessibleWindowSpecs));
-        tools.add(buildDefaultsTool(accessibleWindowSpecs));
-        tools.add(buildSchemaTool(accessibleWindowSpecs));
-      }
-      if (canWrite) {
-        tools.add(buildCreateTool(accessibleWindowSpecs));
-        tools.add(buildUpdateTool(accessibleWindowSpecs));
-        tools.add(buildDeleteTool(accessibleWindowSpecs));
-      }
-    }
+    registerCrudTools(tools, accessibleWindowSpecs, permissions);
 
     log.debug("Generated {} MCP tools for scopes {}", tools.size(), scopes);
     return tools;
+  }
+
+  private ScopePermissions resolvePermissions(Set<String> scopes) {
+    boolean hasAll = scopes.contains("neo:*");
+    return new ScopePermissions(
+        hasAll || scopes.contains("neo:read"),
+        hasAll || scopes.contains("neo:write"),
+        hasAll || scopes.contains("neo:process"),
+        hasAll || scopes.contains("neo:report"));
+  }
+
+  private void processSpec(SFSpec spec, List<String> accessibleWindowSpecs,
+      List<McpToolDefinition> tools, ScopePermissions permissions) {
+    try {
+      String specType = spec.getSpecType();
+      if ("W".equals(specType)) {
+        addWindowSpec(spec, accessibleWindowSpecs);
+        return;
+      }
+      if ("P".equals(specType) && hasProcessAccess(spec) && permissions.canProcess) {
+        tools.add(buildProcessTool(spec.getName(), spec));
+        return;
+      }
+      if ("R".equals(specType) && hasProcessAccess(spec) && permissions.canReport) {
+        tools.add(buildReportTool(spec.getName(), spec));
+      }
+    } catch (Exception e) {
+      log.warn("Error generating tools for spec '{}': {}", spec.getName(), e.getMessage());
+    }
+  }
+
+  private void addWindowSpec(SFSpec spec, List<String> accessibleWindowSpecs) {
+    Window window = spec.getADWindow();
+    if (window == null || NeoAccessUtils.hasWindowAccess(window.getId())) {
+      accessibleWindowSpecs.add(spec.getName());
+    }
+  }
+
+  private boolean hasProcessAccess(SFSpec spec) {
+    Process adProcess = spec.getProcess();
+    return adProcess == null || NeoAccessUtils.hasProcessAccess(adProcess.getId());
+  }
+
+  private void registerCrudTools(List<McpToolDefinition> tools, List<String> accessibleWindowSpecs,
+      ScopePermissions permissions) {
+    if (accessibleWindowSpecs.isEmpty()) {
+      return;
+    }
+    if (permissions.canRead) {
+      tools.add(buildListTool(accessibleWindowSpecs));
+      tools.add(buildGetTool(accessibleWindowSpecs));
+      tools.add(buildSelectorsTool(accessibleWindowSpecs));
+      tools.add(buildDefaultsTool(accessibleWindowSpecs));
+      tools.add(buildSchemaTool(accessibleWindowSpecs));
+    }
+    if (permissions.canWrite) {
+      tools.add(buildCreateTool(accessibleWindowSpecs));
+      tools.add(buildUpdateTool(accessibleWindowSpecs));
+      tools.add(buildDeleteTool(accessibleWindowSpecs));
+    }
   }
 
   // ── Tool name resolution ──────────────────────────────────────────────
@@ -165,8 +176,8 @@ public class ToolRegistry {
     }
 
     // Report tools: strip "generate_" prefix and convert back to kebab
-    if (toolName.startsWith("generate_")) {
-      return snakeToKebab(toolName.substring("generate_".length()));
+    if (toolName.startsWith(McpConstants.GENERATE_PREFIX)) {
+      return snakeToKebab(toolName.substring(McpConstants.GENERATE_PREFIX.length()));
     }
 
     // Process tools: tool name is snake_case of spec name
@@ -175,6 +186,9 @@ public class ToolRegistry {
 
   /**
    * Check if a tool name is a CRUD tool (shared across specs).
+  *
+  * @param toolName the MCP tool name
+  * @return true when the tool is one of the shared CRUD tools
    */
   public static boolean isCrudTool(String toolName) {
     switch (toolName) {
@@ -196,9 +210,9 @@ public class ToolRegistry {
   // ── Discovery tool ─────────────────────────────────────────────────────
 
   private McpToolDefinition buildDiscoverTool() {
-    Map<String, Object> schema = buildSchema("object",
+    Map<String, Object> schema = buildSchema(McpConstants.TYPE_OBJECT,
         "Discover all available NEO Headless API specs and their entities");
-    schema.put("properties", new HashMap<>());
+    schema.put(McpConstants.KEY_PROPERTIES, new HashMap<>());
     return new McpToolDefinition(
         "neo_discover",
         "List all available NEO Headless API specs the current user can access. "
@@ -212,92 +226,97 @@ public class ToolRegistry {
   private McpToolDefinition buildListTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp("Spec name (use neo_discover to find available specs)", specNames));
-    props.put("entity", stringProp("Entity name within the spec (e.g. 'header', 'lines')", true));
+    props.put(McpConstants.PARAM_ENTITY,
+      stringProp(McpConstants.LABEL_ENTITY_NAME_WITH_EXAMPLE));
     props.put("filters", objectProp("Filter criteria as key-value pairs (column=value)"));
     props.put("limit", intProp("Maximum number of records to return (default 100)"));
     props.put("offset", intProp("Number of records to skip for pagination"));
-    props.put("orderBy", stringProp("Column name to sort by, prefix with '-' for descending", false));
+    props.put("orderBy", stringProp("Column name to sort by, prefix with '-' for descending"));
 
     return new McpToolDefinition(
         "neo_list",
         "List records from a NEO Headless API spec. "
             + "Supports filtering, pagination, and sorting.",
-        buildObjectSchema(props, List.of("spec", "entity")));
+          buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
   }
 
   private McpToolDefinition buildGetTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put("spec", enumProp("Spec name", specNames));
-    props.put("entity", stringProp("Entity name within the spec", true));
-    props.put("id", stringProp("Record ID to retrieve", true));
+    props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
+    props.put("id", stringProp("Record ID to retrieve"));
 
     return new McpToolDefinition(
         "neo_get",
         "Get a single record by ID from a NEO Headless API spec.",
-        buildObjectSchema(props, List.of("spec", "entity", "id")));
+          buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));
   }
 
   private McpToolDefinition buildCreateTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put("spec", enumProp("Spec name", specNames));
-    props.put("entity", stringProp("Entity name within the spec", true));
-    props.put("fields", objectProp("Field values for the new record"));
+    props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
+    props.put(McpConstants.PARAM_FIELDS, objectProp("Field values for the new record"));
 
     return new McpToolDefinition(
         "neo_create",
         "Create a new record in a NEO Headless API spec.",
-        buildObjectSchema(props, List.of("spec", "entity", "fields")));
+        buildObjectSchema(props,
+          List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS)));
   }
 
   private McpToolDefinition buildUpdateTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put("spec", enumProp("Spec name", specNames));
-    props.put("entity", stringProp("Entity name within the spec", true));
-    props.put("id", stringProp("Record ID to update", true));
-    props.put("fields", objectProp("Field values to update"));
+    props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
+    props.put("id", stringProp("Record ID to update"));
+    props.put(McpConstants.PARAM_FIELDS, objectProp("Field values to update"));
 
     return new McpToolDefinition(
         "neo_update",
         "Update an existing record in a NEO Headless API spec.",
-        buildObjectSchema(props, List.of("spec", "entity", "id", "fields")));
+        buildObjectSchema(props,
+          List.of("spec", McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS)));
   }
 
   private McpToolDefinition buildDeleteTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put("spec", enumProp("Spec name", specNames));
-    props.put("entity", stringProp("Entity name within the spec", true));
-    props.put("id", stringProp("Record ID to delete", true));
+    props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
+    props.put("id", stringProp("Record ID to delete"));
 
     return new McpToolDefinition(
         "neo_delete",
         "Delete a record from a NEO Headless API spec.",
-        buildObjectSchema(props, List.of("spec", "entity", "id")));
+          buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));
   }
 
   private McpToolDefinition buildSelectorsTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put("spec", enumProp("Spec name", specNames));
-    props.put("entity", stringProp("Entity name within the spec", true));
-    props.put("column", stringProp("Field name (e.g. 'businessPartner') or DB column name (e.g. 'C_BPartner_ID') to get selector values for", true));
-    props.put("query", stringProp("Search query to filter selector values", false));
+    props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
+    props.put(McpConstants.PARAM_COLUMN,
+      stringProp("Field name (e.g. 'businessPartner') or DB column name (e.g. 'C_BPartner_ID') to get selector values for"));
+    props.put("query", stringProp("Search query to filter selector values"));
 
     return new McpToolDefinition(
         "neo_selectors",
         "Get foreign-key selector values for a column. "
             + "Use this to discover valid values for FK reference fields.",
-        buildObjectSchema(props, List.of("spec", "entity", "column")));
+        buildObjectSchema(props,
+          List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN)));
   }
 
   private McpToolDefinition buildDefaultsTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put("spec", enumProp("Spec name", specNames));
-    props.put("entity", stringProp("Entity name within the spec", true));
+    props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
 
     return new McpToolDefinition(
         "neo_defaults",
         "Get default field values for creating a new record. "
             + "Optional — neo_create auto-fills defaults, so only call this if you need to inspect default values before creating.",
-        buildObjectSchema(props, List.of("spec", "entity")));
+        buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
   }
 
   // ── Schema tool ────────────────────────────────────────────────────────
@@ -305,7 +324,8 @@ public class ToolRegistry {
   private McpToolDefinition buildSchemaTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp("Spec name (use neo_discover to find available specs)", specNames));
-    props.put("entity", stringProp("Entity name within the spec (e.g. 'Header', 'Lines')", true));
+    props.put(McpConstants.PARAM_ENTITY,
+      stringProp("Entity name within the spec (e.g. 'Header', 'Lines')"));
 
     return new McpToolDefinition(
         "neo_schema",
@@ -338,7 +358,7 @@ public class ToolRegistry {
   // ── Report tool ────────────────────────────────────────────────────────
 
   private McpToolDefinition buildReportTool(String specName, SFSpec spec) {
-    String toolName = "generate_" + kebabToSnake(specName);
+    String toolName = McpConstants.GENERATE_PREFIX + kebabToSnake(specName);
     String desc = String.format("Generate the '%s' report", specName);
     if (spec.getDescription() != null) {
       desc += ". " + spec.getDescription();
@@ -380,8 +400,7 @@ public class ToolRegistry {
           if (field.getADColumn() != null) {
             String fieldName = field.getADColumn().getDBColumnName();
             String label = field.getADColumn().getName();
-            boolean required = field.getADColumn().isMandatory();
-            paramProps.put(fieldName, stringProp(label, required));
+            paramProps.put(fieldName, stringProp(label));
           }
         }
       }
@@ -398,7 +417,7 @@ public class ToolRegistry {
     Map<String, Object> schema = new LinkedHashMap<>();
     schema.put("type", type);
     if (description != null) {
-      schema.put("description", description);
+      schema.put(McpConstants.KEY_DESCRIPTION, description);
     }
     return schema;
   }
@@ -406,25 +425,25 @@ public class ToolRegistry {
   private Map<String, Object> buildObjectSchema(Map<String, Object> properties,
       List<String> required) {
     Map<String, Object> schema = new LinkedHashMap<>();
-    schema.put("type", "object");
-    schema.put("properties", properties);
+    schema.put("type", McpConstants.TYPE_OBJECT);
+    schema.put(McpConstants.KEY_PROPERTIES, properties);
     if (required != null && !required.isEmpty()) {
       schema.put("required", required);
     }
     return schema;
   }
 
-  private Map<String, Object> stringProp(String description, boolean required) {
+  private Map<String, Object> stringProp(String description) {
     Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", "string");
-    prop.put("description", description);
+    prop.put("type", McpConstants.TYPE_STRING);
+    prop.put(McpConstants.KEY_DESCRIPTION, description);
     return prop;
   }
 
   private Map<String, Object> enumProp(String description, List<String> values) {
     Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", "string");
-    prop.put("description", description);
+    prop.put("type", McpConstants.TYPE_STRING);
+    prop.put(McpConstants.KEY_DESCRIPTION, description);
     prop.put("enum", values);
     return prop;
   }
@@ -432,24 +451,24 @@ public class ToolRegistry {
   private Map<String, Object> intProp(String description) {
     Map<String, Object> prop = new LinkedHashMap<>();
     prop.put("type", "integer");
-    prop.put("description", description);
+    prop.put(McpConstants.KEY_DESCRIPTION, description);
     return prop;
   }
 
   private Map<String, Object> objectProp(String description) {
     Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", "object");
-    prop.put("description", description);
+    prop.put("type", McpConstants.TYPE_OBJECT);
+    prop.put(McpConstants.KEY_DESCRIPTION, description);
     return prop;
   }
 
   private Map<String, Object> objectPropWithProperties(String description,
       Map<String, Object> nestedProps) {
     Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", "object");
-    prop.put("description", description);
+    prop.put("type", McpConstants.TYPE_OBJECT);
+    prop.put(McpConstants.KEY_DESCRIPTION, description);
     if (nestedProps != null && !nestedProps.isEmpty()) {
-      prop.put("properties", nestedProps);
+      prop.put(McpConstants.KEY_PROPERTIES, nestedProps);
     }
     return prop;
   }
@@ -468,5 +487,20 @@ public class ToolRegistry {
    */
   static String snakeToKebab(String snake) {
     return snake.replace('_', '-');
+  }
+
+  private static final class ScopePermissions {
+    private final boolean canRead;
+    private final boolean canWrite;
+    private final boolean canProcess;
+    private final boolean canReport;
+
+    private ScopePermissions(boolean canRead, boolean canWrite, boolean canProcess,
+        boolean canReport) {
+      this.canRead = canRead;
+      this.canWrite = canWrite;
+      this.canProcess = canProcess;
+      this.canReport = canReport;
+    }
   }
 }

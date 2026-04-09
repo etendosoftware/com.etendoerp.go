@@ -15,26 +15,11 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.onboarding;
+package com.etendoerp.go.mcp;
 
-/**
- * Contract for an individual onboarding action in the environment creation workflow.
- */
-@SuppressWarnings("java:S112")
-public interface OnboardingStep {
+class McpToolException extends RuntimeException {
 
-  /**
-   * Returns the display name used in onboarding progress events.
-   *
-   * @return step name shown to the client while onboarding runs
-   */
-  String name();
-
-  /**
-   * Executes the onboarding action, updating the shared context as needed.
-   *
-   * @param ctx mutable onboarding context shared across the step chain
-   * @throws Exception when the step cannot complete successfully
-   */
-  void execute(OnboardingContext ctx) throws Exception;
+  McpToolException(String message, Throwable cause) {
+    super(message, cause);
+  }
 }

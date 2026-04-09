@@ -39,6 +39,7 @@ import org.codehaus.jettison.json.JSONObject;
 
 import org.openbravo.dal.core.OBContext;
 
+import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 
 /**
@@ -71,19 +72,16 @@ public class McpServlet extends HttpServlet {
 
   // ── CORS ───────────────────────────────────────────────────────────────
 
-  private void setCorsHeaders(HttpServletResponse response) {
-    response.setHeader("Access-Control-Allow-Origin", "*");
-    response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    response.setHeader("Access-Control-Allow-Headers",
-        "Content-Type, Authorization, Accept, Mcp-Session-Id");
-    response.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id, WWW-Authenticate");
-    response.setHeader("Access-Control-Max-Age", "86400");
+  private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
+    CorsUtils.apply(request, response, "GET, POST, OPTIONS",
+        "Content-Type, Authorization, Accept, Mcp-Session-Id",
+        "Mcp-Session-Id, WWW-Authenticate", false);
   }
 
   @Override
   protected void doOptions(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    setCorsHeaders(response);
+    setCorsHeaders(request, response);
     response.setStatus(HttpServletResponse.SC_NO_CONTENT);
   }
 
@@ -99,7 +97,7 @@ public class McpServlet extends HttpServlet {
   protected void doPost(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
 
-    setCorsHeaders(response);
+    setCorsHeaders(request, response);
 
     // Authenticate via OAuth2 Bearer token
     AuthIdentity identity = authenticate(request, response);
@@ -162,7 +160,7 @@ public class McpServlet extends HttpServlet {
   @Override
   protected void doGet(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    setCorsHeaders(response);
+    setCorsHeaders(request, response);
     response.setContentType(CONTENT_TYPE_JSON);
 
     String pathInfo = request.getPathInfo();
@@ -295,9 +293,9 @@ public class McpServlet extends HttpServlet {
       case "tools/call":
         return handleToolsCall(identity, params);
       case "resources/list":
-        return handleResourcesList(identity);
+        return handleResourcesList();
       case "resources/read":
-        return handleResourcesRead(identity, params);
+        return handleResourcesRead(params);
       default:
         throw new McpMethodNotFoundException("Method not found: " + method);
     }
@@ -382,7 +380,7 @@ public class McpServlet extends HttpServlet {
 
   // ── Handler: resources/list ─────────────────────────────────────────────
 
-  private JSONObject handleResourcesList(AuthIdentity identity) throws Exception {
+  private JSONObject handleResourcesList() throws Exception {
     OBContext.setAdminMode(true);
     try {
       McpResourceProvider provider = new McpResourceProvider();
@@ -396,7 +394,7 @@ public class McpServlet extends HttpServlet {
 
   // ── Handler: resources/read ─────────────────────────────────────────────
 
-  private JSONObject handleResourcesRead(AuthIdentity identity, JSONObject params) throws Exception {
+  private JSONObject handleResourcesRead(JSONObject params) throws Exception {
     String uri = params != null ? params.optString("uri", "") : "";
     if (uri.isEmpty()) {
       throw new IllegalArgumentException("Missing 'uri' parameter for resources/read");

@@ -21,8 +21,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Order;
@@ -52,7 +50,14 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  */
 public class McpResourceProvider {
 
-  private static final Logger log = LogManager.getLogger(McpResourceProvider.class);
+  private static final String FIELD_DESCRIPTION = "description";
+  private static final String FIELD_MIME_TYPE = "mimeType";
+  private static final String FIELD_PROCESS_NAME = "processName";
+  private static final String TYPE_STRING = "string";
+  private static final String MIME_TYPE_JSON = "application/json";
+  private static final String URI_SPECS = "neo://specs";
+  private static final String URI_SPECS_PREFIX = URI_SPECS + "/";
+  private static final String URI_PROCESSES_PREFIX = "neo://processes/";
 
   // AD_Reference IDs for selector types
   private static final Set<String> SELECTOR_REFS = new HashSet<>();
@@ -67,18 +72,19 @@ public class McpResourceProvider {
    * List all available MCP resources.
    * Returns one static resource (neo://specs) plus one resource per active spec.
    *
-   * @return a JSONArray of resource descriptors
+  * @return a JSONArray of resource descriptors
+  * @throws Exception if schema metadata cannot be read
    */
   public JSONArray listResources() throws Exception {
     JSONArray resources = new JSONArray();
 
     // Static resource: list of all specs
     JSONObject specsList = new JSONObject();
-    specsList.put("uri", "neo://specs");
+    specsList.put("uri", URI_SPECS);
     specsList.put("name", "Available NEO Specs");
-    specsList.put("description",
+    specsList.put(FIELD_DESCRIPTION,
         "List of all NEO Headless API specs configured in this instance");
-    specsList.put("mimeType", "application/json");
+    specsList.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
     resources.put(specsList);
 
     // Dynamic resources: one per active spec
@@ -92,21 +98,21 @@ public class McpResourceProvider {
 
       // Spec schema resource
       JSONObject specResource = new JSONObject();
-      specResource.put("uri", "neo://specs/" + specName);
+        specResource.put("uri", URI_SPECS_PREFIX + specName);
       specResource.put("name", "Spec: " + specName);
-      specResource.put("description",
+        specResource.put(FIELD_DESCRIPTION,
           spec.getDescription() != null ? spec.getDescription() : "Schema for " + specName);
-      specResource.put("mimeType", "application/json");
+        specResource.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
       resources.put(specResource);
 
       // Process description resource (for process and report specs)
       if ("P".equals(specType) || "R".equals(specType)) {
         JSONObject processResource = new JSONObject();
-        processResource.put("uri", "neo://processes/" + specName);
+        processResource.put("uri", URI_PROCESSES_PREFIX + specName);
         processResource.put("name", "Process: " + specName);
-        processResource.put("description",
+        processResource.put(FIELD_DESCRIPTION,
             ("R".equals(specType) ? "Report" : "Process") + " parameters for " + specName);
-        processResource.put("mimeType", "application/json");
+        processResource.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
         resources.put(processResource);
       }
     }
@@ -122,12 +128,12 @@ public class McpResourceProvider {
    * @throws IllegalArgumentException if the URI is unknown or the resource is not found
    */
   public JSONObject readResource(String uri) throws Exception {
-    if ("neo://specs".equals(uri)) {
+    if (URI_SPECS.equals(uri)) {
       return readSpecsList();
     }
 
-    if (uri.startsWith("neo://specs/")) {
-      String path = uri.substring("neo://specs/".length());
+    if (uri.startsWith(URI_SPECS_PREFIX)) {
+      String path = uri.substring(URI_SPECS_PREFIX.length());
       String[] parts = path.split("/", 2);
       if (parts.length == 1) {
         return readSpec(parts[0]);
@@ -136,8 +142,8 @@ public class McpResourceProvider {
       }
     }
 
-    if (uri.startsWith("neo://processes/")) {
-      String specName = uri.substring("neo://processes/".length());
+    if (uri.startsWith(URI_PROCESSES_PREFIX)) {
+      String specName = uri.substring(URI_PROCESSES_PREFIX.length());
       return readProcess(specName);
     }
 
@@ -160,7 +166,7 @@ public class McpResourceProvider {
       JSONObject specObj = new JSONObject();
       specObj.put("name", spec.getName());
       specObj.put("type", spec.getSpecType());
-      specObj.put("description", spec.getDescription());
+      specObj.put(FIELD_DESCRIPTION, spec.getDescription());
 
       // Include linked AD object info
       if ("W".equals(spec.getSpecType())) {
@@ -171,7 +177,7 @@ public class McpResourceProvider {
       } else if ("P".equals(spec.getSpecType()) || "R".equals(spec.getSpecType())) {
         Process process = spec.getProcess();
         if (process != null) {
-          specObj.put("processName", process.getName());
+          specObj.put(FIELD_PROCESS_NAME, process.getName());
         }
         if ("R".equals(spec.getSpecType())) {
           specObj.put("isReport", true);
@@ -203,7 +209,7 @@ public class McpResourceProvider {
     JSONObject result = new JSONObject();
     result.put("name", spec.getName());
     result.put("type", spec.getSpecType());
-    result.put("description", spec.getDescription());
+    result.put(FIELD_DESCRIPTION, spec.getDescription());
 
     // Linked AD object
     if ("W".equals(spec.getSpecType())) {
@@ -215,7 +221,7 @@ public class McpResourceProvider {
     } else if ("P".equals(spec.getSpecType()) || "R".equals(spec.getSpecType())) {
       Process process = spec.getProcess();
       if (process != null) {
-        result.put("processName", process.getName());
+        result.put(FIELD_PROCESS_NAME, process.getName());
         result.put("processId", process.getId());
       }
     }
@@ -285,9 +291,9 @@ public class McpResourceProvider {
     result.put("specName", specName);
     result.put("specType", specType);
     result.put("isReport", "R".equals(specType));
-    result.put("processName", adProcess.getName());
+    result.put(FIELD_PROCESS_NAME, adProcess.getName());
     result.put("processId", adProcess.getId());
-    result.put("description", adProcess.getDescription());
+    result.put(FIELD_DESCRIPTION, adProcess.getDescription());
     result.put("helpComment", adProcess.getHelpComment());
     result.put("uiPattern", adProcess.getUIPattern());
 
@@ -304,7 +310,7 @@ public class McpResourceProvider {
       paramObj.put("sequenceNumber", param.getSequenceNumber());
       paramObj.put("mandatory", Boolean.TRUE.equals(param.isMandatory()));
       paramObj.put("defaultValue", param.getDefaultValue());
-      paramObj.put("description", param.getDescription());
+      paramObj.put(FIELD_DESCRIPTION, param.getDescription());
 
       if (param.getReference() != null) {
         paramObj.put("referenceId", param.getReference().getId());
@@ -430,11 +436,11 @@ public class McpResourceProvider {
    */
   private String mapReferenceToType(String refId) {
     if (refId == null) {
-      return "string";
+      return TYPE_STRING;
     }
     switch (refId) {
       case "10": case "14": case "34":
-        return "string";
+        return TYPE_STRING;
       case "11": case "22": case "29": case "12":
       case "800008": case "800019":
         return "number";
@@ -453,7 +459,7 @@ public class McpResourceProvider {
       case "13":
         return "id";
       default:
-        return "string";
+        return TYPE_STRING;
     }
   }
 

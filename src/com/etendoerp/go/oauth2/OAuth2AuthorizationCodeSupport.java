@@ -15,26 +15,30 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.onboarding;
+package com.etendoerp.go.oauth2;
 
-/**
- * Contract for an individual onboarding action in the environment creation workflow.
- */
-@SuppressWarnings("java:S112")
-public interface OnboardingStep {
+final class OAuth2AuthorizationCodeSupport {
 
-  /**
-   * Returns the display name used in onboarding progress events.
-   *
-   * @return step name shown to the client while onboarding runs
-   */
-  String name();
+  private OAuth2AuthorizationCodeSupport() {
+  }
 
-  /**
-   * Executes the onboarding action, updating the shared context as needed.
-   *
-   * @param ctx mutable onboarding context shared across the step chain
-   * @throws Exception when the step cannot complete successfully
-   */
-  void execute(OnboardingContext ctx) throws Exception;
+  static String validateAuthorizationCode(OAuth2Servlet.AuthCodeData codeData,
+      String codeVerifier, String redirectUri) {
+    if (codeData == null) {
+      return "Authorization code not found or expired";
+    }
+    if (codeData.used) {
+      return "Authorization code already used";
+    }
+    if (System.currentTimeMillis() > codeData.expiresAt) {
+      return "Authorization code expired";
+    }
+    if (!OAuth2Utils.verifyCodeChallenge(codeVerifier, codeData.codeChallenge)) {
+      return "PKCE verification failed";
+    }
+    if (redirectUri != null && !redirectUri.equals(codeData.redirectUri)) {
+      return "redirect_uri mismatch";
+    }
+    return null;
+  }
 }

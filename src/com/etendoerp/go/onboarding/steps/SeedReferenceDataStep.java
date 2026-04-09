@@ -84,7 +84,7 @@ public class SeedReferenceDataStep implements OnboardingStep {
 
     // 2. Create locations
     Location whLocation = createLocation(client, org, country, "WH Street", null);
-    Location bpLocation = createLocation(client, org, country, "Street 123", "Springfield");
+    createLocation(client, org, country, "Street 123", "Springfield");
 
     // 3. Create calendar with years and periods
     Calendar calendar = createCalendar(client, org);

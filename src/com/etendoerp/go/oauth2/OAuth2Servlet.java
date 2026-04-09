@@ -46,6 +46,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.SequenceIdData;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.common.CorsUtils;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -69,18 +70,55 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private static final Logger log = LogManager.getLogger(OAuth2Servlet.class);
 
   private static final int TOKEN_EXPIRY_SECONDS = 3600;
-  private static final int REFRESH_TOKEN_EXPIRY_SECONDS = 604800; // 7 days
   private static final int AUTH_CODE_EXPIRY_MS = 300_000; // 5 minutes
+    private static final String APPLICATION_JSON = "application/json";
+    private static final String UTF_8 = "UTF-8";
+    private static final String TOKEN_TYPE_BEARER = "bearer";
+    private static final String ERROR_INVALID_REQUEST = "invalid_request";
+    private static final String ERROR_SERVER = "server_error";
+    private static final String ERROR_ACCESS_DENIED = "access_denied";
+    private static final String ERROR_NOT_FOUND = "not_found";
+    private static final String ERROR_INVALID_GRANT = "invalid_grant";
+    private static final String MESSAGE_INTERNAL_SERVER_ERROR = "Internal server error";
+    private static final String MESSAGE_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
+    private static final String MESSAGE_CLIENT_NOT_FOUND = "Client not found: ";
+    private static final String PATH_AUTHORIZE = "/authorize";
   private static final String GRANT_TYPE_CLIENT_CREDENTIALS = "client_credentials";
   private static final String GRANT_TYPE_AUTHORIZATION_CODE = "authorization_code";
   private static final String GRANT_TYPE_REFRESH_TOKEN = "refresh_token";
+    private static final String SCOPE_NEO_READ = "neo:read";
+    private static final String SCOPE_NEO_WRITE = "neo:write";
+    private static final String SCOPE_NEO_PROCESS = "neo:process";
+    private static final String SCOPE_NEO_REPORT = "neo:report";
   private static final String ADMIN_ROLE_ID = "0";
+    private static final String FIELD_ID = "id";
+    private static final String FIELD_CLIENT_ID = "clientId";
+    private static final String FIELD_CLIENT_ID_REQUEST = "client_id";
+    private static final String FIELD_CLIENT_IDENTIFIER = "client_identifier";
+    private static final String FIELD_AD_USER_ID = "adUserId";
+    private static final String FIELD_DB_AD_USER_ID = "ad_user_id";
+    private static final String FIELD_AD_ROLE_ID = "adRoleId";
+    private static final String FIELD_DB_AD_ROLE_ID = "ad_role_id";
+    private static final String FIELD_SCOPES = "scopes";
+    private static final String FIELD_SCOPE = "scope";
+    private static final String FIELD_IS_ACTIVE = "isActive";
+    private static final String FIELD_ACTIVE = "active";
+    private static final String FIELD_TOKEN = "token";
+    private static final String FIELD_ACCESS_TOKEN = "access_token";
+    private static final String FIELD_TOKEN_TYPE = "token_type";
+    private static final String FIELD_EXPIRES_IN = "expires_in";
+    private static final String FIELD_REFRESH_TOKEN = "refresh_token";
+    private static final String FIELD_REDIRECT_URI = "redirect_uri";
+    private static final String FIELD_CODE_CHALLENGE = "code_challenge";
+    private static final String FIELD_STATE = "state";
+    private static final String DB_OAUTH2_CLIENT_ID = "etgo_oauth2_client_id";
 
   /** In-memory store for authorization codes (short-lived, single-use). */
   private static final Map<String, AuthCodeData> AUTH_CODE_STORE = new ConcurrentHashMap<>();
 
   private static final Set<String> VALID_SCOPES = Collections.unmodifiableSet(
-      new HashSet<>(Arrays.asList("neo:read", "neo:write", "neo:process", "neo:report", "neo:*"))
+      new HashSet<>(Arrays.asList(SCOPE_NEO_READ, SCOPE_NEO_WRITE, SCOPE_NEO_PROCESS,
+        SCOPE_NEO_REPORT, WILDCARD_SCOPE))
   );
 
   private static final String WILDCARD_SCOPE = "neo:*";
@@ -164,18 +202,15 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   // --- CORS ---
 
-  private void setCorsHeaders(HttpServletResponse response) {
-    response.setHeader("Access-Control-Allow-Origin", "*");
-    response.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-    response.setHeader("Access-Control-Allow-Headers",
-        "Content-Type, Authorization, Accept");
-    response.setHeader("Access-Control-Max-Age", "86400");
+  private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
+    CorsUtils.apply(request, response, "GET, POST, PUT, DELETE, OPTIONS",
+        "Content-Type, Authorization, Accept", null, false);
   }
 
   @Override
   public void service(HttpServletRequest request, HttpServletResponse response)
       throws javax.servlet.ServletException, IOException {
-    setCorsHeaders(response);
+    setCorsHeaders(request, response);
     if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
       return;
@@ -190,15 +225,15 @@ public class OAuth2Servlet extends HttpBaseServlet {
     String path = request.getPathInfo();
     if ("/clients".equals(path) || "/clients/".equals(path)) {
       handleListClients(request, response);
-    } else if ("/authorize".equals(path) || "/authorize/".equals(path)) {
+    } else if (PATH_AUTHORIZE.equals(path) || (PATH_AUTHORIZE + "/").equals(path)) {
       handleAuthorizeGet(request, response);
     } else if ("/metadata".equals(path) || "/metadata/".equals(path)
         || "/.well-known/oauth-authorization-server".equals(path)
         || path == null || path.isEmpty() || "/".equals(path)) {
       handleMetadata(request, response);
     } else {
-      writeError(response, HttpServletResponse.SC_NOT_FOUND, "invalid_request",
-          "Unknown endpoint: " + path);
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_INVALID_REQUEST,
+          MESSAGE_UNKNOWN_ENDPOINT + path);
     }
   }
 
@@ -213,13 +248,13 @@ public class OAuth2Servlet extends HttpBaseServlet {
       handleRevoke(request, response);
     } else if ("/introspect".equals(path) || "/introspect/".equals(path)) {
       handleIntrospect(request, response);
-    } else if ("/authorize".equals(path) || "/authorize/".equals(path)) {
+    } else if (PATH_AUTHORIZE.equals(path) || (PATH_AUTHORIZE + "/").equals(path)) {
       handleAuthorizePost(request, response);
     } else if ("/register".equals(path) || "/register/".equals(path)) {
       handleRegister(request, response);
     } else {
-      writeError(response, HttpServletResponse.SC_NOT_FOUND, "invalid_request",
-          "Unknown endpoint: " + path);
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_INVALID_REQUEST,
+          MESSAGE_UNKNOWN_ENDPOINT + path);
     }
   }
 
@@ -227,7 +262,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   public void doPut(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
     if (path == null) {
-      writeError(response, HttpServletResponse.SC_NOT_FOUND, "invalid_request", "Missing path");
+      writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_INVALID_REQUEST, "Missing path");
       return;
     }
 
@@ -236,13 +271,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String clientId = extractPathSegment(path, 2);
       handleRegenerateSecret(request, response, clientId);
     }
-    // PUT /clients/{id}
     else if (path.matches("/clients/[^/]+/?")) {
       String clientId = extractPathSegment(path, 2);
       handleUpdateClient(request, response, clientId);
     } else {
-      writeError(response, HttpServletResponse.SC_NOT_FOUND, "invalid_request",
-          "Unknown endpoint: " + path);
+      writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_INVALID_REQUEST,
+          MESSAGE_UNKNOWN_ENDPOINT + path);
     }
   }
 
@@ -253,8 +287,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String clientId = extractPathSegment(path, 2);
       handleDeleteClient(request, response, clientId);
     } else {
-      writeError(response, HttpServletResponse.SC_NOT_FOUND, "invalid_request",
-          "Unknown endpoint: " + path);
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_INVALID_REQUEST,
+          MESSAGE_UNKNOWN_ENDPOINT + path);
     }
   }
 
@@ -274,18 +308,18 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String scopeParam;
 
       String contentType = request.getContentType();
-      if (contentType != null && contentType.contains("application/json")) {
+      if (contentType != null && contentType.contains(APPLICATION_JSON)) {
         JSONObject body = parseJsonBody(request);
         grantType = body.optString("grant_type", null);
-        clientId = body.optString("client_id", null);
+        clientId = body.optString(FIELD_CLIENT_ID_REQUEST, null);
         clientSecret = body.optString("client_secret", null);
-        scopeParam = body.optString("scope", null);
+        scopeParam = body.optString(FIELD_SCOPE, null);
       } else {
         // Default: form-encoded
         grantType = request.getParameter("grant_type");
-        clientId = request.getParameter("client_id");
+        clientId = request.getParameter(FIELD_CLIENT_ID_REQUEST);
         clientSecret = request.getParameter("client_secret");
-        scopeParam = request.getParameter("scope");
+        scopeParam = request.getParameter(FIELD_SCOPE);
       }
 
       // Route by grant_type
@@ -309,7 +343,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
       // Validate required fields
       if (clientId == null || clientId.isEmpty() || clientSecret == null || clientSecret.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
             "client_id and client_secret are required");
         return;
       }
@@ -356,23 +390,23 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
       // Build RFC 6749 response
       JSONObject result = new JSONObject();
-      result.put("access_token", accessToken);
-      result.put("token_type", "bearer");
-      result.put("expires_in", TOKEN_EXPIRY_SECONDS);
-      result.put("refresh_token", refreshToken);
-      result.put("scope", grantedScopeStr);
+      result.put(FIELD_ACCESS_TOKEN, accessToken);
+      result.put(FIELD_TOKEN_TYPE, TOKEN_TYPE_BEARER);
+      result.put(FIELD_EXPIRES_IN, TOKEN_EXPIRY_SECONDS);
+      result.put(FIELD_REFRESH_TOKEN, refreshToken);
+      result.put(FIELD_SCOPE, grantedScopeStr);
 
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
       log.info("OAuth2 token issued for client: {}", clientId);
 
     } catch (JSONException e) {
       log.error("Failed to build OAuth2 response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
-          "Internal server error");
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     } catch (SQLException e) {
       log.error("Database error during OAuth2 token request", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
-          "Internal server error");
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -394,13 +428,13 @@ public class OAuth2Servlet extends HttpBaseServlet {
            ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           JSONObject client = new JSONObject();
-          client.put("id", rs.getString("etgo_oauth2_client_id"));
+          client.put(FIELD_ID, rs.getString(DB_OAUTH2_CLIENT_ID));
           client.put("name", rs.getString("name"));
-          client.put("clientId", rs.getString("client_identifier"));
-          client.put("adUserId", rs.getString("ad_user_id"));
-          client.put("adRoleId", rs.getString("ad_role_id"));
-          client.put("scopes", rs.getString("scopes"));
-          client.put("isActive", "Y".equals(rs.getString("isactive")));
+          client.put(FIELD_CLIENT_ID, rs.getString(FIELD_CLIENT_IDENTIFIER));
+          client.put(FIELD_AD_USER_ID, rs.getString(FIELD_DB_AD_USER_ID));
+          client.put(FIELD_AD_ROLE_ID, rs.getString(FIELD_DB_AD_ROLE_ID));
+          client.put(FIELD_SCOPES, rs.getString(FIELD_SCOPES));
+          client.put(FIELD_IS_ACTIVE, "Y".equals(rs.getString("isactive")));
           clients.put(client);
         }
       }
@@ -410,11 +444,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
 
     } catch (AuthException e) {
-      writeError(response, e.statusCode, "access_denied", e.getMessage());
+      writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (SQLException | JSONException e) {
       log.error("Error listing OAuth2 clients", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
-          "Internal server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -431,23 +465,23 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
       JSONObject body = parseJsonBody(request);
       String name = body.optString("name", null);
-      String adUserId = body.optString("adUserId", null);
-      String adRoleId = body.optString("adRoleId", null);
-      String scopes = body.optString("scopes", "neo:read");
-      boolean isActive = body.optBoolean("isActive", true);
+      String adUserId = body.optString(FIELD_AD_USER_ID, null);
+      String adRoleId = body.optString(FIELD_AD_ROLE_ID, null);
+      String scopes = body.optString(FIELD_SCOPES, SCOPE_NEO_READ);
+      boolean isActive = body.optBoolean(FIELD_IS_ACTIVE, true);
 
       if (name == null || name.trim().isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
             "name is required");
         return;
       }
       if (adUserId == null || adUserId.trim().isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
             "adUserId is required");
         return;
       }
       if (adRoleId == null || adRoleId.trim().isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
             "adRoleId is required");
         return;
       }
@@ -474,24 +508,24 @@ public class OAuth2Servlet extends HttpBaseServlet {
       }
 
       JSONObject result = new JSONObject();
-      result.put("id", generatedId);
+      result.put(FIELD_ID, generatedId);
       result.put("name", name.trim());
-      result.put("clientId", clientIdentifier);
+      result.put(FIELD_CLIENT_ID, clientIdentifier);
       result.put("clientSecret", plainSecret);
-      result.put("adUserId", adUserId.trim());
-      result.put("adRoleId", adRoleId.trim());
-      result.put("scopes", scopes.trim());
-      result.put("isActive", isActive);
+      result.put(FIELD_AD_USER_ID, adUserId.trim());
+      result.put(FIELD_AD_ROLE_ID, adRoleId.trim());
+      result.put(FIELD_SCOPES, scopes.trim());
+      result.put(FIELD_IS_ACTIVE, isActive);
 
       writeJsonResponse(response, HttpServletResponse.SC_CREATED, result);
       log.info("OAuth2 client created: {} ({})", name, clientIdentifier);
 
     } catch (AuthException e) {
-      writeError(response, e.statusCode, "access_denied", e.getMessage());
+      writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (SQLException | JSONException e) {
       log.error("Error creating OAuth2 client", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
-          "Internal server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -511,16 +545,18 @@ public class OAuth2Servlet extends HttpBaseServlet {
       // Verify client exists
       JSONObject existing = findClientById(id);
       if (existing == null) {
-        writeError(response, HttpServletResponse.SC_NOT_FOUND, "not_found",
-            "Client not found: " + id);
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND,
+            MESSAGE_CLIENT_NOT_FOUND + id);
         return;
       }
 
       String name = body.optString("name", existing.getString("name"));
-      String scopes = body.optString("scopes", existing.getString("scopes"));
-      String adUserId = body.optString("adUserId", existing.getString("adUserId"));
-      String adRoleId = body.optString("adRoleId", existing.getString("adRoleId"));
-      boolean isActive = body.has("isActive") ? body.getBoolean("isActive") : existing.getBoolean("isActive");
+      String scopes = body.optString(FIELD_SCOPES, existing.getString(FIELD_SCOPES));
+      String adUserId = body.optString(FIELD_AD_USER_ID, existing.getString(FIELD_AD_USER_ID));
+      String adRoleId = body.optString(FIELD_AD_ROLE_ID, existing.getString(FIELD_AD_ROLE_ID));
+      boolean isActive = body.has(FIELD_IS_ACTIVE)
+          ? body.getBoolean(FIELD_IS_ACTIVE)
+          : existing.getBoolean(FIELD_IS_ACTIVE);
 
       Connection conn = OBDal.getInstance().getConnection();
       try (PreparedStatement ps = conn.prepareStatement(SQL_UPDATE_CLIENT)) {
@@ -533,30 +569,30 @@ public class OAuth2Servlet extends HttpBaseServlet {
         ps.setString(7, id);
         int rows = ps.executeUpdate();
         if (rows == 0) {
-          writeError(response, HttpServletResponse.SC_NOT_FOUND, "not_found",
-              "Client not found: " + id);
+          writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND,
+              MESSAGE_CLIENT_NOT_FOUND + id);
           return;
         }
       }
 
       JSONObject result = new JSONObject();
-      result.put("id", id);
+      result.put(FIELD_ID, id);
       result.put("name", name.trim());
-      result.put("clientId", existing.getString("clientId"));
-      result.put("adUserId", adUserId.trim());
-      result.put("adRoleId", adRoleId.trim());
-      result.put("scopes", scopes.trim());
-      result.put("isActive", isActive);
+      result.put(FIELD_CLIENT_ID, existing.getString(FIELD_CLIENT_ID));
+      result.put(FIELD_AD_USER_ID, adUserId.trim());
+      result.put(FIELD_AD_ROLE_ID, adRoleId.trim());
+      result.put(FIELD_SCOPES, scopes.trim());
+      result.put(FIELD_IS_ACTIVE, isActive);
 
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
       log.info("OAuth2 client updated: {}", id);
 
     } catch (AuthException e) {
-      writeError(response, e.statusCode, "access_denied", e.getMessage());
+      writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (SQLException | JSONException e) {
       log.error("Error updating OAuth2 client", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
-          "Internal server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -585,23 +621,23 @@ public class OAuth2Servlet extends HttpBaseServlet {
       }
 
       if (rows == 0) {
-        writeError(response, HttpServletResponse.SC_NOT_FOUND, "not_found",
-            "Client not found: " + id);
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND,
+          MESSAGE_CLIENT_NOT_FOUND + id);
         return;
       }
 
       JSONObject result = new JSONObject();
       result.put("deleted", true);
-      result.put("id", id);
+      result.put(FIELD_ID, id);
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
       log.info("OAuth2 client deleted: {}", id);
 
     } catch (AuthException e) {
-      writeError(response, e.statusCode, "access_denied", e.getMessage());
+      writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (SQLException | JSONException e) {
       log.error("Error deleting OAuth2 client", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
-          "Internal server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -621,7 +657,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       // Check if caller wants to revoke existing tokens
       boolean revokeTokens = true;
       String contentType = request.getContentType();
-      if (contentType != null && contentType.contains("application/json")) {
+      if (contentType != null && contentType.contains(APPLICATION_JSON)) {
         JSONObject body = parseJsonBody(request);
         revokeTokens = body.optBoolean("revokeExistingTokens", true);
       }
@@ -629,8 +665,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
       // Verify client exists
       JSONObject existing = findClientById(id);
       if (existing == null) {
-        writeError(response, HttpServletResponse.SC_NOT_FOUND, "not_found",
-            "Client not found: " + id);
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND,
+          MESSAGE_CLIENT_NOT_FOUND + id);
         return;
       }
 
@@ -657,8 +693,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
       }
 
       JSONObject result = new JSONObject();
-      result.put("id", id);
-      result.put("clientId", existing.getString("clientId"));
+      result.put(FIELD_ID, id);
+      result.put(FIELD_CLIENT_ID, existing.getString(FIELD_CLIENT_ID));
       result.put("clientSecret", plainSecret);
       result.put("tokensRevoked", revokeTokens);
 
@@ -666,11 +702,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
       log.info("OAuth2 client secret regenerated: {}", id);
 
     } catch (AuthException e) {
-      writeError(response, e.statusCode, "access_denied", e.getMessage());
+      writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (SQLException | JSONException e) {
       log.error("Error regenerating OAuth2 client secret", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
-          "Internal server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -686,10 +722,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       requireAdmin(request);
 
       JSONObject body = parseJsonBody(request);
-      String clientIdentifier = body.optString("clientId", null);
+      String clientIdentifier = body.optString(FIELD_CLIENT_ID, null);
 
       if (clientIdentifier == null || clientIdentifier.trim().isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
             "clientId is required");
         return;
       }
@@ -703,18 +739,18 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
       JSONObject result = new JSONObject();
       result.put("revoked", true);
-      result.put("clientId", clientIdentifier.trim());
+      result.put(FIELD_CLIENT_ID, clientIdentifier.trim());
       result.put("tokensRevoked", rowsUpdated);
 
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
       log.info("OAuth2 tokens revoked for client: {} ({} tokens)", clientIdentifier, rowsUpdated);
 
     } catch (AuthException e) {
-      writeError(response, e.statusCode, "access_denied", e.getMessage());
+      writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (SQLException | JSONException e) {
       log.error("Error revoking OAuth2 tokens", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
-          "Internal server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -729,10 +765,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       requireAdmin(request);
 
       JSONObject body = parseJsonBody(request);
-      String token = body.optString("token", null);
+      String token = body.optString(FIELD_TOKEN, null);
 
       if (token == null || token.trim().isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
             "token is required");
         return;
       }
@@ -747,7 +783,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
           if (!rs.next()) {
             // Token not found — inactive
-            result.put("active", false);
+            result.put(FIELD_ACTIVE, false);
           } else {
             String isRevoked = rs.getString("is_revoked");
             Timestamp expiresAt = rs.getTimestamp("expires_at");
@@ -755,12 +791,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
             boolean revoked = "Y".equals(isRevoked);
 
             if (expired || revoked) {
-              result.put("active", false);
+              result.put(FIELD_ACTIVE, false);
             } else {
-              result.put("active", true);
-              result.put("scope", rs.getString("scopes"));
+              result.put(FIELD_ACTIVE, true);
+              result.put(FIELD_SCOPE, rs.getString(FIELD_SCOPES));
               result.put("exp", expiresAt.getTime() / 1000);
-              result.put("client_id", rs.getString("client_identifier"));
+              result.put(FIELD_CLIENT_ID_REQUEST, rs.getString(FIELD_CLIENT_IDENTIFIER));
             }
           }
 
@@ -769,11 +805,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
       }
 
     } catch (AuthException e) {
-      writeError(response, e.statusCode, "access_denied", e.getMessage());
+      writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (SQLException | JSONException e) {
       log.error("Error during OAuth2 token introspection", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
-          "Internal server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -785,13 +821,13 @@ public class OAuth2Servlet extends HttpBaseServlet {
    */
   private void handleAuthorizeGet(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    String clientId = request.getParameter("client_id");
-    String redirectUri = request.getParameter("redirect_uri");
+    String clientId = request.getParameter(FIELD_CLIENT_ID_REQUEST);
+    String redirectUri = request.getParameter(FIELD_REDIRECT_URI);
     String responseType = request.getParameter("response_type");
-    String codeChallenge = request.getParameter("code_challenge");
+    String codeChallenge = request.getParameter(FIELD_CODE_CHALLENGE);
     String codeChallengeMethod = request.getParameter("code_challenge_method");
-    String state = request.getParameter("state");
-    String scope = request.getParameter("scope");
+    String state = request.getParameter(FIELD_STATE);
+    String scope = request.getParameter(FIELD_SCOPE);
 
     if (!"code".equals(responseType)) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, "unsupported_response_type",
@@ -800,13 +836,13 @@ public class OAuth2Servlet extends HttpBaseServlet {
     }
 
     if (codeChallenge == null || codeChallenge.isEmpty()) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
           "code_challenge is required (PKCE S256)");
       return;
     }
 
     if (!"S256".equals(codeChallengeMethod)) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
           "code_challenge_method must be S256");
       return;
     }
@@ -815,17 +851,17 @@ public class OAuth2Servlet extends HttpBaseServlet {
     // The PWA handles authentication (user is already logged in) and consent UI.
     String appBase = resolveAppUrl(request);
     StringBuilder appUrl = new StringBuilder(appBase)
-        .append("/authorize")
+        .append(PATH_AUTHORIZE)
         .append("?response_type=code")
-        .append("&client_id=").append(java.net.URLEncoder.encode(clientId, "UTF-8"))
-        .append("&redirect_uri=").append(java.net.URLEncoder.encode(redirectUri, "UTF-8"))
-        .append("&code_challenge=").append(java.net.URLEncoder.encode(codeChallenge, "UTF-8"))
+        .append("&client_id=").append(java.net.URLEncoder.encode(clientId, UTF_8))
+        .append("&redirect_uri=").append(java.net.URLEncoder.encode(redirectUri, UTF_8))
+        .append("&code_challenge=").append(java.net.URLEncoder.encode(codeChallenge, UTF_8))
         .append("&code_challenge_method=S256");
     if (state != null && !state.isEmpty()) {
-      appUrl.append("&state=").append(java.net.URLEncoder.encode(state, "UTF-8"));
+      appUrl.append("&state=").append(java.net.URLEncoder.encode(state, UTF_8));
     }
     if (scope != null && !scope.isEmpty()) {
-      appUrl.append("&scope=").append(java.net.URLEncoder.encode(scope, "UTF-8"));
+      appUrl.append("&scope=").append(java.net.URLEncoder.encode(scope, UTF_8));
     }
     response.sendRedirect(appUrl.toString());
   }
@@ -845,51 +881,42 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String state;
       String scope;
 
-      if (contentType != null && contentType.contains("application/json")) {
+      if (contentType != null && contentType.contains(APPLICATION_JSON)) {
         JSONObject body = parseJsonBody(request);
-        jwtToken = body.optString("token", null);
-        clientId = body.optString("client_id", null);
-        redirectUri = body.optString("redirect_uri", null);
-        codeChallenge = body.optString("code_challenge", null);
-        state = body.optString("state", null);
-        scope = body.optString("scope", null);
+        jwtToken = body.optString(FIELD_TOKEN, null);
+        clientId = body.optString(FIELD_CLIENT_ID_REQUEST, null);
+        redirectUri = body.optString(FIELD_REDIRECT_URI, null);
+        codeChallenge = body.optString(FIELD_CODE_CHALLENGE, null);
+        state = body.optString(FIELD_STATE, null);
+        scope = body.optString(FIELD_SCOPE, null);
       } else {
-        jwtToken = request.getParameter("token");
-        clientId = request.getParameter("client_id");
-        redirectUri = request.getParameter("redirect_uri");
-        codeChallenge = request.getParameter("code_challenge");
-        state = request.getParameter("state");
-        scope = request.getParameter("scope");
+        jwtToken = request.getParameter(FIELD_TOKEN);
+        clientId = request.getParameter(FIELD_CLIENT_ID_REQUEST);
+        redirectUri = request.getParameter(FIELD_REDIRECT_URI);
+        codeChallenge = request.getParameter(FIELD_CODE_CHALLENGE);
+        state = request.getParameter(FIELD_STATE);
+        scope = request.getParameter(FIELD_SCOPE);
       }
 
       if (jwtToken == null || jwtToken.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
             "JWT token is required");
         return;
       }
 
       if (redirectUri == null || redirectUri.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
             "redirect_uri is required");
         return;
       }
 
       if (codeChallenge == null || codeChallenge.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
             "code_challenge is required");
         return;
       }
 
-      // Validate JWT to get user identity
-      DecodedJWT jwt;
-      try {
-        jwt = SecureWebServicesUtils.decodeToken(jwtToken);
-      } catch (Exception e) {
-        log.warn("Authorization code request with invalid JWT: {}", e.getMessage());
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "access_denied",
-            "Invalid JWT token");
-        return;
-      }
+      DecodedJWT jwt = authenticateJwt(jwtToken);
 
       String userId = jwt.getClaim("user").asString();
       String roleId = jwt.getClaim("role").asString();
@@ -906,7 +933,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       codeData.roleId = roleId;
       codeData.redirectUri = redirectUri;
       codeData.codeChallenge = codeChallenge;
-      codeData.scopes = scope != null ? scope : "neo:read neo:write";
+      codeData.scopes = scope != null ? scope : SCOPE_NEO_READ + " " + SCOPE_NEO_WRITE;
       codeData.expiresAt = System.currentTimeMillis() + AUTH_CODE_EXPIRY_MS;
       codeData.used = false;
 
@@ -927,9 +954,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
       result.put("redirect_url", redirect.toString());
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
 
+    } catch (AuthException e) {
+      log.warn("Authorization code request with invalid JWT: {}", e.getMessage());
+      writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (JSONException e) {
       log.error("Error processing authorize request", e);
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
           "Malformed request body");
     }
   }
@@ -943,73 +973,41 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       String code;
       String codeVerifier;
-      String clientId;
       String redirectUri;
 
-      if (contentType != null && contentType.contains("application/json")) {
+      if (contentType != null && contentType.contains(APPLICATION_JSON)) {
         JSONObject body = parseJsonBody(request);
         code = body.optString("code", null);
         codeVerifier = body.optString("code_verifier", null);
-        clientId = body.optString("client_id", null);
-        redirectUri = body.optString("redirect_uri", null);
+        redirectUri = body.optString(FIELD_REDIRECT_URI, null);
       } else {
         code = request.getParameter("code");
         codeVerifier = request.getParameter("code_verifier");
-        clientId = request.getParameter("client_id");
-        redirectUri = request.getParameter("redirect_uri");
+        redirectUri = request.getParameter(FIELD_REDIRECT_URI);
       }
 
       if (code == null || code.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
             "code is required");
         return;
       }
 
       if (codeVerifier == null || codeVerifier.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
             "code_verifier is required (PKCE)");
         return;
       }
 
       // Look up the authorization code
       String codeHash = OAuth2Utils.hashToken(code);
-      AuthCodeData codeData = AUTH_CODE_STORE.get(codeHash);
-
-      if (codeData == null) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_grant",
-            "Authorization code not found or expired");
-        return;
-      }
-
-      // Single-use check
-      if (codeData.used) {
-        AUTH_CODE_STORE.remove(codeHash);
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_grant",
-            "Authorization code already used");
-        return;
-      }
-
-      // Expiry check
-      if (System.currentTimeMillis() > codeData.expiresAt) {
-        AUTH_CODE_STORE.remove(codeHash);
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_grant",
-            "Authorization code expired");
-        return;
-      }
-
-      // Verify PKCE code_challenge
-      if (!OAuth2Utils.verifyCodeChallenge(codeVerifier, codeData.codeChallenge)) {
-        AUTH_CODE_STORE.remove(codeHash);
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_grant",
-            "PKCE verification failed");
-        return;
-      }
-
-      // Verify redirect_uri matches
-      if (redirectUri != null && !redirectUri.equals(codeData.redirectUri)) {
-        AUTH_CODE_STORE.remove(codeHash);
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_grant",
-            "redirect_uri mismatch");
+        AuthCodeData codeData = AUTH_CODE_STORE.get(codeHash);
+        String grantError = OAuth2AuthorizationCodeSupport.validateAuthorizationCode(codeData,
+          codeVerifier, redirectUri);
+      if (grantError != null) {
+        if (codeData != null) {
+          AUTH_CODE_STORE.remove(codeHash);
+        }
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_GRANT, grantError);
         return;
       }
 
@@ -1030,7 +1028,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
         ps.setString(1, codeData.clientId);
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
-            tokenClient.id = rs.getString("etgo_oauth2_client_id");
+            tokenClient.id = rs.getString(DB_OAUTH2_CLIENT_ID);
             tokenClient.adClientId = "0";
           }
         }
@@ -1038,7 +1036,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
       if (tokenClient.id == null) {
         log.warn("No client record found for client_id: {}", codeData.clientId);
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_grant",
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_GRANT,
             "Client not found");
         return;
       }
@@ -1065,11 +1063,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
       // Build response
       JSONObject result = new JSONObject();
-      result.put("access_token", accessToken);
-      result.put("token_type", "bearer");
-      result.put("expires_in", TOKEN_EXPIRY_SECONDS);
-      result.put("refresh_token", refreshToken);
-      result.put("scope", codeData.scopes);
+      result.put(FIELD_ACCESS_TOKEN, accessToken);
+      result.put(FIELD_TOKEN_TYPE, TOKEN_TYPE_BEARER);
+      result.put(FIELD_EXPIRES_IN, TOKEN_EXPIRY_SECONDS);
+      result.put(FIELD_REFRESH_TOKEN, refreshToken);
+      result.put(FIELD_SCOPE, codeData.scopes);
 
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
       log.info("OAuth2 token issued via authorization_code for user={}, client={}",
@@ -1077,12 +1075,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
     } catch (JSONException e) {
       log.error("Error building authorization_code response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
-          "Internal server error");
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     } catch (SQLException e) {
       log.error("Database error during authorization_code token exchange", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
-          "Internal server error");
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -1097,15 +1095,15 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       String refreshTokenParam;
 
-      if (contentType != null && contentType.contains("application/json")) {
+      if (contentType != null && contentType.contains(APPLICATION_JSON)) {
         JSONObject body = parseJsonBody(request);
-        refreshTokenParam = body.optString("refresh_token", null);
+        refreshTokenParam = body.optString(GRANT_TYPE_REFRESH_TOKEN, null);
       } else {
-        refreshTokenParam = request.getParameter("refresh_token");
+        refreshTokenParam = request.getParameter(GRANT_TYPE_REFRESH_TOKEN);
       }
 
       if (refreshTokenParam == null || refreshTokenParam.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
             "refresh_token is required");
         return;
       }
@@ -1128,29 +1126,29 @@ public class OAuth2Servlet extends HttpBaseServlet {
         ps.setString(1, refreshHash);
         try (ResultSet rs = ps.executeQuery()) {
           if (!rs.next()) {
-            writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "invalid_grant",
+            writeError(response, HttpServletResponse.SC_UNAUTHORIZED, ERROR_INVALID_GRANT,
                 "Refresh token not found or expired");
             return;
           }
           tokenId = rs.getString("etgo_oauth2_token_id");
-          oauth2ClientId = rs.getString("etgo_oauth2_client_id");
-          scopes = rs.getString("scopes");
+          oauth2ClientId = rs.getString(DB_OAUTH2_CLIENT_ID);
+          scopes = rs.getString(FIELD_SCOPES);
           revoked = "Y".equals(rs.getString("is_revoked"));
-          adUserId = rs.getString("ad_user_id");
-          adRoleId = rs.getString("ad_role_id");
+          adUserId = rs.getString(FIELD_DB_AD_USER_ID);
+          adRoleId = rs.getString(FIELD_DB_AD_ROLE_ID);
           adClientId = rs.getString("etendo_client_id");
           clientActive = "Y".equals(rs.getString("client_active"));
         }
       }
 
       if (revoked) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "invalid_grant",
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, ERROR_INVALID_GRANT,
             "Refresh token has been revoked");
         return;
       }
 
       if (!clientActive) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "invalid_grant",
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, ERROR_INVALID_GRANT,
             "OAuth2 client is inactive");
         return;
       }
@@ -1178,23 +1176,23 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
       // Build response
       JSONObject result = new JSONObject();
-      result.put("access_token", newAccessToken);
-      result.put("token_type", "bearer");
-      result.put("expires_in", TOKEN_EXPIRY_SECONDS);
-      result.put("refresh_token", newRefreshToken);
-      result.put("scope", scopes);
+      result.put(FIELD_ACCESS_TOKEN, newAccessToken);
+      result.put(FIELD_TOKEN_TYPE, TOKEN_TYPE_BEARER);
+      result.put(FIELD_EXPIRES_IN, TOKEN_EXPIRY_SECONDS);
+      result.put(FIELD_REFRESH_TOKEN, newRefreshToken);
+      result.put(FIELD_SCOPE, scopes);
 
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
       log.info("OAuth2 token refreshed for client_id={}", oauth2ClientId);
 
     } catch (JSONException e) {
       log.error("Error building refresh_token response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
-          "Internal server error");
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     } catch (SQLException e) {
       log.error("Database error during refresh_token grant", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
-          "Internal server error");
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -1209,7 +1207,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       JSONObject body = parseJsonBody(request);
       String clientName = body.optString("client_name", "MCP Client");
-      String scopes = "neo:read neo:write";
+      String scopes = SCOPE_NEO_READ + " " + SCOPE_NEO_WRITE;
 
       // Generate a unique client_identifier
       String clientIdentifier = OAuth2Utils.generateClientId();
@@ -1227,9 +1225,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
       // RFC 7591 response
       JSONObject result = new JSONObject();
-      result.put("client_id", clientIdentifier);
+        result.put(FIELD_CLIENT_ID_REQUEST, clientIdentifier);
       result.put("client_name", clientName);
-      result.put("grant_types", new JSONArray(Arrays.asList("authorization_code", "refresh_token")));
+        result.put("grant_types",
+          new JSONArray(Arrays.asList(GRANT_TYPE_AUTHORIZATION_CODE, GRANT_TYPE_REFRESH_TOKEN)));
       result.put("response_types", new JSONArray(Arrays.asList("code")));
       result.put("token_endpoint_auth_method", "none");
       result.put("redirect_uris", body.optJSONArray("redirect_uris"));
@@ -1241,12 +1240,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
     } catch (JSONException e) {
       log.error("Error processing DCR request", e);
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_request",
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
           "Malformed request body");
     } catch (SQLException e) {
       log.error("Database error during DCR", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
-          "Internal server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -1263,14 +1262,16 @@ public class OAuth2Servlet extends HttpBaseServlet {
       JSONObject metadata = new JSONObject();
       String appUrl = resolveAppUrl(request);
       metadata.put("issuer", baseUrl + "/oauth2");
-      metadata.put("authorization_endpoint", appUrl + "/authorize");
+      metadata.put("authorization_endpoint", appUrl + PATH_AUTHORIZE);
       metadata.put("token_endpoint", baseUrl + "/oauth2/token");
       metadata.put("registration_endpoint", baseUrl + "/oauth2/register");
       metadata.put("scopes_supported",
-          new JSONArray(Arrays.asList("neo:read", "neo:write", "neo:process", "neo:report", "neo:*")));
+            new JSONArray(Arrays.asList(SCOPE_NEO_READ, SCOPE_NEO_WRITE, SCOPE_NEO_PROCESS,
+              SCOPE_NEO_REPORT, WILDCARD_SCOPE)));
       metadata.put("response_types_supported", new JSONArray(Arrays.asList("code")));
       metadata.put("grant_types_supported",
-          new JSONArray(Arrays.asList("authorization_code", "client_credentials", "refresh_token")));
+            new JSONArray(Arrays.asList(GRANT_TYPE_AUTHORIZATION_CODE,
+              GRANT_TYPE_CLIENT_CREDENTIALS, GRANT_TYPE_REFRESH_TOKEN)));
       metadata.put("token_endpoint_auth_methods_supported",
           new JSONArray(Arrays.asList("none", "client_secret_post")));
       metadata.put("code_challenge_methods_supported", new JSONArray(Arrays.asList("S256")));
@@ -1278,8 +1279,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
       writeJsonResponse(response, HttpServletResponse.SC_OK, metadata);
     } catch (JSONException e) {
       log.error("Error building metadata response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "server_error",
-          "Internal server error");
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -1326,161 +1327,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
   }
 
   /**
-   * Build the HTML login page for the OAuth2 authorize flow.
-   */
-  private String buildLoginPage(String contextPath, String clientId, String redirectUri,
-      String codeChallenge, String state, String scope) {
-    String safeClientId = escapeHtml(clientId != null ? clientId : "");
-    String safeRedirectUri = escapeHtml(redirectUri != null ? redirectUri : "");
-    String safeCodeChallenge = escapeHtml(codeChallenge != null ? codeChallenge : "");
-    String safeState = escapeHtml(state != null ? state : "");
-    String safeScope = escapeHtml(scope != null ? scope : "");
-
-    return "<!DOCTYPE html>\n"
-      + "<html lang=\"en\">\n<head>\n"
-      + "<meta charset=\"UTF-8\">\n"
-      + "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
-      + "<title>Etendo — Authorize MCP Client</title>\n"
-      + "<style>\n"
-      + "  * { box-sizing: border-box; margin: 0; padding: 0; }\n"
-      + "  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n"
-      + "    background: #f5f5f5; display: flex; justify-content: center; align-items: center;\n"
-      + "    min-height: 100vh; }\n"
-      + "  .card { background: white; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.1);\n"
-      + "    padding: 2rem; width: 100%; max-width: 400px; }\n"
-      + "  h1 { font-size: 1.5rem; margin-bottom: 0.5rem; color: #1a1a1a; }\n"
-      + "  p.sub { color: #666; font-size: 0.9rem; margin-bottom: 1.5rem; }\n"
-      + "  label { display: block; font-weight: 500; margin-bottom: 0.25rem; color: #333; font-size: 0.9rem; }\n"
-      + "  input[type=text], input[type=password], select { width: 100%; padding: 0.6rem 0.8rem;\n"
-      + "    border: 1px solid #ddd; border-radius: 6px; font-size: 1rem; margin-bottom: 1rem;\n"
-      + "    background: white; }\n"
-      + "  input:focus, select:focus { outline: none; border-color: #2563eb;\n"
-      + "    box-shadow: 0 0 0 3px rgba(37,99,235,0.1); }\n"
-      + "  button { width: 100%; padding: 0.7rem; background: #2563eb; color: white;\n"
-      + "    border: none; border-radius: 6px; font-size: 1rem; cursor: pointer; font-weight: 500; }\n"
-      + "  button:hover { background: #1d4ed8; }\n"
-      + "  button:disabled { background: #93c5fd; cursor: not-allowed; }\n"
-      + "  .error { color: #dc2626; font-size: 0.85rem; margin-bottom: 1rem; display: none; }\n"
-      + "  .info { color: #666; font-size: 0.8rem; margin-top: 1rem; text-align: center; }\n"
-      + "  .hidden { display: none; }\n"
-      + "</style>\n</head>\n<body>\n"
-      + "<div class=\"card\">\n"
-      + "  <h1>Authorize MCP Client</h1>\n"
-      + "  <p class=\"sub\">Sign in with your Etendo credentials to authorize access.</p>\n"
-      + "  <div id=\"error\" class=\"error\"></div>\n"
-      + "  <form id=\"loginForm\">\n"
-      + "    <label for=\"username\">Username</label>\n"
-      + "    <input type=\"text\" id=\"username\" name=\"username\" autocomplete=\"username\" required autofocus>\n"
-      + "    <label for=\"password\">Password</label>\n"
-      + "    <input type=\"password\" id=\"password\" name=\"password\" autocomplete=\"current-password\" required>\n"
-      + "    <div id=\"roleSection\" class=\"hidden\">\n"
-      + "      <label for=\"roleSelect\">Role</label>\n"
-      + "      <select id=\"roleSelect\"></select>\n"
-      + "    </div>\n"
-      + "    <button type=\"submit\" id=\"submitBtn\">Sign In &amp; Authorize</button>\n"
-      + "  </form>\n"
-      + "  <p class=\"info\">Client: " + safeClientId + "</p>\n"
-      + "</div>\n"
-      + "<script>\n"
-      + "const form = document.getElementById('loginForm');\n"
-      + "const errorDiv = document.getElementById('error');\n"
-      + "const submitBtn = document.getElementById('submitBtn');\n"
-      + "const roleSection = document.getElementById('roleSection');\n"
-      + "const roleSelect = document.getElementById('roleSelect');\n"
-      + "const CTX = '" + escapeJs(contextPath) + "';\n"
-      + "\n"
-      + "let currentToken = null;\n"
-      + "let currentPassword = null;\n"
-      + "\n"
-      + "form.addEventListener('submit', async (e) => {\n"
-      + "  e.preventDefault();\n"
-      + "  errorDiv.style.display = 'none';\n"
-      + "  submitBtn.disabled = true;\n"
-      + "  submitBtn.textContent = 'Signing in...';\n"
-      + "\n"
-      + "  const username = document.getElementById('username').value;\n"
-      + "  const password = document.getElementById('password').value;\n"
-      + "\n"
-      + "  try {\n"
-      + "    // If a role is selected, re-login with that role and authorize\n"
-      + "    if (roleSection.classList.contains('hidden') === false && roleSelect.value) {\n"
-      + "      const reLoginResp = await fetch(CTX + '/sws/login', {\n"
-      + "        method: 'POST',\n"
-      + "        headers: { 'Content-Type': 'application/json' },\n"
-      + "        body: JSON.stringify({ username, password: currentPassword, role: roleSelect.value })\n"
-      + "      });\n"
-      + "      const reLoginData = await reLoginResp.json();\n"
-      + "      if (reLoginData.status === 'error' || !reLoginData.token) {\n"
-      + "        throw new Error(reLoginData.message || 'Authentication failed');\n"
-      + "      }\n"
-      + "      currentToken = reLoginData.token;\n"
-      + "      await submitAuthorize(currentToken);\n"
-      + "      return;\n"
-      + "    }\n"
-      + "\n"
-      + "    // Step 1: First login without role to get roleList\n"
-      + "    currentPassword = password;\n"
-      + "    const loginResp = await fetch(CTX + '/sws/login', {\n"
-      + "      method: 'POST',\n"
-      + "      headers: { 'Content-Type': 'application/json' },\n"
-      + "      body: JSON.stringify({ username, password })\n"
-      + "    });\n"
-      + "    const loginData = await loginResp.json();\n"
-      + "    if (loginData.status === 'error' || !loginData.token) {\n"
-      + "      throw new Error(loginData.message || 'Authentication failed');\n"
-      + "    }\n"
-      + "    currentToken = loginData.token;\n"
-      + "\n"
-      + "    // If roleList has multiple roles, show selector\n"
-      + "    if (loginData.roleList && loginData.roleList.length > 1) {\n"
-      + "      roleSelect.innerHTML = '';\n"
-      + "      loginData.roleList.forEach(r => {\n"
-      + "        const opt = document.createElement('option');\n"
-      + "        opt.value = r.id;\n"
-      + "        opt.textContent = r.name;\n"
-      + "        roleSelect.appendChild(opt);\n"
-      + "      });\n"
-      + "      roleSection.classList.remove('hidden');\n"
-      + "      submitBtn.disabled = false;\n"
-      + "      submitBtn.textContent = 'Authorize';\n"
-      + "      return;\n"
-      + "    }\n"
-      + "\n"
-      + "    // Single role — authorize directly\n"
-      + "    await submitAuthorize(currentToken);\n"
-      + "  } catch (err) {\n"
-      + "    errorDiv.textContent = err.message;\n"
-      + "    errorDiv.style.display = 'block';\n"
-      + "    submitBtn.disabled = false;\n"
-      + "    submitBtn.textContent = roleSection.classList.contains('hidden') ? 'Sign In & Authorize' : 'Authorize';\n"
-      + "  }\n"
-      + "});\n"
-      + "\n"
-      + "async function submitAuthorize(token) {\n"
-      + "  const authResp = await fetch(CTX + '/oauth2/authorize', {\n"
-      + "    method: 'POST',\n"
-      + "    headers: { 'Content-Type': 'application/json' },\n"
-      + "    body: JSON.stringify({\n"
-      + "      token: token,\n"
-      + "      client_id: '" + escapeJs(safeClientId) + "',\n"
-      + "      redirect_uri: '" + escapeJs(safeRedirectUri) + "',\n"
-      + "      code_challenge: '" + escapeJs(safeCodeChallenge) + "',\n"
-      + "      state: '" + escapeJs(safeState) + "',\n"
-      + "      scope: '" + escapeJs(safeScope) + "'\n"
-      + "    })\n"
-      + "  });\n"
-      + "\n"
-      + "  const authData = await authResp.json();\n"
-      + "  if (authData.redirect_url) {\n"
-      + "    window.location.href = authData.redirect_url;\n"
-      + "  } else {\n"
-      + "    throw new Error(authData.error_description || authData.error || 'Authorization failed');\n"
-      + "  }\n"
-      + "}\n"
-      + "</script>\n</body>\n</html>";
-  }
-
-  /**
    * Purge expired authorization codes from the in-memory store.
    */
   private void purgeExpiredAuthCodes() {
@@ -1508,7 +1354,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       throw new AuthException(HttpServletResponse.SC_UNAUTHORIZED,
           "Missing or invalid Authorization header");
     }
-    String token = authHeader.substring(7);
+    return authenticateJwt(authHeader.substring(7));
+  }
+
+  private DecodedJWT authenticateJwt(String token) throws AuthException {
     try {
       return SecureWebServicesUtils.decodeToken(token);
     } catch (Exception e) {
@@ -1551,12 +1400,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
           return null;
         }
         ClientRecord client = new ClientRecord();
-        client.id = rs.getString("etgo_oauth2_client_id");
+        client.id = rs.getString(DB_OAUTH2_CLIENT_ID);
         client.secretHash = rs.getString("client_secret_hash");
-        client.scopes = rs.getString("scopes");
+        client.scopes = rs.getString(FIELD_SCOPES);
         client.adClientId = rs.getString("ad_client_id");
-        client.adUserId = rs.getString("ad_user_id");
-        client.adRoleId = rs.getString("ad_role_id");
+        client.adUserId = rs.getString(FIELD_DB_AD_USER_ID);
+        client.adRoleId = rs.getString(FIELD_DB_AD_ROLE_ID);
         return client;
       }
     }
@@ -1577,13 +1426,13 @@ public class OAuth2Servlet extends HttpBaseServlet {
           return null;
         }
         JSONObject client = new JSONObject();
-        client.put("id", rs.getString("etgo_oauth2_client_id"));
+        client.put(FIELD_ID, rs.getString(DB_OAUTH2_CLIENT_ID));
         client.put("name", rs.getString("name"));
-        client.put("clientId", rs.getString("client_identifier"));
-        client.put("adUserId", rs.getString("ad_user_id"));
-        client.put("adRoleId", rs.getString("ad_role_id"));
-        client.put("scopes", rs.getString("scopes"));
-        client.put("isActive", "Y".equals(rs.getString("isactive")));
+        client.put(FIELD_CLIENT_ID, rs.getString(FIELD_CLIENT_IDENTIFIER));
+        client.put(FIELD_AD_USER_ID, rs.getString(FIELD_DB_AD_USER_ID));
+        client.put(FIELD_AD_ROLE_ID, rs.getString(FIELD_DB_AD_ROLE_ID));
+        client.put(FIELD_SCOPES, rs.getString(FIELD_SCOPES));
+        client.put(FIELD_IS_ACTIVE, "Y".equals(rs.getString("isactive")));
         return client;
       }
     }
@@ -1719,7 +1568,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   /**
    * In-memory holder for authorization codes (short-lived, single-use).
    */
-  private static class AuthCodeData {
+  static class AuthCodeData {
     String clientId;
     String userId;
     String roleId;
@@ -1730,31 +1579,4 @@ public class OAuth2Servlet extends HttpBaseServlet {
     boolean used;
   }
 
-  /**
-   * Escape a string for safe inclusion in HTML attributes.
-   */
-  private String escapeHtml(String value) {
-    if (value == null) {
-      return "";
-    }
-    return value.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace("\"", "&quot;")
-        .replace("'", "&#39;");
-  }
-
-  /**
-   * Escape a string for safe inclusion in JavaScript string literals.
-   */
-  private String escapeJs(String value) {
-    if (value == null) {
-      return "";
-    }
-    return value.replace("\\", "\\\\")
-        .replace("'", "\\'")
-        .replace("\"", "\\\"")
-        .replace("\n", "\\n")
-        .replace("\r", "\\r");
-  }
 }

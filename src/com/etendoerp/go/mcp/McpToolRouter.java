@@ -121,7 +121,7 @@ public class McpToolRouter {
             return handleSchema(specName, arguments);
           default:
             // Check if it's a report tool (generate_*)
-            if (toolName.startsWith("generate_")) {
+            if (toolName.startsWith(McpConstants.GENERATE_PREFIX)) {
               return handleReport(specName, arguments);
             }
             // Otherwise it's a process tool
@@ -151,35 +151,10 @@ public class McpToolRouter {
     JSONArray specsArray = new JSONArray();
     for (SFSpec spec : allSpecs) {
       String specType = spec.getSpecType();
-      String name = spec.getName();
-
-      // RBAC check
-      if ("W".equals(specType)) {
-        Window window = spec.getADWindow();
-        if (window != null && !NeoAccessUtils.hasWindowAccess(window.getId())) {
-          continue;
-        }
-      } else if ("P".equals(specType) || "R".equals(specType)) {
-        Process adProcess = spec.getProcess();
-        if (adProcess != null && !NeoAccessUtils.hasProcessAccess(adProcess.getId())) {
-          continue;
-        }
+      if (McpToolRouterSupport.hasSpecAccess(spec, specType)) {
+        JSONArray entities = "W".equals(specType) ? buildEntitySummaryArray(spec.getId()) : null;
+        specsArray.put(McpToolRouterSupport.buildDiscoverSpec(spec, specType, entities));
       }
-
-      JSONObject specObj = new JSONObject();
-      specObj.put("name", name);
-      specObj.put("type", specType);
-      if (spec.getDescription() != null) {
-        specObj.put("description", spec.getDescription());
-      }
-
-      if ("W".equals(specType)) {
-        specObj.put("entities", buildEntitySummaryArray(spec.getId()));
-      } else if ("R".equals(specType)) {
-        specObj.put("isReport", true);
-      }
-
-      specsArray.put(specObj);
     }
 
     JSONObject result = new JSONObject();
@@ -194,9 +169,9 @@ public class McpToolRouter {
    * List records from a spec entity. Replicates NeoServlet.handleDefault() GET logic.
    */
   private JSONObject handleList(String specName, JSONObject args) throws Exception {
-    validateArgs(args, "entity");
+    validateArgs(args, McpConstants.PARAM_ENTITY);
 
-    String entityName = args.getString("entity");
+    String entityName = args.getString(McpConstants.PARAM_ENTITY);
     int limit = args.optInt("limit", 100);
     int offset = args.optInt("offset", 0);
     String orderBy = args.optString("orderBy", null);
@@ -261,9 +236,9 @@ public class McpToolRouter {
    * Get a single record by ID.
    */
   private JSONObject handleGet(String specName, JSONObject args) throws Exception {
-    validateArgs(args, "entity", "id");
+    validateArgs(args, McpConstants.PARAM_ENTITY, "id");
 
-    String entityName = args.getString("entity");
+    String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String recordId = args.getString("id");
 
     SFSpec spec = findSpecOrThrow(specName);
@@ -296,10 +271,10 @@ public class McpToolRouter {
    * Create a new record.
    */
   private JSONObject handleCreate(String specName, JSONObject args) throws Exception {
-    validateArgs(args, "entity", "fields");
+    validateArgs(args, McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS);
 
-    String entityName = args.getString("entity");
-    JSONObject fields = args.getJSONObject("fields");
+    String entityName = args.getString(McpConstants.PARAM_ENTITY);
+    JSONObject fields = args.getJSONObject(McpConstants.PARAM_FIELDS);
 
     SFSpec spec = findSpecOrThrow(specName);
     SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
@@ -323,9 +298,9 @@ public class McpToolRouter {
 
     // Resolve parentId if present
     String parentIdValue = null;
-    if (filteredBody.has("parentId")) {
-      parentIdValue = filteredBody.getString("parentId");
-      filteredBody.remove("parentId");
+    if (filteredBody.has(McpConstants.PARAM_PARENT_ID)) {
+      parentIdValue = filteredBody.getString(McpConstants.PARAM_PARENT_ID);
+      filteredBody.remove(McpConstants.PARAM_PARENT_ID);
       resolveParentFK(adTab, filteredBody, parentIdValue);
     }
 
@@ -345,7 +320,7 @@ public class McpToolRouter {
     Iterator<String> userKeys = userProvided.keys();
     while (userKeys.hasNext()) {
       String key = userKeys.next();
-      if ("parentId".equals(key)) {
+      if (McpConstants.PARAM_PARENT_ID.equals(key)) {
         continue;
       }
       filteredBody.put(key, userProvided.get(key));
@@ -394,11 +369,11 @@ public class McpToolRouter {
    * Update an existing record.
    */
   private JSONObject handleUpdate(String specName, JSONObject args) throws Exception {
-    validateArgs(args, "entity", "id", "fields");
+    validateArgs(args, McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS);
 
-    String entityName = args.getString("entity");
+    String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String recordId = args.getString("id");
-    JSONObject fields = args.getJSONObject("fields");
+    JSONObject fields = args.getJSONObject(McpConstants.PARAM_FIELDS);
 
     SFSpec spec = findSpecOrThrow(specName);
     SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
@@ -434,9 +409,9 @@ public class McpToolRouter {
    * Delete a record by ID.
    */
   private JSONObject handleDelete(String specName, JSONObject args) throws Exception {
-    validateArgs(args, "entity", "id");
+    validateArgs(args, McpConstants.PARAM_ENTITY, "id");
 
-    String entityName = args.getString("entity");
+    String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String recordId = args.getString("id");
 
     SFSpec spec = findSpecOrThrow(specName);
@@ -471,10 +446,10 @@ public class McpToolRouter {
    * bypassing ETGO_SF_FIELD so all FK columns are queryable — not just included ones.
    */
   private JSONObject handleSelectors(String specName, JSONObject args) throws Exception {
-    validateArgs(args, "entity", "column");
+    validateArgs(args, McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN);
 
-    String entityName = args.getString("entity");
-    String columnName = args.getString("column");
+    String entityName = args.getString(McpConstants.PARAM_ENTITY);
+    String columnName = args.getString(McpConstants.PARAM_COLUMN);
     String query = args.optString("query", null);
 
     SFSpec spec = findSpecOrThrow(specName);
@@ -482,31 +457,9 @@ public class McpToolRouter {
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     // Find the AD_Column by DB column name or DAL property name (field name from schema)
-    Column adColumn = null;
-    for (Column col : adTab.getTable().getADColumnList()) {
-      if (col.getDBColumnName().equalsIgnoreCase(columnName)) {
-        adColumn = col;
-        break;
-      }
-    }
-
-    // Fallback: resolve by DAL property name (e.g. "businessPartner" → "C_BPartner_ID")
-    if (adColumn == null) {
-      Entity dalEntity = ModelProvider.getInstance().getEntityByTableName(adTab.getTable().getDBTableName());
-      if (dalEntity != null) {
-        for (Column col : adTab.getTable().getADColumnList()) {
-          try {
-            Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-            if (prop != null && prop.getName().equalsIgnoreCase(columnName)) {
-              adColumn = col;
-              break;
-            }
-          } catch (Exception ignored) {
-            // Column not mappable to property
-          }
-        }
-      }
-    }
+    Entity dalEntity = ModelProvider.getInstance()
+      .getEntityByTableName(adTab.getTable().getDBTableName());
+    Column adColumn = McpToolRouterSupport.findColumn(adTab, columnName, dalEntity);
 
     if (adColumn == null) {
       throw new IllegalArgumentException("Column not found in table: " + columnName);
@@ -524,9 +477,9 @@ public class McpToolRouter {
    * Get default field values for creating a new record.
    */
   private JSONObject handleDefaults(String specName, JSONObject args) throws Exception {
-    validateArgs(args, "entity");
+    validateArgs(args, McpConstants.PARAM_ENTITY);
 
-    String entityName = args.getString("entity");
+    String entityName = args.getString(McpConstants.PARAM_ENTITY);
 
     SFSpec spec = findSpecOrThrow(specName);
     SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
@@ -565,9 +518,9 @@ public class McpToolRouter {
    * so the agent sees exactly the same fields the UI would show.
    */
   private JSONObject handleSchema(String specName, JSONObject args) throws Exception {
-    validateArgs(args, "entity");
+    validateArgs(args, McpConstants.PARAM_ENTITY);
 
-    String entityName = args.getString("entity");
+    String entityName = args.getString(McpConstants.PARAM_ENTITY);
 
     SFSpec spec = findSpecOrThrow(specName);
     SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
@@ -576,87 +529,10 @@ public class McpToolRouter {
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
 
-    // Load SF_FIELD visibility map: AD_COLUMN_ID -> visibility string
-    Map<String, String> visibilityByColumnId = new HashMap<>();
-    OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
-    fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
-    fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
-    for (SFField sfField : fieldCrit.list()) {
-      Column adCol = sfField.getADColumn();
-      if (adCol != null) {
-        String vis = (String) sfField.get("visibility");
-        if (vis != null && !vis.trim().isEmpty()) {
-          visibilityByColumnId.put((String) adCol.getId(), vis.trim());
-        }
-      }
-    }
-
-    // Build fields array from AD_Column (dictionary-driven, like the classic UI)
-    JSONArray fieldsArray = new JSONArray();
-    for (Column col : adTab.getTable().getADColumnList()) {
-      if (!col.isActive()) {
-        continue;
-      }
-      String dbColName = col.getDBColumnName();
-      if (SYSTEM_COLUMNS.contains(dbColName.toUpperCase())) {
-        continue;
-      }
-
-      // Resolve DAL property name (camelCase, matches GET response keys)
-      String propName = dbColName;
-      if (dalEntity != null) {
-        try {
-          Property prop = dalEntity.getPropertyByColumnName(dbColName);
-          if (prop != null) {
-            propName = prop.getName();
-          }
-        } catch (Exception ignored) {
-          // keep dbColName as fallback
-        }
-      }
-
-      String refId = col.getReference() != null
-          ? (String) col.getReference().getId() : null;
-
-      JSONObject fieldObj = new JSONObject();
-      fieldObj.put("name", propName);
-      fieldObj.put("column", dbColName);
-      fieldObj.put("label", col.getName());
-      fieldObj.put("type", mapColumnType(refId));
-      fieldObj.put("required", col.isMandatory());
-
-      // A field is readOnly if: it's a PK, a DocumentNo, or has an automatic sequence
-      String tableName = adTab.getTable().getDBTableName();
-      String expectedPK = tableName + "_ID";
-      boolean isReadOnly = expectedPK.equalsIgnoreCase(dbColName)
-          || "DocumentNo".equalsIgnoreCase(dbColName)
-          || (Boolean.TRUE.equals(col.isUseAutomaticSequence()));
-      fieldObj.put("readOnly", isReadOnly);
-
-      // Default value expression (so agent knows what the system auto-fills)
-      String defaultExpr = col.getDefaultValue();
-      if (defaultExpr != null && !defaultExpr.trim().isEmpty()) {
-        fieldObj.put("defaultExpression", defaultExpr.trim());
-      }
-
-      // Visibility from ETGO_SF_FIELD (editable, readOnly, system, discarded)
-      String visibility = visibilityByColumnId.get((String) col.getId());
-      if (visibility != null) {
-        fieldObj.put("visibility", visibility);
-        // userRequired: only true when field is editable AND mandatory in the AD dictionary
-        boolean userRequired = "editable".equals(visibility) && col.isMandatory();
-        fieldObj.put("userRequired", userRequired);
-      }
-
-      // FK selector info
-      boolean hasSelector = refId != null && SELECTOR_REFS.contains(refId);
-      if (hasSelector) {
-        fieldObj.put("hasSelector", true);
-        fieldObj.put("selectorType", mapSelectorType(refId));
-      }
-
-      fieldsArray.put(fieldObj);
-    }
+    Map<String, String> visibilityByColumnId =
+      McpToolRouterSupport.loadVisibilityByColumnId(sfEntity);
+    JSONArray fieldsArray = McpToolRouterSupport.buildSchemaFieldsArray(adTab, dalEntity,
+      visibilityByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
 
     // Build entity schema
     JSONObject entitySchema = new JSONObject();
@@ -693,10 +569,10 @@ public class McpToolRouter {
     return wrapAsTextContent(entitySchema.toString(2));
   }
 
-  private String mapColumnType(String refId) {
-    if (refId == null) return "string";
+  static String mapColumnTypeStatic(String refId) {
+    if (refId == null) return McpConstants.TYPE_STRING;
     switch (refId) {
-      case "10": case "14": case "34": return "string";
+      case "10": case "14": case "34": return McpConstants.TYPE_STRING;
       case "11": case "22": case "29": case "12":
       case "800008": case "800019": return "number";
       case "20": return "boolean";
@@ -706,19 +582,19 @@ public class McpToolRouter {
       case "28": return "button";
       case "17": return "list";
       case "13": return "id";
-      case "19": case "18": case "30": case "95E2A8B50A254B2AAE6774B8C2F28120":
+      case "19": case "18": case "30": case REF_OBUISEL:
         return "foreignKey";
-      default: return "string";
+      default: return McpConstants.TYPE_STRING;
     }
   }
 
-  private String mapSelectorType(String refId) {
+  static String mapSelectorTypeStatic(String refId) {
     if (refId == null) return null;
     switch (refId) {
       case "19": return "TableDir";
       case "18": return "Table";
       case "30": return "Search";
-      case "95E2A8B50A254B2AAE6774B8C2F28120": return "OBUISEL";
+      case REF_OBUISEL: return "OBUISEL";
       default: return null;
     }
   }
@@ -812,11 +688,11 @@ public class McpToolRouter {
     criteria.setMaxResults(1);
     List<SFSpec> results = criteria.list();
     if (results.isEmpty()) {
-      throw new IllegalArgumentException("Spec not found: " + specName);
-    }
-    return results.get(0);
-  }
-
+      for (SFSpec spec : allSpecs) {
+        String specType = spec.getSpecType();
+        if (McpToolRouterSupport.hasSpecAccess(spec, specType)) {
+          JSONArray entities = "W".equals(specType) ? buildEntitySummaryArray(spec.getId()) : null;
+          specsArray.put(McpToolRouterSupport.buildDiscoverSpec(spec, specType, entities));
   /**
    * Find an active, included entity within a spec or throw.
    * Same query pattern as NeoServlet.findEntity().
@@ -887,25 +763,25 @@ public class McpToolRouter {
           prop = dalEntity.getProperty(key);
         } catch (Exception alsoIgnored) {
           log.debug("Filter column '{}' not found in entity, skipping", key);
-          continue;
         }
       }
 
-      if (where.length() > 0) {
-        where.append(" and ");
-      }
-
-      if (prop != null && !prop.isPrimitive()) {
-        // FK reference — match on .id
-        where.append("e.").append(prop.getName()).append(".id='")
-            .append(value.replace("'", "''")).append("'");
-      } else if (prop != null) {
-        where.append("e.").append(prop.getName()).append("='")
-            .append(value.replace("'", "''")).append("'");
-      } else {
+      if (prop == null) {
         // No resolved property — skip to prevent HQL injection
         log.warn("Filter key '{}' could not be resolved to a DAL property, ignoring", key);
-        continue;
+      } else {
+        if (where.length() > 0) {
+          where.append(" and ");
+        }
+
+        if (!prop.isPrimitive()) {
+          // FK reference — match on .id
+          where.append("e.").append(prop.getName()).append(".id='")
+              .append(value.replace("'", "''")).append("'");
+        } else {
+          where.append("e.").append(prop.getName()).append("='")
+              .append(value.replace("'", "''")).append("'");
+        }
       }
     }
     return where.length() > 0 ? where.toString() : null;
@@ -927,23 +803,22 @@ public class McpToolRouter {
     while (keys.hasNext()) {
       String key = keys.next();
       Object value = fields.get(key);
+      String mappedKey = key;
 
       // Try as DAL property name first
       Property prop = dalEntity.getProperty(key, false);
       if (prop != null) {
-        mapped.put(key, value);
-        continue;
-      }
-
-      // Try as DB column name
-      prop = dalEntity.getPropertyByColumnName(key, false);
-      if (prop != null) {
-        mapped.put(prop.getName(), value);
-        continue;
+        mappedKey = key;
+      } else {
+        // Try as DB column name
+        prop = dalEntity.getPropertyByColumnName(key, false);
+        if (prop != null) {
+          mappedKey = prop.getName();
+        }
       }
 
       // Pass through unknown keys (parentId, etc.)
-      mapped.put(key, value);
+      mapped.put(mappedKey, value);
     }
     return mapped;
   }
@@ -967,55 +842,15 @@ public class McpToolRouter {
     }
 
     for (Column col : adTab.getTable().getADColumnList()) {
-      if (!col.isActive() || !col.isMandatory()) {
-        continue;
-      }
-      // Skip primary key column (auto-generated by DAL)
-      if (col.getDBColumnName().equalsIgnoreCase(adTab.getTable().getDBTableName() + "_ID")) {
-        continue;
-      }
-      String dbColName = col.getDBColumnName();
-      if (SYSTEM_COLUMNS.contains(dbColName.toUpperCase())) {
-        continue;
-      }
-
-      Property prop = null;
-      try {
-        prop = dalEntity.getPropertyByColumnName(dbColName);
-      } catch (Exception ignored) {
-        continue;
-      }
-      if (prop == null) {
-        continue;
-      }
-
-      String propName = prop.getName();
-      if (body.has(propName) && !body.isNull(propName)) {
-        Object val = body.opt(propName);
-        if (val instanceof String && !((String) val).isEmpty()) {
-          continue;
+      Property prop = McpToolRouterSupport.resolveMandatoryProperty(adTab, dalEntity, col,
+          SYSTEM_COLUMNS);
+      if (prop != null && McpToolRouterSupport.isMandatoryValueMissing(body, prop.getName())) {
+        try {
+          missing.put(McpToolRouterSupport.buildMissingFieldInfo(col, prop.getName(),
+              SELECTOR_REFS));
+        } catch (Exception ignored) {
+          // skip malformed field info
         }
-        if (!(val instanceof String)) {
-          continue;
-        }
-      }
-
-      // This mandatory field is missing — build schema-compatible descriptor
-      try {
-        JSONObject fieldInfo = new JSONObject();
-        fieldInfo.put("name", propName);
-        fieldInfo.put("column", dbColName);
-
-        String refId = col.getReference() != null ? col.getReference().getId() : null;
-        boolean isFK = SELECTOR_REFS.contains(refId);
-        fieldInfo.put("type", isFK ? "foreignKey" : "other");
-        if (isFK) {
-          fieldInfo.put("hasSelector", true);
-        }
-        fieldInfo.put("label", col.getName());
-        missing.put(fieldInfo);
-      } catch (Exception ignored) {
-        // skip
       }
     }
     return missing;
@@ -1038,28 +873,8 @@ public class McpToolRouter {
     }
     for (String key : keys) {
       Property prop = dalEntity.getProperty(key, false);
-      if (prop == null || !prop.isPrimitive()) {
-        continue;
-      }
-      Object val = body.opt(key);
-      if (!(val instanceof String)) {
-        continue;
-      }
-      String strVal = (String) val;
-      if (strVal.isEmpty()) {
-        continue;
-      }
-      try {
-        Class<?> type = prop.getPrimitiveObjectType();
-        if (type == Long.class) {
-          body.put(key, Long.parseLong(strVal.contains(".") ? strVal.substring(0, strVal.indexOf('.')) : strVal));
-        } else if (type == java.math.BigDecimal.class) {
-          body.put(key, new java.math.BigDecimal(strVal));
-        } else if (type == Boolean.class) {
-          body.put(key, "Y".equalsIgnoreCase(strVal) || "true".equalsIgnoreCase(strVal));
-        }
-      } catch (Exception e) {
-        log.debug("Could not coerce field {} value '{}': {}", key, strVal, e.getMessage());
+      if (prop != null && prop.isPrimitive()) {
+        McpToolRouterSupport.coercePrimitiveFieldValue(body, key, prop, log);
       }
     }
   }
@@ -1245,7 +1060,7 @@ public class McpToolRouter {
       return result;
     } catch (JSONException e) {
       // Should never happen with string values
-      throw new RuntimeException("Error building MCP content", e);
+      throw new McpToolException("Error building MCP content", e);
     }
   }
 
@@ -1265,7 +1080,7 @@ public class McpToolRouter {
       result.put("isError", true);
       return result;
     } catch (JSONException e) {
-      throw new RuntimeException("Error building MCP error content", e);
+      throw new McpToolException("Error building MCP error content", e);
     }
   }
 

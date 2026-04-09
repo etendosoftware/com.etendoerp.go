@@ -52,6 +52,8 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+
+import com.etendoerp.go.common.CorsUtils;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -79,6 +81,27 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
   private static final String HASH_ALGORITHM = "SHA-256";
   private static final int SALT_BYTES = 16;
+  private static final String UTF_8 = "UTF-8";
+  private static final String FIELD_EMAIL = "email";
+  private static final String FIELD_CLIENT_NAME = "clientName";
+  private static final String FIELD_STATUS = "status";
+  private static final String FIELD_TOKEN = "token";
+  private static final String FIELD_MESSAGE = "message";
+  private static final String FIELD_SUCCESS = "success";
+  private static final String STATUS_SUCCESS = "success";
+  private static final String INVALID_JSON_BODY = "Invalid JSON body";
+  private static final String INTERNAL_ERROR = "Internal error";
+  private static final String SERVER_ERROR = "Server error";
+  private static final String INVALID_AUTHORIZATION_HEADER =
+      "Missing or invalid Authorization header";
+  private static final String INVALID_OR_EXPIRED_TOKEN = "Invalid or expired token";
+  private static final String DB_ACCOUNT_ID = "etgo_account_id";
+  private static final String DB_CLIENT_ID = "ad_client_id";
+  private static final String DB_ORG_ID = "ad_org_id";
+  private static final String PROGRESS_IN_PROGRESS = "in_progress";
+  private static final String PROGRESS_CLIENT = "client";
+  private static final String PROGRESS_ERROR = "error";
+  private static final String PROGRESS_ORGANIZATION = "organization";
 
   // --- SQL constants ---
 
@@ -120,18 +143,15 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
   // --- CORS ---
 
-  private void setCorsHeaders(HttpServletResponse response) {
-    response.setHeader("Access-Control-Allow-Origin", "*");
-    response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    response.setHeader("Access-Control-Allow-Headers",
-        "Content-Type, Authorization, Accept");
-    response.setHeader("Access-Control-Max-Age", "86400");
+  private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
+    CorsUtils.apply(request, response, "GET, POST, OPTIONS",
+        "Content-Type, Authorization, Accept", null, false);
   }
 
   @Override
   public void service(HttpServletRequest request, HttpServletResponse response)
       throws javax.servlet.ServletException, IOException {
-    setCorsHeaders(response);
+    setCorsHeaders(request, response);
     if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
       return;
@@ -182,7 +202,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     try {
       body = readJsonBody(request);
     } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
       return;
     }
 
@@ -190,7 +210,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     String password;
     String name;
     try {
-      email = body.getString("email").trim().toLowerCase();
+      email = body.getString(FIELD_EMAIL).trim().toLowerCase();
       password = body.getString("password");
       name = body.getString("name").trim();
     } catch (JSONException e) {
@@ -238,19 +258,19 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
         ps.setString(1, email);
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
-            accountId = rs.getString("etgo_account_id");
+            accountId = rs.getString(DB_ACCOUNT_ID);
           }
         }
       }
 
       JSONObject accountJson = new JSONObject();
       accountJson.put("id", accountId);
-      accountJson.put("email", email);
+      accountJson.put(FIELD_EMAIL, email);
       accountJson.put("name", name);
 
       JSONObject result = new JSONObject();
-      result.put("status", "success");
-      result.put("token", sessionToken);
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_TOKEN, sessionToken);
       result.put("account", accountJson);
 
       writeResponse(response, HttpServletResponse.SC_CREATED, result);
@@ -261,7 +281,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
           "Registration failed due to a server error");
     } catch (JSONException e) {
       log.error("JSON error building register response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
     }
   }
 
@@ -276,14 +296,14 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     try {
       body = readJsonBody(request);
     } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
       return;
     }
 
     String email;
     String password;
     try {
-      email = body.getString("email").trim().toLowerCase();
+      email = body.getString(FIELD_EMAIL).trim().toLowerCase();
       password = body.getString("password");
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
@@ -301,7 +321,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
         ps.setString(1, email);
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
-            accountId = rs.getString("etgo_account_id");
+            accountId = rs.getString(DB_ACCOUNT_ID);
             storedHash = rs.getString("password_hash");
             accountName = rs.getString("name");
           }
@@ -324,12 +344,12 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
       JSONObject accountJson = new JSONObject();
       accountJson.put("id", accountId);
-      accountJson.put("email", email);
+      accountJson.put(FIELD_EMAIL, email);
       accountJson.put("name", accountName);
 
       JSONObject result = new JSONObject();
-      result.put("status", "success");
-      result.put("token", sessionToken);
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_TOKEN, sessionToken);
       result.put("account", accountJson);
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
@@ -340,7 +360,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
           "Login failed due to a server error");
     } catch (JSONException e) {
       log.error("JSON error building login response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
     }
   }
 
@@ -354,7 +374,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     String token = extractBearerToken(request);
     if (token == null) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
-          "Missing or invalid Authorization header");
+          INVALID_AUTHORIZATION_HEADER);
       return;
     }
 
@@ -364,13 +384,13 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
         ps.setString(1, token);
         try (ResultSet rs = ps.executeQuery()) {
           if (!rs.next()) {
-            writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
+            writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
             return;
           }
 
           JSONObject result = new JSONObject();
-          result.put("id", rs.getString("etgo_account_id"));
-          result.put("email", rs.getString("email"));
+          result.put("id", rs.getString(DB_ACCOUNT_ID));
+          result.put(FIELD_EMAIL, rs.getString(FIELD_EMAIL));
           result.put("name", rs.getString("name"));
           Timestamp created = rs.getTimestamp("created");
           if (created != null) {
@@ -382,10 +402,10 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       }
     } catch (SQLException e) {
       log.error("Database error fetching account by token", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
     } catch (JSONException e) {
       log.error("JSON error building /me response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
     }
   }
 
@@ -400,7 +420,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     String token = extractBearerToken(request);
     if (token == null) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
-          "Missing or invalid Authorization header");
+          INVALID_AUTHORIZATION_HEADER);
       return;
     }
 
@@ -412,13 +432,13 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
         ps.setString(1, token);
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
-            accountEmail = rs.getString("email");
+            accountEmail = rs.getString(FIELD_EMAIL);
           }
         }
       }
 
       if (accountEmail == null) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
 
@@ -430,9 +450,9 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
         try (ResultSet rs = ps.executeQuery()) {
           while (rs.next()) {
             JSONObject env = new JSONObject();
-            env.put("clientId", rs.getString("ad_client_id"));
-            env.put("clientName", rs.getString("client_name"));
-            env.put("orgId", rs.getString("ad_org_id"));
+            env.put("clientId", rs.getString(DB_CLIENT_ID));
+            env.put(FIELD_CLIENT_NAME, rs.getString("client_name"));
+            env.put("orgId", rs.getString(DB_ORG_ID));
             env.put("orgName", rs.getString("org_name"));
             env.put("adminUserId", rs.getString("ad_user_id"));
             env.put("adminUser", rs.getString("admin_user"));
@@ -447,10 +467,10 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
     } catch (SQLException e) {
       log.error("Database error in /environments", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
     } catch (JSONException e) {
       log.error("JSON error building /environments response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
     }
   }
 
@@ -464,7 +484,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     String token = extractBearerToken(request);
     if (token == null) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
-          "Missing or invalid Authorization header");
+          INVALID_AUTHORIZATION_HEADER);
       return;
     }
 
@@ -476,110 +496,28 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
     Connection conn = OBDal.getInstance().getConnection();
     try {
-      // Verify token and get account email
-      String accountEmail = null;
-      try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_ACCOUNT_BY_TOKEN)) {
-        ps.setString(1, token);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            accountEmail = rs.getString("email");
-          }
-        }
-      }
-
+      String accountEmail = EtendoGoJwtSupport.requireAccountEmail(conn, token);
       if (accountEmail == null) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
 
-      // Verify the AD_User belongs to this account (username matches email)
-      boolean authorized = false;
-      try (PreparedStatement ps = conn.prepareStatement(
-          "SELECT username FROM ad_user WHERE ad_user_id = ? AND isactive = 'Y'")) {
-        ps.setString(1, userId);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            String username = rs.getString("username");
-            authorized = accountEmail.equals(username)
-                || (username != null && username.startsWith(accountEmail + "+"));
-          }
-        }
-      }
-
-      if (!authorized) {
+      if (!EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(conn, accountEmail, userId)) {
         writeError(response, HttpServletResponse.SC_FORBIDDEN,
             "User does not belong to this account");
         return;
       }
 
-      // Build roleList with orgList via SQL (avoids DAL session/cache issues)
-      String firstRoleId = null;
-      org.codehaus.jettison.json.JSONArray roleArray = new org.codehaus.jettison.json.JSONArray();
-      try (PreparedStatement ps = conn.prepareStatement(
-          "SELECT r.ad_role_id, r.name AS role_name "
-          + "FROM ad_user_roles ur "
-          + "JOIN ad_role r ON ur.ad_role_id = r.ad_role_id "
-          + "WHERE ur.ad_user_id = ? AND ur.isactive = 'Y' AND r.isactive = 'Y' "
-          + "ORDER BY r.created")) {
-        ps.setString(1, userId);
-        try (ResultSet rs = ps.executeQuery()) {
-          while (rs.next()) {
-            String rId = rs.getString("ad_role_id");
-            if (firstRoleId == null) firstRoleId = rId;
-            JSONObject roleObj = new JSONObject();
-            roleObj.put("id", rId);
-            roleObj.put("name", rs.getString("role_name"));
-
-            // Get orgs for this role
-            org.codehaus.jettison.json.JSONArray orgArray = new org.codehaus.jettison.json.JSONArray();
-            try (PreparedStatement ps2 = conn.prepareStatement(
-                "SELECT o.ad_org_id, o.name AS org_name "
-                + "FROM ad_role_orgaccess roa "
-                + "JOIN ad_org o ON roa.ad_org_id = o.ad_org_id "
-                + "WHERE roa.ad_role_id = ? AND roa.isactive = 'Y' AND o.isactive = 'Y' "
-                + "ORDER BY o.name")) {
-              ps2.setString(1, rId);
-              try (ResultSet rs2 = ps2.executeQuery()) {
-                while (rs2.next()) {
-                  JSONObject orgObj = new JSONObject();
-                  orgObj.put("id", rs2.getString("ad_org_id"));
-                  orgObj.put("name", rs2.getString("org_name"));
-                  orgArray.put(orgObj);
-                }
-              }
-            }
-            roleObj.put("orgList", orgArray);
-            roleArray.put(roleObj);
-          }
-        }
-      }
-
-      // Generate Etendo JWT for the AD_User with explicit role
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-      try {
-        User user = OBDal.getInstance().get(User.class, userId);
-        if (user == null) {
-          writeError(response, HttpServletResponse.SC_NOT_FOUND, "User not found");
-          return;
-        }
-        Role role = firstRoleId != null ? OBDal.getInstance().get(Role.class, firstRoleId) : null;
-        String jwtToken = SecureWebServicesUtils.generateToken(user, role);
-
-        JSONObject result = new JSONObject();
-        result.put("token", jwtToken);
-        result.put("roleList", roleArray);
-        writeResponse(response, HttpServletResponse.SC_OK, result);
-      } finally {
-        OBContext.restorePreviousMode();
-      }
+        EtendoGoJwtSupport.RoleListData roleListData =
+          EtendoGoJwtSupport.loadRoleListData(conn, userId);
+      writeEnvironmentLoginResponse(response, userId, roleListData);
 
     } catch (SQLException e) {
       log.error("Database error in /login", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
     } catch (JSONException e) {
       log.error("JSON error in /login", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
     } catch (Exception e) {
       log.error("Token generation error in /login", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Token generation failed");
@@ -595,24 +533,6 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       "SELECT c_currency_id FROM c_currency WHERE iso_code = ?";
 
   /**
-   * SQL to find the '*' organization that InitialClientSetup creates for a new client.
-   */
-  private static final String SQL_FIND_STAR_ORG =
-      "SELECT ad_org_id FROM ad_org WHERE ad_client_id = ? AND value = '*'";
-
-  /**
-   * SQL to find a client by name.
-   */
-  private static final String SQL_FIND_CLIENT_BY_NAME =
-      "SELECT ad_client_id FROM ad_client WHERE name = ?";
-
-  /**
-   * SQL to check if a non-'*' organization already exists for a client.
-   */
-  private static final String SQL_FIND_ORG_BY_CLIENT =
-      "SELECT ad_org_id, name FROM ad_org WHERE ad_client_id = ? AND value != '*'";
-
-  /**
    * SQL to find the admin role and user created by InitialClientSetup for a client.
    */
   private static final String SQL_FIND_CLIENT_ADMIN =
@@ -622,13 +542,6 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       + "JOIN ad_user u ON ur.ad_user_id = u.ad_user_id "
       + "WHERE r.ad_client_id = ? AND u.ad_user_id != '100' "
       + "ORDER BY r.created LIMIT 1";
-
-  /**
-   * SQL to check if an AD_User with a given username already exists.
-   */
-  private static final String SQL_FIND_AD_USER_BY_USERNAME =
-      "SELECT ad_user_id FROM ad_user WHERE username = ?";
-
 
   /**
    * POST /sws/go/onboarding
@@ -645,80 +558,45 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     String token = extractBearerToken(request);
     if (token == null) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
-          "Missing or invalid Authorization header");
+          INVALID_AUTHORIZATION_HEADER);
       return;
     }
 
-    // Authenticate and get account info
-    String accountEmail = null;
-    String accountName = null;
     Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_ACCOUNT_BY_TOKEN)) {
-      ps.setString(1, token);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (!rs.next()) {
-          writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
-          return;
-        }
-        accountEmail = rs.getString("email");
-        accountName = rs.getString("name");
+    final String accountEmail;
+    try {
+      accountEmail = EtendoGoJwtSupport.requireAccountEmail(conn, token);
+      if (accountEmail == null) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
       }
     } catch (SQLException e) {
       log.error("Database error validating token for onboarding", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Server error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
       return;
     }
 
-    // Parse request body
-    JSONObject body;
+    OnboardingRequestData onboardingRequest = parseOnboardingRequest(request, response);
+    if (onboardingRequest == null) {
+      return;
+    }
+
+    final String currencyId;
     try {
-      body = readJsonBody(request);
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
-      return;
-    }
-
-    String clientName;
-    String currencyIso;
-    String language;
-    try {
-      clientName = body.getString("clientName").trim();
-      currencyIso = body.optString("currency", "EUR").trim();
-      language = body.optString("language", "en_US").trim();
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing required field: clientName");
-      return;
-    }
-
-    if (clientName.isEmpty()) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "clientName must not be empty");
-      return;
-    }
-
-    // Resolve currency ISO code → ID
-    String currencyId = null;
-    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_CURRENCY_BY_ISO)) {
-      ps.setString(1, currencyIso.toUpperCase());
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          currencyId = rs.getString("c_currency_id");
-        }
-      }
+      currencyId = resolveCurrencyId(conn, onboardingRequest.currencyIso, response);
     } catch (SQLException e) {
-      log.error("Error resolving currency ISO: " + currencyIso, e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Server error");
+      log.error("Error resolving currency ISO: {}", onboardingRequest.currencyIso, e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
       return;
     }
     if (currencyId == null) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Unknown currency: " + currencyIso);
       return;
     }
 
     // Set up NDJSON streaming
     response.setStatus(HttpServletResponse.SC_OK);
     response.setContentType("application/x-ndjson");
-    response.setCharacterEncoding("UTF-8");
+    response.setCharacterEncoding(UTF_8);
     response.setHeader("X-Content-Type-Options", "nosniff");
     PrintWriter writer = response.getWriter();
 
@@ -726,203 +604,26 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     String adminPassword = UUID.randomUUID().toString().substring(0, 12);
 
     try {
-      // Step 1: Set up admin context
-      sendProgress(writer, "setup", "in_progress", "Setting up admin context...");
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-
-      VariablesSecureApp vars = new VariablesSecureApp("0", "0", "0", "0", language);
-      sendProgress(writer, "setup", "done", "Admin context ready");
-
-      // Step 2: Create client (idempotent — skip if already exists)
-      sendProgress(writer, "client", "in_progress",
-          "Creating client: " + clientName + "...");
-
-      String newClientId = null;
-      // Check if client already exists (retry scenario)
-      try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_CLIENT_BY_NAME)) {
-        ps.setString(1, clientName);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            newClientId = rs.getString("ad_client_id");
-          }
-        }
+      VariablesSecureApp vars = prepareAdminContext(writer, onboardingRequest.language);
+      String clientId = resolveOrCreateClient(conn, writer, vars, accountEmail, onboardingRequest,
+          currencyId, adminPassword);
+      if (clientId == null) {
+        return;
       }
 
-      if (newClientId != null) {
-        // Client exists — verify it's complete (has '*' org)
-        boolean hasStarOrg = false;
-        try (PreparedStatement ps2 = conn.prepareStatement(SQL_FIND_STAR_ORG)) {
-          ps2.setString(1, newClientId);
-          try (ResultSet rs2 = ps2.executeQuery()) {
-            hasStarOrg = rs2.next();
-          }
-        }
-        if (!hasStarOrg) {
-          // Client exists but is incomplete (failed mid-creation) — cannot resume
-          sendProgress(writer, "client", "error",
-              "Client '" + clientName + "' exists but is incomplete. Use a different name.");
-          sendFinalResult(writer, false,
-              "A previous attempt left '" + clientName + "' in an incomplete state. Please choose a different company name.");
-          return;
-        }
-        sendProgress(writer, "client", "done",
-            "Client already exists, resuming...");
-      } else {
-        // Check if AD_User with this email already exists (leftover from a failed attempt)
-        String clientUser = accountEmail;
-        try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_AD_USER_BY_USERNAME)) {
-          ps.setString(1, accountEmail);
-          try (ResultSet rs = ps.executeQuery()) {
-            if (rs.next()) {
-              // User exists — derive a unique username for this client
-              clientUser = accountEmail + "+" + clientName.toLowerCase().replaceAll("[^a-z0-9]", "");
-            }
-          }
-        }
-
-        // Create new client
-        InitialClientSetup ics = new InitialClientSetup();
-        OBError clientResult = ics.createClient(
-            vars,
-            currencyId,
-            clientName,      // client name
-            clientUser,      // client user (unique per client)
-            adminPassword,   // generated password
-            "",              // no modules (reference data)
-            "Account",       // account text
-            "Calendar",      // calendar text
-            false,           // no accounting
-            null,            // no CoA file
-            false, false, false, false, false  // no dimensions
-        );
-
-        if (!"Success".equals(clientResult.getType())) {
-          String errorMsg = clientResult.getMessage() != null
-              ? clientResult.getMessage() : "Client creation failed";
-          sendProgress(writer, "client", "error", errorMsg);
-          sendFinalResult(writer, false, errorMsg);
-          return;
-        }
-        sendProgress(writer, "client", "done", "Client created successfully");
-      }
-
-      // Re-initialize DAL session — createClient() calls commitAndClose() internally
-      // which closes the pooled connection and DAL session.
-      // We need a fresh OBContext pointing to the new client for InitialOrgSetup.
       conn = OBDal.getInstance().getConnection();
-
-      // Look up the client ID (needed whether we just created it or it already existed)
-      if (newClientId == null) {
-        try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_CLIENT_BY_NAME)) {
-          ps.setString(1, clientName);
-          try (ResultSet rs = ps.executeQuery()) {
-            if (rs.next()) {
-              newClientId = rs.getString("ad_client_id");
-            }
-          }
-        }
-      }
-
-      if (newClientId == null) {
-        sendProgress(writer, "organization", "error", "Could not find client");
-        sendFinalResult(writer, false, "Client was created but could not be found");
+      AdminContextData adminContext = resolveAdminContextData(conn, clientId, writer);
+      if (adminContext == null) {
         return;
       }
 
-      // Re-establish OBContext for the new client so DAL queries
-      // (especially getOrgTree) can find client-specific data.
-      // Must use the client's own admin role/user — system admin ("0") can't read new client data.
-      String adminRoleId = null;
-      String adminUserId = null;
-      try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_CLIENT_ADMIN)) {
-        ps.setString(1, newClientId);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            adminRoleId = rs.getString("ad_role_id");
-            adminUserId = rs.getString("ad_user_id");
-          }
-        }
-      }
-      if (adminRoleId == null || adminUserId == null) {
-        sendProgress(writer, "organization", "error", "Could not find admin role for new client");
-        sendFinalResult(writer, false, "Admin role not found — client may be incomplete");
+      if (!ensureOrganization(conn, writer, onboardingRequest.clientName, clientId, adminContext,
+          currencyId)) {
         return;
       }
 
-      // Find the '*' org for the new client
-      String starOrgId = null;
-      try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_STAR_ORG)) {
-        ps.setString(1, newClientId);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            starOrgId = rs.getString("ad_org_id");
-          }
-        }
-      }
-      if (starOrgId == null) {
-        starOrgId = "0";
-      }
-
-      OBContext.setOBContext(adminUserId, adminRoleId, newClientId, starOrgId);
-      OBContext.setAdminMode(true);
-
-      // Step 3: Create organization (idempotent — skip if already exists)
-      sendProgress(writer, "organization", "in_progress",
-          "Creating organization: " + clientName + "...");
-
-      // Check if a non-'*' org already exists for this client
-      boolean orgExists = false;
-      try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_ORG_BY_CLIENT)) {
-        ps.setString(1, newClientId);
-        try (ResultSet rs = ps.executeQuery()) {
-          orgExists = rs.next();
-        }
-      }
-
-      if (orgExists) {
-        sendProgress(writer, "organization", "done",
-            "Organization already exists, resuming...");
-      } else {
-        // Get the Client entity for InitialOrgSetup
-        Client newClient = OBDal.getInstance().get(Client.class, newClientId);
-        if (newClient == null) {
-          sendProgress(writer, "organization", "error", "Could not load client entity");
-          sendFinalResult(writer, false, "Client entity not found in DAL");
-          return;
-        }
-
-        // Create organization (starOrgId already resolved above)
-        InitialOrgSetup ios = new InitialOrgSetup(newClient);
-        OBError orgResult = ios.createOrganization(
-            clientName,      // org name = client name
-            "",              // no org user — already created by client step
-            "0",             // org type: 0 = Organization
-            starOrgId,       // parent org = the '*' org
-            null,            // no location
-            "",              // no password — no user being created
-            "",              // no modules
-            false,           // no accounting
-            null,            // no CoA file
-            currencyId,      // currency
-            false, false, false, false, false  // no dimensions
-        );
-
-        if (!"Success".equals(orgResult.getType())) {
-          String errorMsg = orgResult.getMessage() != null
-              ? orgResult.getMessage() : "Organization creation failed";
-          sendProgress(writer, "organization", "error", errorMsg);
-          sendFinalResult(writer, false, errorMsg);
-          return;
-        }
-        sendProgress(writer, "organization", "done", "Organization created successfully");
-      }
-
-      // Step 5: Finalize (createClient/createOrganization handle their own commits)
-      sendProgress(writer, "finalize", "in_progress", "Finalizing setup...");
+      sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
       sendProgress(writer, "finalize", "done", "Environment ready");
-
-      // Send final success result
       sendFinalResult(writer, true, "Environment created successfully");
 
     } catch (Exception e) {
@@ -932,12 +633,194 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       } catch (Exception rollbackEx) {
         log.error("Rollback failed", rollbackEx);
       }
-      sendProgress(writer, "error", "error", "Onboarding failed: " + e.getMessage());
+      sendProgress(writer, PROGRESS_ERROR, PROGRESS_ERROR,
+          "Onboarding failed: " + e.getMessage());
       sendFinalResult(writer, false, "Onboarding failed: " + e.getMessage());
     } finally {
       OBContext.restorePreviousMode();
       writer.flush();
     }
+  }
+
+  private void writeEnvironmentLoginResponse(HttpServletResponse response, String userId,
+      EtendoGoJwtSupport.RoleListData roleListData) throws Exception {
+    OBContext.setOBContext("0", "0", "0", "0");
+    OBContext.setAdminMode(true);
+    try {
+      User user = OBDal.getInstance().get(User.class, userId);
+      if (user == null) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, "User not found");
+        return;
+      }
+      Role role = roleListData.firstRoleId != null
+          ? OBDal.getInstance().get(Role.class, roleListData.firstRoleId)
+          : null;
+      String jwtToken = SecureWebServicesUtils.generateToken(user, role);
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_TOKEN, jwtToken);
+      result.put("roleList", roleListData.roleArray);
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private OnboardingRequestData parseOnboardingRequest(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    try {
+      JSONObject body = readJsonBody(request);
+      String clientName = body.getString(FIELD_CLIENT_NAME).trim();
+      if (clientName.isEmpty()) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+        FIELD_CLIENT_NAME + " must not be empty");
+        return null;
+      }
+      OnboardingRequestData data = new OnboardingRequestData();
+      data.clientName = clientName;
+      data.currencyIso = body.optString("currency", "EUR").trim();
+      data.language = body.optString("language", "en_US").trim();
+      return data;
+    } catch (JSONException e) {
+        String message = e.getMessage() != null && e.getMessage().contains(FIELD_CLIENT_NAME)
+          ? "Missing required field: " + FIELD_CLIENT_NAME
+          : INVALID_JSON_BODY;
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, message);
+      return null;
+    }
+  }
+
+  private String resolveCurrencyId(Connection conn, String currencyIso,
+      HttpServletResponse response) throws SQLException, IOException {
+    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_CURRENCY_BY_ISO)) {
+      ps.setString(1, currencyIso.toUpperCase());
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          return rs.getString("c_currency_id");
+        }
+      }
+    }
+    writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Unknown currency: " + currencyIso);
+    return null;
+  }
+
+  private VariablesSecureApp prepareAdminContext(PrintWriter writer, String language) {
+    sendProgress(writer, "setup", PROGRESS_IN_PROGRESS, "Setting up admin context...");
+    OBContext.setOBContext("0", "0", "0", "0");
+    OBContext.setAdminMode(true);
+    VariablesSecureApp vars = new VariablesSecureApp("0", "0", "0", "0", language);
+    sendProgress(writer, "setup", "done", "Admin context ready");
+    return vars;
+  }
+
+  private String resolveOrCreateClient(Connection conn, PrintWriter writer, VariablesSecureApp vars,
+      String accountEmail, OnboardingRequestData requestData, String currencyId,
+      String adminPassword) throws Exception {
+    sendProgress(writer, PROGRESS_CLIENT, PROGRESS_IN_PROGRESS,
+        "Creating client: " + requestData.clientName + "...");
+    String clientId = EtendoGoJwtSupport.findClientIdByName(conn, requestData.clientName);
+    if (clientId != null) {
+      return validateExistingClient(conn, writer, requestData.clientName, clientId) ? clientId : null;
+    }
+
+    String clientUser = EtendoGoJwtSupport.buildClientUsername(conn, accountEmail,
+        requestData.clientName);
+    if (!createClient(vars, currencyId, requestData.clientName, clientUser, adminPassword, writer)) {
+      return null;
+    }
+    return EtendoGoJwtSupport.findClientIdByName(OBDal.getInstance().getConnection(),
+        requestData.clientName);
+  }
+
+  private boolean validateExistingClient(Connection conn, PrintWriter writer, String clientName,
+      String clientId) throws SQLException {
+    if (!EtendoGoJwtSupport.hasStarOrganization(conn, clientId)) {
+      sendProgress(writer, PROGRESS_CLIENT, PROGRESS_ERROR,
+          "Client '" + clientName + "' exists but is incomplete. Use a different name.");
+      sendFinalResult(writer, false,
+          "A previous attempt left '" + clientName + "' in an incomplete state. Please choose a different company name.");
+      return false;
+    }
+    sendProgress(writer, PROGRESS_CLIENT, "done", "Client already exists, resuming...");
+    return true;
+  }
+
+  private boolean createClient(VariablesSecureApp vars, String currencyId, String clientName,
+      String clientUser, String adminPassword, PrintWriter writer) {
+    InitialClientSetup clientSetup = new InitialClientSetup();
+    OBError clientResult = clientSetup.createClient(vars, currencyId, clientName, clientUser,
+        adminPassword, "", "Account", "Calendar", false, null, false, false, false,
+        false, false);
+    if (!"Success".equals(clientResult.getType())) {
+      String errorMsg = clientResult.getMessage() != null
+          ? clientResult.getMessage()
+          : "Client creation failed";
+      sendProgress(writer, PROGRESS_CLIENT, PROGRESS_ERROR, errorMsg);
+      sendFinalResult(writer, false, errorMsg);
+      return false;
+    }
+    sendProgress(writer, PROGRESS_CLIENT, "done", "Client created successfully");
+    return true;
+  }
+
+  private AdminContextData resolveAdminContextData(Connection conn, String clientId,
+      PrintWriter writer) throws SQLException {
+    AdminContextData data = new AdminContextData();
+    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_CLIENT_ADMIN)) {
+      ps.setString(1, clientId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          data.adminRoleId = rs.getString("ad_role_id");
+          data.adminUserId = rs.getString("ad_user_id");
+        }
+      }
+    }
+    if (data.adminRoleId == null || data.adminUserId == null) {
+      sendProgress(writer, PROGRESS_ORGANIZATION, PROGRESS_ERROR,
+          "Could not find admin role for new client");
+      sendFinalResult(writer, false, "Admin role not found — client may be incomplete");
+      return null;
+    }
+    data.starOrgId = EtendoGoJwtSupport.findStarOrgId(conn, clientId);
+    OBContext.setOBContext(data.adminUserId, data.adminRoleId, clientId, data.starOrgId);
+    OBContext.setAdminMode(true);
+    return data;
+  }
+
+  private boolean ensureOrganization(Connection conn, PrintWriter writer, String clientName,
+      String clientId, AdminContextData adminContext, String currencyId) throws SQLException {
+    sendProgress(writer, PROGRESS_ORGANIZATION, PROGRESS_IN_PROGRESS,
+        "Creating organization: " + clientName + "...");
+    if (EtendoGoJwtSupport.organizationExists(conn, clientId)) {
+      sendProgress(writer, PROGRESS_ORGANIZATION, "done",
+          "Organization already exists, resuming...");
+      return true;
+    }
+    return createOrganization(writer, clientName, clientId, adminContext.starOrgId, currencyId);
+  }
+
+  private boolean createOrganization(PrintWriter writer, String clientName, String clientId,
+      String starOrgId, String currencyId) {
+    Client client = OBDal.getInstance().get(Client.class, clientId);
+    if (client == null) {
+      sendProgress(writer, PROGRESS_ORGANIZATION, PROGRESS_ERROR,
+          "Could not load client entity");
+      sendFinalResult(writer, false, "Client entity not found in DAL");
+      return false;
+    }
+    InitialOrgSetup orgSetup = new InitialOrgSetup(client);
+    OBError orgResult = orgSetup.createOrganization(clientName, "", "0", starOrgId, null,
+        "", "", false, null, currencyId, false, false, false, false, false);
+    if (!"Success".equals(orgResult.getType())) {
+      String errorMsg = orgResult.getMessage() != null
+          ? orgResult.getMessage()
+          : "Organization creation failed";
+      sendProgress(writer, PROGRESS_ORGANIZATION, PROGRESS_ERROR, errorMsg);
+      sendFinalResult(writer, false, errorMsg);
+      return false;
+    }
+    sendProgress(writer, PROGRESS_ORGANIZATION, "done", "Organization created successfully");
+    return true;
   }
 
   /**
@@ -948,8 +831,8 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       JSONObject progress = new JSONObject();
       progress.put("type", "progress");
       progress.put("step", step);
-      progress.put("status", status);
-      progress.put("message", message);
+      progress.put(FIELD_STATUS, status);
+      progress.put(FIELD_MESSAGE, message);
       progress.put("timestamp", Instant.now().toString());
       writer.println(progress.toString());
       writer.flush();
@@ -965,8 +848,8 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     try {
       JSONObject result = new JSONObject();
       result.put("type", "result");
-      result.put("success", success);
-      result.put("message", message);
+      result.put(FIELD_SUCCESS, success);
+      result.put(FIELD_MESSAGE, message);
       result.put("timestamp", Instant.now().toString());
       writer.println(result.toString());
       writer.flush();
@@ -995,7 +878,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       String hashB64 = Base64.getEncoder().encodeToString(hash);
       return saltB64 + ":" + hashB64;
     } catch (NoSuchAlgorithmException e) {
-      throw new RuntimeException("SHA-256 not available", e);
+      throw new IllegalStateException("SHA-256 not available", e);
     }
   }
 
@@ -1075,7 +958,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       throws IOException {
     response.setStatus(status);
     response.setContentType("application/json");
-    response.setCharacterEncoding("UTF-8");
+    response.setCharacterEncoding(UTF_8);
     try (PrintWriter writer = response.getWriter()) {
       writer.write(body.toString());
     }
@@ -1088,15 +971,15 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       throws IOException {
     response.setStatus(status);
     response.setContentType("application/json");
-    response.setCharacterEncoding("UTF-8");
+    response.setCharacterEncoding(UTF_8);
     try (PrintWriter writer = response.getWriter()) {
       try {
         JSONObject error = new JSONObject();
-        error.put("message", message);
-        error.put("status", status);
+        error.put(FIELD_MESSAGE, message);
+        error.put(FIELD_STATUS, status);
 
         JSONObject wrapper = new JSONObject();
-        wrapper.put("error", error);
+        wrapper.put(PROGRESS_ERROR, error);
 
         writer.write(wrapper.toString());
       } catch (JSONException e) {
@@ -1104,5 +987,17 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
         writer.write("{\"error\":{\"message\":\"" + message + "\",\"status\":" + status + "}}");
       }
     }
+  }
+
+  private static class OnboardingRequestData {
+    private String clientName;
+    private String currencyIso;
+    private String language;
+  }
+
+  private static class AdminContextData {
+    private String adminRoleId;
+    private String adminUserId;
+    private String starOrgId;
   }
 }

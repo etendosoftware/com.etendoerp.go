@@ -17,7 +17,10 @@
 
 package com.etendoerp.go.onboarding;
 
-public class OnboardingContext {
+/**
+ * Request-scoped onboarding input values plus the mutable state inherited from the step chain.
+ */
+public class OnboardingContext extends OnboardingState {
 
   // Input (set once from request)
   private String clientName;
@@ -27,23 +30,6 @@ public class OnboardingContext {
   private String currencyCode;
   private String languageCode;
   private String countryCode;
-
-  // Resolved by CreateClientStep from currencyCode
-  private String currencyId;
-
-  // Accumulated IDs (set by steps, read by subsequent steps)
-  private String clientId;
-  private String orgId;
-  private String clientAdminUserId;
-  private String orgAdminUserId;
-  private String roleId;
-  private String warehouseId;
-  private String calendarId;
-  private String priceListSalesId;
-  private String priceListPurchaseId;
-  private String financialAccountId;
-  private String productCategoryId;
-  private String taxCategoryId;
 
   // Getters and setters
 
@@ -103,107 +89,4 @@ public class OnboardingContext {
     this.countryCode = countryCode;
   }
 
-  public String getCurrencyId() {
-    return currencyId;
-  }
-
-  public void setCurrencyId(String currencyId) {
-    this.currencyId = currencyId;
-  }
-
-  public String getClientId() {
-    return clientId;
-  }
-
-  public void setClientId(String clientId) {
-    this.clientId = clientId;
-  }
-
-  public String getOrgId() {
-    return orgId;
-  }
-
-  public void setOrgId(String orgId) {
-    this.orgId = orgId;
-  }
-
-  public String getClientAdminUserId() {
-    return clientAdminUserId;
-  }
-
-  public void setClientAdminUserId(String clientAdminUserId) {
-    this.clientAdminUserId = clientAdminUserId;
-  }
-
-  public String getOrgAdminUserId() {
-    return orgAdminUserId;
-  }
-
-  public void setOrgAdminUserId(String orgAdminUserId) {
-    this.orgAdminUserId = orgAdminUserId;
-  }
-
-  public String getRoleId() {
-    return roleId;
-  }
-
-  public void setRoleId(String roleId) {
-    this.roleId = roleId;
-  }
-
-  public String getWarehouseId() {
-    return warehouseId;
-  }
-
-  public void setWarehouseId(String warehouseId) {
-    this.warehouseId = warehouseId;
-  }
-
-  public String getCalendarId() {
-    return calendarId;
-  }
-
-  public void setCalendarId(String calendarId) {
-    this.calendarId = calendarId;
-  }
-
-  public String getPriceListSalesId() {
-    return priceListSalesId;
-  }
-
-  public void setPriceListSalesId(String priceListSalesId) {
-    this.priceListSalesId = priceListSalesId;
-  }
-
-  public String getPriceListPurchaseId() {
-    return priceListPurchaseId;
-  }
-
-  public void setPriceListPurchaseId(String priceListPurchaseId) {
-    this.priceListPurchaseId = priceListPurchaseId;
-  }
-
-  public String getFinancialAccountId() {
-    return financialAccountId;
-  }
-
-  public void setFinancialAccountId(String financialAccountId) {
-    this.financialAccountId = financialAccountId;
-  }
-
-  public String getProductCategoryId() {
-    return productCategoryId;
-  }
-
-  public void setProductCategoryId(String productCategoryId) {
-    this.productCategoryId = productCategoryId;
-  }
-
-  public String getTaxCategoryId() {
-    return taxCategoryId;
-  }
-
-  public void setTaxCategoryId(String taxCategoryId) {
-    this.taxCategoryId = taxCategoryId;
-  }
 }

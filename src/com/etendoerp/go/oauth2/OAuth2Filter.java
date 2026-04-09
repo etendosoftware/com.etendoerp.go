@@ -193,6 +193,9 @@ public class OAuth2Filter implements Filter {
   /**
    * Validate a Bearer token and return the resolved identity, or null if invalid.
    * Uses Hibernate session's JDBC connection (no separate pool connection).
+    *
+    * @param bearerToken the raw OAuth2 bearer token received from the request
+    * @return a map with the resolved identity attributes, or null when the token is invalid
    */
   public static java.util.Map<String, String> validateToken(String bearerToken) {
     if (bearerToken == null || bearerToken.isEmpty()) {

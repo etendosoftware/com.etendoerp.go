@@ -15,26 +15,24 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.onboarding;
+package com.etendoerp.go.mcp;
 
-/**
- * Contract for an individual onboarding action in the environment creation workflow.
- */
-@SuppressWarnings("java:S112")
-public interface OnboardingStep {
+final class McpConstants {
 
-  /**
-   * Returns the display name used in onboarding progress events.
-   *
-   * @return step name shown to the client while onboarding runs
-   */
-  String name();
+  static final String PARAM_ENTITY = "entity";
+  static final String PARAM_FIELDS = "fields";
+  static final String PARAM_COLUMN = "column";
+  static final String PARAM_PARENT_ID = "parentId";
+  static final String TYPE_STRING = "string";
+  static final String TYPE_OBJECT = "object";
+  static final String KEY_PROPERTIES = "properties";
+  static final String KEY_DESCRIPTION = "description";
+  static final String GENERATE_PREFIX = "generate_";
+  static final String LABEL_SPEC_NAME = "Spec name";
+  static final String LABEL_ENTITY_NAME = "Entity name within the spec";
+  static final String LABEL_ENTITY_NAME_WITH_EXAMPLE =
+      "Entity name within the spec (e.g. 'header', 'lines')";
 
-  /**
-   * Executes the onboarding action, updating the shared context as needed.
-   *
-   * @param ctx mutable onboarding context shared across the step chain
-   * @throws Exception when the step cannot complete successfully
-   */
-  void execute(OnboardingContext ctx) throws Exception;
+  private McpConstants() {
+  }
 }

@@ -46,6 +46,25 @@ import com.etendoerp.go.onboarding.OnboardingStep;
  */
 public class CreateDocTypesStep implements OnboardingStep {
 
+  private static final String GL_CATEGORY_NONE = "None";
+  private static final String GL_CATEGORY_AR_INVOICE = "AR Invoice";
+  private static final String GL_CATEGORY_AP_INVOICE = "AP Invoice";
+
+  private static final class DocumentTypeDefinition {
+    private final String name;
+    private final String docBaseType;
+    private final boolean salesTransaction;
+    private final String soSubType;
+
+    private DocumentTypeDefinition(String name, String docBaseType, boolean salesTransaction,
+        String soSubType) {
+      this.name = name;
+      this.docBaseType = docBaseType;
+      this.salesTransaction = salesTransaction;
+      this.soSubType = soSubType;
+    }
+  }
+
   @Override
   public String name() {
     return "createDocTypes";
@@ -63,29 +82,37 @@ public class CreateDocTypesStep implements OnboardingStep {
     }
 
     // 1. Create GL categories
-    GLCategory glNone = createGLCategory(client, org, "None", "D");
-    GLCategory glARInvoice = createGLCategory(client, org, "AR Invoice", "D");
-    GLCategory glAPInvoice = createGLCategory(client, org, "AP Invoice", "D");
+    GLCategory glNone = createGLCategory(client, org, GL_CATEGORY_NONE, "D");
+    GLCategory glARInvoice = createGLCategory(client, org, GL_CATEGORY_AR_INVOICE, "D");
+    GLCategory glAPInvoice = createGLCategory(client, org, GL_CATEGORY_AP_INVOICE, "D");
     GLCategory glMaterial = createGLCategory(client, org, "Material Management", "D");
 
     // 2. Create sequences and document types
     Sequence seqSO = createSequence(client, org, "Standard Order", "SO/", 50000L);
-    createDocumentType(client, org, "Standard Order", "SOO", true, "SO", seqSO, glNone);
+    createDocumentType(client, org,
+      new DocumentTypeDefinition("Standard Order", "SOO", true, "SO"), seqSO, glNone);
 
     Sequence seqPO = createSequence(client, org, "Purchase Order", "PO/", 800000L);
-    createDocumentType(client, org, "Purchase Order", "POO", false, null, seqPO, glNone);
+    createDocumentType(client, org,
+      new DocumentTypeDefinition("Purchase Order", "POO", false, null), seqPO, glNone);
 
-    Sequence seqARI = createSequence(client, org, "AR Invoice", "ARI/", 100000L);
-    createDocumentType(client, org, "AR Invoice", "ARI", true, null, seqARI, glARInvoice);
+    Sequence seqARI = createSequence(client, org, GL_CATEGORY_AR_INVOICE, "ARI/", 100000L);
+    createDocumentType(client, org,
+      new DocumentTypeDefinition(GL_CATEGORY_AR_INVOICE, "ARI", true, null), seqARI,
+      glARInvoice);
 
-    Sequence seqAPI = createSequence(client, org, "AP Invoice", "API/", 200000L);
-    createDocumentType(client, org, "AP Invoice", "API", false, null, seqAPI, glAPInvoice);
+    Sequence seqAPI = createSequence(client, org, GL_CATEGORY_AP_INVOICE, "API/", 200000L);
+    createDocumentType(client, org,
+      new DocumentTypeDefinition(GL_CATEGORY_AP_INVOICE, "API", false, null), seqAPI,
+      glAPInvoice);
 
     Sequence seqMMS = createSequence(client, org, "MM Shipment", "MMS/", 500000L);
-    createDocumentType(client, org, "MM Shipment", "MMS", true, null, seqMMS, glMaterial);
+    createDocumentType(client, org,
+      new DocumentTypeDefinition("MM Shipment", "MMS", true, null), seqMMS, glMaterial);
 
     Sequence seqMMR = createSequence(client, org, "MM Receipt", "MMR/", 600000L);
-    createDocumentType(client, org, "MM Receipt", "MMR", false, null, seqMMR, glMaterial);
+    createDocumentType(client, org,
+      new DocumentTypeDefinition("MM Receipt", "MMR", false, null), seqMMR, glMaterial);
   }
 
   private GLCategory createGLCategory(Client client, Organization org, String name,
@@ -118,18 +145,17 @@ public class CreateDocTypesStep implements OnboardingStep {
     return sequence;
   }
 
-  private DocumentType createDocumentType(Client client, Organization org, String name,
-      String docBaseType, boolean isSalesTrx, String soSubType, Sequence sequence,
-      GLCategory glCategory) {
+  private DocumentType createDocumentType(Client client, Organization org,
+      DocumentTypeDefinition definition, Sequence sequence, GLCategory glCategory) {
     DocumentType docType = OBProvider.getInstance().get(DocumentType.class);
     docType.setNewOBObject(true);
     docType.setClient(client);
     docType.setOrganization(org);
-    docType.setName(name);
-    docType.setPrintText(name);
-    docType.setDocumentCategory(docBaseType);
-    docType.setSalesTransaction(isSalesTrx);
-    docType.setSOSubType(soSubType);
+    docType.setName(definition.name);
+    docType.setPrintText(definition.name);
+    docType.setDocumentCategory(definition.docBaseType);
+    docType.setSalesTransaction(definition.salesTransaction);
+    docType.setSOSubType(definition.soSubType);
     docType.setSequencedDocument(true);
     docType.setDocumentSequence(sequence);
     docType.setGLCategory(glCategory);

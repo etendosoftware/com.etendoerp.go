@@ -40,6 +40,7 @@ public final class OAuth2Utils {
   private static final String CLIENT_ID_PREFIX = "etgo-";
   private static final String HASH_ALGORITHM = "SHA-256";
   private static final String SALT_SEPARATOR = ":";
+  private static final String AUTH_CODE_PREFIX = "ac-";
 
   private OAuth2Utils() {
     // prevent instantiation
@@ -61,10 +62,6 @@ public final class OAuth2Utils {
    * Hash a client secret for secure storage.
    * Uses SHA-256 with a random 16-byte salt. The output format is "salt:hash"
    * where both salt and hash are hex-encoded.
-   * <p>
-   * TODO: Migrate to BCrypt (jBCrypt / org.mindrot.jbcrypt.BCrypt) when available
-   * on the Etendo classpath for stronger password hashing.
-   *
    * @param plainSecret the plaintext secret to hash
    * @return salted hash in format "hexSalt:hexHash"
    */
@@ -134,11 +131,11 @@ public final class OAuth2Utils {
 
   /**
    * Generate a cryptographically secure authorization code (32 bytes, 64 hex chars).
+   *
+   * @return authorization code string prefixed for log and storage differentiation
    */
   public static String generateAuthCode() {
-    byte[] bytes = new byte[TOKEN_BYTE_LENGTH];
-    SECURE_RANDOM.nextBytes(bytes);
-    return bytesToHex(bytes);
+    return AUTH_CODE_PREFIX + generateSecureToken();
   }
 
   /**

@@ -25,11 +25,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -50,6 +46,7 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.common.CorsUtils;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 import com.etendoerp.go.onboarding.steps.CreateClientStep;
@@ -77,23 +74,22 @@ public class OnboardingServlet extends HttpBaseServlet {
   private static final String SYSTEM_CLIENT_ID = "0";
   private static final String SYSTEM_ORG_ID = "0";
   private static final String SYSTEM_USER_ID = "100";
+  private static final String FB_DEMO_CLIENT_ID = "23C59575B9CF467C9620760EB255B389";
+  private static final String QA_TESTING_CLIENT_ID = "4028E6C72959682B01295A070852010D";
+  private static final String CONTENT_TYPE_JSON = "application/json";
+  private static final String CONTENT_TYPE_NDJSON = "application/x-ndjson";
+  private static final String CHARSET_UTF8 = "UTF-8";
+  private static final String FIELD_STATUS = "status";
+  private static final String STATUS_SUCCESS = "success";
+  private static final String FIELD_CLIENT_NAME = "clientName";
+  private static final String FIELD_ORG_NAME = "orgName";
+  private static final String FIELD_ADMIN_USER = "adminUser";
+  private static final String FIELD_TYPE_STRING = "string";
   private static final int TOTAL_STEPS = 6;
 
-  // Clients to exclude from environment listing (System, F&B demo, QA Testing)
-  private static final Set<String> EXCLUDED_CLIENT_IDS = new HashSet<>(Arrays.asList(
-      "0",
-      "23C59575B9CF467C9620760EB255B389",
-      "4028E6C72959682B01295A070852010D"
-  ));
-
   private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
-    String origin = request.getHeader("Origin");
-    if (origin != null) {
-      response.setHeader("Access-Control-Allow-Origin", origin);
-      response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-      response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-      response.setHeader("Access-Control-Allow-Credentials", "true");
-    }
+    CorsUtils.apply(request, response, "GET, POST, OPTIONS", "Content-Type, Authorization",
+        null, true);
   }
 
   @Override
@@ -152,10 +148,9 @@ public class OnboardingServlet extends HttpBaseServlet {
         return;
       }
       String jwt = SecureWebServicesUtils.generateToken(loginUser);
-      response.setContentType("application/json");
-      response.setCharacterEncoding("UTF-8");
+      prepareJsonResponse(response, CONTENT_TYPE_JSON);
       JSONObject result = new JSONObject();
-      result.put("status", "success");
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
       result.put("token", jwt);
       response.getWriter().write(result.toString());
     } finally {
@@ -166,15 +161,10 @@ public class OnboardingServlet extends HttpBaseServlet {
   private void sendEnvironments(HttpServletResponse response) throws Exception {
     OBContext.setAdminMode(true);
     try {
-      response.setContentType("application/json");
-      response.setCharacterEncoding("UTF-8");
+      prepareJsonResponse(response, CONTENT_TYPE_JSON);
 
       Connection conn = OBDal.getInstance().getConnection();
       JSONArray environments = new JSONArray();
-      List<String> excludedClientIds = new ArrayList<>(EXCLUDED_CLIENT_IDS);
-      String excludedPlaceholders = String.join(",",
-          Collections.nCopies(excludedClientIds.size(), "?"));
-
       String sql = "SELECT DISTINCT ON (c.ad_client_id) c.ad_client_id, c.name, c.created, "
           + "o.ad_org_id, o.name AS org_name, "
           + "u.username, u.ad_user_id "
@@ -182,26 +172,26 @@ public class OnboardingServlet extends HttpBaseServlet {
           + "LEFT JOIN ad_org o ON o.ad_client_id = c.ad_client_id AND o.ad_org_id != '0' "
           + "LEFT JOIN ad_user u ON u.ad_client_id = c.ad_client_id "
           + "AND u.ad_user_id != ? AND u.username NOT LIKE '%.org' "
-          + "WHERE c.ad_client_id NOT IN (" + excludedPlaceholders + ") "
+          + "WHERE c.ad_client_id NOT IN (?, ?, ?) "
           + "ORDER BY c.ad_client_id, c.created DESC";
 
       try (PreparedStatement ps = conn.prepareStatement(sql)) {
         ps.setString(1, SYSTEM_USER_ID);
-        for (int index = 0; index < excludedClientIds.size(); index++) {
-          ps.setString(index + 2, excludedClientIds.get(index));
-        }
+        ps.setString(2, SYSTEM_CLIENT_ID);
+        ps.setString(3, FB_DEMO_CLIENT_ID);
+        ps.setString(4, QA_TESTING_CLIENT_ID);
         try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          JSONObject env = new JSONObject();
-          env.put("clientId", rs.getString("ad_client_id"));
-          env.put("clientName", rs.getString("name"));
-          env.put("created", rs.getString("created"));
-          env.put("orgId", rs.getString("ad_org_id"));
-          env.put("orgName", rs.getString("org_name"));
-          env.put("adminUser", rs.getString("username"));
-          env.put("adminUserId", rs.getString("ad_user_id"));
-          environments.put(env);
-        }
+          while (rs.next()) {
+            JSONObject env = new JSONObject();
+            env.put("clientId", rs.getString("ad_client_id"));
+            env.put(FIELD_CLIENT_NAME, rs.getString("name"));
+            env.put("created", rs.getString("created"));
+            env.put("orgId", rs.getString("ad_org_id"));
+            env.put(FIELD_ORG_NAME, rs.getString("org_name"));
+            env.put(FIELD_ADMIN_USER, rs.getString("username"));
+            env.put("adminUserId", rs.getString("ad_user_id"));
+            environments.put(env);
+          }
         }
       }
 
@@ -234,9 +224,9 @@ public class OnboardingServlet extends HttpBaseServlet {
       // 3. Parse request body
       JSONObject body = parseRequestBody(request);
 
-      String clientName = body.optString("clientName", null);
-      String orgName = body.optString("orgName", null);
-      String adminUser = body.optString("adminUser", null);
+      String clientName = body.optString(FIELD_CLIENT_NAME, null);
+      String orgName = body.optString(FIELD_ORG_NAME, null);
+      String adminUser = body.optString(FIELD_ADMIN_USER, null);
       String adminPassword = body.optString("adminPassword", null);
       String currencyCode = body.optString("currency", null);
       String languageCode = body.optString("language", null);
@@ -270,18 +260,11 @@ public class OnboardingServlet extends HttpBaseServlet {
       }
 
       // 6. Build onboarding context
-      OnboardingContext ctx = new OnboardingContext();
-      ctx.setClientName(clientName);
-      ctx.setOrgName(orgName);
-      ctx.setAdminUser(adminUser);
-      ctx.setAdminPassword(adminPassword);
-      ctx.setCurrencyCode(currencyCode);
-      ctx.setLanguageCode(languageCode);
-      ctx.setCountryCode(countryCode);
+        OnboardingContext ctx = buildOnboardingContext(clientName, orgName, adminUser,
+          adminPassword, currencyCode, languageCode, countryCode);
 
       // 7. Set up NDJSON streaming response
-      response.setContentType("application/x-ndjson");
-      response.setCharacterEncoding("UTF-8");
+        prepareJsonResponse(response, CONTENT_TYPE_NDJSON);
       OutputStream out = response.getOutputStream();
 
       // 8. Build step chain
@@ -294,56 +277,7 @@ public class OnboardingServlet extends HttpBaseServlet {
         OnboardingStep step = steps.get(i);
         int stepNum = i + 1;
 
-        // Write "running" progress line
-        writeProgressLine(out, stepNum, step.name(), "running", 0);
-
-        long stepStart = System.currentTimeMillis();
-        try {
-          step.execute(ctx);
-          OBDal.getInstance().flush();
-
-          long elapsed = System.currentTimeMillis() - stepStart;
-          writeProgressLine(out, stepNum, step.name(), "done", elapsed);
-
-        } catch (Exception e) {
-          long elapsed = System.currentTimeMillis() - stepStart;
-          log.error("Onboarding step {} ({}) failed", stepNum, step.name(), e);
-
-          // Rollback immediately
-          try {
-            OBDal.getInstance().rollbackAndClose();
-          } catch (Exception rollbackEx) {
-            log.warn("Rollback after step {} error", stepNum, rollbackEx);
-          }
-
-          // Write failure line
-          JSONObject failLine = new JSONObject();
-          failLine.put("step", stepNum);
-          failLine.put("total", TOTAL_STEPS);
-          failLine.put("name", step.name());
-          failLine.put("status", "failed");
-          failLine.put("ms", elapsed);
-          StringBuilder errorMsg = new StringBuilder(e.getMessage() != null ? e.getMessage() : e.getClass().getName());
-          Throwable cause = e.getCause();
-          while (cause != null) {
-            errorMsg.append(" | Caused by: ").append(cause.getClass().getSimpleName())
-                .append(": ").append(cause.getMessage());
-            cause = cause.getCause();
-          }
-          failLine.put("error", errorMsg.toString());
-          out.write((failLine.toString() + "\n").getBytes(StandardCharsets.UTF_8));
-          out.flush();
-
-          // Write final failure summary and stop
-          long totalMs = System.currentTimeMillis() - totalStart;
-          JSONObject result = new JSONObject();
-          result.put("result", "failed");
-          result.put("failedStep", step.name());
-          result.put("totalMs", totalMs);
-          result.put("rolledBack", true);
-          out.write((result.toString() + "\n").getBytes(StandardCharsets.UTF_8));
-          out.flush();
-          response.flushBuffer();
+        if (!executeStep(out, response, ctx, step, stepNum, totalStart)) {
           return;
         }
       }
@@ -355,7 +289,7 @@ public class OnboardingServlet extends HttpBaseServlet {
 
       // 11. Write final success summary
       JSONObject summary = new JSONObject();
-      summary.put("status", "success");
+      summary.put(FIELD_STATUS, STATUS_SUCCESS);
       summary.put("totalMs", totalMs);
       summary.put("clientId", ctx.getClientId());
       summary.put("orgId", ctx.getOrgId());
@@ -365,16 +299,7 @@ public class OnboardingServlet extends HttpBaseServlet {
       userIds.put("orgAdmin", ctx.getOrgAdminUserId());
       summary.put("userIds", userIds);
 
-      // Generate JWT for the client admin user so frontend can auto-login
-      try {
-        User tokenUser = OBDal.getInstance().get(User.class, ctx.getClientAdminUserId());
-        if (tokenUser != null) {
-          String jwt = SecureWebServicesUtils.generateToken(tokenUser);
-          summary.put("token", jwt);
-        }
-      } catch (Exception tokenEx) {
-        log.warn("Could not generate token for new admin user", tokenEx);
-      }
+      addAdminToken(summary, ctx.getClientAdminUserId());
 
       out.write((summary.toString() + "\n").getBytes(StandardCharsets.UTF_8));
       out.flush();
@@ -420,13 +345,6 @@ public class OnboardingServlet extends HttpBaseServlet {
   }
 
   /**
-   * Authenticate the JWT token and set OBContext (no role return, for GET).
-   */
-  private void authenticateJwt(HttpServletRequest request) throws Exception {
-    authenticateJwtAndGetRole(request);
-  }
-
-  /**
    * Check if the role is an admin role (System Administrator or system-level userLevel).
    */
   private boolean isAdminRole(String roleId) {
@@ -469,7 +387,7 @@ public class OnboardingServlet extends HttpBaseServlet {
     line.put("step", stepNum);
     line.put("total", TOTAL_STEPS);
     line.put("name", name);
-    line.put("status", status);
+    line.put(FIELD_STATUS, status);
     if (ms > 0) {
       line.put("ms", ms);
     }
@@ -501,20 +419,19 @@ public class OnboardingServlet extends HttpBaseServlet {
         + "roles, and reference data");
 
     JSONArray fields = new JSONArray();
-    fields.put(fieldDef("clientName", "string", true, "Name for the new client"));
-    fields.put(fieldDef("orgName", "string", true, "Name for the main organization"));
-    fields.put(fieldDef("adminUser", "string", true, "Username for the client administrator"));
-    fields.put(fieldDef("adminPassword", "string", true, "Password for the client administrator"));
-    fields.put(fieldDef("currency", "string", true,
+    fields.put(fieldDef(FIELD_CLIENT_NAME, FIELD_TYPE_STRING, true, "Name for the new client"));
+    fields.put(fieldDef(FIELD_ORG_NAME, FIELD_TYPE_STRING, true, "Name for the main organization"));
+    fields.put(fieldDef(FIELD_ADMIN_USER, FIELD_TYPE_STRING, true, "Username for the client administrator"));
+    fields.put(fieldDef("adminPassword", FIELD_TYPE_STRING, true, "Password for the client administrator"));
+    fields.put(fieldDef("currency", FIELD_TYPE_STRING, true,
         "ISO 4217 currency code (e.g., USD, EUR)"));
-    fields.put(fieldDef("language", "string", true,
+    fields.put(fieldDef("language", FIELD_TYPE_STRING, true,
         "Language code (e.g., en_US, es_ES)"));
-    fields.put(fieldDef("countryCode", "string", true,
+    fields.put(fieldDef("countryCode", FIELD_TYPE_STRING, true,
         "ISO 3166-1 alpha-2 country code (e.g., US, ES)"));
     describe.put("fields", fields);
 
-    response.setContentType("application/json");
-    response.setCharacterEncoding("UTF-8");
+    prepareJsonResponse(response, CONTENT_TYPE_JSON);
     response.getWriter().write(describe.toString());
   }
 
@@ -541,16 +458,107 @@ public class OnboardingServlet extends HttpBaseServlet {
       return;
     }
     response.setStatus(status);
-    response.setContentType("application/json");
-    response.setCharacterEncoding("UTF-8");
+    prepareJsonResponse(response, CONTENT_TYPE_JSON);
     try {
       JSONObject error = new JSONObject();
       error.put("error", message);
-      error.put("status", status);
+      error.put(FIELD_STATUS, status);
       response.getWriter().write(error.toString());
     } catch (Exception e) {
       log.error("Failed to write error response", e);
       response.getWriter().write("{\"error\":\"Internal server error\"}");
     }
+  }
+
+  private OnboardingContext buildOnboardingContext(String clientName, String orgName,
+      String adminUser, String adminPassword, String currencyCode, String languageCode,
+      String countryCode) {
+    OnboardingContext ctx = new OnboardingContext();
+    ctx.setClientName(clientName);
+    ctx.setOrgName(orgName);
+    ctx.setAdminUser(adminUser);
+    ctx.setAdminPassword(adminPassword);
+    ctx.setCurrencyCode(currencyCode);
+    ctx.setLanguageCode(languageCode);
+    ctx.setCountryCode(countryCode);
+    return ctx;
+  }
+
+  private boolean executeStep(OutputStream out, HttpServletResponse response, OnboardingContext ctx,
+      OnboardingStep step, int stepNum, long totalStart) throws Exception {
+    writeProgressLine(out, stepNum, step.name(), "running", 0);
+
+    long stepStart = System.currentTimeMillis();
+    try {
+      step.execute(ctx);
+      OBDal.getInstance().flush();
+      long elapsed = System.currentTimeMillis() - stepStart;
+      writeProgressLine(out, stepNum, step.name(), "done", elapsed);
+      return true;
+    } catch (Exception e) {
+      long elapsed = System.currentTimeMillis() - stepStart;
+      log.error("Onboarding step {} ({}) failed", stepNum, step.name(), e);
+      rollbackOnboarding(stepNum);
+      writeFailureResult(out, step, stepNum, elapsed, totalStart, e);
+      response.flushBuffer();
+      return false;
+    }
+  }
+
+  private void rollbackOnboarding(int stepNum) {
+    try {
+      OBDal.getInstance().rollbackAndClose();
+    } catch (Exception rollbackEx) {
+      log.warn("Rollback after step {} error", stepNum, rollbackEx);
+    }
+  }
+
+  private void writeFailureResult(OutputStream out, OnboardingStep step, int stepNum, long elapsed,
+      long totalStart, Exception e) throws Exception {
+    JSONObject failLine = new JSONObject();
+    failLine.put("step", stepNum);
+    failLine.put("total", TOTAL_STEPS);
+    failLine.put("name", step.name());
+    failLine.put(FIELD_STATUS, "failed");
+    failLine.put("ms", elapsed);
+    failLine.put("error", buildErrorMessage(e));
+    out.write((failLine.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+    out.flush();
+
+    JSONObject result = new JSONObject();
+    result.put("result", "failed");
+    result.put("failedStep", step.name());
+    result.put("totalMs", System.currentTimeMillis() - totalStart);
+    result.put("rolledBack", true);
+    out.write((result.toString() + "\n").getBytes(StandardCharsets.UTF_8));
+    out.flush();
+  }
+
+  private String buildErrorMessage(Exception e) {
+    StringBuilder errorMsg = new StringBuilder(
+        e.getMessage() != null ? e.getMessage() : e.getClass().getName());
+    Throwable cause = e.getCause();
+    while (cause != null) {
+      errorMsg.append(" | Caused by: ").append(cause.getClass().getSimpleName())
+          .append(": ").append(cause.getMessage());
+      cause = cause.getCause();
+    }
+    return errorMsg.toString();
+  }
+
+  private void addAdminToken(JSONObject summary, String clientAdminUserId) {
+    try {
+      User tokenUser = OBDal.getInstance().get(User.class, clientAdminUserId);
+      if (tokenUser != null) {
+        summary.put("token", SecureWebServicesUtils.generateToken(tokenUser));
+      }
+    } catch (Exception tokenEx) {
+      log.warn("Could not generate token for new admin user", tokenEx);
+    }
+  }
+
+  private void prepareJsonResponse(HttpServletResponse response, String contentType) {
+    response.setContentType(contentType);
+    response.setCharacterEncoding(CHARSET_UTF8);
   }
 }
