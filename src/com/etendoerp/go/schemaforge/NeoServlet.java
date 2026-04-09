@@ -27,6 +27,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -40,14 +41,10 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.base.model.Entity;
-import org.openbravo.base.model.ModelProvider;
-import org.openbravo.base.model.Property;
 import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
@@ -89,10 +86,13 @@ public class NeoServlet extends HttpBaseServlet {
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
   private static final String HOOK_ERROR_MSG = "An internal error occurred while processing the hook handler";
   private static final String PATCH_METHOD = "PATCH";
+  private static final String DELETE_METHOD = "DELETE";
   private static final String PARENT_ID_KEY = "parentId";
+  // Etendo record IDs: 32-char hex, UUID with hyphens, or legacy numeric strings
+  private static final java.util.regex.Pattern VALID_ID_PATTERN =
+      java.util.regex.Pattern.compile("[A-Za-z0-9\\-]+");
   private static final String KEY_UPDATES = "updates";
   private static final String KEY_COMBOS = "combos";
-
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -111,7 +111,7 @@ public class NeoServlet extends HttpBaseServlet {
 
   @Override
   public void doDelete(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    processRequest(request, response, "DELETE");
+    processRequest(request, response, DELETE_METHOD);
   }
 
   @Override
@@ -625,7 +625,7 @@ public class NeoServlet extends HttpBaseServlet {
         return Boolean.TRUE.equals(entity.isPut());
       case PATCH_METHOD:
         return Boolean.TRUE.equals(entity.isPatch());
-      case "DELETE":
+      case DELETE_METHOD:
         return Boolean.TRUE.equals(entity.isDelete());
       default:
         return false;
@@ -743,28 +743,7 @@ public class NeoServlet extends HttpBaseServlet {
         .obContext(OBContext.getOBContext())
         .build();
 
-    try {
-      // Pre-hook
-      NeoResponse preResult = handler.handle(hookCtx);
-      if (preResult != null) {
-        hookCtx.setPreviousResult(preResult);
-        NeoResponse afterResult = handler.afterHandle(hookCtx);
-        return afterResult != null ? afterResult : preResult;
-      }
-
-      // Default service
-      NeoResponse defaultResult = defaultAction.get();
-
-      // Post-hook
-      hookCtx.setPreviousResult(defaultResult);
-      NeoResponse afterResult = handler.afterHandle(hookCtx);
-      return afterResult != null ? afterResult : defaultResult;
-
-    } catch (Exception e) {
-      log.error("Error in hook dispatch for {}/{}: {}",
-          endpointType, entityName, e.getMessage(), e);
-      return NeoResponse.error(500, HOOK_ERROR_MSG);
-    }
+    return executeHookChain(handler, hookCtx, defaultAction, endpointType, entityName);
   }
 
   /**
@@ -817,6 +796,13 @@ public class NeoServlet extends HttpBaseServlet {
         .obContext(OBContext.getOBContext())
         .build();
 
+    return executeHookChain(handler, hookCtx, defaultAction, endpointType, entityName);
+  }
+
+  private NeoResponse executeHookChain(
+      NeoHandler handler, NeoContext hookCtx,
+      java.util.function.Supplier<NeoResponse> defaultAction,
+      NeoEndpointType endpointType, String entityName) {
     try {
       NeoResponse preResult = handler.handle(hookCtx);
       if (preResult != null) {
@@ -840,7 +826,173 @@ public class NeoServlet extends HttpBaseServlet {
 
   private NeoResponse handleDefault(NeoContext context, HttpServletRequest request,
       HttpServletResponse response) {
-    return NeoCrudHelper.handleDefault(context);
+    try {
+      Tab adTab = context.getAdTab();
+      if (adTab == null) {
+        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "No AD_Tab linked to entity: " + context.getEntityName());
+      }
+
+      String dalEntityName = adTab.getTable().getName();
+      DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
+
+      // Build field filter from ETGO_SF_FIELD configuration (cached for this request)
+      NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(
+          context.getSfEntity(), dalEntityName);
+
+      Map<String, String> params = NeoCrudHelper.buildBaseParams(context, adTab, dalEntityName);
+
+      // Build where clause: tab's own HQL + parent filter for child tabs
+      StringBuilder whereClause = new StringBuilder();
+
+      String parentId = context.getQueryParams() != null
+          ? context.getQueryParams().get(PARENT_ID_KEY)
+          : null;
+
+      // Reject parentId values that contain characters outside the expected ID format
+      // to prevent HQL injection via the query parameter.
+      if (parentId != null && !VALID_ID_PATTERN.matcher(parentId).matches()) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+            "Invalid parentId format: " + parentId);
+      }
+
+      String tabWhere = adTab.getHqlwhereclause();
+      if (StringUtils.isNotBlank(tabWhere)) {
+        // Substitute @PLACEHOLDER@ style tokens used in classic UI tab where clauses
+        // (e.g. @FIN_Payment_ID@, @Locator.id@) with the actual parentId so indirect parent-child
+        // relationships — where there is no direct FK to the parent table — work in NEO.
+        // The pattern allows dots to handle compound references like @Locator.id@.
+        if (parentId != null && tabWhere.contains("@")) {
+          tabWhere = tabWhere.replaceAll("@[A-Za-z_.]+@",
+              Matcher.quoteReplacement("'" + parentId.replace("'", "''") + "'"));
+        }
+        whereClause.append("(").append(tabWhere).append(")");
+      }
+      if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
+        NeoTypeCoercionHelper.ParentFilter parentFilter =
+            NeoTypeCoercionHelper.buildParentWhereClause(adTab, parentId);
+        if (parentFilter != null) {
+          if (whereClause.length() > 0) {
+            whereClause.append(" and ");
+          }
+          // resolveForStringApi() is used here because DefaultJsonDataService only
+          // accepts a flat HQL string — named parameters are not supported by that API.
+          whereClause.append("(").append(parentFilter.resolveForStringApi()).append(")");
+        }
+      }
+
+      // _neoWhere is an internal extension point: buildBaseParams strips it from HTTP query params
+      // (HQL injection prevention), but trusted internal code (hooks, custom handlers) may add it
+      // to the params map after buildBaseParams returns. Consumed here before passing to the service.
+      String neoWhere = params.remove(NeoCrudHelper.NEO_WHERE_PARAM);
+      if (StringUtils.isNotBlank(neoWhere)) {
+        if (whereClause.length() > 0) {
+          whereClause.append(" and ");
+        }
+        whereClause.append("(").append(neoWhere).append(")");
+      }
+
+      if (whereClause.length() > 0) {
+        params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause.toString());
+        params.put(JsonConstants.USE_ALIAS, "true");
+      }
+
+      // Set pagination defaults if not provided
+      if (!params.containsKey(JsonConstants.STARTROW_PARAMETER)) {
+        params.put(JsonConstants.STARTROW_PARAMETER, "0");
+      }
+      if (!params.containsKey(JsonConstants.ENDROW_PARAMETER)) {
+        params.put(JsonConstants.ENDROW_PARAMETER, "100");
+      }
+
+      String result;
+      switch (context.getHttpMethod()) {
+        case "GET":
+          result = jsonService.fetch(params);
+          break;
+        case "POST": {
+          // Validate: POST must NOT have a recordId (creates don't target an existing record)
+          if (context.getRecordId() != null) {
+            return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+                "POST (create) must not include a record ID in the URL");
+          }
+          // Resolve parentId from body: map generic "parentId" to the actual FK property name
+          // (e.g., parentId → salesOrder for C_OrderLine, parentId → invoice for C_InvoiceLine)
+          JSONObject requestBody = context.getRequestBody();
+          String parentIdValue = NeoCrudHelper.resolveAndMapParentId(requestBody, adTab);
+          // Filter out non-included fields (allow read-only on create — callouts/defaults set them)
+          JSONObject filteredBody = fieldFilter.filterCreateRequest(requestBody);
+          // Inject defaults for mandatory columns not in ETGO_SF_FIELD config
+          NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+          // For header tabs (level 0): run callout cascade to derive field values (e.g. docType,
+          // business partner defaults), then re-apply tab filter, remove empty FKs, and re-inject
+          // mandatory defaults after callout mutations.
+          if (adTab.getTabLevel() != null && adTab.getTabLevel() == 0) {
+            Set<String> seqFields = new HashSet<>();
+            NeoDefaultsService.executeCalloutCascade(context, adTab, filteredBody, seqFields);
+            NeoDefaultsService.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
+            NeoDefaultsService.removeEmptyFkValues(filteredBody, adTab);
+            NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+          }
+          // Wrap in SmartClient envelope for DefaultJsonDataService (data + _entityName + _new)
+          String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(filteredBody, dalEntityName, null);
+          result = jsonService.add(params, wrappedBody);
+          break;
+        }
+        case "PUT":
+        case PATCH_METHOD: {
+          // Validate: PUT/PATCH require a recordId
+          if (context.getRecordId() == null) {
+            return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+                context.getHttpMethod() + " requires a record ID in the URL");
+          }
+          // Filter out non-included and read-only fields from request body
+          JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
+          // Wrap in SmartClient envelope for DefaultJsonDataService (data + _entityName + id)
+          String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
+          result = jsonService.update(params, wrappedBody);
+          break;
+        }
+        case DELETE_METHOD:
+          result = jsonService.remove(params);
+          break;
+        default:
+          return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Unsupported method: " + context.getHttpMethod());
+      }
+
+      JSONObject responseJson = new JSONObject(result);
+
+      // Check for error responses from DefaultJsonDataService
+      JSONObject innerResponse = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
+      if (innerResponse != null) {
+        int status = innerResponse.optInt(JsonConstants.RESPONSE_STATUS, 0);
+        if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
+          String errMsg = innerResponse.has(JsonConstants.RESPONSE_ERROR)
+              ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
+                  .optString("message", "Write operation failed")
+              : "Write operation failed";
+          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+              OBMessageUtils.messageBD(errMsg));
+        }
+        if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
+          // Return 400 with the full error details for validation errors
+          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
+        }
+      }
+
+      // Filter response to only include configured fields (for all methods)
+      fieldFilter.filterGetResponse(responseJson);
+
+      if ("GET".equals(context.getHttpMethod()) && context.getSfEntity() != null) {
+        NeoListIdentifierHelper.enrichListIdentifiers(responseJson, context.getSfEntity());
+      }
+
+      return NeoResponse.ok(responseJson);
+    } catch (Exception e) {
+      log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    }
   }
 
   private void writeResponse(HttpServletResponse response, NeoResponse neoResponse)
