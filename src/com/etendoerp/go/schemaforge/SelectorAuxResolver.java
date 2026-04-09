@@ -182,12 +182,14 @@ class SelectorAuxResolver {
    * Handles optional DISTINCT and "expr as alias" notation.
    */
   static List<String> parseSelectAliases(String selectClause) {
+    // Use a simple pattern that only captures the alias after "as" keyword.
+    // All quantifiers are possessive to guarantee linear runtime with find().
     java.util.regex.Matcher aliasMatcher = Pattern.compile(
-        "(?:,|SELECT(?:\\s++DISTINCT)?)\\s++(.+?)\\s++[Aa][Ss]\\s++(\\w+)",
-        Pattern.DOTALL).matcher(selectClause);
+        "\\b[Aa][Ss]\\s++(\\w++)")
+        .matcher(selectClause);
     List<String> aliases = new ArrayList<>();
     while (aliasMatcher.find()) {
-      aliases.add(aliasMatcher.group(2).toLowerCase());
+      aliases.add(aliasMatcher.group(1).toLowerCase());
     }
     return aliases;
   }
