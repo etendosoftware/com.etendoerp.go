@@ -150,6 +150,8 @@ public class NeoDefaultsService {
                 ctx);
             if (resolvedValue != null) {
               defaults.put(propertyName, resolvedValue);
+              // For FK fields, also inject $_identifier so selectors display the label, not the ID
+              tryInjectIdentifier(defaults, dalEntity, propertyName, resolvedValue);
 
               // Track sequence fields (wrapped in angle brackets by Utility.getDocumentNo)
               if (isSequenceField(adColumn) && resolvedValue instanceof String
@@ -203,6 +205,36 @@ public class NeoDefaultsService {
     } catch (Exception e) {
       log.error("Error resolving defaults: {}", e.getMessage(), e);
       return NeoResponse.error(500, "Failed to resolve defaults: " + e.getMessage());
+    }
+  }
+
+  /**
+   * For FK (non-primitive) properties, looks up the referenced record by ID and injects its
+   * display name as {@code propertyName$_identifier} so selectors show a label instead of a
+   * raw ID string. Silently skips if the property is primitive, the entity is not found, or
+   * the lookup fails.
+   */
+  private static void tryInjectIdentifier(JSONObject defaults, Entity dalEntity,
+      String propertyName, Object resolvedValue) {
+    if (dalEntity == null || resolvedValue == null) {
+      return;
+    }
+    try {
+      Property prop = dalEntity.getProperty(propertyName);
+      if (prop == null || prop.isPrimitive()) {
+        return;
+      }
+      Entity targetEntity = prop.getTargetEntity();
+      if (targetEntity == null) {
+        return;
+      }
+      BaseOBObject obj = OBDal.getInstance().get(targetEntity.getName(), resolvedValue.toString());
+      if (obj != null) {
+        defaults.put(propertyName + "$_identifier", obj.getIdentifier());
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve identifier for default field '{}': {}", propertyName,
+          e.getMessage());
     }
   }
 
@@ -677,7 +709,8 @@ public class NeoDefaultsService {
         return null;
       }
 
-      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+      OBContext obCtx = OBContext.getOBContext();
+      String clientId = obCtx.getCurrentClient().getId();
       String keyColumn = refTable.getDBTableName() + "_ID";
 
       // Check if the target table has IsDefault and Name columns
