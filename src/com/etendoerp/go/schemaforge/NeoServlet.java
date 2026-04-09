@@ -24,6 +24,7 @@ import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -58,6 +59,7 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoDiscoveryHelper;
 import com.etendoerp.go.schemaforge.util.NeoDisplayLogicHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
@@ -85,7 +87,11 @@ public class NeoServlet extends HttpBaseServlet {
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
   private static final String HOOK_ERROR_MSG = "An internal error occurred while processing the hook handler";
   private static final String PATCH_METHOD = "PATCH";
+  private static final String DELETE_METHOD = "DELETE";
   private static final String PARENT_ID_KEY = "parentId";
+  // Etendo record IDs: 32-char hex, UUID with hyphens, or legacy numeric strings
+  private static final java.util.regex.Pattern VALID_ID_PATTERN =
+      java.util.regex.Pattern.compile("[A-Za-z0-9\\-]+");
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -104,7 +110,7 @@ public class NeoServlet extends HttpBaseServlet {
 
   @Override
   public void doDelete(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    processRequest(request, response, "DELETE");
+    processRequest(request, response, DELETE_METHOD);
   }
 
   @Override
@@ -618,7 +624,7 @@ public class NeoServlet extends HttpBaseServlet {
         return Boolean.TRUE.equals(entity.isPut());
       case PATCH_METHOD:
         return Boolean.TRUE.equals(entity.isPatch());
-      case "DELETE":
+      case DELETE_METHOD:
         return Boolean.TRUE.equals(entity.isDelete());
       default:
         return false;
@@ -736,28 +742,7 @@ public class NeoServlet extends HttpBaseServlet {
         .obContext(OBContext.getOBContext())
         .build();
 
-    try {
-      // Pre-hook
-      NeoResponse preResult = handler.handle(hookCtx);
-      if (preResult != null) {
-        hookCtx.setPreviousResult(preResult);
-        NeoResponse afterResult = handler.afterHandle(hookCtx);
-        return afterResult != null ? afterResult : preResult;
-      }
-
-      // Default service
-      NeoResponse defaultResult = defaultAction.get();
-
-      // Post-hook
-      hookCtx.setPreviousResult(defaultResult);
-      NeoResponse afterResult = handler.afterHandle(hookCtx);
-      return afterResult != null ? afterResult : defaultResult;
-
-    } catch (Exception e) {
-      log.error("Error in hook dispatch for {}/{}: {}",
-          endpointType, entityName, e.getMessage(), e);
-      return NeoResponse.error(500, HOOK_ERROR_MSG);
-    }
+    return executeHookChain(handler, hookCtx, defaultAction, endpointType, entityName);
   }
 
   /**
@@ -810,6 +795,13 @@ public class NeoServlet extends HttpBaseServlet {
         .obContext(OBContext.getOBContext())
         .build();
 
+    return executeHookChain(handler, hookCtx, defaultAction, endpointType, entityName);
+  }
+
+  private NeoResponse executeHookChain(
+      NeoHandler handler, NeoContext hookCtx,
+      java.util.function.Supplier<NeoResponse> defaultAction,
+      NeoEndpointType endpointType, String entityName) {
     try {
       NeoResponse preResult = handler.handle(hookCtx);
       if (preResult != null) {
@@ -847,22 +839,7 @@ public class NeoServlet extends HttpBaseServlet {
       NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(
           context.getSfEntity(), dalEntityName);
 
-      Map<String, String> params = new HashMap<>();
-      params.put(JsonConstants.ENTITYNAME, dalEntityName);
-      params.put(JsonConstants.TAB_PARAMETER, adTab.getId());
-      params.put(JsonConstants.WINDOW_ID, adTab.getWindow().getId());
-      params.put(JsonConstants.NO_ACTIVE_FILTER, "true");
-
-      if (context.getRecordId() != null) {
-        params.put(JsonConstants.ID, context.getRecordId());
-      }
-
-      // Copy query params (filters, pagination, sorting)
-      if (context.getQueryParams() != null) {
-        for (Map.Entry<String, String> entry : context.getQueryParams().entrySet()) {
-          params.put(entry.getKey(), entry.getValue());
-        }
-      }
+      Map<String, String> params = NeoCrudHelper.buildBaseParams(context, adTab, dalEntityName);
 
       // Build where clause: tab's own HQL + parent filter for child tabs
       StringBuilder whereClause = new StringBuilder();
@@ -871,6 +848,13 @@ public class NeoServlet extends HttpBaseServlet {
           ? context.getQueryParams().get(PARENT_ID_KEY)
           : null;
 
+      // Reject parentId values that contain characters outside the expected ID format
+      // to prevent HQL injection via the query parameter.
+      if (parentId != null && !VALID_ID_PATTERN.matcher(parentId).matches()) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+            "Invalid parentId format: " + parentId);
+      }
+
       String tabWhere = adTab.getHqlwhereclause();
       if (StringUtils.isNotBlank(tabWhere)) {
         // Substitute @PLACEHOLDER@ style tokens used in classic UI tab where clauses
@@ -878,7 +862,8 @@ public class NeoServlet extends HttpBaseServlet {
         // relationships — where there is no direct FK to the parent table — work in NEO.
         // The pattern allows dots to handle compound references like @Locator.id@.
         if (parentId != null && tabWhere.contains("@")) {
-          tabWhere = tabWhere.replaceAll("@[A-Za-z_.]+@", "'" + parentId.replace("'", "''") + "'");
+          tabWhere = tabWhere.replaceAll("@[A-Za-z_.]+@",
+              Matcher.quoteReplacement("'" + parentId.replace("'", "''") + "'"));
         }
         whereClause.append("(").append(tabWhere).append(")");
       }
@@ -923,32 +908,13 @@ public class NeoServlet extends HttpBaseServlet {
           if (requestBody != null && requestBody.has(PARENT_ID_KEY)) {
             parentIdValue = requestBody.getString(PARENT_ID_KEY);
             requestBody.remove(PARENT_ID_KEY);
-            // Find the link-to-parent column and resolve its DAL property name
-            if (adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
-              Entity dalEnt = ModelProvider.getInstance().getEntityByTableName(adTab.getTable().getDBTableName());
-              if (dalEnt != null) {
-                for (Column col : adTab.getTable().getADColumnList()) {
-                  if (col.isLinkToParentColumn() && col.isActive()) {
-                    try {
-                      Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
-                      if (prop != null) {
-                        requestBody.put(prop.getName(), parentIdValue);
-                        break;
-                      }
-                    } catch (Exception e) {
-                      log.debug("Could not resolve DAL property for column '{}': {}",
-                          col.getDBColumnName(), e.getMessage());
-                    }
-                  }
-                }
-              }
-            }
+            injectParentIdProperty(requestBody, adTab, parentIdValue);
           }
           // Filter out non-included fields (allow read-only on create — callouts/defaults set them)
           JSONObject filteredBody = fieldFilter.filterCreateRequest(requestBody);
           // Inject defaults for mandatory columns not in ETGO_SF_FIELD config
           NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
-          // Wrap for DefaultJsonDataService: {"data": {fields, "_entityName": ..., "_new": true}}
+          // Wrap in SmartClient envelope for DefaultJsonDataService (data + _entityName + _new)
           String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(filteredBody, dalEntityName, null);
           result = jsonService.add(params, wrappedBody);
           break;
@@ -962,12 +928,12 @@ public class NeoServlet extends HttpBaseServlet {
           }
           // Filter out non-included and read-only fields from request body
           JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
-          // Wrap for DefaultJsonDataService: {"data": {fields, "_entityName": ..., "id": recordId}}
+          // Wrap in SmartClient envelope for DefaultJsonDataService (data + _entityName + id)
           String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
           result = jsonService.update(params, wrappedBody);
           break;
         }
-        case "DELETE":
+        case DELETE_METHOD:
           result = jsonService.remove(params);
           break;
         default:
@@ -1006,6 +972,34 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    }
+  }
+
+  /**
+   * Resolves the DAL property name for the link-to-parent column and injects
+   * the parentId value into the request body under that property name.
+   */
+  private void injectParentIdProperty(JSONObject requestBody, Tab adTab, String parentIdValue) {
+    if (adTab.getTabLevel() == null || adTab.getTabLevel() <= 0) {
+      return;
+    }
+    Entity dalEnt = ModelProvider.getInstance().getEntityByTableName(adTab.getTable().getDBTableName());
+    if (dalEnt == null) {
+      return;
+    }
+    for (Column col : adTab.getTable().getADColumnList()) {
+      if (col.isLinkToParentColumn() && col.isActive()) {
+        try {
+          Property prop = dalEnt.getPropertyByColumnName(col.getDBColumnName());
+          if (prop != null) {
+            requestBody.put(prop.getName(), parentIdValue);
+            break;
+          }
+        } catch (Exception e) {
+          log.debug("Could not resolve DAL property for column '{}': {}",
+              col.getDBColumnName(), e.getMessage());
+        }
+      }
     }
   }
 

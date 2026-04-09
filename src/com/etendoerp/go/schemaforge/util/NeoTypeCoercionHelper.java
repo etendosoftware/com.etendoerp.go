@@ -152,6 +152,12 @@ public final class NeoTypeCoercionHelper {
     if (childTab == null) {
       return null;
     }
+    // Validate parentId to prevent HQL injection via concatenation.
+    // Etendo IDs are 32-char hex, UUID with hyphens, or legacy numeric strings.
+    if (parentId != null && !parentId.matches("[A-Za-z0-9\\-]+")) {
+      log.warn("Rejected parentId with unexpected format: '{}'", parentId);
+      return null;
+    }
     try {
       Tab parentTab = KernelUtils.getInstance().getParentTab(childTab);
       if (parentTab == null) {

@@ -98,9 +98,16 @@ public class NeoCrudHelper {
   }
 
   /**
-   * Build the base parameter map for DefaultJsonDataService operations.
+   * Builds the base parameter map required by {@code DefaultJsonDataService} operations.
+   * Includes entity name, tab ID, window ID, and active-record filter; also copies any
+   * additional query parameters (filters, pagination, sorting) from the request context.
+   *
+   * @param context        the current NEO request context, used to read the record ID and query params
+   * @param adTab          the AD_Tab linked to the entity, used to resolve tab and window IDs
+   * @param dalEntityName  the DAL entity name (e.g. {@code "Order"}) required by DefaultJsonDataService
+   * @return a mutable parameter map ready to be passed to {@code DefaultJsonDataService} fetch/add/update/remove
    */
-  static Map<String, String> buildBaseParams(NeoContext context, Tab adTab, String dalEntityName) {
+  public static Map<String, String> buildBaseParams(NeoContext context, Tab adTab, String dalEntityName) {
     Map<String, String> params = new HashMap<>();
     params.put(JsonConstants.ENTITYNAME, dalEntityName);
     params.put(JsonConstants.TAB_PARAMETER, adTab.getId());
