@@ -43,8 +43,6 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 
 final class McpToolRouterSupport {
 
-  private static final String REF_OBUISEL = "95E2A8B50A254B2AAE6774B8C2F28120";
-
   private McpToolRouterSupport() {
   }
 
@@ -147,7 +145,7 @@ final class McpToolRouterSupport {
       case "19":
       case "18":
       case "30":
-      case REF_OBUISEL:
+      case NeoSelectorService.REF_OBUISEL:
         return "foreignKey";
       default:
         return McpConstants.TYPE_STRING;
@@ -165,7 +163,7 @@ final class McpToolRouterSupport {
         return "Table";
       case "30":
         return "Search";
-      case REF_OBUISEL:
+      case NeoSelectorService.REF_OBUISEL:
         return "OBUISEL";
       default:
         return null;

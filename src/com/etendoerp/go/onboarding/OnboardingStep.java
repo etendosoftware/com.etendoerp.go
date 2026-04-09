@@ -20,7 +20,6 @@ package com.etendoerp.go.onboarding;
 /**
  * Contract for an individual onboarding action in the environment creation workflow.
  */
-@SuppressWarnings("java:S112")
 public interface OnboardingStep {
 
   /**

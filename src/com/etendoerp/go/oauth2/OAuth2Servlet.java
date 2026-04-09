@@ -107,11 +107,13 @@ public class OAuth2Servlet extends HttpBaseServlet {
     private static final String FIELD_ACCESS_TOKEN = "access_token";
     private static final String FIELD_TOKEN_TYPE = "token_type";
     private static final String FIELD_EXPIRES_IN = "expires_in";
-    private static final String FIELD_REFRESH_TOKEN = "refresh_token";
+    private static final String FIELD_REFRESH_TOKEN = GRANT_TYPE_REFRESH_TOKEN;
     private static final String FIELD_REDIRECT_URI = "redirect_uri";
     private static final String FIELD_CODE_CHALLENGE = "code_challenge";
     private static final String FIELD_STATE = "state";
     private static final String DB_OAUTH2_CLIENT_ID = "etgo_oauth2_client_id";
+
+  private static final String WILDCARD_SCOPE = "neo:*";
 
   /** In-memory store for authorization codes (short-lived, single-use). */
   private static final Map<String, AuthCodeData> AUTH_CODE_STORE = new ConcurrentHashMap<>();
@@ -120,8 +122,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
       new HashSet<>(Arrays.asList(SCOPE_NEO_READ, SCOPE_NEO_WRITE, SCOPE_NEO_PROCESS,
         SCOPE_NEO_REPORT, WILDCARD_SCOPE))
   );
-
-  private static final String WILDCARD_SCOPE = "neo:*";
 
   // --- SQL constants ---
 

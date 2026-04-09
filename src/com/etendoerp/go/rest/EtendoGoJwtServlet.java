@@ -88,7 +88,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
   private static final String FIELD_TOKEN = "token";
   private static final String FIELD_MESSAGE = "message";
   private static final String FIELD_SUCCESS = "success";
-  private static final String STATUS_SUCCESS = "success";
+  private static final String STATUS_SUCCESS = FIELD_SUCCESS;
   private static final String INVALID_JSON_BODY = "Invalid JSON body";
   private static final String INTERNAL_ERROR = "Internal error";
   private static final String SERVER_ERROR = "Server error";

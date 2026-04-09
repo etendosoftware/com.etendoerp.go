@@ -87,8 +87,8 @@ class NeoButtonHandler {
   private NeoResponse listButtonActions(String entityId) throws Exception {
     OBCriteria<SFField> fieldCriteria = OBDal.getInstance().createCriteria(SFField.class);
     fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
-    fieldCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-    fieldCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
+    fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + "." + SFEntity.PROPERTY_ETGOSFSPEC + "." + SFSpec.PROPERTY_ISACTIVE, true));
     List<SFField> fields = fieldCriteria.list();
 
     JSONArray actions = new JSONArray();
@@ -141,8 +141,8 @@ class NeoButtonHandler {
       HttpServletRequest request) throws Exception {
     OBCriteria<SFField> fieldCriteria = OBDal.getInstance().createCriteria(SFField.class);
     fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
-    fieldCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-    fieldCriteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
+    fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + "." + SFEntity.PROPERTY_ETGOSFSPEC + "." + SFSpec.PROPERTY_ISACTIVE, true));
     List<SFField> fields = fieldCriteria.list();
 
     Column targetColumn = null;
@@ -214,7 +214,7 @@ class NeoButtonHandler {
     criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
     criteria.add(Restrictions.ilike(SFEntity.PROPERTY_NAME, entityName,
         org.hibernate.criterion.MatchMode.EXACT));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
     criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
     criteria.setMaxResults(1);
     List<SFEntity> results = criteria.list();

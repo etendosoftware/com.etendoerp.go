@@ -60,10 +60,10 @@ class NeoDiscoveryHandler {
 
   private static final Set<String> SELECTOR_REFS = new HashSet<>();
   static {
-    SELECTOR_REFS.add("19"); // TableDir
-    SELECTOR_REFS.add("18"); // Table
-    SELECTOR_REFS.add("30"); // Search
-    SELECTOR_REFS.add("95E2A8B50A254B2AAE6774B8C2F28120"); // OBUISEL
+    SELECTOR_REFS.add(NeoSelectorService.REF_TABLEDIR);
+    SELECTOR_REFS.add(NeoSelectorService.REF_TABLE);
+    SELECTOR_REFS.add(NeoSelectorService.REF_SEARCH);
+    SELECTOR_REFS.add(NeoSelectorService.REF_OBUISEL);
   }
 
   private static final Pattern VALIDATION_PARAM_PATTERN = Pattern.compile("@(\\w+)@");
@@ -206,7 +206,7 @@ class NeoDiscoveryHandler {
   private JSONArray buildEntitySummaryArray(String specId) throws Exception {
     OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
     criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
     criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
     criteria.addOrder(Order.asc(SFEntity.PROPERTY_SEQNO));
     List<SFEntity> entities = criteria.list();
@@ -250,9 +250,9 @@ class NeoDiscoveryHandler {
   private JSONArray buildFieldsArray(String entityId) throws Exception {
     OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
     criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-    criteria.addOrder(Order.asc(SFEntity.PROPERTY_SEQNO));
+    criteria.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
+    criteria.addOrder(Order.asc(SFField.PROPERTY_SEQNO));
     List<SFField> fields = criteria.list();
 
     JSONArray arr = new JSONArray();
@@ -322,7 +322,7 @@ class NeoDiscoveryHandler {
       case "19": return "TableDir";
       case "18": return "Table";
       case "30": return "Search";
-      case "95E2A8B50A254B2AAE6774B8C2F28120": return "OBUISEL";
+      case NeoSelectorService.REF_OBUISEL: return "OBUISEL";
       default: return null;
     }
   }
