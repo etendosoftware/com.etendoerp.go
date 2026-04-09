@@ -114,7 +114,7 @@ public class CreateShipmentHandler implements NeoHandler {
   }
 
   private ShipmentInOut createShipmentHeader(Order order) {
-    DocumentType docType = findShipmentDocType();
+    DocumentType docType = findShipmentDocType(order);
     if (docType == null) {
       throw new OBException("No Goods Shipment document type found (docBaseType=MMS, isSOTrx=true)");
     }
@@ -134,6 +134,7 @@ public class CreateShipmentHandler implements NeoHandler {
     shipment.setSalesTransaction(true);
     shipment.setSalesOrder(order);
     shipment.setProcessed(false);
+    shipment.setDocumentStatus("DR");
     shipment.setMovementType("C-");
     return shipment;
   }
@@ -141,8 +142,8 @@ public class CreateShipmentHandler implements NeoHandler {
   private void createShipmentLines(ShipmentInOut shipment, Order order) {
     Locator defaultLocator = findDefaultLocator(order);
     if (defaultLocator == null) {
-      throw new OBException(
-          "No storage locator found for warehouse: " + order.getWarehouse().getName());
+      String warehouseName = order.getWarehouse() != null ? order.getWarehouse().getName() : "unknown";
+      throw new OBException("No storage locator found for warehouse: " + warehouseName);
     }
 
     long lineNo = 10;
@@ -185,8 +186,9 @@ public class CreateShipmentHandler implements NeoHandler {
     }
   }
 
-  private DocumentType findShipmentDocType() {
+  private DocumentType findShipmentDocType(Order order) {
     List<DocumentType> results = OBDal.getInstance().createCriteria(DocumentType.class)
+        .add(Restrictions.eq(DocumentType.PROPERTY_CLIENT, order.getClient()))
         .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, "MMS"))
         .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, true))
         .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true))
@@ -196,6 +198,9 @@ public class CreateShipmentHandler implements NeoHandler {
   }
 
   private Locator findDefaultLocator(Order order) {
+    if (order.getWarehouse() == null) {
+      return null;
+    }
     List<Locator> defaults = OBDal.getInstance().createCriteria(Locator.class)
         .add(Restrictions.eq(Locator.PROPERTY_WAREHOUSE, order.getWarehouse()))
         .add(Restrictions.eq(Locator.PROPERTY_DEFAULT, true))

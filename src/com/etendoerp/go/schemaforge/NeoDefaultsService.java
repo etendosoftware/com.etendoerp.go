@@ -1217,8 +1217,8 @@ public class NeoDefaultsService {
       }
 
     } catch (Exception e) {
-      log.debug("[NEO-CALLOUT] Interactive cascade failed for trigger '{}': {}",
-          triggerField, e.getMessage());
+      log.warn("[NEO-CALLOUT] Interactive cascade failed for trigger '{}': {}",
+          triggerField, e.getMessage(), e);
     }
 
     return result;

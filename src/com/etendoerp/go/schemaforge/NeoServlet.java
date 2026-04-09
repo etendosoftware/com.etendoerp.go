@@ -1005,7 +1005,7 @@ public class NeoServlet extends HttpBaseServlet {
             NeoDefaultsService.cascadeInteractiveCallout(neoContext, tab, fieldName, formState, calloutResult.getBody());
         if (cascade.hasResults()) {
           mergeCalloutResponse(calloutResult.getBody(), cascade.toJSON());
-          log.info("[NEO-CALLOUT] Cascade merged additional fields into response");
+          log.debug("[NEO-CALLOUT] Cascade merged additional fields into response");
         }
       }
 

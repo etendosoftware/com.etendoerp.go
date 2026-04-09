@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -241,7 +242,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           item.put("grandTotalAmount",
               inv.getGrandTotalAmount() != null ? inv.getGrandTotalAmount() : 0);
           if (inv.getInvoiceDate() != null) {
-            item.put("invoiceDate", inv.getInvoiceDate().toString());
+            item.put("invoiceDate", new SimpleDateFormat("yyyy-MM-dd").format(inv.getInvoiceDate()));
           }
           arr.put(item);
         }
