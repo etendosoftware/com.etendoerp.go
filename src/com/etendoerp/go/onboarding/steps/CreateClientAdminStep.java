@@ -64,8 +64,6 @@ public class CreateClientAdminStep implements OnboardingStep {
       OBDal.getInstance().save(user);
 
       ctx.setClientAdminUserId(user.getId());
-    } catch (OnboardingStepException e) {
-      throw e;
     } catch (Exception e) {
       throw new OnboardingStepException(e.getMessage(), e);
     }
