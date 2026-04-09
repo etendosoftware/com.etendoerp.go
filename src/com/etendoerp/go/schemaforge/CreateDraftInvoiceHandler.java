@@ -67,7 +67,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   private static final String SPEC_GOODS_SHIPMENT = "goods-shipment";
   private static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String PARAM_SHIPMENT_IDS = "shipmentIds";
-  private static final String ERR_RECORD_ID_REQUIRED = ERR_RECORD_ID_REQUIRED;
+  private static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
   private static final String KEY_RESPONSE = "response";
 
   @Override
