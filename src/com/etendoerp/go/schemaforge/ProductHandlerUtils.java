@@ -19,12 +19,35 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
+
 /**
  * Shared utilities for product-related NEO handlers.
  */
 final class ProductHandlerUtils {
 
   private ProductHandlerUtils() {
+  }
+
+  /**
+   * Build a standard NEO list response wrapping a data array.
+   */
+  static NeoResponse buildListResponse(JSONArray data) {
+    try {
+      JSONObject inner = new JSONObject();
+      inner.put("data",      data);
+      inner.put("startRow",  0);
+      inner.put("endRow",    data.length());
+      inner.put("totalRows", data.length());
+      inner.put("status",    0);
+      JSONObject body = new JSONObject();
+      body.put("response", inner);
+      return NeoResponse.ok(body);
+    } catch (JSONException e) {
+      return NeoResponse.error(500, "Error building list response");
+    }
   }
 
   /**

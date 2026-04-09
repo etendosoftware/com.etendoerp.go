@@ -109,7 +109,7 @@ public class ProductStockWarehouseHandler implements NeoHandler {
           data.put(item);
         }
 
-        return NeoResponse.listOk(data);
+        return ProductHandlerUtils.buildListResponse(data);
 
       } finally {
         OBContext.restorePreviousMode();

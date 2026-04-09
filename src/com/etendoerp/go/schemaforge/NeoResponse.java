@@ -20,7 +20,6 @@ package com.etendoerp.go.schemaforge;
 import java.util.HashMap;
 import java.util.Map;
 
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
@@ -58,25 +57,6 @@ public class NeoResponse {
 
   public static NeoResponse ok(JSONObject data) {
     return new NeoResponse(200, data);
-  }
-
-  /**
-   * Build a standard NEO list response wrapping a data array.
-   */
-  public static NeoResponse listOk(JSONArray data) {
-    try {
-      JSONObject inner = new JSONObject();
-      inner.put("data",      data);
-      inner.put("startRow",  0);
-      inner.put("endRow",    data.length());
-      inner.put("totalRows", data.length());
-      inner.put("status",    0);
-      JSONObject body = new JSONObject();
-      body.put("response", inner);
-      return new NeoResponse(200, body);
-    } catch (JSONException e) {
-      return NeoResponse.error(500, "Error building list response");
-    }
   }
 
   public static NeoResponse created(JSONObject data) {
