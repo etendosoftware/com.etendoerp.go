@@ -33,7 +33,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
- * Webhook to create or update an ETGO_SF_Entity record.
+ * Webhook service to create or update an ETGO_SF_Entity record.
+ * Maps a single AD Tab to a SchemaForge entity within a specification.
  *
  * Required params: SpecID, TabID, ModuleID
  * Optional params: Name, IsIncluded, IsGet, IsGetbyid, IsPost, IsPut, IsPatch, IsDelete,
