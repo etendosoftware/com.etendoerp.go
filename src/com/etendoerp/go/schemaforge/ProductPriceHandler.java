@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.math.BigDecimal;
 import java.util.List;
 
 import javax.inject.Named;
@@ -35,6 +34,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.model.pricing.pricelist.PriceListVersion;
+
 
 /**
  * NEO Handler for the {@code price} entity (M_ProductPrice tab).
@@ -189,9 +189,9 @@ public class ProductPriceHandler implements NeoHandler {
           item.put(PRODUCT_FIELD,                      row[1]);
           item.put(PRICE_LIST_VERSION_FIELD,           row[2]);
           item.put("priceListVersion$_identifier",     row[3]);
-          item.put(STANDARD_PRICE_FIELD,               toBigDecimal(row[4]));
-          item.put(LIST_PRICE_FIELD,                   toBigDecimal(row[5]));
-          item.put(PRICE_LIMIT,                        toBigDecimal(row[6]));
+          item.put(STANDARD_PRICE_FIELD,               ProductHandlerUtils.toBigDecimal(row[4]));
+          item.put(LIST_PRICE_FIELD,                   ProductHandlerUtils.toBigDecimal(row[5]));
+          item.put(PRICE_LIMIT,                        ProductHandlerUtils.toBigDecimal(row[6]));
           String algoCode = row[7] != null ? String.valueOf(row[7]) : "S";
           item.put("algorithm",                        algoCode);
           item.put("algorithm$_identifier",            "S".equals(algoCode) ? "Standard" : algoCode);
@@ -204,17 +204,7 @@ public class ProductPriceHandler implements NeoHandler {
           data.put(item);
         }
 
-        JSONObject inner = new JSONObject();
-        inner.put("data",      data);
-        inner.put("startRow",  0);
-        inner.put("endRow",    data.length());
-        inner.put("totalRows", data.length());
-        inner.put("status",    0);
-
-        JSONObject body = new JSONObject();
-        body.put("response", inner);
-
-        return NeoResponse.ok(body);
+        return NeoResponse.listOk(data);
 
       } finally {
         OBContext.restorePreviousMode();
@@ -311,13 +301,4 @@ public class ProductPriceHandler implements NeoHandler {
     return null;
   }
 
-  private static BigDecimal toBigDecimal(Object val) {
-    if (val == null) return BigDecimal.ZERO;
-    if (val instanceof BigDecimal) return (BigDecimal) val;
-    try {
-      return new BigDecimal(val.toString());
-    } catch (NumberFormatException e) {
-      return BigDecimal.ZERO;
-    }
-  }
 }

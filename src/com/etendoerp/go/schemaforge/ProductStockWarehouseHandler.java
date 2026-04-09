@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.math.BigDecimal;
 import java.util.List;
 
 import javax.inject.Named;
@@ -30,6 +29,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+
 
 /**
  * NEO Handler for the {@code stock} entity (M_StorageDetail) in the product window.
@@ -102,24 +102,14 @@ public class ProductStockWarehouseHandler implements NeoHandler {
           item.put("storageBin$_identifier",  row[2]);
           item.put("warehouse",               row[3]);
           item.put("warehouse$_identifier",   row[4]);
-          item.put("quantityOnHand",          toBigDecimal(row[5]));
-          item.put("reservedQty",             toBigDecimal(row[6]));
-          item.put("allocatedQuantity",       toBigDecimal(row[7]));
+          item.put("quantityOnHand",          ProductHandlerUtils.toBigDecimal(row[5]));
+          item.put("reservedQty",             ProductHandlerUtils.toBigDecimal(row[6]));
+          item.put("allocatedQuantity",       ProductHandlerUtils.toBigDecimal(row[7]));
           item.put("attributeSetValue",       row[8]);
           data.put(item);
         }
 
-        JSONObject inner = new JSONObject();
-        inner.put("data",      data);
-        inner.put("startRow",  0);
-        inner.put("endRow",    data.length());
-        inner.put("totalRows", data.length());
-        inner.put("status",    0);
-
-        JSONObject body = new JSONObject();
-        body.put("response", inner);
-
-        return NeoResponse.ok(body);
+        return NeoResponse.listOk(data);
 
       } finally {
         OBContext.restorePreviousMode();
@@ -130,17 +120,4 @@ public class ProductStockWarehouseHandler implements NeoHandler {
     }
   }
 
-  private static BigDecimal toBigDecimal(Object val) {
-    if (val == null) {
-      return BigDecimal.ZERO;
-    }
-    if (val instanceof BigDecimal) {
-      return (BigDecimal) val;
-    }
-    try {
-      return new BigDecimal(val.toString());
-    } catch (NumberFormatException e) {
-      return BigDecimal.ZERO;
-    }
-  }
 }
