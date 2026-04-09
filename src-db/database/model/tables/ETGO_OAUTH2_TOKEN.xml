@@ -60,19 +60,19 @@
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_OA2T_CLI_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
-      <foreign-key foreignTable="AD_ORG" name="ETGO_OA2T_ORG_FK">
-        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
-      </foreign-key>
       <foreign-key foreignTable="ETGO_OAUTH2_CLIENT" name="ETGO_OA2T_OACLI_FK">
         <reference local="ETGO_OAUTH2_CLIENT_ID" foreign="ETGO_OAUTH2_CLIENT_ID"/>
       </foreign-key>
-      <check name="ETGO_OA2T_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
-      <check name="ETGO_OA2T_ISREVOKED"><![CDATA[IS_REVOKED IN ('Y', 'N')]]></check>
-      <unique name="ETGO_OA2T_TOKENHASH_UQ">
-        <unique-column name="ACCESS_TOKEN_HASH"/>
-      </unique>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_OA2T_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
       <unique name="ETGO_OA2T_REFTOKENHASH_UQ">
         <unique-column name="REFRESH_TOKEN_HASH"/>
       </unique>
+      <unique name="ETGO_OA2T_TOKENHASH_UQ">
+        <unique-column name="ACCESS_TOKEN_HASH"/>
+      </unique>
+      <check name="ETGO_OA2T_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="ETGO_OA2T_ISREVOKED"><![CDATA[IS_REVOKED IN ('Y', 'N')]]></check>
     </table>
   </database>
