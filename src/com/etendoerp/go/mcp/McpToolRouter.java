@@ -501,10 +501,9 @@ public class McpToolRouter {
   // ── neo_schema ─────────────────────────────────────────────────────────
 
   // AD_Reference ID for OBUISEL selectors (extends the base FK refs from NeoSelectorService)
-  private static final String REF_OBUISEL = "95E2A8B50A254B2AAE6774B8C2F28120";
   private static final java.util.Set<String> SELECTOR_REFS = new java.util.HashSet<>(
       java.util.Arrays.asList(NeoSelectorService.REF_TABLEDIR, NeoSelectorService.REF_TABLE,
-          NeoSelectorService.REF_SEARCH, REF_OBUISEL));
+          NeoSelectorService.REF_SEARCH, NeoSelectorService.REF_OBUISEL));
 
   // System/audit columns excluded from schema (auto-managed by Etendo)
   private static final java.util.Set<String> SYSTEM_COLUMNS = new java.util.HashSet<>(
@@ -582,7 +581,7 @@ public class McpToolRouter {
       case "28": return "button";
       case "17": return "list";
       case "13": return "id";
-      case "19": case "18": case "30": case REF_OBUISEL:
+      case "19": case "18": case "30": case NeoSelectorService.REF_OBUISEL:
         return "foreignKey";
       default: return McpConstants.TYPE_STRING;
     }
@@ -594,7 +593,7 @@ public class McpToolRouter {
       case "19": return "TableDir";
       case "18": return "Table";
       case "30": return "Search";
-      case REF_OBUISEL: return "OBUISEL";
+      case NeoSelectorService.REF_OBUISEL: return "OBUISEL";
       default: return null;
     }
   }
@@ -688,11 +687,11 @@ public class McpToolRouter {
     criteria.setMaxResults(1);
     List<SFSpec> results = criteria.list();
     if (results.isEmpty()) {
-      for (SFSpec spec : allSpecs) {
-        String specType = spec.getSpecType();
-        if (McpToolRouterSupport.hasSpecAccess(spec, specType)) {
-          JSONArray entities = "W".equals(specType) ? buildEntitySummaryArray(spec.getId()) : null;
-          specsArray.put(McpToolRouterSupport.buildDiscoverSpec(spec, specType, entities));
+      throw new IllegalArgumentException("Spec not found: " + specName);
+    }
+    return results.get(0);
+  }
+
   /**
    * Find an active, included entity within a spec or throw.
    * Same query pattern as NeoServlet.findEntity().
@@ -848,8 +847,8 @@ public class McpToolRouter {
         try {
           missing.put(McpToolRouterSupport.buildMissingFieldInfo(col, prop.getName(),
               SELECTOR_REFS));
-        } catch (Exception ignored) {
-          // skip malformed field info
+        } catch (Exception e) {
+          log.warn("Error building missing field info for column {}: {}", col.getDBColumnName(), e.getMessage());
         }
       }
     }
@@ -967,8 +966,8 @@ public class McpToolRouter {
             body.put(prop.getName(), parentIdValue);
             break;
           }
-        } catch (Exception ignored) {
-          // Column not mappable to property
+        } catch (Exception e) {
+          log.warn("Column '{}' not mappable to property in entity '{}': {}", col.getDBColumnName(), dalEntity.getName(), e.getMessage());
         }
       }
     }

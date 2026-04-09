@@ -515,7 +515,7 @@ public class NeoServlet extends HttpBaseServlet {
       NeoHandler handler = lookupHandler(javaQualifier);
       if (handler == null) {
         log.warn("No handler found for qualifier '{}', falling back to default", javaQualifier);
-        return crudHandler.handleDefault(context, request, response);
+        return crudHandler.handleDefault(context);
       }
 
       // Pre-hook
@@ -527,7 +527,7 @@ public class NeoServlet extends HttpBaseServlet {
       }
 
       // Default service
-      NeoResponse defaultResult = crudHandler.handleDefault(context, request, response);
+      NeoResponse defaultResult = crudHandler.handleDefault(context);
 
       // Post-hook
       context.setPreviousResult(defaultResult);

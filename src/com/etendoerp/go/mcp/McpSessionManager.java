@@ -111,10 +111,8 @@ public class McpSessionManager {
       }
       throw e;
     } finally {
-      // Always restore previous context to prevent cross-call leakage
-      if (previousContext != null) {
-        OBContext.setOBContext(previousContext);
-      }
+      // Always restore previous context (even if null) to prevent cross-call leakage
+      OBContext.setOBContext(previousContext);
     }
   }
 

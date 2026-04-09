@@ -146,7 +146,7 @@ class NeoCrudHandler {
     if (StringUtils.isNotBlank(javaQualifier)) {
       return servlet.handleWithHooks(javaQualifier, neoContext, request, response);
     }
-    return handleDefault(neoContext, request, response);
+    return handleDefault(neoContext);
   }
 
   /**
@@ -170,8 +170,7 @@ class NeoCrudHandler {
   /**
    * Executes the default DAL-based handler for a CRUD request.
    */
-  NeoResponse handleDefault(NeoContext context, HttpServletRequest request,
-      HttpServletResponse response) {
+  NeoResponse handleDefault(NeoContext context) {
     try {
       Tab adTab = context.getAdTab();
       if (adTab == null) {

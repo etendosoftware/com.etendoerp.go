@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.oauth2;
 
+import java.util.Objects;
+
 final class OAuth2AuthorizationCodeSupport {
 
   private OAuth2AuthorizationCodeSupport() {
@@ -36,7 +38,7 @@ final class OAuth2AuthorizationCodeSupport {
     if (!OAuth2Utils.verifyCodeChallenge(codeVerifier, codeData.codeChallenge)) {
       return "PKCE verification failed";
     }
-    if (redirectUri != null && !redirectUri.equals(codeData.redirectUri)) {
+    if (!Objects.equals(redirectUri, codeData.redirectUri)) {
       return "redirect_uri mismatch";
     }
     return null;

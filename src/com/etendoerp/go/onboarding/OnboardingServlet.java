@@ -105,6 +105,11 @@ public class OnboardingServlet extends HttpBaseServlet {
       String currentRoleId = authenticateJwtAndGetRole(request);
       String action = request.getParameter("action");
       if ("environments".equals(action)) {
+        if (!isAdminRole(currentRoleId)) {
+          sendJsonError(response, HttpServletResponse.SC_FORBIDDEN,
+              "Unauthorized: System Administrator role required");
+          return;
+        }
         sendEnvironments(response);
       } else if ("login".equals(action)) {
         if (!isAdminRole(currentRoleId)) {

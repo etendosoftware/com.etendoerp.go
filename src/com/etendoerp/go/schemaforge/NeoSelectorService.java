@@ -53,6 +53,7 @@ public class NeoSelectorService {
   public static final String REF_TABLE = "18";
   public static final String REF_TABLEDIR = "19";
   public static final String REF_SEARCH = "30";
+  public static final String REF_OBUISEL = "95E2A8B50A254B2AAE6774B8C2F28120";
 
   // JSON field name constants
   private static final String PARAM_SEARCH = "search";
@@ -473,7 +474,8 @@ public class NeoSelectorService {
     if (hasSearch) {
       countQuery.setParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
     }
-    int totalCount = countQuery.uniqueResult().intValue();
+    Long countResult = countQuery.uniqueResult();
+    int totalCount = (countResult != null) ? countResult.intValue() : 0;
 
     // Data query — use the ORIGINAL select columns + our filters
     String dataHql = selectPart + fromClause + " ORDER BY " + alias + "." + meta.displayProperty;

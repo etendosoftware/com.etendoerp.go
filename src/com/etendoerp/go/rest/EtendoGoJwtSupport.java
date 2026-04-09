@@ -86,8 +86,8 @@ final class EtendoGoJwtSupport {
           return false;
         }
         String username = rs.getString("username");
-        return accountEmail.equals(username)
-            || (username != null && username.startsWith(accountEmail + "+"));
+        return accountEmail != null && (accountEmail.equals(username)
+            || (username != null && username.startsWith(accountEmail + "+")));
       }
     }
   }
@@ -139,7 +139,8 @@ final class EtendoGoJwtSupport {
         }
       }
     }
-    return accountEmail + "+" + clientName.toLowerCase().replaceAll("[^a-z0-9]", "");
+    String safeClientName = (clientName != null) ? clientName.toLowerCase().replaceAll("[^a-z0-9]", "") : "";
+    return accountEmail + "+" + safeClientName;
   }
 
   static String findStarOrgId(Connection conn, String clientId) throws SQLException {
@@ -187,7 +188,7 @@ final class EtendoGoJwtSupport {
   }
 
   static final class RoleListData {
-    private String firstRoleId;
-    private JSONArray roleArray;
+    String firstRoleId;
+    JSONArray roleArray;
   }
 }

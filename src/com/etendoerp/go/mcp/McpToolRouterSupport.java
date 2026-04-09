@@ -26,6 +26,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBCriteria;
@@ -35,6 +36,7 @@ import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -53,7 +55,7 @@ final class McpToolRouterSupport {
     criteria.setMaxResults(1);
     List<SFSpec> results = criteria.list();
     if (results.isEmpty()) {
-      throw new IllegalArgumentException("Spec not found: " + specName);
+      throw new OBException("Spec not found: " + specName);
     }
     return results.get(0);
   }
@@ -67,7 +69,7 @@ final class McpToolRouterSupport {
     criteria.setMaxResults(1);
     List<SFEntity> results = criteria.list();
     if (results.isEmpty()) {
-      throw new IllegalArgumentException("Entity not found: " + entityName);
+      throw new OBException("Entity not found: " + entityName);
     }
     return results.get(0);
   }
