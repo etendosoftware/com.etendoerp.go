@@ -24,8 +24,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import java.util.HashMap;
 import java.util.Map;
 
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
  * Unit tests for {@link NeoServlet} tab filtering logic.
@@ -36,20 +37,13 @@ import org.junit.jupiter.api.Test;
  */
 public class NeoServletTabFilterTest {
 
-  private NeoServlet servlet;
-
-  @BeforeEach
-  public void setUp() {
-    servlet = new NeoServlet();
-  }
-
   /**
    * buildParentWhereClause returns null when called with a null tab.
    * The method performs an explicit null check at the start and returns null immediately.
    */
   @Test
   public void testBuildParentWhereClauseWithNullTab() {
-    String result = servlet.buildParentWhereClause(null, "ABC123");
+    String result = NeoTypeCoercionHelper.buildParentWhereClause(null, "ABC123");
     assertNull(result, "Should return null when tab is null");
   }
 
