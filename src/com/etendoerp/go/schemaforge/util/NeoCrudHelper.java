@@ -27,7 +27,9 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
@@ -51,16 +53,12 @@ public class NeoCrudHelper {
   private static final Logger log = LogManager.getLogger(NeoCrudHelper.class);
   private static final String PARENT_ID_KEY = "parentId";
   private static final String NEO_ERROR_PREFIX = "__NEO_ERROR__:";
+  /** Internal-only HQL predicate param — stripped from HTTP request params to prevent injection. */
+  static final String NEO_WHERE_PARAM = "_neoWhere";
 
   private NeoCrudHelper() {
   }
 
-  /**
-   * Handle the default CRUD request lifecycle: build params, dispatch, parse response.
-   *
-   * @param context the NEO request context containing entity, method, body and query params
-   * @return a NeoResponse with the result or an error
-   */
   /**
    * Builds the base parameter map required by {@code DefaultJsonDataService} operations.
    * Includes entity name, tab ID, window ID, and active-record filter; also copies any
@@ -84,13 +82,15 @@ public class NeoCrudHelper {
 
     if (context.getQueryParams() != null) {
       for (Map.Entry<String, String> entry : context.getQueryParams().entrySet()) {
-        params.put(entry.getKey(), entry.getValue());
+        // _neoWhere is an internal-only predicate injected by hooks/handlers after params are built.
+        // Stripping it here prevents HQL injection via HTTP request parameters.
+        if (!NEO_WHERE_PARAM.equals(entry.getKey())) {
+          params.put(entry.getKey(), entry.getValue());
+        }
       }
     }
     return params;
   }
-
-  private static final String NEO_WHERE_PARAM = "_neoWhere";
 
   /**
    * Build and apply the where clause (tab HQL + parent filter + client base filter) to the params map.
@@ -197,9 +197,24 @@ public class NeoCrudHelper {
   }
 
   /**
-   * Resolve the parentId from the request body and map it to the actual FK property name.
+   * Resolves the {@code parentId} field from the request body and maps it to the actual
+   * DAL FK property name of the child entity (e.g. {@code parentId} → {@code salesOrder}
+   * for {@code C_OrderLine}).
+   *
+   * <p>The generic {@code "parentId"} key is removed from {@code requestBody} and replaced
+   * with the property name resolved by scanning the tab's link-to-parent column. If the tab
+   * is a header (level 0) or no matching column is found, only the removal is performed.
+   *
+   * @param requestBody the mutable request JSON; may be {@code null} (returns {@code null})
+   * @param adTab       the AD_Tab of the child entity; must not be {@code null}
+   * @return the raw parentId string extracted from the body, or {@code null} if absent
+   * @throws OBException  if {@code adTab} is {@code null}
+   * @throws JSONException if the JSON body cannot be read or written
    */
-  public static String resolveAndMapParentId(JSONObject requestBody, Tab adTab) throws Exception {
+  public static String resolveAndMapParentId(JSONObject requestBody, Tab adTab) throws JSONException {
+    if (adTab == null) {
+      throw new OBException("resolveAndMapParentId: adTab must not be null");
+    }
     if (requestBody == null || !requestBody.has(PARENT_ID_KEY)) {
       return null;
     }
@@ -220,7 +235,7 @@ public class NeoCrudHelper {
    * Find the link-to-parent column and set the parentId value on its DAL property name.
    */
   static void mapParentIdToFkColumn(JSONObject requestBody, Tab adTab,
-      Entity dalEnt, String parentIdValue) throws Exception {
+      Entity dalEnt, String parentIdValue) throws JSONException {
     for (Column col : adTab.getTable().getADColumnList()) {
       if (!col.isLinkToParentColumn() || !col.isActive()) {
         continue;

@@ -880,7 +880,7 @@ public class NeoServlet extends HttpBaseServlet {
 
       // Allow callers to inject an additional HQL predicate via _neoWhere (e.g. from hooks or
       // custom handlers). Consumed here so it is not passed as a raw query param downstream.
-      String neoWhere = params.remove("_neoWhere");
+      String neoWhere = params.remove(NeoCrudHelper.NEO_WHERE_PARAM);
       if (StringUtils.isNotBlank(neoWhere)) {
         if (whereClause.length() > 0) {
           whereClause.append(" and ");
