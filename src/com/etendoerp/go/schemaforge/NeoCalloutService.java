@@ -441,23 +441,31 @@ public class NeoCalloutService {
     }
     Iterator<String> keys = formState.keys();
     while (keys.hasNext()) {
-      String key = keys.next();
-      // Skip $_identifier companion keys
-      if (key.contains("$_identifier")) {
-        continue;
-      }
-      String val = formState.optString(key, "");
-      // Try OBDal property name first, then fall back to clean/db names
-      String inpKey = maps.propertyNameToInp.get(key.toLowerCase());
-      if (inpKey == null) {
-        inpKey = resolveToInpName(key, maps.dbNameToInp, maps.cleanNameToInp);
-      }
-      // Never overwrite the trigger field — its value comes from the `value` parameter
-      if (inpKey.equals(inpFieldName)) {
-        continue;
-      }
-      params.put(inpKey, new String[]{ val });
+      mapFormStateEntry(keys.next(), formState, inpFieldName, maps, params);
     }
+  }
+
+  /**
+   * Maps a single form-state key to its inp* parameter name and adds it to params,
+   * skipping identifier companion keys and the trigger field.
+   */
+  private static void mapFormStateEntry(String key, JSONObject formState, String inpFieldName,
+      ColumnLookupMaps maps, Map<String, String[]> params) {
+    // Skip $_identifier companion keys
+    if (key.contains("$_identifier")) {
+      return;
+    }
+    String val = formState.optString(key, "");
+    // Try OBDal property name first, then fall back to clean/db names
+    String inpKey = maps.propertyNameToInp.get(key.toLowerCase());
+    if (inpKey == null) {
+      inpKey = resolveToInpName(key, maps.dbNameToInp, maps.cleanNameToInp);
+    }
+    // Never overwrite the trigger field — its value comes from the `value` parameter
+    if (inpKey.equals(inpFieldName)) {
+      return;
+    }
+    params.put(inpKey, new String[]{ val });
   }
 
   /**
@@ -986,25 +994,34 @@ public class NeoCalloutService {
       Map<String, String> rDisplayNames) throws Exception {
     Iterator<String> keys = calloutResult.keys();
     while (keys.hasNext()) {
-      String key = keys.next();
-      JSONObject fieldResult = calloutResult.optJSONObject(key);
-      if (fieldResult == null) {
-        continue;
-      }
-      if (isMessageKey(key)) {
-        messages.put(buildMessageEntry(key, fieldResult));
-        continue;
-      }
-      if ("JSEXECUTE".equals(key)) {
-        // Not applicable in REST context
-        continue;
-      }
-      if (key.endsWith("_R")) {
-        collectRDisplayName(key, fieldResult, adTab, rDisplayNames);
-        continue;
-      }
-      classifyFieldUpdate(key, fieldResult, adTab, updates, combos);
+      classifyCalloutField(keys.next(), calloutResult, adTab, updates, combos, messages, rDisplayNames);
     }
+  }
+
+  /**
+   * Classifies a single callout result field into updates, combos, messages, or _R display-name
+   * entries. Fields with null value, JSEXECUTE keys, or unrecognized types are skipped silently.
+   */
+  private static void classifyCalloutField(String key, JSONObject calloutResult, Tab adTab,
+      JSONObject updates, JSONObject combos, JSONArray messages,
+      Map<String, String> rDisplayNames) throws Exception {
+    JSONObject fieldResult = calloutResult.optJSONObject(key);
+    if (fieldResult == null) {
+      return;
+    }
+    if (isMessageKey(key)) {
+      messages.put(buildMessageEntry(key, fieldResult));
+      return;
+    }
+    if ("JSEXECUTE".equals(key)) {
+      // Not applicable in REST context
+      return;
+    }
+    if (key.endsWith("_R")) {
+      collectRDisplayName(key, fieldResult, adTab, rDisplayNames);
+      return;
+    }
+    classifyFieldUpdate(key, fieldResult, adTab, updates, combos);
   }
 
   /**
