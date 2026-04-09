@@ -21,6 +21,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -104,7 +105,7 @@ public class NeoCalloutService {
 
         // Build synthetic request parameters
         Map<String, String[]> params = CalloutRequestBuilder.buildRequestParams(
-            adTab, fieldName, value, formState, calloutInfo.inpFieldName,
+            adTab, value, formState, calloutInfo.inpFieldName,
             auxValues);
 
         // Build session attributes from a fully populated VariablesSecureApp

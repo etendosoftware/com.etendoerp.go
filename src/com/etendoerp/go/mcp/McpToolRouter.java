@@ -751,39 +751,41 @@ public class McpToolRouter {
     while (keys.hasNext()) {
       String key = keys.next();
       String value = filters.getString(key);
-
-      // Try to resolve as a DAL property
-      Property prop = null;
-      try {
-        prop = dalEntity.getPropertyByColumnName(key);
-      } catch (Exception ignored) {
-        // Try by property name
-        try {
-          prop = dalEntity.getProperty(key);
-        } catch (Exception alsoIgnored) {
-          log.debug("Filter column '{}' not found in entity, skipping", key);
-        }
-      }
-
-      if (prop == null) {
-        // No resolved property — skip to prevent HQL injection
-        log.warn("Filter key '{}' could not be resolved to a DAL property, ignoring", key);
-      } else {
-        if (where.length() > 0) {
-          where.append(" and ");
-        }
-
-        if (!prop.isPrimitive()) {
-          // FK reference — match on .id
-          where.append("e.").append(prop.getName()).append(".id='")
-              .append(value.replace("'", "''")).append("'");
-        } else {
-          where.append("e.").append(prop.getName()).append("='")
-              .append(value.replace("'", "''")).append("'");
-        }
-      }
+      appendFilterCondition(where, dalEntity, key, value);
     }
     return where.length() > 0 ? where.toString() : null;
+  }
+
+  /**
+   * Resolve a single filter key to a DAL property and append an HQL condition.
+   */
+  private void appendFilterCondition(StringBuilder where, Entity dalEntity,
+      String key, String value) {
+    Property prop = null;
+    try {
+      prop = dalEntity.getPropertyByColumnName(key);
+    } catch (Exception ignored) {
+      try {
+        prop = dalEntity.getProperty(key);
+      } catch (Exception alsoIgnored) {
+        log.debug("Filter column '{}' not found in entity, skipping", key);
+      }
+    }
+
+    if (prop == null) {
+      log.warn("Filter key '{}' could not be resolved to a DAL property, ignoring", key);
+      return;
+    }
+
+    if (where.length() > 0) {
+      where.append(" and ");
+    }
+    String escaped = value.replace("'", "''");
+    if (!prop.isPrimitive()) {
+      where.append("e.").append(prop.getName()).append(".id='").append(escaped).append("'");
+    } else {
+      where.append("e.").append(prop.getName()).append("='").append(escaped).append("'");
+    }
   }
 
   /**

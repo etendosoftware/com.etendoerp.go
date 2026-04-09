@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -77,7 +78,7 @@ class CalloutRequestBuilder {
    * Loads columns once and builds a lookup map for efficient resolution.
    */
   static Map<String, String[]> buildRequestParams(Tab adTab,
-      String fieldName, Object value, JSONObject formState, String inpFieldName,
+      Object value, JSONObject formState, String inpFieldName,
       JSONObject auxValues) {
 
     Map<String, String[]> params = new HashMap<>();
@@ -154,8 +155,8 @@ class CalloutRequestBuilder {
           if (prop != null) {
             maps.propertyNameToInp.put(prop.getName().toLowerCase(), inpName);
           }
-        } catch (Exception ignored) {
-          // Not all columns have DAL properties
+        } catch (Exception e) {
+          log.trace("Column '{}' does not have a DAL property", dbColName);
         }
       }
     }
@@ -197,10 +198,12 @@ class CalloutRequestBuilder {
       inpKey = resolveToInpName(key, maps.dbNameToInp, maps.cleanNameToInp);
     }
     // Never overwrite the trigger field — its value comes from the `value` parameter
-    if (inpKey.equals(inpFieldName)) {
+    if (Objects.equals(inpKey, inpFieldName)) {
       return;
     }
-    params.put(inpKey, new String[]{ val });
+    if (inpKey != null) {
+      params.put(inpKey, new String[]{ val });
+    }
   }
 
   // ── Default filling ────────────────────────────────────────────────
@@ -421,7 +424,9 @@ class CalloutRequestBuilder {
         if (inpBase == null) {
           inpBase = resolveToInpName(baseName, maps.dbNameToInp, maps.cleanNameToInp);
         }
-        params.put(inpBase + suffix, new String[]{ auxVal });
+        if (inpBase != null) {
+          params.put(inpBase + suffix, new String[]{ auxVal });
+        }
       }
     }
   }

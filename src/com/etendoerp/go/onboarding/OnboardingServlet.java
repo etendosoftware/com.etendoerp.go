@@ -85,6 +85,8 @@ public class OnboardingServlet extends HttpBaseServlet {
   private static final String FIELD_ORG_NAME = "orgName";
   private static final String FIELD_ADMIN_USER = "adminUser";
   private static final String FIELD_TYPE_STRING = "string";
+  private static final String ERR_ADMIN_REQUIRED =
+      "Unauthorized: System Administrator role required";
   private static final int TOTAL_STEPS = 6;
 
   private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
@@ -107,14 +109,14 @@ public class OnboardingServlet extends HttpBaseServlet {
       if ("environments".equals(action)) {
         if (!isAdminRole(currentRoleId)) {
           sendJsonError(response, HttpServletResponse.SC_FORBIDDEN,
-              "Unauthorized: System Administrator role required");
+              ERR_ADMIN_REQUIRED);
           return;
         }
         sendEnvironments(response);
       } else if ("login".equals(action)) {
         if (!isAdminRole(currentRoleId)) {
           sendJsonError(response, HttpServletResponse.SC_FORBIDDEN,
-              "Unauthorized: System Administrator role required");
+              ERR_ADMIN_REQUIRED);
           return;
         }
         loginAsUser(request, response);
@@ -216,7 +218,7 @@ public class OnboardingServlet extends HttpBaseServlet {
       String roleId = authenticateJwtAndGetRole(request);
       if (!isAdminRole(roleId)) {
         sendJsonError(response, HttpServletResponse.SC_FORBIDDEN,
-            "Unauthorized: System Administrator role required");
+            ERR_ADMIN_REQUIRED);
         return;
       }
 
