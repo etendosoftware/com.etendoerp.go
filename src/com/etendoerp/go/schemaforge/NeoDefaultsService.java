@@ -366,6 +366,69 @@ public class NeoDefaultsService {
     if (docTypeId != null) {
       return docTypeId;
     }
+    // Fallback: read DB-level column default from information_schema when AD has no expression.
+    // Handles mandatory boolean/char columns whose AD_Column.DefaultValue is null/empty but
+    // the DB column has a DEFAULT clause (e.g., IsEmployee DEFAULT 'N', IsProspect DEFAULT 'Y').
+    if (!colUpper.endsWith("_ID") && adColumn.getTable() != null) {
+      String dbDefault = resolveDbColumnDefault(
+          adColumn.getTable().getDBTableName(), dbColumnName);
+      if (dbDefault != null) {
+        return dbDefault;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Read the DB-level column DEFAULT from {@code information_schema.columns}.
+   * Used as a last-resort fallback when {@code AD_Column.DefaultValue} is null/empty and
+   * no preference or doctype default can be resolved.
+   *
+   * <p>Parses PostgreSQL's {@code column_default} format:
+   * <ul>
+   *   <li>{@code 'N'::bpchar} → {@code N}</li>
+   *   <li>{@code 'Y'::character varying} → {@code Y}</li>
+   *   <li>{@code '1'::character varying} → {@code 1}</li>
+   *   <li>{@code 0} (numeric literal) → {@code 0}</li>
+   * </ul>
+   *
+   * @param tableName  DB table name (matched case-insensitively)
+   * @param columnName DB column name (matched case-insensitively)
+   * @return parsed default value string, or {@code null} if not found or not parseable
+   */
+  private static String resolveDbColumnDefault(String tableName, String columnName) {
+    try {
+      String sql = "SELECT column_default FROM information_schema.columns "
+          + "WHERE LOWER(table_name) = LOWER(?) AND LOWER(column_name) = LOWER(?)";
+      try (PreparedStatement ps =
+          OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
+        ps.setString(1, tableName);
+        ps.setString(2, columnName);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            String colDefault = rs.getString(1);
+            if (colDefault == null || colDefault.isEmpty()) {
+              return null;
+            }
+            // Parse PostgreSQL column_default format, e.g. 'N'::bpchar
+            if (colDefault.startsWith("'")) {
+              int endQuote = colDefault.indexOf("'", 1);
+              if (endQuote > 0) {
+                return colDefault.substring(1, endQuote);
+              }
+            }
+            // Numeric literals like 0 or 0.00
+            String stripped = colDefault.split("::")[0].trim();
+            if (!stripped.isEmpty()) {
+              return stripped;
+            }
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not read DB-level column default for {}.{}: {}",
+          tableName, columnName, e.getMessage());
+    }
     return null;
   }
 
