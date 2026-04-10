@@ -18,8 +18,10 @@ package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -67,7 +69,7 @@ class SelectorQueryBuilder {
 
   // SQL functions that have no HQL equivalent and must cause a clause to be skipped
   static final Pattern SQL_ONLY_FUNCTIONS = Pattern.compile(
-      "AD_ISORGINCLUDED|AD_ISCHILDORGINCLUDED", Pattern.CASE_INSENSITIVE);
+      "AD_ISORGINCLUDED|AD_ISCHILDORGINCLUDED|AD_ROLE_ORGACCESS", Pattern.CASE_INSENSITIVE);
 
   private SelectorQueryBuilder() {
   }
@@ -105,6 +107,14 @@ class SelectorQueryBuilder {
         hql.append(SQL_AND);
       }
       hql.append(validationFilter);
+    }
+
+    String readableOrgsFilter = buildReadableOrgsPredicate(meta.entityName, alias, true);
+    if (StringUtils.isNotBlank(readableOrgsFilter)) {
+      if (hql.length() > 0) {
+        hql.append(SQL_AND);
+      }
+      hql.append(readableOrgsFilter);
     }
 
     if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
@@ -168,34 +178,69 @@ class SelectorQueryBuilder {
       hasWhere = true;
     }
 
-    hasWhere = appendReadableOrgsFilter(baseHql, alias, hasWhere);
+    hasWhere = appendReadableOrgsFilter(baseHql, alias, meta.entityName, hasWhere, true);
     appendCustomSearchFilter(baseHql, meta.searchableProperties, alias, search, hasWhere);
 
     return baseHql.toString();
   }
 
   /**
-   * Append a readable-organizations IN filter to an HQL builder.
-   * Reads the current organizations from {@link OBContext} and appends
-   * {@code alias.organization.id IN ('org1', 'org2', ...)} if any exist.
+   * Build a readable-organizations filter for org-aware entities.
+   * Optionally includes organization "0" (the "*" org).
+   *
+   * @return a predicate string like {@code alias.organization.id IN ('org1','0')}, or {@code null}
+   */
+  static String buildReadableOrgsPredicate(String entityName, String alias, boolean includeOrgZero) {
+    Entity entityDef = ModelProvider.getInstance().getEntity(entityName);
+    if (entityDef == null || !entityDef.hasProperty("organization")) {
+      return null;
+    }
+    OBContext ctx = OBContext.getOBContext();
+    if (ctx == null) {
+      return null;
+    }
+    String[] readableOrgs = ctx.getReadableOrganizations();
+    Set<String> orgIds = new LinkedHashSet<>();
+    if (readableOrgs != null) {
+      for (String orgId : readableOrgs) {
+        if (StringUtils.isNotBlank(orgId)) {
+          orgIds.add(orgId);
+        }
+      }
+    }
+    if (includeOrgZero) {
+      orgIds.add("0");
+    }
+    if (orgIds.isEmpty()) {
+      return null;
+    }
+    StringBuilder filter = new StringBuilder(alias).append(".organization.id IN (");
+    boolean first = true;
+    for (String orgId : orgIds) {
+      if (!first) {
+        filter.append(", ");
+      }
+      filter.append("'").append(orgId.replace("'", "''")).append("'");
+      first = false;
+    }
+    filter.append(")");
+    return filter.toString();
+  }
+
+  /**
+   * Append a readable-organizations IN filter to an HQL builder when applicable.
+   * Adds a filter only for org-aware entities.
    *
    * @return {@code true} if a WHERE clause is now present (was already present, or was just added)
    */
   static boolean appendReadableOrgsFilter(StringBuilder hql, String alias,
-      boolean hasWhere) {
-    String[] readableOrgs = OBContext.getOBContext().getReadableOrganizations();
-    if (readableOrgs == null || readableOrgs.length == 0) {
+      String entityName, boolean hasWhere, boolean includeOrgZero) {
+    String orgFilter = buildReadableOrgsPredicate(entityName, alias, includeOrgZero);
+    if (StringUtils.isBlank(orgFilter)) {
       return hasWhere;
     }
     hql.append(hasWhere ? SQL_AND : SQL_WHERE);
-    hql.append(alias).append(".organization.id IN (");
-    for (int i = 0; i < readableOrgs.length; i++) {
-      if (i > 0) {
-        hql.append(", ");
-      }
-      hql.append("'").append(readableOrgs[i]).append("'");
-    }
-    hql.append(")");
+    hql.append(orgFilter);
     return true;
   }
 

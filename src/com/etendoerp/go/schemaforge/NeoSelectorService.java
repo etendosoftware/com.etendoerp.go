@@ -54,6 +54,7 @@ public class NeoSelectorService {
   public static final String REF_TABLE = "18";
   public static final String REF_TABLEDIR = "19";
   public static final String REF_SEARCH = "30";
+  public static final String REF_LIST = "17";
   public static final String REF_OBUISEL = "95E2A8B50A254B2AAE6774B8C2F28120";
 
   // JSON field name constants
@@ -118,6 +119,9 @@ public class NeoSelectorService {
       return null;
     }
     String refId = getBaseReferenceId(column);
+    if (isListReference(refId)) {
+      return buildListSelectorItem(column);
+    }
     boolean isObuisel = hasObuiselSelector(column);
     if (!isObuisel && !isFkReference(refId)) {
       return null;
@@ -127,6 +131,17 @@ public class NeoSelectorService {
       return null;
     }
     return buildSelectorItem(column, refId, meta);
+  }
+
+  /**
+   * Build the JSON descriptor object for a List reference selector.
+   */
+  private static JSONObject buildListSelectorItem(Column column) throws Exception {
+    JSONObject item = new JSONObject();
+    item.put("columnName", column.getDBColumnName());
+    item.put("referenceType", "List");
+    item.put("type", "list");
+    return item;
   }
 
   /**
@@ -287,9 +302,13 @@ public class NeoSelectorService {
 
       String refId = getBaseReferenceId(column);
       boolean isObuisel = hasObuiselSelector(column);
-      if (!isObuisel && !isFkReference(refId)) {
+      boolean isList = isListReference(refId);
+      if (!isObuisel && !isFkReference(refId) && !isList) {
         return NeoResponse.error(400,
             "Field is not a FK reference: " + columnName);
+      }
+      if (isList) {
+        return resolveListSelector(column, search, limit, offset);
       }
 
       SelectorMeta meta = resolveTarget(column, refId);
@@ -333,6 +352,16 @@ public class NeoSelectorService {
         hql.append(SelectorQueryBuilder.SQL_AND);
       }
       hql.append(validationFilter);
+    }
+
+    // Apply readable org filter for org-aware entities (including "*" org 0)
+    String readableOrgsFilter = SelectorQueryBuilder.buildReadableOrgsPredicate(
+        meta.entityName, "e", true);
+    if (StringUtils.isNotBlank(readableOrgsFilter)) {
+      if (hql.length() > 0) {
+        hql.append(SelectorQueryBuilder.SQL_AND);
+      }
+      hql.append(readableOrgsFilter);
     }
 
     // Search filter on display property
@@ -580,6 +609,11 @@ public class NeoSelectorService {
   private static String getBaseReferenceId(Column column) {
     String refId = column.getReference().getId();
 
+    // Check if this is 17, 18, 19, or 30 directly
+    if (REF_LIST.equals(refId)) {
+      return refId;
+    }
+
     // Check if this is 18, 19, or 30 directly
     if (REF_TABLE.equals(refId) || REF_TABLEDIR.equals(refId)
         || REF_SEARCH.equals(refId)) {
@@ -590,7 +624,7 @@ public class NeoSelectorService {
     org.openbravo.model.ad.domain.Reference ref = column.getReference();
     if (ref.getParentReference() != null) {
       String parentId = ref.getParentReference().getId();
-      if (REF_TABLE.equals(parentId) || REF_TABLEDIR.equals(parentId)
+      if (REF_LIST.equals(parentId) || REF_TABLE.equals(parentId) || REF_TABLEDIR.equals(parentId)
           || REF_SEARCH.equals(parentId)) {
         return parentId;
       }
@@ -609,6 +643,85 @@ public class NeoSelectorService {
   public static boolean isFkReference(String refId) {
     return REF_TABLE.equals(refId) || REF_TABLEDIR.equals(refId)
         || REF_SEARCH.equals(refId);
+  }
+
+  /**
+   * Returns {@code true} if the given AD_Reference ID represents a list reference type (List=17).
+   */
+  private static boolean isListReference(String refId) {
+    return REF_LIST.equals(refId);
+  }
+
+  /**
+   * Resolve list values for a List reference (AD_Reference type 17).
+   * Queries AD_REF_LIST using the column's AD_Reference_Value_ID (referenceSearchKey).
+   */
+  @SuppressWarnings("unchecked")
+  private static NeoResponse resolveListSelector(Column column, String search,
+      int limit, int offset) throws Exception {
+
+    org.openbravo.model.ad.domain.Reference listRef = column.getReferenceSearchKey();
+    if (listRef == null) {
+      // Fallback: use the column's own reference (for inline list definitions)
+      listRef = column.getReference();
+    }
+
+    // Apply static validation rule clauses only (skip context-based @param@ rules).
+    String valRuleSql = null;
+    org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
+    if (valRule != null && StringUtils.isNotBlank(valRule.getValidationCode())) {
+      String ruleCode = valRule.getValidationCode().trim();
+      if (!ruleCode.contains("@")) {
+        valRuleSql = ruleCode;
+      }
+    }
+
+    // Use separate criteria for count/data because count() mutates projection state.
+    OBCriteria<org.openbravo.model.ad.domain.List> countCrit = OBDal.getInstance()
+        .createCriteria(org.openbravo.model.ad.domain.List.class);
+    countCrit.add(Restrictions.eq(
+        org.openbravo.model.ad.domain.List.PROPERTY_REFERENCE + ".id",
+        listRef.getId()));
+    countCrit.add(Restrictions.eq(
+        org.openbravo.model.ad.domain.List.PROPERTY_ACTIVE, true));
+    if (valRuleSql != null) {
+      countCrit.add(Restrictions.sqlRestriction(valRuleSql));
+    }
+    if (StringUtils.isNotBlank(search)) {
+      countCrit.add(Restrictions.ilike(
+          org.openbravo.model.ad.domain.List.PROPERTY_NAME,
+          "%" + search + "%"));
+    }
+    int totalCount = countCrit.count();
+
+    OBCriteria<org.openbravo.model.ad.domain.List> dataCrit = OBDal.getInstance()
+        .createCriteria(org.openbravo.model.ad.domain.List.class);
+    dataCrit.add(Restrictions.eq(
+        org.openbravo.model.ad.domain.List.PROPERTY_REFERENCE + ".id",
+        listRef.getId()));
+    dataCrit.add(Restrictions.eq(
+        org.openbravo.model.ad.domain.List.PROPERTY_ACTIVE, true));
+    if (valRuleSql != null) {
+      dataCrit.add(Restrictions.sqlRestriction(valRuleSql));
+    }
+    if (StringUtils.isNotBlank(search)) {
+      dataCrit.add(Restrictions.ilike(
+          org.openbravo.model.ad.domain.List.PROPERTY_NAME,
+          "%" + search + "%"));
+    }
+    dataCrit.addOrderBy(
+        org.openbravo.model.ad.domain.List.PROPERTY_SEQUENCENUMBER, true);
+    dataCrit.setFirstResult(offset);
+    dataCrit.setMaxResults(limit);
+
+    JSONArray items = new JSONArray();
+    for (org.openbravo.model.ad.domain.List listItem : dataCrit.list()) {
+      JSONObject item = new JSONObject();
+      item.put("id", listItem.getSearchKey());
+      item.put(FIELD_LABEL, listItem.getName());
+      items.put(item);
+    }
+    return SelectorQueryBuilder.buildSelectorResponse(items, new JSONArray(), totalCount, limit, offset);
   }
 
   /**

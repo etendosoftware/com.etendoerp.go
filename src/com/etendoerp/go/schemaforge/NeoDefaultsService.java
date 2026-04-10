@@ -808,7 +808,9 @@ public class NeoDefaultsService {
       VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext());
       DalConnectionProvider conn = new DalConnectionProvider(false);
       String windowId = ctx.getSfEntity() != null ? resolveWindowId(ctx.getSfEntity()) : "";
-      MandatoryDefaultContext mCtx = new MandatoryDefaultContext(parentId, vars, conn, windowId, ctx);
+      Map<String, Object> parentValues = loadParentValues(adTab, parentId);
+      MandatoryDefaultContext mCtx = new MandatoryDefaultContext(parentId, vars, conn,
+          windowId, ctx, parentValues);
 
       for (Column col : adTab.getTable().getADColumnList()) {
         if (!col.isActive() || !col.isMandatory()) {
@@ -838,14 +840,18 @@ public class NeoDefaultsService {
     final DalConnectionProvider conn;
     final String windowId;
     final NeoContext neoCtx;
+    final Map<String, Object> parentValues;
 
     MandatoryDefaultContext(String parentId, VariablesSecureApp vars,
-        DalConnectionProvider conn, String windowId, NeoContext neoCtx) {
+        DalConnectionProvider conn, String windowId, NeoContext neoCtx,
+        Map<String, Object> parentValues) {
       this.parentId = parentId;
       this.vars = vars;
       this.conn = conn;
       this.windowId = windowId;
       this.neoCtx = neoCtx;
+      this.parentValues = parentValues != null ? parentValues
+          : java.util.Collections.emptyMap();
     }
   }
 
@@ -870,6 +876,9 @@ public class NeoDefaultsService {
         return;
       }
       if (tryInjectFromSession(body, propName, col.getDBColumnName(), mCtx.vars)) {
+        return;
+      }
+      if (tryInjectFromParentValues(body, propName, col, mCtx.parentValues)) {
         return;
       }
       injectSafeTypeDefault(body, propName, col);
@@ -920,6 +929,30 @@ public class NeoDefaultsService {
       log.debug("Could not read session value for {}: {}", dbColName, e.getMessage());
     }
     return false;
+  }
+
+  private static boolean tryInjectFromParentValues(JSONObject body, String propName,
+      Column col, Map<String, Object> parentValues) {
+    if (parentValues == null || parentValues.isEmpty()) {
+      return false;
+    }
+    String defaultExpr = col.getDefaultValue();
+    if (defaultExpr == null || !defaultExpr.matches("^@[A-Za-z_]+@$") ) {
+      return false;
+    }
+    String refCol = defaultExpr.substring(1, defaultExpr.length() - 1).toUpperCase();
+    Object value = parentValues.get(refCol);
+    if (value == null) {
+      return false;
+    }
+    try {
+      body.put(propName, value);
+      log.debug("Injected parent fallback default: {} = {}", propName, value);
+      return true;
+    } catch (Exception e) {
+      log.debug("Could not inject parent fallback for {}: {}", propName, e.getMessage());
+      return false;
+    }
   }
 
   /**

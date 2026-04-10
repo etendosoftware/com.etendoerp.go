@@ -349,8 +349,20 @@ public class NeoServlet extends HttpBaseServlet {
           "Actions support GET (list) and POST (execute)");
       return true;
     }
+    ActionDispatchParams actionParams = new ActionDispatchParams(pathInfo.recordId, null);
+    if ("POST".equals(method)) {
+      try {
+        String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        if (StringUtils.isNotBlank(bodyStr)) {
+          actionParams = new ActionDispatchParams(pathInfo.recordId, new JSONObject(bodyStr));
+        }
+      } catch (Exception e) {
+        sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body: " + e.getMessage());
+        return true;
+      }
+    }
     NeoResponse actionResult = dispatchWithHooks(spec, pathInfo.entityName,
-        NeoEndpointType.ACTION, pathInfo.actionName, method,
+        NeoEndpointType.ACTION, pathInfo.actionName, method, actionParams,
         () -> buttonHandler.handleButtonAction(spec, pathInfo, method, request));
     writeResponse(response, actionResult);
     return true;
