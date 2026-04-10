@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -167,6 +168,8 @@ public class NeoDefaultsService {
                 ctx);
             if (resolvedValue != null) {
               defaults.put(propertyName, resolvedValue);
+              // For FK fields, also inject $_identifier so selectors display the label, not the ID
+              tryInjectIdentifier(defaults, dalEntity, propertyName, resolvedValue);
             }
           } catch (Exception e) {
             log.debug("Could not resolve default for column {}: {}",
@@ -203,35 +206,22 @@ public class NeoDefaultsService {
           }
         }
 
-        // Execute callout cascade for defaulted fields that have callouts configured
-        Tab adTab = ctx.getAdTab();
-        Set<String> seqFieldSet = new HashSet<>();
-        for (int i = 0; i < sequenceFields.length(); i++) {
-          seqFieldSet.add(sequenceFields.getString(i));
-        }
-
-        CalloutCascadeResult cascadeResult = null;
-        if (adTab != null) {
-          cascadeResult = executeCalloutCascade(ctx, adTab, defaults, seqFieldSet);
-        }
+        // NOTE: The callout cascade is intentionally NOT run here.
+        // Running callouts in the defaults endpoint pre-fills billing/preference fields from
+        // org-level AD_Preferences (price list, payment method, payment terms, account, blocking
+        // flags, vendor flag, etc.) — resulting in a form that looks "used" even for new records.
+        // Callouts should respond to user-initiated field changes via the live /callout endpoint,
+        // not fire automatically when the user opens a blank form.
+        // The two-pass defaults system (pass 1 → doctype, pass 2 → sequence with doctype) already
+        // covers the only valid cross-field dependency in defaults without needing callouts.
 
         // Build response
         JSONObject response = new JSONObject();
         response.put("defaults", defaults);
 
-        if (cascadeResult != null && cascadeResult.hasResults()) {
-          response.put("calloutResults", cascadeResult.toJSON());
-        }
-
         JSONObject metadata = new JSONObject();
         metadata.put("unresolvedFields", unresolvedFields);
         metadata.put("sequenceFields", sequenceFields);
-        if (cascadeResult != null) {
-          metadata.put("calloutChainDepth", cascadeResult.chainDepth);
-          if (cascadeResult.truncated) {
-            metadata.put("calloutChainTruncated", true);
-          }
-        }
         response.put("metadata", metadata);
 
         return NeoResponse.ok(response);
@@ -242,6 +232,36 @@ public class NeoDefaultsService {
     } catch (Exception e) {
       log.error("Error resolving defaults: {}", e.getMessage(), e);
       return NeoResponse.error(500, "Failed to resolve defaults: " + e.getMessage());
+    }
+  }
+
+  /**
+   * For FK (non-primitive) properties, looks up the referenced record by ID and injects its
+   * display name as {@code propertyName$_identifier} so selectors show a label instead of a
+   * raw ID string. Silently skips if the property is primitive, the entity is not found, or
+   * the lookup fails.
+   */
+  private static void tryInjectIdentifier(JSONObject defaults, Entity dalEntity,
+      String propertyName, Object resolvedValue) {
+    if (dalEntity == null || resolvedValue == null) {
+      return;
+    }
+    try {
+      Property prop = dalEntity.getProperty(propertyName);
+      if (prop == null || prop.isPrimitive()) {
+        return;
+      }
+      Entity targetEntity = prop.getTargetEntity();
+      if (targetEntity == null) {
+        return;
+      }
+      BaseOBObject obj = OBDal.getInstance().get(targetEntity.getName(), resolvedValue.toString());
+      if (obj != null) {
+        defaults.put(propertyName + "$_identifier", obj.getIdentifier());
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve identifier for default field '{}': {}", propertyName,
+          e.getMessage());
     }
   }
 
@@ -326,13 +346,80 @@ public class NeoDefaultsService {
       // correct docBaseType, isSOTrx and org filters.
       return resolveDefaultDocTypeId(adColumn, ctx);
     }
-    String fromPrefs = Utility.getDefault(conn, vars, dbColumnName, "", windowId, "");
+    // For columns without AD_Column.DefaultValue, resolve only explicit preferences.
+    // Do NOT use Utility.getDefault(..., "") here because it also falls back to session
+    // variables (#COLUMN / $COLUMN), which can contain SmartClient temporary import keys
+    // like "100_BusinessPartner" and break POST create payloads.
+    String fromPrefs = Utility.getPreference(vars, dbColumnName, windowId != null ? windowId : "");
     if (fromPrefs != null && !fromPrefs.isEmpty()) {
       return fromPrefs;
     }
     String docTypeId = resolveDefaultDocTypeId(adColumn, ctx);
     if (docTypeId != null) {
       return docTypeId;
+    }
+    // Fallback: read DB-level column default from information_schema when AD has no expression.
+    // Handles mandatory boolean/char columns whose AD_Column.DefaultValue is null/empty but
+    // the DB column has a DEFAULT clause (e.g., IsEmployee DEFAULT 'N', IsProspect DEFAULT 'Y').
+    if (!colUpper.endsWith("_ID") && adColumn.getTable() != null) {
+      String dbDefault = resolveDbColumnDefault(
+          adColumn.getTable().getDBTableName(), dbColumnName);
+      if (dbDefault != null) {
+        return dbDefault;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Read the DB-level column DEFAULT from {@code information_schema.columns}.
+   * Used as a last-resort fallback when {@code AD_Column.DefaultValue} is null/empty and
+   * no preference or doctype default can be resolved.
+   *
+   * <p>Parses PostgreSQL's {@code column_default} format:
+   * <ul>
+   *   <li>{@code 'N'::bpchar} → {@code N}</li>
+   *   <li>{@code 'Y'::character varying} → {@code Y}</li>
+   *   <li>{@code '1'::character varying} → {@code 1}</li>
+   *   <li>{@code 0} (numeric literal) → {@code 0}</li>
+   * </ul>
+   *
+   * @param tableName  DB table name (matched case-insensitively)
+   * @param columnName DB column name (matched case-insensitively)
+   * @return parsed default value string, or {@code null} if not found or not parseable
+   */
+  private static String resolveDbColumnDefault(String tableName, String columnName) {
+    try {
+      String sql = "SELECT column_default FROM information_schema.columns "
+          + "WHERE LOWER(table_name) = LOWER(?) AND LOWER(column_name) = LOWER(?)";
+      try (PreparedStatement ps =
+          OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
+        ps.setString(1, tableName);
+        ps.setString(2, columnName);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            String colDefault = rs.getString(1);
+            if (colDefault == null || colDefault.isEmpty()) {
+              return null;
+            }
+            // Parse PostgreSQL column_default format, e.g. 'N'::bpchar
+            if (colDefault.startsWith("'")) {
+              int endQuote = colDefault.indexOf("'", 1);
+              if (endQuote > 0) {
+                return colDefault.substring(1, endQuote);
+              }
+            }
+            // Numeric literals like 0 or 0.00
+            String stripped = colDefault.split("::")[0].trim();
+            if (!stripped.isEmpty()) {
+              return stripped;
+            }
+          }
+        }
+      }
+    } catch (SQLException e) {
+      log.debug("Could not read DB-level column default for {}.{}: {}",
+          tableName, columnName, e.getMessage());
     }
     return null;
   }
@@ -681,12 +768,25 @@ public class NeoDefaultsService {
   /**
    * Inject the mandatory default for a single column into the body if it is missing.
    * Skips inactive, non-mandatory, unresolvable, or already-present fields.
+   * Also skips Etendo audit/traceable columns (Created, Updated, CreatedBy, UpdatedBy)
+   * because they are auto-managed by OBInterceptor on every save. Injecting them with
+   * wrong timestamp formats causes OBException in JsonToDataConverter.setData() during
+   * the optimistic-locking check for new records.
    */
   private static void injectColumnDefaultIfMissing(JSONObject body, Column col,
       Entity dalEntity, String parentId, Map<String, Object> parentValues,
       VariablesSecureApp vars, DalConnectionProvider conn,
       String windowId, NeoContext ctx) {
     if (!col.isActive() || !col.isMandatory()) {
+      return;
+    }
+    // Skip audit/traceable columns — auto-managed by OBInterceptor on every save.
+    // Injecting Created/Updated timestamps (resolved as date-only strings from @#Date@)
+    // breaks the optimistic-locking check in JsonToDataConverter.setData() which expects
+    // a full ISO 8601 datetime. CreatedBy/UpdatedBy FKs are also handled by OBInterceptor.
+    String colNameUpper = col.getDBColumnName().toUpperCase();
+    if ("CREATED".equals(colNameUpper) || "UPDATED".equals(colNameUpper)
+        || "CREATEDBY".equals(colNameUpper) || "UPDATEDBY".equals(colNameUpper)) {
       return;
     }
     Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
@@ -795,7 +895,8 @@ public class NeoDefaultsService {
         return null;
       }
 
-      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+      OBContext obCtx = OBContext.getOBContext();
+      String clientId = obCtx.getCurrentClient().getId();
       String keyColumn = refTable.getDBTableName() + "_ID";
 
       // Check if the target table has IsDefault and Name columns

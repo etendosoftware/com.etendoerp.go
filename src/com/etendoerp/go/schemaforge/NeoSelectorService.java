@@ -105,6 +105,31 @@ public class NeoSelectorService {
       Pattern.CASE_INSENSITIVE);
   private static final Pattern WHERE_CLAUSE_PATTERN = Pattern.compile("\\sWHERE\\s",
       Pattern.CASE_INSENSITIVE);
+  private static final Pattern COMPLEX_SUBQUERY_PATTERN = Pattern.compile(
+      "\\b(EXISTS|IN\\s*\\(\\s*SELECT)\\b", Pattern.CASE_INSENSITIVE);
+
+  /**
+   * HQL filters applied by AD_Reference_Value_ID when the standard AD_Ref_Table.hqlwhereclause
+   * is not set (or belongs to a module we cannot modify). Keyed by AD_Reference_Value_ID.
+   * These override / supplement the DB-level where clause without touching core or third-party
+   * module source data.
+   */
+  private static final java.util.Map<String, String> REFERENCE_OVERRIDE_FILTERS;
+  static {
+    java.util.Map<String, String> m = new java.util.HashMap<>();
+    // M_PriceList references — filter by direction so each selector shows only its type
+    m.put("166",    "e.salesPriceList = true");   // M_PriceListForSale  (customer price list)
+    m.put("800031", "e.salesPriceList = false");  // M_PriceListForPurchase (vendor price list)
+    // Financial payment method — only methods that have at least one active account link
+    m.put("EED0EF97D4A7421687F3B365D009E7A6",
+        "exists (select 1 from FinancialMgmtFinAccPaymentMethod fapm"
+        + " where fapm.paymentMethod = e and fapm.active = true)");
+    // Financial account — only accounts that have at least one active payment method link
+    m.put("DF1CEA94B3564A33AFDB37C07E1CE353",
+        "exists (select 1 from FinancialMgmtFinAccPaymentMethod fapm"
+        + " where fapm.account = e and fapm.active = true)");
+    REFERENCE_OVERRIDE_FILTERS = java.util.Collections.unmodifiableMap(m);
+  }
 
   private NeoSelectorService() {
   }
@@ -302,7 +327,9 @@ public class NeoSelectorService {
       // Resolve validation rule filter from context params
       String validationFilter = resolveValidationFilter(column, meta.entityName, contextParams);
       String organizationFilter = resolveOrgFilter(entity, column, meta, contextParams);
-      String combinedFilter = combineFilters(validationFilter, organizationFilter);
+      String referenceOverride = resolveReferenceOverrideFilter(column);
+      String combinedFilter = combineFilters(
+          combineFilters(validationFilter, organizationFilter), referenceOverride);
 
       // Build and execute query
       if (meta.isRich) {
@@ -578,6 +605,19 @@ public class NeoSelectorService {
     OBContext ctx = OBContext.getOBContext();
     String[] readableOrgs = ctx.getReadableOrganizations();
     if (readableOrgs != null && readableOrgs.length > 0) {
+      boolean hasSystemOrg = false;
+      for (String org : readableOrgs) {
+        if ("0".equals(org)) {
+          hasSystemOrg = true;
+          break;
+        }
+      }
+      if (!hasSystemOrg) {
+        String[] withSystemOrg = new String[readableOrgs.length + 1];
+        System.arraycopy(readableOrgs, 0, withSystemOrg, 0, readableOrgs.length);
+        withSystemOrg[readableOrgs.length] = "0";
+        readableOrgs = withSystemOrg;
+      }
       hasWhere = appendCondition(baseHql, hasWhere,
           buildOrganizationFilter(alias, readableOrgs));
     }
@@ -1764,6 +1804,14 @@ public class NeoSelectorService {
         continue;
       }
 
+      // Skip clauses containing complex subqueries (EXISTS, IN SELECT)
+      // Automatic SQL-to-HQL conversion for subqueries is unstable because we cannot
+      // easily determine entity names, aliases, and property paths inside nested SQL.
+      if (COMPLEX_SUBQUERY_PATTERN.matcher(trimmed).find()) {
+        log.debug("Skipping validation clause with complex subquery: {}", trimmed);
+        continue;
+      }
+
       // Check if all @Param@ in this clause can be resolved
       Matcher paramMatcher = VALIDATION_PARAM.matcher(trimmed);
       boolean allResolvable = true;
@@ -1830,6 +1878,27 @@ public class NeoSelectorService {
    * <p>This compensates for the fact that {@code AD_ISORGINCLUDED} validation clauses are
    * stripped by {@link #sanitizeAdWhereClause} because they are SQL-only and not valid in HQL.
    */
+
+  /**
+   * Returns an additional HQL predicate for columns whose {@code AD_Reference_Value_ID} is listed
+   * in {@link #REFERENCE_OVERRIDE_FILTERS}. This avoids modifying {@code AD_Ref_Table.hqlwhereclause}
+   * records that belong to other modules (core, advpaymentmngt), keeping all filter logic
+   * self-contained within {@code com.etendoerp.go}.
+   *
+   * @param column the AD_Column being queried
+   * @return an HQL WHERE predicate, or {@code null} if no override is registered
+   */
+  private static String resolveReferenceOverrideFilter(Column column) {
+    if (column == null) {
+      return null;
+    }
+    org.openbravo.model.ad.domain.Reference refValue = column.getReferenceSearchKey();
+    if (refValue == null) {
+      return null;
+    }
+    return REFERENCE_OVERRIDE_FILTERS.get(refValue.getId());
+  }
+
   private static String resolveOrgFilter(SFEntity sourceEntity,
       Column sourceColumn, SelectorMeta targetMeta, Map<String, String> contextParams) {
     if (sourceEntity == null || sourceColumn == null || targetMeta == null) {
@@ -1855,7 +1924,15 @@ public class NeoSelectorService {
     String safeOrgId = organizationId.replace("'", "''");
     log.debug("Applying organization filter {} to selector {}", safeOrgId,
         sourceColumn.getDBColumnName());
-    return "e.organization.id='" + safeOrgId + "'";
+
+    org.openbravo.dal.security.OrganizationStructureProvider osp =
+       OBContext.getOBContext().getOrganizationStructureProvider();
+    java.util.Set<String> naturalTree = new java.util.HashSet<>(osp.getNaturalTree(safeOrgId));
+    if (!naturalTree.contains("0")) {
+      naturalTree.add("0");
+    }
+    String alias = (targetMeta != null && targetMeta.entityAlias != null) ? targetMeta.entityAlias : "e";
+    return buildOrganizationFilter(alias, naturalTree.toArray(new String[0]));
   }
 
   private static String resolveOrgFromParentRecord(SFEntity sourceEntity, String parentId) {
@@ -1865,10 +1942,33 @@ public class NeoSelectorService {
 
     try {
       Tab childTab = sourceEntity.getADTab();
-      if (childTab == null || childTab.getTabLevel() == null || childTab.getTabLevel() <= 0) {
+      if (childTab == null) {
         return null;
       }
 
+      // For top-level entities (tabLevel 0), parentId is the entity record's own ID.
+      // Look up its organization directly to apply org filtering to selectors.
+      if (childTab.getTabLevel() == null || childTab.getTabLevel() <= 0) {
+        if (childTab.getTable() == null) {
+          return null;
+        }
+        Entity selfEntity = ModelProvider.getInstance().getEntityByTableId(childTab.getTable().getId());
+        if (selfEntity == null || !selfEntity.hasProperty(PROP_ORGANIZATION)) {
+          return null;
+        }
+        BaseOBObject selfRecord = OBDal.getInstance().get(selfEntity.getName(), parentId);
+        if (selfRecord == null) {
+          return null;
+        }
+        Object organization = selfRecord.get(PROP_ORGANIZATION);
+        if (organization instanceof BaseOBObject) {
+          Object orgId = ((BaseOBObject) organization).getId();
+          return orgId != null ? orgId.toString() : null;
+        }
+        return organization != null ? organization.toString() : null;
+      }
+
+      // For child tabs (tabLevel > 0): navigate to the parent entity to derive the org.
       Tab parentTab = KernelUtils.getInstance().getParentTab(childTab);
       if (parentTab == null || parentTab.getTable() == null) {
         return null;
