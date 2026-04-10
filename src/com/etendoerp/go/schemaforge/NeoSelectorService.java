@@ -578,6 +578,19 @@ public class NeoSelectorService {
     OBContext ctx = OBContext.getOBContext();
     String[] readableOrgs = ctx.getReadableOrganizations();
     if (readableOrgs != null && readableOrgs.length > 0) {
+      boolean hasSystemOrg = false;
+      for (String org : readableOrgs) {
+        if ("0".equals(org)) {
+          hasSystemOrg = true;
+          break;
+        }
+      }
+      if (!hasSystemOrg) {
+        String[] withSystemOrg = new String[readableOrgs.length + 1];
+        System.arraycopy(readableOrgs, 0, withSystemOrg, 0, readableOrgs.length);
+        withSystemOrg[readableOrgs.length] = "0";
+        readableOrgs = withSystemOrg;
+      }
       hasWhere = appendCondition(baseHql, hasWhere,
           buildOrganizationFilter(alias, readableOrgs));
     }
@@ -1764,6 +1777,14 @@ public class NeoSelectorService {
         continue;
       }
 
+      // Skip clauses containing complex subqueries (EXISTS, IN SELECT)
+      // Automatic SQL-to-HQL conversion for subqueries is unstable because we cannot
+      // easily determine entity names, aliases, and property paths inside nested SQL.
+      if (Pattern.compile("\\b(EXISTS|IN\\s*\\(\\s*SELECT)\\b", Pattern.CASE_INSENSITIVE).matcher(trimmed).find()) {
+        log.debug("Skipping validation clause with complex subquery: {}", trimmed);
+        continue;
+      }
+
       // Check if all @Param@ in this clause can be resolved
       Matcher paramMatcher = VALIDATION_PARAM.matcher(trimmed);
       boolean allResolvable = true;
@@ -1855,7 +1876,15 @@ public class NeoSelectorService {
     String safeOrgId = organizationId.replace("'", "''");
     log.debug("Applying organization filter {} to selector {}", safeOrgId,
         sourceColumn.getDBColumnName());
-    return "e.organization.id='" + safeOrgId + "'";
+
+    org.openbravo.dal.security.OrganizationStructureProvider osp =
+       OBContext.getOBContext().getOrganizationStructureProvider();
+    java.util.Set<String> naturalTree = osp.getNaturalTree(safeOrgId);
+    if (!naturalTree.contains("0")) {
+      naturalTree.add("0");
+    }
+    String alias = (targetMeta != null && targetMeta.entityAlias != null) ? targetMeta.entityAlias : "e";
+    return buildOrganizationFilter(alias, naturalTree.toArray(new String[0]));
   }
 
   private static String resolveOrgFromParentRecord(SFEntity sourceEntity, String parentId) {
@@ -1865,10 +1894,33 @@ public class NeoSelectorService {
 
     try {
       Tab childTab = sourceEntity.getADTab();
-      if (childTab == null || childTab.getTabLevel() == null || childTab.getTabLevel() <= 0) {
+      if (childTab == null) {
         return null;
       }
 
+      // For top-level entities (tabLevel 0), parentId is the entity record's own ID.
+      // Look up its organization directly to apply org filtering to selectors.
+      if (childTab.getTabLevel() == null || childTab.getTabLevel() <= 0) {
+        if (childTab.getTable() == null) {
+          return null;
+        }
+        Entity selfEntity = ModelProvider.getInstance().getEntityByTableId(childTab.getTable().getId());
+        if (selfEntity == null || !selfEntity.hasProperty(PROP_ORGANIZATION)) {
+          return null;
+        }
+        BaseOBObject selfRecord = OBDal.getInstance().get(selfEntity.getName(), parentId);
+        if (selfRecord == null) {
+          return null;
+        }
+        Object organization = selfRecord.get(PROP_ORGANIZATION);
+        if (organization instanceof BaseOBObject) {
+          Object orgId = ((BaseOBObject) organization).getId();
+          return orgId != null ? orgId.toString() : null;
+        }
+        return organization != null ? organization.toString() : null;
+      }
+
+      // For child tabs (tabLevel > 0): navigate to the parent entity to derive the org.
       Tab parentTab = KernelUtils.getInstance().getParentTab(childTab);
       if (parentTab == null || parentTab.getTable() == null) {
         return null;

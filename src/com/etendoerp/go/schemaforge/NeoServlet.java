@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -93,6 +94,18 @@ public class NeoServlet extends HttpBaseServlet {
       java.util.regex.Pattern.compile("[A-Za-z0-9\\-]+");
   private static final String KEY_UPDATES = "updates";
   private static final String KEY_COMBOS = "combos";
+  private static final Set<String> CONTACTS_PRECREATE_BILLING_FIELDS = new HashSet<>(
+      Arrays.asList(
+          "priceList",
+          "paymentMethod",
+          "paymentTerms",
+          "account",
+          "customerBlocking",
+          "purchasePricelist",
+          "pOPaymentMethod",
+          "pOPaymentTerms",
+          "pOFinancialAccount",
+          "vendorBlocking"));
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -992,6 +1005,9 @@ public class NeoServlet extends HttpBaseServlet {
             NeoDefaultsService.removeEmptyFkValues(filteredBody, adTab);
             NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
           }
+          // Contacts/BP create follows Classic flow: billing preferences are configured
+          // after header creation, not persisted on the first save.
+          stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
           // Wrap in SmartClient envelope for DefaultJsonDataService (data + _entityName + _new)
           String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(filteredBody, dalEntityName, null);
           result = jsonService.add(params, wrappedBody);
@@ -1070,6 +1086,23 @@ public class NeoServlet extends HttpBaseServlet {
       response.setContentType(ContentType.APPLICATION_JSON.getMimeType());
       response.setCharacterEncoding(StandardCharsets.UTF_8.name());
       response.getWriter().write(neoResponse.getBody().toString());
+    }
+  }
+
+  private void stripContactsPreCreateBillingDefaults(JSONObject body, NeoContext context, Tab adTab) {
+    if (body == null || context == null || adTab == null) {
+      return;
+    }
+    if (!("contacts".equalsIgnoreCase(context.getSpecName())
+        && "businessPartner".equals(context.getEntityName())
+        && adTab.getTabLevel() != null
+        && adTab.getTabLevel() == 0)) {
+      return;
+    }
+
+    for (String key : CONTACTS_PRECREATE_BILLING_FIELDS) {
+      body.remove(key);
+      body.remove(key + "$_identifier");
     }
   }
 

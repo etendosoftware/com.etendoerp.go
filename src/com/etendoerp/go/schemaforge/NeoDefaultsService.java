@@ -205,35 +205,22 @@ public class NeoDefaultsService {
           }
         }
 
-        // Execute callout cascade for defaulted fields that have callouts configured
-        Tab adTab = ctx.getAdTab();
-        Set<String> seqFieldSet = new HashSet<>();
-        for (int i = 0; i < sequenceFields.length(); i++) {
-          seqFieldSet.add(sequenceFields.getString(i));
-        }
-
-        CalloutCascadeResult cascadeResult = null;
-        if (adTab != null) {
-          cascadeResult = executeCalloutCascade(ctx, adTab, defaults, seqFieldSet);
-        }
+        // NOTE: The callout cascade is intentionally NOT run here.
+        // Running callouts in the defaults endpoint pre-fills billing/preference fields from
+        // org-level AD_Preferences (price list, payment method, payment terms, account, blocking
+        // flags, vendor flag, etc.) — resulting in a form that looks "used" even for new records.
+        // Callouts should respond to user-initiated field changes via the live /callout endpoint,
+        // not fire automatically when the user opens a blank form.
+        // The two-pass defaults system (pass 1 → doctype, pass 2 → sequence with doctype) already
+        // covers the only valid cross-field dependency in defaults without needing callouts.
 
         // Build response
         JSONObject response = new JSONObject();
         response.put("defaults", defaults);
 
-        if (cascadeResult != null && cascadeResult.hasResults()) {
-          response.put("calloutResults", cascadeResult.toJSON());
-        }
-
         JSONObject metadata = new JSONObject();
         metadata.put("unresolvedFields", unresolvedFields);
         metadata.put("sequenceFields", sequenceFields);
-        if (cascadeResult != null) {
-          metadata.put("calloutChainDepth", cascadeResult.chainDepth);
-          if (cascadeResult.truncated) {
-            metadata.put("calloutChainTruncated", true);
-          }
-        }
         response.put("metadata", metadata);
 
         return NeoResponse.ok(response);
@@ -358,7 +345,11 @@ public class NeoDefaultsService {
       // correct docBaseType, isSOTrx and org filters.
       return resolveDefaultDocTypeId(adColumn, ctx);
     }
-    String fromPrefs = Utility.getDefault(conn, vars, dbColumnName, "", windowId, "");
+    // For columns without AD_Column.DefaultValue, resolve only explicit preferences.
+    // Do NOT use Utility.getDefault(..., "") here because it also falls back to session
+    // variables (#COLUMN / $COLUMN), which can contain SmartClient temporary import keys
+    // like "100_BusinessPartner" and break POST create payloads.
+    String fromPrefs = Utility.getPreference(vars, dbColumnName, windowId != null ? windowId : "");
     if (fromPrefs != null && !fromPrefs.isEmpty()) {
       return fromPrefs;
     }
@@ -776,12 +767,25 @@ public class NeoDefaultsService {
   /**
    * Inject the mandatory default for a single column into the body if it is missing.
    * Skips inactive, non-mandatory, unresolvable, or already-present fields.
+   * Also skips Etendo audit/traceable columns (Created, Updated, CreatedBy, UpdatedBy)
+   * because they are auto-managed by OBInterceptor on every save. Injecting them with
+   * wrong timestamp formats causes OBException in JsonToDataConverter.setData() during
+   * the optimistic-locking check for new records.
    */
   private static void injectColumnDefaultIfMissing(JSONObject body, Column col,
       Entity dalEntity, String parentId, Map<String, Object> parentValues,
       VariablesSecureApp vars, DalConnectionProvider conn,
       String windowId, NeoContext ctx) {
     if (!col.isActive() || !col.isMandatory()) {
+      return;
+    }
+    // Skip audit/traceable columns — auto-managed by OBInterceptor on every save.
+    // Injecting Created/Updated timestamps (resolved as date-only strings from @#Date@)
+    // breaks the optimistic-locking check in JsonToDataConverter.setData() which expects
+    // a full ISO 8601 datetime. CreatedBy/UpdatedBy FKs are also handled by OBInterceptor.
+    String colNameUpper = col.getDBColumnName().toUpperCase();
+    if ("CREATED".equals(colNameUpper) || "UPDATED".equals(colNameUpper)
+        || "CREATEDBY".equals(colNameUpper) || "UPDATEDBY".equals(colNameUpper)) {
       return;
     }
     Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
