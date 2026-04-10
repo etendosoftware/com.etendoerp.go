@@ -21,6 +21,7 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,6 +32,7 @@ import javax.inject.Named;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -102,7 +104,7 @@ public class TaxReportHandler implements NeoHandler {
       desc.put("description",
           "Multidimensional tax report showing VAT and withholding transactions");
       return NeoResponse.ok(desc);
-    } catch (Exception e) {
+    } catch (JSONException e) {
       log.error("Error building tax report descriptor", e);
       return NeoResponse.error(500, "Internal Server Error");
     }
@@ -150,7 +152,7 @@ public class TaxReportHandler implements NeoHandler {
 
     } catch (Exception e) {
       log.error("Error executing tax report", e);
-      return NeoResponse.error(500, "Internal Server Error: " + e.getMessage());
+      return NeoResponse.error(500, "Internal Server Error");
     }
   }
 
@@ -180,7 +182,7 @@ public class TaxReportHandler implements NeoHandler {
   // -------------------------------------------------------------------------
 
   private List<TaxRow> queryRows(String dateColumn, String isSOTrx, ReportParams p)
-      throws Exception {
+      throws JSONException, SQLException {
 
     String bpNameCol = "legal".equals(p.bpNameType)
         ? "COALESCE(NULLIF(bp.name2,''), bp.name)"
@@ -273,7 +275,7 @@ public class TaxReportHandler implements NeoHandler {
     return rows;
   }
 
-  private static TaxRow mapRow(ResultSet rs) throws Exception {
+  private static TaxRow mapRow(ResultSet rs) throws JSONException, SQLException {
     TaxRow row         = new TaxRow();
     row.taxId          = rs.getString("tax_id");
     row.taxName        = rs.getString("tax_name");
@@ -301,7 +303,7 @@ public class TaxReportHandler implements NeoHandler {
   // -------------------------------------------------------------------------
 
   private JSONObject buildSection(List<TaxRow> rows, boolean showDetails, boolean groupByBp)
-      throws Exception {
+      throws JSONException {
     JSONObject section = new JSONObject();
     section.put("detail",            showDetails ? buildDetail(rows, groupByBp) : new JSONArray());
     section.put("summaryByCategory", buildSummaryByCategory(rows));
@@ -309,18 +311,18 @@ public class TaxReportHandler implements NeoHandler {
     return section;
   }
 
-  private JSONArray buildDetail(List<TaxRow> rows, boolean groupByBp) throws Exception {
+  private JSONArray buildDetail(List<TaxRow> rows, boolean groupByBp) throws JSONException {
     Map<String, List<TaxRow>> byTax = groupBy(rows, r -> r.taxId);
     JSONArray result = new JSONArray();
     for (Map.Entry<String, List<TaxRow>> entry : byTax.entrySet()) {
       List<TaxRow> taxRows = entry.getValue();
       TaxRow first = taxRows.get(0);
       JSONObject taxGroup = new JSONObject();
-      taxGroup.put("taxId",     first.taxId);
-      taxGroup.put(F_TAX_NAME,  first.taxName);
-      taxGroup.put(F_TAX_BASE,  sum(taxRows, F_TAX_BASE));
-      taxGroup.put(F_TAX_AMT,   sum(taxRows, F_TAX_AMT));
-      taxGroup.put(F_TOTAL_AMT, sum(taxRows, F_TOTAL_AMT));
+      taxGroup.put(PARAM_TAX_ID,  first.taxId);
+      taxGroup.put(F_TAX_NAME,    first.taxName);
+      taxGroup.put(F_TAX_BASE,    sum(taxRows, F_TAX_BASE));
+      taxGroup.put(F_TAX_AMT,     sum(taxRows, F_TAX_AMT));
+      taxGroup.put(F_TOTAL_AMT,   sum(taxRows, F_TOTAL_AMT));
       if (groupByBp) {
         taxGroup.put(F_BP_GROUPS, buildBpGroups(taxRows, false));
         taxGroup.put("docs",      new JSONArray());
@@ -334,17 +336,17 @@ public class TaxReportHandler implements NeoHandler {
   }
 
   /**
-   * Builds per-BP groups for the detail section (forRate=false) or the rate summary (forRate=true).
-   * When forRate=true each group includes bpTaxId and a tax breakdown array instead of doc rows.
+   * Builds per-BP groups for the detail section (forRate=false) or rate summary (forRate=true).
+   * When forRate=true each group includes bpTaxId and a tax breakdown; otherwise doc rows.
    */
-  private JSONArray buildBpGroups(List<TaxRow> rows, boolean forRate) throws Exception {
+  private JSONArray buildBpGroups(List<TaxRow> rows, boolean forRate) throws JSONException {
     Map<String, List<TaxRow>> byBp = groupBy(rows, r -> r.bPartnerId);
     JSONArray groups = new JSONArray();
     for (Map.Entry<String, List<TaxRow>> entry : byBp.entrySet()) {
       List<TaxRow> bpRows = entry.getValue();
       TaxRow first = bpRows.get(0);
       JSONObject g = new JSONObject();
-      g.put("bPartnerId", first.bPartnerId);
+      g.put(PARAM_BP_ID,  first.bPartnerId);
       g.put(F_PARTNER,    first.bPartner);
       g.put(F_TAX_BASE,   sum(bpRows, F_TAX_BASE));
       g.put(F_TAX_AMT,    sum(bpRows, F_TAX_AMT));
@@ -360,7 +362,7 @@ public class TaxReportHandler implements NeoHandler {
     return groups;
   }
 
-  private static JSONArray buildDocRows(List<TaxRow> rows) throws Exception {
+  private static JSONArray buildDocRows(List<TaxRow> rows) throws JSONException {
     JSONArray docs = new JSONArray();
     for (TaxRow r : rows) {
       JSONObject doc = new JSONObject();
@@ -384,7 +386,7 @@ public class TaxReportHandler implements NeoHandler {
   // Summary by Tax Category
   // -------------------------------------------------------------------------
 
-  private JSONArray buildSummaryByCategory(List<TaxRow> rows) throws Exception {
+  private JSONArray buildSummaryByCategory(List<TaxRow> rows) throws JSONException {
     Map<String, List<TaxRow>> byCategory = groupBy(rows, r -> r.taxCategoryId);
     JSONArray result = new JSONArray();
     for (Map.Entry<String, List<TaxRow>> catEntry : byCategory.entrySet()) {
@@ -403,7 +405,7 @@ public class TaxReportHandler implements NeoHandler {
   // Summary by Tax Rate
   // -------------------------------------------------------------------------
 
-  private JSONArray buildSummaryByRate(List<TaxRow> rows) throws Exception {
+  private JSONArray buildSummaryByRate(List<TaxRow> rows) throws JSONException {
     Map<BigDecimal, List<TaxRow>> byRate = new LinkedHashMap<>();
     for (TaxRow r : rows) {
       byRate.computeIfAbsent(r.rate, k -> new ArrayList<>()).add(r);
@@ -415,7 +417,7 @@ public class TaxReportHandler implements NeoHandler {
     return result;
   }
 
-  private JSONObject buildRateGroup(BigDecimal rate, List<TaxRow> rateRows) throws Exception {
+  private JSONObject buildRateGroup(BigDecimal rate, List<TaxRow> rateRows) throws JSONException {
     long totalBpCount = rateRows.stream().map(r -> r.bPartnerId).distinct().count();
     JSONObject rateGroup = new JSONObject();
     rateGroup.put(F_RATE,      rate);
@@ -428,20 +430,20 @@ public class TaxReportHandler implements NeoHandler {
     return rateGroup;
   }
 
-  private JSONArray buildTaxSummaryArray(Map<String, List<TaxRow>> byTax) throws Exception {
+  private JSONArray buildTaxSummaryArray(Map<String, List<TaxRow>> byTax) throws JSONException {
     JSONArray taxes = new JSONArray();
     for (Map.Entry<String, List<TaxRow>> taxEntry : byTax.entrySet()) {
       List<TaxRow> taxRows = taxEntry.getValue();
       TaxRow taxFirst = taxRows.get(0);
       long bpCount = taxRows.stream().map(r -> r.bPartnerId).distinct().count();
       JSONObject taxSummary = new JSONObject();
-      taxSummary.put("taxId",    taxFirst.taxId);
-      taxSummary.put(F_TAX_NAME, taxFirst.taxName);
-      taxSummary.put(F_RATE,     taxFirst.rate);
-      taxSummary.put(F_TAX_BASE, sum(taxRows, F_TAX_BASE));
-      taxSummary.put(F_TAX_AMT,  sum(taxRows, F_TAX_AMT));
-      taxSummary.put(F_TOTAL_AMT,sum(taxRows, F_TOTAL_AMT));
-      taxSummary.put(F_BP_COUNT, bpCount);
+      taxSummary.put(PARAM_TAX_ID, taxFirst.taxId);
+      taxSummary.put(F_TAX_NAME,   taxFirst.taxName);
+      taxSummary.put(F_RATE,       taxFirst.rate);
+      taxSummary.put(F_TAX_BASE,   sum(taxRows, F_TAX_BASE));
+      taxSummary.put(F_TAX_AMT,    sum(taxRows, F_TAX_AMT));
+      taxSummary.put(F_TOTAL_AMT,  sum(taxRows, F_TOTAL_AMT));
+      taxSummary.put(F_BP_COUNT,   bpCount);
       taxes.put(taxSummary);
     }
     return taxes;
@@ -451,7 +453,7 @@ public class TaxReportHandler implements NeoHandler {
   // Meta
   // -------------------------------------------------------------------------
 
-  private static JSONObject buildMeta(ReportParams p) throws Exception {
+  private static JSONObject buildMeta(ReportParams p) throws JSONException {
     JSONObject meta = new JSONObject();
     meta.put(PARAM_DATE_FROM,    p.dateFrom);
     meta.put(PARAM_DATE_TO,      p.dateTo);
