@@ -81,6 +81,12 @@ public class NeoDefaultsCascadeHelper {
   /**
    * Execute the create/defaults callout cascade until no more dependent fields remain
    * or the configured maximum depth is reached.
+   *
+   * @param ctx the NEO request context used to resolve callouts
+   * @param adTab the tab whose columns may trigger dependent callouts
+   * @param defaults the current defaults payload, updated in place during the cascade
+   * @param seqFields fields that should be skipped because they are sequence previews
+   * @return the aggregated cascade result with merged updates, combos, and messages
    */
   public static NeoDefaultsService.CalloutCascadeResult executeCalloutCascade(NeoContext ctx, Tab adTab,
       JSONObject defaults, Set<String> seqFields) {
@@ -387,6 +393,9 @@ public class NeoDefaultsCascadeHelper {
   /**
    * Remove mandatory FK properties that still carry empty-string placeholders
    * so DAL can resolve them as null/absent instead of invalid IDs.
+   *
+   * @param body the request payload to sanitize
+   * @param adTab the tab whose FK columns should be checked
    */
   public static void removeEmptyFkValues(JSONObject body, Tab adTab) {
     if (body == null || adTab == null || adTab.getTable() == null) {

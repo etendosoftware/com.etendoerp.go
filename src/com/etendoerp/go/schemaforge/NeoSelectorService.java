@@ -1,7 +1,6 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -68,7 +67,7 @@ public class NeoSelectorService {
   private static final String PROP_ORGANIZATION = "organization";
 
   // Session-level params resolved server-side (should not appear in selectorParams)
-  private static final java.util.Set<String> SESSION_PARAMS = new java.util.HashSet<>(
+  static final java.util.Set<String> SESSION_PARAMS = new java.util.HashSet<>(
       java.util.Arrays.asList(AD_ORG_ID, "AD_Client_ID", "AD_User_ID", "AD_Role_ID"));
 
   private NeoSelectorService() {
@@ -101,7 +100,7 @@ public class NeoSelectorService {
         if (column == null) {
           continue;
         }
-        appendSelectorDescriptor(selectors, column);
+        NeoSelectorExecutionHelper.appendSelectorDescriptor(selectors, column);
       }
 
       JSONObject result = new JSONObject();
@@ -241,18 +240,19 @@ public class NeoSelectorService {
 
     StringBuilder hql = new StringBuilder();
     Map<String, Object> queryParams = new HashMap<>();
-    appendResolvedWhereClause(hql, queryParams, meta.whereClause);
-    appendLiteralFilter(hql, validationFilter);
-    appendSelectorOrganizationFilter(hql, queryParams, meta, contextOrganizationId);
-    appendSimpleSearchFilter(hql, meta.displayProperty, search);
+    NeoSelectorExecutionHelper.appendResolvedWhereClause(hql, queryParams, meta.whereClause);
+    NeoSelectorExecutionHelper.appendLiteralFilter(hql, validationFilter);
+    NeoSelectorExecutionHelper.appendSelectorOrganizationFilter(hql, queryParams, meta,
+        contextOrganizationId);
+    NeoSelectorExecutionHelper.appendSimpleSearchFilter(hql, meta.displayProperty, search);
 
     // Prefix with alias "as e" so OBQuery registers the entity alias
-    String whereStr = buildSimpleWhereClause(hql);
+    String whereStr = NeoSelectorExecutionHelper.buildSimpleWhereClause(hql);
 
     // Count query
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
         .createQuery(meta.entityName, whereStr);
-    bindNamedParameters(countQuery, queryParams);
+    NeoSelectorExecutionHelper.bindNamedParameters(countQuery, queryParams);
     if (StringUtils.isNotBlank(search)) {
       countQuery.setNamedParameter(PARAM_SEARCH,
           "%" + search.toLowerCase() + "%");
@@ -265,7 +265,7 @@ public class NeoSelectorService {
 
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance()
         .createQuery(meta.entityName, dataWhere);
-    bindNamedParameters(dataQuery, queryParams);
+    NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, queryParams);
     if (StringUtils.isNotBlank(search)) {
       dataQuery.setNamedParameter(PARAM_SEARCH,
           "%" + search.toLowerCase() + "%");
@@ -305,7 +305,7 @@ public class NeoSelectorService {
     // Count query
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
         .createQuery(meta.entityName, whereClause.getHql());
-    bindNamedParameters(countQuery, whereClause.getParams());
+    NeoSelectorExecutionHelper.bindNamedParameters(countQuery, whereClause.getParams());
     if (hasSearch) {
       countQuery.setNamedParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
     }
@@ -315,7 +315,7 @@ public class NeoSelectorService {
     String dataWhere = whereClause.getHql() + " ORDER BY " + alias + "." + meta.displayProperty;
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance()
         .createQuery(meta.entityName, dataWhere);
-    bindNamedParameters(dataQuery, whereClause.getParams());
+    NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, whereClause.getParams());
     if (hasSearch) {
       dataQuery.setNamedParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
     }
@@ -381,7 +381,7 @@ public class NeoSelectorService {
     String countHql = "SELECT COUNT(" + alias + ")" + fromClause.getHql();
     org.hibernate.query.Query<Long> countQuery = OBDal.getInstance()
         .getSession().createQuery(countHql, Long.class);
-    bindNamedParameters(countQuery, fromClause.getParams());
+    NeoSelectorExecutionHelper.bindNamedParameters(countQuery, fromClause.getParams());
     if (hasSearch) {
       countQuery.setParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
     }
@@ -393,7 +393,7 @@ public class NeoSelectorService {
         + meta.displayProperty;
     org.hibernate.query.Query<?> dataQuery = OBDal.getInstance()
         .getSession().createQuery(dataHql);
-    bindNamedParameters(dataQuery, fromClause.getParams());
+    NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, fromClause.getParams());
     if (hasSearch) {
       dataQuery.setParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
     }
@@ -478,98 +478,6 @@ public class NeoSelectorService {
     return organizationId;
   }
 
-  private static void bindNamedParameters(OBQuery<?> query, Map<String, Object> params) {
-    if (params == null || params.isEmpty()) {
-      return;
-    }
-    for (Map.Entry<String, Object> entry : params.entrySet()) {
-      query.setNamedParameter(entry.getKey(), entry.getValue());
-    }
-  }
-
-  private static void bindNamedParameters(org.hibernate.query.Query<?> query,
-      Map<String, Object> params) {
-    if (params == null || params.isEmpty()) {
-      return;
-    }
-    for (Map.Entry<String, Object> entry : params.entrySet()) {
-      if (entry.getValue() instanceof Collection<?>) {
-        query.setParameterList(entry.getKey(), (Collection<?>) entry.getValue());
-      } else {
-        query.setParameter(entry.getKey(), entry.getValue());
-      }
-    }
-  }
-
-  private static void appendSelectorDescriptor(JSONArray selectors, Column column) throws Exception {
-    String refId = getBaseReferenceId(column);
-    if (isListReference(refId)) {
-      selectors.put(SelectorDescriptorBuilder.buildListSelectorItem(column));
-      return;
-    }
-    boolean isObuisel = hasObuiselSelector(column);
-    if (isObuisel || isFkReference(refId)) {
-      SelectorMeta meta = resolveTarget(column, refId);
-      if (meta != null) {
-        selectors.put(SelectorDescriptorBuilder.buildSelectorItem(
-            column, refId, meta, SESSION_PARAMS));
-      }
-    }
-  }
-
-  private static void appendResolvedWhereClause(StringBuilder hql, Map<String, Object> queryParams,
-      String whereClause) {
-    if (StringUtils.isBlank(whereClause)) {
-      return;
-    }
-    SelectorQueryBuilder.HqlWithParams resolvedWhereClause =
-        SelectorQueryBuilder.resolveObuiselParams(whereClause);
-    hql.append(resolvedWhereClause.getHql());
-    queryParams.putAll(resolvedWhereClause.getParams());
-  }
-
-  private static void appendLiteralFilter(StringBuilder hql, String filter) {
-    if (StringUtils.isBlank(filter)) {
-      return;
-    }
-    appendAndIfNeeded(hql);
-    hql.append(filter);
-  }
-
-  private static void appendSelectorOrganizationFilter(StringBuilder hql,
-      Map<String, Object> queryParams, SelectorMeta meta, String contextOrganizationId) {
-    SelectorQueryBuilder.HqlWithParams orgFilter = SelectorQueryBuilder.buildOrganizationPredicate(
-        meta.entityName, "e", contextOrganizationId, true);
-    if (orgFilter == null || orgFilter.isBlank()) {
-      orgFilter = SelectorQueryBuilder.buildReadableOrgsPredicate(meta.entityName, "e", true);
-    }
-    if (orgFilter == null || orgFilter.isBlank()) {
-      return;
-    }
-    appendAndIfNeeded(hql);
-    hql.append(orgFilter.getHql());
-    queryParams.putAll(orgFilter.getParams());
-  }
-
-  private static void appendSimpleSearchFilter(StringBuilder hql, String displayProperty,
-      String search) {
-    if (StringUtils.isBlank(search)) {
-      return;
-    }
-    appendAndIfNeeded(hql);
-    hql.append("lower(e.").append(displayProperty).append(") LIKE :search");
-  }
-
-  private static void appendAndIfNeeded(StringBuilder hql) {
-    if (hql.length() > 0) {
-      hql.append(SelectorQueryBuilder.SQL_AND);
-    }
-  }
-
-  private static String buildSimpleWhereClause(StringBuilder hql) {
-    return hql.length() > 0 ? "as e where " + hql : "as e";
-  }
-
   private static String resolveOrgFromParentRecord(SFEntity sourceEntity, String parentId) {
     if (sourceEntity == null || StringUtils.isBlank(parentId)) {
       return null;
@@ -636,7 +544,11 @@ public class NeoSelectorService {
   /**
    * Get the base reference ID (18, 19, or 30) checking parent references.
    */
-  private static String getBaseReferenceId(Column column) {
+  static java.util.Set<String> getSessionParams() {
+    return SESSION_PARAMS;
+  }
+
+  static String getBaseReferenceId(Column column) {
     String refId = column.getReference().getId();
 
     // Check if this is 17, 18, 19, or 30 directly
@@ -678,7 +590,7 @@ public class NeoSelectorService {
   /**
    * Returns {@code true} if the given AD_Reference ID represents a list reference type (List=17).
    */
-  private static boolean isListReference(String refId) {
+  static boolean isListReference(String refId) {
     return REF_LIST.equals(refId);
   }
 
@@ -775,7 +687,7 @@ public class NeoSelectorService {
    * Check if a column has an associated OBUISEL_Selector.
    * Checks both referenceSearchKey and the column's own reference.
    */
-  private static boolean hasObuiselSelector(Column column) {
+  static boolean hasObuiselSelector(Column column) {
     return findObuiselSelector(column) != null;
   }
 
@@ -831,7 +743,7 @@ public class NeoSelectorService {
    * Resolve the target entity, display property, and optional where clause.
    * Priority: OBUISEL_Selector first, then TableDir / AD_Ref_Table.
    */
-  private static SelectorMeta resolveTarget(Column column, String baseRefId) {
+  static SelectorMeta resolveTarget(Column column, String baseRefId) {
     // 1. Check OBUISEL_Selector first
     Selector obuisel = findObuiselSelector(column);
     if (obuisel != null) {
