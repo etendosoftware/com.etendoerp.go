@@ -1,6 +1,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -252,10 +253,14 @@ public class NeoSelectorService {
       String contextOrganizationId) throws Exception {
 
     StringBuilder hql = new StringBuilder();
+    Map<String, Object> queryParams = new HashMap<>();
 
     // Apply where clause from AD_Ref_Table if present
     if (StringUtils.isNotBlank(meta.whereClause)) {
-      hql.append(meta.whereClause);
+      SelectorQueryBuilder.HqlWithParams whereClause =
+          SelectorQueryBuilder.resolveObuiselParams(meta.whereClause);
+      hql.append(whereClause.getHql());
+      queryParams.putAll(whereClause.getParams());
     }
 
     // Apply validation rule filter (resolved from context params)
@@ -267,16 +272,17 @@ public class NeoSelectorService {
     }
 
     // Prefer context/parent derived org filter; fallback to readable orgs.
-    String orgFilter = SelectorQueryBuilder.buildOrganizationPredicate(
+    SelectorQueryBuilder.HqlWithParams orgFilter = SelectorQueryBuilder.buildOrganizationPredicate(
         meta.entityName, "e", contextOrganizationId, true);
-    if (StringUtils.isBlank(orgFilter)) {
+    if (orgFilter == null || orgFilter.isBlank()) {
       orgFilter = SelectorQueryBuilder.buildReadableOrgsPredicate(meta.entityName, "e", true);
     }
-    if (StringUtils.isNotBlank(orgFilter)) {
+    if (orgFilter != null && !orgFilter.isBlank()) {
       if (hql.length() > 0) {
         hql.append(SelectorQueryBuilder.SQL_AND);
       }
-      hql.append(orgFilter);
+      hql.append(orgFilter.getHql());
+      queryParams.putAll(orgFilter.getParams());
     }
 
     // Search filter on display property
@@ -294,6 +300,7 @@ public class NeoSelectorService {
     // Count query
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
         .createQuery(meta.entityName, whereStr);
+    bindNamedParameters(countQuery, queryParams);
     if (StringUtils.isNotBlank(search)) {
       countQuery.setNamedParameter(PARAM_SEARCH,
           "%" + search.toLowerCase() + "%");
@@ -306,6 +313,7 @@ public class NeoSelectorService {
 
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance()
         .createQuery(meta.entityName, dataWhere);
+    bindNamedParameters(dataQuery, queryParams);
     if (StringUtils.isNotBlank(search)) {
       dataQuery.setNamedParameter(PARAM_SEARCH,
           "%" + search.toLowerCase() + "%");
@@ -338,22 +346,24 @@ public class NeoSelectorService {
     // Custom query flag set but no HQL defined: fall through to standard query
 
     String alias = "e";
-    String whereStr = SelectorQueryBuilder.buildRichQueryWhereClause(
+    SelectorQueryBuilder.HqlWithParams whereClause = SelectorQueryBuilder.buildRichQueryWhereClause(
         meta, search, validationFilter, alias, contextOrganizationId);
     boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
 
     // Count query
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
-        .createQuery(meta.entityName, whereStr);
+        .createQuery(meta.entityName, whereClause.getHql());
+    bindNamedParameters(countQuery, whereClause.getParams());
     if (hasSearch) {
       countQuery.setNamedParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
     }
     int totalCount = countQuery.count();
 
     // Data query with ordering and pagination
-    String dataWhere = whereStr + " ORDER BY " + alias + "." + meta.displayProperty;
+    String dataWhere = whereClause.getHql() + " ORDER BY " + alias + "." + meta.displayProperty;
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance()
         .createQuery(meta.entityName, dataWhere);
+    bindNamedParameters(dataQuery, whereClause.getParams());
     if (hasSearch) {
       dataQuery.setNamedParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
     }
@@ -406,7 +416,7 @@ public class NeoSelectorService {
     String fromOnwards = rawHql.substring(fromIdx);
 
     // Build the FROM…WHERE…filters portion
-    String fromClause = SelectorQueryBuilder.buildCustomHqlFromClause(
+    SelectorQueryBuilder.HqlWithParams fromClause = SelectorQueryBuilder.buildCustomHqlFromClause(
         fromOnwards, alias, meta, validationFilter, search, contextOrganizationId);
     boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
 
@@ -416,9 +426,10 @@ public class NeoSelectorService {
     Map<String, Integer> colIndexMap = SelectorQueryBuilder.buildSelectColumnIndexMap(selectExprs);
 
     // Count query
-    String countHql = "SELECT COUNT(" + alias + ")" + fromClause;
+    String countHql = "SELECT COUNT(" + alias + ")" + fromClause.getHql();
     org.hibernate.query.Query<Long> countQuery = OBDal.getInstance()
         .getSession().createQuery(countHql, Long.class);
+    bindNamedParameters(countQuery, fromClause.getParams());
     if (hasSearch) {
       countQuery.setParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
     }
@@ -426,9 +437,11 @@ public class NeoSelectorService {
     int totalCount = (countResult != null) ? countResult.intValue() : 0;
 
     // Data query — use the ORIGINAL select columns + our filters
-    String dataHql = selectPart + fromClause + " ORDER BY " + alias + "." + meta.displayProperty;
+    String dataHql = selectPart + fromClause.getHql() + " ORDER BY " + alias + "."
+        + meta.displayProperty;
     org.hibernate.query.Query<?> dataQuery = OBDal.getInstance()
         .getSession().createQuery(dataHql);
+    bindNamedParameters(dataQuery, fromClause.getParams());
     if (hasSearch) {
       dataQuery.setParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
     }
@@ -511,6 +524,30 @@ public class NeoSelectorService {
       return null;
     }
     return organizationId;
+  }
+
+  private static void bindNamedParameters(OBQuery<?> query, Map<String, Object> params) {
+    if (params == null || params.isEmpty()) {
+      return;
+    }
+    for (Map.Entry<String, Object> entry : params.entrySet()) {
+      query.setNamedParameter(entry.getKey(), entry.getValue());
+    }
+  }
+
+  private static void bindNamedParameters(org.hibernate.query.Query<?> query,
+      Map<String, Object> params) {
+    if (params == null || params.isEmpty()) {
+      return;
+    }
+    for (Map.Entry<String, Object> entry : params.entrySet()) {
+      Object value = entry.getValue();
+      if (value instanceof Collection<?>) {
+        query.setParameterList(entry.getKey(), (Collection<?>) value);
+      } else {
+        query.setParameter(entry.getKey(), value);
+      }
+    }
   }
 
   private static String resolveOrgFromParentRecord(SFEntity sourceEntity, String parentId) {

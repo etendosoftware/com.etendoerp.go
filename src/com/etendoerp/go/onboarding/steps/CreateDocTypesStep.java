@@ -17,6 +17,9 @@
 
 package com.etendoerp.go.onboarding.steps;
 
+import java.util.Arrays;
+import java.util.List;
+
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
@@ -50,6 +53,11 @@ public class CreateDocTypesStep implements OnboardingStep {
   private static final String GL_CATEGORY_NONE = "None";
   private static final String GL_CATEGORY_AR_INVOICE = "AR Invoice";
   private static final String GL_CATEGORY_AP_INVOICE = "AP Invoice";
+  private static final String GL_CATEGORY_MATERIAL = "Material Management";
+  private static final String GL_REF_NONE = "NONE";
+  private static final String GL_REF_AR = "AR";
+  private static final String GL_REF_AP = "AP";
+  private static final String GL_REF_MATERIAL = "MATERIAL";
 
   private static final class DocumentTypeDefinition {
     private final String name;
@@ -63,6 +71,23 @@ public class CreateDocTypesStep implements OnboardingStep {
       this.docBaseType = docBaseType;
       this.salesTransaction = salesTransaction;
       this.soSubType = soSubType;
+    }
+  }
+
+  private static final class DocumentTypeSeed {
+    private final String sequenceName;
+    private final String sequencePrefix;
+    private final long sequenceStartNo;
+    private final DocumentTypeDefinition documentType;
+    private final String glCategoryRef;
+
+    private DocumentTypeSeed(String sequenceName, String sequencePrefix, long sequenceStartNo,
+        DocumentTypeDefinition documentType, String glCategoryRef) {
+      this.sequenceName = sequenceName;
+      this.sequencePrefix = sequencePrefix;
+      this.sequenceStartNo = sequenceStartNo;
+      this.documentType = documentType;
+      this.glCategoryRef = glCategoryRef;
     }
   }
 
@@ -87,36 +112,48 @@ public class CreateDocTypesStep implements OnboardingStep {
       GLCategory glNone = createGLCategory(client, org, GL_CATEGORY_NONE, "D");
       GLCategory glARInvoice = createGLCategory(client, org, GL_CATEGORY_AR_INVOICE, "D");
       GLCategory glAPInvoice = createGLCategory(client, org, GL_CATEGORY_AP_INVOICE, "D");
-      GLCategory glMaterial = createGLCategory(client, org, "Material Management", "D");
+      GLCategory glMaterial = createGLCategory(client, org, GL_CATEGORY_MATERIAL, "D");
 
       // 2. Create sequences and document types
-      Sequence seqSO = createSequence(client, org, "Standard Order", "SO/", 50000L);
-      createDocumentType(client, org,
-        new DocumentTypeDefinition("Standard Order", "SOO", true, "SO"), seqSO, glNone);
-
-      Sequence seqPO = createSequence(client, org, "Purchase Order", "PO/", 800000L);
-      createDocumentType(client, org,
-        new DocumentTypeDefinition("Purchase Order", "POO", false, null), seqPO, glNone);
-
-      Sequence seqARI = createSequence(client, org, GL_CATEGORY_AR_INVOICE, "ARI/", 100000L);
-      createDocumentType(client, org,
-        new DocumentTypeDefinition(GL_CATEGORY_AR_INVOICE, "ARI", true, null), seqARI,
-        glARInvoice);
-
-      Sequence seqAPI = createSequence(client, org, GL_CATEGORY_AP_INVOICE, "API/", 200000L);
-      createDocumentType(client, org,
-        new DocumentTypeDefinition(GL_CATEGORY_AP_INVOICE, "API", false, null), seqAPI,
-        glAPInvoice);
-
-      Sequence seqMMS = createSequence(client, org, "MM Shipment", "MMS/", 500000L);
-      createDocumentType(client, org,
-        new DocumentTypeDefinition("MM Shipment", "MMS", true, null), seqMMS, glMaterial);
-
-      Sequence seqMMR = createSequence(client, org, "MM Receipt", "MMR/", 600000L);
-      createDocumentType(client, org,
-        new DocumentTypeDefinition("MM Receipt", "MMR", false, null), seqMMR, glMaterial);
+      for (DocumentTypeSeed seed : buildDocumentTypeSeeds()) {
+        Sequence sequence = createSequence(client, org, seed.sequenceName,
+            seed.sequencePrefix, seed.sequenceStartNo);
+        createDocumentType(client, org, seed.documentType, sequence,
+            resolveGlCategory(seed.glCategoryRef, glNone, glARInvoice, glAPInvoice, glMaterial));
+      }
     } catch (Exception e) {
       throw new OnboardingStepException(e.getMessage(), e);
+    }
+  }
+
+  private List<DocumentTypeSeed> buildDocumentTypeSeeds() {
+    return Arrays.asList(
+        new DocumentTypeSeed("Standard Order", "SO/", 50000L,
+            new DocumentTypeDefinition("Standard Order", "SOO", true, "SO"), GL_REF_NONE),
+        new DocumentTypeSeed("Purchase Order", "PO/", 800000L,
+            new DocumentTypeDefinition("Purchase Order", "POO", false, null), GL_REF_NONE),
+        new DocumentTypeSeed(GL_CATEGORY_AR_INVOICE, "ARI/", 100000L,
+            new DocumentTypeDefinition(GL_CATEGORY_AR_INVOICE, "ARI", true, null), GL_REF_AR),
+        new DocumentTypeSeed(GL_CATEGORY_AP_INVOICE, "API/", 200000L,
+            new DocumentTypeDefinition(GL_CATEGORY_AP_INVOICE, "API", false, null), GL_REF_AP),
+        new DocumentTypeSeed("MM Shipment", "MMS/", 500000L,
+            new DocumentTypeDefinition("MM Shipment", "MMS", true, null), GL_REF_MATERIAL),
+        new DocumentTypeSeed("MM Receipt", "MMR/", 600000L,
+            new DocumentTypeDefinition("MM Receipt", "MMR", false, null), GL_REF_MATERIAL));
+  }
+
+  private GLCategory resolveGlCategory(String glCategoryRef, GLCategory glNone,
+      GLCategory glARInvoice, GLCategory glAPInvoice, GLCategory glMaterial) {
+    switch (glCategoryRef) {
+      case GL_REF_AR:
+        return glARInvoice;
+      case GL_REF_AP:
+        return glAPInvoice;
+      case GL_REF_MATERIAL:
+        return glMaterial;
+      case GL_REF_NONE:
+      default:
+        return glNone;
     }
   }
 

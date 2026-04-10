@@ -95,7 +95,7 @@ public class DocTypeResolver {
    * Resolve a default C_DocType ID for a column that references the C_DocType table.
    * Returns null if the column does not reference C_DocType or no suitable default is found.
    */
-  private static String resolveDefaultDocTypeId(Column col, NeoContext ctx) {
+  static String resolveDefaultDocTypeId(Column col, NeoContext ctx) {
     String colName = col.getDBColumnName().toUpperCase();
     if (!colName.endsWith("_ID") || !colName.contains("DOCTYPE")) {
       return null;

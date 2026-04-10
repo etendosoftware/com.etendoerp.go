@@ -162,12 +162,16 @@ class SelectorAuxResolver {
       }
 
       // Build and execute the aux query filtered by the already-fetched IDs
-      String auxHql = buildAuxIdListQuery(selectClause + fromOnwards, entityAlias);
-      auxHql = SelectorQueryBuilder.resolveObuiselParams(auxHql);
+      SelectorQueryBuilder.HqlWithParams auxQueryFragment =
+          SelectorQueryBuilder.resolveObuiselParams(
+              buildAuxIdListQuery(selectClause + fromOnwards, entityAlias));
 
       org.hibernate.query.Query<Object[]> auxQuery = OBDal.getInstance()
-          .getSession().createQuery(auxHql, Object[].class);
+          .getSession().createQuery(auxQueryFragment.getHql(), Object[].class);
       auxQuery.setParameterList("auxIds", entityIds);
+      for (Map.Entry<String, Object> entry : auxQueryFragment.getParams().entrySet()) {
+        auxQuery.setParameter(entry.getKey(), entry.getValue());
+      }
 
       Map<String, JSONObject> auxMap = buildAuxResultMap(auxQuery.list(), idPos, auxAliasPos);
       mergeAuxIntoItems(items, auxMap);

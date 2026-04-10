@@ -7,7 +7,6 @@ import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -61,17 +60,8 @@ public class NeoDefaultsService {
 
   private static final Logger log = LogManager.getLogger(NeoDefaultsService.class);
   private static final String DATE_FORMAT = "yyyy-MM-dd";
-  private static final int MAX_CALLOUT_CHAIN_DEPTH = 5;
-  private static final String FIELD_VALUE = "value";
-  private static final String VALUE_KEY = FIELD_VALUE;
   private static final String KEY_UPDATES = "updates";
   private static final String KEY_COMBOS = "combos";
-  private static final java.util.regex.Pattern SUBTYPE_NOT_LIKE_PATTERN =
-      java.util.regex.Pattern.compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'",
-          java.util.regex.Pattern.CASE_INSENSITIVE);
-  private static final java.util.regex.Pattern SUBTYPE_LIKE_PATTERN =
-      java.util.regex.Pattern.compile("sOSubType\\s+LIKE\\s+'(\\w+)'",
-          java.util.regex.Pattern.CASE_INSENSITIVE);
 
   // Cache VariablesSecureApp per user+role+org+warehouse combination to avoid calling
   // LoginUtils.fillSessionArguments (multiple DB queries) on every request.
@@ -330,13 +320,13 @@ public class NeoDefaultsService {
       DalConnectionProvider conn, String windowId, String dbColumnName, NeoContext ctx) {
     String colUpper = dbColumnName.toUpperCase();
     if (colUpper.endsWith("_ID") && colUpper.contains("DOCTYPE")) {
-      return resolveDefaultDocTypeId(adColumn, ctx);
+      return DocTypeResolver.resolveDefaultDocTypeId(adColumn, ctx);
     }
     String fromPrefs = Utility.getDefault(conn, vars, dbColumnName, "", windowId, "");
     if (fromPrefs != null && !fromPrefs.isEmpty()) {
       return fromPrefs;
     }
-    String docTypeId = resolveDefaultDocTypeId(adColumn, ctx);
+    String docTypeId = DocTypeResolver.resolveDefaultDocTypeId(adColumn, ctx);
     if (docTypeId != null) {
       return docTypeId;
     }
@@ -571,193 +561,6 @@ public class NeoDefaultsService {
 
     varsCache.put(cacheKey, vars);
     return vars;
-  }
-
-  /**
-   * Resolve the default C_DocType ID for columns referencing document type.
-   */
-  private static String resolveDefaultDocTypeId(Column col, NeoContext ctx) {
-    String colName = col.getDBColumnName().toUpperCase();
-    if (!colName.endsWith("_ID") || !colName.contains("DOCTYPE")) {
-      return null;
-    }
-
-    try {
-      String clientId = OBContext.getOBContext().getCurrentClient().getId();
-      String isSOTrx = resolveIsSOTrxDefault(col.getTable(), ctx);
-      String docBaseType = resolveDocBaseType(col.getTable().getDBTableName(), isSOTrx);
-      if (docBaseType == null) {
-        log.debug("Could not determine DocBaseType for table {} — skipping doctype resolution",
-            col.getTable().getDBTableName());
-        return null;
-      }
-
-      String[] subTypeFilters = parseSubTypeFilters(ctx);
-      return queryDefaultDocType(clientId, docBaseType, isSOTrx,
-          subTypeFilters[0], subTypeFilters[1], colName);
-    } catch (Exception e) {
-      log.debug("Could not resolve default doctype for {}: {}", colName, e.getMessage());
-      return null;
-    }
-  }
-
-  private static String[] parseSubTypeFilters(NeoContext ctx) {
-    String subTypeFilter = null;
-    String subTypeExclude = null;
-    if (ctx != null && ctx.getSfEntity() != null && ctx.getSfEntity().getADTab() != null) {
-      String tabWhere = ctx.getSfEntity().getADTab().getHqlwhereclause();
-      if (tabWhere != null) {
-        java.util.regex.Matcher m = SUBTYPE_NOT_LIKE_PATTERN.matcher(tabWhere);
-        if (m.find()) {
-          subTypeExclude = m.group(1);
-        } else {
-          m = SUBTYPE_LIKE_PATTERN.matcher(tabWhere);
-          if (m.find()) {
-            subTypeFilter = m.group(1);
-          }
-        }
-      }
-    }
-    return new String[]{ subTypeFilter, subTypeExclude };
-  }
-
-  private static String queryDefaultDocType(String clientId, String docBaseType,
-      String isSOTrx, String subTypeFilter, String subTypeExclude, String colName)
-      throws Exception {
-    OBContext obCtx = OBContext.getOBContext();
-    if (obCtx == null || obCtx.getCurrentOrganization() == null) {
-      return null;
-    }
-    String orgId = obCtx.getCurrentOrganization().getId();
-
-    StringBuilder sql = new StringBuilder();
-    sql.append("SELECT dt.C_DocType_ID FROM C_DocType dt ");
-    sql.append("WHERE dt.IsActive = 'Y' ");
-    sql.append("AND dt.AD_Client_ID = ? ");
-    sql.append("AND dt.DocBaseType = ? ");
-    sql.append("AND dt.IsSOTrx = ? ");
-    sql.append("AND (dt.AD_Org_ID = '0' OR AD_ISORGINCLUDED(?, dt.AD_Org_ID, ?) <> '-1') ");
-    if (subTypeFilter != null) {
-      sql.append("AND dt.DocSubTypeSO = ? ");
-    } else if (subTypeExclude != null) {
-      sql.append("AND (dt.DocSubTypeSO IS NULL OR dt.DocSubTypeSO != ?) ");
-    }
-    sql.append("ORDER BY dt.IsDefault DESC, dt.Name ASC");
-
-    try (PreparedStatement ps = OBDal.getInstance().getConnection(false)
-        .prepareStatement(sql.toString())) {
-      int paramIndex = 1;
-      ps.setString(paramIndex++, clientId);
-      ps.setString(paramIndex++, docBaseType);
-      ps.setString(paramIndex++, isSOTrx);
-      ps.setString(paramIndex++, orgId);
-      ps.setString(paramIndex++, clientId);
-      if (subTypeFilter != null) {
-        ps.setString(paramIndex++, subTypeFilter);
-      } else if (subTypeExclude != null) {
-        ps.setString(paramIndex++, subTypeExclude);
-      }
-
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          String docTypeId = rs.getString(1);
-          log.debug("Resolved default doctype for {} (DocBaseType={}, IsSOTrx={}): {}",
-              colName, docBaseType, isSOTrx, docTypeId);
-          return docTypeId;
-        }
-      }
-    }
-
-    log.debug("No matching doctype found for {} (DocBaseType={}, IsSOTrx={})",
-        colName, docBaseType, isSOTrx);
-    return null;
-  }
-
-  private static String resolveIsSOTrxDefault(
-      org.openbravo.model.ad.datamodel.Table table, NeoContext ctx) {
-    for (Column c : table.getADColumnList()) {
-      if ("IsSOTrx".equalsIgnoreCase(c.getDBColumnName())) {
-        return resolveIsSOTrxFromColumn(c, ctx);
-      }
-    }
-    return "Y";
-  }
-
-  private static String resolveIsSOTrxFromColumn(Column col, NeoContext ctx) {
-    String defaultVal = col.getDefaultValue();
-    if (defaultVal == null || defaultVal.trim().isEmpty()) {
-      return "Y";
-    }
-    defaultVal = defaultVal.trim();
-
-    String literal = parseIsSOTrxLiteral(defaultVal);
-    if (literal != null) {
-      return literal;
-    }
-
-    if (defaultVal.contains("@") && ctx != null) {
-      String resolved = resolveIsSOTrxFromContext(defaultVal, ctx);
-      if (resolved != null) {
-        return resolved;
-      }
-    }
-
-    return "Y";
-  }
-
-  private static String parseIsSOTrxLiteral(String value) {
-    if ("Y".equals(value) || "'Y'".equals(value)) {
-      return "Y";
-    }
-    if ("N".equals(value) || "'N'".equals(value)) {
-      return "N";
-    }
-    return null;
-  }
-
-  private static String resolveIsSOTrxFromContext(String defaultVal, NeoContext ctx) {
-    try {
-      VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext());
-      DalConnectionProvider conn = new DalConnectionProvider(false);
-      String windowId = resolveWindowId(ctx.getSfEntity());
-      String resolved = Utility.getDefault(conn, vars, "IsSOTrx", defaultVal, windowId, "");
-      if ("Y".equals(resolved) || "N".equals(resolved)) {
-        log.debug("Resolved IsSOTrx context var '{}' to '{}'", defaultVal, resolved);
-        return resolved;
-      }
-    } catch (Exception e) {
-      log.debug("Could not resolve IsSOTrx context var: {}", e.getMessage());
-    }
-    return null;
-  }
-
-  private static String resolveDocBaseType(String tableName, String isSOTrx) {
-    boolean isSales = "Y".equals(isSOTrx);
-    String upper = tableName.toUpperCase();
-
-    if ("C_ORDER".equals(upper)) {
-      return isSales ? "SOO" : "POO";
-    }
-    if ("C_INVOICE".equals(upper)) {
-      return isSales ? "ARI" : "API";
-    }
-    if ("M_INOUT".equals(upper)) {
-      return isSales ? "MMS" : "MMR";
-    }
-    if ("C_PAYMENT".equals(upper)) {
-      return isSales ? "ARR" : "APP";
-    }
-    if ("M_MOVEMENT".equals(upper)) {
-      return "MMM";
-    }
-    if ("M_INVENTORY".equals(upper)) {
-      return "MMI";
-    }
-    if ("C_BANKSTATEMENT".equals(upper)) {
-      return "CMB";
-    }
-
-    return null;
   }
 
   /**
@@ -1003,27 +806,11 @@ public class NeoDefaultsService {
     }
 
     void mergeUpdates(JSONObject newUpdates) {
-      Iterator<String> keys = newUpdates.keys();
-      while (keys.hasNext()) {
-        String key = keys.next();
-        try {
-          updates.put(key, newUpdates.get(key));
-        } catch (Exception e) {
-          // skip
-        }
-      }
+      mergeJsonObjectValues(updates, newUpdates);
     }
 
     void mergeCombos(JSONObject newCombos) {
-      Iterator<String> keys = newCombos.keys();
-      while (keys.hasNext()) {
-        String key = keys.next();
-        try {
-          combos.put(key, newCombos.get(key));
-        } catch (Exception e) {
-          // skip
-        }
-      }
+      mergeJsonObjectValues(combos, newCombos);
     }
 
     void mergeMessages(JSONArray newMessages) {
@@ -1046,6 +833,21 @@ public class NeoDefaultsService {
         // should never happen
       }
       return json;
+    }
+
+    private void mergeJsonObjectValues(JSONObject target, JSONObject source) {
+      if (source == null) {
+        return;
+      }
+      Iterator<String> keys = source.keys();
+      while (keys.hasNext()) {
+        String key = keys.next();
+        try {
+          target.put(key, source.get(key));
+        } catch (Exception e) {
+          // skip
+        }
+      }
     }
   }
 

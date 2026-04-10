@@ -74,6 +74,36 @@ class SelectorQueryBuilder {
   private SelectorQueryBuilder() {
   }
 
+  static final class HqlWithParams {
+    private final String hql;
+    private final Map<String, Object> params;
+
+    private HqlWithParams(String hql, Map<String, Object> params) {
+      this.hql = hql;
+      this.params = params;
+    }
+
+    static HqlWithParams empty() {
+      return new HqlWithParams("", new HashMap<>());
+    }
+
+    static HqlWithParams of(String hql) {
+      return new HqlWithParams(StringUtils.defaultString(hql), new HashMap<>());
+    }
+
+    String getHql() {
+      return hql;
+    }
+
+    Map<String, Object> getParams() {
+      return params;
+    }
+
+    boolean isBlank() {
+      return StringUtils.isBlank(hql);
+    }
+  }
+
   /**
    * Build the standard paginated selector response JSON.
    */
@@ -94,17 +124,20 @@ class SelectorQueryBuilder {
    * Incorporates the OBUISEL where clause, validation filter, and search predicate.
    * Returns "as e [where ...]" ready to pass to {@link OBDal#createQuery}.
    */
-  static String buildRichQueryWhereClause(SelectorMeta meta,
+  static HqlWithParams buildRichQueryWhereClause(SelectorMeta meta,
       String search, String validationFilter, String alias, String contextOrganizationId) {
     StringBuilder hql = new StringBuilder();
-    appendResolvedClause(hql, resolveObuiselParams(meta.whereClause));
-    appendResolvedClause(hql, validationFilter);
-    appendResolvedClause(hql, resolveSelectorOrgFilter(meta.entityName, alias, contextOrganizationId));
+    Map<String, Object> queryParams = new HashMap<>();
+    appendResolvedClause(hql, queryParams, resolveObuiselParams(meta.whereClause));
+    appendResolvedClause(hql, queryParams, HqlWithParams.of(validationFilter));
+    appendResolvedClause(hql, queryParams,
+        resolveSelectorOrgFilter(meta.entityName, alias, contextOrganizationId));
     appendSearchClause(hql, meta.searchableProperties, alias, search);
 
-    return hql.length() > 0
+    String whereClause = hql.length() > 0
         ? "as " + alias + " where " + hql
         : "as " + alias;
+    return new HqlWithParams(whereClause, queryParams);
   }
 
   /**
@@ -130,37 +163,42 @@ class SelectorQueryBuilder {
    *
    * @return the complete FROM clause string, ready to use in COUNT and data queries
    */
-  static String buildCustomHqlFromClause(String fromOnwards, String alias,
+  static HqlWithParams buildCustomHqlFromClause(String fromOnwards, String alias,
       SelectorMeta meta, String validationFilter, String search, String contextOrganizationId) {
     StringBuilder baseHql = new StringBuilder(fromOnwards);
+    Map<String, Object> queryParams = new HashMap<>();
     boolean hasWhere = Pattern.compile("\\sWHERE\\s", Pattern.CASE_INSENSITIVE)
         .matcher(fromOnwards).find();
 
-    hasWhere = appendClause(baseHql, resolveObuiselParams(meta.whereClause), hasWhere);
-    hasWhere = appendClause(baseHql, validationFilter, hasWhere);
-    hasWhere = appendClause(baseHql,
+    hasWhere = appendClause(baseHql, queryParams, resolveObuiselParams(meta.whereClause), hasWhere);
+    hasWhere = appendClause(baseHql, queryParams, HqlWithParams.of(validationFilter), hasWhere);
+    hasWhere = appendClause(baseHql, queryParams,
         resolveSelectorOrgFilter(meta.entityName, alias, contextOrganizationId), hasWhere);
     appendCustomSearchFilter(baseHql, meta.searchableProperties, alias, search, hasWhere);
 
-    return baseHql.toString();
+    return new HqlWithParams(baseHql.toString(), queryParams);
   }
 
-  private static void appendResolvedClause(StringBuilder hql, String clause) {
-    if (StringUtils.isBlank(clause)) {
+  private static void appendResolvedClause(StringBuilder hql, Map<String, Object> queryParams,
+      HqlWithParams clause) {
+    if (clause == null || clause.isBlank()) {
       return;
     }
     if (hql.length() > 0) {
       hql.append(SQL_AND);
     }
-    hql.append(clause);
+    hql.append(clause.getHql());
+    queryParams.putAll(clause.getParams());
   }
 
-  private static boolean appendClause(StringBuilder hql, String clause, boolean hasWhere) {
-    if (StringUtils.isBlank(clause)) {
+  private static boolean appendClause(StringBuilder hql, Map<String, Object> queryParams,
+      HqlWithParams clause, boolean hasWhere) {
+    if (clause == null || clause.isBlank()) {
       return hasWhere;
     }
     hql.append(hasWhere ? SQL_AND : SQL_WHERE);
-    hql.append(clause);
+    hql.append(clause.getHql());
+    queryParams.putAll(clause.getParams());
     return true;
   }
 
@@ -169,10 +207,11 @@ class SelectorQueryBuilder {
     appendCustomSearchFilter(hql, searchableProperties, alias, search, hql.length() > 0);
   }
 
-  private static String resolveSelectorOrgFilter(String entityName, String alias,
+  private static HqlWithParams resolveSelectorOrgFilter(String entityName, String alias,
       String contextOrganizationId) {
-    String orgFilter = buildOrganizationPredicate(entityName, alias, contextOrganizationId, true);
-    if (StringUtils.isNotBlank(orgFilter)) {
+    HqlWithParams orgFilter = buildOrganizationPredicate(entityName, alias,
+        contextOrganizationId, true);
+    if (orgFilter != null && !orgFilter.isBlank()) {
       return orgFilter;
     }
     return buildReadableOrgsPredicate(entityName, alias, true);
@@ -184,7 +223,8 @@ class SelectorQueryBuilder {
    *
    * @return a predicate string like {@code alias.organization.id IN ('org1','0')}, or {@code null}
    */
-  static String buildReadableOrgsPredicate(String entityName, String alias, boolean includeOrgZero) {
+  static HqlWithParams buildReadableOrgsPredicate(String entityName, String alias,
+      boolean includeOrgZero) {
     Entity entityDef = ModelProvider.getInstance().getEntity(entityName);
     if (entityDef == null || !entityDef.hasProperty("organization")) {
       return null;
@@ -208,24 +248,16 @@ class SelectorQueryBuilder {
     if (orgIds.isEmpty()) {
       return null;
     }
-    StringBuilder filter = new StringBuilder(alias).append(".organization.id IN (");
-    boolean first = true;
-    for (String orgId : orgIds) {
-      if (!first) {
-        filter.append(", ");
-      }
-      filter.append("'").append(orgId.replace("'", "''")).append("'");
-      first = false;
-    }
-    filter.append(")");
-    return filter.toString();
+    Map<String, Object> params = new HashMap<>();
+    params.put("selectorReadableOrgIds", new ArrayList<>(orgIds));
+    return new HqlWithParams(alias + ".organization.id IN (:selectorReadableOrgIds)", params);
   }
 
   /**
    * Build an organization filter bound to a single org context.
    * Optionally includes organization "0" (the "*" org) to preserve shared master data visibility.
    */
-  static String buildOrganizationPredicate(String entityName, String alias,
+  static HqlWithParams buildOrganizationPredicate(String entityName, String alias,
       String organizationId, boolean includeOrgZero) {
     if (StringUtils.isBlank(organizationId)) {
       return null;
@@ -239,23 +271,13 @@ class SelectorQueryBuilder {
     if (includeOrgZero) {
       orgIds.add("0");
     }
-    StringBuilder filter = new StringBuilder(alias).append(".organization.id IN (");
-    boolean first = true;
-    for (String orgId : orgIds) {
-      if (StringUtils.isBlank(orgId)) {
-        continue;
-      }
-      if (!first) {
-        filter.append(", ");
-      }
-      filter.append("'").append(orgId.replace("'", "''")).append("'");
-      first = false;
-    }
-    if (first) {
+    orgIds.removeIf(StringUtils::isBlank);
+    if (orgIds.isEmpty()) {
       return null;
     }
-    filter.append(")");
-    return filter.toString();
+    Map<String, Object> params = new HashMap<>();
+    params.put("selectorContextOrgIds", new ArrayList<>(orgIds));
+    return new HqlWithParams(alias + ".organization.id IN (:selectorContextOrgIds)", params);
   }
 
   /**
@@ -266,12 +288,12 @@ class SelectorQueryBuilder {
    */
   static boolean appendReadableOrgsFilter(StringBuilder hql, String alias,
       String entityName, boolean hasWhere, boolean includeOrgZero) {
-    String orgFilter = buildReadableOrgsPredicate(entityName, alias, includeOrgZero);
-    if (StringUtils.isBlank(orgFilter)) {
+    HqlWithParams orgFilter = buildReadableOrgsPredicate(entityName, alias, includeOrgZero);
+    if (orgFilter == null || orgFilter.isBlank()) {
       return hasWhere;
     }
     hql.append(hasWhere ? SQL_AND : SQL_WHERE);
-    hql.append(orgFilter);
+    hql.append(orgFilter.getHql());
     return true;
   }
 
@@ -421,23 +443,32 @@ class SelectorQueryBuilder {
    * case-insensitively. Unknown params (e.g. @inpmWarehouseId@) that depend on form context
    * are replaced with NULL since NEO selectors don't have that context yet.
    */
-  static String resolveObuiselParams(String whereClause) {
+  static HqlWithParams resolveObuiselParams(String whereClause) {
+    if (StringUtils.isBlank(whereClause)) {
+      return HqlWithParams.empty();
+    }
     OBContext ctx = OBContext.getOBContext();
-    java.util.Map<String, String> knownParams = new java.util.HashMap<>();
-    knownParams.put("ad_org_id", "'" + ctx.getCurrentOrganization().getId() + "'");
-    knownParams.put("ad_client_id", "'" + ctx.getCurrentClient().getId() + "'");
-    knownParams.put("ad_user_id", "'" + ctx.getUser().getId() + "'");
-    knownParams.put("ad_role_id", "'" + ctx.getRole().getId() + "'");
-    // Common aliases
-    knownParams.put("client", "'" + ctx.getCurrentClient().getId() + "'");
+    Map<String, String> knownParams = new HashMap<>();
+    if (ctx != null) {
+      knownParams.put("ad_org_id", ctx.getCurrentOrganization().getId());
+      knownParams.put("ad_client_id", ctx.getCurrentClient().getId());
+      knownParams.put("ad_user_id", ctx.getUser().getId());
+      knownParams.put("ad_role_id", ctx.getRole().getId());
+      knownParams.put("client", ctx.getCurrentClient().getId());
+    }
 
+    Map<String, Object> queryParams = new HashMap<>();
     java.util.regex.Matcher m = PARAM_PATTERN.matcher(whereClause);
     StringBuffer sb = new StringBuffer();
+    int paramIndex = 0;
     while (m.find()) {
       String paramName = m.group(1);
       String resolved = knownParams.get(paramName.toLowerCase());
       if (resolved != null) {
-        m.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(resolved));
+        String hqlParamName = "obuiselParam" + paramIndex++;
+        queryParams.put(hqlParamName, resolved);
+        m.appendReplacement(sb,
+            java.util.regex.Matcher.quoteReplacement(":" + hqlParamName));
       } else {
         // Unknown context param — replace with NULL so the condition
         // evaluates safely rather than crashing with '@' parse error
@@ -446,7 +477,7 @@ class SelectorQueryBuilder {
       }
     }
     m.appendTail(sb);
-    return sb.toString();
+    return new HqlWithParams(sb.toString(), queryParams);
   }
 
   /**
