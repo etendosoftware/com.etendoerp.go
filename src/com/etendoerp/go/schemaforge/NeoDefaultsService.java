@@ -807,7 +807,7 @@ public class NeoDefaultsService {
       }
       // Last-resort fallback for any mandatory FK still unresolved — find a valid record
       if (resolved == null && col.getDBColumnName().toUpperCase().endsWith("_ID")) {
-        String fallbackId = resolveFallbackFkDefault(col);
+        String fallbackId = resolveFallbackFkDefault(col, ctx);
         if (fallbackId != null) {
           resolved = fallbackId;
         }
@@ -874,7 +874,7 @@ public class NeoDefaultsService {
    * @param col the mandatory FK column with no resolved default
    * @return the record ID, or null if no fallback could be found
    */
-  private static String resolveFallbackFkDefault(Column col) {
+  private static String resolveFallbackFkDefault(Column col, NeoContext ctx) {
     try {
       // Determine the referenced table from the column's reference
       org.openbravo.model.ad.datamodel.Table refTable = null;
@@ -913,6 +913,11 @@ public class NeoDefaultsService {
       sql.append(" FROM ").append(refTable.getDBTableName()).append(" t");
       sql.append(" WHERE t.IsActive = 'Y'");
       sql.append(" AND t.AD_Client_ID = ?");
+      if ("M_PriceList".equalsIgnoreCase(refTable.getDBTableName())
+          && ctx != null && ctx.getAdTab() != null) {
+        boolean isSO = ctx.getAdTab().getWindow().isSalesTransaction();
+        sql.append(" AND t.issopricelist = '").append(isSO ? "Y" : "N").append("'");
+      }
       sql.append(" ORDER BY ");
       if (hasIsDefault) {
         sql.append("t.IsDefault DESC, ");
