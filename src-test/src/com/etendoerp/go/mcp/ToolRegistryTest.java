@@ -1,0 +1,108 @@
+/*
+ *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance
+ * with the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ *************************************************************************
+ */
+package com.etendoerp.go.mcp;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+
+import java.util.Collections;
+import java.util.Map;
+
+import org.junit.Test;
+
+/**
+ * Unit tests for {@link ToolRegistry} naming helpers and {@link McpToolDefinition}.
+ * <p>
+ * Full integration tests (RBAC filtering, DAL queries) require OBBaseTest and run
+ * against a live Etendo instance. These unit tests cover the pure-logic parts.
+ */
+public class ToolRegistryTest {
+
+  private static final String INVOICES = "invoices";
+
+  /** Tests that a single-dash kebab string is converted to snake_case correctly. */
+  @Test
+  public void testKebabToSnakeSimple() {
+    assertEquals("complete_order", ToolRegistry.kebabToSnake("complete-order"));
+  }
+
+  /** Tests that a multi-dash kebab string is converted to snake_case correctly. */
+  @Test
+  public void testKebabToSnakeMultipleDashes() {
+    assertEquals("sales_order_lines", ToolRegistry.kebabToSnake("sales-order-lines"));
+  }
+
+  /** Tests that a string with no dashes passes through kebabToSnake unchanged. */
+  @Test
+  public void testKebabToSnakeNoDashes() {
+    assertEquals(INVOICES, ToolRegistry.kebabToSnake(INVOICES));
+  }
+
+  /** Tests that a single-character segment kebab string is converted to snake_case correctly. */
+  @Test
+  public void testKebabToSnakeSingleChar() {
+    assertEquals("a_b", ToolRegistry.kebabToSnake("a-b"));
+  }
+
+  /** Tests that McpToolDefinition getters return the values provided at construction. */
+  @Test
+  public void testMcpToolDefinitionGetters() {
+    Map<String, Object> schema = Map.of("type", "object");
+    McpToolDefinition tool = new McpToolDefinition("neo_list", "List records", schema);
+
+    assertEquals("neo_list", tool.getName());
+    assertEquals("List records", tool.getDescription());
+    assertEquals(schema, tool.getInputSchema());
+  }
+
+  /** Tests that a null input schema is normalized to an empty map by McpToolDefinition. */
+  @Test
+  public void testMcpToolDefinitionNullSchema() {
+    McpToolDefinition tool = new McpToolDefinition("neo_discover", "Discover specs", null);
+
+    assertNotNull(tool.getInputSchema());
+    assertTrue(tool.getInputSchema().isEmpty());
+  }
+
+  /** Tests that a single-underscore snake_case string is converted to kebab-case correctly. */
+  @Test
+  public void testSnakeToKebabSimple() {
+    assertEquals("complete-order", ToolRegistry.snakeToKebab("complete_order"));
+  }
+
+  /** Tests that a multi-underscore snake_case string is converted to kebab-case correctly. */
+  @Test
+  public void testSnakeToKebabMultipleUnderscores() {
+    assertEquals("sales-order-lines", ToolRegistry.snakeToKebab("sales_order_lines"));
+  }
+
+  /** Tests that a string with no underscores passes through snakeToKebab unchanged. */
+  @Test
+  public void testSnakeToKebabNoUnderscores() {
+    assertEquals(INVOICES, ToolRegistry.snakeToKebab(INVOICES));
+  }
+
+  /** Tests that McpToolDefinition.toString() includes the tool name and description. */
+  @Test
+  public void testMcpToolDefinitionToString() {
+    McpToolDefinition tool = new McpToolDefinition("neo_get", "Get record", Collections.emptyMap());
+    String str = tool.toString();
+    assertTrue(str.contains("neo_get"));
+    assertTrue(str.contains("Get record"));
+  }
+}
