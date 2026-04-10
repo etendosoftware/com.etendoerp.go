@@ -78,6 +78,10 @@ public class NeoDefaultsCascadeHelper {
     }
   }
 
+  /**
+   * Execute the create/defaults callout cascade until no more dependent fields remain
+   * or the configured maximum depth is reached.
+   */
   public static NeoDefaultsService.CalloutCascadeResult executeCalloutCascade(NeoContext ctx, Tab adTab,
       JSONObject defaults, Set<String> seqFields) {
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
@@ -380,6 +384,10 @@ public class NeoDefaultsCascadeHelper {
     }
   }
 
+  /**
+   * Remove mandatory FK properties that still carry empty-string placeholders
+   * so DAL can resolve them as null/absent instead of invalid IDs.
+   */
   public static void removeEmptyFkValues(JSONObject body, Tab adTab) {
     if (body == null || adTab == null || adTab.getTable() == null) {
       return;

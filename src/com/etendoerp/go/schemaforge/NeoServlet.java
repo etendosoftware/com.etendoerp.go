@@ -322,9 +322,9 @@ public class NeoServlet extends HttpBaseServlet {
           "Selectors only support GET");
       return true;
     }
-    return handleHookedSubEndpoint(spec, pathInfo.entityName, NeoEndpointType.SELECTOR,
-        pathInfo.selectorField, method, null,
-        () -> handleSelector(spec.getId(), pathInfo, request), response);
+    return handleHookedSubEndpoint(new HookedSubEndpointRequest(spec, pathInfo.entityName,
+        NeoEndpointType.SELECTOR, pathInfo.selectorField, method, null,
+        () -> handleSelector(spec.getId(), pathInfo, request)), response);
   }
 
   private boolean handleActionSubEndpoint(SFSpec spec, NeoPathInfo pathInfo, String method,
@@ -339,9 +339,9 @@ public class NeoServlet extends HttpBaseServlet {
     if (actionParams == null) {
       return true;
     }
-    return handleHookedSubEndpoint(spec, pathInfo.entityName, NeoEndpointType.ACTION,
-        pathInfo.actionName, method, actionParams,
-        () -> buttonHandler.handleButtonAction(spec, pathInfo, method, request), response);
+    return handleHookedSubEndpoint(new HookedSubEndpointRequest(spec, pathInfo.entityName,
+        NeoEndpointType.ACTION, pathInfo.actionName, method, actionParams,
+        () -> buttonHandler.handleButtonAction(spec, pathInfo, method, request)), response);
   }
 
   private boolean handleEvaluateDisplaySubEndpoint(SFSpec spec, NeoPathInfo pathInfo, String method,
@@ -351,9 +351,9 @@ public class NeoServlet extends HttpBaseServlet {
           "Method not allowed. Use POST.");
       return true;
     }
-    return handleHookedSubEndpoint(spec, pathInfo.entityName, NeoEndpointType.EVALUATE_DISPLAY,
-        null, method, null, () -> displayLogicHandler.handleEvaluateDisplay(spec, pathInfo, request),
-        response);
+    return handleHookedSubEndpoint(new HookedSubEndpointRequest(spec, pathInfo.entityName,
+        NeoEndpointType.EVALUATE_DISPLAY, null, method, null,
+        () -> displayLogicHandler.handleEvaluateDisplay(spec, pathInfo, request)), response);
   }
 
   private boolean handleCalloutSubEndpoint(SFSpec spec, NeoPathInfo pathInfo, String method,
@@ -363,8 +363,9 @@ public class NeoServlet extends HttpBaseServlet {
           "Callout endpoint only supports POST");
       return true;
     }
-    return handleHookedSubEndpoint(spec, pathInfo.entityName, NeoEndpointType.CALLOUT,
-        null, method, null, () -> handleCallout(spec, pathInfo, request), response);
+    return handleHookedSubEndpoint(new HookedSubEndpointRequest(spec, pathInfo.entityName,
+        NeoEndpointType.CALLOUT, null, method, null,
+        () -> handleCallout(spec, pathInfo, request)), response);
   }
 
   private boolean handleDefaultsSubEndpoint(SFSpec spec, NeoPathInfo pathInfo, String method,
@@ -374,18 +375,18 @@ public class NeoServlet extends HttpBaseServlet {
           "Defaults endpoint only supports GET");
       return true;
     }
-    return handleHookedSubEndpoint(spec, pathInfo.entityName, NeoEndpointType.DEFAULTS,
-        null, method, null, () -> handleDefaults(spec, pathInfo, request), response);
+    return handleHookedSubEndpoint(new HookedSubEndpointRequest(spec, pathInfo.entityName,
+        NeoEndpointType.DEFAULTS, null, method, null,
+        () -> handleDefaults(spec, pathInfo, request)), response);
   }
 
-  private boolean handleHookedSubEndpoint(SFSpec spec, String entityName,
-      NeoEndpointType endpointType, String fieldName, String method,
-      ActionDispatchParams actionParams, java.util.function.Supplier<NeoResponse> defaultAction,
+  private boolean handleHookedSubEndpoint(HookedSubEndpointRequest request,
       HttpServletResponse response) throws IOException {
-    NeoResponse endpointResult = actionParams == null
-        ? dispatchWithHooks(spec, entityName, endpointType, fieldName, method, defaultAction)
-        : dispatchWithHooks(spec, entityName, endpointType, fieldName, method, actionParams,
-            defaultAction);
+    NeoResponse endpointResult = request.actionParams == null
+        ? dispatchWithHooks(request.spec, request.entityName, request.endpointType,
+            request.fieldName, request.method, request.defaultAction)
+        : dispatchWithHooks(request.spec, request.entityName, request.endpointType,
+            request.fieldName, request.method, request.actionParams, request.defaultAction);
     writeResponse(response, endpointResult);
     return true;
   }
@@ -577,6 +578,28 @@ public class NeoServlet extends HttpBaseServlet {
     ActionDispatchParams(String recordId, JSONObject requestBody) {
       this.recordId = recordId;
       this.requestBody = requestBody;
+    }
+  }
+
+  private static class HookedSubEndpointRequest {
+    final SFSpec spec;
+    final String entityName;
+    final NeoEndpointType endpointType;
+    final String fieldName;
+    final String method;
+    final ActionDispatchParams actionParams;
+    final java.util.function.Supplier<NeoResponse> defaultAction;
+
+    HookedSubEndpointRequest(SFSpec spec, String entityName, NeoEndpointType endpointType,
+        String fieldName, String method, ActionDispatchParams actionParams,
+        java.util.function.Supplier<NeoResponse> defaultAction) {
+      this.spec = spec;
+      this.entityName = entityName;
+      this.endpointType = endpointType;
+      this.fieldName = fieldName;
+      this.method = method;
+      this.actionParams = actionParams;
+      this.defaultAction = defaultAction;
     }
   }
 

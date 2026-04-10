@@ -101,20 +101,7 @@ public class NeoSelectorService {
         if (column == null) {
           continue;
         }
-        String refId = getBaseReferenceId(column);
-        if (isListReference(refId)) {
-          selectors.put(SelectorDescriptorBuilder.buildListSelectorItem(column));
-          continue;
-        }
-        boolean isObuisel = hasObuiselSelector(column);
-        if (!isObuisel && !isFkReference(refId)) {
-          continue;
-        }
-        SelectorMeta meta = resolveTarget(column, refId);
-        if (meta != null) {
-          selectors.put(SelectorDescriptorBuilder.buildSelectorItem(
-              column, refId, meta, SESSION_PARAMS));
-        }
+        appendSelectorDescriptor(selectors, column);
       }
 
       JSONObject result = new JSONObject();
@@ -254,48 +241,13 @@ public class NeoSelectorService {
 
     StringBuilder hql = new StringBuilder();
     Map<String, Object> queryParams = new HashMap<>();
-
-    // Apply where clause from AD_Ref_Table if present
-    if (StringUtils.isNotBlank(meta.whereClause)) {
-      SelectorQueryBuilder.HqlWithParams whereClause =
-          SelectorQueryBuilder.resolveObuiselParams(meta.whereClause);
-      hql.append(whereClause.getHql());
-      queryParams.putAll(whereClause.getParams());
-    }
-
-    // Apply validation rule filter (resolved from context params)
-    if (StringUtils.isNotBlank(validationFilter)) {
-      if (hql.length() > 0) {
-        hql.append(SelectorQueryBuilder.SQL_AND);
-      }
-      hql.append(validationFilter);
-    }
-
-    // Prefer context/parent derived org filter; fallback to readable orgs.
-    SelectorQueryBuilder.HqlWithParams orgFilter = SelectorQueryBuilder.buildOrganizationPredicate(
-        meta.entityName, "e", contextOrganizationId, true);
-    if (orgFilter == null || orgFilter.isBlank()) {
-      orgFilter = SelectorQueryBuilder.buildReadableOrgsPredicate(meta.entityName, "e", true);
-    }
-    if (orgFilter != null && !orgFilter.isBlank()) {
-      if (hql.length() > 0) {
-        hql.append(SelectorQueryBuilder.SQL_AND);
-      }
-      hql.append(orgFilter.getHql());
-      queryParams.putAll(orgFilter.getParams());
-    }
-
-    // Search filter on display property
-    if (StringUtils.isNotBlank(search)) {
-      if (hql.length() > 0) {
-        hql.append(SelectorQueryBuilder.SQL_AND);
-      }
-      hql.append("lower(e.").append(meta.displayProperty)
-          .append(") LIKE :search");
-    }
+    appendResolvedWhereClause(hql, queryParams, meta.whereClause);
+    appendLiteralFilter(hql, validationFilter);
+    appendSelectorOrganizationFilter(hql, queryParams, meta, contextOrganizationId);
+    appendSimpleSearchFilter(hql, meta.displayProperty, search);
 
     // Prefix with alias "as e" so OBQuery registers the entity alias
-    String whereStr = hql.length() > 0 ? "as e where " + hql.toString() : "as e";
+    String whereStr = buildSimpleWhereClause(hql);
 
     // Count query
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
@@ -541,13 +493,81 @@ public class NeoSelectorService {
       return;
     }
     for (Map.Entry<String, Object> entry : params.entrySet()) {
-      Object value = entry.getValue();
-      if (value instanceof Collection<?>) {
-        query.setParameterList(entry.getKey(), (Collection<?>) value);
+      if (entry.getValue() instanceof Collection<?>) {
+        query.setParameterList(entry.getKey(), (Collection<?>) entry.getValue());
       } else {
-        query.setParameter(entry.getKey(), value);
+        query.setParameter(entry.getKey(), entry.getValue());
       }
     }
+  }
+
+  private static void appendSelectorDescriptor(JSONArray selectors, Column column) throws Exception {
+    String refId = getBaseReferenceId(column);
+    if (isListReference(refId)) {
+      selectors.put(SelectorDescriptorBuilder.buildListSelectorItem(column));
+      return;
+    }
+    boolean isObuisel = hasObuiselSelector(column);
+    if (isObuisel || isFkReference(refId)) {
+      SelectorMeta meta = resolveTarget(column, refId);
+      if (meta != null) {
+        selectors.put(SelectorDescriptorBuilder.buildSelectorItem(
+            column, refId, meta, SESSION_PARAMS));
+      }
+    }
+  }
+
+  private static void appendResolvedWhereClause(StringBuilder hql, Map<String, Object> queryParams,
+      String whereClause) {
+    if (StringUtils.isBlank(whereClause)) {
+      return;
+    }
+    SelectorQueryBuilder.HqlWithParams resolvedWhereClause =
+        SelectorQueryBuilder.resolveObuiselParams(whereClause);
+    hql.append(resolvedWhereClause.getHql());
+    queryParams.putAll(resolvedWhereClause.getParams());
+  }
+
+  private static void appendLiteralFilter(StringBuilder hql, String filter) {
+    if (StringUtils.isBlank(filter)) {
+      return;
+    }
+    appendAndIfNeeded(hql);
+    hql.append(filter);
+  }
+
+  private static void appendSelectorOrganizationFilter(StringBuilder hql,
+      Map<String, Object> queryParams, SelectorMeta meta, String contextOrganizationId) {
+    SelectorQueryBuilder.HqlWithParams orgFilter = SelectorQueryBuilder.buildOrganizationPredicate(
+        meta.entityName, "e", contextOrganizationId, true);
+    if (orgFilter == null || orgFilter.isBlank()) {
+      orgFilter = SelectorQueryBuilder.buildReadableOrgsPredicate(meta.entityName, "e", true);
+    }
+    if (orgFilter == null || orgFilter.isBlank()) {
+      return;
+    }
+    appendAndIfNeeded(hql);
+    hql.append(orgFilter.getHql());
+    queryParams.putAll(orgFilter.getParams());
+  }
+
+  private static void appendSimpleSearchFilter(StringBuilder hql, String displayProperty,
+      String search) {
+    if (StringUtils.isBlank(search)) {
+      return;
+    }
+    appendAndIfNeeded(hql);
+    hql.append("lower(e.").append(displayProperty).append(") LIKE :search");
+  }
+
+  private static void appendAndIfNeeded(StringBuilder hql) {
+    if (hql.length() > 0) {
+      hql.append(SelectorQueryBuilder.SQL_AND);
+    }
+  }
+
+  private static String buildSimpleWhereClause(StringBuilder hql) {
+    return hql.length() > 0 ? "as e where " + hql : "as e";
   }
 
   private static String resolveOrgFromParentRecord(SFEntity sourceEntity, String parentId) {

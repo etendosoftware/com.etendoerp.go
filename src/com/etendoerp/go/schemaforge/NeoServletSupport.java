@@ -76,8 +76,7 @@ class NeoServletSupport {
       return new NeoServlet.NeoPathInfo(null, null, null);
     }
 
-    String path = pathInfo.startsWith("/") ? pathInfo.substring(1) : pathInfo;
-    String[] parts = path.split("/");
+    String[] parts = normalizePathParts(pathInfo);
     if (parts.length < 1 || parts[0].isEmpty()) {
       return new NeoServlet.NeoPathInfo(null, null, null);
     }
@@ -87,27 +86,55 @@ class NeoServletSupport {
       return new NeoServlet.NeoPathInfo(specName, null, null);
     }
 
+    return parseEntityPath(specName, parts);
+  }
+
+  private static String[] normalizePathParts(String pathInfo) {
+    String normalizedPath = pathInfo.startsWith("/") ? pathInfo.substring(1) : pathInfo;
+    return normalizedPath.split("/");
+  }
+
+  private static NeoServlet.NeoPathInfo parseEntityPath(String specName, String[] parts) {
     String entityName = parts[1];
-    if (parts.length >= 3 && "selectors".equals(parts[2])) {
+    if (parts.length < 3) {
+      return new NeoServlet.NeoPathInfo(specName, entityName, null);
+    }
+    NeoServlet.NeoPathInfo subEndpointPath = parseSubEndpointPath(specName, entityName, parts);
+    if (subEndpointPath != null) {
+      return subEndpointPath;
+    }
+    String recordId = parts[2];
+    return parseActionOrRecordPath(specName, entityName, recordId, parts);
+  }
+
+  private static NeoServlet.NeoPathInfo parseSubEndpointPath(String specName, String entityName,
+      String[] parts) {
+    String thirdSegment = parts[2];
+    if ("selectors".equals(thirdSegment)) {
       String selectorField = parts.length >= 4 ? parts[3] : null;
       return new NeoServlet.NeoPathInfo(specName, entityName, null, true, selectorField);
     }
-    if (parts.length >= 3 && "callout".equals(parts[2])) {
+    if ("callout".equals(thirdSegment)) {
       return new NeoServlet.NeoPathInfo(
           specName, entityName, null, false, null, false, null, false, true, false);
     }
-    if (parts.length >= 3 && "defaults".equals(parts[2])) {
+    if ("defaults".equals(thirdSegment)) {
       return new NeoServlet.NeoPathInfo(
           specName, entityName, null, false, null, false, null, false, false, true);
     }
-    if (parts.length >= 3 && "evaluate-display".equals(parts[2])) {
+    if ("evaluate-display".equals(thirdSegment)) {
       return new NeoServlet.NeoPathInfo(specName, entityName, null, false, null, false, null, true);
     }
+    return null;
+  }
+
+  private static NeoServlet.NeoPathInfo parseActionOrRecordPath(String specName, String entityName,
+      String recordId, String[] parts) {
     if (parts.length >= 4 && "action".equals(parts[3])) {
       String actionName = parts.length >= 5 ? parts[4] : null;
-      return new NeoServlet.NeoPathInfo(specName, entityName, parts[2], false, null, true, actionName);
+      return new NeoServlet.NeoPathInfo(specName, entityName, recordId, false, null, true,
+          actionName);
     }
-    String recordId = parts.length >= 3 ? parts[2] : null;
     return new NeoServlet.NeoPathInfo(specName, entityName, recordId);
   }
 }
