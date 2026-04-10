@@ -106,6 +106,29 @@ public class NeoSelectorService {
   private static final Pattern WHERE_CLAUSE_PATTERN = Pattern.compile("\\sWHERE\\s",
       Pattern.CASE_INSENSITIVE);
 
+  /**
+   * HQL filters applied by AD_Reference_Value_ID when the standard AD_Ref_Table.hqlwhereclause
+   * is not set (or belongs to a module we cannot modify). Keyed by AD_Reference_Value_ID.
+   * These override / supplement the DB-level where clause without touching core or third-party
+   * module source data.
+   */
+  private static final java.util.Map<String, String> REFERENCE_OVERRIDE_FILTERS;
+  static {
+    java.util.Map<String, String> m = new java.util.HashMap<>();
+    // M_PriceList references — filter by direction so each selector shows only its type
+    m.put("166",    "e.salesPriceList = true");   // M_PriceListForSale  (customer price list)
+    m.put("800031", "e.salesPriceList = false");  // M_PriceListForPurchase (vendor price list)
+    // Financial payment method — only methods that have at least one active account link
+    m.put("EED0EF97D4A7421687F3B365D009E7A6",
+        "exists (select 1 from FinancialMgmtFinAccPaymentMethod fapm"
+        + " where fapm.paymentMethod = e and fapm.active = true)");
+    // Financial account — only accounts that have at least one active payment method link
+    m.put("DF1CEA94B3564A33AFDB37C07E1CE353",
+        "exists (select 1 from FinancialMgmtFinAccPaymentMethod fapm"
+        + " where fapm.account = e and fapm.active = true)");
+    REFERENCE_OVERRIDE_FILTERS = java.util.Collections.unmodifiableMap(m);
+  }
+
   private NeoSelectorService() {
   }
 
@@ -302,7 +325,9 @@ public class NeoSelectorService {
       // Resolve validation rule filter from context params
       String validationFilter = resolveValidationFilter(column, meta.entityName, contextParams);
       String organizationFilter = resolveOrgFilter(entity, column, meta, contextParams);
-      String combinedFilter = combineFilters(validationFilter, organizationFilter);
+      String referenceOverride = resolveReferenceOverrideFilter(column);
+      String combinedFilter = combineFilters(
+          combineFilters(validationFilter, organizationFilter), referenceOverride);
 
       // Build and execute query
       if (meta.isRich) {
@@ -1851,6 +1876,27 @@ public class NeoSelectorService {
    * <p>This compensates for the fact that {@code AD_ISORGINCLUDED} validation clauses are
    * stripped by {@link #sanitizeAdWhereClause} because they are SQL-only and not valid in HQL.
    */
+
+  /**
+   * Returns an additional HQL predicate for columns whose {@code AD_Reference_Value_ID} is listed
+   * in {@link #REFERENCE_OVERRIDE_FILTERS}. This avoids modifying {@code AD_Ref_Table.hqlwhereclause}
+   * records that belong to other modules (core, advpaymentmngt), keeping all filter logic
+   * self-contained within {@code com.etendoerp.go}.
+   *
+   * @param column the AD_Column being queried
+   * @return an HQL WHERE predicate, or {@code null} if no override is registered
+   */
+  private static String resolveReferenceOverrideFilter(Column column) {
+    if (column == null) {
+      return null;
+    }
+    org.openbravo.model.ad.domain.Reference refValue = column.getReferenceSearchKey();
+    if (refValue == null) {
+      return null;
+    }
+    return REFERENCE_OVERRIDE_FILTERS.get(refValue.getId());
+  }
+
   private static String resolveOrgFilter(SFEntity sourceEntity,
       Column sourceColumn, SelectorMeta targetMeta, Map<String, String> contextParams) {
     if (sourceEntity == null || sourceColumn == null || targetMeta == null) {
