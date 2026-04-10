@@ -146,6 +146,7 @@ public class NeoCalloutService {
         // Transform the callout result to REST format
         JSONObject restResponse = transformResponse(calloutResult, adTab);
         log.info("[NEO-CALLOUT] Transformed response: {}", restResponse.toString().substring(0, Math.min(500, restResponse.toString().length())));
+
         return NeoResponse.ok(restResponse);
 
       } finally {
@@ -382,6 +383,15 @@ public class NeoCalloutService {
     String lang = obCtx.getLanguage().getLanguage();
     String warehouseId = obCtx.getWarehouse() != null
         ? obCtx.getWarehouse().getId() : "";
+
+    // When logged in with "*" org (id=0), resolve the first real org so that
+    // @#AD_Org_ID@ expressions inside callouts resolve to a valid org.
+    if ("0".equals(orgId)) {
+      String realOrgId = NeoDefaultsService.resolveFirstOrgForClient(clientId);
+      if (realOrgId != null) {
+        orgId = realOrgId;
+      }
+    }
 
     VariablesSecureApp vars = new VariablesSecureApp(userId, clientId, orgId, roleId, lang);
     DalConnectionProvider conn = new DalConnectionProvider(false);
@@ -753,4 +763,5 @@ public class NeoCalloutService {
     }
     return stripped;
   }
+
 }

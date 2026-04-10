@@ -5,8 +5,12 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -58,6 +62,15 @@ public class NeoServlet extends HttpBaseServlet {
   private static final String PARAM_PARENT_ID = "parentId";
   private static final String ERR_ENTITY_NOT_FOUND = "Entity not found: ";
   private static final String ERR_NO_LINKED_TAB = "Entity has no linked AD_Tab: ";
+  private static final String HOOK_ERROR_MSG = "An internal error occurred while processing the hook handler";
+  private static final String PATCH_METHOD = "PATCH";
+  private static final String DELETE_METHOD = "DELETE";
+  private static final String PARENT_ID_KEY = "parentId";
+  // Etendo record IDs: 32-char hex, UUID with hyphens, or legacy numeric strings
+  private static final java.util.regex.Pattern VALID_ID_PATTERN =
+      java.util.regex.Pattern.compile("[A-Za-z0-9\\-]+");
+  private static final String KEY_UPDATES = "updates";
+  private static final String KEY_COMBOS = "combos";
 
   private final NeoDiscoveryHandler discoveryHandler = new NeoDiscoveryHandler(this);
   private final NeoButtonHandler buttonHandler = new NeoButtonHandler();
@@ -404,8 +417,66 @@ public class NeoServlet extends HttpBaseServlet {
     }
 
     OBContext context = SecureWebServicesUtils.createContext(userId, roleId, orgId, warehouseId, clientId);
+    // The JWT warehouse may have been set to an inaccessible warehouse by the token generator
+    // (SecureWebServicesUtils.getWarehouse() falls back to warehouseList.get(0) when the user
+    // has no default, without filtering by client). Validate it against the user's readable orgs;
+    // if inaccessible, find the first warehouse the user can actually access.
+    if (context.getWarehouse() != null) {
+      String whOrgId = context.getWarehouse().getOrganization().getId();
+      boolean accessible = false;
+      for (String readableOrg : context.getReadableOrganizations()) {
+        if (readableOrg.equals(whOrgId)) {
+          accessible = true;
+          break;
+        }
+      }
+      if (!accessible) {
+        log.warn("JWT warehouse '{}' (org='{}') is not in user '{}' readable orgs — resolving accessible warehouse",
+            warehouseId, whOrgId, userId);
+        String correctedWarehouseId = findAccessibleWarehouse(context);
+        context = SecureWebServicesUtils.createContext(userId, roleId, orgId, correctedWarehouseId, clientId);
+      }
+    }
     OBContext.setOBContext(context);
     OBContext.setOBContextInSession(request, context);
+  }
+
+  /**
+   * Finds the first warehouse accessible to the current user: active, same client, and belonging
+   * to one of the user's readable organizations. Returns {@code null} if none is found, in which
+   * case the context will be created without a warehouse and warehouse defaults will be empty.
+   */
+  private static String findAccessibleWarehouse(OBContext ctx) {
+    try {
+      OBContext.setAdminMode(true);
+      Set<String> readableOrgs = new java.util.HashSet<>(
+          java.util.Arrays.asList(ctx.getReadableOrganizations()));
+      OBCriteria<org.openbravo.model.common.enterprise.Warehouse> crit =
+          OBDal.getInstance().createCriteria(org.openbravo.model.common.enterprise.Warehouse.class);
+      crit.add(Restrictions.eq(
+          org.openbravo.model.common.enterprise.Warehouse.PROPERTY_CLIENT,
+          ctx.getCurrentClient()));
+      crit.add(Restrictions.eq(
+          org.openbravo.model.common.enterprise.Warehouse.PROPERTY_ACTIVE, true));
+      crit.setMaxResults(50);
+      for (org.openbravo.model.common.enterprise.Warehouse wh : crit.list()) {
+        String whOrgId = wh.getOrganization().getId();
+        if (readableOrgs.contains(whOrgId)) {
+          log.debug("Resolved accessible warehouse '{}' (org='{}') for user '{}'",
+              wh.getId(), whOrgId, ctx.getUser().getId());
+          return wh.getId();
+        }
+      }
+      log.warn("No accessible warehouse found for user '{}' client '{}'",
+          ctx.getUser().getId(), ctx.getCurrentClient().getId());
+      return null;
+    } catch (Exception e) {
+      log.error("Error finding accessible warehouse for user '{}': {}",
+          ctx.getUser().getId(), e.getMessage(), e);
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /**
@@ -493,6 +564,34 @@ public class NeoServlet extends HttpBaseServlet {
     criteria.setMaxResults(1);
     List<SFEntity> results = criteria.list();
     return results.isEmpty() ? null : results.get(0);
+  }
+
+  /**
+   * Check if the given HTTP method is enabled on the entity.
+   */
+  private boolean isMethodEnabled(SFEntity entity, String method) {
+    switch (method) {
+      case "GET":
+        return Boolean.TRUE.equals(entity.isGet())
+            || Boolean.TRUE.equals(entity.isGetByID());
+      case "POST":
+        return Boolean.TRUE.equals(entity.isPost());
+      case "PUT":
+        return Boolean.TRUE.equals(entity.isPut());
+      case PATCH_METHOD:
+        return Boolean.TRUE.equals(entity.isPatch());
+      case DELETE_METHOD:
+        return Boolean.TRUE.equals(entity.isDelete());
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * Get the AD_Tab linked to the entity.
+   */
+  private Tab getAdTab(SFEntity entity) {
+    return entity.getADTab();
   }
 
   Map<String, String> extractQueryParams(HttpServletRequest request) {
@@ -599,8 +698,67 @@ public class NeoServlet extends HttpBaseServlet {
         .obContext(OBContext.getOBContext())
         .build();
 
+    return executeHookChain(handler, hookCtx, defaultAction, endpointType, entityName);
+  }
+
+  /**
+   * Handle a process-type spec POST. Reads the request body as JSON
+   * and delegates to NeoProcessService.
+   */
+  private static class ActionDispatchParams {
+    final String recordId;
+    final JSONObject requestBody;
+
+    ActionDispatchParams(String recordId, JSONObject requestBody) {
+      this.recordId = recordId;
+      this.requestBody = requestBody;
+    }
+  }
+
+  /**
+   * Overload that passes recordId and requestBody to the hook context.
+   * Used by action endpoints where the record context matters.
+   */
+  private NeoResponse dispatchWithHooks(
+      SFSpec spec, String entityName,
+      NeoEndpointType endpointType, String fieldName,
+      String httpMethod, ActionDispatchParams actionParams,
+      java.util.function.Supplier<NeoResponse> defaultAction) {
+
+    SFEntity entity = findEntity(spec.getId(), entityName);
+    String qualifier = (entity != null) ? entity.getJavaQualifier() : null;
+
+    if (StringUtils.isBlank(qualifier)) {
+      return defaultAction.get();
+    }
+
+    NeoHandler handler = lookupHandler(qualifier);
+    if (handler == null) {
+      return defaultAction.get();
+    }
+
+    Tab adTab = (entity != null) ? getAdTab(entity) : null;
+    NeoContext hookCtx = NeoContext.builder()
+        .specName(spec.getName())
+        .entityName(entityName)
+        .httpMethod(httpMethod)
+        .endpointType(endpointType)
+        .fieldName(fieldName)
+        .recordId(actionParams.recordId)
+        .requestBody(actionParams.requestBody)
+        .sfEntity(entity)
+        .adTab(adTab)
+        .obContext(OBContext.getOBContext())
+        .build();
+
+    return executeHookChain(handler, hookCtx, defaultAction, endpointType, entityName);
+  }
+
+  private NeoResponse executeHookChain(
+      NeoHandler handler, NeoContext hookCtx,
+      java.util.function.Supplier<NeoResponse> defaultAction,
+      NeoEndpointType endpointType, String entityName) {
     try {
-      // Pre-hook
       NeoResponse preResult = handler.handle(hookCtx);
       if (preResult != null) {
         hookCtx.setPreviousResult(preResult);
@@ -608,10 +766,8 @@ public class NeoServlet extends HttpBaseServlet {
         return afterResult != null ? afterResult : preResult;
       }
 
-      // Default service
       NeoResponse defaultResult = defaultAction.get();
 
-      // Post-hook
       hookCtx.setPreviousResult(defaultResult);
       NeoResponse afterResult = handler.afterHandle(hookCtx);
       return afterResult != null ? afterResult : defaultResult;
@@ -619,14 +775,10 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error in hook dispatch for {}/{}: {}",
           endpointType, entityName, e.getMessage(), e);
-      return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
+      return NeoResponse.error(500, HOOK_ERROR_MSG);
     }
   }
 
-  /**
-   * Handle a process-type spec POST. Reads the request body as JSON
-   * and delegates to NeoProcessService.
-   */
   private void handleProcessSpec(SFSpec spec, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     try {
@@ -828,13 +980,65 @@ public class NeoServlet extends HttpBaseServlet {
           .obContext(OBContext.getOBContext())
           .build();
 
-      // Delegate to callout service
-      return NeoCalloutService.executeCallout(neoContext, requestBody);
+      // Execute the callout
+      NeoResponse calloutResult = NeoCalloutService.executeCallout(neoContext, requestBody);
+
+      // Cascade: if the callout set fields that have further callouts (e.g., SL_Order_Product
+      // sets tax+grossUnitPrice for gross-price lists → SL_Order_Amt derives unitPrice),
+      // chain those callouts and merge the results back into the response.
+      // This is done here (not in NeoCalloutService) to avoid recursion when
+      // executeSingleCallout calls NeoCalloutService.executeCallout internally.
+      if (calloutResult.getHttpStatus() == 200 && calloutResult.getBody() != null) {
+        String fieldName = requestBody.optString("field", "");
+        JSONObject formState = requestBody.optJSONObject("formState");
+        NeoDefaultsService.CalloutCascadeResult cascade =
+            NeoDefaultsService.cascadeInteractiveCallout(neoContext, tab, fieldName, formState, calloutResult.getBody());
+        if (cascade.hasResults()) {
+          mergeCalloutResponse(calloutResult.getBody(), cascade.toJSON());
+          log.debug("[NEO-CALLOUT] Cascade merged additional fields into response");
+        }
+      }
+
+      return calloutResult;
     } catch (Exception e) {
       log.error("Error handling callout for {}/{}: {}",
           pathInfo.specName, pathInfo.entityName, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Callout error: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Merge cascade results into an existing REST callout response.
+   * Does not overwrite fields already set by the initial callout.
+   */
+  private void mergeCalloutResponse(JSONObject base, JSONObject addition) {
+    try {
+      mergeJsonSection(base, addition, KEY_UPDATES);
+      mergeJsonSection(base, addition, KEY_COMBOS);
+    } catch (Exception e) {
+      log.debug("[NEO-CALLOUT] Failed to merge cascade results: {}", e.getMessage());
+    }
+  }
+
+  private static void mergeJsonSection(JSONObject base, JSONObject addition, String sectionKey)
+      throws org.codehaus.jettison.json.JSONException {
+    JSONObject addSection = addition.optJSONObject(sectionKey);
+    if (addSection == null) {
+      return;
+    }
+    JSONObject baseSection = base.optJSONObject(sectionKey);
+    if (baseSection == null) {
+      base.put(sectionKey, addSection);
+      return;
+    }
+    @SuppressWarnings("unchecked")
+    Iterator<String> keys = addSection.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if (!baseSection.has(key)) {
+        baseSection.put(key, addSection.get(key));
+      }
     }
   }
 
