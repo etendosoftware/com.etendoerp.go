@@ -423,6 +423,7 @@ public class NeoDefaultsService {
    *   This method passes empty doctype strings and is only kept for callers outside the
    *   two-pass defaults flow (e.g., injectMandatoryDefaults).
    */
+  @Deprecated
   private static String resolveSequencePreview(Column adColumn, VariablesSecureApp vars,
       DalConnectionProvider conn, String windowId, NeoContext ctx) {
     try {
@@ -878,7 +879,7 @@ public class NeoDefaultsService {
       if (tryInjectFromSession(body, propName, col.getDBColumnName(), mCtx.vars)) {
         return;
       }
-      if (tryInjectFromParentValues(body, propName, col, mCtx.parentValues)) {
+      if (tryInjectFromParentValues(body, dalEntity, propName, col, mCtx.parentValues)) {
         return;
       }
       injectSafeTypeDefault(body, propName, col);
@@ -931,8 +932,8 @@ public class NeoDefaultsService {
     return false;
   }
 
-  private static boolean tryInjectFromParentValues(JSONObject body, String propName,
-      Column col, Map<String, Object> parentValues) {
+  private static boolean tryInjectFromParentValues(JSONObject body, Entity dalEntity,
+      String propName, Column col, Map<String, Object> parentValues) {
     if (parentValues == null || parentValues.isEmpty()) {
       return false;
     }
@@ -947,6 +948,8 @@ public class NeoDefaultsService {
     }
     try {
       body.put(propName, value);
+      // Keep selector labels populated for FK fallbacks (same behavior as /defaults).
+      tryInjectIdentifier(body, dalEntity, propName, value);
       log.debug("Injected parent fallback default: {} = {}", propName, value);
       return true;
     } catch (Exception e) {

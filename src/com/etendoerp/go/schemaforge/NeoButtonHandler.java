@@ -16,6 +16,7 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 import javax.servlet.http.HttpServletRequest;
@@ -176,11 +177,18 @@ class NeoButtonHandler {
       return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
           "Access denied to process for current role");
     }
-    String bodyStr = new String(request.getInputStream().readAllBytes(),
-        java.nio.charset.StandardCharsets.UTF_8);
+    String bodyStr = resolveActionBody(request);
     JSONObject params = StringUtils.isNotBlank(bodyStr) ? new JSONObject(bodyStr) : new JSONObject();
     params.put("recordId", pathInfo.recordId);
     return NeoProcessService.executeProcess(adProcess, params);
+  }
+
+  private String resolveActionBody(HttpServletRequest request) throws Exception {
+    Object cached = request.getAttribute(NeoServlet.ACTION_REQUEST_BODY_ATTR);
+    if (cached instanceof String) {
+      return (String) cached;
+    }
+    return new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
   }
 
   /**

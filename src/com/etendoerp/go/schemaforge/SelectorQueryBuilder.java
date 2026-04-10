@@ -95,7 +95,7 @@ class SelectorQueryBuilder {
    * Returns "as e [where ...]" ready to pass to {@link OBDal#createQuery}.
    */
   static String buildRichQueryWhereClause(SelectorMeta meta,
-      String search, String validationFilter, String alias) {
+      String search, String validationFilter, String alias, String contextOrganizationId) {
     StringBuilder hql = new StringBuilder();
 
     if (StringUtils.isNotBlank(meta.whereClause)) {
@@ -109,12 +109,15 @@ class SelectorQueryBuilder {
       hql.append(validationFilter);
     }
 
-    String readableOrgsFilter = buildReadableOrgsPredicate(meta.entityName, alias, true);
-    if (StringUtils.isNotBlank(readableOrgsFilter)) {
+    String orgFilter = buildOrganizationPredicate(meta.entityName, alias, contextOrganizationId, true);
+    if (StringUtils.isBlank(orgFilter)) {
+      orgFilter = buildReadableOrgsPredicate(meta.entityName, alias, true);
+    }
+    if (StringUtils.isNotBlank(orgFilter)) {
       if (hql.length() > 0) {
         hql.append(SQL_AND);
       }
-      hql.append(readableOrgsFilter);
+      hql.append(orgFilter);
     }
 
     if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
@@ -161,7 +164,7 @@ class SelectorQueryBuilder {
    * @return the complete FROM clause string, ready to use in COUNT and data queries
    */
   static String buildCustomHqlFromClause(String fromOnwards, String alias,
-      SelectorMeta meta, String validationFilter, String search) {
+      SelectorMeta meta, String validationFilter, String search, String contextOrganizationId) {
     StringBuilder baseHql = new StringBuilder(fromOnwards);
     boolean hasWhere = Pattern.compile("\\sWHERE\\s", Pattern.CASE_INSENSITIVE)
         .matcher(fromOnwards).find();
@@ -178,7 +181,15 @@ class SelectorQueryBuilder {
       hasWhere = true;
     }
 
-    hasWhere = appendReadableOrgsFilter(baseHql, alias, meta.entityName, hasWhere, true);
+    String orgFilter = buildOrganizationPredicate(meta.entityName, alias, contextOrganizationId, true);
+    if (StringUtils.isBlank(orgFilter)) {
+      orgFilter = buildReadableOrgsPredicate(meta.entityName, alias, true);
+    }
+    if (StringUtils.isNotBlank(orgFilter)) {
+      baseHql.append(hasWhere ? SQL_AND : SQL_WHERE);
+      baseHql.append(orgFilter);
+      hasWhere = true;
+    }
     appendCustomSearchFilter(baseHql, meta.searchableProperties, alias, search, hasWhere);
 
     return baseHql.toString();
@@ -222,6 +233,43 @@ class SelectorQueryBuilder {
       }
       filter.append("'").append(orgId.replace("'", "''")).append("'");
       first = false;
+    }
+    filter.append(")");
+    return filter.toString();
+  }
+
+  /**
+   * Build an organization filter bound to a single org context.
+   * Optionally includes organization "0" (the "*" org) to preserve shared master data visibility.
+   */
+  static String buildOrganizationPredicate(String entityName, String alias,
+      String organizationId, boolean includeOrgZero) {
+    if (StringUtils.isBlank(organizationId)) {
+      return null;
+    }
+    Entity entityDef = ModelProvider.getInstance().getEntity(entityName);
+    if (entityDef == null || !entityDef.hasProperty("organization")) {
+      return null;
+    }
+    Set<String> orgIds = new LinkedHashSet<>();
+    orgIds.add(organizationId.trim());
+    if (includeOrgZero) {
+      orgIds.add("0");
+    }
+    StringBuilder filter = new StringBuilder(alias).append(".organization.id IN (");
+    boolean first = true;
+    for (String orgId : orgIds) {
+      if (StringUtils.isBlank(orgId)) {
+        continue;
+      }
+      if (!first) {
+        filter.append(", ");
+      }
+      filter.append("'").append(orgId.replace("'", "''")).append("'");
+      first = false;
+    }
+    if (first) {
+      return null;
     }
     filter.append(")");
     return filter.toString();
@@ -437,6 +485,19 @@ class SelectorQueryBuilder {
    */
   static String resolveValidationFilter(Column column, String targetEntityName,
       Map<String, String> contextParams) {
+    String resolvedSql = resolveValidationSql(column, contextParams);
+    if (StringUtils.isBlank(resolvedSql)) {
+      return null;
+    }
+    // Convert SQL TABLE.COLUMN references to HQL e.property paths
+    return convertSqlToHql(resolvedSql, targetEntityName);
+  }
+
+  /**
+   * Resolve validation rules into a SQL clause with context params substituted.
+   * Used by list selectors that execute SQL restrictions directly.
+   */
+  static String resolveValidationSql(Column column, Map<String, String> contextParams) {
     Validation valRule = column.getValidation();
     if (valRule == null || StringUtils.isBlank(valRule.getValidationCode())) {
       return null;
@@ -457,12 +518,7 @@ class SelectorQueryBuilder {
     if (resolvedClauses.isEmpty()) {
       return null;
     }
-
-    // Join resolved clauses back with AND
-    String joined = String.join(SQL_AND, resolvedClauses);
-
-    // Convert SQL TABLE.COLUMN references to HQL e.property paths
-    return convertSqlToHql(joined, targetEntityName);
+    return String.join(SQL_AND, resolvedClauses);
   }
 
   /**
@@ -478,6 +534,15 @@ class SelectorQueryBuilder {
     if (contextParams != null) {
       allParams.putAll(contextParams);
     }
+    Map<String, String> normalized = new HashMap<>();
+    for (Map.Entry<String, String> entry : allParams.entrySet()) {
+      if (entry.getKey() == null || entry.getValue() == null) {
+        continue;
+      }
+      normalized.put(entry.getKey().toLowerCase(), entry.getValue());
+      normalized.put(entry.getKey().toUpperCase(), entry.getValue());
+    }
+    allParams.putAll(normalized);
     return allParams;
   }
 
@@ -500,7 +565,7 @@ class SelectorQueryBuilder {
     // Check if all @Param@ in this clause can be resolved
     Matcher paramMatcher = VALIDATION_PARAM.matcher(trimmed);
     while (paramMatcher.find()) {
-      if (!allParams.containsKey(paramMatcher.group(1))) {
+      if (lookupParamValue(allParams, paramMatcher.group(1)) == null) {
         log.debug("Skipping validation clause with unresolvable params: {}", trimmed);
         return null;
       }
@@ -510,11 +575,30 @@ class SelectorQueryBuilder {
     StringBuffer resolved = new StringBuffer();
     paramMatcher = VALIDATION_PARAM.matcher(trimmed);
     while (paramMatcher.find()) {
-      String value = allParams.get(paramMatcher.group(1)).replace("'", "''");
+      String rawValue = lookupParamValue(allParams, paramMatcher.group(1));
+      if (rawValue == null) {
+        return null;
+      }
+      String value = rawValue.replace("'", "''");
       paramMatcher.appendReplacement(resolved, Matcher.quoteReplacement("'" + value + "'"));
     }
     paramMatcher.appendTail(resolved);
     return resolved.toString();
+  }
+
+  private static String lookupParamValue(Map<String, String> allParams, String key) {
+    if (allParams == null || StringUtils.isBlank(key)) {
+      return null;
+    }
+    String exact = allParams.get(key);
+    if (exact != null) {
+      return exact;
+    }
+    String lower = allParams.get(key.toLowerCase());
+    if (lower != null) {
+      return lower;
+    }
+    return allParams.get(key.toUpperCase());
   }
 
   /**

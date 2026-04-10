@@ -95,7 +95,8 @@ class CalloutRequestBuilder {
 
     // Inject essential context params from OBContext (security boundary — always authoritative)
     OBContext obCtx = OBContext.getOBContext();
-    params.put("inpadOrgId", new String[]{ obCtx.getCurrentOrganization().getId() });
+    String normalizedOrgId = resolveEffectiveCalloutOrgId(obCtx);
+    params.put("inpadOrgId", new String[]{ normalizedOrgId });
     params.put("inpadClientId", new String[]{ obCtx.getCurrentClient().getId() });
     String isSOTrx = adTab.getWindow() != null
         && Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
@@ -109,6 +110,8 @@ class CalloutRequestBuilder {
 
     // Map form state fields to inp* parameters (skips trigger field and $_identifier keys)
     mapFormStateToParams(formState, inpFieldName, maps, params);
+    // Keep org context authoritative: avoid stale/inconsistent AD_Org_ID from formState.
+    params.put("inpadOrgId", new String[]{ normalizedOrgId });
 
     // Fill missing columns with their AD defaults so callouts see all fields
     fillMissingColumnDefaults(adTab, obCtx, maps.columns, params);
@@ -120,6 +123,29 @@ class CalloutRequestBuilder {
     mapAuxValuesToParams(auxValues, maps, params);
 
     return params;
+  }
+
+  /**
+   * Resolve the effective organization for callout request params.
+   * When session org is "*" (0), use the first real org for the client.
+   */
+  private static String resolveEffectiveCalloutOrgId(OBContext obCtx) {
+    if (obCtx == null) {
+      return "0";
+    }
+    String orgId = obCtx.getCurrentOrganization() != null
+        ? obCtx.getCurrentOrganization().getId() : null;
+    if (orgId != null && !orgId.isEmpty() && !"0".equals(orgId)) {
+      return orgId;
+    }
+    String clientId = obCtx.getCurrentClient() != null ? obCtx.getCurrentClient().getId() : null;
+    if (clientId != null && !clientId.isEmpty()) {
+      String realOrgId = NeoDefaultsService.resolveFirstOrgForClient(clientId);
+      if (realOrgId != null && !realOrgId.isEmpty()) {
+        return realOrgId;
+      }
+    }
+    return orgId != null ? orgId : "0";
   }
 
   // ── Column lookup maps ─────────────────────────────────────────────

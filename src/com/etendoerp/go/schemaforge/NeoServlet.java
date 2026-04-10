@@ -66,6 +66,7 @@ public class NeoServlet extends HttpBaseServlet {
   private static final String PATCH_METHOD = "PATCH";
   private static final String DELETE_METHOD = "DELETE";
   private static final String PARENT_ID_KEY = "parentId";
+  static final String ACTION_REQUEST_BODY_ATTR = "neo.action.requestBody";
   // Etendo record IDs: 32-char hex, UUID with hyphens, or legacy numeric strings
   private static final java.util.regex.Pattern VALID_ID_PATTERN =
       java.util.regex.Pattern.compile("[A-Za-z0-9\\-]+");
@@ -353,6 +354,8 @@ public class NeoServlet extends HttpBaseServlet {
     if ("POST".equals(method)) {
       try {
         String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        // Cache body so action execution does not consume the request stream a second time.
+        request.setAttribute(ACTION_REQUEST_BODY_ATTR, bodyStr);
         if (StringUtils.isNotBlank(bodyStr)) {
           actionParams = new ActionDispatchParams(pathInfo.recordId, new JSONObject(bodyStr));
         }

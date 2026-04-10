@@ -18,12 +18,15 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.client.application.ApplicationUtils;
+import org.openbravo.client.kernel.KernelUtils;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.domain.ReferencedTable;
+import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.userinterface.selector.Selector;
 import org.openbravo.userinterface.selector.SelectorField;
 
@@ -60,10 +63,12 @@ public class NeoSelectorService {
   // JSON field name constants
   private static final String PARAM_SEARCH = "search";
   private static final String FIELD_LABEL = "label";
+  private static final String AD_ORG_ID = "AD_Org_ID";
+  private static final String PROP_ORGANIZATION = "organization";
 
   // Session-level params resolved server-side (should not appear in selectorParams)
   private static final java.util.Set<String> SESSION_PARAMS = new java.util.HashSet<>(
-      java.util.Arrays.asList("AD_Org_ID", "AD_Client_ID", "AD_User_ID", "AD_Role_ID"));
+      java.util.Arrays.asList(AD_ORG_ID, "AD_Client_ID", "AD_User_ID", "AD_Role_ID"));
 
   private NeoSelectorService() {
   }
@@ -266,7 +271,7 @@ public class NeoSelectorService {
             "Could not resolve AD_Column for field: " + columnName);
       }
 
-      return querySelectorByColumn(column, columnName, search, limit, offset, contextParams);
+      return querySelectorByColumn(entity, column, columnName, search, limit, offset, contextParams);
 
     } catch (Exception e) {
       log.error("Error querying selector {}/{}", entityName, columnName, e);
@@ -289,6 +294,11 @@ public class NeoSelectorService {
    */
   public static NeoResponse querySelectorByColumn(Column column, String columnName,
       String search, int limit, int offset, Map<String, String> contextParams) {
+    return querySelectorByColumn(null, column, columnName, search, limit, offset, contextParams);
+  }
+
+  private static NeoResponse querySelectorByColumn(SFEntity sourceEntity, Column column, String columnName,
+      String search, int limit, int offset, Map<String, String> contextParams) {
     try {
       if (limit <= 0) {
         limit = DEFAULT_LIMIT;
@@ -308,7 +318,7 @@ public class NeoSelectorService {
             "Field is not a FK reference: " + columnName);
       }
       if (isList) {
-        return resolveListSelector(column, search, limit, offset);
+        return resolveListSelector(column, search, limit, offset, contextParams);
       }
 
       SelectorMeta meta = resolveTarget(column, refId);
@@ -320,12 +330,13 @@ public class NeoSelectorService {
       // Resolve validation rule filter from context params
       String validationFilter = SelectorQueryBuilder.resolveValidationFilter(
           column, meta.entityName, contextParams);
+      String contextOrganizationId = resolveContextOrganizationId(sourceEntity, contextParams);
 
       // Build and execute query
       if (meta.isRich) {
-        return executeRichQuery(meta, search, limit, offset, validationFilter);
+        return executeRichQuery(meta, search, limit, offset, validationFilter, contextOrganizationId);
       }
-      return executeQuery(meta, search, limit, offset, validationFilter);
+      return executeQuery(meta, search, limit, offset, validationFilter, contextOrganizationId);
 
     } catch (Exception e) {
       log.error("Error querying selector by column {}", columnName, e);
@@ -337,7 +348,8 @@ public class NeoSelectorService {
    * Execute the paginated query against the target entity (simple selectors).
    */
   private static NeoResponse executeQuery(SelectorMeta meta,
-      String search, int limit, int offset, String validationFilter) throws Exception {
+      String search, int limit, int offset, String validationFilter,
+      String contextOrganizationId) throws Exception {
 
     StringBuilder hql = new StringBuilder();
 
@@ -354,14 +366,17 @@ public class NeoSelectorService {
       hql.append(validationFilter);
     }
 
-    // Apply readable org filter for org-aware entities (including "*" org 0)
-    String readableOrgsFilter = SelectorQueryBuilder.buildReadableOrgsPredicate(
-        meta.entityName, "e", true);
-    if (StringUtils.isNotBlank(readableOrgsFilter)) {
+    // Prefer context/parent derived org filter; fallback to readable orgs.
+    String orgFilter = SelectorQueryBuilder.buildOrganizationPredicate(
+        meta.entityName, "e", contextOrganizationId, true);
+    if (StringUtils.isBlank(orgFilter)) {
+      orgFilter = SelectorQueryBuilder.buildReadableOrgsPredicate(meta.entityName, "e", true);
+    }
+    if (StringUtils.isNotBlank(orgFilter)) {
       if (hql.length() > 0) {
         hql.append(SelectorQueryBuilder.SQL_AND);
       }
-      hql.append(readableOrgsFilter);
+      hql.append(orgFilter);
     }
 
     // Search filter on display property
@@ -414,15 +429,17 @@ public class NeoSelectorService {
    * Execute a rich (OBUISEL) selector query with multi-column response.
    */
   private static NeoResponse executeRichQuery(SelectorMeta meta,
-      String search, int limit, int offset, String validationFilter) throws Exception {
+      String search, int limit, int offset, String validationFilter,
+      String contextOrganizationId) throws Exception {
 
     if (meta.isCustomQuery && StringUtils.isNotBlank(meta.customHql)) {
-      return executeCustomHqlQuery(meta, search, limit, offset, validationFilter);
+      return executeCustomHqlQuery(meta, search, limit, offset, validationFilter, contextOrganizationId);
     }
     // Custom query flag set but no HQL defined: fall through to standard query
 
     String alias = "e";
-    String whereStr = SelectorQueryBuilder.buildRichQueryWhereClause(meta, search, validationFilter, alias);
+    String whereStr = SelectorQueryBuilder.buildRichQueryWhereClause(
+        meta, search, validationFilter, alias, contextOrganizationId);
     boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
 
     // Count query
@@ -472,7 +489,8 @@ public class NeoSelectorService {
    */
   @SuppressWarnings("unchecked")
   private static NeoResponse executeCustomHqlQuery(SelectorMeta meta,
-      String search, int limit, int offset, String validationFilter) throws Exception {
+      String search, int limit, int offset, String validationFilter,
+      String contextOrganizationId) throws Exception {
 
     String alias = meta.entityAlias;
     String rawHql = meta.customHql.replace("@additional_filters@", "1=1");
@@ -489,7 +507,7 @@ public class NeoSelectorService {
 
     // Build the FROM…WHERE…filters portion
     String fromClause = SelectorQueryBuilder.buildCustomHqlFromClause(
-        fromOnwards, alias, meta, validationFilter, search);
+        fromOnwards, alias, meta, validationFilter, search, contextOrganizationId);
     boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
 
     // Parse SELECT column aliases to build a name→index map
@@ -577,6 +595,61 @@ public class NeoSelectorService {
     }
   }
 
+  private static String resolveContextOrganizationId(SFEntity sourceEntity,
+      Map<String, String> contextParams) {
+    if (contextParams == null) {
+      return null;
+    }
+    String organizationId = StringUtils.trimToNull(contextParams.get(AD_ORG_ID));
+    if (organizationId == null) {
+      organizationId = StringUtils.trimToNull(contextParams.get("inpadOrgId"));
+    }
+    if (organizationId == null) {
+      organizationId = resolveOrgFromParentRecord(sourceEntity, contextParams.get("parentId"));
+    }
+    if ("0".equals(organizationId)) {
+      return null;
+    }
+    return organizationId;
+  }
+
+  private static String resolveOrgFromParentRecord(SFEntity sourceEntity, String parentId) {
+    if (sourceEntity == null || StringUtils.isBlank(parentId)) {
+      return null;
+    }
+    try {
+      Tab childTab = sourceEntity.getADTab();
+      if (childTab == null || childTab.getTabLevel() == null || childTab.getTabLevel() <= 0) {
+        return null;
+      }
+      Tab parentTab = KernelUtils.getInstance().getParentTab(childTab);
+      if (parentTab == null || parentTab.getTable() == null) {
+        return null;
+      }
+      String parentProperty = ApplicationUtils.getParentProperty(childTab, parentTab);
+      if (StringUtils.isBlank(parentProperty)) {
+        return null;
+      }
+      Entity parentEntity = ModelProvider.getInstance().getEntityByTableId(parentTab.getTable().getId());
+      if (parentEntity == null || !parentEntity.hasProperty(PROP_ORGANIZATION)) {
+        return null;
+      }
+      BaseOBObject parentRecord = OBDal.getInstance().get(parentEntity.getName(), parentId);
+      if (parentRecord == null) {
+        return null;
+      }
+      Object organization = parentRecord.get(PROP_ORGANIZATION);
+      if (organization instanceof BaseOBObject) {
+        Object organizationId = ((BaseOBObject) organization).getId();
+        return organizationId != null ? organizationId.toString() : null;
+      }
+      return organization != null ? organization.toString() : null;
+    } catch (Exception e) {
+      log.debug("Could not resolve parent organization for selector context: {}", e.getMessage());
+      return null;
+    }
+  }
+
   // ---- Resolution helpers ----
 
   private static SFEntity findEntity(String specId, String entityName) {
@@ -658,7 +731,7 @@ public class NeoSelectorService {
    */
   @SuppressWarnings("unchecked")
   private static NeoResponse resolveListSelector(Column column, String search,
-      int limit, int offset) throws Exception {
+      int limit, int offset, Map<String, String> contextParams) throws Exception {
 
     org.openbravo.model.ad.domain.Reference listRef = column.getReferenceSearchKey();
     if (listRef == null) {
@@ -666,15 +739,7 @@ public class NeoSelectorService {
       listRef = column.getReference();
     }
 
-    // Apply static validation rule clauses only (skip context-based @param@ rules).
-    String valRuleSql = null;
-    org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
-    if (valRule != null && StringUtils.isNotBlank(valRule.getValidationCode())) {
-      String ruleCode = valRule.getValidationCode().trim();
-      if (!ruleCode.contains("@")) {
-        valRuleSql = ruleCode;
-      }
-    }
+    String valRuleSql = SelectorQueryBuilder.resolveValidationSql(column, contextParams);
 
     // Use separate criteria for count/data because count() mutates projection state.
     OBCriteria<org.openbravo.model.ad.domain.List> countCrit = OBDal.getInstance()
