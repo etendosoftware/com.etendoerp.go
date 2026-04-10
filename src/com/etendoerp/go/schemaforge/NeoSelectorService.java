@@ -105,6 +105,8 @@ public class NeoSelectorService {
       Pattern.CASE_INSENSITIVE);
   private static final Pattern WHERE_CLAUSE_PATTERN = Pattern.compile("\\sWHERE\\s",
       Pattern.CASE_INSENSITIVE);
+  private static final Pattern COMPLEX_SUBQUERY_PATTERN = Pattern.compile(
+      "\\b(EXISTS|IN\\s*\\(\\s*SELECT)\\b", Pattern.CASE_INSENSITIVE);
 
   /**
    * HQL filters applied by AD_Reference_Value_ID when the standard AD_Ref_Table.hqlwhereclause
@@ -1805,7 +1807,7 @@ public class NeoSelectorService {
       // Skip clauses containing complex subqueries (EXISTS, IN SELECT)
       // Automatic SQL-to-HQL conversion for subqueries is unstable because we cannot
       // easily determine entity names, aliases, and property paths inside nested SQL.
-      if (Pattern.compile("\\b(EXISTS|IN\\s*\\(\\s*SELECT)\\b", Pattern.CASE_INSENSITIVE).matcher(trimmed).find()) {
+      if (COMPLEX_SUBQUERY_PATTERN.matcher(trimmed).find()) {
         log.debug("Skipping validation clause with complex subquery: {}", trimmed);
         continue;
       }
@@ -1925,7 +1927,7 @@ public class NeoSelectorService {
 
     org.openbravo.dal.security.OrganizationStructureProvider osp =
        OBContext.getOBContext().getOrganizationStructureProvider();
-    java.util.Set<String> naturalTree = osp.getNaturalTree(safeOrgId);
+    java.util.Set<String> naturalTree = new java.util.HashSet<>(osp.getNaturalTree(safeOrgId));
     if (!naturalTree.contains("0")) {
       naturalTree.add("0");
     }

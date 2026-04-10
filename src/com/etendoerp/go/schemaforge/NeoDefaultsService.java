@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -416,7 +417,7 @@ public class NeoDefaultsService {
           }
         }
       }
-    } catch (Exception e) {
+    } catch (SQLException e) {
       log.debug("Could not read DB-level column default for {}.{}: {}",
           tableName, columnName, e.getMessage());
     }
