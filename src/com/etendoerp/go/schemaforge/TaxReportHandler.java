@@ -322,7 +322,7 @@ public class TaxReportHandler implements NeoHandler {
       taxGroup.put(F_TAX_AMT,   sum(taxRows, F_TAX_AMT));
       taxGroup.put(F_TOTAL_AMT, sum(taxRows, F_TOTAL_AMT));
       if (groupByBp) {
-        taxGroup.put(F_BP_GROUPS, buildBpGroups(taxRows));
+        taxGroup.put(F_BP_GROUPS, buildBpGroups(taxRows, false));
         taxGroup.put("docs",      new JSONArray());
       } else {
         taxGroup.put(F_BP_GROUPS, new JSONArray());
@@ -333,7 +333,11 @@ public class TaxReportHandler implements NeoHandler {
     return result;
   }
 
-  private JSONArray buildBpGroups(List<TaxRow> rows) throws Exception {
+  /**
+   * Builds per-BP groups for the detail section (forRate=false) or the rate summary (forRate=true).
+   * When forRate=true each group includes bpTaxId and a tax breakdown array instead of doc rows.
+   */
+  private JSONArray buildBpGroups(List<TaxRow> rows, boolean forRate) throws Exception {
     Map<String, List<TaxRow>> byBp = groupBy(rows, r -> r.bPartnerId);
     JSONArray groups = new JSONArray();
     for (Map.Entry<String, List<TaxRow>> entry : byBp.entrySet()) {
@@ -345,7 +349,12 @@ public class TaxReportHandler implements NeoHandler {
       g.put(F_TAX_BASE,   sum(bpRows, F_TAX_BASE));
       g.put(F_TAX_AMT,    sum(bpRows, F_TAX_AMT));
       g.put(F_TOTAL_AMT,  sum(bpRows, F_TOTAL_AMT));
-      g.put("docs",       buildDocRows(bpRows));
+      if (forRate) {
+        g.put("bpTaxId", first.bpTaxId != null ? first.bpTaxId : "");
+        g.put(F_TAXES,   buildTaxSummaryArray(groupBy(bpRows, r -> r.taxId)));
+      } else {
+        g.put("docs", buildDocRows(bpRows));
+      }
       groups.put(g);
     }
     return groups;
@@ -410,48 +419,13 @@ public class TaxReportHandler implements NeoHandler {
     long totalBpCount = rateRows.stream().map(r -> r.bPartnerId).distinct().count();
     JSONObject rateGroup = new JSONObject();
     rateGroup.put(F_RATE,      rate);
-    rateGroup.put(F_BP_GROUPS, buildBpGroupsForRate(rateRows));
+    rateGroup.put(F_BP_GROUPS, buildBpGroups(rateRows, true));
     rateGroup.put(F_TAXES,     buildTaxSummaryArray(groupBy(rateRows, r -> r.taxId)));
     rateGroup.put(F_TAX_BASE,  sum(rateRows, F_TAX_BASE));
     rateGroup.put(F_TAX_AMT,   sum(rateRows, F_TAX_AMT));
     rateGroup.put(F_TOTAL_AMT, sum(rateRows, F_TOTAL_AMT));
     rateGroup.put(F_BP_COUNT,  totalBpCount);
     return rateGroup;
-  }
-
-  private JSONArray buildBpGroupsForRate(List<TaxRow> rateRows) throws Exception {
-    Map<String, List<TaxRow>> byBp = groupBy(rateRows, r -> r.bPartnerId);
-    JSONArray bpGroups = new JSONArray();
-    for (Map.Entry<String, List<TaxRow>> bpEntry : byBp.entrySet()) {
-      List<TaxRow> bpRows = bpEntry.getValue();
-      TaxRow bpFirst = bpRows.get(0);
-      JSONObject bpGroup = new JSONObject();
-      bpGroup.put("bPartnerId", bpFirst.bPartnerId);
-      bpGroup.put(F_PARTNER,    bpFirst.bPartner);
-      bpGroup.put("bpTaxId",    bpFirst.bpTaxId != null ? bpFirst.bpTaxId : "");
-      bpGroup.put(F_TAX_BASE,   sum(bpRows, F_TAX_BASE));
-      bpGroup.put(F_TAX_AMT,    sum(bpRows, F_TAX_AMT));
-      bpGroup.put(F_TOTAL_AMT,  sum(bpRows, F_TOTAL_AMT));
-      bpGroup.put(F_TAXES,      buildBpTaxArray(groupBy(bpRows, r -> r.taxId)));
-      bpGroups.put(bpGroup);
-    }
-    return bpGroups;
-  }
-
-  private JSONArray buildBpTaxArray(Map<String, List<TaxRow>> byTax) throws Exception {
-    JSONArray taxes = new JSONArray();
-    for (Map.Entry<String, List<TaxRow>> taxEntry : byTax.entrySet()) {
-      List<TaxRow> taxRows = taxEntry.getValue();
-      TaxRow taxFirst = taxRows.get(0);
-      JSONObject t = new JSONObject();
-      t.put(F_TAX_NAME,  taxFirst.taxName);
-      t.put(F_RATE,      taxFirst.rate);
-      t.put(F_TAX_BASE,  sum(taxRows, F_TAX_BASE));
-      t.put(F_TAX_AMT,   sum(taxRows, F_TAX_AMT));
-      t.put(F_TOTAL_AMT, sum(taxRows, F_TOTAL_AMT));
-      taxes.put(t);
-    }
-    return taxes;
   }
 
   private JSONArray buildTaxSummaryArray(Map<String, List<TaxRow>> byTax) throws Exception {
