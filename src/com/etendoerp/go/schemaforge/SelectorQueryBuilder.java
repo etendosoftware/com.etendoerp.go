@@ -97,43 +97,10 @@ class SelectorQueryBuilder {
   static String buildRichQueryWhereClause(SelectorMeta meta,
       String search, String validationFilter, String alias, String contextOrganizationId) {
     StringBuilder hql = new StringBuilder();
-
-    if (StringUtils.isNotBlank(meta.whereClause)) {
-      hql.append(resolveObuiselParams(meta.whereClause));
-    }
-
-    if (StringUtils.isNotBlank(validationFilter)) {
-      if (hql.length() > 0) {
-        hql.append(SQL_AND);
-      }
-      hql.append(validationFilter);
-    }
-
-    String orgFilter = buildOrganizationPredicate(meta.entityName, alias, contextOrganizationId, true);
-    if (StringUtils.isBlank(orgFilter)) {
-      orgFilter = buildReadableOrgsPredicate(meta.entityName, alias, true);
-    }
-    if (StringUtils.isNotBlank(orgFilter)) {
-      if (hql.length() > 0) {
-        hql.append(SQL_AND);
-      }
-      hql.append(orgFilter);
-    }
-
-    if (StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty()) {
-      if (hql.length() > 0) {
-        hql.append(SQL_AND);
-      }
-      hql.append("(");
-      for (int i = 0; i < meta.searchableProperties.size(); i++) {
-        if (i > 0) {
-          hql.append(" OR ");
-        }
-        hql.append("lower(COALESCE(cast(").append(alias).append(".")
-            .append(meta.searchableProperties.get(i)).append(" as string), '')) LIKE :search");
-      }
-      hql.append(")");
-    }
+    appendResolvedClause(hql, resolveObuiselParams(meta.whereClause));
+    appendResolvedClause(hql, validationFilter);
+    appendResolvedClause(hql, resolveSelectorOrgFilter(meta.entityName, alias, contextOrganizationId));
+    appendSearchClause(hql, meta.searchableProperties, alias, search);
 
     return hql.length() > 0
         ? "as " + alias + " where " + hql
@@ -169,30 +136,46 @@ class SelectorQueryBuilder {
     boolean hasWhere = Pattern.compile("\\sWHERE\\s", Pattern.CASE_INSENSITIVE)
         .matcher(fromOnwards).find();
 
-    if (StringUtils.isNotBlank(meta.whereClause)) {
-      baseHql.append(hasWhere ? SQL_AND : SQL_WHERE);
-      baseHql.append(resolveObuiselParams(meta.whereClause));
-      hasWhere = true;
-    }
-
-    if (StringUtils.isNotBlank(validationFilter)) {
-      baseHql.append(hasWhere ? SQL_AND : SQL_WHERE);
-      baseHql.append(validationFilter);
-      hasWhere = true;
-    }
-
-    String orgFilter = buildOrganizationPredicate(meta.entityName, alias, contextOrganizationId, true);
-    if (StringUtils.isBlank(orgFilter)) {
-      orgFilter = buildReadableOrgsPredicate(meta.entityName, alias, true);
-    }
-    if (StringUtils.isNotBlank(orgFilter)) {
-      baseHql.append(hasWhere ? SQL_AND : SQL_WHERE);
-      baseHql.append(orgFilter);
-      hasWhere = true;
-    }
+    hasWhere = appendClause(baseHql, resolveObuiselParams(meta.whereClause), hasWhere);
+    hasWhere = appendClause(baseHql, validationFilter, hasWhere);
+    hasWhere = appendClause(baseHql,
+        resolveSelectorOrgFilter(meta.entityName, alias, contextOrganizationId), hasWhere);
     appendCustomSearchFilter(baseHql, meta.searchableProperties, alias, search, hasWhere);
 
     return baseHql.toString();
+  }
+
+  private static void appendResolvedClause(StringBuilder hql, String clause) {
+    if (StringUtils.isBlank(clause)) {
+      return;
+    }
+    if (hql.length() > 0) {
+      hql.append(SQL_AND);
+    }
+    hql.append(clause);
+  }
+
+  private static boolean appendClause(StringBuilder hql, String clause, boolean hasWhere) {
+    if (StringUtils.isBlank(clause)) {
+      return hasWhere;
+    }
+    hql.append(hasWhere ? SQL_AND : SQL_WHERE);
+    hql.append(clause);
+    return true;
+  }
+
+  private static void appendSearchClause(StringBuilder hql,
+      List<String> searchableProperties, String alias, String search) {
+    appendCustomSearchFilter(hql, searchableProperties, alias, search, hql.length() > 0);
+  }
+
+  private static String resolveSelectorOrgFilter(String entityName, String alias,
+      String contextOrganizationId) {
+    String orgFilter = buildOrganizationPredicate(entityName, alias, contextOrganizationId, true);
+    if (StringUtils.isNotBlank(orgFilter)) {
+      return orgFilter;
+    }
+    return buildReadableOrgsPredicate(entityName, alias, true);
   }
 
   /**

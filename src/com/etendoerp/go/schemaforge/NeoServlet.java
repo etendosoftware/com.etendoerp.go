@@ -32,8 +32,6 @@ import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
-import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
-
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -132,7 +130,7 @@ public class NeoServlet extends HttpBaseServlet {
     // 2. Parse the path
     NeoPathInfo pathInfo;
     try {
-      pathInfo = parsePath(request.getPathInfo());
+      pathInfo = NeoServletSupport.parsePath(request.getPathInfo());
     } catch (IllegalArgumentException e) {
       sendError(response, HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
       return;
@@ -154,7 +152,7 @@ public class NeoServlet extends HttpBaseServlet {
       }
 
       // Find the spec
-      SFSpec spec = findSpec(pathInfo.specName);
+      SFSpec spec = NeoServletSupport.findSpec(pathInfo.specName);
       if (spec == null) {
         sendError(response, HttpServletResponse.SC_NOT_FOUND,
             "Spec not found: " + pathInfo.specName);
@@ -448,123 +446,12 @@ public class NeoServlet extends HttpBaseServlet {
       if (!accessible) {
         log.warn("JWT warehouse '{}' (org='{}') is not in user '{}' readable orgs — resolving accessible warehouse",
             warehouseId, whOrgId, userId);
-        String correctedWarehouseId = findAccessibleWarehouse(context);
+        String correctedWarehouseId = NeoServletSupport.findAccessibleWarehouse(context);
         context = SecureWebServicesUtils.createContext(userId, roleId, orgId, correctedWarehouseId, clientId);
       }
     }
     OBContext.setOBContext(context);
     OBContext.setOBContextInSession(request, context);
-  }
-
-  /**
-   * Finds the first warehouse accessible to the current user: active, same client, and belonging
-   * to one of the user's readable organizations. Returns {@code null} if none is found, in which
-   * case the context will be created without a warehouse and warehouse defaults will be empty.
-   */
-  private static String findAccessibleWarehouse(OBContext ctx) {
-    try {
-      OBContext.setAdminMode(true);
-      Set<String> readableOrgs = new java.util.HashSet<>(
-          java.util.Arrays.asList(ctx.getReadableOrganizations()));
-      OBCriteria<org.openbravo.model.common.enterprise.Warehouse> crit =
-          OBDal.getInstance().createCriteria(org.openbravo.model.common.enterprise.Warehouse.class);
-      crit.add(Restrictions.eq(
-          org.openbravo.model.common.enterprise.Warehouse.PROPERTY_CLIENT,
-          ctx.getCurrentClient()));
-      crit.add(Restrictions.eq(
-          org.openbravo.model.common.enterprise.Warehouse.PROPERTY_ACTIVE, true));
-      crit.setMaxResults(50);
-      for (org.openbravo.model.common.enterprise.Warehouse wh : crit.list()) {
-        String whOrgId = wh.getOrganization().getId();
-        if (readableOrgs.contains(whOrgId)) {
-          log.debug("Resolved accessible warehouse '{}' (org='{}') for user '{}'",
-              wh.getId(), whOrgId, ctx.getUser().getId());
-          return wh.getId();
-        }
-      }
-      log.warn("No accessible warehouse found for user '{}' client '{}'",
-          ctx.getUser().getId(), ctx.getCurrentClient().getId());
-      return null;
-    } catch (Exception e) {
-      log.error("Error finding accessible warehouse for user '{}': {}",
-          ctx.getUser().getId(), e.getMessage(), e);
-      return null;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  /**
-   * Parse the path into spec name, entity name, and optional record ID or selector info.
-   * Expected formats:
-   *   /{specName}                              (process specs, POST only)
-   *   /{specName}/{entityName}[/{id}]          (window specs)
-   *   /{specName}/{entityName}/selectors[/{columnName}]
-   *   /{specName}/{entityName}/{recordId}/action[/{columnName}]
-   */
-  NeoPathInfo parsePath(String pathInfo) {
-    // Discovery mode: no path or root path
-    if (pathInfo == null || pathInfo.isEmpty() || "/".equals(pathInfo)) {
-      return new NeoPathInfo(null, null, null);
-    }
-
-    String path = pathInfo.startsWith("/") ? pathInfo.substring(1) : pathInfo;
-    String[] parts = path.split("/");
-
-    if (parts.length < 1 || parts[0].isEmpty()) {
-      return new NeoPathInfo(null, null, null);
-    }
-
-    String specName = parts[0];
-
-    // Single segment: spec-only path (for process specs)
-    if (parts.length == 1) {
-      return new NeoPathInfo(specName, null, null);
-    }
-
-    String entityName = parts[1];
-
-    // Check for /selectors sub-path
-    if (parts.length >= 3 && "selectors".equals(parts[2])) {
-      String selectorField = parts.length >= 4 ? parts[3] : null;
-      return new NeoPathInfo(specName, entityName, null, true, selectorField);
-    }
-
-    // Check for /callout sub-path
-    if (parts.length >= 3 && "callout".equals(parts[2])) {
-      return new NeoPathInfo(specName, entityName, null, false, null, false, null, false, true, false);
-    }
-
-    // Check for /defaults sub-path
-    if (parts.length >= 3 && "defaults".equals(parts[2])) {
-      return new NeoPathInfo(specName, entityName, null, false, null, false, null, false, false, true);
-    }
-
-    // Check for /evaluate-display sub-path
-    if (parts.length >= 3 && "evaluate-display".equals(parts[2])) {
-      return new NeoPathInfo(specName, entityName, null, false, null, false, null, true);
-    }
-
-    // Check for /{spec}/{entity}/{recordId}/action[/{columnName}]
-    if (parts.length >= 4 && "action".equals(parts[3])) {
-      String actionName = parts.length >= 5 ? parts[4] : null;
-      return new NeoPathInfo(specName, entityName, parts[2], false, null, true, actionName);
-    }
-
-    String recordId = parts.length >= 3 ? parts[2] : null;
-    return new NeoPathInfo(specName, entityName, recordId);
-  }
-
-  /**
-   * Find an active ETGO_SF_Spec by name.
-   */
-  private SFSpec findSpec(String specName) {
-    OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
-    criteria.add(Restrictions.ilike(SFSpec.PROPERTY_NAME, specName, MatchMode.EXACT));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    criteria.setMaxResults(1);
-    List<SFSpec> results = criteria.list();
-    return results.isEmpty() ? null : results.get(0);
   }
 
   /**
@@ -600,13 +487,6 @@ public class NeoServlet extends HttpBaseServlet {
       default:
         return false;
     }
-  }
-
-  /**
-   * Get the AD_Tab linked to the entity.
-   */
-  private Tab getAdTab(SFEntity entity) {
-    return entity.getADTab();
   }
 
   Map<String, String> extractQueryParams(HttpServletRequest request) {
@@ -752,7 +632,7 @@ public class NeoServlet extends HttpBaseServlet {
       return defaultAction.get();
     }
 
-    Tab adTab = (entity != null) ? getAdTab(entity) : null;
+    Tab adTab = entity != null ? entity.getADTab() : null;
     NeoContext hookCtx = NeoContext.builder()
         .specName(spec.getName())
         .entityName(entityName)
@@ -932,14 +812,14 @@ public class NeoServlet extends HttpBaseServlet {
    * Check if the current role has access to the given window.
    */
   private boolean hasWindowAccess(String windowId) {
-    return NeoAccessHelper.hasWindowAccess(windowId);
+    return NeoServletSupport.hasWindowAccess(windowId);
   }
 
   /**
    * Check if the current role has access to the given process.
    */
   private boolean hasProcessAccess(String processId) {
-    return NeoAccessHelper.hasProcessAccess(processId);
+    return NeoServletSupport.hasProcessAccess(processId);
   }
 
   /**
@@ -1007,7 +887,8 @@ public class NeoServlet extends HttpBaseServlet {
         String fieldName = requestBody.optString("field", "");
         JSONObject formState = requestBody.optJSONObject("formState");
         NeoDefaultsService.CalloutCascadeResult cascade =
-            NeoDefaultsService.cascadeInteractiveCallout(neoContext, tab, fieldName, formState, calloutResult.getBody());
+            NeoDefaultsCascadeHelper.cascadeInteractiveCallout(
+                neoContext, tab, fieldName, formState, calloutResult.getBody());
         if (cascade.hasResults()) {
           mergeCalloutResponse(calloutResult.getBody(), cascade.toJSON());
           log.debug("[NEO-CALLOUT] Cascade merged additional fields into response");

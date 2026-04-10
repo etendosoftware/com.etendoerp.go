@@ -41,6 +41,7 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 import com.etendoerp.go.schemaforge.DocTypeResolver;
 import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoDefaultsCascadeHelper;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -267,9 +268,9 @@ public class NeoCrudHelper {
       return;
     }
     Set<String> seqFields = new HashSet<>();
-    NeoDefaultsService.executeCalloutCascade(context, adTab, filteredBody, seqFields);
+    NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields);
     DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
-    NeoDefaultsService.removeEmptyFkValues(filteredBody, adTab);
+    NeoDefaultsCascadeHelper.removeEmptyFkValues(filteredBody, adTab);
     NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
   }
 

@@ -96,9 +96,23 @@ public class NeoSelectorService {
 
       JSONArray selectors = new JSONArray();
       for (SFField field : fields) {
-        JSONObject item = buildSelectorItemForField(field);
-        if (item != null) {
-          selectors.put(item);
+        Column column = field.getADColumn();
+        if (column == null) {
+          continue;
+        }
+        String refId = getBaseReferenceId(column);
+        if (isListReference(refId)) {
+          selectors.put(SelectorDescriptorBuilder.buildListSelectorItem(column));
+          continue;
+        }
+        boolean isObuisel = hasObuiselSelector(column);
+        if (!isObuisel && !isFkReference(refId)) {
+          continue;
+        }
+        SelectorMeta meta = resolveTarget(column, refId);
+        if (meta != null) {
+          selectors.put(SelectorDescriptorBuilder.buildSelectorItem(
+              column, refId, meta, SESSION_PARAMS));
         }
       }
 
@@ -111,120 +125,6 @@ public class NeoSelectorService {
       log.error("Error listing selectors for {}", entityName, e);
       return NeoResponse.error(500, e.getMessage());
     }
-  }
-
-  /**
-   * Resolve and build the JSON selector descriptor for a single {@link SFField}.
-   * Returns {@code null} when the field has no column, is not a FK reference, or the
-   * target selector cannot be resolved — all cases that should be silently skipped.
-   */
-  private static JSONObject buildSelectorItemForField(SFField field) throws Exception {
-    Column column = field.getADColumn();
-    if (column == null) {
-      return null;
-    }
-    String refId = getBaseReferenceId(column);
-    if (isListReference(refId)) {
-      return buildListSelectorItem(column);
-    }
-    boolean isObuisel = hasObuiselSelector(column);
-    if (!isObuisel && !isFkReference(refId)) {
-      return null;
-    }
-    SelectorMeta meta = resolveTarget(column, refId);
-    if (meta == null) {
-      return null;
-    }
-    return buildSelectorItem(column, refId, meta);
-  }
-
-  /**
-   * Build the JSON descriptor object for a List reference selector.
-   */
-  private static JSONObject buildListSelectorItem(Column column) throws Exception {
-    JSONObject item = new JSONObject();
-    item.put("columnName", column.getDBColumnName());
-    item.put("referenceType", "List");
-    item.put("type", "list");
-    return item;
-  }
-
-  /**
-   * Build the JSON descriptor object for a single selector field.
-   * Extracts reference type, aux fields, and selector params from the column metadata.
-   */
-  private static JSONObject buildSelectorItem(Column column, String refId,
-      SelectorMeta meta) throws Exception {
-    JSONObject item = new JSONObject();
-    item.put("columnName", column.getDBColumnName());
-    if (meta.isRich) {
-      item.put("referenceType", "OBUISEL");
-      item.put("type", "rich");
-    } else {
-      String referenceType;
-      if (refId.equals(REF_TABLE)) {
-        referenceType = "Table";
-      } else if (refId.equals(REF_TABLEDIR)) {
-        referenceType = "TableDir";
-      } else {
-        referenceType = "Search";
-      }
-      item.put("referenceType", referenceType);
-      item.put("type", "simple");
-    }
-    item.put("targetEntity", meta.entityName);
-    item.put("displayProperty", meta.displayProperty);
-
-    if (meta.auxFields != null && !meta.auxFields.isEmpty()) {
-      JSONArray auxArray = buildAuxFieldsArray(meta.auxFields);
-      item.put("auxFields", auxArray);
-    }
-
-    JSONArray params = extractSelectorParams(column);
-    if (params.length() > 0) {
-      item.put("selectorParams", params);
-    }
-    return item;
-  }
-
-  /**
-   * Build the JSON array describing auxiliary output fields for a selector.
-   */
-  private static JSONArray buildAuxFieldsArray(List<AuxFieldMeta> auxFields) throws Exception {
-    JSONArray auxArray = new JSONArray();
-    for (AuxFieldMeta af : auxFields) {
-      JSONObject auxItem = new JSONObject();
-      auxItem.put("suffix", af.suffix);
-      auxItem.put("name", af.name);
-      auxArray.put(auxItem);
-    }
-    return auxArray;
-  }
-
-  /**
-   * Extract non-session {@code @Param@} references from the column's validation rule.
-   * Session-level params (prefixed with {@code #}) and standard context params are excluded.
-   *
-   * @param column the AD_Column whose validation rule is inspected
-   * @return JSONArray of resolvable parameter names; empty if none
-   */
-  private static JSONArray extractSelectorParams(Column column) {
-    JSONArray params = new JSONArray();
-    org.openbravo.model.ad.domain.Validation valRule = column.getValidation();
-    if (valRule == null || StringUtils.isBlank(valRule.getValidationCode())) {
-      return params;
-    }
-    Pattern paramExtract = Pattern.compile("@(#?)(\\w+)@");
-    Matcher m = paramExtract.matcher(valRule.getValidationCode());
-    java.util.Set<String> seen = new java.util.HashSet<>();
-    while (m.find()) {
-      boolean isSession = "#".equals(m.group(1));
-      String param = m.group(2);
-      if (!isSession && !SESSION_PARAMS.contains(param) && seen.add(param)) {
-        params.put(param);
-      }
-    }
-    return params;
   }
 
   /**
