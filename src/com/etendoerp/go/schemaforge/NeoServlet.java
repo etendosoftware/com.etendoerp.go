@@ -928,7 +928,21 @@ public class NeoServlet extends HttpBaseServlet {
           // business partner defaults), then re-apply tab filter, remove empty FKs, and re-inject
           // mandatory defaults after callout mutations.
           if (adTab.getTabLevel() != null && adTab.getTabLevel() == 0) {
+            // Detect sequence preview fields already in the body (values wrapped in angle
+            // brackets, e.g. "<1000009>"). The callout cascade must not overwrite these —
+            // the real sequence number is consumed by DocumentNoHandlerLegacy on OBDal.save().
             Set<String> seqFields = new HashSet<>();
+            Iterator<String> bodyKeys = filteredBody.keys();
+            while (bodyKeys.hasNext()) {
+              String k = bodyKeys.next();
+              Object v = filteredBody.opt(k);
+              if (v instanceof String) {
+                String s = (String) v;
+                if (s.startsWith("<") && s.endsWith(">") && s.length() > 2) {
+                  seqFields.add(k);
+                }
+              }
+            }
             NeoDefaultsService.executeCalloutCascade(context, adTab, filteredBody, seqFields);
             NeoDefaultsService.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
             NeoDefaultsService.removeEmptyFkValues(filteredBody, adTab);

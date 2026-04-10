@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge.util;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 
@@ -269,7 +270,9 @@ public class NeoCrudHelper {
     // e.g. "<1000371>"). The callout cascade must not overwrite these — the real sequence
     // number is consumed by DefaultJsonDataService.add() when it detects the brackets.
     Set<String> seqFields = new HashSet<>();
-    for (String key : filteredBody.keySet()) {
+    Iterator<String> bodyKeys = filteredBody.keys();
+    while (bodyKeys.hasNext()) {
+      String key = bodyKeys.next();
       Object val = filteredBody.opt(key);
       if (val instanceof String) {
         String s = (String) val;
