@@ -20,27 +20,26 @@ package com.etendoerp.go.schemaforge;
 import javax.inject.Named;
 
 /**
- * NeoHandler for the Sales Order header entity.
+ * NeoHandler for the Purchase Order header entity.
  *
  * Dispatches custom ACTION requests to the appropriate handler:
  * <ul>
- *   <li>{@code createShipment} → {@link CreateShipmentHandler}</li>
- *   <li>{@code createDraftInvoice} / {@code checkDraftInvoice} / {@code listInvoices} → {@link CreateDraftInvoiceHandler}</li>
+ *   <li>{@code createGoodsReceipt} → {@link CreateGoodsReceiptHandler}</li>
+ *   <li>{@code createPurchaseInvoice} → {@link CreatePurchaseInvoiceHandler}</li>
  * </ul>
  *
- * Each delegate handler contains its own spec/field matching logic and returns
- * {@code null} when the request does not apply, so this class needs no
- * additional routing conditions.
+ * Other actions (e.g. {@code documentAction}) return {@code null} here and
+ * fall through to the default AD process execution path.
  */
-@Named("salesOrderHeaderHandler")
-public class SalesOrderHeaderHandler implements NeoHandler {
+@Named("purchaseOrderHeaderHandler")
+public class PurchaseOrderHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse result = new CreateShipmentHandler().handle(context);
+    NeoResponse result = new CreateGoodsReceiptHandler().handle(context);
     if (result != null) {
       return result;
     }
-    return new CreateDraftInvoiceHandler().handle(context);
+    return new CreatePurchaseInvoiceHandler().handle(context);
   }
 }
