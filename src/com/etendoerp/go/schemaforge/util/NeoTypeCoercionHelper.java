@@ -96,6 +96,8 @@ public final class NeoTypeCoercionHelper {
         Object val = data.opt(key);
         if (val instanceof String) {
           coerceField(entity, key, (String) val, coerced);
+        } else if (val instanceof Integer || val instanceof Long) {
+          coerceNumberToStringField(entity, key, (Number) val, coerced);
         }
       }
       for (Map.Entry<String, Object> entry : coerced.entrySet()) {
@@ -120,6 +122,19 @@ public final class NeoTypeCoercionHelper {
    * @param strVal  the raw string value to convert
    * @param coerced the accumulator map into which the coerced entry is placed when conversion succeeds
    */
+  private static void coerceNumberToStringField(Entity entity, String key, Number numVal,
+      Map<String, Object> coerced) {
+    try {
+      Property prop = entity.getProperty(key);
+      if (prop != null && prop.isPrimitive()
+          && String.class.isAssignableFrom(prop.getPrimitiveObjectType())) {
+        coerced.put(key, String.valueOf(numVal.intValue()));
+      }
+    } catch (Exception ignored) {
+      // Not a DAL property or not primitive — skip
+    }
+  }
+
   public static void coerceField(Entity entity, String key, String strVal,
       Map<String, Object> coerced) {
     try {
@@ -129,7 +144,7 @@ public final class NeoTypeCoercionHelper {
         if (type != null && java.math.BigDecimal.class.isAssignableFrom(type) && !strVal.isEmpty()) {
           coerced.put(key, new java.math.BigDecimal(strVal));
         } else if (type != null && Long.class.isAssignableFrom(type) && !strVal.isEmpty()) {
-          coerced.put(key, Long.parseLong(strVal));
+          coerced.put(key, new java.math.BigDecimal(strVal).longValue());
         }
       }
     } catch (Exception ignored) {
