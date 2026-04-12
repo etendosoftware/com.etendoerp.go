@@ -1591,10 +1591,17 @@ public class NeoDefaultsService {
       Object newValue = updateObj.get(VALUE_KEY);
       Object oldValue = formState.opt(updatedField);
 
+      // Never let a callout overwrite a sequence/DocumentNo field — the bracket-wrapped
+      // preview value must survive intact so DefaultJsonDataService can consume the real
+      // sequence on save (or pass 2 of resolveDefaults can set the correct preview).
+      if (seqFields.contains(updatedField)) {
+        continue;
+      }
+
       formState.put(updatedField, newValue);
       defaults.put(updatedField, newValue);
 
-      if (!valueChanged(oldValue, newValue) || seqFields.contains(updatedField)) {
+      if (!valueChanged(oldValue, newValue)) {
         continue;
       }
       NeoCalloutService.CalloutInfo nextInfo =
