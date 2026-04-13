@@ -363,7 +363,10 @@ class NeoCrudHandler {
       requestBody.remove(PARAM_PARENT_ID);
       injectParentIdAsProperty(adTab, requestBody, parentIdValue);
     }
-    JSONObject filteredBody = fieldFilter.filterWriteRequest(requestBody);
+    // Use filterCreateRequest (not filterWriteRequest): readOnly fields must pass through
+    // on create because they often carry values set by callouts or defaults (e.g., taxCategory
+    // populated from productCategory). filterWriteRequest is for PATCH/PUT only.
+    JSONObject filteredBody = fieldFilter.filterCreateRequest(requestBody);
     NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
     return jsonService.add(params, wrappedBody);

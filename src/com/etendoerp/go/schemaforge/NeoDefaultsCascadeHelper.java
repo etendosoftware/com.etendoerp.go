@@ -317,6 +317,21 @@ public class NeoDefaultsCascadeHelper {
       }
       Object newValue = updateObj.get(FIELD_VALUE);
       Object oldValue = formState.opt(updatedField);
+      // Legacy callouts (e.g., SL_TaxCategory_Org) sometimes return empty strings as a
+      // "don't know / clear this" signal. In the defaults/create flow we don't want to
+      // overwrite a valid existing value with "" — that destroys defaults we already
+      // resolved and causes NOT-NULL violations on save for mandatory FKs.
+      boolean newIsEmpty = newValue == null
+          || JSONObject.NULL.equals(newValue)
+          || "".equals(String.valueOf(newValue));
+      boolean oldIsPresent = oldValue != null
+          && !JSONObject.NULL.equals(oldValue)
+          && !"".equals(String.valueOf(oldValue));
+      if (newIsEmpty && oldIsPresent) {
+        log.debug("[NEO-DEFAULTS] Skipping callout update that would clear '{}' "
+            + "(old='{}', new='')", updatedField, oldValue);
+        continue;
+      }
       formState.put(updatedField, newValue);
       defaults.put(updatedField, newValue);
       if (valueChanged(oldValue, newValue)
