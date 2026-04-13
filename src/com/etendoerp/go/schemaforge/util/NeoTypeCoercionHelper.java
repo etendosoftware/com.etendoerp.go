@@ -128,10 +128,10 @@ public final class NeoTypeCoercionHelper {
       Property prop = entity.getProperty(key);
       if (prop != null && prop.isPrimitive()
           && String.class.isAssignableFrom(prop.getPrimitiveObjectType())) {
-        coerced.put(key, String.valueOf(numVal.intValue()));
+        coerced.put(key, String.valueOf(numVal.longValue()));
       }
     } catch (Exception ignored) {
-      // Not a DAL property or not primitive — skip
+      log.debug("Skipping number-to-string coercion for key {}: {}", key, ignored.getMessage());
     }
   }
 
@@ -148,7 +148,7 @@ public final class NeoTypeCoercionHelper {
         }
       }
     } catch (Exception ignored) {
-      // Not a DAL property or not primitive — skip
+      log.debug("Skipping string coercion for key {}: {}", key, ignored.getMessage());
     }
   }
 
