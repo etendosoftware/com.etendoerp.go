@@ -42,6 +42,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
  * Handles all CRUD operations for NEO window entity endpoints.
@@ -422,23 +423,7 @@ class NeoCrudHandler {
    */
   private String wrapForSmartclient(JSONObject filteredBody, String dalEntityName,
       String recordId) {
-    try {
-      JSONObject data = filteredBody != null ? filteredBody : new JSONObject();
-      data.put(JsonConstants.ENTITYNAME, dalEntityName);
-      if (recordId != null) {
-        data.put(JsonConstants.ID, recordId);
-      } else {
-        // Mark as new record for creates
-        data.put(JsonConstants.NEW_INDICATOR, true);
-      }
-
-      JSONObject wrapper = new JSONObject();
-      wrapper.put(JsonConstants.DATA, data);
-      return wrapper.toString();
-    } catch (Exception e) {
-      log.error("Error wrapping body for Smartclient format: {}", e.getMessage(), e);
-      return "{}";
-    }
+    return NeoTypeCoercionHelper.wrapForSmartclient(filteredBody, dalEntityName, recordId);
   }
 
   /**
