@@ -36,6 +36,7 @@ import org.openbravo.model.ad.ui.Process;
 
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.NeoServlet;
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -140,7 +141,10 @@ public final class NeoButtonActionHelper {
             "No process linked to button: " + pathInfo.actionName);
       }
     }
-    String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+    Object cachedBody = request.getAttribute(NeoServlet.ACTION_REQUEST_BODY_ATTR);
+    String bodyStr = cachedBody instanceof String
+        ? (String) cachedBody
+        : new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
     JSONObject params = StringUtils.isNotBlank(bodyStr) ? new JSONObject(bodyStr) : new JSONObject();
     params.put("recordId", pathInfo.recordId);
     params.put("inpRecordId", pathInfo.recordId);
