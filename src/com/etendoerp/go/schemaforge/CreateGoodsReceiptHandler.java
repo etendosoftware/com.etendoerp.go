@@ -146,18 +146,14 @@ public class CreateGoodsReceiptHandler implements NeoHandler {
     long lineNo = 10;
     int addedLines = 0;
     for (OrderLine orderLine : order.getOrderLineList()) {
-      if (!orderLine.isActive()) {
-        continue;
-      }
-      if (orderLine.getProduct() == null || orderLine.getUOM() == null) {
-        continue;
-      }
       java.math.BigDecimal orderedQty = orderLine.getOrderedQuantity();
       java.math.BigDecimal deliveredQty = orderLine.getDeliveredQuantity() != null
           ? orderLine.getDeliveredQuantity() : java.math.BigDecimal.ZERO;
       java.math.BigDecimal pendingQty = orderedQty != null
           ? orderedQty.subtract(deliveredQty) : java.math.BigDecimal.ZERO;
-      if (pendingQty.compareTo(java.math.BigDecimal.ZERO) <= 0) {
+      if (!orderLine.isActive() || orderLine.getProduct() == null
+          || orderLine.getUOM() == null
+          || pendingQty.compareTo(java.math.BigDecimal.ZERO) <= 0) {
         continue;
       }
 

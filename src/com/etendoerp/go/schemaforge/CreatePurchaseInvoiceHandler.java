@@ -111,19 +111,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
     // Pre-validate: check pending lines exist before creating the invoice header
     // to prevent zombie invoice headers if addOrderLinesToInvoice throws.
-    boolean hasPending = false;
-    for (OrderLine ol : order.getOrderLineList()) {
-      if (!ol.isActive() || ol.getProduct() == null) {
-        continue;
-      }
-      BigDecimal ordered  = ol.getOrderedQuantity()  != null ? ol.getOrderedQuantity()  : BigDecimal.ZERO;
-      BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
-      if (ordered.subtract(invoiced).compareTo(BigDecimal.ZERO) > 0) {
-        hasPending = true;
-        break;
-      }
-    }
-    if (!hasPending) {
+    if (!hasPendingLines(order)) {
       throw new OBException("No pending lines to invoice in this purchase order");
     }
 
@@ -176,17 +164,28 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     return invoice;
   }
 
-  private void addOrderLinesToInvoice(Invoice invoice, Order order) {
-    long lineNo = 10;
-    int addedLines = 0;
+  private boolean hasPendingLines(Order order) {
     for (OrderLine ol : order.getOrderLineList()) {
       if (!ol.isActive() || ol.getProduct() == null) {
         continue;
       }
-      BigDecimal ordered = ol.getOrderedQuantity() != null ? ol.getOrderedQuantity() : BigDecimal.ZERO;
+      BigDecimal ordered  = ol.getOrderedQuantity()  != null ? ol.getOrderedQuantity()  : BigDecimal.ZERO;
       BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
-      BigDecimal pending = ordered.subtract(invoiced);
-      if (pending.compareTo(BigDecimal.ZERO) <= 0) {
+      if (ordered.subtract(invoiced).compareTo(BigDecimal.ZERO) > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private void addOrderLinesToInvoice(Invoice invoice, Order order) {
+    long lineNo = 10;
+    int addedLines = 0;
+    for (OrderLine ol : order.getOrderLineList()) {
+      BigDecimal ordered  = ol.getOrderedQuantity()  != null ? ol.getOrderedQuantity()  : BigDecimal.ZERO;
+      BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
+      BigDecimal pending  = ordered.subtract(invoiced);
+      if (!ol.isActive() || ol.getProduct() == null || pending.compareTo(BigDecimal.ZERO) <= 0) {
         continue;
       }
 

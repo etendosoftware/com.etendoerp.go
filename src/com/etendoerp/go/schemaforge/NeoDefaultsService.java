@@ -872,7 +872,11 @@ public class NeoDefaultsService {
         valueToStore = new java.math.BigDecimal(strVal).longValueExact();
       } catch (ArithmeticException ae) {
         // Has fractional part — store as BigDecimal
-        try { valueToStore = new java.math.BigDecimal(strVal); } catch (Exception ignored) { }
+        try {
+          valueToStore = new java.math.BigDecimal(strVal);
+        } catch (Exception ignored) {
+          log.debug("Could not parse '{}' as BigDecimal, keeping as String", strVal);
+        }
       } catch (Exception ignored) {
         // Not numeric — keep as String (e.g. status flags, doc numbers)
       }
