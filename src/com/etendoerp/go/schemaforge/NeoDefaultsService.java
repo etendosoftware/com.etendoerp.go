@@ -807,7 +807,7 @@ public class NeoDefaultsService {
       }
       // Last-resort fallback for any mandatory FK still unresolved — find a valid record
       if (resolved == null && col.getDBColumnName().toUpperCase().endsWith("_ID")) {
-        String fallbackId = resolveFallbackFkDefault(col);
+        String fallbackId = resolveFallbackFkDefault(col, ctx);
         if (fallbackId != null) {
           resolved = fallbackId;
         }
@@ -862,8 +862,28 @@ public class NeoDefaultsService {
       log.debug("Skipping FK default '0' for {}", propName);
       return;
     }
-    body.put(propName, resolved);
-    log.debug("Injected mandatory default: {} = {}", propName, resolved);
+    // Coerce numeric String defaults to their proper Java type so DAL validation passes.
+    // SQL defaults (e.g. lineNo from COALESCE(MAX(Line),0)+10) arrive as String from rs.getString().
+    // Non-FK numeric columns must be Long or BigDecimal — never String — when handed to the DAL.
+    Object valueToStore = resolved;
+    if (resolved instanceof String && !col.getDBColumnName().toUpperCase().endsWith("_ID")) {
+      String strVal = ((String) resolved).trim();
+      try {
+        valueToStore = new java.math.BigDecimal(strVal).longValueExact();
+      } catch (ArithmeticException ae) {
+        // Has fractional part — store as BigDecimal
+        try {
+          valueToStore = new java.math.BigDecimal(strVal);
+        } catch (Exception ignored) {
+          log.debug("Could not parse '{}' as BigDecimal, keeping as String", strVal);
+        }
+      } catch (Exception ignored) {
+        // Not numeric — keep as String (e.g. status flags, doc numbers)
+      }
+    }
+    body.put(propName, valueToStore);
+    log.warn("[NEO-DEFAULTS] {} = {} ({})", propName, valueToStore,
+        valueToStore == null ? "null" : valueToStore.getClass().getSimpleName());
   }
 
   /**
@@ -874,7 +894,7 @@ public class NeoDefaultsService {
    * @param col the mandatory FK column with no resolved default
    * @return the record ID, or null if no fallback could be found
    */
-  private static String resolveFallbackFkDefault(Column col) {
+  private static String resolveFallbackFkDefault(Column col, NeoContext ctx) {
     try {
       // Determine the referenced table from the column's reference
       org.openbravo.model.ad.datamodel.Table refTable = null;
@@ -913,6 +933,11 @@ public class NeoDefaultsService {
       sql.append(" FROM ").append(refTable.getDBTableName()).append(" t");
       sql.append(" WHERE t.IsActive = 'Y'");
       sql.append(" AND t.AD_Client_ID = ?");
+      if ("M_PriceList".equalsIgnoreCase(refTable.getDBTableName())
+          && ctx != null && ctx.getAdTab() != null) {
+        boolean isSO = Boolean.TRUE.equals(ctx.getAdTab().getWindow().isSalesTransaction());
+        sql.append(" AND t.issopricelist = '").append(isSO ? "Y" : "N").append("'");
+      }
       sql.append(" ORDER BY ");
       if (hasIsDefault) {
         sql.append("t.IsDefault DESC, ");
