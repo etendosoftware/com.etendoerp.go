@@ -1778,4 +1778,90 @@ public class NeoDefaultsService {
     return null;
   }
 
+  /**
+   * For tax-inclusive invoice/order lines, when 'grossUnitPrice' is present but 'grossAmount'
+   * (LINE_GROSS_AMOUNT) is zero or missing, compute it as grossUnitPrice × invoicedQuantity.
+   *
+   * The callout (SL_Invoice_Product) fires at product selection time when qty is still 0,
+   * so it sets grossAmount = grossUnitPrice × 0 = 0. The c_invoiceline_before_trg trigger
+   * then uses LINE_GROSS_AMOUNT to compute PRICEACTUAL for tax-inclusive price lists — if it
+   * is 0, priceActual ends up as 0. This method corrects the stale callout value at save time.
+   */
+  public static void injectGrossAmountIfMissing(JSONObject body) {
+    if (body == null) {
+      return;
+    }
+    double grossUnitPrice;
+    try {
+      grossUnitPrice = body.optDouble("grossUnitPrice", 0);
+    } catch (Exception e) {
+      return;
+    }
+    if (grossUnitPrice <= 0) {
+      return;
+    }
+    double existingGrossAmount = body.optDouble("grossAmount", 0);
+    if (existingGrossAmount != 0) {
+      return;
+    }
+    double qty;
+    try {
+      qty = Double.parseDouble(body.optString("invoicedQuantity", "0"));
+    } catch (NumberFormatException e) {
+      return;
+    }
+    if (qty == 0) {
+      return;
+    }
+    try {
+      double computed = grossUnitPrice * qty;
+      body.put("grossAmount", computed);
+      log.debug("[NEO-DEFAULTS] Computed grossAmount={} from grossUnitPrice={} × qty={}",
+          computed, grossUnitPrice, qty);
+    } catch (Exception e) {
+      log.debug("Could not compute grossAmount: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * For line entities (e.g. C_InvoiceLine, C_OrderLine), when 'product' is present in the body
+   * but 'uOM' (C_UOM_ID) is missing or empty, derive C_UOM_ID from M_Product.C_UOM_ID.
+   *
+   * This prevents DB trigger failures on INSERT caused by a product/transaction UOM mismatch:
+   * the c_invoiceline_trg trigger requires that C_UOM_ID matches the product's UOM, but
+   * callouts return uOM as empty (the classic UI auto-fills it via readOnly logic), so NEO
+   * must derive it here before persisting.
+   */
+  public static void injectProductDerivedUomIfMissing(JSONObject body) {
+    if (body == null) {
+      return;
+    }
+    String productId = body.optString("product", "");
+    if (productId.isEmpty()) {
+      return;
+    }
+    // Only inject if uOM is absent or empty
+    String existingUom = body.optString("uOM", "");
+    if (!existingUom.isEmpty()) {
+      return;
+    }
+    try {
+      String sql = "SELECT C_UOM_ID FROM M_PRODUCT WHERE M_PRODUCT_ID = ?";
+      try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
+        ps.setString(1, productId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            String uomId = rs.getString(1);
+            if (uomId != null && !uomId.isEmpty()) {
+              body.put("uOM", uomId);
+              log.debug("[NEO-DEFAULTS] Injected product-derived uOM={} for product={}", uomId, productId);
+            }
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not inject product-derived UOM for product {}: {}", productId, e.getMessage());
+    }
+  }
+
 }

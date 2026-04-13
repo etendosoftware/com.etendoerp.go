@@ -333,11 +333,17 @@ public class NeoSelectorService {
       String combinedFilter = combineFilters(
           combineFilters(validationFilter, organizationFilter), referenceOverride);
 
-      // Build and execute query
+      // Build and execute query.
+      // Context-param filters (isCustomer, isVendor…) are resolved with the correct entity alias:
+      //   - custom-HQL rich selectors use meta.entityAlias (e.g. "bp" for BusinessPartner)
+      //   - standard rich selectors and simple selectors always use "e"
       if (meta.isRich) {
-        return executeRichQuery(meta, search, limit, offset, combinedFilter);
+        String ctxAlias = (meta.isCustomQuery && meta.entityAlias != null) ? meta.entityAlias : "e";
+        String ctxParamFilter = resolveContextParamFilter(meta.entityName, contextParams, ctxAlias);
+        return executeRichQuery(meta, search, limit, offset, combineFilters(combinedFilter, ctxParamFilter));
       }
-      return executeQuery(meta, search, limit, offset, combinedFilter);
+      String ctxParamFilter = resolveContextParamFilter(meta.entityName, contextParams, "e");
+      return executeQuery(meta, search, limit, offset, combineFilters(combinedFilter, ctxParamFilter));
 
     } catch (Exception e) {
       log.error("Error querying selector {}/{}", entityName, columnName, e);
@@ -622,6 +628,15 @@ public class NeoSelectorService {
       }
       hasWhere = appendCondition(baseHql, hasWhere,
           buildOrganizationFilter(alias, readableOrgs));
+    }
+
+    // Apply client filter — custom HQL uses Session.createQuery() which bypasses Hibernate's
+    // automatic AD_Client filter (enabled by OBDal). We must add it explicitly so results are
+    // always scoped to the current session client, never leaking records from other clients.
+    String currentClientId = ctx.getCurrentClient().getId();
+    if (StringUtils.isNotBlank(currentClientId) && !"0".equals(currentClientId)) {
+      hasWhere = appendCondition(baseHql, hasWhere,
+          alias + ".client.id = '" + currentClientId + "'");
     }
 
     // Search filter across searchable properties
@@ -1940,6 +1955,44 @@ public class NeoSelectorService {
       return null;
     }
     return REFERENCE_OVERRIDE_FILTERS.get(refValue.getId());
+  }
+
+  /**
+   * Resolves HQL filters from URL context params for specific entity types.
+   * Supports {@code isCustomer} and {@code isVendor} params for BusinessPartner selectors,
+   * enabling sales/purchase windows to restrict the selector to customers or vendors.
+   *
+   * @param entityName    the target entity (e.g. "BusinessPartner")
+   * @param contextParams URL query params passed from the request
+   * @param alias         the HQL entity alias used in the query (e.g. "e" or "bp")
+   * @return an HQL WHERE predicate or {@code null}
+   */
+  private static String resolveContextParamFilter(String entityName,
+      Map<String, String> contextParams, String alias) {
+    if (contextParams == null || contextParams.isEmpty() || entityName == null) {
+      return null;
+    }
+    if (!"BusinessPartner".equals(entityName)) {
+      return null;
+    }
+    String a = (alias != null && !alias.isEmpty()) ? alias : "e";
+    java.util.List<String> conditions = new java.util.ArrayList<>();
+    String isCustomer = contextParams.get("isCustomer");
+    if ("Y".equalsIgnoreCase(isCustomer)) {
+      conditions.add(a + ".customer = true");
+    } else if ("N".equalsIgnoreCase(isCustomer)) {
+      conditions.add(a + ".customer = false");
+    }
+    String isVendor = contextParams.get("isVendor");
+    if ("Y".equalsIgnoreCase(isVendor)) {
+      conditions.add(a + ".vendor = true");
+    } else if ("N".equalsIgnoreCase(isVendor)) {
+      conditions.add(a + ".vendor = false");
+    }
+    if (conditions.isEmpty()) {
+      return null;
+    }
+    return String.join(" AND ", conditions);
   }
 
   private static String resolveOrgFilter(SFEntity sourceEntity,

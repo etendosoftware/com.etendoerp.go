@@ -1019,6 +1019,17 @@ public class NeoServlet extends HttpBaseServlet {
             NeoDefaultsService.removeEmptyFkValues(filteredBody, adTab);
             NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
           }
+          // For line entities: when 'product' is set but 'uOM' (C_UOM_ID) is missing,
+          // derive it from M_Product.C_UOM_ID. The callout (SL_Invoice_Product,
+          // SL_Order_Product) returns uOM as empty because the classic UI resolves it
+          // via readOnly display logic — NEO must inject it explicitly to satisfy the
+          // c_invoiceline_trg / c_orderline_trg DB trigger (product/transaction UOM check).
+          NeoDefaultsService.injectProductDerivedUomIfMissing(filteredBody);
+          // For tax-inclusive invoice lines: compute LINE_GROSS_AMOUNT = grossUnitPrice × qty
+          // when grossAmount is 0 (stale callout value computed before user entered qty).
+          // The c_invoiceline_before_trg trigger derives PRICEACTUAL from LINE_GROSS_AMOUNT
+          // for tax-inclusive price lists, so it must be non-zero.
+          NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
           // Contacts/BP create follows Classic flow: billing preferences are configured
           // after header creation, not persisted on the first save.
           stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
