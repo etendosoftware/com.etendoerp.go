@@ -105,7 +105,11 @@ public class PriceListEventHandler extends EntityPersistenceEventObserver {
     schema.setNewOBObject(true);
     schema.setClient(priceList.getClient());
     schema.setOrganization(priceList.getOrganization());
-    schema.setName(priceList.getName() + " Schema");
+    String schemaName = priceList.getName() + " Schema";
+    if (schemaName.length() > 60) {
+      schemaName = schemaName.substring(0, 57) + "...";
+    }
+    schema.setName(schemaName);
     OBDal.getInstance().save(schema);
 
     PriceListVersion version = OBProvider.getInstance().get(PriceListVersion.class);
