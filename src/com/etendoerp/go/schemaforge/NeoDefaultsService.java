@@ -816,7 +816,13 @@ public class NeoDefaultsService {
         where.append(" and ").append(orgPredicate.getHql());
       }
       Entity targetEntity = ModelProvider.getInstance().getEntity(target.entityName);
+      if (targetEntity == null) {
+        return false;
+      }
       String idProp = NeoSelectorService.findIdentifierProperty(targetEntity);
+      if (idProp == null) {
+        return false;
+      }
       where.append(" order by e.").append(idProp);
 
       OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(target.entityName,
