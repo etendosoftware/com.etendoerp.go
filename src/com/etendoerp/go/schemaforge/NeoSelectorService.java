@@ -294,15 +294,17 @@ public class NeoSelectorService {
 
       // Find the specific field by column name
       SFField sfField = findFieldByColumnName(entity.getId(), columnName);
-      if (sfField == null) {
-        return NeoResponse.error(404,
-            "Field not found or not included: " + columnName);
+      Column column = sfField != null ? sfField.getADColumn() : null;
+
+      // Virtual selector fallback for BP location wrappers (e.g. contacts/locationAddress).
+      // Some windows expose C_Location_ID in the selected entity, while Country/Region live in C_Location.
+      if (column == null) {
+        column = resolveVirtualSelectorColumn(entity, columnName);
       }
 
-      Column column = sfField.getADColumn();
       if (column == null) {
-        return NeoResponse.error(500,
-            "Could not resolve AD_Column for field: " + columnName);
+        return NeoResponse.error(404,
+            "Field not found or not included: " + columnName);
       }
 
       String refId = getBaseReferenceId(column);
@@ -1295,6 +1297,47 @@ public class NeoSelectorService {
     criteria.setMaxResults(1);
     List<SFField> results = criteria.list();
     return results.isEmpty() ? null : results.get(0);
+  }
+
+  /**
+   * Resolve a virtual selector column for wrapper entities that reference C_Location.
+   *
+   * contacts/locationAddress stores C_Location_ID in C_BPartner_Location, but users still
+   * need Country/Region selectors. Classic resolves this through Location selector logic.
+   * Here we emulate that by mapping C_Country_ID / C_Region_ID to AD_Column rows in C_Location.
+   */
+  private static Column resolveVirtualSelectorColumn(SFEntity entity, String columnName) {
+    if (entity == null || StringUtils.isBlank(columnName)) {
+      return null;
+    }
+
+    Tab tab = entity.getADTab();
+    String tableName = tab != null && tab.getTable() != null
+        ? tab.getTable().getDBTableName()
+        : null;
+
+    boolean isBPartnerLocationWrapper = "C_BPartner_Location".equalsIgnoreCase(tableName)
+        || "locationAddress".equals(entity.getName());
+    boolean isLocationVirtualColumn = "C_Country_ID".equalsIgnoreCase(columnName)
+        || "C_Region_ID".equalsIgnoreCase(columnName);
+
+    if (!isBPartnerLocationWrapper || !isLocationVirtualColumn) {
+      return null;
+    }
+
+    OBCriteria<Column> criteria = OBDal.getInstance().createCriteria(Column.class);
+    criteria.createAlias(Column.PROPERTY_TABLE, "tbl");
+    criteria.add(Restrictions.eq("tbl.dBTableName", "C_Location"));
+    criteria.add(Restrictions.eq(Column.PROPERTY_DBCOLUMNNAME, columnName));
+    criteria.setMaxResults(1);
+
+    List<Column> results = criteria.list();
+    if (results.isEmpty()) {
+      return null;
+    }
+
+    log.debug("Resolved virtual selector column {} for entity {}", columnName, entity.getName());
+    return results.get(0);
   }
 
 
