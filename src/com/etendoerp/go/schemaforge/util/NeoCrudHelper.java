@@ -270,20 +270,34 @@ public class NeoCrudHelper {
     // e.g. "<1000371>"). The callout cascade must not overwrite these — the real sequence
     // number is consumed by DefaultJsonDataService.add() when it detects the brackets.
     Set<String> seqFields = new HashSet<>();
+    // Snapshot non-empty values from the user's request before the callout cascade
+    // can overwrite them. Some business partners have no payment method configured, so
+    // their callout returns "" which removes the user's explicit choice (e.g. "Efectivo").
+    // We restore user-provided values if the cascade clears them to an empty string.
+    java.util.Map<String, Object> userValueSnapshot = new java.util.HashMap<>();
     Iterator<String> bodyKeys = filteredBody.keys();
     while (bodyKeys.hasNext()) {
       String key = bodyKeys.next();
       Object val = filteredBody.opt(key);
-      if (val instanceof String) {
-        String s = (String) val;
-        if (s.startsWith("<") && s.endsWith(">") && s.length() > 2) {
-          seqFields.add(key);
-        }
+      if (val instanceof String && !((String) val).trim().isEmpty()) {
+        userValueSnapshot.put(key, val);
       }
     }
     NeoDefaultsService.executeCalloutCascade(context, adTab, filteredBody, seqFields);
     NeoDefaultsService.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
     NeoDefaultsService.removeEmptyFkValues(filteredBody, adTab);
+    // Restore user-provided values cleared by the callout cascade.
+    // Only restores fields that are now absent (removed by removeEmptyFkValues),
+    // so callout-set non-empty values are always respected.
+    for (java.util.Map.Entry<String, Object> entry : userValueSnapshot.entrySet()) {
+      String field = entry.getKey();
+      if (!filteredBody.has(field)) {
+        try {
+          filteredBody.put(field, entry.getValue());
+          log.debug("[NEO] Restored user-provided value for '{}' cleared by callout cascade", field);
+        } catch (Exception ignored) { /* best effort */ }
+      }
+    }
     NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
   }
 
