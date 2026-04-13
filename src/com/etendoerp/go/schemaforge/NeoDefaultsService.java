@@ -25,6 +25,7 @@ import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
@@ -190,6 +191,23 @@ public class NeoDefaultsService {
         if (adTab != null) {
           cascadeResult = NeoDefaultsCascadeHelper.executeCalloutCascade(
               ctx, adTab, defaults, seqFieldSet);
+        }
+
+        // Classic parity: for each MANDATORY FK column that still has no resolved value,
+        // auto-pick the first available option ordered alphabetically (same as
+        // UIDefinition.getValueInComboReference() lines 713-728 in Classic Etendo).
+        // Non-mandatory FKs are intentionally left blank — Classic leaves them empty too.
+        for (SFField sfField : fields) {
+          Column adColumn = sfField.getADColumn();
+          if (adColumn == null || !adColumn.isMandatory()) {
+            continue;
+          }
+          String propName = NeoDefaultsCascadeHelper.resolvePropertyName(
+              dalEntity, adColumn.getDBColumnName());
+          if (propName == null || defaults.has(propName)) {
+            continue;
+          }
+          tryInjectFirstFromLookup(defaults, dalEntity, propName, adColumn);
         }
 
         // Build response
@@ -687,6 +705,9 @@ public class NeoDefaultsService {
       if (tryInjectFromParentValues(body, dalEntity, propName, col, mCtx.parentValues)) {
         return;
       }
+      if (tryInjectFirstFromLookup(body, dalEntity, propName, col)) {
+        return;
+      }
       NeoDefaultsCascadeHelper.injectSafeTypeDefault(body, propName, col);
     } catch (Exception e) {
       log.debug("Could not process mandatory column {}: {}",
@@ -759,6 +780,68 @@ public class NeoDefaultsService {
       return true;
     } catch (Exception e) {
       log.debug("Could not inject parent fallback for {}: {}", propName, e.getMessage());
+      return false;
+    }
+  }
+
+  /**
+   * Auto-pick the first available FK option for mandatory FK columns that have no resolved default.
+   * Replicates Classic Etendo behavior: UIDefinition.getValueInComboReference() always picks the
+   * alphabetically-first combo entry when no explicit default is configured.
+   *
+   * <p>Applies to TableDir (17), Table (18), Search (30), and OBUISEL_Selector references.
+   * Skips non-FK columns and columns where a default was already resolved.
+   *
+   * @return true if a value was injected, false if not applicable or lookup was empty
+   */
+  private static boolean tryInjectFirstFromLookup(JSONObject body, Entity dalEntity,
+      String propName, Column col) {
+    try {
+      String baseRefId = NeoSelectorService.getBaseReferenceId(col);
+      boolean isFk = NeoSelectorService.isFkReference(baseRefId)
+          || NeoSelectorService.REF_OBUISEL.equals(baseRefId);
+      if (!isFk) {
+        return false;
+      }
+      SelectorMeta target = NeoSelectorService.resolveTarget(col, baseRefId);
+      if (target == null || target.entityName == null) {
+        return false;
+      }
+
+      // Build an org-scoped query — include org "0" for shared master data
+      SelectorQueryBuilder.HqlWithParams orgPredicate =
+          SelectorQueryBuilder.buildReadableOrgsPredicate(target.entityName, "e", true);
+      StringBuilder where = new StringBuilder("as e where e.active = true");
+      if (orgPredicate != null && !orgPredicate.isBlank()) {
+        where.append(" and ").append(orgPredicate.getHql());
+      }
+      Entity targetEntity = ModelProvider.getInstance().getEntity(target.entityName);
+      if (targetEntity == null) {
+        return false;
+      }
+      String idProp = NeoSelectorService.findIdentifierProperty(targetEntity);
+      if (idProp == null) {
+        return false;
+      }
+      where.append(" order by e.").append(idProp);
+
+      OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(target.entityName,
+          where.toString());
+      if (orgPredicate != null && !orgPredicate.isBlank()) {
+        NeoSelectorExecutionHelper.bindNamedParameters(query, orgPredicate.getParams());
+      }
+      query.setMaxResult(1);
+      List<BaseOBObject> results = query.list();
+      if (results.isEmpty()) {
+        return false;
+      }
+      String firstId = (String) results.get(0).getId();
+      body.put(propName, firstId);
+      tryInjectIdentifier(body, dalEntity, propName, firstId);
+      log.debug("Auto-injected first FK option: {} = {}", propName, firstId);
+      return true;
+    } catch (Exception e) {
+      log.debug("Could not auto-pick first FK for {}: {}", col.getDBColumnName(), e.getMessage());
       return false;
     }
   }
