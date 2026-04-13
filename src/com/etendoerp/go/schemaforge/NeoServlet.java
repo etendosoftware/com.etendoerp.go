@@ -60,7 +60,7 @@ public class NeoServlet extends HttpBaseServlet {
   private static final String ERR_ENTITY_NOT_FOUND = "Entity not found: ";
   private static final String ERR_NO_LINKED_TAB = "Entity has no linked AD_Tab: ";
   private static final String HOOK_ERROR_MSG = "An internal error occurred while processing the hook handler";
-  static final String ACTION_REQUEST_BODY_ATTR = "neo.action.requestBody";
+  public static final String ACTION_REQUEST_BODY_ATTR = "neo.action.requestBody";
   private static final String KEY_UPDATES = "updates";
   private static final String KEY_COMBOS = "combos";
 
@@ -339,9 +339,15 @@ public class NeoServlet extends HttpBaseServlet {
     if (actionParams == null) {
       return true;
     }
+    SFEntity actionEntity = findEntity(spec.getId(), pathInfo.entityName);
+    if (actionEntity == null) {
+      sendError(response, HttpServletResponse.SC_NOT_FOUND,
+          "Entity not found in spec: " + pathInfo.entityName);
+      return true;
+    }
     return handleHookedSubEndpoint(new HookedSubEndpointRequest(spec, pathInfo.entityName,
         NeoEndpointType.ACTION, pathInfo.actionName, method, actionParams,
-        () -> buttonHandler.handleButtonAction(spec, pathInfo, method, request)), response);
+        () -> buttonHandler.handleButtonAction(pathInfo, method, request, actionEntity)), response);
   }
 
   private boolean handleEvaluateDisplaySubEndpoint(SFSpec spec, NeoPathInfo pathInfo, String method,
