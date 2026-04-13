@@ -269,18 +269,22 @@ public class NeoCrudHelper {
     // Detect sequence preview fields already in the body (values wrapped in angle brackets,
     // e.g. "<1000371>"). The callout cascade must not overwrite these — the real sequence
     // number is consumed by DefaultJsonDataService.add() when it detects the brackets.
+    // Also snapshot non-empty values from the user's request: some business partners have
+    // no payment method configured so their callout returns "" — we restore user-provided
+    // values if the cascade clears them to empty (see below).
     Set<String> seqFields = new HashSet<>();
-    // Snapshot non-empty values from the user's request before the callout cascade
-    // can overwrite them. Some business partners have no payment method configured, so
-    // their callout returns "" which removes the user's explicit choice (e.g. "Efectivo").
-    // We restore user-provided values if the cascade clears them to an empty string.
     java.util.Map<String, Object> userValueSnapshot = new java.util.HashMap<>();
     Iterator<String> bodyKeys = filteredBody.keys();
     while (bodyKeys.hasNext()) {
       String key = bodyKeys.next();
       Object val = filteredBody.opt(key);
-      if (val instanceof String && !((String) val).trim().isEmpty()) {
-        userValueSnapshot.put(key, val);
+      if (val instanceof String) {
+        String s = (String) val;
+        if (s.startsWith("<") && s.endsWith(">") && s.length() > 2) {
+          seqFields.add(key);
+        } else if (!s.trim().isEmpty()) {
+          userValueSnapshot.put(key, s);
+        }
       }
     }
     NeoDefaultsService.executeCalloutCascade(context, adTab, filteredBody, seqFields);
