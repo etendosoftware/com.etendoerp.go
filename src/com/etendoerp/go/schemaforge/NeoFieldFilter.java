@@ -153,16 +153,8 @@ public class NeoFieldFilter {
       Map<String, String> apiKeyMap, Map<String, String> propToApiMap,
       String dalEntityName) {
     for (SFField sfField : fields) {
-      Column adColumn = sfField.getADColumn();
-      if (adColumn == null) {
-        continue;
-      }
-
-      String dbColumnName = adColumn.getDBColumnName();
-      Property prop = dalEntity.getPropertyByColumnName(dbColumnName);
+      Property prop = resolveProperty(sfField, dalEntity, dalEntityName);
       if (prop == null) {
-        log.debug("No DAL property found for column {} in entity {}",
-            dbColumnName, dalEntityName);
         continue;
       }
 
@@ -192,6 +184,23 @@ public class NeoFieldFilter {
         }
       }
     }
+  }
+
+  /**
+   * Resolves the DAL {@link Property} for the given SF field, or returns {@code null}
+   * if the field has no AD column or the column has no matching DAL property.
+   */
+  private static Property resolveProperty(SFField sfField, Entity dalEntity, String dalEntityName) {
+    Column adColumn = sfField.getADColumn();
+    if (adColumn == null) {
+      return null;
+    }
+    String dbColumnName = adColumn.getDBColumnName();
+    Property prop = dalEntity.getPropertyByColumnName(dbColumnName);
+    if (prop == null) {
+      log.debug("No DAL property found for column {} in entity {}", dbColumnName, dalEntityName);
+    }
+    return prop;
   }
 
   /**
