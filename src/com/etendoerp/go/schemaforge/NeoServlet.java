@@ -34,6 +34,7 @@ import org.openbravo.model.ad.ui.Window;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -141,6 +142,12 @@ public class NeoServlet extends HttpBaseServlet {
           return;
         }
         discoveryHandler.handleDiscovery(response);
+        return;
+      }
+
+      // Image endpoint: GET /sws/neo/image/{imageId}  or  POST /sws/neo/image
+      if ("image".equals(pathInfo.specName)) {
+        NeoImageHelper.handleImageRequest(pathInfo.entityName, method, request, response);
         return;
       }
 

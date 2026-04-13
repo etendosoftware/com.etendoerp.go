@@ -1006,7 +1006,7 @@ public class NeoSelectorService {
    * Find the first identifier property of an entity.
    * Falls back to "name" or "id" if no identifier is found.
    */
-  private static String findIdentifierProperty(Entity entity) {
+  static String findIdentifierProperty(Entity entity) {
     for (Property prop : entity.getIdentifierProperties()) {
       if (!prop.isPrimitive()) {
         continue;
