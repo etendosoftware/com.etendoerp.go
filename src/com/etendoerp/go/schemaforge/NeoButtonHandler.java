@@ -46,6 +46,10 @@ class NeoButtonHandler {
   NeoResponse handleButtonAction(NeoServlet.NeoPathInfo pathInfo,
       String method, HttpServletRequest request, SFEntity entity) {
     try {
+      if (entity == null) {
+        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+            "Entity not found in spec: " + pathInfo.entityName);
+      }
       if ("GET".equals(method) && pathInfo.actionName == null) {
         return NeoButtonActionHelper.listButtonActions(entity.getId());
       }
