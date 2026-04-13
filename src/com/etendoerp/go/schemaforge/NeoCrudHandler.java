@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -401,6 +402,16 @@ class NeoCrudHandler {
     NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
     // TODO move this compatibility rule into the shared create-defaults helper once the merge settles.
     stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
+    // Coerce String primitives to correct Java types. Utility.getDefault() always returns String,
+    // but JsonToDataConverter has no String→BigDecimal/Integer/Boolean path — it falls through to
+    // return value, causing OBDal to reject the String with a type mismatch error.
+    coerceBodyTypes(filteredBody, dalEntityName);
+    // Remove 'id' after mandatory-default injection — injectMandatoryDefaults may accidentally
+    // inject a fallback FK record ID for the PK column, which would cause DefaultJsonDataService
+    // to UPDATE an existing record instead of INSERT a new one.
+    if (filteredBody != null) {
+      filteredBody.remove("id");
+    }
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
     return jsonService.add(params, wrappedBody);
   }
@@ -483,6 +494,79 @@ class NeoCrudHandler {
     JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
+  }
+
+  /**
+   * Coerces String values in the body to the correct Java primitive types based on the DAL entity.
+   *
+   * <p>{@code Utility.getDefault()} always returns String regardless of the column type.
+   * {@code JsonToDataConverter.convertJsonToPropertyValue()} has no String→BigDecimal path — it
+   * falls through to {@code return value}, causing OBDal to reject the String with a type mismatch.
+   * This method converts String "0", "1", etc. to the proper type (Double for BigDecimal columns,
+   * Integer for Long/Integer columns, Boolean for Boolean columns) so that
+   * {@code JsonToDataConverter} can coerce them correctly.</p>
+   */
+  @SuppressWarnings("unchecked")
+  private void coerceBodyTypes(JSONObject body, String dalEntityName) {
+    if (body == null || dalEntityName == null) {
+      return;
+    }
+    try {
+      Entity entity = ModelProvider.getInstance().getEntity(dalEntityName);
+      if (entity == null) {
+        return;
+      }
+      Map<String, Object> replacements = new HashMap<>();
+      Iterator<String> keys = body.keys();
+      while (keys.hasNext()) {
+        String key = keys.next();
+        Object raw = body.opt(key);
+        if (!(raw instanceof String)) {
+          continue; // already a typed value — no coercion needed
+        }
+        String strVal = (String) raw;
+        if (strVal.isEmpty()) {
+          continue;
+        }
+        Property prop = null;
+        try {
+          prop = entity.getProperty(key);
+        } catch (Exception e) {
+          continue; // not a known property (metadata key, etc.)
+        }
+        if (prop == null || !prop.isPrimitive()) {
+          continue;
+        }
+        Class<?> type = prop.getPrimitiveObjectType();
+        if (type == BigDecimal.class) {
+          // Send as Double — JsonToDataConverter line 195 converts Double→BigDecimal.valueOf(d).
+          try {
+            replacements.put(key, Double.parseDouble(strVal));
+          } catch (NumberFormatException e) {
+            log.debug("Cannot coerce '{}' to Double for property {}", strVal, key);
+          }
+        } else if (type == Long.class) {
+          try {
+            replacements.put(key, Long.parseLong(strVal));
+          } catch (NumberFormatException e) {
+            log.debug("Cannot coerce '{}' to Long for property {}", strVal, key);
+          }
+        } else if (type == Integer.class) {
+          try {
+            replacements.put(key, Integer.parseInt(strVal));
+          } catch (NumberFormatException e) {
+            log.debug("Cannot coerce '{}' to Integer for property {}", strVal, key);
+          }
+        } else if (type == Boolean.class) {
+          replacements.put(key, "Y".equals(strVal) || "true".equalsIgnoreCase(strVal));
+        }
+      }
+      for (Map.Entry<String, Object> entry : replacements.entrySet()) {
+        body.put(entry.getKey(), entry.getValue());
+      }
+    } catch (Exception e) {
+      log.debug("Error coercing body types for entity {}: {}", dalEntityName, e.getMessage());
+    }
   }
 
   /**

@@ -228,6 +228,7 @@ public class NeoSelectorService {
       }
 
       SelectorMeta meta = resolveTarget(column, refId);
+      meta = adaptSelectorForInternalConsumption(sourceEntity, column, meta);
       if (meta == null) {
         return NeoResponse.error(500,
             "Could not resolve target for: " + columnName);
@@ -317,11 +318,17 @@ public class NeoSelectorService {
     dataQuery.setFirstResult(offset);
 
     // Build results
+    Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
     JSONArray items = new JSONArray();
     for (BaseOBObject bob : dataQuery.list()) {
       JSONObject item = new JSONObject();
       item.put("id", SelectorQueryBuilder.normalizeEntityId(bob.getId().toString()));
-      item.put(FIELD_LABEL, bob.getIdentifier());
+      if (meta.displayProperty != null && meta.displayProperty.contains(".")) {
+        Object labelValue = resolvePropertyValue(bob, meta.displayProperty, entityDef);
+        item.put(FIELD_LABEL, labelValue != null ? labelValue : bob.getIdentifier());
+      } else {
+        item.put(FIELD_LABEL, bob.getIdentifier());
+      }
       items.put(item);
     }
 
@@ -370,12 +377,14 @@ public class NeoSelectorService {
     Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
     JSONArray items = new JSONArray();
     List<String> entityIds = new ArrayList<>();
+    boolean useValueProperty = meta.valueProperty != null && !meta.valueProperty.equals("id");
     for (BaseOBObject bob : dataQuery.list()) {
       JSONObject item = new JSONObject();
       String itemId = resolveRichItemId(bob, meta, entityDef);
       item.put("id", itemId);
       item.put(FIELD_LABEL, bob.getIdentifier());
       entityIds.add(itemId);
+      entityIds.add(bob.getId().toString()); // keep view PK for aux HQL resolution
 
       for (RichFieldMeta fieldMeta : meta.gridFields) {
         Object value = resolvePropertyValue(bob, fieldMeta.property, entityDef);
@@ -872,8 +881,36 @@ public class NeoSelectorService {
       return resolveTableDir(column);
     } else {
       // Table (18) or Search (30): use AD_Ref_Table
-      return resolveRefTable(column);
+      SelectorMeta meta = resolveRefTable(column);
+      if (meta == null && column.getDBColumnName().endsWith("_ID")) {
+        // AD_Ref_Table missing — fall back to TableDir convention as last resort
+        // (e.g. M_Locator_ID → M_Locator when no AD_Ref_Table or OBUISEL_Selector exists)
+        log.debug("No AD_Ref_Table for {}, trying TableDir fallback", column.getDBColumnName());
+        return resolveTableDir(column);
+      }
+      return meta;
     }
+  }
+
+  /**
+   * Internal Consumption line UX: for Storage Bin selectors, display the parent warehouse
+   * identifier while still returning the locator ID as value for POST/PUT/PATCH payloads.
+   */
+  private static SelectorMeta adaptSelectorForInternalConsumption(SFEntity sourceEntity,
+      Column column, SelectorMeta meta) {
+    if (sourceEntity == null || column == null || meta == null || meta.isRich) {
+      return meta;
+    }
+    if (!"M_Locator_ID".equalsIgnoreCase(column.getDBColumnName())) {
+      return meta;
+    }
+    Tab sourceTab = sourceEntity.getADTab();
+    if (sourceTab == null || sourceTab.getTable() == null
+        || !"M_Internal_ConsumptionLine".equalsIgnoreCase(sourceTab.getTable().getDBTableName())) {
+      return meta;
+    }
+
+    return new SelectorMeta(meta.entityName, "warehouse.name", meta.whereClause);
   }
 
   /**
