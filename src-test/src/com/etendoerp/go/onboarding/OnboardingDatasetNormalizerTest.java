@@ -29,7 +29,7 @@ import org.junit.Test;
  */
 public class OnboardingDatasetNormalizerTest {
 
-  /** Test method for {@link OnboardingDatasetNormalizer#buildDatasetXml()}. */
+  /** Verifies that the bootstrap exclusion list contains the expected tenant-definition tables. */
   @Test
   public void testDefinitionExcludesBootstrapTables() {
     assertTrue(OnboardingDatasetDefinition.getExcludedTables().contains("AD_CLIENT"));
@@ -39,7 +39,7 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue(OnboardingDatasetDefinition.getExcludedTables().contains("AD_REF_DATA_LOADED"));
   }
 
-  /** Test method for {@link OnboardingDatasetNormalizer#buildDatasetXml()}. */
+  /** Verifies that the generated onboarding XML uses the Openbravo root element. */
 
   @Test
   public void testNormalizerUsesOpenbravoRootElement() {
@@ -49,7 +49,7 @@ public class OnboardingDatasetNormalizerTest {
     assertFalse(xml.contains("<data>"));
   }
 
-  /* Test method for {@link OnboardingDatasetNormalizer#buildDatasetXml()}. */
+  /** Verifies that bootstrap records are removed from the generated onboarding dataset. */
   @Test
   public void testNormalizerRemovesBootstrapTablesFromDatasetXml() {
     String xml = new OnboardingDatasetNormalizer(sampleDataDir()).buildDatasetXml();
@@ -61,7 +61,7 @@ public class OnboardingDatasetNormalizerTest {
     assertFalse(xml.contains("<AD_REF_DATA_LOADED>"));
   }
 
-  /** Test method for {@link OnboardingDatasetNormalizer#buildDatasetXml()}. */
+  /** Verifies that representative foundation business records remain in the normalized XML. */
   @Test
   public void testNormalizerKeepsFoundationBusinessContent() {
     String xml = new OnboardingDatasetNormalizer(sampleDataDir()).buildDatasetXml();
@@ -72,7 +72,7 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue(xml.contains("Efectivo"));
   }
 
-  /** Test method for {@link OnboardingDatasetNormalizer#buildDatasetXml()}. */
+  /** Verifies that user-scoped sales representative columns are stripped from product rows. */
   @Test
   public void testNormalizerStripsUserScopedProductSalesRepField() {
     String xml = new OnboardingDatasetNormalizer(sampleDataDir()).buildDatasetXml();
@@ -80,7 +80,7 @@ public class OnboardingDatasetNormalizerTest {
     assertFalse(xml.contains("<SALESREP_ID>"));
   }
 
-  /** Test method for {@link OnboardingDatasetNormalizer#buildDatasetXml()}. */
+  /** Verifies that sourcedata table and column tags do not leak into the final XML. */
   @Test
   public void testNormalizerDoesNotEmitSourcedataTableOrColumnTags() {
     String xml = new OnboardingDatasetNormalizer(sampleDataDir()).buildDatasetXml();

@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Objects;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -71,7 +72,8 @@ public class OnboardingDatasetNormalizer {
    * @param sampleDataDirectory the directory that contains the GOClient sourcedata XML files
    */
   public OnboardingDatasetNormalizer(Path sampleDataDirectory) {
-    this.sampleDataDirectory = sampleDataDirectory;
+    this.sampleDataDirectory = Objects.requireNonNull(sampleDataDirectory,
+        "sampleDataDirectory is required");
   }
 
   /**

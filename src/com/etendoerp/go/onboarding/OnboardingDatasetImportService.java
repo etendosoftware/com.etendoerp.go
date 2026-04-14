@@ -80,8 +80,10 @@ public class OnboardingDatasetImportService {
     if (result.hasErrorOccured()) {
       throw new OBException(result.getErrorMessages());
     }
-    commitImport();
+
+    flushImport();
     validateImportedSeed(client, organization);
+    commitImport();
     return result;
   }
 
@@ -112,10 +114,19 @@ public class OnboardingDatasetImportService {
     }
   }
 
-  protected void commitImport() {
+  protected void flushImport() {
     OBContext.setAdminMode(true);
     try {
       OBDal.getInstance().flush();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+
+  protected void commitImport() {
+    OBContext.setAdminMode(true);
+    try {
       OBDal.getInstance().commitAndClose();
     } finally {
       OBContext.restorePreviousMode();

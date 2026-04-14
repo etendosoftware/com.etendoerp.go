@@ -99,6 +99,8 @@ public final class OnboardingDatasetDefinition {
    * @return {@code true} when the table should be normalized into the onboarding dataset
    */
   public static boolean shouldIncludeTable(String tableName) {
-    return INCLUDED_TABLES.contains(tableName) && !EXCLUDED_TABLES.contains(tableName);
+    return tableName != null
+        && INCLUDED_TABLES.contains(tableName)
+        && !EXCLUDED_TABLES.contains(tableName);
   }
 }

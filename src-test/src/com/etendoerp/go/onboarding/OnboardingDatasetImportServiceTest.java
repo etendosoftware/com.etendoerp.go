@@ -17,6 +17,7 @@
 package com.etendoerp.go.onboarding;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -68,6 +69,7 @@ public class OnboardingDatasetImportServiceTest {
       service.importDataset("missing-client", ORGANIZATION_ID);
       fail("Expected missing client to fail");
     } catch (OBException e) {
+      assertNotNull("Exception message should not be null", e.getMessage());
       assertTrue(e.getMessage().contains("missing-client"));
     }
   }
@@ -84,6 +86,7 @@ public class OnboardingDatasetImportServiceTest {
       service.importDataset(CLIENT_ID, "missing-org");
       fail("Expected missing organization to fail");
     } catch (OBException e) {
+      assertNotNull("Exception message should not be null", e.getMessage());
       assertTrue(e.getMessage().contains("missing-org"));
     }
   }
@@ -103,6 +106,7 @@ public class OnboardingDatasetImportServiceTest {
       service.importDataset(CLIENT_ID, ORGANIZATION_ID);
       fail("Expected import errors to fail");
     } catch (OBException e) {
+      assertNotNull("Exception message should not be null", e.getMessage());
       assertTrue(e.getMessage().contains("broken import"));
     }
   }
@@ -181,6 +185,7 @@ public class OnboardingDatasetImportServiceTest {
 
     @Override
     protected void validateImportedSeed(Client client, Organization organization) {
+      summaryLogged = true;
       validationCalled = true;
     }
 
