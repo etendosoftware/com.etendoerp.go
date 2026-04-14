@@ -36,8 +36,6 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
-import org.openbravo.client.application.ApplicationUtils;
-import org.openbravo.client.kernel.KernelUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
@@ -47,6 +45,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
@@ -246,7 +245,7 @@ class NeoCrudHandler {
     String tabWhere = adTab.getHqlwhereclause();
     if (StringUtils.isNotBlank(tabWhere)) {
       if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = tabWhere.replaceAll("@[A-Za-z_]+@", "'" + parentId.replace("'", "''") + "'");
+        tabWhere = tabWhere.replaceAll("@[A-Za-z_.]+@", "'" + parentId.replace("'", "''") + "'");
       }
       where.append("(").append(tabWhere).append(")");
     }
@@ -258,6 +257,13 @@ class NeoCrudHandler {
         }
         where.append("(").append(parentFilter).append(")");
       }
+    }
+    String neoWhere = params.remove(NeoCrudHelper.NEO_WHERE_PARAM);
+    if (StringUtils.isNotBlank(neoWhere)) {
+      if (where.length() > 0) {
+        where.append(" and ");
+      }
+      where.append("(").append(neoWhere).append(")");
     }
     if (where.length() > 0) {
       params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, where.toString());
@@ -503,16 +509,9 @@ class NeoCrudHandler {
    */
   private String resolveParentFilter(Tab childTab, String parentId) {
     try {
-      Tab parentTab = KernelUtils.getInstance().getParentTab(childTab);
-      if (parentTab == null) return null;
-      String parentProperty = ApplicationUtils.getParentProperty(childTab, parentTab);
-      if (StringUtils.isBlank(parentProperty)) return null;
-      Entity childEntity = ModelProvider.getInstance().getEntityByTableId(childTab.getTable().getId());
-      Property prop = childEntity.getProperty(parentProperty);
-      String escaped = parentId.replace("'", "''");
-      return (prop != null && !prop.isPrimitive())
-          ? "e." + parentProperty + ".id='" + escaped + "'"
-          : "e." + parentProperty + "='" + escaped + "'";
+      NeoTypeCoercionHelper.ParentFilter parentFilter =
+          NeoTypeCoercionHelper.buildParentWhereClause(childTab, parentId);
+      return parentFilter != null ? parentFilter.resolveForStringApi() : null;
     } catch (Exception e) {
       log.error("Error resolving parent filter for tab '{}': {}", childTab.getName(), e.getMessage(), e);
       return null;
