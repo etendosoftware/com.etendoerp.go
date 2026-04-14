@@ -266,8 +266,12 @@ class SelectorQueryBuilder {
     if (entityDef == null || !entityDef.hasProperty("organization")) {
       return null;
     }
-    Set<String> orgIds = new LinkedHashSet<>();
-    orgIds.add(organizationId.trim());
+    OBContext ctx = OBContext.getOBContext();
+    if (ctx == null) {
+      return null;
+    }
+    Set<String> orgIds = new LinkedHashSet<>(
+        ctx.getOrganizationStructureProvider().getNaturalTree(organizationId.trim()));
     if (includeOrgZero) {
       orgIds.add("0");
     }

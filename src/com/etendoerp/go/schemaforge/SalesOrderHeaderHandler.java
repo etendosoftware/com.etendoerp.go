@@ -17,8 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import javax.enterprise.context.ApplicationScoped;
-import javax.inject.Inject;
 import javax.inject.Named;
 
 /**
@@ -34,22 +32,15 @@ import javax.inject.Named;
  * {@code null} when the request does not apply, so this class needs no
  * additional routing conditions.
  */
-@ApplicationScoped
 @Named("salesOrderHeaderHandler")
 public class SalesOrderHeaderHandler implements NeoHandler {
 
-  @Inject
-  private CreateShipmentHandler shipmentHandler;
-
-  @Inject
-  private CreateDraftInvoiceHandler invoiceHandler;
-
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse result = shipmentHandler.handle(context);
+    NeoResponse result = new CreateShipmentHandler().handle(context);
     if (result != null) {
       return result;
     }
-    return invoiceHandler.handle(context);
+    return new CreateDraftInvoiceHandler().handle(context);
   }
 }

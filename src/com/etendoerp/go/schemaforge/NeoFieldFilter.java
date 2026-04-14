@@ -17,9 +17,11 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
@@ -58,12 +60,29 @@ public class NeoFieldFilter {
    */
   private final Set<String> writableFields;
 
+  /**
+   * Maps API keys (javaQualifier, e.g. "unitPrice") to DAL property names
+   * (e.g. "priceActual"). Used to rename request body keys before filtering,
+   * bridging the gap between the frontend field name and DefaultJsonDataService.
+   */
+  private final Map<String, String> apiKeyToPropName;
+
+  /**
+   * Reverse of apiKeyToPropName: DAL property name → API key
+   * (e.g. "priceActual" → "unitPrice"). Used to rename GET response fields
+   * so the frontend receives the field names it declared in decisions.json.
+   */
+  private final Map<String, String> propNameToApiKey;
+
   /** Whether filtering is active (false if no SF_FIELD config exists). */
   private final boolean active;
 
-  private NeoFieldFilter(Set<String> includedFields, Set<String> writableFields, boolean active) {
+  private NeoFieldFilter(Set<String> includedFields, Set<String> writableFields,
+      Map<String, String> apiKeyToPropName, Map<String, String> propNameToApiKey, boolean active) {
     this.includedFields = includedFields;
     this.writableFields = writableFields;
+    this.apiKeyToPropName = apiKeyToPropName;
+    this.propNameToApiKey = propNameToApiKey;
     this.active = active;
   }
 
@@ -101,61 +120,22 @@ public class NeoFieldFilter {
 
       Set<String> included = new HashSet<>();
       Set<String> writable = new HashSet<>();
+      Map<String, String> apiKeyMap = new HashMap<>();
+      Map<String, String> propToApiMap = new HashMap<>();
 
-      for (SFField sfField : allFields) {
-        Column adColumn = sfField.getADColumn();
-        if (adColumn == null) {
-          continue;
-        }
-
-        String dbColumnName = adColumn.getDBColumnName();
-        Property prop = dalEntity.getPropertyByColumnName(dbColumnName);
-        if (prop == null) {
-          log.debug("No DAL property found for column {} in entity {}",
-              dbColumnName, dalEntityName);
-          continue;
-        }
-
-        String propName = prop.getName();
-
-        if (Boolean.TRUE.equals(sfField.isIncluded())) {
-          included.add(propName);
-          // For FK properties, also include the "_identifier" variant
-          // that DefaultJsonDataService adds to the JSON
-          if (!prop.isPrimitive() && prop.getTargetEntity() != null) {
-            included.add(propName + "$_identifier");
-          }
-
-          if (!Boolean.TRUE.equals(sfField.isReadOnly())) {
-            writable.add(propName);
-          }
-        }
-      }
+      processFieldMappings(allFields, dalEntity, included, writable, apiKeyMap, propToApiMap,
+          dalEntityName);
 
       // Always include "id" — it's needed for record identification
       included.add("id");
       writable.add("id");
 
-      // Always allow link-to-parent columns — they're needed for child record
-      // creation
-      // (e.g., salesOrder on C_OrderLine, invoice on C_InvoiceLine)
-      Tab adTab = sfEntity.getADTab();
-      if (adTab != null && adTab.getTable() != null) {
-        for (Column col : adTab.getTable().getADColumnList()) {
-          if (col.isActive() && col.isLinkToParentColumn()) {
-            Property parentProp = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-            if (parentProp != null) {
-              writable.add(parentProp.getName());
-              included.add(parentProp.getName());
-            }
-          }
-        }
-      }
+      addParentColumnMappings(sfEntity, dalEntity, included, writable);
 
       log.debug("Field filter for entity {}: {} included, {} writable",
           sfEntity.getName(), included.size(), writable.size());
 
-      return new NeoFieldFilter(included, writable, true);
+      return new NeoFieldFilter(included, writable, apiKeyMap, propToApiMap, true);
 
     } catch (Exception e) {
       log.error("Error building field filter for entity {}: {}",
@@ -165,10 +145,91 @@ public class NeoFieldFilter {
   }
 
   /**
+   * Processes field mappings for all SF fields, populating the included, writable,
+   * apiKeyMap, and propToApiMap sets/maps.
+   */
+  private static void processFieldMappings(List<SFField> fields, Entity dalEntity,
+      Set<String> included, Set<String> writable,
+      Map<String, String> apiKeyMap, Map<String, String> propToApiMap,
+      String dalEntityName) {
+    for (SFField sfField : fields) {
+      Property prop = resolveProperty(sfField, dalEntity, dalEntityName);
+      if (prop == null) {
+        continue;
+      }
+
+      String propName = prop.getName();
+
+      // push-to-neo.js stores the frontend field name (e.g. "unitPrice") in
+      // javaQualifier. DefaultJsonDataService expects the DAL property name
+      // (e.g. "priceActual"). Build both maps:
+      //   POST: apiKeyMap  (qualifier → propName) for remapApiKeys()
+      //   GET:  propToApiMap (propName → qualifier) for renameToApiKeys()
+      String qualifier = sfField.getJavaQualifier();
+      if (qualifier != null && !qualifier.equals(propName)) {
+        apiKeyMap.put(qualifier, propName);
+        propToApiMap.put(propName, qualifier);
+      }
+
+      if (Boolean.TRUE.equals(sfField.isIncluded())) {
+        included.add(propName);
+        // For FK properties, also include the "_identifier" variant
+        // that DefaultJsonDataService adds to the JSON
+        if (!prop.isPrimitive() && prop.getTargetEntity() != null) {
+          included.add(propName + "$_identifier");
+        }
+
+        if (!Boolean.TRUE.equals(sfField.isReadOnly())) {
+          writable.add(propName);
+        }
+      }
+    }
+  }
+
+  /**
+   * Resolves the DAL {@link Property} for the given SF field, or returns {@code null}
+   * if the field has no AD column or the column has no matching DAL property.
+   */
+  private static Property resolveProperty(SFField sfField, Entity dalEntity, String dalEntityName) {
+    Column adColumn = sfField.getADColumn();
+    if (adColumn == null) {
+      return null;
+    }
+    String dbColumnName = adColumn.getDBColumnName();
+    Property prop = dalEntity.getPropertyByColumnName(dbColumnName);
+    if (prop == null) {
+      log.debug("No DAL property found for column {} in entity {}", dbColumnName, dalEntityName);
+    }
+    return prop;
+  }
+
+  /**
+   * Adds link-to-parent column properties to included and writable sets.
+   * These are always allowed — they're needed for child record creation
+   * (e.g., salesOrder on C_OrderLine, invoice on C_InvoiceLine).
+   */
+  private static void addParentColumnMappings(SFEntity sfEntity, Entity dalEntity,
+      Set<String> included, Set<String> writable) {
+    Tab adTab = sfEntity.getADTab();
+    if (adTab != null && adTab.getTable() != null) {
+      for (Column col : adTab.getTable().getADColumnList()) {
+        if (col.isActive() && col.isLinkToParentColumn()) {
+          Property parentProp = dalEntity.getPropertyByColumnName(col.getDBColumnName());
+          if (parentProp != null) {
+            writable.add(parentProp.getName());
+            included.add(parentProp.getName());
+          }
+        }
+      }
+    }
+  }
+
+  /**
    * Create an inactive filter that performs no filtering.
    */
   private static NeoFieldFilter inactive() {
-    return new NeoFieldFilter(null, null, false);
+    return new NeoFieldFilter(null, null,
+        java.util.Collections.emptyMap(), java.util.Collections.emptyMap(), false);
   }
 
   /**
@@ -195,6 +256,7 @@ public class NeoFieldFilter {
         for (int i = 0; i < data.length(); i++) {
           JSONObject record = data.getJSONObject(i);
           filterRecord(record, includedFields);
+          renameToApiKeys(record);
         }
       }
     } catch (Exception e) {
@@ -241,6 +303,7 @@ public class NeoFieldFilter {
       if (requestBody.has("data") && requestBody.optJSONObject("data") != null) {
         bodyToFilter = requestBody.getJSONObject("data");
       }
+      remapApiKeys(bodyToFilter);
       filterRecord(bodyToFilter, allowedFields);
       return bodyToFilter;
     } catch (Exception e) {
@@ -248,6 +311,83 @@ public class NeoFieldFilter {
     }
 
     return requestBody;
+  }
+
+  /**
+   * Renames DAL property names (e.g. "priceActual") in a GET response record to
+   * their API keys (e.g. "unitPrice") so the frontend receives the field names it
+   * declared in decisions.json / the contract. Called after filterRecord() so only
+   * included fields are present and eligible for renaming.
+   */
+  @SuppressWarnings("unchecked")
+  private void renameToApiKeys(JSONObject jsonObj) {
+    if (propNameToApiKey.isEmpty() || jsonObj == null) {
+      return;
+    }
+    Map<String, String> toRename = new HashMap<>();
+    Iterator<String> keys = jsonObj.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      String apiKey = propNameToApiKey.get(key);
+      if (apiKey != null) {
+        toRename.put(key, apiKey);
+      }
+    }
+    for (Map.Entry<String, String> entry : toRename.entrySet()) {
+      String propName = entry.getKey();
+      String apiKey = entry.getValue();
+      Object value = jsonObj.opt(propName);
+      jsonObj.remove(propName);
+      if (!jsonObj.has(apiKey) && value != null) {
+        try {
+          jsonObj.put(apiKey, value);
+          log.debug("[NEO] renameToApiKeys: '{}' → '{}' (value={})", propName, apiKey, value);
+        } catch (Exception e) {
+          log.warn("[NEO] renameToApiKeys: failed to rename '{}' → '{}': {}",
+              propName, apiKey, e.getMessage());
+        }
+      }
+    }
+  }
+
+  /**
+   * Renames API keys (javaQualifier, e.g. "unitPrice") in the request body to
+   * their DAL property names (e.g. "priceActual") before filtering and coercion.
+   * If the DAL property name is already present in the body, the API key is
+   * dropped and the existing DAL-name value is preserved.
+   */
+  @SuppressWarnings("unchecked")
+  private void remapApiKeys(JSONObject body) {
+    log.info("[REMAP] apiKeyToPropName map: {}", apiKeyToPropName);
+    log.info("[REMAP] body recibido: {}", body);
+    if (apiKeyToPropName.isEmpty() || body == null) {
+      return;
+    }
+    Map<String, String> toRename = new HashMap<>();
+    Iterator<String> keys = body.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      String propName = apiKeyToPropName.get(key);
+      if (propName != null) {
+        toRename.put(key, propName);
+      }
+    }
+    for (Map.Entry<String, String> entry : toRename.entrySet()) {
+      String apiKey = entry.getKey();
+      String propName = entry.getValue();
+      Object value = body.opt(apiKey);
+      body.remove(apiKey);
+      // Preserve an existing DAL-name value if already present in the body.
+      if (!body.has(propName) && value != null) {
+        try {
+          body.put(propName, value);
+          log.debug("[NEO] remapApiKeys: '{}' → '{}' (value={})", apiKey, propName, value);
+        } catch (Exception e) {
+          log.warn("[NEO] remapApiKeys: failed to rename '{}' → '{}': {}",
+              apiKey, propName, e.getMessage());
+        }
+      }
+    }
   }
 
   /**

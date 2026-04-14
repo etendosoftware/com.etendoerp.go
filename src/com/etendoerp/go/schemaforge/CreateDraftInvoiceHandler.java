@@ -117,6 +117,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         }
 
         OBDal.getInstance().flush();
+        // Refresh to pick up trigger-generated documentNo and ensure the
+        // invoice line collection is loaded fresh (not the pre-save empty proxy).
+        OBDal.getInstance().getSession().refresh(invoice);
         recalculateTotals(invoice);
         OBDal.getInstance().flush();
 
@@ -308,6 +311,20 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     Order order = OBDal.getInstance().get(Order.class, orderId);
     if (order == null) {
       throw new OBException("Order not found: " + orderId);
+    }
+
+    // Pre-validate: check pending lines exist before creating the invoice header.
+    // This prevents zombie invoice headers being committed when the exception is caught.
+    boolean hasOverrides = !lineOverrides.isEmpty();
+    boolean hasPending = false;
+    for (OrderLine ol : order.getOrderLineList()) {
+      if (resolveOrderLineQty(ol, hasOverrides, lineOverrides) != null) {
+        hasPending = true;
+        break;
+      }
+    }
+    if (!hasPending) {
+      throw new OBException("No hay líneas a facturar en este pedido");
     }
 
     BusinessPartner bp = order.getBusinessPartner();

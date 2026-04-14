@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge.util;
 
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 
@@ -267,7 +268,21 @@ public class NeoCrudHelper {
     if (adTab == null || adTab.getTabLevel() == null || adTab.getTabLevel() != 0) {
       return;
     }
+    // Detect sequence preview fields already in the body (values wrapped in angle brackets,
+    // e.g. "<1000371>"). The callout cascade must not overwrite these — the real sequence
+    // number is consumed by DefaultJsonDataService.add() when it detects the brackets.
     Set<String> seqFields = new HashSet<>();
+    Iterator<String> bodyKeys = filteredBody.keys();
+    while (bodyKeys.hasNext()) {
+      String key = bodyKeys.next();
+      Object val = filteredBody.opt(key);
+      if (val instanceof String) {
+        String s = (String) val;
+        if (s.startsWith("<") && s.endsWith(">") && s.length() > 2) {
+          seqFields.add(key);
+        }
+      }
+    }
     NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields);
     DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
     NeoDefaultsCascadeHelper.removeEmptyFkValues(filteredBody, adTab);
