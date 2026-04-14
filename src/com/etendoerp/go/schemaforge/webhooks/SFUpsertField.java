@@ -33,7 +33,8 @@ import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
- * Webhook to create or update an ETGO_SF_Field record.
+ * Webhook service to create or update an ETGO_SF_Field record from external API calls.
+ * This is used to build the SchemaForge specification for a given entity.
  *
  * Required params: EntityID, ColumnID, ModuleID
  * Optional params: IsIncluded, IsReadOnly, DefaultValue, JavaQualifier,

@@ -36,6 +36,7 @@ import org.openbravo.model.ad.ui.Process;
 
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.NeoServlet;
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -46,11 +47,16 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  */
 public final class NeoButtonActionHelper {
 
-  private static final Logger log = LogManager.getLogger(NeoButtonActionHelper.class);
-
   private NeoButtonActionHelper() {
   }
 
+  /**
+   * Returns the list of available button actions for the given entity.
+   *
+   * @param entityId the ID of the {@link com.etendoerp.go.schemaforge.data.SFEntity} to inspect
+   * @return a {@link NeoResponse} containing a JSON object with an {@code actions} array
+   * @throws Exception if loading fields or building the response fails
+   */
   public static NeoResponse listButtonActions(String entityId) throws Exception {
     List<SFField> fields = loadEntityFields(entityId);
     JSONArray actions = new JSONArray();
@@ -65,6 +71,15 @@ public final class NeoButtonActionHelper {
     return NeoResponse.ok(responseBody);
   }
 
+  /**
+   * Builds a JSON descriptor for a single button action field, or returns {@code null}
+   * if the field is not a button (AD reference 28) or has no linked process.
+   *
+   * @param field the {@link com.etendoerp.go.schemaforge.data.SFField} to evaluate
+   * @return a {@link JSONObject} with {@code columnName}, {@code processType}, and
+   *         {@code processName}, or {@code null} if the field is not an actionable button
+   * @throws Exception if JSON construction fails
+   */
   public static JSONObject buildButtonActionEntry(SFField field) throws Exception {
     Column column = field.getADColumn();
     if (column == null || column.getReference() == null
@@ -93,6 +108,16 @@ public final class NeoButtonActionHelper {
     return actionObj;
   }
 
+  /**
+   * Executes a button action on a specific record.
+   *
+   * @param entity   the entity configuration that owns the button field
+   * @param pathInfo parsed path components containing the action name and record ID
+   * @param request  the HTTP request carrying optional JSON body parameters
+   * @return a {@link NeoResponse} with the process result, or an error response
+   *         if the action is not found, the field is not a button, or access is denied
+   * @throws Exception if process execution or I/O fails
+   */
   public static NeoResponse executeButtonAction(SFEntity entity,
       NeoPathInfo pathInfo, HttpServletRequest request) throws Exception {
     Column targetColumn = findButtonColumn(entity.getId(), pathInfo.actionName);
@@ -116,7 +141,10 @@ public final class NeoButtonActionHelper {
             "No process linked to button: " + pathInfo.actionName);
       }
     }
-    String bodyStr = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+    Object cachedBody = request.getAttribute(NeoServlet.ACTION_REQUEST_BODY_ATTR);
+    String bodyStr = cachedBody instanceof String
+        ? (String) cachedBody
+        : new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
     JSONObject params = StringUtils.isNotBlank(bodyStr) ? new JSONObject(bodyStr) : new JSONObject();
     params.put("recordId", pathInfo.recordId);
     params.put("inpRecordId", pathInfo.recordId);
@@ -146,6 +174,12 @@ public final class NeoButtonActionHelper {
     }
   }
 
+  /**
+   * Loads all active, included fields for the given entity from the database.
+   *
+   * @param entityId the ID of the {@link com.etendoerp.go.schemaforge.data.SFEntity}
+   * @return an ordered list of {@link com.etendoerp.go.schemaforge.data.SFField} records
+   */
   public static List<SFField> loadEntityFields(String entityId) {
     OBCriteria<SFField> fieldCriteria = OBDal.getInstance().createCriteria(SFField.class);
     fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
@@ -154,6 +188,14 @@ public final class NeoButtonActionHelper {
     return fieldCriteria.list();
   }
 
+  /**
+   * Finds the AD column that corresponds to the given action name within an entity.
+   * Matches against both the DB column name and the field's Java qualifier.
+   *
+   * @param entityId   the ID of the entity to search within
+   * @param actionName the action identifier (DB column name or camelCase Java qualifier)
+   * @return the matching {@link org.openbravo.model.ad.datamodel.Column}, or {@code null} if not found
+   */
   public static Column findButtonColumn(String entityId, String actionName) {
     for (SFField field : loadEntityFields(entityId)) {
       Column column = field.getADColumn();

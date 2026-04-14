@@ -31,9 +31,10 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 /**
- * NeoHandler that returns the 10 most recent sales invoices for the dashboard widget.
- * Queries sales invoices (c_invoice) joined with business partner, ordered by
- * invoice date descending, limited to the latest 10 records.
+ * NeoHandler that returns recent completed sales invoices for the dashboard widget.
+ * Queries sales invoices (c_invoice) joined with business partner, filtered to
+ * completed statuses (CO, CL) within the last 7 days, ordered by invoice date
+ * descending, limited to the latest 10 records.
  */
 @Named("widgetRecentInvoicesHandler")
 public class WidgetRecentInvoicesHandler implements NeoHandler {
@@ -47,6 +48,8 @@ public class WidgetRecentInvoicesHandler implements NeoHandler {
     + "FROM c_invoice i "
     + "JOIN c_bpartner bp ON bp.c_bpartner_id = i.c_bpartner_id "
     + "WHERE i.issotrx = 'Y' AND i.ad_client_id = :clientId "
+    + "  AND i.docstatus IN ('CO','CL') "
+    + "  AND i.dateinvoiced >= CURRENT_DATE - CAST('7 days' AS interval) "
     + "ORDER BY i.dateinvoiced DESC, i.created DESC "
     + "LIMIT 10";
 

@@ -36,7 +36,8 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
- * Webhook to create or update an ETGO_SF_Spec record.
+ * Webhook service to create or update an ETGO_SF_Spec record.
+ * This represents the top-level API configuration for a Window or Process.
  *
  * Required params: Name, ModuleID
  * Optional params: Description, SpecID (for update), SpecType (W or P, default W)
@@ -46,6 +47,9 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
 public class SFUpsertSpec extends BaseWebhookService {
 
   private static final Logger log = LogManager.getLogger(SFUpsertSpec.class);
+
+  /** Response variable key used to communicate error messages to the webhook caller. */
+  private static final String ERROR = "error";
 
   @Override
   public void get(Map<String, String> parameter, Map<String, String> responseVars) {
@@ -70,7 +74,7 @@ public class SFUpsertSpec extends BaseWebhookService {
       }
 
       if (!"W".equals(specType) && !"P".equals(specType)) {
-        responseVars.put("error", "Invalid SpecType: " + specType + ". Must be W or P.");
+        responseVars.put(ERROR, "Invalid SpecType: " + specType + ". Must be W or P.");
         return;
       }
 
@@ -78,7 +82,7 @@ public class SFUpsertSpec extends BaseWebhookService {
       if (specId != null && !specId.isEmpty()) {
         spec = OBDal.getInstance().get(SFSpec.class, specId);
         if (spec == null) {
-          responseVars.put("error", "Spec not found: " + specId);
+          responseVars.put(ERROR, "Spec not found: " + specId);
           return;
         }
       } else {
@@ -88,7 +92,7 @@ public class SFUpsertSpec extends BaseWebhookService {
         dupCriteria.setMaxResults(1);
         List<SFSpec> existing = dupCriteria.list();
         if (!existing.isEmpty()) {
-          responseVars.put("error", "A spec with name '" + name + "' already exists (ID: " + existing.get(0).getId() + ")");
+          responseVars.put(ERROR, "A spec with name '" + name + "' already exists (ID: " + existing.get(0).getId() + ")");
           return;
         }
 
@@ -108,24 +112,24 @@ public class SFUpsertSpec extends BaseWebhookService {
 
       if ("P".equals(specType)) {
         if (processId == null || processId.isEmpty()) {
-          responseVars.put("error", "ProcessID is required when SpecType is P");
+          responseVars.put(ERROR, "ProcessID is required when SpecType is P");
           return;
         }
         Process process = OBDal.getInstance().get(Process.class, processId);
         if (process == null) {
-          responseVars.put("error", "Process not found: " + processId);
+          responseVars.put(ERROR, "Process not found: " + processId);
           return;
         }
         spec.setProcess(process);
         spec.setADWindow(null);
       } else {
         if (windowId == null || windowId.isEmpty()) {
-          responseVars.put("error", "WindowID is required when SpecType is W");
+          responseVars.put(ERROR, "WindowID is required when SpecType is W");
           return;
         }
         Window window = OBDal.getInstance().get(Window.class, windowId);
         if (window == null) {
-          responseVars.put("error", "Window not found: " + windowId);
+          responseVars.put(ERROR, "Window not found: " + windowId);
           return;
         }
         spec.setADWindow(window);
@@ -134,7 +138,7 @@ public class SFUpsertSpec extends BaseWebhookService {
 
       Module module = OBDal.getInstance().get(Module.class, moduleId);
       if (module == null) {
-        responseVars.put("error", "Module not found: " + moduleId);
+        responseVars.put(ERROR, "Module not found: " + moduleId);
         return;
       }
       spec.setADModule(module);
@@ -154,7 +158,7 @@ public class SFUpsertSpec extends BaseWebhookService {
 
     } catch (Exception e) {
       log.error("Error in SFUpsertSpec", e);
-      responseVars.put("error", e.getMessage());
+      responseVars.put(ERROR, e.getMessage());
     } finally {
       OBContext.restorePreviousMode();
     }

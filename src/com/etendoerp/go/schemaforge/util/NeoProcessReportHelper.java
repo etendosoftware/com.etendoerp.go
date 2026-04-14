@@ -50,6 +50,14 @@ public final class NeoProcessReportHelper {
   private NeoProcessReportHelper() {
   }
 
+  /**
+   * Resolves the Java qualifier of the custom report handler associated with the given spec
+   * by inspecting the Java qualifier declared on the first matching {@link SFEntity}.
+   *
+   * @param spec the {@link SFSpec} for which the report handler qualifier should be resolved
+   * @return the non-blank Java qualifier string if one is configured, or {@code null} if no
+   *         entity with a qualifier exists or an error occurs
+   */
   public static String resolveReportHandlerQualifier(SFSpec spec) {
     try {
       OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
@@ -68,6 +76,16 @@ public final class NeoProcessReportHelper {
     return null;
   }
 
+  /**
+   * Handles the execution of a process spec by resolving the linked AD_Process, reading the
+   * JSON request body, invoking {@link NeoProcessService#executeProcess}, and writing the
+   * result to the servlet response.
+   *
+   * @param spec     the {@link SFSpec} of type {@code P} to execute
+   * @param request  the HTTP request whose body may contain JSON parameters for the process
+   * @param response the HTTP servlet response to which the process result is written
+   * @throws IOException if an I/O error occurs while reading the request or writing the response
+   */
   public static void handleProcessSpec(SFSpec spec, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     try {
@@ -91,6 +109,16 @@ public final class NeoProcessReportHelper {
     }
   }
 
+  /**
+   * Handles the generation and streaming of a report spec by resolving the linked AD_Process,
+   * reading the export type and parameters from the request body, and writing the generated
+   * report binary directly to the servlet response output stream.
+   *
+   * @param spec     the {@link SFSpec} of type {@code R} to execute
+   * @param request  the HTTP request whose body may contain {@code exportType} and {@code params}
+   * @param response the HTTP servlet response to which the report binary is streamed
+   * @throws IOException if an I/O error occurs while reading the request or writing the response
+   */
   public static void handleReportSpec(SFSpec spec, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     try {

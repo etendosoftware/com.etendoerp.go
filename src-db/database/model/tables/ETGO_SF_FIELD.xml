@@ -65,6 +65,10 @@
         <default><![CDATA[10]]></default>
         <onCreateDefault/>
       </column>
+      <column name="VISIBILITY" primaryKey="false" required="false" type="VARCHAR" size="20" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_SF_FLD_CLI_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>

@@ -62,6 +62,39 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
   private static final String TAG_NAME = "EtendoGo";
   private static final String BASE_PATH = "/sws/neo/";
 
+  /** HTTP 401 response description. */
+  private static final String MSG_UNAUTHORIZED = "Unauthorized";
+  /** HTTP 404 response description when a spec is not found. */
+  private static final String MSG_SPEC_NOT_FOUND = "Spec not found";
+  /** HTTP 400 response description for bad requests. */
+  private static final String MSG_BAD_REQUEST = "Bad request";
+  /** MIME type for JSON content. */
+  private static final String CONTENT_TYPE_JSON = "application/json";
+  /** Label prefix for list operations (includes trailing space). */
+  private static final String LABEL_LIST = "List ";
+  /** OpenAPI type name for integer fields. */
+  private static final String TYPE_INTEGER = "integer";
+  /** HTTP 404 response description when a spec or entity is not found. */
+  private static final String MSG_SPEC_OR_ENTITY_NOT_FOUND = "Spec or entity not found";
+  /** Label suffix for record references (includes leading space). */
+  private static final String LABEL_RECORD = " record";
+  /** Label suffix for record references ending with a period (includes leading space). */
+  private static final String LABEL_RECORD_DOT = " record.";
+  /** OpenAPI type name for string fields. */
+  private static final String TYPE_STRING = "string";
+  /** Label for record ID fields. */
+  private static final String LABEL_RECORD_ID = "Record ID";
+  /** HTTP 404 response description when a record is not found. */
+  private static final String MSG_RECORD_NOT_FOUND = "Record not found";
+  /** Path parameter name for column identifiers. */
+  private static final String PARAM_COLUMN_NAME = "columnName";
+  /** Property key name for label fields. */
+  private static final String PARAM_LABEL = "label";
+  /** OpenAPI type name for boolean fields. */
+  private static final String TYPE_BOOLEAN = "boolean";
+  /** OpenAPI type name for object fields. */
+  private static final String TYPE_OBJECT = "object";
+
   @Override
   public boolean isValid(String tag) {
     return tag == null || TAG_NAME.equalsIgnoreCase(tag);
@@ -134,8 +167,8 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     describeOp.responses(new ApiResponses()
         .addApiResponse("200", createJsonResponse("Process metadata",
             createObjectSchema("Process metadata with parameter definitions")))
-        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
-        .addApiResponse("404", new ApiResponse().description("Spec not found")));
+        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
+        .addApiResponse("404", new ApiResponse().description(MSG_SPEC_NOT_FOUND)));
     pathItem.get(describeOp);
 
     // POST - execute process
@@ -146,8 +179,8 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     executeOp.responses(new ApiResponses()
         .addApiResponse("200", createJsonResponse("Process result",
             createProcessResponseSchema()))
-        .addApiResponse("400", new ApiResponse().description("Bad request"))
-        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
+        .addApiResponse("400", new ApiResponse().description(MSG_BAD_REQUEST))
+        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
         .addApiResponse("500", new ApiResponse().description("Internal server error")));
     pathItem.post(executeOp);
 
@@ -177,8 +210,8 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         .description("Available export formats: PDF, XLS, XLSX, HTML, CSV"));
     describeOp.responses(new ApiResponses()
         .addApiResponse("200", createJsonResponse("Report metadata", describeResponseSchema))
-        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
-        .addApiResponse("404", new ApiResponse().description("Spec not found")));
+        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
+        .addApiResponse("404", new ApiResponse().description(MSG_SPEC_NOT_FOUND)));
     pathItem.get(describeOp);
 
     // POST - generate report
@@ -205,7 +238,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         .description("Report generation request")
         .required(true)
         .content(new Content()
-            .addMediaType("application/json",
+            .addMediaType(CONTENT_TYPE_JSON,
                 new MediaType().schema(requestSchema))));
 
     // Response: binary file with multiple possible content types
@@ -223,8 +256,8 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
             .description("Report file download")
             .content(responseContent))
         .addApiResponse("400", new ApiResponse().description("Bad request (invalid parameters)"))
-        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
-        .addApiResponse("404", new ApiResponse().description("Spec not found"))
+        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
+        .addApiResponse("404", new ApiResponse().description(MSG_SPEC_NOT_FOUND))
         .addApiResponse("500", new ApiResponse().description("Report generation failed")));
     pathItem.post(generateOp);
 
@@ -280,30 +313,30 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
 
       if (isGet) {
         Operation getOp = createOperation(
-            "List " + entityName + " records",
+            LABEL_LIST + entityName + " records",
             "Retrieves a paginated list of " + entityName + " records.");
-        getOp.addParametersItem(createQueryParam("_startRow", "integer",
+        getOp.addParametersItem(createQueryParam("_startRow", TYPE_INTEGER,
             "Starting row index", "0"));
-        getOp.addParametersItem(createQueryParam("_endRow", "integer",
+        getOp.addParametersItem(createQueryParam("_endRow", TYPE_INTEGER,
             "Ending row index", "100"));
         getOp.responses(new ApiResponses()
             .addApiResponse("200", createJsonResponse("List of records",
                 createObjectSchema(entityName + " records")))
-            .addApiResponse("401", new ApiResponse().description("Unauthorized"))
-            .addApiResponse("404", new ApiResponse().description("Spec or entity not found")));
+            .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
+            .addApiResponse("404", new ApiResponse().description(MSG_SPEC_OR_ENTITY_NOT_FOUND)));
         listItem.get(getOp);
       }
 
       if (isPost) {
         Operation postOp = createOperation(
-            "Create " + entityName + " record",
-            "Creates a new " + entityName + " record.");
+            "Create " + entityName + LABEL_RECORD,
+            "Creates a new " + entityName + LABEL_RECORD_DOT);
         postOp.setRequestBody(createJsonRequestBody(entityName + " data"));
         postOp.responses(new ApiResponses()
             .addApiResponse("200", createJsonResponse("Created record",
-                createObjectSchema("Created " + entityName + " record")))
-            .addApiResponse("400", new ApiResponse().description("Bad request"))
-            .addApiResponse("401", new ApiResponse().description("Unauthorized")));
+                createObjectSchema("Created " + entityName + LABEL_RECORD)))
+            .addApiResponse("400", new ApiResponse().description(MSG_BAD_REQUEST))
+            .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED)));
         listItem.post(postOp);
       }
 
@@ -318,8 +351,8 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
           .in("path")
           .name("id")
           .required(true)
-          .schema(new Schema<String>().type("string"))
-          .description("Record ID");
+          .schema(new Schema<String>().type(TYPE_STRING))
+          .description(LABEL_RECORD_ID);
 
       if (isGetById) {
         Operation getByIdOp = createOperation(
@@ -328,51 +361,51 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         getByIdOp.addParametersItem(idParam);
         getByIdOp.responses(new ApiResponses()
             .addApiResponse("200", createJsonResponse("Record data",
-                createObjectSchema(entityName + " record")))
-            .addApiResponse("401", new ApiResponse().description("Unauthorized"))
-            .addApiResponse("404", new ApiResponse().description("Record not found")));
+                createObjectSchema(entityName + LABEL_RECORD)))
+            .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
+            .addApiResponse("404", new ApiResponse().description(MSG_RECORD_NOT_FOUND)));
         itemItem.get(getByIdOp);
       }
 
       if (isPut) {
         Operation putOp = createOperation(
-            "Update " + entityName + " record",
-            "Fully updates an existing " + entityName + " record.");
+            "Update " + entityName + LABEL_RECORD,
+            "Fully updates an existing " + entityName + LABEL_RECORD_DOT);
         putOp.addParametersItem(idParam);
         putOp.setRequestBody(createJsonRequestBody(entityName + " data"));
         putOp.responses(new ApiResponses()
             .addApiResponse("200", createJsonResponse("Updated record",
-                createObjectSchema("Updated " + entityName + " record")))
-            .addApiResponse("400", new ApiResponse().description("Bad request"))
-            .addApiResponse("401", new ApiResponse().description("Unauthorized"))
-            .addApiResponse("404", new ApiResponse().description("Record not found")));
+                createObjectSchema("Updated " + entityName + LABEL_RECORD)))
+            .addApiResponse("400", new ApiResponse().description(MSG_BAD_REQUEST))
+            .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
+            .addApiResponse("404", new ApiResponse().description(MSG_RECORD_NOT_FOUND)));
         itemItem.put(putOp);
       }
 
       if (isPatch) {
         Operation patchOp = createOperation(
-            "Partially update " + entityName + " record",
-            "Partially updates an existing " + entityName + " record.");
+            "Partially update " + entityName + LABEL_RECORD,
+            "Partially updates an existing " + entityName + LABEL_RECORD_DOT);
         patchOp.addParametersItem(idParam);
         patchOp.setRequestBody(createJsonRequestBody(entityName + " partial data"));
         patchOp.responses(new ApiResponses()
             .addApiResponse("200", createJsonResponse("Updated record",
-                createObjectSchema("Updated " + entityName + " record")))
-            .addApiResponse("400", new ApiResponse().description("Bad request"))
-            .addApiResponse("401", new ApiResponse().description("Unauthorized"))
-            .addApiResponse("404", new ApiResponse().description("Record not found")));
+                createObjectSchema("Updated " + entityName + LABEL_RECORD)))
+            .addApiResponse("400", new ApiResponse().description(MSG_BAD_REQUEST))
+            .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
+            .addApiResponse("404", new ApiResponse().description(MSG_RECORD_NOT_FOUND)));
         itemItem.patch(patchOp);
       }
 
       if (isDelete) {
         Operation deleteOp = createOperation(
-            "Delete " + entityName + " record",
-            "Deletes an existing " + entityName + " record.");
+            "Delete " + entityName + LABEL_RECORD,
+            "Deletes an existing " + entityName + LABEL_RECORD_DOT);
         deleteOp.addParametersItem(idParam);
         deleteOp.responses(new ApiResponses()
             .addApiResponse("204", new ApiResponse().description("No Content"))
-            .addApiResponse("401", new ApiResponse().description("Unauthorized"))
-            .addApiResponse("404", new ApiResponse().description("Record not found")));
+            .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
+            .addApiResponse("404", new ApiResponse().description(MSG_RECORD_NOT_FOUND)));
         itemItem.delete(deleteOp);
       }
 
@@ -389,12 +422,12 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     PathItem selectorListItem = getOrCreatePathItem(openAPI, selectorListPath);
 
     Operation listSelectorsOp = createOperation(
-        "List " + entityName + " FK selectors",
+        LABEL_LIST + entityName + " FK selectors",
         "Returns the list of foreign key selector columns available for " + entityName + ".");
     listSelectorsOp.responses(new ApiResponses()
         .addApiResponse("200", createJsonResponse("Selector list",
             createSelectorListSchema()))
-        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
+        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
         .addApiResponse("404", new ApiResponse().description("Entity not found")));
     selectorListItem.get(listSelectorsOp);
     openAPI.getPaths().addPathItem(selectorListPath, selectorListItem);
@@ -412,20 +445,20 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
             + "Use the describe endpoint to discover which selectorParams each field requires.");
     querySelectorOp.addParametersItem(new Parameter()
         .in("path")
-        .name("columnName")
+        .name(PARAM_COLUMN_NAME)
         .required(true)
-        .schema(new Schema<String>().type("string"))
+        .schema(new Schema<String>().type(TYPE_STRING))
         .description("Column name of the selector"));
-    querySelectorOp.addParametersItem(createQueryParam("q", "string",
+    querySelectorOp.addParametersItem(createQueryParam("q", TYPE_STRING,
         "Search term to filter selector values", null));
-    querySelectorOp.addParametersItem(createQueryParam("limit", "integer",
+    querySelectorOp.addParametersItem(createQueryParam("limit", TYPE_INTEGER,
         "Maximum number of results to return", "20"));
-    querySelectorOp.addParametersItem(createQueryParam("offset", "integer",
+    querySelectorOp.addParametersItem(createQueryParam("offset", TYPE_INTEGER,
         "Number of results to skip", "0"));
     querySelectorOp.responses(new ApiResponses()
         .addApiResponse("200", createJsonResponse("Selector values",
             createSelectorQueryResponseSchema()))
-        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
+        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
         .addApiResponse("404", new ApiResponse().description("Selector not found")));
     selectorQueryItem.get(querySelectorOp);
     openAPI.getPaths().addPathItem(selectorQueryPath, selectorQueryItem);
@@ -443,17 +476,17 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         .in("path")
         .name("id")
         .required(true)
-        .schema(new Schema<String>().type("string"))
-        .description("Record ID");
+        .schema(new Schema<String>().type(TYPE_STRING))
+        .description(LABEL_RECORD_ID);
 
     Operation listActionsOp = createOperation(
-        "List " + entityName + " button actions",
-        "Returns available button process actions for a " + entityName + " record.");
+        LABEL_LIST + entityName + " button actions",
+        "Returns available button process actions for a " + entityName + LABEL_RECORD_DOT);
     listActionsOp.addParametersItem(idParam);
     listActionsOp.responses(new ApiResponses()
         .addApiResponse("200", createJsonResponse("Action list",
             createActionListSchema()))
-        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
+        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
         .addApiResponse("404", new ApiResponse().description("Entity not found")));
     actionListItem.get(listActionsOp);
     openAPI.getPaths().addPathItem(actionListPath, actionListItem);
@@ -465,20 +498,20 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
 
     Operation execActionOp = createOperation(
         "Execute " + entityName + " button action",
-        "Executes a button process action on a specific " + entityName + " record.");
+        "Executes a button process action on a specific " + entityName + LABEL_RECORD_DOT);
     execActionOp.addParametersItem(idParam);
     execActionOp.addParametersItem(new Parameter()
         .in("path")
-        .name("columnName")
+        .name(PARAM_COLUMN_NAME)
         .required(true)
-        .schema(new Schema<String>().type("string"))
+        .schema(new Schema<String>().type(TYPE_STRING))
         .description("Column name of the button action"));
     execActionOp.setRequestBody(createJsonRequestBody("Action parameters"));
     execActionOp.responses(new ApiResponses()
         .addApiResponse("200", createJsonResponse("Action result",
             createProcessResponseSchema()))
-        .addApiResponse("400", new ApiResponse().description("Bad request"))
-        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
+        .addApiResponse("400", new ApiResponse().description(MSG_BAD_REQUEST))
+        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
         .addApiResponse("404", new ApiResponse().description("Action not found")));
     actionExecItem.post(execActionOp);
     openAPI.getPaths().addPathItem(actionExecPath, actionExecItem);
@@ -498,16 +531,16 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
             + "including their entities and enabled HTTP methods.");
 
     ObjectSchema specSchema = new ObjectSchema();
-    specSchema.addProperties("name", new Schema<String>().type("string")
+    specSchema.addProperties("name", new Schema<String>().type(TYPE_STRING)
         .description("Spec name"));
-    specSchema.addProperties("type", new Schema<String>().type("string")
+    specSchema.addProperties("type", new Schema<String>().type(TYPE_STRING)
         .description("Spec type: W (window), P (process), or R (report)"));
 
     ObjectSchema entitySummarySchema = new ObjectSchema();
-    entitySummarySchema.addProperties("name", new Schema<String>().type("string")
+    entitySummarySchema.addProperties("name", new Schema<String>().type(TYPE_STRING)
         .description("Entity name"));
     entitySummarySchema.addProperties("methods", new ArraySchema()
-        .items(new Schema<String>().type("string"))
+        .items(new Schema<String>().type(TYPE_STRING))
         .description("Enabled HTTP methods (GET, POST, PUT, PATCH, DELETE)"));
     specSchema.addProperties("entities", new ArraySchema()
         .items(entitySummarySchema)
@@ -518,7 +551,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
 
     listSpecsOp.responses(new ApiResponses()
         .addApiResponse("200", createJsonResponse("List of all specs", discoveryResponseSchema))
-        .addApiResponse("401", new ApiResponse().description("Unauthorized")));
+        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED)));
     rootItem.get(listSpecsOp);
     openAPI.getPaths().addPathItem(rootPath, rootItem);
 
@@ -534,44 +567,44 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         .in("path")
         .name("specName")
         .required(true)
-        .schema(new Schema<String>().type("string"))
+        .schema(new Schema<String>().type(TYPE_STRING))
         .description("Name of the spec to describe"));
 
     ObjectSchema fieldSchema = new ObjectSchema();
-    fieldSchema.addProperties("name", new Schema<String>().type("string")
+    fieldSchema.addProperties("name", new Schema<String>().type(TYPE_STRING)
         .description("DB column name"));
-    fieldSchema.addProperties("label", new Schema<String>().type("string")
+    fieldSchema.addProperties(PARAM_LABEL, new Schema<String>().type(TYPE_STRING)
         .description("Human-readable label"));
-    fieldSchema.addProperties("columnType", new Schema<String>().type("string")
+    fieldSchema.addProperties("columnType", new Schema<String>().type(TYPE_STRING)
         .description("Type: string, number, boolean, date, datetime, list, id, button"));
-    fieldSchema.addProperties("readOnly", new Schema<Boolean>().type("boolean"));
-    fieldSchema.addProperties("required", new Schema<Boolean>().type("boolean"));
-    fieldSchema.addProperties("hasSelector", new Schema<Boolean>().type("boolean")
+    fieldSchema.addProperties("readOnly", new Schema<Boolean>().type(TYPE_BOOLEAN));
+    fieldSchema.addProperties("required", new Schema<Boolean>().type(TYPE_BOOLEAN));
+    fieldSchema.addProperties("hasSelector", new Schema<Boolean>().type(TYPE_BOOLEAN)
         .description("Whether this field has an FK selector"));
-    fieldSchema.addProperties("selectorType", new Schema<String>().type("string")
+    fieldSchema.addProperties("selectorType", new Schema<String>().type(TYPE_STRING)
         .description("Selector type: TableDir, Table, Search, OBUISEL"));
     fieldSchema.addProperties("selectorParams", new ArraySchema()
-        .items(new Schema<String>().type("string"))
+        .items(new Schema<String>().type(TYPE_STRING))
         .description("Column names that must be passed as query params to filter this selector "
             + "(e.g., C_BPartner_ID). Derived from the column's validation rule."));
 
     ObjectSchema entityDetailSchema = new ObjectSchema();
-    entityDetailSchema.addProperties("name", new Schema<String>().type("string"));
-    entityDetailSchema.addProperties("tabLevel", new Schema<Integer>().type("integer")
+    entityDetailSchema.addProperties("name", new Schema<String>().type(TYPE_STRING));
+    entityDetailSchema.addProperties("tabLevel", new Schema<Integer>().type(TYPE_INTEGER)
         .description("Tab hierarchy level (0 = header, 1+ = child)"));
     entityDetailSchema.addProperties("methods", new ArraySchema()
-        .items(new Schema<String>().type("string")));
+        .items(new Schema<String>().type(TYPE_STRING)));
     entityDetailSchema.addProperties("fields", new ArraySchema().items(fieldSchema));
 
     ObjectSchema specDetailSchema = new ObjectSchema();
-    specDetailSchema.addProperties("name", new Schema<String>().type("string"));
-    specDetailSchema.addProperties("type", new Schema<String>().type("string"));
+    specDetailSchema.addProperties("name", new Schema<String>().type(TYPE_STRING));
+    specDetailSchema.addProperties("type", new Schema<String>().type(TYPE_STRING));
     specDetailSchema.addProperties("entities", new ArraySchema().items(entityDetailSchema));
 
     describeSpecOp.responses(new ApiResponses()
         .addApiResponse("200", createJsonResponse("Spec metadata", specDetailSchema))
-        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
-        .addApiResponse("404", new ApiResponse().description("Spec not found")));
+        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
+        .addApiResponse("404", new ApiResponse().description(MSG_SPEC_NOT_FOUND)));
     specDescribeItem.get(describeSpecOp);
     openAPI.getPaths().addPathItem(specDescribePath, specDescribeItem);
   }
@@ -597,7 +630,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         .required(false)
         .description("Field values for expression evaluation. "
             + "Empty body evaluates using only session/preference context.")
-        .content(new Content().addMediaType("application/json",
+        .content(new Content().addMediaType(CONTENT_TYPE_JSON,
             new MediaType().schema(requestSchema)));
 
     // Response schema
@@ -629,8 +662,8 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         .addApiResponse("200", createJsonResponse(
             "Evaluated display logic for all fields", responseSchema))
         .addApiResponse("400", new ApiResponse().description("Invalid request body"))
-        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
-        .addApiResponse("404", new ApiResponse().description("Spec or entity not found"))
+        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
+        .addApiResponse("404", new ApiResponse().description(MSG_SPEC_OR_ENTITY_NOT_FOUND))
         .addApiResponse("405", new ApiResponse().description("Method not allowed")));
 
     pathItem.post(evalOp);
@@ -667,18 +700,18 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     Operation getOp = createOperation(
         "Get default values for new " + entityName,
         "Returns server-resolved default values for creating a new " + entityName
-            + " record. Resolves literal defaults from AD_Column.DefaultValue, "
+            + LABEL_RECORD_DOT + " Resolves literal defaults from AD_Column.DefaultValue, "
             + "session context variables (@#AD_Org_ID@, @#Date@, etc.), "
             + "and sequence previews (DocumentNo). "
             + "Use parentId query parameter for child entities that need a parent link.");
 
-    getOp.addParametersItem(createQueryParam("parentId", "string",
+    getOp.addParametersItem(createQueryParam("parentId", TYPE_STRING,
         "Parent record ID for child entities (auto-fills parent link column)", null));
 
     getOp.responses(new ApiResponses()
         .addApiResponse("200", createJsonResponse("Default values for new record", responseSchema))
-        .addApiResponse("401", new ApiResponse().description("Unauthorized"))
-        .addApiResponse("404", new ApiResponse().description("Spec or entity not found")));
+        .addApiResponse("401", new ApiResponse().description(MSG_UNAUTHORIZED))
+        .addApiResponse("404", new ApiResponse().description(MSG_SPEC_OR_ENTITY_NOT_FOUND)));
 
     pathItem.get(getOp);
     openAPI.getPaths().addPathItem(path, pathItem);
@@ -709,7 +742,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     Schema<Object> schema = new Schema<>();
     schema.type(type);
     if (defaultValue != null) {
-      if ("integer".equals(type)) {
+      if (TYPE_INTEGER.equals(type)) {
         schema.setDefault(Integer.parseInt(defaultValue));
       } else {
         schema.setDefault(defaultValue);
@@ -728,7 +761,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         .description(description)
         .required(true)
         .content(new Content()
-            .addMediaType("application/json",
+            .addMediaType(CONTENT_TYPE_JSON,
                 new MediaType().schema(new ObjectSchema())));
   }
 
@@ -736,7 +769,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     return new ApiResponse()
         .description(description)
         .content(new Content()
-            .addMediaType("application/json",
+            .addMediaType(CONTENT_TYPE_JSON,
                 new MediaType().schema(schema)));
   }
 
@@ -749,11 +782,11 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
    */
   private Schema<?> createSelectorListSchema() {
     Schema<Object> itemSchema = new Schema<>();
-    itemSchema.type("object");
-    itemSchema.addProperties("columnName", new Schema<String>().type("string"));
-    itemSchema.addProperties("referenceType", new Schema<String>().type("string"));
-    itemSchema.addProperties("type", new Schema<String>().type("string"));
-    itemSchema.addProperties("targetEntity", new Schema<String>().type("string"));
+    itemSchema.type(TYPE_OBJECT);
+    itemSchema.addProperties(PARAM_COLUMN_NAME, new Schema<String>().type(TYPE_STRING));
+    itemSchema.addProperties("referenceType", new Schema<String>().type(TYPE_STRING));
+    itemSchema.addProperties("type", new Schema<String>().type(TYPE_STRING));
+    itemSchema.addProperties("targetEntity", new Schema<String>().type(TYPE_STRING));
 
     ArraySchema arraySchema = new ArraySchema();
     arraySchema.items(itemSchema);
@@ -765,10 +798,10 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
    */
   private Schema<?> createActionListSchema() {
     Schema<Object> itemSchema = new Schema<>();
-    itemSchema.type("object");
-    itemSchema.addProperties("columnName", new Schema<String>().type("string"));
-    itemSchema.addProperties("processType", new Schema<String>().type("string"));
-    itemSchema.addProperties("processName", new Schema<String>().type("string"));
+    itemSchema.type(TYPE_OBJECT);
+    itemSchema.addProperties(PARAM_COLUMN_NAME, new Schema<String>().type(TYPE_STRING));
+    itemSchema.addProperties("processType", new Schema<String>().type(TYPE_STRING));
+    itemSchema.addProperties("processName", new Schema<String>().type(TYPE_STRING));
 
     ArraySchema arraySchema = new ArraySchema();
     arraySchema.items(itemSchema);
@@ -781,9 +814,9 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
   private Schema<?> createSelectorQueryResponseSchema() {
     // Item schema: {id, label, ...gridFields}
     ObjectSchema itemSchema = new ObjectSchema();
-    itemSchema.addProperties("id", new Schema<String>().type("string")
-        .description("Record ID"));
-    itemSchema.addProperties("label", new Schema<String>().type("string")
+    itemSchema.addProperties("id", new Schema<String>().type(TYPE_STRING)
+        .description(LABEL_RECORD_ID));
+    itemSchema.addProperties(PARAM_LABEL, new Schema<String>().type(TYPE_STRING)
         .description("Display value (identifier)"));
     itemSchema.setDescription("Selector item. Rich selectors include additional "
         + "grid field properties beyond id and label.");
@@ -791,11 +824,11 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
 
     // Column schema for rich selectors
     ObjectSchema columnSchema = new ObjectSchema();
-    columnSchema.addProperties("name", new Schema<String>().type("string")
+    columnSchema.addProperties("name", new Schema<String>().type(TYPE_STRING)
         .description("Property key (last segment of DAL path)"));
-    columnSchema.addProperties("label", new Schema<String>().type("string")
+    columnSchema.addProperties(PARAM_LABEL, new Schema<String>().type(TYPE_STRING)
         .description("Display label for the column"));
-    columnSchema.addProperties("sortNo", new Schema<Long>().type("integer")
+    columnSchema.addProperties("sortNo", new Schema<Long>().type(TYPE_INTEGER)
         .description("Column sort order"));
 
     ObjectSchema responseSchema = new ObjectSchema();
@@ -805,13 +838,13 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
         .description("Grid column definitions (populated for rich/OBUISEL selectors, "
             + "empty array for simple selectors)"));
     responseSchema.addProperties("totalCount",
-        new Schema<Integer>().type("integer")
+        new Schema<Integer>().type(TYPE_INTEGER)
             .description("Total number of matching records"));
     responseSchema.addProperties("limit",
-        new Schema<Integer>().type("integer")
+        new Schema<Integer>().type(TYPE_INTEGER)
             .description("Page size used for this query"));
     responseSchema.addProperties("offset",
-        new Schema<Integer>().type("integer")
+        new Schema<Integer>().type(TYPE_INTEGER)
             .description("Number of records skipped"));
     responseSchema.addProperties("hasMore", new BooleanSchema()
         .description("True if more records exist beyond the current page"));
@@ -823,9 +856,9 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
    */
   private Schema<?> createProcessResponseSchema() {
     Schema<Object> schema = new Schema<>();
-    schema.type("object");
-    schema.addProperties("status", new Schema<String>().type("string"));
-    schema.addProperties("message", new Schema<String>().type("string"));
+    schema.type(TYPE_OBJECT);
+    schema.addProperties("status", new Schema<String>().type(TYPE_STRING));
+    schema.addProperties("message", new Schema<String>().type(TYPE_STRING));
     return schema;
   }
 }
