@@ -228,7 +228,6 @@ public class NeoSelectorService {
       }
 
       SelectorMeta meta = resolveTarget(column, refId);
-      meta = adaptSelectorForInternalConsumption(sourceEntity, column, meta);
       if (meta == null) {
         return NeoResponse.error(500,
             "Could not resolve target for: " + columnName);
@@ -890,27 +889,6 @@ public class NeoSelectorService {
       }
       return meta;
     }
-  }
-
-  /**
-   * Internal Consumption line UX: for Storage Bin selectors, display the parent warehouse
-   * identifier while still returning the locator ID as value for POST/PUT/PATCH payloads.
-   */
-  private static SelectorMeta adaptSelectorForInternalConsumption(SFEntity sourceEntity,
-      Column column, SelectorMeta meta) {
-    if (sourceEntity == null || column == null || meta == null || meta.isRich) {
-      return meta;
-    }
-    if (!"M_Locator_ID".equalsIgnoreCase(column.getDBColumnName())) {
-      return meta;
-    }
-    Tab sourceTab = sourceEntity.getADTab();
-    if (sourceTab == null || sourceTab.getTable() == null
-        || !"M_Internal_ConsumptionLine".equalsIgnoreCase(sourceTab.getTable().getDBTableName())) {
-      return meta;
-    }
-
-    return new SelectorMeta(meta.entityName, "warehouse.name", meta.whereClause);
   }
 
   /**
