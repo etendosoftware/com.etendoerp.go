@@ -2,6 +2,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -180,23 +181,19 @@ public class NeoDefaultsService {
           }
         }
 
-        // Execute callout cascade for defaulted fields that have callouts configured
+        // Keep cascade enabled for /defaults to preserve the compatibility behavior chosen
+        // for this merge: dependent defaults should still be derived during form bootstrap.
         Tab adTab = ctx.getAdTab();
         Set<String> seqFieldSet = new HashSet<>();
         for (int i = 0; i < sequenceFields.length(); i++) {
           seqFieldSet.add(sequenceFields.getString(i));
         }
-
-        CalloutCascadeResult cascadeResult = null;
         if (adTab != null) {
-          cascadeResult = NeoDefaultsCascadeHelper.executeCalloutCascade(
-              ctx, adTab, defaults, seqFieldSet);
+          NeoDefaultsCascadeHelper.executeCalloutCascade(ctx, adTab, defaults, seqFieldSet);
         }
 
-        // Classic parity: for each MANDATORY FK column that still has no resolved value,
-        // auto-pick the first available option ordered alphabetically (same as
-        // UIDefinition.getValueInComboReference() lines 713-728 in Classic Etendo).
-        // Non-mandatory FKs are intentionally left blank — Classic leaves them empty too.
+        // Classic parity: for each mandatory FK column still unresolved after defaults/callouts,
+        // auto-pick the first valid lookup option.
         for (SFField sfField : fields) {
           Column adColumn = sfField.getADColumn();
           if (adColumn == null || !adColumn.isMandatory()) {
@@ -214,19 +211,9 @@ public class NeoDefaultsService {
         JSONObject response = new JSONObject();
         response.put("defaults", defaults);
 
-        if (cascadeResult != null && cascadeResult.hasResults()) {
-          response.put("calloutResults", cascadeResult.toJSON());
-        }
-
         JSONObject metadata = new JSONObject();
         metadata.put("unresolvedFields", unresolvedFields);
         metadata.put("sequenceFields", sequenceFields);
-        if (cascadeResult != null) {
-          metadata.put("calloutChainDepth", cascadeResult.chainDepth);
-          if (cascadeResult.truncated) {
-            metadata.put("calloutChainTruncated", true);
-          }
-        }
         response.put("metadata", metadata);
 
         return NeoResponse.ok(response);
@@ -333,6 +320,15 @@ public class NeoDefaultsService {
 
   /**
    * Resolve default from preferences or doctype when no column-level default expression exists.
+   *
+   * <p>For doctype columns (*DOCTYPE*_ID), Utility.getDefault is intentionally skipped and
+   * replaced with Utility.getPreference. LoginUtils.fillSessionArguments stores an arbitrary
+   * C_DocType record in the session variable {@code #C_DocTypeTarget_ID} (the first isDefault='Y'
+   * row from DefaultValuesData, with no stable ORDER BY). Utility.getDefault reads that session
+   * variable and returns a wrong doctype (e.g. "Inventory Move" instead of "AR Invoice").
+   * Utility.getPreference only checks real AD_Preference records (P|window|col and P|col keys),
+   * which are window-scoped and therefore correct. After the preference check, the context-aware
+   * resolveDefaultDocTypeId is used as fallback.</p>
    */
   private static Object resolveFromPrefsOrDocType(Column adColumn, VariablesSecureApp vars,
       DalConnectionProvider conn, String windowId, String dbColumnName, NeoContext ctx) {
@@ -340,13 +336,59 @@ public class NeoDefaultsService {
     if (colUpper.endsWith("_ID") && colUpper.contains("DOCTYPE")) {
       return DocTypeResolver.resolveDefaultDocTypeId(adColumn, ctx);
     }
-    String fromPrefs = Utility.getDefault(conn, vars, dbColumnName, "", windowId, "");
+    String fromPrefs = Utility.getPreference(vars, dbColumnName, windowId != null ? windowId : "");
     if (fromPrefs != null && !fromPrefs.isEmpty()) {
       return fromPrefs;
     }
     String docTypeId = DocTypeResolver.resolveDefaultDocTypeId(adColumn, ctx);
     if (docTypeId != null) {
       return docTypeId;
+    }
+    if (!colUpper.endsWith("_ID") && adColumn.getTable() != null) {
+      String dbDefault = resolveDbColumnDefault(
+          adColumn.getTable().getDBTableName(), dbColumnName);
+      if (dbDefault != null) {
+        return dbDefault;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Read the DB-level column DEFAULT from {@code information_schema.columns}.
+   * Used as a last-resort fallback when {@code AD_Column.DefaultValue} is null/empty and
+   * no preference or doctype default can be resolved.
+   */
+  private static String resolveDbColumnDefault(String tableName, String columnName) {
+    try {
+      String sql = "SELECT column_default FROM information_schema.columns "
+          + "WHERE LOWER(table_name) = LOWER(?) AND LOWER(column_name) = LOWER(?)";
+      try (PreparedStatement ps =
+          OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
+        ps.setString(1, tableName);
+        ps.setString(2, columnName);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            String colDefault = rs.getString(1);
+            if (colDefault == null || colDefault.isEmpty()) {
+              return null;
+            }
+            if (colDefault.startsWith("'")) {
+              int endQuote = colDefault.indexOf("'", 1);
+              if (endQuote > 0) {
+                return colDefault.substring(1, endQuote);
+              }
+            }
+            String stripped = colDefault.split("::")[0].trim();
+            if (!stripped.isEmpty()) {
+              return stripped;
+            }
+          }
+        }
+      }
+    } catch (SQLException e) {
+      log.debug("Could not read DB-level column default for {}.{}: {}",
+          tableName, columnName, e.getMessage());
     }
     return null;
   }
@@ -656,7 +698,6 @@ public class NeoDefaultsService {
 
   /**
    * Bundles the resolution infrastructure needed for mandatory default injection.
-   * Passed as a single parameter instead of 5 separate arguments.
    */
   private static class MandatoryDefaultContext {
     final String parentId;
@@ -686,6 +727,9 @@ public class NeoDefaultsService {
   private static void injectMandatoryDefaultForColumn(JSONObject body, Entity dalEntity,
       Column col, MandatoryDefaultContext mCtx) {
     try {
+      if (isAuditColumn(col)) {
+        return;
+      }
       Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
       if (prop == null) {
         return;
@@ -699,10 +743,13 @@ public class NeoDefaultsService {
       if (tryResolveFieldDefault(body, propName, col, mCtx)) {
         return;
       }
-      if (tryInjectFromSession(body, propName, col.getDBColumnName(), mCtx.vars)) {
+      if (tryInjectFromSession(body, dalEntity, propName, col, mCtx)) {
         return;
       }
       if (tryInjectFromParentValues(body, dalEntity, propName, col, mCtx.parentValues)) {
+        return;
+      }
+      if (tryInjectFallbackFkDefault(body, dalEntity, propName, col, mCtx.neoCtx)) {
         return;
       }
       if (tryInjectFirstFromLookup(body, dalEntity, propName, col)) {
@@ -725,8 +772,11 @@ public class NeoDefaultsService {
       Object resolved = resolveFieldDefault(col, mCtx.parentId, mCtx.vars, mCtx.conn,
           mCtx.windowId, mCtx.neoCtx);
       if (resolved != null) {
-        body.put(propName, resolved);
-        log.debug("Injected mandatory default: {} = {}", propName, resolved);
+        applyResolvedDefault(body, col, propName, resolved, mCtx.neoCtx);
+        tryInjectIdentifier(body,
+            NeoDefaultsCascadeHelper.resolveDalEntity(mCtx.neoCtx.getSfEntity()),
+            propName, body.opt(propName));
+        log.debug("Injected mandatory default: {} = {}", propName, body.opt(propName));
         return true;
       }
     } catch (Exception e) {
@@ -740,20 +790,23 @@ public class NeoDefaultsService {
    * Try to inject a value from session context variables (#ColumnName or ColumnName).
    * Returns true if a value was found and injected, false otherwise.
    */
-  private static boolean tryInjectFromSession(JSONObject body, String propName,
-      String dbColName, VariablesSecureApp vars) {
+  private static boolean tryInjectFromSession(JSONObject body, Entity dalEntity, String propName,
+      Column col, MandatoryDefaultContext mCtx) {
     try {
+      String dbColName = col.getDBColumnName();
+      VariablesSecureApp vars = mCtx.vars;
       String fromSession = vars.getSessionValue("#" + dbColName);
       if (fromSession == null || fromSession.isEmpty()) {
         fromSession = vars.getSessionValue(dbColName);
       }
       if (fromSession != null && !fromSession.isEmpty()) {
-        body.put(propName, fromSession);
-        log.debug("Injected from session context: {} = {}", propName, fromSession);
+        applyResolvedDefault(body, col, propName, fromSession, mCtx.neoCtx);
+        tryInjectIdentifier(body, dalEntity, propName, body.opt(propName));
+        log.debug("Injected from session context: {} = {}", propName, body.opt(propName));
         return true;
       }
     } catch (Exception e) {
-      log.debug("Could not read session value for {}: {}", dbColName, e.getMessage());
+      log.debug("Could not read session value for {}: {}", col.getDBColumnName(), e.getMessage());
     }
     return false;
   }
@@ -773,15 +826,155 @@ public class NeoDefaultsService {
       return false;
     }
     try {
-      body.put(propName, value);
-      // Keep selector labels populated for FK fallbacks (same behavior as /defaults).
-      tryInjectIdentifier(body, dalEntity, propName, value);
-      log.debug("Injected parent fallback default: {} = {}", propName, value);
+      applyResolvedDefault(body, col, propName, value, null);
+      tryInjectIdentifier(body, dalEntity, propName, body.opt(propName));
+      log.debug("Injected parent fallback default: {} = {}", propName, body.opt(propName));
       return true;
     } catch (Exception e) {
       log.debug("Could not inject parent fallback for {}: {}", propName, e.getMessage());
       return false;
     }
+  }
+
+  private static boolean tryInjectFallbackFkDefault(JSONObject body, Entity dalEntity,
+      String propName, Column col, NeoContext ctx) {
+    try {
+      if (!col.getDBColumnName().toUpperCase().endsWith("_ID")) {
+        return false;
+      }
+      String fallbackId = resolveFallbackFkDefault(col, ctx);
+      if (fallbackId == null || fallbackId.isEmpty()) {
+        return false;
+      }
+      applyResolvedDefault(body, col, propName, fallbackId, ctx);
+      tryInjectIdentifier(body, dalEntity, propName, body.opt(propName));
+      log.debug("Injected FK fallback default: {} = {}", propName, body.opt(propName));
+      return true;
+    } catch (Exception e) {
+      log.debug("Could not inject fallback FK default for {}: {}",
+          col.getDBColumnName(), e.getMessage());
+      return false;
+    }
+  }
+
+  private static void applyResolvedDefault(JSONObject body, Column col,
+      String propName, Object resolved, NeoContext ctx) throws Exception {
+    if (resolved == null) {
+      return;
+    }
+    // FK columns with legacy "0" default — OBDal cannot resolve "0" as an entity ID.
+    // For doctype columns, try to resolve the actual default from C_DocType table.
+    if ("0".equals(String.valueOf(resolved))
+        && col.getDBColumnName().toUpperCase().endsWith("_ID")) {
+      String docTypeId = DocTypeResolver.resolveDefaultDocTypeId(col, ctx);
+      if (docTypeId != null) {
+        body.put(propName, docTypeId);
+        log.debug("Resolved doctype default for {}: {}", propName, docTypeId);
+        return;
+      }
+      log.debug("Skipping FK default '0' for {}", propName);
+      return;
+    }
+    // Coerce numeric String defaults to their proper Java type so DAL validation passes.
+    // SQL defaults (e.g. lineNo from COALESCE(MAX(Line),0)+10) arrive as String from rs.getString().
+    // Non-FK numeric columns must be Long or BigDecimal — never String — when handed to the DAL.
+    Object valueToStore = resolved;
+    if (resolved instanceof String && !col.getDBColumnName().toUpperCase().endsWith("_ID")) {
+      String strVal = ((String) resolved).trim();
+      try {
+        valueToStore = new java.math.BigDecimal(strVal).longValueExact();
+      } catch (ArithmeticException ae) {
+        // Has fractional part — store as BigDecimal
+        try {
+          valueToStore = new java.math.BigDecimal(strVal);
+        } catch (Exception ignored) {
+          log.debug("Could not parse '{}' as BigDecimal, keeping as String", strVal);
+        }
+      } catch (Exception ignored) {
+        // Not numeric — keep as String (e.g. status flags, doc numbers)
+      }
+    }
+    body.put(propName, valueToStore);
+    log.warn("[NEO-DEFAULTS] {} = {} ({})", propName, valueToStore,
+        valueToStore == null ? "null" : valueToStore.getClass().getSimpleName());
+  }
+
+  private static String resolveFallbackFkDefault(Column col, NeoContext ctx) {
+    try {
+      // Determine the referenced table from the column's reference
+      org.openbravo.model.ad.datamodel.Table refTable = null;
+
+      // For TableDir references, the table name is derived from the column name
+      // (e.g., C_PaymentTerm_ID → C_PaymentTerm)
+      String dbColName = col.getDBColumnName();
+      if (dbColName.toUpperCase().endsWith("_ID")) {
+        String tableName = dbColName.substring(0, dbColName.length() - 3);
+        OBCriteria<org.openbravo.model.ad.datamodel.Table> tblCrit =
+            OBDal.getInstance().createCriteria(org.openbravo.model.ad.datamodel.Table.class);
+        tblCrit.add(Restrictions.eq("dBTableName", tableName));
+        tblCrit.setMaxResults(1);
+        refTable = (org.openbravo.model.ad.datamodel.Table) tblCrit.uniqueResult();
+      }
+
+      if (refTable == null) {
+        return null;
+      }
+
+      OBContext obCtx = OBContext.getOBContext();
+      String clientId = obCtx.getCurrentClient().getId();
+      String keyColumn = refTable.getDBTableName() + "_ID";
+
+      // Check if the target table has IsDefault and Name columns
+      boolean hasIsDefault = false;
+      boolean hasName = false;
+      for (Column c : refTable.getADColumnList()) {
+        String cn = c.getDBColumnName();
+        if ("IsDefault".equalsIgnoreCase(cn)) hasIsDefault = true;
+        if ("Name".equalsIgnoreCase(cn)) hasName = true;
+      }
+
+      StringBuilder sql = new StringBuilder();
+      sql.append("SELECT t.").append(keyColumn);
+      sql.append(" FROM ").append(refTable.getDBTableName()).append(" t");
+      sql.append(" WHERE t.IsActive = 'Y'");
+      sql.append(" AND t.AD_Client_ID = ?");
+      if ("M_PriceList".equalsIgnoreCase(refTable.getDBTableName())
+          && ctx != null && ctx.getAdTab() != null) {
+        boolean isSO = Boolean.TRUE.equals(ctx.getAdTab().getWindow().isSalesTransaction());
+        sql.append(" AND t.issopricelist = '").append(isSO ? "Y" : "N").append("'");
+      }
+      sql.append(" ORDER BY ");
+      if (hasIsDefault) {
+        sql.append("t.IsDefault DESC, ");
+      }
+      sql.append(hasName ? "t.Name ASC" : "t." + keyColumn + " ASC");
+
+      try (PreparedStatement ps = OBDal.getInstance().getConnection(false)
+          .prepareStatement(sql.toString())) {
+        ps.setMaxRows(1);
+        ps.setString(1, clientId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            String id = rs.getString(1);
+            log.warn("Fallback FK default for {}: {} (table={}) — no explicit default configured",
+                dbColName, id, refTable.getDBTableName());
+            return id;
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve fallback FK default for {}: {}",
+          col.getDBColumnName(), e.getMessage());
+    }
+    return null;
+  }
+
+  private static boolean isAuditColumn(Column col) {
+    String colNameUpper = col.getDBColumnName().toUpperCase();
+    return "CREATED".equals(colNameUpper)
+        || "UPDATED".equals(colNameUpper)
+        || "CREATEDBY".equals(colNameUpper)
+        || "UPDATEDBY".equals(colNameUpper);
   }
 
   /**
@@ -999,5 +1192,90 @@ public class NeoDefaultsService {
       log.debug("Could not resolve first org for client {}: {}", clientId, e.getMessage());
     }
     return null;
+  }
+  /**
+   * For tax-inclusive invoice/order lines, when 'grossUnitPrice' is present but 'grossAmount'
+   * (LINE_GROSS_AMOUNT) is zero or missing, compute it as grossUnitPrice × invoicedQuantity.
+   *
+   * The callout (SL_Invoice_Product) fires at product selection time when qty is still 0,
+   * so it sets grossAmount = grossUnitPrice × 0 = 0. The c_invoiceline_before_trg trigger
+   * then uses LINE_GROSS_AMOUNT to compute PRICEACTUAL for tax-inclusive price lists — if it
+   * is 0, priceActual ends up as 0. This method corrects the stale callout value at save time.
+   */
+  public static void injectGrossAmountIfMissing(JSONObject body) {
+    if (body == null) {
+      return;
+    }
+    double grossUnitPrice;
+    try {
+      grossUnitPrice = body.optDouble("grossUnitPrice", 0);
+    } catch (Exception e) {
+      return;
+    }
+    if (grossUnitPrice <= 0) {
+      return;
+    }
+    double existingGrossAmount = body.optDouble("grossAmount", 0);
+    if (existingGrossAmount != 0) {
+      return;
+    }
+    double qty;
+    try {
+      qty = Double.parseDouble(body.optString("invoicedQuantity", "0"));
+    } catch (NumberFormatException e) {
+      return;
+    }
+    if (qty == 0) {
+      return;
+    }
+    try {
+      double computed = grossUnitPrice * qty;
+      body.put("grossAmount", computed);
+      log.debug("[NEO-DEFAULTS] Computed grossAmount={} from grossUnitPrice={} × qty={}",
+          computed, grossUnitPrice, qty);
+    } catch (Exception e) {
+      log.debug("Could not compute grossAmount: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * For line entities (e.g. C_InvoiceLine, C_OrderLine), when 'product' is present in the body
+   * but 'uOM' (C_UOM_ID) is missing or empty, derive C_UOM_ID from M_Product.C_UOM_ID.
+   *
+   * This prevents DB trigger failures on INSERT caused by a product/transaction UOM mismatch:
+   * the c_invoiceline_trg trigger requires that C_UOM_ID matches the product's UOM, but
+   * callouts return uOM as empty (the classic UI auto-fills it via readOnly logic), so NEO
+   * must derive it here before persisting.
+   */
+  public static void injectProductDerivedUomIfMissing(JSONObject body) {
+    if (body == null) {
+      return;
+    }
+    String productId = body.optString("product", "");
+    if (productId.isEmpty()) {
+      return;
+    }
+    // Only inject if uOM is absent or empty
+    String existingUom = body.optString("uOM", "");
+    if (!existingUom.isEmpty()) {
+      return;
+    }
+    try {
+      String sql = "SELECT C_UOM_ID FROM M_PRODUCT WHERE M_PRODUCT_ID = ?";
+      try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
+        ps.setString(1, productId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            String uomId = rs.getString(1);
+            if (uomId != null && !uomId.isEmpty()) {
+              body.put("uOM", uomId);
+              log.debug("[NEO-DEFAULTS] Injected product-derived uOM={} for product={}", uomId, productId);
+            }
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not inject product-derived UOM for product {}: {}", productId, e.getMessage());
+    }
   }
 }
