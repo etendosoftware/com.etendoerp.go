@@ -682,6 +682,14 @@ public class NeoDefaultsService {
         if (!col.isActive() || !col.isMandatory()) {
           continue;
         }
+        // Skip audit trail columns — Etendo sets these automatically via EntityPersistenceEvent.
+        // Injecting them here causes JsonToDataConverter to compare the injected date against
+        // the entity's null value on new records, throwing "Exception when updating X(null)".
+        String colUpper = col.getDBColumnName().toUpperCase();
+        if (colUpper.equals("UPDATED") || colUpper.equals("CREATED")
+            || colUpper.equals("CREATEDBY") || colUpper.equals("UPDATEDBY")) {
+          continue;
+        }
         injectMandatoryDefaultForColumn(body, dalEntity, col, mCtx);
       }
 
