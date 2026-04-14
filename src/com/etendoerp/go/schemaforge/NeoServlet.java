@@ -5,11 +5,9 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Enumeration;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -34,6 +32,7 @@ import org.openbravo.model.ad.ui.Window;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -141,6 +140,12 @@ public class NeoServlet extends HttpBaseServlet {
           return;
         }
         discoveryHandler.handleDiscovery(response);
+        return;
+      }
+
+      // Image endpoint: GET /sws/neo/image/{imageId}  or  POST /sws/neo/image
+      if ("image".equals(pathInfo.specName)) {
+        NeoImageHelper.handleImageRequest(pathInfo.entityName, method, request, response);
         return;
       }
 

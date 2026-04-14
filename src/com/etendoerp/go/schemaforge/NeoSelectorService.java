@@ -70,6 +70,24 @@ public class NeoSelectorService {
   static final java.util.Set<String> SESSION_PARAMS = new java.util.HashSet<>(
       java.util.Arrays.asList(AD_ORG_ID, "AD_Client_ID", "AD_User_ID", "AD_Role_ID"));
 
+  /**
+   * HQL filters applied by AD_Reference_Value_ID when the standard AD_Ref_Table.hqlwhereclause
+   * is not set (or belongs to a module we cannot modify). Keyed by AD_Reference_Value_ID.
+   */
+  private static final java.util.Map<String, String> REFERENCE_OVERRIDE_FILTERS;
+  static {
+    java.util.Map<String, String> m = new java.util.HashMap<>();
+    m.put("166", "e.salesPriceList = true");
+    m.put("800031", "e.salesPriceList = false");
+    m.put("EED0EF97D4A7421687F3B365D009E7A6",
+        "exists (select 1 from FinancialMgmtFinAccPaymentMethod fapm"
+            + " where fapm.paymentMethod = e and fapm.active = true)");
+    m.put("DF1CEA94B3564A33AFDB37C07E1CE353",
+        "exists (select 1 from FinancialMgmtFinAccPaymentMethod fapm"
+            + " where fapm.account = e and fapm.active = true)");
+    REFERENCE_OVERRIDE_FILTERS = java.util.Collections.unmodifiableMap(m);
+  }
+
   private NeoSelectorService() {
   }
 
@@ -147,15 +165,13 @@ public class NeoSelectorService {
 
       // Find the specific field by column name
       SFField sfField = findFieldByColumnName(entity.getId(), columnName);
-      if (sfField == null) {
+      Column column = sfField != null ? sfField.getADColumn() : null;
+      if (column == null) {
+        column = resolveVirtualSelectorColumn(entity, columnName);
+      }
+      if (column == null) {
         return NeoResponse.error(404,
             "Field not found or not included: " + columnName);
-      }
-
-      Column column = sfField.getADColumn();
-      if (column == null) {
-        return NeoResponse.error(500,
-            "Could not resolve AD_Column for field: " + columnName);
       }
 
       return querySelectorByColumn(entity, column, columnName, search, limit, offset, contextParams);
@@ -218,12 +234,18 @@ public class NeoSelectorService {
       String validationFilter = SelectorQueryBuilder.resolveValidationFilter(
           column, meta.entityName, contextParams);
       String contextOrganizationId = resolveContextOrganizationId(sourceEntity, contextParams);
+      String filterAlias = meta.isRich && meta.isCustomQuery
+          && StringUtils.isNotBlank(meta.entityAlias) ? meta.entityAlias : "e";
+      String combinedFilter = combineFilters(
+          remapFilterAlias(validationFilter, filterAlias),
+          remapFilterAlias(resolveReferenceOverrideFilter(column), filterAlias),
+          resolveContextParamFilter(meta.entityName, contextParams, filterAlias));
 
       // Build and execute query
       if (meta.isRich) {
-        return executeRichQuery(meta, search, limit, offset, validationFilter, contextOrganizationId);
+        return executeRichQuery(meta, search, limit, offset, combinedFilter, contextOrganizationId);
       }
-      return executeQuery(meta, search, limit, offset, validationFilter, contextOrganizationId);
+      return executeQuery(meta, search, limit, offset, combinedFilter, contextOrganizationId);
 
     } catch (Exception e) {
       log.error("Error querying selector by column {}", columnName, e);
@@ -484,8 +506,27 @@ public class NeoSelectorService {
     }
     try {
       Tab childTab = sourceEntity.getADTab();
-      if (childTab == null || childTab.getTabLevel() == null || childTab.getTabLevel() <= 0) {
+      if (childTab == null) {
         return null;
+      }
+      if (childTab.getTabLevel() == null || childTab.getTabLevel() <= 0) {
+        if (childTab.getTable() == null) {
+          return null;
+        }
+        Entity selfEntity = ModelProvider.getInstance().getEntityByTableId(childTab.getTable().getId());
+        if (selfEntity == null || !selfEntity.hasProperty(PROP_ORGANIZATION)) {
+          return null;
+        }
+        BaseOBObject selfRecord = OBDal.getInstance().get(selfEntity.getName(), parentId);
+        if (selfRecord == null) {
+          return null;
+        }
+        Object organization = selfRecord.get(PROP_ORGANIZATION);
+        if (organization instanceof BaseOBObject) {
+          Object organizationId = ((BaseOBObject) organization).getId();
+          return organizationId != null ? organizationId.toString() : null;
+        }
+        return organization != null ? organization.toString() : null;
       }
       Tab parentTab = KernelUtils.getInstance().getParentTab(childTab);
       if (parentTab == null || parentTab.getTable() == null) {
@@ -539,6 +580,38 @@ public class NeoSelectorService {
     criteria.setMaxResults(1);
     List<SFField> results = criteria.list();
     return results.isEmpty() ? null : results.get(0);
+  }
+
+  private static Column resolveVirtualSelectorColumn(SFEntity entity, String columnName) {
+    if (entity == null || StringUtils.isBlank(columnName)) {
+      return null;
+    }
+
+    Tab tab = entity.getADTab();
+    String tableName = tab != null && tab.getTable() != null
+        ? tab.getTable().getDBTableName()
+        : null;
+
+    boolean isBPartnerLocationWrapper = "C_BPartner_Location".equalsIgnoreCase(tableName)
+        || "locationAddress".equals(entity.getName());
+    boolean isLocationVirtualColumn = "C_Country_ID".equalsIgnoreCase(columnName)
+        || "C_Region_ID".equalsIgnoreCase(columnName);
+    if (!isBPartnerLocationWrapper || !isLocationVirtualColumn) {
+      return null;
+    }
+
+    OBCriteria<Column> criteria = OBDal.getInstance().createCriteria(Column.class);
+    criteria.createAlias(Column.PROPERTY_TABLE, "tbl");
+    criteria.add(Restrictions.eq("tbl.dBTableName", "C_Location"));
+    criteria.add(Restrictions.eq(Column.PROPERTY_DBCOLUMNNAME, columnName));
+    criteria.setMaxResults(1);
+
+    List<Column> results = criteria.list();
+    if (results.isEmpty()) {
+      return null;
+    }
+    log.debug("Resolved virtual selector column {} for entity {}", columnName, entity.getName());
+    return results.get(0);
   }
 
   /**
@@ -1006,7 +1079,7 @@ public class NeoSelectorService {
    * Find the first identifier property of an entity.
    * Falls back to "name" or "id" if no identifier is found.
    */
-  private static String findIdentifierProperty(Entity entity) {
+  static String findIdentifierProperty(Entity entity) {
     for (Property prop : entity.getIdentifierProperties()) {
       if (!prop.isPrimitive()) {
         continue;
@@ -1021,6 +1094,61 @@ public class NeoSelectorService {
       return "searchKey";
     }
     return "id";
+  }
+
+  static String combineFilters(String... filters) {
+    List<String> parts = new ArrayList<>();
+    for (String filter : filters) {
+      if (StringUtils.isNotBlank(filter)) {
+        parts.add(filter);
+      }
+    }
+    if (parts.isEmpty()) {
+      return null;
+    }
+    return String.join(SelectorQueryBuilder.SQL_AND, parts);
+  }
+
+  private static String resolveReferenceOverrideFilter(Column column) {
+    if (column == null || column.getReferenceSearchKey() == null) {
+      return null;
+    }
+    return REFERENCE_OVERRIDE_FILTERS.get(column.getReferenceSearchKey().getId());
+  }
+
+  private static String resolveContextParamFilter(String entityName,
+      Map<String, String> contextParams, String alias) {
+    if (contextParams == null || contextParams.isEmpty() || entityName == null) {
+      return null;
+    }
+    if (!"BusinessPartner".equals(entityName)) {
+      return null;
+    }
+    String resolvedAlias = StringUtils.isNotBlank(alias) ? alias : "e";
+    List<String> conditions = new ArrayList<>();
+    String isCustomer = contextParams.get("isCustomer");
+    if ("Y".equalsIgnoreCase(isCustomer)) {
+      conditions.add(resolvedAlias + ".customer = true");
+    } else if ("N".equalsIgnoreCase(isCustomer)) {
+      conditions.add(resolvedAlias + ".customer = false");
+    }
+    String isVendor = contextParams.get("isVendor");
+    if ("Y".equalsIgnoreCase(isVendor)) {
+      conditions.add(resolvedAlias + ".vendor = true");
+    } else if ("N".equalsIgnoreCase(isVendor)) {
+      conditions.add(resolvedAlias + ".vendor = false");
+    }
+    if (conditions.isEmpty()) {
+      return null;
+    }
+    return String.join(SelectorQueryBuilder.SQL_AND, conditions);
+  }
+
+  private static String remapFilterAlias(String filter, String alias) {
+    if (StringUtils.isBlank(filter) || StringUtils.isBlank(alias) || "e".equals(alias)) {
+      return filter;
+    }
+    return filter.replaceAll("(?<![\\w.])e\\.", Matcher.quoteReplacement(alias + "."));
   }
 
   /**

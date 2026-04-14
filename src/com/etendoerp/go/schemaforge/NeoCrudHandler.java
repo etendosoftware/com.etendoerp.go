@@ -19,8 +19,12 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
+import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -32,16 +36,17 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
-import org.openbravo.client.application.ApplicationUtils;
-import org.openbravo.client.kernel.KernelUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
+import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
@@ -58,6 +63,18 @@ class NeoCrudHandler {
   private static final String METHOD_DELETE = "DELETE";
   private static final String METHOD_PATCH = "PATCH";
   private static final String PARAM_PARENT_ID = "parentId";
+  private static final Set<String> CONTACTS_PRECREATE_BILLING_FIELDS = new HashSet<>(
+      Arrays.asList(
+          "priceList",
+          "paymentMethod",
+          "paymentTerms",
+          "account",
+          "customerBlocking",
+          "purchasePricelist",
+          "pOPaymentMethod",
+          "pOPaymentTerms",
+          "pOFinancialAccount",
+          "vendorBlocking"));
 
   private final NeoServlet servlet;
 
@@ -228,7 +245,7 @@ class NeoCrudHandler {
     String tabWhere = adTab.getHqlwhereclause();
     if (StringUtils.isNotBlank(tabWhere)) {
       if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = tabWhere.replaceAll("@[A-Za-z_]+@", "'" + parentId.replace("'", "''") + "'");
+        tabWhere = tabWhere.replaceAll("@[A-Za-z_.]+@", "'" + parentId.replace("'", "''") + "'");
       }
       where.append("(").append(tabWhere).append(")");
     }
@@ -240,6 +257,13 @@ class NeoCrudHandler {
         }
         where.append("(").append(parentFilter).append(")");
       }
+    }
+    String neoWhere = params.remove(NeoCrudHelper.NEO_WHERE_PARAM);
+    if (StringUtils.isNotBlank(neoWhere)) {
+      if (where.length() > 0) {
+        where.append(" and ");
+      }
+      where.append("(").append(neoWhere).append(")");
     }
     if (where.length() > 0) {
       params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, where.toString());
@@ -302,6 +326,9 @@ class NeoCrudHandler {
       return errorResponse;
     }
     fieldFilter.filterGetResponse(responseJson);
+    if ("GET".equals(context.getHttpMethod()) && context.getSfEntity() != null) {
+      NeoListIdentifierHelper.enrichListIdentifiers(responseJson, context.getSfEntity());
+    }
     return NeoResponse.ok(responseJson);
   }
 
@@ -342,7 +369,8 @@ class NeoCrudHandler {
           ? innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
               .optString("message", "Write operation failed")
           : "Write operation failed";
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, errMsg);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          OBMessageUtils.messageBD(errMsg));
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
@@ -363,10 +391,43 @@ class NeoCrudHandler {
       requestBody.remove(PARAM_PARENT_ID);
       injectParentIdAsProperty(adTab, requestBody, parentIdValue);
     }
-    JSONObject filteredBody = fieldFilter.filterWriteRequest(requestBody);
+    // Use filterCreateRequest (not filterWriteRequest): readOnly fields must pass through
+    // on create because they often carry values set by callouts or defaults (e.g., taxCategory
+    // populated from productCategory). filterWriteRequest is for PATCH/PUT only.
+    JSONObject filteredBody = fieldFilter.filterCreateRequest(requestBody);
     NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue);
+    NeoDefaultsService.injectProductDerivedUomIfMissing(filteredBody);
+    NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
+    // TODO move this compatibility rule into the shared create-defaults helper once the merge settles.
+    stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
     return jsonService.add(params, wrappedBody);
+  }
+
+  private void executePostCalloutCascade(JSONObject filteredBody, Tab adTab,
+      NeoContext context, String parentIdValue) {
+    if (adTab == null || adTab.getTabLevel() == null || adTab.getTabLevel() != 0) {
+      return;
+    }
+
+    Set<String> seqFields = new HashSet<>();
+    Iterator<String> bodyKeys = filteredBody.keys();
+    while (bodyKeys.hasNext()) {
+      String key = bodyKeys.next();
+      Object value = filteredBody.opt(key);
+      if (value instanceof String) {
+        String stringValue = (String) value;
+        if (stringValue.startsWith("<") && stringValue.endsWith(">") && stringValue.length() > 2) {
+          seqFields.add(key);
+        }
+      }
+    }
+
+    NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields);
+    DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
+    NeoDefaultsCascadeHelper.removeEmptyFkValues(filteredBody, adTab);
+    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
   }
 
   /**
@@ -393,6 +454,23 @@ class NeoCrudHandler {
           log.debug("Could not resolve parent column for '{}': {}", col.getDBColumnName(), ex.getMessage());
         }
       }
+    }
+  }
+
+  private void stripContactsPreCreateBillingDefaults(JSONObject body, NeoContext context, Tab adTab) {
+    if (body == null || context == null || adTab == null) {
+      return;
+    }
+    if (!("contacts".equalsIgnoreCase(context.getSpecName())
+        && "businessPartner".equals(context.getEntityName())
+        && adTab.getTabLevel() != null
+        && adTab.getTabLevel() == 0)) {
+      return;
+    }
+
+    for (String key : CONTACTS_PRECREATE_BILLING_FIELDS) {
+      body.remove(key);
+      body.remove(key + "$_identifier");
     }
   }
 
@@ -431,16 +509,9 @@ class NeoCrudHandler {
    */
   private String resolveParentFilter(Tab childTab, String parentId) {
     try {
-      Tab parentTab = KernelUtils.getInstance().getParentTab(childTab);
-      if (parentTab == null) return null;
-      String parentProperty = ApplicationUtils.getParentProperty(childTab, parentTab);
-      if (StringUtils.isBlank(parentProperty)) return null;
-      Entity childEntity = ModelProvider.getInstance().getEntityByTableId(childTab.getTable().getId());
-      Property prop = childEntity.getProperty(parentProperty);
-      String escaped = parentId.replace("'", "''");
-      return (prop != null && !prop.isPrimitive())
-          ? "e." + parentProperty + ".id='" + escaped + "'"
-          : "e." + parentProperty + "='" + escaped + "'";
+      NeoTypeCoercionHelper.ParentFilter parentFilter =
+          NeoTypeCoercionHelper.buildParentWhereClause(childTab, parentId);
+      return parentFilter != null ? parentFilter.resolveForStringApi() : null;
     } catch (Exception e) {
       log.error("Error resolving parent filter for tab '{}': {}", childTab.getName(), e.getMessage(), e);
       return null;
