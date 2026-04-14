@@ -26,6 +26,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Properties;
 
+import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
 import javax.xml.transform.OutputKeys;
@@ -57,19 +58,38 @@ public class OnboardingDatasetNormalizer {
 
   private final Path sampleDataDirectory;
 
+  /**
+   * Creates a normalizer that resolves the GOClient sourcedata directory from known module paths.
+   */
   public OnboardingDatasetNormalizer() {
     this(resolveDefaultSampleDataDirectory());
   }
 
+  /**
+   * Creates a normalizer that reads onboarding sourcedata from the provided directory.
+   *
+   * @param sampleDataDirectory the directory that contains the GOClient sourcedata XML files
+   */
   public OnboardingDatasetNormalizer(Path sampleDataDirectory) {
     this.sampleDataDirectory = sampleDataDirectory;
   }
 
-  public String buildDatasetXml() throws Exception {
+  /**
+   * Builds onboarding dataset XML without remapping organization ownership.
+   *
+   * @return the normalized Openbravo XML ready to be imported
+   */
+  public String buildDatasetXml() {
     return buildDatasetXml(null);
   }
 
-  public String buildDatasetXml(String targetOrganizationId) throws Exception {
+  /**
+   * Builds onboarding dataset XML and remaps non-system records to the target organization when provided.
+   *
+   * @param targetOrganizationId the organization that should own imported business data, or {@code null}
+   * @return the normalized Openbravo XML ready to be imported
+   */
+  public String buildDatasetXml(String targetOrganizationId) {
     DocumentBuilder builder = newDocumentBuilder();
     Document output = builder.newDocument();
     Element root = output.createElement("Openbravo");
@@ -84,7 +104,7 @@ public class OnboardingDatasetNormalizer {
   }
 
   private void appendEntities(Path sourceFile, DocumentBuilder builder, Document output, Element root,
-      String targetOrganizationId) throws Exception {
+      String targetOrganizationId) {
     Entity entity = resolveEntity(tableName(sourceFile));
     try (var inputStream = Files.newInputStream(sourceFile)) {
       Document source = builder.parse(inputStream);
@@ -95,69 +115,82 @@ public class OnboardingDatasetNormalizer {
           root.appendChild(convertRow((Element) child, entity, targetOrganizationId, output));
         }
       }
+    } catch (Exception e) {
+      throw new OnboardingDatasetNormalizationException(
+          "Failed to normalize sourcedata file " + sourceFile.getFileName(), e);
     }
   }
 
   private Element convertRow(Element sourceRow, Entity entity, String targetOrganizationId,
       Document output) {
     Element entityElement = output.createElement(entity.getName());
-    String rowId = null;
-    String sourceOrganizationId = null;
+    RowConversionState rowState = new RowConversionState();
 
     NodeList children = sourceRow.getChildNodes();
     for (int i = 0; i < children.getLength(); i++) {
       Node child = children.item(i);
-      if (!(child instanceof Element)) {
-        continue;
-      }
-      Element sourceField = (Element) child;
-      String columnName = sourceField.getTagName();
-      String rawValue = sourceField.getTextContent();
-
-      if (OnboardingDatasetDefinition.getStrippedFields().contains(columnName)
-          || rawValue == null || rawValue.trim().isEmpty()) {
-        continue;
-      }
-
-      if ("AD_CLIENT_ID".equals(columnName)) {
-        continue;
-      }
-      if ("AD_ORG_ID".equals(columnName)) {
-        sourceOrganizationId = rawValue.trim();
-        continue;
-      }
-
-      Property property = entity.getPropertyByColumnName(columnName, false);
-      if (property == null) {
-        continue;
-      }
-      if (property.isId()) {
-        rowId = rawValue.trim();
-        continue;
-      }
-      if (property.isOneToMany()) {
-        continue;
-      }
-
-      if (property.isPrimitive()) {
-        Element propertyElement = output.createElement(property.getName());
-        propertyElement.setTextContent(rawValue.trim());
-        entityElement.appendChild(propertyElement);
-      } else {
-        Element referenceElement = output.createElement(property.getName());
-        referenceElement.setAttribute("id", mapReferenceId(rawValue.trim()));
-        entityElement.appendChild(referenceElement);
+      if (child instanceof Element) {
+        appendMappedField((Element) child, entity, entityElement, rowState, output);
       }
     }
 
-    if (rowId == null) {
+    if (rowState.rowId == null) {
       throw new OBException("Missing ID for entity " + entity.getName());
     }
-    entityElement.setAttribute("id", rowId);
+    entityElement.setAttribute("id", rowState.rowId);
 
-    appendOrganizationReferenceIfNeeded(output, entityElement, entity, sourceOrganizationId,
+    appendOrganizationReferenceIfNeeded(output, entityElement, entity, rowState.sourceOrganizationId,
         targetOrganizationId);
     return entityElement;
+  }
+
+  private void appendMappedField(Element sourceField, Entity entity, Element entityElement,
+      RowConversionState rowState, Document output) {
+    String columnName = sourceField.getTagName();
+    String rawValue = normalizeFieldValue(sourceField.getTextContent());
+
+    if (shouldSkipColumn(columnName, rawValue)) {
+      return;
+    }
+
+    if ("AD_ORG_ID".equals(columnName)) {
+      rowState.sourceOrganizationId = rawValue;
+      return;
+    }
+
+    Property property = entity.getPropertyByColumnName(columnName, false);
+    if (property == null) {
+      return;
+    }
+    if (property.isId()) {
+      rowState.rowId = rawValue;
+      return;
+    }
+    if (!property.isOneToMany()) {
+      appendPropertyElement(output, entityElement, property, rawValue);
+    }
+  }
+
+  private String normalizeFieldValue(String rawValue) {
+    return rawValue == null ? null : rawValue.trim();
+  }
+
+  private boolean shouldSkipColumn(String columnName, String rawValue) {
+    return rawValue == null
+        || rawValue.isEmpty()
+        || "AD_CLIENT_ID".equals(columnName)
+        || OnboardingDatasetDefinition.getStrippedFields().contains(columnName);
+  }
+
+  private void appendPropertyElement(Document output, Element entityElement, Property property,
+      String rawValue) {
+    Element propertyElement = output.createElement(property.getName());
+    if (property.isPrimitive()) {
+      propertyElement.setTextContent(rawValue);
+    } else {
+      propertyElement.setAttribute("id", mapReferenceId(rawValue));
+    }
+    entityElement.appendChild(propertyElement);
   }
 
   private void appendOrganizationReferenceIfNeeded(Document output, Element entityElement, Entity entity,
@@ -190,7 +223,7 @@ public class OnboardingDatasetNormalizer {
     return entity;
   }
 
-  private List<Path> listIncludedSourceFiles() throws Exception {
+  private List<Path> listIncludedSourceFiles() {
     List<Path> files = new ArrayList<>();
     try (var stream = Files.list(sampleDataDirectory)) {
       stream.filter(Files::isRegularFile)
@@ -198,6 +231,9 @@ public class OnboardingDatasetNormalizer {
           .filter(path -> OnboardingDatasetDefinition.shouldIncludeTable(tableName(path)))
           .sorted(Comparator.comparing(path -> path.getFileName().toString()))
           .forEach(files::add);
+    } catch (Exception e) {
+      throw new OnboardingDatasetNormalizationException(
+          "Failed to list onboarding sourcedata in " + sampleDataDirectory, e);
     }
     return files;
   }
@@ -223,7 +259,7 @@ public class OnboardingDatasetNormalizer {
         return candidate;
       }
     }
-    throw new IllegalStateException(
+    throw new OnboardingDatasetNormalizationException(
         "GOClient sampledata directory not found in known locations: " + candidates);
   }
 
@@ -236,25 +272,47 @@ public class OnboardingDatasetNormalizer {
     }
   }
 
-  private DocumentBuilder newDocumentBuilder() throws Exception {
-    DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-    factory.setNamespaceAware(false);
-    factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-    factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
-    factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-    factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
-    factory.setXIncludeAware(false);
-    factory.setExpandEntityReferences(false);
-    return factory.newDocumentBuilder();
+  private DocumentBuilder newDocumentBuilder() {
+    try {
+      DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+      factory.setNamespaceAware(false);
+      factory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+      factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+      factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+      factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+      factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
+      factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+      factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
+      factory.setXIncludeAware(false);
+      factory.setExpandEntityReferences(false);
+      return factory.newDocumentBuilder();
+    } catch (Exception e) {
+      throw new OnboardingDatasetNormalizationException(
+          "Failed to create a secure XML parser for onboarding sourcedata", e);
+    }
   }
 
-  private String toXml(Document document) throws Exception {
-    Transformer transformer = TransformerFactory.newInstance().newTransformer();
-    transformer.setOutputProperty(OutputKeys.ENCODING, StandardCharsets.UTF_8.name());
-    transformer.setOutputProperty(OutputKeys.INDENT, "yes");
-    transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "no");
-    StringWriter writer = new StringWriter();
-    transformer.transform(new DOMSource(document), new StreamResult(writer));
-    return writer.toString();
+  private String toXml(Document document) {
+    try {
+      TransformerFactory transformerFactory = TransformerFactory.newInstance();
+      transformerFactory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
+      transformerFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
+      transformerFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
+      Transformer transformer = transformerFactory.newTransformer();
+      transformer.setOutputProperty(OutputKeys.ENCODING, StandardCharsets.UTF_8.name());
+      transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+      transformer.setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "no");
+      StringWriter writer = new StringWriter();
+      transformer.transform(new DOMSource(document), new StreamResult(writer));
+      return writer.toString();
+    } catch (Exception e) {
+      throw new OnboardingDatasetNormalizationException(
+          "Failed to serialize onboarding dataset XML", e);
+    }
+  }
+
+  private static final class RowConversionState {
+    private String rowId;
+    private String sourceOrganizationId;
   }
 }

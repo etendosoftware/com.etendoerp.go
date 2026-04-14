@@ -24,8 +24,12 @@ import java.nio.file.Paths;
 
 import org.junit.Test;
 
+/**
+ * Test class for {@link OnboardingDatasetNormalizer}.
+ */
 public class OnboardingDatasetNormalizerTest {
 
+  /** Test method for {@link OnboardingDatasetNormalizer#buildDatasetXml()}. */
   @Test
   public void testDefinitionExcludesBootstrapTables() {
     assertTrue(OnboardingDatasetDefinition.getExcludedTables().contains("AD_CLIENT"));
@@ -35,17 +39,19 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue(OnboardingDatasetDefinition.getExcludedTables().contains("AD_REF_DATA_LOADED"));
   }
 
+  /** Test method for {@link OnboardingDatasetNormalizer#buildDatasetXml()}. */
+
   @Test
-  public void testNormalizerUsesOpenbravoRootElement() throws Exception {
+  public void testNormalizerUsesOpenbravoRootElement() {
     String xml = new OnboardingDatasetNormalizer(sampleDataDir()).buildDatasetXml();
 
     assertTrue(xml.contains("<Openbravo"));
     assertFalse(xml.contains("<data>"));
   }
 
-
+  /* Test method for {@link OnboardingDatasetNormalizer#buildDatasetXml()}. */
   @Test
-  public void testNormalizerRemovesBootstrapTablesFromDatasetXml() throws Exception {
+  public void testNormalizerRemovesBootstrapTablesFromDatasetXml() {
     String xml = new OnboardingDatasetNormalizer(sampleDataDir()).buildDatasetXml();
 
     assertFalse(xml.contains("<AD_CLIENT>"));
@@ -55,8 +61,9 @@ public class OnboardingDatasetNormalizerTest {
     assertFalse(xml.contains("<AD_REF_DATA_LOADED>"));
   }
 
+  /** Test method for {@link OnboardingDatasetNormalizer#buildDatasetXml()}. */
   @Test
-  public void testNormalizerKeepsFoundationBusinessContent() throws Exception {
+  public void testNormalizerKeepsFoundationBusinessContent() {
     String xml = new OnboardingDatasetNormalizer(sampleDataDir()).buildDatasetXml();
 
     assertTrue(xml.contains("Agua"));
@@ -65,15 +72,17 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue(xml.contains("Efectivo"));
   }
 
+  /** Test method for {@link OnboardingDatasetNormalizer#buildDatasetXml()}. */
   @Test
-  public void testNormalizerStripsUserScopedProductSalesRepField() throws Exception {
+  public void testNormalizerStripsUserScopedProductSalesRepField() {
     String xml = new OnboardingDatasetNormalizer(sampleDataDir()).buildDatasetXml();
 
     assertFalse(xml.contains("<SALESREP_ID>"));
   }
 
+  /** Test method for {@link OnboardingDatasetNormalizer#buildDatasetXml()}. */
   @Test
-  public void testNormalizerDoesNotEmitSourcedataTableOrColumnTags() throws Exception {
+  public void testNormalizerDoesNotEmitSourcedataTableOrColumnTags() {
     String xml = new OnboardingDatasetNormalizer(sampleDataDir()).buildDatasetXml();
 
     assertFalse(xml.contains("<AD_ORG_WAREHOUSE>"));

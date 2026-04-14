@@ -92,6 +92,12 @@ public final class OnboardingDatasetDefinition {
     return STRIPPED_FIELDS;
   }
 
+  /**
+   * Returns whether a sourcedata table is part of the curated onboarding dataset.
+   *
+   * @param tableName the database table name represented by the sourcedata file
+   * @return {@code true} when the table should be normalized into the onboarding dataset
+   */
   public static boolean shouldIncludeTable(String tableName) {
     return INCLUDED_TABLES.contains(tableName) && !EXCLUDED_TABLES.contains(tableName);
   }

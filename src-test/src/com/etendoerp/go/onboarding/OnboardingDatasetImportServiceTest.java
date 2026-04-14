@@ -27,20 +27,28 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.service.db.ImportResult;
 
+/**
+ * Test class for {@link OnboardingDatasetImportService}.
+ */
 public class OnboardingDatasetImportServiceTest {
 
+  private static final String CLIENT_ID = "CLIENT-1";
+  private static final String ORGANIZATION_ID = "ORG-1";
+  private static final String EMPTY_OPENBRAVO_XML = "<Openbravo/>";
+
+  /** Test method for {@link OnboardingDatasetImportService#importDataset(String, String)}. */
   @Test
-  public void testImportDatasetBuildsNormalizedXmlAndDelegatesToImporter() throws Exception {
+  public void testImportDatasetBuildsNormalizedXmlAndDelegatesToImporter() {
     Client client = new Client();
-    client.setId("CLIENT-1");
+    client.setId(CLIENT_ID);
     Organization org = new Organization();
-    org.setId("ORG-1");
+    org.setId(ORGANIZATION_ID);
 
     ImportResult expected = new ImportResult();
     FakeImportService service = new FakeImportService(
         new StubNormalizer("<Openbravo><M_PRODUCT/></Openbravo>"), client, org, expected);
 
-    ImportResult actual = service.importDataset("CLIENT-1", "ORG-1");
+    ImportResult actual = service.importDataset(CLIENT_ID, ORGANIZATION_ID);
 
     assertSame(expected, actual);
     assertSame(client, service.importedClient);
@@ -48,47 +56,51 @@ public class OnboardingDatasetImportServiceTest {
     assertEquals("<Openbravo><M_PRODUCT/></Openbravo>", service.importedXml);
     assertTrue(service.summaryLogged);
     assertTrue(service.validationCalled);
+  }
 
+  /** Verifies that the import fails when the requested client cannot be resolved. */
   @Test
-  public void testImportDatasetFailsWhenClientDoesNotExist() throws Exception {
-    FakeImportService service = new FakeImportService(new StubNormalizer("<Openbravo/>"), null,
+  public void testImportDatasetFailsWhenClientDoesNotExist() {
+    FakeImportService service = new FakeImportService(new StubNormalizer(EMPTY_OPENBRAVO_XML), null,
         new Organization(), new ImportResult());
 
     try {
-      service.importDataset("missing-client", "ORG-1");
+      service.importDataset("missing-client", ORGANIZATION_ID);
       fail("Expected missing client to fail");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("missing-client"));
     }
   }
 
+  /** Verifies that the import fails when the requested organization cannot be resolved. */
   @Test
-  public void testImportDatasetFailsWhenOrganizationDoesNotExist() throws Exception {
+  public void testImportDatasetFailsWhenOrganizationDoesNotExist() {
     Client client = new Client();
-    client.setId("CLIENT-1");
-    FakeImportService service = new FakeImportService(new StubNormalizer("<Openbravo/>"), client,
+    client.setId(CLIENT_ID);
+    FakeImportService service = new FakeImportService(new StubNormalizer(EMPTY_OPENBRAVO_XML), client,
         null, new ImportResult());
 
     try {
-      service.importDataset("CLIENT-1", "missing-org");
+      service.importDataset(CLIENT_ID, "missing-org");
       fail("Expected missing organization to fail");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("missing-org"));
     }
   }
 
+  /** Verifies that import errors returned by the importer are surfaced as OBExceptions. */
   @Test
-  public void testImportDatasetPropagatesImporterErrors() throws Exception {
+  public void testImportDatasetPropagatesImporterErrors() {
     Client client = new Client();
-    client.setId("CLIENT-1");
+    client.setId(CLIENT_ID);
     Organization org = new Organization();
-    org.setId("ORG-1");
+    org.setId(ORGANIZATION_ID);
 
     FakeImportService service = new FakeImportService(
-        new StubNormalizer("<Openbravo/>"), client, org, new ErrorImportResult("broken import"));
+        new StubNormalizer(EMPTY_OPENBRAVO_XML), client, org, new ErrorImportResult("broken import"));
 
     try {
-      service.importDataset("CLIENT-1", "ORG-1");
+      service.importDataset(CLIENT_ID, ORGANIZATION_ID);
       fail("Expected import errors to fail");
     } catch (OBException e) {
       assertTrue(e.getMessage().contains("broken import"));
@@ -168,7 +180,7 @@ public class OnboardingDatasetImportServiceTest {
     }
 
     @Override
-    protected void validateImportedSeed(Client client, Organization organization, ImportResult result) {
+    protected void validateImportedSeed(Client client, Organization organization) {
       validationCalled = true;
     }
 

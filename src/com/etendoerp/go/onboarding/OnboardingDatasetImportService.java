@@ -42,6 +42,9 @@ public class OnboardingDatasetImportService {
 
   private final OnboardingDatasetNormalizer normalizer;
 
+  /**
+   * Creates the service using the default onboarding dataset normalizer.
+   */
   public OnboardingDatasetImportService() {
     this(new OnboardingDatasetNormalizer());
   }
@@ -50,7 +53,14 @@ public class OnboardingDatasetImportService {
     this.normalizer = normalizer;
   }
 
-  public ImportResult importDataset(String clientId, String orgId) throws Exception {
+  /**
+   * Normalizes and imports the onboarding dataset for the given client and organization.
+   *
+   * @param clientId the target client identifier
+   * @param orgId the target organization identifier
+   * @return the import result returned by the Openbravo data import service
+   */
+  public ImportResult importDataset(String clientId, String orgId) {
     Client client = resolveClient(clientId);
     if (client == null) {
       throw new OBException("Client not found with ID: " + clientId);
@@ -71,7 +81,7 @@ public class OnboardingDatasetImportService {
       throw new OBException(result.getErrorMessages());
     }
     commitImport();
-    validateImportedSeed(client, organization, result);
+    validateImportedSeed(client, organization);
     return result;
   }
 
@@ -112,28 +122,15 @@ public class OnboardingDatasetImportService {
     }
   }
 
-  protected void validateImportedSeed(Client client, Organization organization, ImportResult result) {
-    Organization systemOrganization = resolveSystemOrganization();
-
-    SeedVisibilitySummary summary = new SeedVisibilitySummary(
-        countByClientAndOrganization(Product.class, Product.PROPERTY_CLIENT,
-            Product.PROPERTY_ORGANIZATION, client, systemOrganization),
-        countByClientAndOrganization(Product.class, Product.PROPERTY_CLIENT,
-            Product.PROPERTY_ORGANIZATION, client, organization),
-        countByClientAndOrganization(Warehouse.class, Warehouse.PROPERTY_CLIENT,
-            Warehouse.PROPERTY_ORGANIZATION, client, systemOrganization),
-        countByClientAndOrganization(Warehouse.class, Warehouse.PROPERTY_CLIENT,
-            Warehouse.PROPERTY_ORGANIZATION, client, organization),
-        countByClientAndOrganization(PriceList.class, PriceList.PROPERTY_CLIENT,
-            PriceList.PROPERTY_ORGANIZATION, client, systemOrganization),
-        countByClientAndOrganization(PriceList.class, PriceList.PROPERTY_CLIENT,
-            PriceList.PROPERTY_ORGANIZATION, client, organization),
-        countByClientAndOrganization(FIN_FinancialAccount.class,
-            FIN_FinancialAccount.PROPERTY_CLIENT, FIN_FinancialAccount.PROPERTY_ORGANIZATION, client,
-            systemOrganization),
-        countByClientAndOrganization(FIN_FinancialAccount.class,
-            FIN_FinancialAccount.PROPERTY_CLIENT, FIN_FinancialAccount.PROPERTY_ORGANIZATION, client,
-            organization));
+  /**
+   * Validates that the imported dataset contains visible seed data for the target organization.
+   *
+   * @param client the client for which the dataset was imported
+   * @param organization the organization for which the dataset was imported
+   * @throws OBException if no visible seed data is found for the target organization
+   */
+  protected void validateImportedSeed(Client client, Organization organization) {
+    SeedVisibilitySummary summary = buildSeedVisibilitySummary(client, organization);
 
     logImportedSeedSummary(client, organization, summary);
 
@@ -146,6 +143,29 @@ public class OnboardingDatasetImportService {
           + ", priceLists=" + summary.totalPriceLists()
           + ", financialAccounts=" + summary.totalFinancialAccounts() + "]");
     }
+  }
+
+  private SeedVisibilitySummary buildSeedVisibilitySummary(Client client, Organization organization) {
+    Organization systemOrganization = resolveSystemOrganization();
+    return new SeedVisibilitySummary(
+        countByOrganization(Product.class, Product.PROPERTY_CLIENT, Product.PROPERTY_ORGANIZATION,
+            client, systemOrganization, organization),
+        countByOrganization(Warehouse.class, Warehouse.PROPERTY_CLIENT,
+            Warehouse.PROPERTY_ORGANIZATION, client, systemOrganization, organization),
+        countByOrganization(PriceList.class, PriceList.PROPERTY_CLIENT,
+            PriceList.PROPERTY_ORGANIZATION, client, systemOrganization, organization),
+        countByOrganization(FIN_FinancialAccount.class, FIN_FinancialAccount.PROPERTY_CLIENT,
+            FIN_FinancialAccount.PROPERTY_ORGANIZATION, client, systemOrganization, organization));
+  }
+
+  private <T extends BaseOBObject> VisibilityCount countByOrganization(Class<T> entityClass,
+      String clientProperty, String organizationProperty, Client client,
+      Organization systemOrganization, Organization targetOrganization) {
+    return new VisibilityCount(
+        countByClientAndOrganization(entityClass, clientProperty, organizationProperty, client,
+            systemOrganization),
+        countByClientAndOrganization(entityClass, clientProperty, organizationProperty, client,
+            targetOrganization));
   }
 
   protected <T extends BaseOBObject> long countByClientAndOrganization(Class<T> entityClass,
@@ -168,10 +188,10 @@ public class OnboardingDatasetImportService {
     log.info("Onboarding dataset visibility summary for client {} org {} -> products[org0={}, targetOrg={}], "
         + "warehouses[org0={}, targetOrg={}], priceLists[org0={}, targetOrg={}], financialAccounts[org0={}, targetOrg={}]",
         client.getId(), organization.getId(),
-        summary.productsInSystemOrg, summary.productsInTargetOrg,
-        summary.warehousesInSystemOrg, summary.warehousesInTargetOrg,
-        summary.priceListsInSystemOrg, summary.priceListsInTargetOrg,
-        summary.financialAccountsInSystemOrg, summary.financialAccountsInTargetOrg);
+        summary.products.systemOrganization, summary.products.targetOrganization,
+        summary.warehouses.systemOrganization, summary.warehouses.targetOrganization,
+        summary.priceLists.systemOrganization, summary.priceLists.targetOrganization,
+        summary.financialAccounts.systemOrganization, summary.financialAccounts.targetOrganization);
   }
 
   protected Organization resolveSystemOrganization() {
@@ -183,44 +203,48 @@ public class OnboardingDatasetImportService {
     }
   }
 
-  protected static final class SeedVisibilitySummary {
-    private final long productsInSystemOrg;
-    private final long productsInTargetOrg;
-    private final long warehousesInSystemOrg;
-    private final long warehousesInTargetOrg;
-    private final long priceListsInSystemOrg;
-    private final long priceListsInTargetOrg;
-    private final long financialAccountsInSystemOrg;
-    private final long financialAccountsInTargetOrg;
+  protected static final class VisibilityCount {
+    private final long systemOrganization;
+    private final long targetOrganization;
 
-    private SeedVisibilitySummary(long productsInSystemOrg, long productsInTargetOrg,
-        long warehousesInSystemOrg, long warehousesInTargetOrg,
-        long priceListsInSystemOrg, long priceListsInTargetOrg,
-        long financialAccountsInSystemOrg, long financialAccountsInTargetOrg) {
-      this.productsInSystemOrg = productsInSystemOrg;
-      this.productsInTargetOrg = productsInTargetOrg;
-      this.warehousesInSystemOrg = warehousesInSystemOrg;
-      this.warehousesInTargetOrg = warehousesInTargetOrg;
-      this.priceListsInSystemOrg = priceListsInSystemOrg;
-      this.priceListsInTargetOrg = priceListsInTargetOrg;
-      this.financialAccountsInSystemOrg = financialAccountsInSystemOrg;
-      this.financialAccountsInTargetOrg = financialAccountsInTargetOrg;
+    private VisibilityCount(long systemOrganization, long targetOrganization) {
+      this.systemOrganization = systemOrganization;
+      this.targetOrganization = targetOrganization;
+    }
+
+    private long total() {
+      return systemOrganization + targetOrganization;
+    }
+  }
+
+  protected static final class SeedVisibilitySummary {
+    private final VisibilityCount products;
+    private final VisibilityCount warehouses;
+    private final VisibilityCount priceLists;
+    private final VisibilityCount financialAccounts;
+
+    private SeedVisibilitySummary(VisibilityCount products, VisibilityCount warehouses,
+        VisibilityCount priceLists, VisibilityCount financialAccounts) {
+      this.products = products;
+      this.warehouses = warehouses;
+      this.priceLists = priceLists;
+      this.financialAccounts = financialAccounts;
     }
 
     private long totalProducts() {
-      return productsInSystemOrg + productsInTargetOrg;
+      return products.total();
     }
 
     private long totalWarehouses() {
-      return warehousesInSystemOrg + warehousesInTargetOrg;
+      return warehouses.total();
     }
 
     private long totalPriceLists() {
-      return priceListsInSystemOrg + priceListsInTargetOrg;
+      return priceLists.total();
     }
 
     private long totalFinancialAccounts() {
-      return financialAccountsInSystemOrg + financialAccountsInTargetOrg;
+      return financialAccounts.total();
     }
   }
 }
