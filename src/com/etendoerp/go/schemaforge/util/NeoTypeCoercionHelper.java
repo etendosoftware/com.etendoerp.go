@@ -113,9 +113,10 @@ public final class NeoTypeCoercionHelper {
   }
 
   /**
-   * Attempts to coerce a single string field value to its proper numeric type
-   * ({@link java.math.BigDecimal} or {@link Long}) using the property metadata of the given entity,
-   * placing the coerced value into the {@code coerced} map if conversion is applicable.
+   * Attempts to coerce a single string field value to its proper Java type
+   * ({@link java.math.BigDecimal}, {@link Long}, {@link Integer}, or {@link Boolean})
+   * using the property metadata of the given entity, placing the coerced value into
+   * the {@code coerced} map if conversion is applicable.
    *
    * @param entity  the DAL {@link Entity} used to look up the property by name
    * @param key     the field name to look up and potentially coerce
@@ -139,13 +140,21 @@ public final class NeoTypeCoercionHelper {
       Map<String, Object> coerced) {
     try {
       Property prop = entity.getProperty(key);
-      if (prop != null && prop.isPrimitive()) {
-        Class<?> type = prop.getPrimitiveObjectType();
-        if (type != null && java.math.BigDecimal.class.isAssignableFrom(type) && !strVal.isEmpty()) {
-          coerced.put(key, new java.math.BigDecimal(strVal));
-        } else if (type != null && Long.class.isAssignableFrom(type) && !strVal.isEmpty()) {
-          coerced.put(key, new java.math.BigDecimal(strVal).longValue());
-        }
+      if (prop == null || !prop.isPrimitive()) {
+        return;
+      }
+      Class<?> type = prop.getPrimitiveObjectType();
+      if (type == null || strVal.isEmpty()) {
+        return;
+      }
+      if (java.math.BigDecimal.class.isAssignableFrom(type)) {
+        coerced.put(key, new java.math.BigDecimal(strVal));
+      } else if (Long.class.isAssignableFrom(type)) {
+        coerced.put(key, new java.math.BigDecimal(strVal).longValue());
+      } else if (Integer.class.isAssignableFrom(type)) {
+        coerced.put(key, Integer.parseInt(strVal));
+      } else if (Boolean.class.isAssignableFrom(type)) {
+        coerced.put(key, "Y".equals(strVal) || "true".equalsIgnoreCase(strVal));
       }
     } catch (Exception ignored) {
       log.debug("Skipping string coercion for key {}: {}", key, ignored.getMessage());
