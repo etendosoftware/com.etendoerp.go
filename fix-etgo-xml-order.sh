@@ -62,10 +62,12 @@ def get_uuid(block):
 # Snapshot of IDs before sorting
 ids_before = set(get_uuid(b) for b in blocks)
 
-# Detect duplicates
-duplicates = [get_uuid(b) for b in blocks if blocks.count(b) > 1]
+# Detect duplicates by UUID (not by full block content)
+from collections import Counter
+uuid_counts = Counter(get_uuid(b) for b in blocks)
+duplicates = sorted(uuid for uuid, count in uuid_counts.items() if count > 1)
 if duplicates:
-    print(f"  WARNING {basename} — UUIDs duplicados: {', '.join(set(duplicates))}")
+    print(f"  WARNING {basename} — UUIDs duplicados: {', '.join(duplicates)}")
 
 # Sort blocks by UUID
 sorted_blocks = sorted(blocks, key=get_uuid)

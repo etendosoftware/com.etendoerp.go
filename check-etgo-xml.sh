@@ -28,7 +28,7 @@ for xml_file in "$SD"/ETGO_*.xml; do
     prev=""
     while IFS= read -r current; do
       if [ -n "$prev" ] && [ "$(printf '%s\n%s' "$prev" "$current" | sort | head -1)" != "$prev" ]; then
-        echo "    Primera violación: $prev debería ir antes de $current"
+        echo "    Primera violación: $current debería ir antes de $prev"
         break
       fi
       prev="$current"
@@ -42,7 +42,7 @@ done
 # ── 2. Unique constraint: ETGO_SF_ENTITY (ETGO_SF_SPEC_ID, NAME) ─
 echo ""
 echo "── Unique constraint (ETGO_SF_ENTITY) ──"
-python3 - "$SD" <<'PYEOF'
+python3 - "$SD" <<'PYEOF' || GLOBAL_EXIT=1
 import xml.etree.ElementTree as ET, sys, os
 
 sd = sys.argv[1]
@@ -70,12 +70,11 @@ if errors:
 else:
     print(f"  \033[32m✔\033[0m ETGO_SF_ENTITY")
 PYEOF
-[ $? -ne 0 ] && GLOBAL_EXIT=1 || true
 
 # ── 3. Referential integrity (orphans) ──────────────────────────
 echo ""
 echo "── Integridad referencial ──"
-python3 - "$SD" <<'PYEOF'
+python3 - "$SD" <<'PYEOF' || GLOBAL_EXIT=1
 import xml.etree.ElementTree as ET, sys, os
 
 sd = sys.argv[1]
@@ -109,7 +108,6 @@ if errors:
 else:
     print(f"  \033[32m✔\033[0m Sin huérfanos")
 PYEOF
-[ $? -ne 0 ] && GLOBAL_EXIT=1 || true
 
 echo ""
 if [ $GLOBAL_EXIT -eq 0 ]; then
