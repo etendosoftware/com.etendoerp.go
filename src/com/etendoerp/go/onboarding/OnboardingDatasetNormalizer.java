@@ -16,16 +16,18 @@
  */
 package com.etendoerp.go.onboarding;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.Objects;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Properties;
+import java.util.Objects;
 
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilder;
@@ -40,7 +42,6 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
-import org.openbravo.base.session.OBPropertiesProvider;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -52,18 +53,20 @@ import org.w3c.dom.NodeList;
  */
 public class OnboardingDatasetNormalizer {
 
-  private static final Path MODULE_RELATIVE_SAMPLE_DATA = Paths.get(
-      "referencedata", "sampledata", "GOClient");
-  private static final Path WORKSPACE_RELATIVE_SAMPLE_DATA = Paths.get(
-      "etendo_core", "modules", "com.etendoerp.go", "referencedata", "sampledata", "GOClient");
+  private static final String SAMPLE_DATA_RESOURCE_ROOT =
+      "com/etendoerp/go/onboarding/sampledata";
+  private static final String SAMPLE_DATA_RESOURCE_DIRECTORY =
+      SAMPLE_DATA_RESOURCE_ROOT + "/GOClient";
+  private static final String SAMPLE_DATA_INDEX_RESOURCE =
+      SAMPLE_DATA_RESOURCE_ROOT + "/index.txt";
 
-  private final Path sampleDataDirectory;
+  private final SourceFileProvider sourceFileProvider;
 
   /**
-   * Creates a normalizer that resolves the GOClient sourcedata directory from known module paths.
+   * Creates a normalizer that reads the packaged GOClient sourcedata from the runtime classpath.
    */
   public OnboardingDatasetNormalizer() {
-    this(resolveDefaultSampleDataDirectory());
+    this(classpathSourceFileProvider(OnboardingDatasetNormalizer.class.getClassLoader()));
   }
 
   /**
@@ -72,8 +75,13 @@ public class OnboardingDatasetNormalizer {
    * @param sampleDataDirectory the directory that contains the GOClient sourcedata XML files
    */
   public OnboardingDatasetNormalizer(Path sampleDataDirectory) {
-    this.sampleDataDirectory = Objects.requireNonNull(sampleDataDirectory,
-        "sampleDataDirectory is required");
+    this(directorySourceFileProvider(Objects.requireNonNull(sampleDataDirectory,
+        "sampleDataDirectory is required")));
+  }
+
+  private OnboardingDatasetNormalizer(SourceFileProvider sourceFileProvider) {
+    this.sourceFileProvider = Objects.requireNonNull(sourceFileProvider,
+        "sourceFileProvider is required");
   }
 
   /**
@@ -98,17 +106,17 @@ public class OnboardingDatasetNormalizer {
     root.setAttribute("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance");
     output.appendChild(root);
 
-    for (Path sourceFile : listIncludedSourceFiles()) {
+    for (SourceFile sourceFile : listIncludedSourceFiles()) {
       appendEntities(sourceFile, builder, output, root, targetOrganizationId);
     }
 
     return toXml(output);
   }
 
-  private void appendEntities(Path sourceFile, DocumentBuilder builder, Document output, Element root,
+  private void appendEntities(SourceFile sourceFile, DocumentBuilder builder, Document output, Element root,
       String targetOrganizationId) {
-    Entity entity = resolveEntity(tableName(sourceFile));
-    try (var inputStream = Files.newInputStream(sourceFile)) {
+    Entity entity = resolveEntity(tableName(sourceFile.fileName));
+    try (InputStream inputStream = sourceFile.openStream()) {
       Document source = builder.parse(inputStream);
       NodeList childNodes = source.getDocumentElement().getChildNodes();
       for (int i = 0; i < childNodes.getLength(); i++) {
@@ -119,7 +127,7 @@ public class OnboardingDatasetNormalizer {
       }
     } catch (Exception e) {
       throw new OnboardingDatasetNormalizationException(
-          "Failed to normalize sourcedata file " + sourceFile.getFileName(), e);
+          "Failed to normalize sourcedata file " + sourceFile.fileName, e);
     }
   }
 
@@ -225,53 +233,92 @@ public class OnboardingDatasetNormalizer {
     return entity;
   }
 
-  private List<Path> listIncludedSourceFiles() {
-    List<Path> files = new ArrayList<>();
-    try (var stream = Files.list(sampleDataDirectory)) {
-      stream.filter(Files::isRegularFile)
-          .filter(path -> path.getFileName().toString().endsWith(".xml"))
-          .filter(path -> OnboardingDatasetDefinition.shouldIncludeTable(tableName(path)))
-          .sorted(Comparator.comparing(path -> path.getFileName().toString()))
-          .forEach(files::add);
-    } catch (Exception e) {
-      throw new OnboardingDatasetNormalizationException(
-          "Failed to list onboarding sourcedata in " + sampleDataDirectory, e);
-    }
-    return files;
+  private List<SourceFile> listIncludedSourceFiles() {
+    return sourceFileProvider.listIncludedSourceFiles();
   }
 
-  private String tableName(Path sourceFile) {
-    String fileName = sourceFile.getFileName().toString();
-    int suffix = fileName.lastIndexOf('.');
-    return suffix == -1 ? fileName : fileName.substring(0, suffix);
-  }
-
-  private static Path resolveDefaultSampleDataDirectory() {
-    List<Path> candidates = new ArrayList<>();
-    String sourcePath = sourcePath();
-    if (sourcePath != null && !sourcePath.isBlank()) {
-      candidates.add(Paths.get(sourcePath, "modules", "com.etendoerp.go",
-          MODULE_RELATIVE_SAMPLE_DATA.toString()));
-    }
-    candidates.add(MODULE_RELATIVE_SAMPLE_DATA);
-    candidates.add(WORKSPACE_RELATIVE_SAMPLE_DATA);
-
-    for (Path candidate : candidates) {
-      if (Files.isDirectory(candidate)) {
-        return candidate;
+  private static SourceFileProvider directorySourceFileProvider(Path sampleDataDirectory) {
+    return () -> {
+      List<SourceFile> files = new ArrayList<>();
+      try (var stream = Files.list(sampleDataDirectory)) {
+        stream.filter(Files::isRegularFile)
+            .filter(path -> path.getFileName().toString().endsWith(".xml"))
+            .filter(path -> OnboardingDatasetDefinition.shouldIncludeTable(
+                tableName(path.getFileName().toString())))
+            .sorted(Comparator.comparing(path -> path.getFileName().toString()))
+            .forEach(path -> files.add(new SourceFile(path.getFileName().toString(),
+                () -> Files.newInputStream(path))));
+      } catch (Exception e) {
+        throw new OnboardingDatasetNormalizationException(
+            "Failed to list onboarding sourcedata in " + sampleDataDirectory, e);
       }
-    }
-    throw new OnboardingDatasetNormalizationException(
-        "GOClient sampledata directory not found in known locations: " + candidates);
+      return files;
+    };
   }
 
-  private static String sourcePath() {
-    try {
-      Properties properties = OBPropertiesProvider.getInstance().getOpenbravoProperties();
-      return properties == null ? null : properties.getProperty("source.path");
-    } catch (Exception ignored) {
-      return null;
+  private static SourceFileProvider classpathSourceFileProvider(ClassLoader classLoader) {
+    Objects.requireNonNull(classLoader, "classLoader is required");
+    return () -> {
+      List<SourceFile> files = new ArrayList<>();
+      for (String fileName : readBundledSourceFileNames(classLoader)) {
+        if (!fileName.endsWith(".xml")) {
+          continue;
+        }
+        if (!OnboardingDatasetDefinition.shouldIncludeTable(tableName(fileName))) {
+          continue;
+        }
+        files.add(new SourceFile(fileName, () -> openBundledSourceFile(classLoader, fileName)));
+      }
+      files.sort(Comparator.comparing(sourceFile -> sourceFile.fileName));
+      return files;
+    };
+  }
+
+  private static List<String> readBundledSourceFileNames(ClassLoader classLoader) {
+    try (InputStream inputStream = classLoader.getResourceAsStream(SAMPLE_DATA_INDEX_RESOURCE)) {
+      if (inputStream == null) {
+        throw new OnboardingDatasetNormalizationException(
+            "Bundled GOClient sampledata index not found on the classpath: "
+                + SAMPLE_DATA_INDEX_RESOURCE);
+      }
+
+      List<String> fileNames = new ArrayList<>();
+      try (BufferedReader reader = new BufferedReader(
+          new InputStreamReader(inputStream, StandardCharsets.UTF_8))) {
+        String line;
+        while ((line = reader.readLine()) != null) {
+          String fileName = line.trim();
+          if (!fileName.isEmpty()) {
+            fileNames.add(fileName);
+          }
+        }
+      }
+
+      if (fileNames.isEmpty()) {
+        throw new OnboardingDatasetNormalizationException(
+            "Bundled GOClient sampledata index is empty: " + SAMPLE_DATA_INDEX_RESOURCE);
+      }
+      return fileNames;
+    } catch (IOException e) {
+      throw new OnboardingDatasetNormalizationException(
+          "Failed to read bundled GOClient sampledata index " + SAMPLE_DATA_INDEX_RESOURCE, e);
     }
+  }
+
+  private static InputStream openBundledSourceFile(ClassLoader classLoader, String fileName)
+      throws IOException {
+    String resourcePath = SAMPLE_DATA_RESOURCE_DIRECTORY + "/" + fileName;
+    InputStream inputStream = classLoader.getResourceAsStream(resourcePath);
+    if (inputStream == null) {
+      throw new OnboardingDatasetNormalizationException(
+          "Bundled GOClient sampledata file not found on the classpath: " + resourcePath);
+    }
+    return inputStream;
+  }
+
+  private static String tableName(String sourceFileName) {
+    int suffix = sourceFileName.lastIndexOf('.');
+    return suffix == -1 ? sourceFileName : sourceFileName.substring(0, suffix);
   }
 
   private DocumentBuilder newDocumentBuilder() {
@@ -310,6 +357,30 @@ public class OnboardingDatasetNormalizer {
     } catch (Exception e) {
       throw new OnboardingDatasetNormalizationException(
           "Failed to serialize onboarding dataset XML", e);
+    }
+  }
+
+  @FunctionalInterface
+  private interface SourceFileProvider {
+    List<SourceFile> listIncludedSourceFiles();
+  }
+
+  @FunctionalInterface
+  private interface SourceFileOpener {
+    InputStream open() throws Exception;
+  }
+
+  private static final class SourceFile {
+    private final String fileName;
+    private final SourceFileOpener opener;
+
+    private SourceFile(String fileName, SourceFileOpener opener) {
+      this.fileName = Objects.requireNonNull(fileName, "fileName is required");
+      this.opener = Objects.requireNonNull(opener, "opener is required");
+    }
+
+    private InputStream openStream() throws Exception {
+      return opener.open();
     }
   }
 

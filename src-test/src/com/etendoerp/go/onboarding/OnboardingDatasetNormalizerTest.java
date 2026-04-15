@@ -19,6 +19,7 @@ package com.etendoerp.go.onboarding;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
@@ -90,6 +91,30 @@ public class OnboardingDatasetNormalizerTest {
     assertFalse(xml.contains("<AD_ORG_WAREHOUSE_ID>"));
     assertFalse(xml.contains("<M_PRODUCT_ID>"));
   }
+
+  /** Verifies that the default normalizer can load packaged sampledata without a repo checkout. */
+  @Test
+  public void testDefaultNormalizerLoadsBundledSampledataFromClasspath() throws Exception {
+    Path isolatedWorkingDirectory = Files.createTempDirectory("onboarding-classpath");
+    String previousUserDir = System.getProperty("user.dir");
+
+    try {
+      System.setProperty("user.dir", isolatedWorkingDirectory.toString());
+
+      String xml = new OnboardingDatasetNormalizer().buildDatasetXml();
+
+      assertTrue(xml.contains("<Openbravo"));
+      assertTrue(xml.contains("Almacen GO"));
+      assertFalse(xml.contains("<AD_CLIENT>"));
+    } finally {
+      if (previousUserDir == null) {
+        System.clearProperty("user.dir");
+      } else {
+        System.setProperty("user.dir", previousUserDir);
+      }
+    }
+  }
+
 
   private Path sampleDataDir() {
     return Paths.get("referencedata", "sampledata", "GOClient");
