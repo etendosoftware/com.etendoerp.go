@@ -23,9 +23,8 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.currency.Currency;
-import org.openbravo.model.common.enterprise.Organization;
-import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 
 /**
  * Resolves org-level session defaults for the current OBContext.
@@ -37,14 +36,11 @@ import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
  * { "currencyCode": "EUR" }
  * </pre>
  *
- * Currency resolution order:
+ * Currency resolution order (via {@code OBCurrencyUtils.getOrgCurrency()}):
  * <ol>
- *   <li>{@code AD_Org.C_Currency_ID} — the currency set directly on the organization
- *       (this is what users see and configure in the Organization window)</li>
- *   <li>{@code OrganizationAcctSchema → AcctSchema.C_Currency_ID} — the functional
- *       currency from the accounting schema, used as fallback for orgs without a
- *       direct currency assignment</li>
- *   <li>{@code "USD"} — ultimate fallback</li>
+ *   <li>{@code AD_Org.C_Currency_ID} — currency set directly on the organization</li>
+ *   <li>Legal entity currency — if the org has no direct currency</li>
+ *   <li>Client base currency — ultimate DB fallback</li>
  * </ol>
  *
  * Frontend components that do not have a document record (dashboards, sidebars) should
@@ -91,39 +87,29 @@ public class NeoSessionService {
   }
 
   /**
-   * Resolves the currency ISO code using the priority order documented on the class.
+   * Resolves the currency ISO code using the same fallback chain as the rest of the ERP.
+   *
+   * <p>Delegates to {@code OBCurrencyUtils.getOrgCurrency()} which covers:</p>
+   * <ol>
+   *   <li>{@code AD_Org.C_Currency_ID} — currency set directly on the org</li>
+   *   <li>Legal entity currency — if the org has no direct currency</li>
+   *   <li>Client base currency — ultimate DB fallback</li>
+   * </ol>
    *
    * @param orgId the current organization ID from OBContext
    * @return ISO 4217 code, never null
    */
   private static String resolveCurrencyCode(String orgId) {
-    // 1. Direct org currency — AD_Org.C_Currency_ID (shown in Organization window)
-    Organization org = OBDal.getInstance().get(Organization.class, orgId);
-    if (org != null) {
-      Currency orgCurrency = org.getCurrency();
-      if (orgCurrency != null) {
-        return orgCurrency.getISOCode();
-      }
+    String currencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+    if (currencyId == null) {
+      log.warn("No currency found for org {} via OBCurrencyUtils — using fallback {}", orgId, FALLBACK_CURRENCY);
+      return FALLBACK_CURRENCY;
     }
-
-    // 2. Fallback: functional currency from the accounting schema
-    AcctSchema schema = OBDal.getInstance()
-        .createQuery(AcctSchema.class,
-            "exists (from OrganizationAcctSchema oas"
-                + " where oas.accountingSchema = this"
-                + " and oas.organization.id = :orgId"
-                + " and oas.active = true)"
-                + " and active = true")
-        .setNamedParameter("orgId", orgId)
-        .setMaxResult(1)
-        .uniqueResult();
-
-    if (schema != null && schema.getCurrency() != null) {
-      return schema.getCurrency().getISOCode();
+    Currency currency = OBDal.getInstance().get(Currency.class, currencyId);
+    if (currency != null) {
+      return currency.getISOCode();
     }
-
-    // 3. Ultimate fallback
-    log.warn("No currency found for org {} — using fallback {}", orgId, FALLBACK_CURRENCY);
+    log.warn("Currency ID {} not found for org {} — using fallback {}", currencyId, orgId, FALLBACK_CURRENCY);
     return FALLBACK_CURRENCY;
   }
 }

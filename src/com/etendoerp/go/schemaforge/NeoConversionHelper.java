@@ -18,8 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 
 /**
  * Shared utility for multi-currency amount conversion in widget SQL queries.
@@ -79,9 +78,10 @@ public class NeoConversionHelper {
     + " WHERE cr.c_currency_id = i.c_currency_id"
     + " AND cr.c_currency_id_to = :orgCurrencyId"
     + " AND cr.ad_client_id = i.ad_client_id"
+    + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = i.ad_org_id)"
     + " AND cr.isactive = 'Y'"
-    + " AND cr.validfrom <= i.dateinvoiced"
-    + " AND (cr.validto IS NULL OR cr.validto >= i.dateinvoiced)"
+    + " AND cr.validfrom <= date_trunc('day', i.dateinvoiced)"
+    + " AND (cr.validto IS NULL OR cr.validto >= date_trunc('day', i.dateinvoiced))"
     + " ORDER BY cr.validfrom DESC LIMIT 1),"
     + "CASE WHEN i.c_currency_id = :orgCurrencyId THEN 1.0 ELSE NULL END)";
 
@@ -92,16 +92,22 @@ public class NeoConversionHelper {
   /**
    * Resolves the functional currency ID for the current organization.
    *
-   * <p>Must be called inside an {@code OBContext.setAdminMode} block.
-   * Returns {@code null} if the organization has no currency configured
-   * (in which case callers should skip conversion and use {@code i.grandtotal} directly).</p>
+   * <p>Delegates to {@code OBCurrencyUtils.getOrgCurrency()} which follows the same
+   * fallback chain used by the rest of the ERP:</p>
+   * <ol>
+   *   <li>{@code AD_Org.C_Currency_ID} — currency set directly on the org</li>
+   *   <li>Legal entity currency — if the org has no direct currency</li>
+   *   <li>Client base currency — ultimate fallback</li>
+   * </ol>
    *
-   * @return the {@code C_Currency_ID} of {@code AD_Org.C_Currency_ID}, or {@code null}
+   * <p>Returns {@code null} only if no currency is configured anywhere in the hierarchy,
+   * in which case callers should skip conversion and use {@code i.grandtotal} directly.</p>
+   *
+   * @return the {@code C_Currency_ID} for the current org, or {@code null}
    */
   public static String resolveOrgCurrencyId() {
-    Organization org = OBDal.getInstance().get(Organization.class,
-        OBContext.getOBContext().getCurrentOrganization().getId());
-    return (org != null && org.getCurrency() != null) ? org.getCurrency().getId() : null;
+    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+    return OBCurrencyUtils.getOrgCurrency(orgId);
   }
 
   /**
