@@ -89,13 +89,7 @@ public class CloneOrderHandler implements NeoHandler {
         data.put("id", clone.getId());
         data.put("documentNo", clone.getDocumentNo() != null ? clone.getDocumentNo() : "");
 
-        JSONObject responseData = new JSONObject();
-        responseData.put("data", data);
-
-        JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
-
-        return NeoResponse.created(wrapper);
+        return NeoResponse.createdWithData(data);
       } finally {
         OBContext.restorePreviousMode();
       }
