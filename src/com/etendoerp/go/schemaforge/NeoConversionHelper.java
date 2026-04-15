@@ -51,7 +51,14 @@ import org.openbravo.erpCommon.utility.OBCurrencyUtils;
  * The placeholder {@code {AMOUNT}} must appear in the SQL template wherever
  * {@code i.grandtotal} was previously used. Assumes invoice alias {@code i}
  * with columns {@code grandtotal}, {@code c_currency_id}, {@code dateinvoiced},
- * {@code ad_client_id}.
+ * {@code ad_client_id}, {@code ad_org_id}.
+ *
+ * <h3>Known limitation</h3>
+ * <p>The SQL expression covers global rates ({@code ad_org_id = '0'}) and rates configured
+ * directly on the invoice's org. It does NOT walk the full org hierarchy recursively
+ * (as {@code FinancialUtils.getConversionRate()} does). Rates configured on intermediate
+ * parent orgs will not be found. In practice this is uncommon — most installations
+ * define rates globally at org "0".</p>
  */
 public class NeoConversionHelper {
 
