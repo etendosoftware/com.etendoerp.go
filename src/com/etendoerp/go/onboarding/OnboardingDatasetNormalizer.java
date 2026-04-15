@@ -59,6 +59,7 @@ public class OnboardingDatasetNormalizer {
       SAMPLE_DATA_RESOURCE_ROOT + "/GOClient";
   private static final String SAMPLE_DATA_INDEX_RESOURCE =
       SAMPLE_DATA_RESOURCE_ROOT + "/index.txt";
+  private static final String RESOURCE_PATH_SEPARATOR = "/";
 
   private final SourceFileProvider sourceFileProvider;
 
@@ -247,7 +248,7 @@ public class OnboardingDatasetNormalizer {
                 tableName(path.getFileName().toString())))
             .sorted(Comparator.comparing(path -> path.getFileName().toString()))
             .forEach(path -> files.add(new SourceFile(path.getFileName().toString(),
-                () -> Files.newInputStream(path))));
+                () -> openFileSystemSourceFile(path))));
       } catch (Exception e) {
         throw new OnboardingDatasetNormalizationException(
             "Failed to list onboarding sourcedata in " + sampleDataDirectory, e);
@@ -261,13 +262,10 @@ public class OnboardingDatasetNormalizer {
     return () -> {
       List<SourceFile> files = new ArrayList<>();
       for (String fileName : readBundledSourceFileNames(classLoader)) {
-        if (!fileName.endsWith(".xml")) {
-          continue;
+        if (fileName.endsWith(".xml")
+            && OnboardingDatasetDefinition.shouldIncludeTable(tableName(fileName))) {
+          files.add(new SourceFile(fileName, () -> openBundledSourceFile(classLoader, fileName)));
         }
-        if (!OnboardingDatasetDefinition.shouldIncludeTable(tableName(fileName))) {
-          continue;
-        }
-        files.add(new SourceFile(fileName, () -> openBundledSourceFile(classLoader, fileName)));
       }
       files.sort(Comparator.comparing(sourceFile -> sourceFile.fileName));
       return files;
@@ -305,12 +303,21 @@ public class OnboardingDatasetNormalizer {
     }
   }
 
+  private static InputStream openFileSystemSourceFile(Path path) throws SourceFileAccessException {
+    try {
+      return Files.newInputStream(path);
+    } catch (IOException e) {
+      throw new SourceFileAccessException(
+          "Failed to open onboarding sourcedata file " + path.getFileName(), e);
+    }
+  }
+
   private static InputStream openBundledSourceFile(ClassLoader classLoader, String fileName)
-      throws IOException {
-    String resourcePath = SAMPLE_DATA_RESOURCE_DIRECTORY + "/" + fileName;
+      throws SourceFileAccessException {
+    String resourcePath = String.join(RESOURCE_PATH_SEPARATOR, SAMPLE_DATA_RESOURCE_DIRECTORY, fileName);
     InputStream inputStream = classLoader.getResourceAsStream(resourcePath);
     if (inputStream == null) {
-      throw new OnboardingDatasetNormalizationException(
+      throw new SourceFileAccessException(
           "Bundled GOClient sampledata file not found on the classpath: " + resourcePath);
     }
     return inputStream;
@@ -367,7 +374,7 @@ public class OnboardingDatasetNormalizer {
 
   @FunctionalInterface
   private interface SourceFileOpener {
-    InputStream open() throws Exception;
+    InputStream open() throws SourceFileAccessException;
   }
 
   private static final class SourceFile {
@@ -379,8 +386,19 @@ public class OnboardingDatasetNormalizer {
       this.opener = Objects.requireNonNull(opener, "opener is required");
     }
 
-    private InputStream openStream() throws Exception {
+    private InputStream openStream() throws SourceFileAccessException {
       return opener.open();
+    }
+  }
+  private static final class SourceFileAccessException extends IOException {
+    private static final long serialVersionUID = 1L;
+
+    private SourceFileAccessException(String message) {
+      super(message);
+    }
+
+    private SourceFileAccessException(String message, Throwable cause) {
+      super(message, cause);
     }
   }
 
