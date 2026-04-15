@@ -109,7 +109,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     JSONObject task = new JSONObject();
     task.put("type", TYPE_WARNING);
     task.put("text", count + " overdue invoice" + (count != 1 ? "s" : ""));
-    task.put("link", "/sales-invoice");
+    task.put("link", "/sales-invoice?filter=overdue");
     task.put(JSON_COUNT, count);
     task.put(JSON_TASK_KEY, count > 1 ? "overdueInvoices_plural" : "overdueInvoices");
     task.put("amount", formatCurrency(totalAmount));
@@ -136,7 +136,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     JSONObject task = new JSONObject();
     task.put("type", TYPE_INFO);
     task.put("text", count + " order" + (count != 1 ? "s" : "") + " pending shipment");
-    task.put("link", "/goods-shipment");
+    task.put("link", "/goods-shipment?DocStatus=DR");
     task.put(JSON_COUNT, count);
     task.put(JSON_TASK_KEY, count > 1 ? "pendingShipments_plural" : "pendingShipments");
     data.put(task);
@@ -162,7 +162,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     JSONObject task = new JSONObject();
     task.put("type", TYPE_INFO);
     task.put("text", count + " purchase order" + (count != 1 ? "s" : "") + " to confirm");
-    task.put("link", "/purchase-order");
+    task.put("link", "/purchase-order?DocStatus=DR");
     task.put(JSON_COUNT, count);
     task.put(JSON_TASK_KEY, count > 1 ? "purchaseOrdersToConfirm_plural" : "purchaseOrdersToConfirm");
     data.put(task);
