@@ -49,6 +49,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
 
   private static final String TYPE_WARNING = "warning";
   private static final String TYPE_INFO = "info";
+  private static final String JSON_NAVIGATION = "navigation";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -109,6 +110,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     JSONObject task = new JSONObject();
     task.put("type", TYPE_WARNING);
     task.put("text", count + " overdue invoice" + (count != 1 ? "s" : ""));
+    task.put(JSON_NAVIGATION, navigationFilter("sales-invoice", "overdue"));
     task.put("link", "/sales-invoice?filter=overdue");
     task.put(JSON_COUNT, count);
     task.put(JSON_TASK_KEY, count > 1 ? "overdueInvoices_plural" : "overdueInvoices");
@@ -136,6 +138,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     JSONObject task = new JSONObject();
     task.put("type", TYPE_INFO);
     task.put("text", count + " order" + (count != 1 ? "s" : "") + " pending shipment");
+    task.put(JSON_NAVIGATION, navigationParams("goods-shipment", new JSONObject().put("DocStatus", "DR")));
     task.put("link", "/goods-shipment?DocStatus=DR");
     task.put(JSON_COUNT, count);
     task.put(JSON_TASK_KEY, count > 1 ? "pendingShipments_plural" : "pendingShipments");
@@ -162,6 +165,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     JSONObject task = new JSONObject();
     task.put("type", TYPE_INFO);
     task.put("text", count + " purchase order" + (count != 1 ? "s" : "") + " to confirm");
+    task.put(JSON_NAVIGATION, navigationParams("purchase-order", new JSONObject().put("DocStatus", "DR")));
     task.put("link", "/purchase-order?DocStatus=DR");
     task.put(JSON_COUNT, count);
     task.put(JSON_TASK_KEY, count > 1 ? "purchaseOrdersToConfirm_plural" : "purchaseOrdersToConfirm");
@@ -208,5 +212,21 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     DecimalFormatSymbols symbols = new DecimalFormatSymbols(Locale.US);
     DecimalFormat fmt = new DecimalFormat("$#,##0", symbols);
     return fmt.format(amount);
+  }
+
+  private JSONObject navigationFilter(String window, String filter) throws Exception {
+    JSONObject navigation = new JSONObject();
+    navigation.put("type", "list");
+    navigation.put("window", window);
+    navigation.put("filter", filter);
+    return navigation;
+  }
+
+  private JSONObject navigationParams(String window, JSONObject params) throws Exception {
+    JSONObject navigation = new JSONObject();
+    navigation.put("type", "list");
+    navigation.put("window", window);
+    navigation.put("params", params);
+    return navigation;
   }
 }
