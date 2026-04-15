@@ -110,6 +110,7 @@ public class OnboardingDatasetNormalizerTest {
 
   /** Verifies that the default normalizer can load packaged sampledata without a repo checkout. */
   @Test
+<<<<<<< HEAD
   public void testDefaultNormalizerLoadsBundledSampledataFromClasspath() {
     String xml = classpathBackedNormalizer().buildDatasetXml();
 
@@ -156,6 +157,30 @@ public class OnboardingDatasetNormalizerTest {
     return builder.toString();
   }
 
+=======
+  public void testDefaultNormalizerLoadsBundledSampledataFromClasspath() throws Exception {
+    Path isolatedWorkingDirectory = Files.createTempDirectory("onboarding-classpath");
+    String previousUserDir = System.getProperty("user.dir");
+
+    try {
+      System.setProperty("user.dir", isolatedWorkingDirectory.toString());
+
+      String xml = new OnboardingDatasetNormalizer().buildDatasetXml();
+
+      assertTrue(xml.contains("<Openbravo"));
+      assertTrue(xml.contains("Almacen GO"));
+      assertFalse(xml.contains("<AD_CLIENT>"));
+    } finally {
+      if (previousUserDir == null) {
+        System.clearProperty("user.dir");
+      } else {
+        System.setProperty("user.dir", previousUserDir);
+      }
+    }
+  }
+
+
+>>>>>>> 6c8a3bb (Feature ETP-3743: Package onboarding sampledata for WAR)
   private Path sampleDataDir() {
     Path moduleRelative = Paths.get("referencedata", "sampledata", "GOClient");
     if (Files.exists(moduleRelative)) {
