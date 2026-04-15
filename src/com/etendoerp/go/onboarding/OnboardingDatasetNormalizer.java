@@ -62,12 +62,18 @@ public class OnboardingDatasetNormalizer {
   private static final String RESOURCE_PATH_SEPARATOR = "/";
 
   private final SourceFileProvider sourceFileProvider;
-
+  private final EntityResolver entityResolver;
   /**
    * Creates a normalizer that reads the packaged GOClient sourcedata from the runtime classpath.
    */
   public OnboardingDatasetNormalizer() {
-    this(classpathSourceFileProvider(OnboardingDatasetNormalizer.class.getClassLoader()));
+    this(classpathSourceFileProvider(OnboardingDatasetNormalizer.class.getClassLoader()),
+        modelProviderEntityResolver());
+  }
+
+  OnboardingDatasetNormalizer(ClassLoader classLoader, EntityResolver entityResolver) {
+    this(classpathSourceFileProvider(Objects.requireNonNull(classLoader, "classLoader is required")),
+        entityResolver);
   }
 
   /**
@@ -76,13 +82,19 @@ public class OnboardingDatasetNormalizer {
    * @param sampleDataDirectory the directory that contains the GOClient sourcedata XML files
    */
   public OnboardingDatasetNormalizer(Path sampleDataDirectory) {
-    this(directorySourceFileProvider(Objects.requireNonNull(sampleDataDirectory,
-        "sampleDataDirectory is required")));
+    this(sampleDataDirectory, modelProviderEntityResolver());
   }
 
-  private OnboardingDatasetNormalizer(SourceFileProvider sourceFileProvider) {
+  OnboardingDatasetNormalizer(Path sampleDataDirectory, EntityResolver entityResolver) {
+    this(directorySourceFileProvider(Objects.requireNonNull(sampleDataDirectory,
+        "sampleDataDirectory is required")), entityResolver);
+  }
+
+  private OnboardingDatasetNormalizer(SourceFileProvider sourceFileProvider,
+      EntityResolver entityResolver) {
     this.sourceFileProvider = Objects.requireNonNull(sourceFileProvider,
         "sourceFileProvider is required");
+    this.entityResolver = Objects.requireNonNull(entityResolver, "entityResolver is required");
   }
 
   /**
@@ -227,11 +239,15 @@ public class OnboardingDatasetNormalizer {
   }
 
   private Entity resolveEntity(String tableName) {
-    Entity entity = ModelProvider.getInstance().getEntityByTableName(tableName);
+    Entity entity = entityResolver.resolve(tableName);
     if (entity == null) {
       throw new OBException("Table " + tableName + " is not mapped in the runtime model");
     }
     return entity;
+  }
+
+  private static EntityResolver modelProviderEntityResolver() {
+    return tableName -> ModelProvider.getInstance().getEntityByTableName(tableName);
   }
 
   private List<SourceFile> listIncludedSourceFiles() {
@@ -337,8 +353,8 @@ public class OnboardingDatasetNormalizer {
       factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
       factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
       factory.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false);
-      factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
-      factory.setAttribute(XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
+      setAttributeIfSupported(factory, XMLConstants.ACCESS_EXTERNAL_DTD, "");
+      setAttributeIfSupported(factory, XMLConstants.ACCESS_EXTERNAL_SCHEMA, "");
       factory.setXIncludeAware(false);
       factory.setExpandEntityReferences(false);
       return factory.newDocumentBuilder();
@@ -352,8 +368,8 @@ public class OnboardingDatasetNormalizer {
     try {
       TransformerFactory transformerFactory = TransformerFactory.newInstance();
       transformerFactory.setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true);
-      transformerFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
-      transformerFactory.setAttribute(XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
+      setAttributeIfSupported(transformerFactory, XMLConstants.ACCESS_EXTERNAL_DTD, "");
+      setAttributeIfSupported(transformerFactory, XMLConstants.ACCESS_EXTERNAL_STYLESHEET, "");
       Transformer transformer = transformerFactory.newTransformer();
       transformer.setOutputProperty(OutputKeys.ENCODING, StandardCharsets.UTF_8.name());
       transformer.setOutputProperty(OutputKeys.INDENT, "yes");
@@ -366,6 +382,30 @@ public class OnboardingDatasetNormalizer {
           "Failed to serialize onboarding dataset XML", e);
     }
   }
+
+  private void setAttributeIfSupported(DocumentBuilderFactory factory, String attribute,
+      String value) {
+    try {
+      factory.setAttribute(attribute, value);
+    } catch (IllegalArgumentException ignored) {
+      // Older XML implementations may not expose these JAXP attributes.
+    }
+  }
+
+  private void setAttributeIfSupported(TransformerFactory factory, String attribute,
+      String value) {
+    try {
+      factory.setAttribute(attribute, value);
+    } catch (IllegalArgumentException ignored) {
+      // Older XML implementations may not expose these JAXP attributes.
+    }
+  }
+
+  @FunctionalInterface
+  interface EntityResolver {
+    Entity resolve(String tableName);
+  }
+
 
   @FunctionalInterface
   private interface SourceFileProvider {

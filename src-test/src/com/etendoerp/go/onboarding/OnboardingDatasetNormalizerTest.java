@@ -18,12 +18,18 @@ package com.etendoerp.go.onboarding;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
 import org.junit.Test;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.Property;
 
 /**
  * Test class for {@link OnboardingDatasetNormalizer}.
@@ -40,11 +46,21 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue(OnboardingDatasetDefinition.getExcludedTables().contains("AD_REF_DATA_LOADED"));
   }
 
+  @Test
+  public void testNormalizerBuildsEmptyDatasetWithoutUnsupportedJaxpFailures() throws Exception {
+    Path emptySampleDataDir = Files.createTempDirectory("onboarding-empty-sampledata");
+
+    String xml = new OnboardingDatasetNormalizer(emptySampleDataDir).buildDatasetXml();
+
+    assertTrue(xml.contains("<Openbravo"));
+  }
+
+
   /** Verifies that the generated onboarding XML uses the Openbravo root element. */
 
   @Test
   public void testNormalizerUsesOpenbravoRootElement() {
-    String xml = new OnboardingDatasetNormalizer(sampleDataDir()).buildDatasetXml();
+    String xml = pathBackedNormalizer().buildDatasetXml();
 
     assertTrue(xml.contains("<Openbravo"));
     assertFalse(xml.contains("<data>"));
@@ -53,7 +69,7 @@ public class OnboardingDatasetNormalizerTest {
   /** Verifies that bootstrap records are removed from the generated onboarding dataset. */
   @Test
   public void testNormalizerRemovesBootstrapTablesFromDatasetXml() {
-    String xml = new OnboardingDatasetNormalizer(sampleDataDir()).buildDatasetXml();
+    String xml = pathBackedNormalizer().buildDatasetXml();
 
     assertFalse(xml.contains("<AD_CLIENT>"));
     assertFalse(xml.contains("<AD_ORG>"));
@@ -65,7 +81,7 @@ public class OnboardingDatasetNormalizerTest {
   /** Verifies that representative foundation business records remain in the normalized XML. */
   @Test
   public void testNormalizerKeepsFoundationBusinessContent() {
-    String xml = new OnboardingDatasetNormalizer(sampleDataDir()).buildDatasetXml();
+    String xml = pathBackedNormalizer().buildDatasetXml();
 
     assertTrue(xml.contains("Agua"));
     assertTrue(xml.contains("Consumidor Final"));
@@ -76,7 +92,7 @@ public class OnboardingDatasetNormalizerTest {
   /** Verifies that user-scoped sales representative columns are stripped from product rows. */
   @Test
   public void testNormalizerStripsUserScopedProductSalesRepField() {
-    String xml = new OnboardingDatasetNormalizer(sampleDataDir()).buildDatasetXml();
+    String xml = pathBackedNormalizer().buildDatasetXml();
 
     assertFalse(xml.contains("<SALESREP_ID>"));
   }
@@ -84,7 +100,7 @@ public class OnboardingDatasetNormalizerTest {
   /** Verifies that sourcedata table and column tags do not leak into the final XML. */
   @Test
   public void testNormalizerDoesNotEmitSourcedataTableOrColumnTags() {
-    String xml = new OnboardingDatasetNormalizer(sampleDataDir()).buildDatasetXml();
+    String xml = pathBackedNormalizer().buildDatasetXml();
 
     assertFalse(xml.contains("<AD_ORG_WAREHOUSE>"));
     assertFalse(xml.contains("<C_BP_GROUP>"));
@@ -94,29 +110,64 @@ public class OnboardingDatasetNormalizerTest {
 
   /** Verifies that the default normalizer can load packaged sampledata without a repo checkout. */
   @Test
-  public void testDefaultNormalizerLoadsBundledSampledataFromClasspath() throws Exception {
-    Path isolatedWorkingDirectory = Files.createTempDirectory("onboarding-classpath");
-    String previousUserDir = System.getProperty("user.dir");
+  public void testDefaultNormalizerLoadsBundledSampledataFromClasspath() {
+    String xml = classpathBackedNormalizer().buildDatasetXml();
 
-    try {
-      System.setProperty("user.dir", isolatedWorkingDirectory.toString());
-
-      String xml = new OnboardingDatasetNormalizer().buildDatasetXml();
-
-      assertTrue(xml.contains("<Openbravo"));
-      assertTrue(xml.contains("Almacen GO"));
-      assertFalse(xml.contains("<AD_CLIENT>"));
-    } finally {
-      if (previousUserDir == null) {
-        System.clearProperty("user.dir");
-      } else {
-        System.setProperty("user.dir", previousUserDir);
-      }
-    }
+    assertTrue(xml.contains("<Openbravo"));
+    assertTrue(xml.contains("Almacen GO"));
+    assertFalse(xml.contains("<AD_CLIENT>"));
   }
 
 
+  private OnboardingDatasetNormalizer pathBackedNormalizer() {
+    return new OnboardingDatasetNormalizer(sampleDataDir(), this::mockEntityForTable);
+  }
+
+  private OnboardingDatasetNormalizer classpathBackedNormalizer() {
+    return new OnboardingDatasetNormalizer(getClass().getClassLoader(), this::mockEntityForTable);
+  }
+
+  private Entity mockEntityForTable(String tableName) {
+    Entity entity = mock(Entity.class);
+    when(entity.getName()).thenReturn(toLowerCamel(tableName));
+    when(entity.isOrganizationEnabled()).thenReturn(true);
+    when(entity.getPropertyByColumnName(anyString(), eq(false)))
+        .thenAnswer(invocation -> mockProperty(tableName, invocation.getArgument(0)));
+    return entity;
+  }
+
+  private Property mockProperty(String tableName, String columnName) {
+    Property property = mock(Property.class);
+    when(property.getName()).thenReturn(
+        columnName.equals(tableName + "_ID") ? "id" : toLowerCamel(columnName));
+    when(property.isId()).thenReturn(columnName.equals(tableName + "_ID"));
+    when(property.isOneToMany()).thenReturn(false);
+    when(property.isPrimitive()).thenReturn(true);
+    return property;
+  }
+
+  private String toLowerCamel(String value) {
+    String[] parts = value.toLowerCase().split("_");
+    StringBuilder builder = new StringBuilder(parts[0]);
+    for (int i = 1; i < parts.length; i++) {
+      builder.append(Character.toUpperCase(parts[i].charAt(0)));
+      builder.append(parts[i].substring(1));
+    }
+    return builder.toString();
+  }
+
   private Path sampleDataDir() {
-    return Paths.get("referencedata", "sampledata", "GOClient");
+    Path moduleRelative = Paths.get("referencedata", "sampledata", "GOClient");
+    if (Files.exists(moduleRelative)) {
+      return moduleRelative;
+    }
+
+    Path rootRelative = Paths.get("modules", "com.etendoerp.go", "referencedata", "sampledata",
+        "GOClient");
+    if (Files.exists(rootRelative)) {
+      return rootRelative;
+    }
+
+    throw new IllegalStateException("GOClient sampledata directory not found from current working directory");
   }
 }

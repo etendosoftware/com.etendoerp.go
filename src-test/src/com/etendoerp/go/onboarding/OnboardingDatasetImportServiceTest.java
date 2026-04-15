@@ -21,6 +21,8 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import org.junit.Test;
 import org.openbravo.base.exception.OBException;
@@ -40,10 +42,8 @@ public class OnboardingDatasetImportServiceTest {
   /** Test method for {@link OnboardingDatasetImportService#importDataset(String, String)}. */
   @Test
   public void testImportDatasetBuildsNormalizedXmlAndDelegatesToImporter() {
-    Client client = new Client();
-    client.setId(CLIENT_ID);
-    Organization org = new Organization();
-    org.setId(ORGANIZATION_ID);
+    Client client = mockClient(CLIENT_ID);
+    Organization org = mockOrganization(ORGANIZATION_ID);
 
     ImportResult expected = new ImportResult();
     FakeImportService service = new FakeImportService(
@@ -55,6 +55,7 @@ public class OnboardingDatasetImportServiceTest {
     assertSame(client, service.importedClient);
     assertSame(org, service.importedOrganization);
     assertEquals("<Openbravo><M_PRODUCT/></Openbravo>", service.importedXml);
+    assertTrue(service.flushCalled);
     assertTrue(service.summaryLogged);
     assertTrue(service.validationCalled);
   }
@@ -63,7 +64,7 @@ public class OnboardingDatasetImportServiceTest {
   @Test
   public void testImportDatasetFailsWhenClientDoesNotExist() {
     FakeImportService service = new FakeImportService(new StubNormalizer(EMPTY_OPENBRAVO_XML), null,
-        new Organization(), new ImportResult());
+        mockOrganization(ORGANIZATION_ID), new ImportResult());
 
     try {
       service.importDataset("missing-client", ORGANIZATION_ID);
@@ -77,8 +78,7 @@ public class OnboardingDatasetImportServiceTest {
   /** Verifies that the import fails when the requested organization cannot be resolved. */
   @Test
   public void testImportDatasetFailsWhenOrganizationDoesNotExist() {
-    Client client = new Client();
-    client.setId(CLIENT_ID);
+    Client client = mockClient(CLIENT_ID);
     FakeImportService service = new FakeImportService(new StubNormalizer(EMPTY_OPENBRAVO_XML), client,
         null, new ImportResult());
 
@@ -94,10 +94,8 @@ public class OnboardingDatasetImportServiceTest {
   /** Verifies that import errors returned by the importer are surfaced as OBExceptions. */
   @Test
   public void testImportDatasetPropagatesImporterErrors() {
-    Client client = new Client();
-    client.setId(CLIENT_ID);
-    Organization org = new Organization();
-    org.setId(ORGANIZATION_ID);
+    Client client = mockClient(CLIENT_ID);
+    Organization org = mockOrganization(ORGANIZATION_ID);
 
     FakeImportService service = new FakeImportService(
         new StubNormalizer(EMPTY_OPENBRAVO_XML), client, org, new ErrorImportResult("broken import"));
@@ -110,6 +108,19 @@ public class OnboardingDatasetImportServiceTest {
       assertTrue(e.getMessage().contains("broken import"));
     }
   }
+
+  private Client mockClient(String clientId) {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(clientId);
+    return client;
+  }
+
+  private Organization mockOrganization(String organizationId) {
+    Organization organization = mock(Organization.class);
+    when(organization.getId()).thenReturn(organizationId);
+    return organization;
+  }
+
 
   private static final class StubNormalizer extends OnboardingDatasetNormalizer {
     private final String xml;
@@ -151,6 +162,7 @@ public class OnboardingDatasetImportServiceTest {
     private String importedXml;
     private boolean summaryLogged;
     private boolean validationCalled;
+    private boolean flushCalled;
 
     private FakeImportService(OnboardingDatasetNormalizer normalizer, Client client,
         Organization organization, ImportResult result) {
@@ -182,6 +194,12 @@ public class OnboardingDatasetImportServiceTest {
     protected void commitImport() {
       // No DAL commit in unit tests.
     }
+
+    @Override
+    protected void flushImport() {
+      flushCalled = true;
+    }
+
 
     @Override
     protected void validateImportedSeed(Client client, Organization organization) {
