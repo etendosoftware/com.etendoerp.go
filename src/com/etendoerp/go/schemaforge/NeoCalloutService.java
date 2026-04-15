@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -468,6 +469,44 @@ public class NeoCalloutService {
     return attrs;
   }
 
+  /**
+   * Returns true if the column's AD Reference type is numeric (Amount=12, Number=22,
+   * Quantity=29, Integer=11). Used to substitute "0" for empty defaults so that
+   * VariablesBase.NumberFilter accepts the parameter instead of rejecting it with an NPE.
+   */
+  private static boolean isNumericReference(Column col) {
+    if (col.getReference() == null) {
+      return false;
+    }
+    String refId = col.getReference().getId();
+    return "11".equals(refId) || "12".equals(refId) || "22".equals(refId) || "29".equals(refId);
+  }
+
+  /**
+   * Find the parent tab of a child tab by walking the window's tab list in sequence order.
+   * Returns the nearest tab with a lower tab level that precedes the child tab.
+   */
+  private static Tab findParentTab(Tab childTab) {
+    if (childTab.getWindow() == null) {
+      return null;
+    }
+    int childLevel = childTab.getTabLevel() != null ? childTab.getTabLevel().intValue() : 0;
+    List<Tab> tabs = childTab.getWindow().getADTabList();
+    tabs.sort(Comparator.comparingLong(Tab::getSequenceNumber));
+    Tab parent = null;
+    for (Tab t : tabs) {
+      if (t.getId().equals(childTab.getId())) {
+        break;
+      }
+      int level = t.getTabLevel() != null ? t.getTabLevel().intValue() : 0;
+      if (level < childLevel) {
+        parent = t;
+      }
+    }
+    return parent;
+  }
+
+  // ── Response transformation ────────────────────────────────────────
   // ── Response transformation ────────────────────────────────────────
 
   /**

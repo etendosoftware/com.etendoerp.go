@@ -54,6 +54,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.CorsUtils;
+import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -102,6 +103,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
   private static final String PROGRESS_CLIENT = "client";
   private static final String PROGRESS_ERROR = "error";
   private static final String PROGRESS_ORGANIZATION = "organization";
+  private static final String PROGRESS_DATASET = "dataset";
 
   // --- SQL constants ---
 
@@ -543,6 +545,9 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       + "WHERE r.ad_client_id = ? AND u.ad_user_id != '100' "
       + "ORDER BY r.created LIMIT 1";
 
+  private static final String SQL_FIND_FIRST_ORGANIZATION =
+      "SELECT ad_org_id FROM ad_org WHERE ad_client_id = ? AND value != '*' ORDER BY created LIMIT 1";
+
   /**
    * POST /sws/go/onboarding
    * Header: Authorization: Bearer <session_token>
@@ -619,6 +624,19 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
       if (!ensureOrganization(conn, writer, onboardingRequest.clientName, clientId, adminContext,
           currencyId)) {
+        return;
+      }
+
+      conn = OBDal.getInstance().getConnection();
+      String orgId = resolveOrganizationId(conn, clientId);
+      if (orgId == null) {
+        sendProgress(writer, PROGRESS_DATASET, PROGRESS_ERROR,
+            "Could not resolve organization for onboarding dataset import");
+        sendFinalResult(writer, false, "Organization not found after onboarding");
+        return;
+      }
+
+      if (!importOnboardingDataset(writer, clientId, orgId)) {
         return;
       }
 
@@ -822,6 +840,36 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     sendProgress(writer, PROGRESS_ORGANIZATION, "done", "Organization created successfully");
     return true;
   }
+
+  private String resolveOrganizationId(Connection conn, String clientId) throws SQLException {
+    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_FIRST_ORGANIZATION)) {
+      ps.setString(1, clientId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getString(DB_ORG_ID) : null;
+      }
+    }
+  }
+
+  boolean importOnboardingDataset(PrintWriter writer, String clientId, String orgId) {
+    sendProgress(writer, PROGRESS_DATASET, PROGRESS_IN_PROGRESS,
+        "Importing onboarding dataset...");
+    try {
+      createOnboardingDatasetImportService().importDataset(clientId, orgId);
+      sendProgress(writer, PROGRESS_DATASET, "done", "Onboarding dataset imported");
+      return true;
+    } catch (Exception e) {
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Onboarding dataset import failed";
+      sendProgress(writer, PROGRESS_DATASET, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  OnboardingDatasetImportService createOnboardingDatasetImportService() {
+    return new OnboardingDatasetImportService();
+  }
+
 
   /**
    * Write a NDJSON progress line.
