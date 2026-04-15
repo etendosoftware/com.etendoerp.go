@@ -106,6 +106,11 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     final String select;
     final StringBuilder fromWhere;
     final String orderBy;
+    /**
+     * When true, :clientId must be bound on the data query.
+     * If :clientId also appears in fromWhere it is bound on the count query too;
+     * if it only appears in orderBy it is bound on the data query only.
+     */
     final boolean bindClient;
 
     SelectorQuery(String select, StringBuilder fromWhere, String orderBy, boolean bindClient) {
@@ -170,7 +175,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error in ReportSelectorsServlet for type '{}': {}", type, e.getMessage(), e);
       sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Selector query failed: " + e.getMessage());
+          "An internal error occurred while processing the selector request.");
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -186,20 +191,50 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   // Selector execution
   // ---------------------------------------------------------------------------
 
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings({"unchecked", "rawtypes"})
   private JSONObject executeSelector(String type, SelectorRequest req) throws JSONException {
     SelectorQuery sq = buildQuery(type, req);
 
-    String countSql = "SELECT COUNT(*) " + sq.fromWhere;
-    String dataSql  = sq.select + " " + sq.fromWhere + " " + sq.orderBy;
+    String fromWhereStr = sq.fromWhere.toString();
+    String countSql = "SELECT COUNT(*) " + fromWhereStr;
+    String dataSql  = sq.select + " " + fromWhereStr + " " + sq.orderBy;
 
-    NativeQuery<Object> countQuery = OBDal.getInstance().getSession().createNativeQuery(countSql);
-    bindParams(countQuery, sq.bindClient, req.q, req.clientId);
+    NativeQuery countQuery = OBDal.getInstance().getSession().createNativeQuery(countSql);
+    NativeQuery dataQuery  = OBDal.getInstance().getSession().createNativeQuery(dataSql);
+
+    // :search is always present in both queries
+    countQuery.setParameter("search", "%" + req.q + "%");
+    dataQuery.setParameter("search", "%" + req.q + "%");
+
+    // :clientId — present in fromWhere: bind on both; present only in orderBy: bind on data only
+    if (sq.bindClient) {
+      if (fromWhereStr.contains(":clientId")) {
+        countQuery.setParameter("clientId", req.clientId);
+      }
+      dataQuery.setParameter("clientId", req.clientId);
+    }
+
+    // Conditional params — only bind when present in the generated SQL
+    if (req.selectedOrgId != null && fromWhereStr.contains(":selectedOrgId")) {
+      countQuery.setParameter("selectedOrgId", req.selectedOrgId);
+      dataQuery.setParameter("selectedOrgId", req.selectedOrgId);
+    }
+    if (req.selectedAcctSchemaId != null && fromWhereStr.contains(":selectedAcctSchemaId")) {
+      countQuery.setParameter("selectedAcctSchemaId", req.selectedAcctSchemaId);
+      dataQuery.setParameter("selectedAcctSchemaId", req.selectedAcctSchemaId);
+    }
+    if (!req.warehouseIds.isEmpty() && fromWhereStr.contains(":warehouseIds")) {
+      countQuery.setParameterList("warehouseIds", req.warehouseIds);
+      dataQuery.setParameterList("warehouseIds", req.warehouseIds);
+    }
+    if (!req.roleOrgIds.isEmpty() && fromWhereStr.contains(":roleOrgIds")) {
+      countQuery.setParameterList("roleOrgIds", req.roleOrgIds);
+      dataQuery.setParameterList("roleOrgIds", req.roleOrgIds);
+    }
+
     Number countResult = (Number) countQuery.uniqueResult();
     int totalCount = countResult != null ? countResult.intValue() : 0;
 
-    NativeQuery<Object[]> dataQuery = OBDal.getInstance().getSession().createNativeQuery(dataSql);
-    bindParams(dataQuery, sq.bindClient, req.q, req.clientId);
     dataQuery.setMaxResults(req.limit);
     dataQuery.setFirstResult(req.offset);
     List<Object[]> rows = dataQuery.list();
@@ -235,7 +270,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
       case "accounting":
       case "acctschema": return buildAcctschemaQuery();
       case "year":       return buildYearQuery(req);
-      case "currency":   return buildCurrencyQuery(req.clientId);
+      case "currency":   return buildCurrencyQuery();
       case "tax":        return buildTaxQuery();
       default: throw new IllegalArgumentException("Unknown selector type: " + type);
     }
@@ -257,20 +292,19 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
       fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
           + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
           + " WHERE sd.m_product_id = m_product.m_product_id"
-          + " AND l.m_warehouse_id IN (").append(buildInList(req.warehouseIds)).append("))");
+          + " AND l.m_warehouse_id IN (:warehouseIds))");
     }
     if (req.selectedOrgId != null) {
       fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
           + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
           + " WHERE sd.m_product_id = m_product.m_product_id"
-          + " AND ad_isorgincluded(l.ad_org_id, '").append(req.selectedOrgId)
-          .append("', m_product.ad_client_id) <> -1)");
+          + " AND ad_isorgincluded(l.ad_org_id, :selectedOrgId, m_product.ad_client_id) <> -1)");
     }
     if (!req.roleOrgIds.isEmpty()) {
       fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
           + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
           + " WHERE sd.m_product_id = m_product.m_product_id"
-          + " AND l.ad_org_id IN (").append(buildInList(req.roleOrgIds)).append("))");
+          + " AND l.ad_org_id IN (:roleOrgIds))");
     }
     return new SelectorQuery(
         "SELECT m_product_id AS id, name, value || ' - ' || name AS label",
@@ -283,12 +317,12 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     if (req.selectedOrgId != null) {
       fromWhere.append(" AND EXISTS (SELECT 1 FROM ad_org_warehouse ow"
           + " WHERE ow.m_warehouse_id = m_warehouse.m_warehouse_id"
-          + " AND ow.ad_org_id = '").append(req.selectedOrgId).append("')");
+          + " AND ow.ad_org_id = :selectedOrgId)");
     }
     if (!req.roleOrgIds.isEmpty()) {
       fromWhere.append(" AND EXISTS (SELECT 1 FROM ad_org_warehouse ow"
           + " WHERE ow.m_warehouse_id = m_warehouse.m_warehouse_id"
-          + " AND ow.ad_org_id IN (").append(buildInList(req.roleOrgIds)).append("))");
+          + " AND ow.ad_org_id IN (:roleOrgIds))");
     }
     return new SelectorQuery(
         "SELECT m_warehouse_id AS id, name, name AS label",
@@ -319,8 +353,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     if (req.selectedAcctSchemaId != null) {
       fromWhere.append(" AND ev.c_element_id IN"
           + " (SELECT c_element_id FROM c_acctschema_element"
-          + " WHERE c_acctschema_id = '").append(req.selectedAcctSchemaId)
-          .append("' AND c_element_id IS NOT NULL)");
+          + " WHERE c_acctschema_id = :selectedAcctSchemaId AND c_element_id IS NOT NULL)");
     }
     return new SelectorQuery(
         "SELECT ev.value AS id, ev.value || ' - ' || ev.name AS name,"
@@ -343,8 +376,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
         + " AND (y.year || ' (' || c.name || ')') ILIKE :search");
     if (req.selectedOrgId != null) {
       fromWhere.append(" AND EXISTS (SELECT 1 FROM ad_org o"
-          + " WHERE o.c_calendar_id = c.c_calendar_id AND o.ad_org_id = '")
-          .append(req.selectedOrgId).append("')");
+          + " WHERE o.c_calendar_id = c.c_calendar_id AND o.ad_org_id = :selectedOrgId)");
     }
     return new SelectorQuery(
         "SELECT y.c_year_id AS id,"
@@ -353,19 +385,19 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
         fromWhere, "ORDER BY y.year DESC", true);
   }
 
-  private SelectorQuery buildCurrencyQuery(String clientId) {
-    // Currency is a global (cross-client) table; no ad_client_id filter.
-    // clientId is inlined in ORDER BY (validated JWT claim) so COUNT and data queries
-    // share the same fromWhere without needing a :clientId bound param.
+  private SelectorQuery buildCurrencyQuery() {
+    // Currency is a global (cross-client) table; no ad_client_id filter in fromWhere.
+    // :clientId is used only in the ORDER BY subquery to sort the client's default currency first.
+    // executeSelector binds :clientId on the data query only (count has no ORDER BY).
     return new SelectorQuery(
         "SELECT c_currency_id AS id, iso_code AS name,"
         + " iso_code || ' - ' || description AS label",
         new StringBuilder("FROM c_currency WHERE isactive='Y'"
             + " AND (iso_code ILIKE :search OR description ILIKE :search)"),
         "ORDER BY (CASE WHEN c_currency_id ="
-        + " (SELECT c_currency_id FROM ad_client WHERE ad_client_id = '"
-        + clientId + "') THEN 0 ELSE 1 END), iso_code",
-        false);
+        + " (SELECT c_currency_id FROM ad_client WHERE ad_client_id = :clientId)"
+        + " THEN 0 ELSE 1 END), iso_code",
+        true);
   }
 
   private SelectorQuery buildTaxQuery() {
@@ -406,25 +438,6 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
-
-  @SuppressWarnings("rawtypes")
-  private void bindParams(NativeQuery query, boolean bindClient, String q, String clientId) {
-    query.setParameter("search", "%" + q + "%");
-    if (bindClient) {
-      query.setParameter("clientId", clientId);
-    }
-  }
-
-  /**
-   * Builds a safe SQL IN-list from a list of Etendo IDs.
-   * Only IDs that match the hex/UUID pattern are included.
-   */
-  private String buildInList(List<String> ids) {
-    return ids.stream()
-        .filter(id -> id != null && id.matches("[0-9A-Fa-f\\-]+") && id.length() <= 36)
-        .map(id -> "'" + id + "'")
-        .collect(Collectors.joining(","));
-  }
 
   /**
    * Returns the ID only if it is a valid Etendo hex/UUID string, null otherwise.
