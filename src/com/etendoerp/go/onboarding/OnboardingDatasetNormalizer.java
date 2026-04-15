@@ -401,8 +401,17 @@ public class OnboardingDatasetNormalizer {
     }
   }
 
+  /**
+   * Resolves the runtime entity metadata for a sourcedata table name.
+   */
   @FunctionalInterface
   interface EntityResolver {
+    /**
+     * Returns the entity mapped to the provided database table name.
+     *
+     * @param tableName the sourcedata table name
+     * @return the mapped entity, or {@code null} when the table is not part of the runtime model
+     */
     Entity resolve(String tableName);
   }
 
