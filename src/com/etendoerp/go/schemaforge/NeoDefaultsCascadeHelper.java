@@ -67,8 +67,13 @@ public class NeoDefaultsCascadeHelper {
   static void executeCalloutCascadeForCreate(NeoContext ctx, Tab adTab, JSONObject body) {
     try {
       Set<String> emptySeqFields = new HashSet<>();
+      Set<String> protectedFields = new HashSet<>();
+      Iterator<String> bodyKeys = body.keys();
+      while (bodyKeys.hasNext()) {
+        protectedFields.add(bodyKeys.next());
+      }
       NeoDefaultsService.CalloutCascadeResult cascadeResult =
-          executeCalloutCascade(ctx, adTab, body, emptySeqFields);
+          executeCalloutCascade(ctx, adTab, body, emptySeqFields, protectedFields);
       if (cascadeResult != null && cascadeResult.hasResults()) {
         log.info("[NEO-CREATE] Callout cascade derived {} field updates",
             cascadeResult.updatedFieldCount());
@@ -90,6 +95,11 @@ public class NeoDefaultsCascadeHelper {
    */
   public static NeoDefaultsService.CalloutCascadeResult executeCalloutCascade(NeoContext ctx, Tab adTab,
       JSONObject defaults, Set<String> seqFields) {
+    return executeCalloutCascade(ctx, adTab, defaults, seqFields, java.util.Collections.emptySet());
+  }
+
+  public static NeoDefaultsService.CalloutCascadeResult executeCalloutCascade(NeoContext ctx, Tab adTab,
+      JSONObject defaults, Set<String> seqFields, Set<String> protectedFields) {
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
     try {
       List<String> fieldsWithCallouts = collectFieldsWithCallouts(defaults, seqFields, adTab);
@@ -108,7 +118,7 @@ public class NeoDefaultsCascadeHelper {
         depth++;
         Set<String> nextPending = new LinkedHashSet<>();
         CalloutFieldContext cCtx = new CalloutFieldContext(formState, defaults, seqFields,
-            result, nextPending);
+            result, nextPending, protectedFields);
         for (String fieldName : pendingFields) {
           Object value = formState.opt(fieldName);
           if (value != null && !JSONObject.NULL.equals(value)) {
@@ -226,7 +236,7 @@ public class NeoDefaultsCascadeHelper {
       Set<String> skipFields, NeoDefaultsService.CalloutCascadeResult result) {
     Set<String> nextPending = new LinkedHashSet<>();
     CalloutFieldContext cCtx = new CalloutFieldContext(formState, defaults,
-        java.util.Collections.emptySet(), result, nextPending);
+        java.util.Collections.emptySet(), result, nextPending, java.util.Collections.emptySet());
 
     for (String fieldName : pendingFields) {
       boolean shouldSkip = skipFields != null && skipFields.contains(fieldName);
@@ -272,7 +282,7 @@ public class NeoDefaultsCascadeHelper {
       }
 
       mergeCalloutUpdates(calloutBody, cCtx.formState, cCtx.defaults, cCtx.seqFields,
-          adTab, cCtx.result, cCtx.nextPending);
+          adTab, cCtx.result, cCtx.nextPending, cCtx.protectedFields);
       mergeCalloutCombos(calloutBody, cCtx.formState, cCtx.defaults, cCtx.result);
 
       JSONArray messages = calloutBody.optJSONArray("messages");
@@ -302,7 +312,8 @@ public class NeoDefaultsCascadeHelper {
 
   private static void mergeCalloutUpdates(JSONObject calloutBody, JSONObject formState,
       JSONObject defaults, Set<String> seqFields, Tab adTab,
-      NeoDefaultsService.CalloutCascadeResult result, Set<String> nextPending) throws Exception {
+      NeoDefaultsService.CalloutCascadeResult result, Set<String> nextPending,
+      Set<String> protectedFields) throws Exception {
     JSONObject updates = calloutBody.optJSONObject(KEY_UPDATES);
     if (updates == null) {
       return;
@@ -313,6 +324,9 @@ public class NeoDefaultsCascadeHelper {
       String updatedField = updateKeys.next();
       JSONObject updateObj = updates.optJSONObject(updatedField);
       if (updateObj == null || !updateObj.has(FIELD_VALUE)) {
+        continue;
+      }
+      if (shouldKeepExistingValue(defaults, updatedField, protectedFields)) {
         continue;
       }
       Object newValue = updateObj.get(FIELD_VALUE);
@@ -381,15 +395,34 @@ public class NeoDefaultsCascadeHelper {
     final Set<String> seqFields;
     final NeoDefaultsService.CalloutCascadeResult result;
     final Set<String> nextPending;
+    final Set<String> protectedFields;
 
     CalloutFieldContext(JSONObject formState, JSONObject defaults, Set<String> seqFields,
-        NeoDefaultsService.CalloutCascadeResult result, Set<String> nextPending) {
+        NeoDefaultsService.CalloutCascadeResult result, Set<String> nextPending,
+        Set<String> protectedFields) {
       this.formState = formState;
       this.defaults = defaults;
       this.seqFields = seqFields;
       this.result = result;
       this.nextPending = nextPending;
+      this.protectedFields = protectedFields != null ? protectedFields
+          : java.util.Collections.emptySet();
     }
+  }
+
+  private static boolean shouldKeepExistingValue(JSONObject defaults, String fieldName,
+      Set<String> protectedFields) {
+    if (protectedFields == null || !protectedFields.contains(fieldName)) {
+      return false;
+    }
+    Object current = defaults.opt(fieldName);
+    if (current == null || JSONObject.NULL.equals(current)) {
+      return false;
+    }
+    if (current instanceof String) {
+      return !((String) current).trim().isEmpty();
+    }
+    return true;
   }
 
   static void injectSafeTypeDefault(JSONObject body, String propName, Column col) {
