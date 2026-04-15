@@ -174,6 +174,19 @@ class SelectorQueryBuilder {
     hasWhere = appendClause(baseHql, queryParams, HqlWithParams.of(validationFilter), hasWhere);
     hasWhere = appendClause(baseHql, queryParams,
         resolveSelectorOrgFilter(meta.entityName, alias, contextOrganizationId), hasWhere);
+
+    // Apply client filter — custom HQL uses Session.createQuery() which bypasses
+    // Hibernate's automatic AD_Client filter (enabled by OBDal). Added explicitly
+    // so results are always scoped to the current session client.
+    OBContext ctx = OBContext.getOBContext();
+    if (ctx != null) {
+      String currentClientId = ctx.getCurrentClient().getId();
+      if (StringUtils.isNotBlank(currentClientId) && !"0".equals(currentClientId)) {
+        hasWhere = appendClause(baseHql, queryParams,
+            HqlWithParams.of(alias + ".client.id = '" + currentClientId + "'"), hasWhere);
+      }
+    }
+
     appendCustomSearchFilter(baseHql, meta.searchableProperties, alias, search, hasWhere);
 
     return new HqlWithParams(baseHql.toString(), queryParams);
