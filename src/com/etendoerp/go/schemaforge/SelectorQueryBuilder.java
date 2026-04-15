@@ -393,6 +393,18 @@ class SelectorQueryBuilder {
   }
 
   /**
+   * Normalize a raw entity ID string from an OBUISEL DB view with a composite 64-char ID.
+   * These views concatenate two 32-char UUIDs. For custom HQL selectors the second half is
+   * used as a fallback row identifier. Prefer resolving via valueProperty when available.
+   */
+  static String normalizeEntityId(String rawId) {
+    if (rawId != null && rawId.length() == 64 && rawId.matches("[0-9A-Fa-f]{64}")) {
+      return rawId.substring(32);
+    }
+    return rawId;
+  }
+
+  /**
    * Extract and normalize the record ID from an HQL Object[] row.
    * Handles BaseOBObject, composite 64-char UUIDs, and plain string values.
    */
@@ -401,12 +413,7 @@ class SelectorQueryBuilder {
     String recordId = idVal instanceof BaseOBObject
         ? ((BaseOBObject) idVal).getId().toString()
         : String.valueOf(idVal);
-    // OBUISEL selectors may return composite IDs (e.g., warehouseId + productId = 64 hex chars).
-    // Etendo entity UUIDs are always 32 hex chars. Extract the actual entity ID (last 32 chars).
-    if (recordId != null && recordId.length() == 64 && recordId.matches("[0-9A-Fa-f]{64}")) {
-      recordId = recordId.substring(32);
-    }
-    return recordId;
+    return normalizeEntityId(recordId);
   }
 
   /**

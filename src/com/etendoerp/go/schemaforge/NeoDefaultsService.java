@@ -139,8 +139,12 @@ public class NeoDefaultsService {
           String propertyName = NeoDefaultsCascadeHelper.resolvePropertyName(dalEntity, dbColumnName);
 
           try {
+            // ETGO_SF_FIELD.defaultvalue overrides the AD_Column default when set.
+            // This allows per-window default expressions (e.g. "@#Date@" for date fields)
+            // without modifying the AD_Column metadata.
+            String sfFieldDefault = sfField.getDefaultValue();
             Object resolvedValue = resolveFieldDefault(adColumn, parentId, vars, conn, windowId,
-                ctx);
+                ctx, sfFieldDefault);
             if (resolvedValue != null) {
               defaults.put(propertyName, resolvedValue);
               // For FK fields, also inject $_identifier so selectors display the label, not the ID
@@ -190,6 +194,14 @@ public class NeoDefaultsService {
         }
         if (adTab != null) {
           NeoDefaultsCascadeHelper.executeCalloutCascade(ctx, adTab, defaults, seqFieldSet);
+        }
+
+        // Re-apply C_DocTypeTarget_ID from the tab's HQL subtype filter (e.g. sOSubType LIKE 'OB'
+        // for Quotation tabs) before the generic FK fallback runs. Without this, the fallback picks
+        // the first alphabetically available doctype (Standard Order) instead of the correct one.
+        // Mirrors NeoCrudHandler.executePostCalloutCascade on the create path.
+        if (adTab != null) {
+          DocTypeResolver.reapplyDocTypeFromTabFilter(defaults, adTab, ctx);
         }
 
         // Classic parity: for each mandatory FK column still unresolved after defaults/callouts,
@@ -266,6 +278,21 @@ public class NeoDefaultsService {
    */
   private static Object resolveFieldDefault(Column adColumn, String parentId,
       VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx) {
+    return resolveFieldDefault(adColumn, parentId, vars, conn, windowId, ctx, null);
+  }
+
+  /**
+   * Resolve the default value for a single AD_Column, with an optional per-field override
+   * expression from ETGO_SF_FIELD.defaultvalue. When {@code sfFieldDefault} is non-blank it
+   * takes precedence over the AD_Column default, allowing per-window default customisation
+   * (e.g. "@#Date@" on a date field) without touching AD_Column metadata.
+   *
+   * @param sfFieldDefault override default expression from ETGO_SF_FIELD (may be null)
+   * @return the resolved value, or null if no default is configured
+   */
+  private static Object resolveFieldDefault(Column adColumn, String parentId,
+      VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx,
+      String sfFieldDefault) {
 
     String dbColumnName = adColumn.getDBColumnName();
 
@@ -287,7 +314,10 @@ public class NeoDefaultsService {
       }
     }
 
-    String defaultExpr = adColumn.getDefaultValue();
+    // ETGO_SF_FIELD.defaultvalue overrides AD_Column.defaultvalue when set
+    String defaultExpr = (sfFieldDefault != null && !sfFieldDefault.trim().isEmpty())
+        ? sfFieldDefault.trim()
+        : adColumn.getDefaultValue();
     if (defaultExpr == null || defaultExpr.trim().isEmpty()) {
       return resolveFromPrefsOrDocType(adColumn, vars, conn, windowId, dbColumnName, ctx);
     }
@@ -682,12 +712,17 @@ public class NeoDefaultsService {
         if (!col.isActive() || !col.isMandatory()) {
           continue;
         }
-        // Skip audit trail columns — Etendo sets these automatically via EntityPersistenceEvent.
-        // Injecting them here causes JsonToDataConverter to compare the injected date against
-        // the entity's null value on new records, throwing "Exception when updating X(null)".
-        String colUpper = col.getDBColumnName().toUpperCase();
-        if (colUpper.equals("UPDATED") || colUpper.equals("CREATED")
-            || colUpper.equals("CREATEDBY") || colUpper.equals("UPDATEDBY")) {
+        // Skip primary key columns — DAL auto-generates UUID PKs.
+        // Injecting any value here (including an existing record's ID via FK fallback)
+        // would cause DefaultJsonDataService to try to UPDATE instead of INSERT.
+        if (Boolean.TRUE.equals(col.isKeyColumn())) {
+          continue;
+        }
+        // Skip audit columns (updated, created, updatedBy, createdBy) — Hibernate manages
+        // these automatically via event listeners. Injecting them causes JsonToDataConverter
+        // to run a stale-date comparison that fails with a date-format parse error.
+        org.openbravo.base.model.Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
+        if (prop != null && prop.isAuditInfo()) {
           continue;
         }
         injectMandatoryDefaultForColumn(body, dalEntity, col, mCtx);
