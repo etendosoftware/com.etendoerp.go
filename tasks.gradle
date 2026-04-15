@@ -1,0 +1,69 @@
+import java.nio.charset.StandardCharsets
+
+final File onboardingModuleDir = file("${rootProject.projectDir}/modules/com.etendoerp.go")
+final String onboardingResourceRoot = "${onboardingModuleDir}/WebContent/WEB-INF/classes/com/etendoerp/go/onboarding/sampledata"
+final File onboardingSourceDir = file("${onboardingModuleDir}/referencedata/sampledata/GOClient")
+final File onboardingTargetDir = file("${onboardingResourceRoot}/GOClient")
+final File onboardingIndexFile = file("${onboardingResourceRoot}/index.txt")
+final List<String> onboardingPackagingTasks = [
+    'smartbuild',
+    'war',
+    'antWar',
+    'compile.war',
+    'compile.complete.war'
+]
+
+tasks.register('prepareOnboardingSampledata') {
+    description = 'Stages GOClient onboarding sampledata into WebContent/WEB-INF/classes for WAR packaging'
+
+    inputs.dir(onboardingSourceDir)
+    outputs.dir(onboardingTargetDir)
+    outputs.file(onboardingIndexFile)
+
+    doLast {
+        if (!onboardingSourceDir.isDirectory()) {
+            throw new GradleException("GOClient sampledata directory not found: ${onboardingSourceDir}")
+        }
+
+        def xmlFiles = onboardingSourceDir
+            .listFiles()
+            .findAll { it.isFile() && it.name.endsWith('.xml') }
+            .sort { left, right -> left.name <=> right.name }
+
+        if (xmlFiles.isEmpty()) {
+            throw new GradleException("GOClient sampledata directory is empty: ${onboardingSourceDir}")
+        }
+
+        delete(onboardingTargetDir)
+        delete(onboardingIndexFile)
+
+        onboardingTargetDir.mkdirs()
+        onboardingIndexFile.parentFile.mkdirs()
+
+        copy {
+            from xmlFiles
+            into onboardingTargetDir
+        }
+
+        onboardingIndexFile.setText(
+            xmlFiles.collect { it.name }.join(System.lineSeparator()) + System.lineSeparator(),
+            StandardCharsets.UTF_8.name()
+        )
+    }
+}
+
+tasks.register('cleanOnboardingSampledata') {
+    description = 'Removes staged onboarding sampledata from WebContent/WEB-INF/classes'
+
+    doLast {
+        delete(file(onboardingResourceRoot))
+    }
+}
+
+rootProject.tasks.matching { task -> onboardingPackagingTasks.contains(task.name) }.configureEach {
+    dependsOn(tasks.named('prepareOnboardingSampledata'))
+}
+
+rootProject.tasks.matching { task -> task.name == 'clean' }.configureEach {
+    dependsOn(tasks.named('cleanOnboardingSampledata'))
+}

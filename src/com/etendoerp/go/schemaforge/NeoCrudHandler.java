@@ -401,6 +401,16 @@ class NeoCrudHandler {
     NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
     // TODO move this compatibility rule into the shared create-defaults helper once the merge settles.
     stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
+    // Coerce String primitives injected by injectMandatoryDefaults to their correct Java types.
+    // Utility.getDefault() always returns String; JsonToDataConverter has no String→BigDecimal/
+    // Integer/Boolean path and falls through to return value, causing OBDal type mismatches.
+    NeoTypeCoercionHelper.coerceTypes(filteredBody, dalEntityName);
+    // Remove 'id' after mandatory-default injection — injectMandatoryDefaults may accidentally
+    // inject a fallback FK record ID for the PK column, which would cause DefaultJsonDataService
+    // to UPDATE an existing record instead of INSERT a new one.
+    if (filteredBody != null) {
+      filteredBody.remove("id");
+    }
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
     return jsonService.add(params, wrappedBody);
   }
