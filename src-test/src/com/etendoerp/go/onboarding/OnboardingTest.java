@@ -55,7 +55,7 @@ public class OnboardingTest {
   private static final String FIELD_REQUIRED = "required";
   private static final String TYPE_STRING = "string";
 
-  private static final class SimulatedStepFailureException extends Exception {
+  private static final class SimulatedStepFailureException extends OnboardingStepException {
 
     private SimulatedStepFailureException(String message) {
       super(message);
@@ -336,7 +336,7 @@ public class OnboardingTest {
       }
 
       @Override
-      public void execute(OnboardingContext ctx) throws Exception {
+      public void execute(OnboardingContext ctx) throws OnboardingStepException {
         executionLog.add(STEP_3);
         throw new SimulatedStepFailureException("Simulated failure in step 3");
       }
@@ -410,7 +410,7 @@ public class OnboardingTest {
       }
 
       @Override
-      public void execute(OnboardingContext ctx) throws Exception {
+      public void execute(OnboardingContext ctx) throws OnboardingStepException {
         throw new SimulatedStepFailureException("Immediate failure");
       }
     };
