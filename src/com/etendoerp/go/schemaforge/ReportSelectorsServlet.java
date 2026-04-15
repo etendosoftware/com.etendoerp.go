@@ -71,13 +71,21 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   private static final int DEFAULT_LIMIT = 20;
   private static final int MAX_LIMIT = 100;
   private static final String ORDER_BY_NAME = "ORDER BY name";
+  private static final String PARAM_SEARCH = "search";
+  private static final String PARAM_CLIENT_ID = "clientId";
+  private static final String PARAM_SELECTED_ORG_ID = "selectedOrgId";
+  private static final String PARAM_SELECTED_ACCT_SCHEMA_ID = "selectedAcctSchemaId";
+  private static final String PARAM_WAREHOUSE_IDS = "warehouseIds";
+  private static final String PARAM_ROLE_ORG_IDS = "roleOrgIds";
+  private static final String ACTIVE_CLIENT_NAME_SEARCH = " AND ad_client_id = :"
+      + PARAM_CLIENT_ID + " AND name ILIKE :" + PARAM_SEARCH;
 
   // ---------------------------------------------------------------------------
   // Value objects
   // ---------------------------------------------------------------------------
 
   /** Groups all filter parameters for a selector request. */
-  private static final class SelectorRequest {
+  private final class SelectorRequest {
     final String q;
     final int limit;
     final int offset;
@@ -87,17 +95,15 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     final List<String> warehouseIds;
     final List<String> roleOrgIds;
 
-    SelectorRequest(String q, int limit, int offset, String clientId,
-        String selectedOrgId, String selectedAcctSchemaId,
-        List<String> warehouseIds, List<String> roleOrgIds) {
-      this.q = q;
-      this.limit = limit;
-      this.offset = offset;
+    SelectorRequest(HttpServletRequest request, String clientId) {
+      this.q = StringUtils.trimToEmpty(request.getParameter("q"));
+      this.limit = parseIntParam(request.getParameter("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
+      this.offset = parseIntParam(request.getParameter("offset"), 0, 0, Integer.MAX_VALUE);
       this.clientId = clientId;
-      this.selectedOrgId = selectedOrgId;
-      this.selectedAcctSchemaId = selectedAcctSchemaId;
-      this.warehouseIds = warehouseIds;
-      this.roleOrgIds = roleOrgIds;
+      this.selectedOrgId = safeId(request.getParameter(PARAM_SELECTED_ORG_ID));
+      this.selectedAcctSchemaId = safeId(request.getParameter(PARAM_SELECTED_ACCT_SCHEMA_ID));
+      this.warehouseIds = parseSafeIdList(request.getParameter(PARAM_WAREHOUSE_IDS));
+      this.roleOrgIds = parseSafeIdList(request.getParameter(PARAM_ROLE_ORG_IDS));
     }
   }
 
@@ -153,15 +159,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     }
 
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
-    SelectorRequest req = new SelectorRequest(
-        StringUtils.trimToEmpty(request.getParameter("q")),
-        parseIntParam(request.getParameter("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT),
-        parseIntParam(request.getParameter("offset"), 0, 0, Integer.MAX_VALUE),
-        clientId,
-        safeId(request.getParameter("selectedOrgId")),
-        safeId(request.getParameter("selectedAcctSchemaId")),
-        parseSafeIdList(request.getParameter("warehouseIds")),
-        parseSafeIdList(request.getParameter("roleOrgIds")));
+    SelectorRequest req = new SelectorRequest(request, clientId);
 
     try {
       OBContext.setAdminMode();
@@ -202,35 +200,16 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     NativeQuery countQuery = OBDal.getInstance().getSession().createNativeQuery(countSql);
     NativeQuery dataQuery  = OBDal.getInstance().getSession().createNativeQuery(dataSql);
 
-    // :search is always present in both queries
-    countQuery.setParameter("search", "%" + req.q + "%");
-    dataQuery.setParameter("search", "%" + req.q + "%");
-
-    // :clientId — present in fromWhere: bind on both; present only in orderBy: bind on data only
-    if (sq.bindClient) {
-      if (fromWhereStr.contains(":clientId")) {
-        countQuery.setParameter("clientId", req.clientId);
-      }
-      dataQuery.setParameter("clientId", req.clientId);
-    }
-
-    // Conditional params — only bind when present in the generated SQL
-    if (req.selectedOrgId != null && fromWhereStr.contains(":selectedOrgId")) {
-      countQuery.setParameter("selectedOrgId", req.selectedOrgId);
-      dataQuery.setParameter("selectedOrgId", req.selectedOrgId);
-    }
-    if (req.selectedAcctSchemaId != null && fromWhereStr.contains(":selectedAcctSchemaId")) {
-      countQuery.setParameter("selectedAcctSchemaId", req.selectedAcctSchemaId);
-      dataQuery.setParameter("selectedAcctSchemaId", req.selectedAcctSchemaId);
-    }
-    if (!req.warehouseIds.isEmpty() && fromWhereStr.contains(":warehouseIds")) {
-      countQuery.setParameterList("warehouseIds", req.warehouseIds);
-      dataQuery.setParameterList("warehouseIds", req.warehouseIds);
-    }
-    if (!req.roleOrgIds.isEmpty() && fromWhereStr.contains(":roleOrgIds")) {
-      countQuery.setParameterList("roleOrgIds", req.roleOrgIds);
-      dataQuery.setParameterList("roleOrgIds", req.roleOrgIds);
-    }
+    bindSearchParameter(countQuery, dataQuery, req.q);
+    bindClientParameter(countQuery, dataQuery, fromWhereStr, sq.bindClient, req.clientId);
+    bindOptionalParameter(countQuery, dataQuery, fromWhereStr, PARAM_SELECTED_ORG_ID,
+        req.selectedOrgId);
+    bindOptionalParameter(countQuery, dataQuery, fromWhereStr, PARAM_SELECTED_ACCT_SCHEMA_ID,
+        req.selectedAcctSchemaId);
+    bindOptionalListParameter(countQuery, dataQuery, fromWhereStr, PARAM_WAREHOUSE_IDS,
+        req.warehouseIds);
+    bindOptionalListParameter(countQuery, dataQuery, fromWhereStr, PARAM_ROLE_ORG_IDS,
+        req.roleOrgIds);
 
     Number countResult = (Number) countQuery.uniqueResult();
     int totalCount = countResult != null ? countResult.intValue() : 0;
@@ -239,14 +218,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     dataQuery.setFirstResult(req.offset);
     List<Object[]> rows = dataQuery.list();
 
-    JSONArray items = new JSONArray();
-    for (Object[] row : rows) {
-      JSONObject item = new JSONObject();
-      item.put("id",    row[0] != null ? row[0].toString() : "");
-      item.put("name",  row[1] != null ? row[1].toString() : "");
-      item.put("label", row[2] != null ? row[2].toString() : "");
-      items.put(item);
-    }
+    JSONArray items = toJsonItems(rows);
 
     JSONObject result = new JSONObject();
     result.put("items", items);
@@ -280,7 +252,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     return new SelectorQuery(
         "SELECT c_bpartner_id AS id, name, name AS label",
         new StringBuilder("FROM c_bpartner WHERE isactive='Y'"
-            + " AND ad_client_id = :clientId AND name ILIKE :search"),
+            + ACTIVE_CLIENT_NAME_SEARCH),
         ORDER_BY_NAME, true);
   }
 
@@ -313,7 +285,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
 
   private SelectorQuery buildWarehouseQuery(SelectorRequest req) {
     StringBuilder fromWhere = new StringBuilder(
-        "FROM m_warehouse WHERE isactive='Y' AND ad_client_id = :clientId AND name ILIKE :search");
+        "FROM m_warehouse WHERE isactive='Y'" + ACTIVE_CLIENT_NAME_SEARCH);
     if (req.selectedOrgId != null) {
       fromWhere.append(" AND EXISTS (SELECT 1 FROM ad_org_warehouse ow"
           + " WHERE ow.m_warehouse_id = m_warehouse.m_warehouse_id"
@@ -333,7 +305,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     return new SelectorQuery(
         "SELECT c_project_id AS id, name, name AS label",
         new StringBuilder("FROM c_project WHERE isactive='Y'"
-            + " AND ad_client_id = :clientId AND name ILIKE :search"),
+            + ACTIVE_CLIENT_NAME_SEARCH),
         ORDER_BY_NAME, true);
   }
 
@@ -341,7 +313,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     return new SelectorQuery(
         "SELECT ad_org_id AS id, name, name AS label",
         new StringBuilder("FROM ad_org WHERE isactive='Y' AND ad_org_id != '0'"
-            + " AND ad_client_id = :clientId AND name ILIKE :search"),
+            + ACTIVE_CLIENT_NAME_SEARCH),
         ORDER_BY_NAME, true);
   }
 
@@ -365,7 +337,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     return new SelectorQuery(
         "SELECT c_acctschema_id AS id, name, name AS label",
         new StringBuilder("FROM c_acctschema WHERE isactive='Y'"
-            + " AND ad_client_id = :clientId AND name ILIKE :search"),
+            + ACTIVE_CLIENT_NAME_SEARCH),
         ORDER_BY_NAME, true);
   }
 
@@ -404,7 +376,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     return new SelectorQuery(
         "SELECT c_tax_id AS id, name, name AS label",
         new StringBuilder("FROM c_tax WHERE isactive='Y'"
-            + " AND ad_client_id = :clientId AND name ILIKE :search"),
+            + ACTIVE_CLIENT_NAME_SEARCH),
         ORDER_BY_NAME, true);
   }
 
@@ -438,6 +410,61 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  private void bindSearchParameter(NativeQuery countQuery, NativeQuery dataQuery, String q) {
+    String searchValue = "%" + q + "%";
+    countQuery.setParameter(PARAM_SEARCH, searchValue);
+    dataQuery.setParameter(PARAM_SEARCH, searchValue);
+  }
+
+  private void bindClientParameter(NativeQuery countQuery, NativeQuery dataQuery,
+      String fromWhereStr, boolean bindClient, String clientId) {
+    if (!bindClient) {
+      return;
+    }
+    if (fromWhereStr.contains(sqlParameter(PARAM_CLIENT_ID))) {
+      countQuery.setParameter(PARAM_CLIENT_ID, clientId);
+    }
+    dataQuery.setParameter(PARAM_CLIENT_ID, clientId);
+  }
+
+  private void bindOptionalParameter(NativeQuery countQuery, NativeQuery dataQuery,
+      String fromWhereStr, String parameterName, String parameterValue) {
+    if (parameterValue == null || !fromWhereStr.contains(sqlParameter(parameterName))) {
+      return;
+    }
+    countQuery.setParameter(parameterName, parameterValue);
+    dataQuery.setParameter(parameterName, parameterValue);
+  }
+
+  private void bindOptionalListParameter(NativeQuery countQuery, NativeQuery dataQuery,
+      String fromWhereStr, String parameterName, List<String> parameterValues) {
+    if (parameterValues.isEmpty() || !fromWhereStr.contains(sqlParameter(parameterName))) {
+      return;
+    }
+    countQuery.setParameterList(parameterName, parameterValues);
+    dataQuery.setParameterList(parameterName, parameterValues);
+  }
+
+  private JSONArray toJsonItems(List<Object[]> rows) throws JSONException {
+    JSONArray items = new JSONArray();
+    for (Object[] row : rows) {
+      JSONObject item = new JSONObject();
+      item.put("id", toText(row[0]));
+      item.put("name", toText(row[1]));
+      item.put("label", toText(row[2]));
+      items.put(item);
+    }
+    return items;
+  }
+
+  private String toText(Object value) {
+    return value != null ? value.toString() : "";
+  }
+
+  private String sqlParameter(String parameterName) {
+    return ":" + parameterName;
+  }
 
   /**
    * Returns the ID only if it is a valid Etendo hex/UUID string, null otherwise.
