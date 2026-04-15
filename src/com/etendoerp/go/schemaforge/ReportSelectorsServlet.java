@@ -105,6 +105,24 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
       this.warehouseIds = parseSafeIdList(request.getParameter(PARAM_WAREHOUSE_IDS));
       this.roleOrgIds = parseSafeIdList(request.getParameter(PARAM_ROLE_ORG_IDS));
     }
+
+    private List<String> parseSafeIdList(String param) {
+      if (StringUtils.isBlank(param)) return List.of();
+      return Arrays.stream(param.split(","))
+          .map(String::trim)
+          .map(ReportSelectorsServlet.this::safeId)
+          .filter(Objects::nonNull)
+          .collect(Collectors.toList());
+    }
+
+    private int parseIntParam(String value, int defaultVal, int min, int max) {
+      if (StringUtils.isBlank(value)) return defaultVal;
+      try {
+        return Math.max(min, Math.min(max, Integer.parseInt(value.trim())));
+      } catch (NumberFormatException e) {
+        return defaultVal;
+      }
+    }
   }
 
   /** Holds the SQL parts produced by a query builder method. */
@@ -473,27 +491,6 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     if (id == null) return null;
     String trimmed = id.trim();
     return (trimmed.matches("[0-9A-Fa-f\\-]+") && trimmed.length() <= 36) ? trimmed : null;
-  }
-
-  /**
-   * Parses a comma-separated list of IDs, filtering to safe values only.
-   */
-  private List<String> parseSafeIdList(String param) {
-    if (StringUtils.isBlank(param)) return List.of();
-    return Arrays.stream(param.split(","))
-        .map(String::trim)
-        .map(this::safeId)
-        .filter(Objects::nonNull)
-        .collect(Collectors.toList());
-  }
-
-  private int parseIntParam(String value, int defaultVal, int min, int max) {
-    if (StringUtils.isBlank(value)) return defaultVal;
-    try {
-      return Math.max(min, Math.min(max, Integer.parseInt(value.trim())));
-    } catch (NumberFormatException e) {
-      return defaultVal;
-    }
   }
 
   private void sendError(HttpServletResponse response, int status, String message)
