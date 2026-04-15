@@ -196,6 +196,14 @@ public class NeoDefaultsService {
           NeoDefaultsCascadeHelper.executeCalloutCascade(ctx, adTab, defaults, seqFieldSet);
         }
 
+        // Re-apply C_DocTypeTarget_ID from the tab's HQL subtype filter (e.g. sOSubType LIKE 'OB'
+        // for Quotation tabs) before the generic FK fallback runs. Without this, the fallback picks
+        // the first alphabetically available doctype (Standard Order) instead of the correct one.
+        // Mirrors NeoCrudHandler.executePostCalloutCascade on the create path.
+        if (adTab != null) {
+          DocTypeResolver.reapplyDocTypeFromTabFilter(defaults, adTab, ctx);
+        }
+
         // Classic parity: for each mandatory FK column still unresolved after defaults/callouts,
         // auto-pick the first valid lookup option.
         for (SFField sfField : fields) {
