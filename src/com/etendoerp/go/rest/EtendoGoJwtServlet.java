@@ -39,18 +39,15 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.HttpBaseServlet;
-import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.dal.service.OBQuery;
 import org.openbravo.erpCommon.businessUtility.InitialClientSetup;
 import org.openbravo.erpCommon.businessUtility.InitialOrgSetup;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
-import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.CorsUtils;
@@ -433,112 +430,6 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       log.error("Token generation error in /login", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Token generation failed");
     }
-  }
-
-  private Account findActiveAccountByEmail(String email) {
-    OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where lower(account.email) = :email and account.active = true");
-    query.setNamedParameter("email", email.toLowerCase());
-    query.setFilterOnReadableClients(false);
-    query.setFilterOnReadableOrganization(false);
-    return query.uniqueResult();
-  }
-
-  private Account findActiveAccountByToken(String token) {
-    OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where account.sessionToken = :token and account.active = true");
-    query.setNamedParameter("token", token);
-    query.setFilterOnReadableClients(false);
-    query.setFilterOnReadableOrganization(false);
-    return query.uniqueResult();
-  }
-
-  private Account createAccount(String email, String passwordHash, String name, String sessionToken)
-      throws SQLException {
-    Account account = OBProvider.getInstance().get(Account.class);
-    account.setClient(OBDal.getInstance().get(Client.class, "0"));
-    account.setOrganization(OBDal.getInstance().get(Organization.class, "0"));
-    account.setEmail(email);
-    account.setPasswordHash(passwordHash);
-    account.setName(name);
-    account.setSessionToken(sessionToken);
-    OBDal.getInstance().save(account);
-    flushAndCommitDalChanges();
-    return account;
-  }
-
-  private void flushAndCommitDalChanges() throws SQLException {
-    OBDal.getInstance().flush();
-    OBDal.getInstance().getConnection().commit();
-  }
-
-  private List<User> findEnvironmentUsersByAccountEmail(String accountEmail) {
-    OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
-        "as user where (user.username = :accountEmail or user.username like :accountPrefix) "
-            + "and user.active = true and user.client.active = true and user.client.id <> '0' "
-            + "order by user.client.creationDate, user.creationDate");
-    query.setNamedParameter("accountEmail", accountEmail);
-    query.setNamedParameter("accountPrefix", accountEmail + "+%");
-    query.setFilterOnReadableClients(false);
-    query.setFilterOnReadableOrganization(false);
-    return query.list();
-  }
-
-  private List<Organization> findNonStarOrganizations(String clientId) {
-    OBQuery<Organization> query = OBDal.getInstance().createQuery(Organization.class,
-        "as organization where organization.client.id = :clientId "
-            + "and organization.searchKey <> :starValue order by organization.creationDate");
-    query.setNamedParameter("clientId", clientId);
-    query.setNamedParameter("starValue", "*");
-    query.setFilterOnReadableClients(false);
-    query.setFilterOnReadableOrganization(false);
-    return query.list();
-  }
-
-  private JSONObject buildEnvironmentJson(Client client, Organization organization, User environmentUser)
-      throws JSONException {
-    JSONObject env = new JSONObject();
-    env.put("clientId", client.getId());
-    env.put(FIELD_CLIENT_NAME, client.getName());
-    env.put("orgId", organization != null ? organization.getId() : JSONObject.NULL);
-    env.put("orgName", organization != null ? organization.getName() : JSONObject.NULL);
-    env.put("adminUserId", environmentUser.getId());
-    env.put("adminUser", environmentUser.getUsername());
-    return env;
-  }
-
-  private Currency findCurrencyByIsoCode(String currencyIso) {
-    OBQuery<Currency> query = OBDal.getInstance().createQuery(Currency.class,
-        "as currency where upper(currency.iSOCode) = :currencyIso");
-    query.setNamedParameter("currencyIso", currencyIso.toUpperCase());
-    query.setFilterOnReadableClients(false);
-    query.setFilterOnReadableOrganization(false);
-    return query.uniqueResult();
-  }
-
-  private UserRoles findClientAdminUserRole(String clientId) {
-    OBQuery<UserRoles> query = OBDal.getInstance().createQuery(UserRoles.class,
-        "as userRole where userRole.role.client.id = :clientId "
-            + "and userRole.userContact.id <> '100' order by userRole.role.creationDate");
-    query.setNamedParameter("clientId", clientId);
-    query.setFilterOnReadableClients(false);
-    query.setFilterOnReadableOrganization(false);
-    query.setMaxResult(1);
-    List<UserRoles> userRoles = query.list();
-    return userRoles.isEmpty() ? null : userRoles.get(0);
-  }
-
-  private Organization findFirstOrganization(String clientId) {
-    OBQuery<Organization> query = OBDal.getInstance().createQuery(Organization.class,
-        "as organization where organization.client.id = :clientId "
-            + "and organization.searchKey <> :starValue order by organization.creationDate");
-    query.setNamedParameter("clientId", clientId);
-    query.setNamedParameter("starValue", "*");
-    query.setFilterOnReadableClients(false);
-    query.setFilterOnReadableOrganization(false);
-    query.setMaxResult(1);
-    List<Organization> organizations = query.list();
-    return organizations.isEmpty() ? null : organizations.get(0);
   }
 
   // --- Onboarding ---
