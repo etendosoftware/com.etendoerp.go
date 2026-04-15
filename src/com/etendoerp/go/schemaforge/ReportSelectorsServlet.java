@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 import javax.servlet.http.HttpServletRequest;
@@ -69,6 +70,51 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
 
   private static final int DEFAULT_LIMIT = 20;
   private static final int MAX_LIMIT = 100;
+  private static final String ORDER_BY_NAME = "ORDER BY name";
+
+  // ---------------------------------------------------------------------------
+  // Value objects
+  // ---------------------------------------------------------------------------
+
+  /** Groups all filter parameters for a selector request. */
+  private static final class SelectorRequest {
+    final String q;
+    final int limit;
+    final int offset;
+    final String clientId;
+    final String selectedOrgId;
+    final String selectedAcctSchemaId;
+    final List<String> warehouseIds;
+    final List<String> roleOrgIds;
+
+    SelectorRequest(String q, int limit, int offset, String clientId,
+        String selectedOrgId, String selectedAcctSchemaId,
+        List<String> warehouseIds, List<String> roleOrgIds) {
+      this.q = q;
+      this.limit = limit;
+      this.offset = offset;
+      this.clientId = clientId;
+      this.selectedOrgId = selectedOrgId;
+      this.selectedAcctSchemaId = selectedAcctSchemaId;
+      this.warehouseIds = warehouseIds;
+      this.roleOrgIds = roleOrgIds;
+    }
+  }
+
+  /** Holds the SQL parts produced by a query builder method. */
+  private static final class SelectorQuery {
+    final String select;
+    final StringBuilder fromWhere;
+    final String orderBy;
+    final boolean bindClient;
+
+    SelectorQuery(String select, StringBuilder fromWhere, String orderBy, boolean bindClient) {
+      this.select = select;
+      this.fromWhere = fromWhere;
+      this.orderBy = orderBy;
+      this.bindClient = bindClient;
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // HTTP entry points
@@ -101,20 +147,20 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
       return;
     }
 
-    String q = StringUtils.trimToEmpty(request.getParameter("q"));
-    int limit = parseIntParam(request.getParameter("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT);
-    int offset = parseIntParam(request.getParameter("offset"), 0, 0, Integer.MAX_VALUE);
-    String selectedOrgId = safeId(request.getParameter("selectedOrgId"));
-    String selectedAcctSchemaId = safeId(request.getParameter("selectedAcctSchemaId"));
-    List<String> warehouseIds = parseSafeIdList(request.getParameter("warehouseIds"));
-    List<String> roleOrgIds = parseSafeIdList(request.getParameter("roleOrgIds"));
-
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    SelectorRequest req = new SelectorRequest(
+        StringUtils.trimToEmpty(request.getParameter("q")),
+        parseIntParam(request.getParameter("limit"), DEFAULT_LIMIT, 1, MAX_LIMIT),
+        parseIntParam(request.getParameter("offset"), 0, 0, Integer.MAX_VALUE),
+        clientId,
+        safeId(request.getParameter("selectedOrgId")),
+        safeId(request.getParameter("selectedAcctSchemaId")),
+        parseSafeIdList(request.getParameter("warehouseIds")),
+        parseSafeIdList(request.getParameter("roleOrgIds")));
 
     try {
       OBContext.setAdminMode();
-      JSONObject result = executeSelector(type, q, limit, offset,
-          clientId, selectedOrgId, selectedAcctSchemaId, warehouseIds, roleOrgIds);
+      JSONObject result = executeSelector(type, req);
       response.setStatus(HttpServletResponse.SC_OK);
       response.setContentType(ContentType.APPLICATION_JSON.getMimeType());
       response.setCharacterEncoding(StandardCharsets.UTF_8.name());
@@ -137,180 +183,25 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   }
 
   // ---------------------------------------------------------------------------
-  // Selector dispatcher
+  // Selector execution
   // ---------------------------------------------------------------------------
 
   @SuppressWarnings("unchecked")
-  private JSONObject executeSelector(String type, String q, int limit, int offset,
-      String clientId, String selectedOrgId, String selectedAcctSchemaId,
-      List<String> warehouseIds, List<String> roleOrgIds) throws JSONException {
+  private JSONObject executeSelector(String type, SelectorRequest req) throws JSONException {
+    SelectorQuery sq = buildQuery(type, req);
 
-    // Each case builds: selectClause, fromWhere (may grow with optional filters), orderBy.
-    // Named params :clientId and :search are bound after building the SQL.
-    // Array-like optional conditions use pre-validated inlined IDs (safe hex strings).
+    String countSql = "SELECT COUNT(*) " + sq.fromWhere;
+    String dataSql  = sq.select + " " + sq.fromWhere + " " + sq.orderBy;
 
-    String selectClause;
-    StringBuilder fromWhere;
-    String orderBy;
-    boolean useSearch = true;   // whether :search param is needed
-    boolean useClient = true;   // whether :clientId param is needed
-
-    switch (type) {
-
-      case "bpartner":
-        selectClause = "SELECT c_bpartner_id AS id, name, name AS label";
-        fromWhere = new StringBuilder(
-            "FROM c_bpartner WHERE isactive='Y' AND ad_client_id = :clientId AND name ILIKE :search");
-        orderBy = "ORDER BY name";
-        break;
-
-      case "product":
-        selectClause = "SELECT m_product_id AS id, name, value || ' - ' || name AS label";
-        fromWhere = new StringBuilder(
-            "FROM m_product WHERE isactive='Y' AND ad_client_id = :clientId"
-            + " AND (name ILIKE :search OR value ILIKE :search)");
-        orderBy = "ORDER BY value, name";
-        if (!warehouseIds.isEmpty()) {
-          fromWhere.append(
-              " AND EXISTS (SELECT 1 FROM m_storage_detail sd"
-              + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
-              + " WHERE sd.m_product_id = m_product.m_product_id"
-              + " AND l.m_warehouse_id IN (").append(buildInList(warehouseIds)).append("))");
-        }
-        if (selectedOrgId != null) {
-          fromWhere.append(
-              " AND EXISTS (SELECT 1 FROM m_storage_detail sd"
-              + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
-              + " WHERE sd.m_product_id = m_product.m_product_id"
-              + " AND ad_isorgincluded(l.ad_org_id, '").append(selectedOrgId).append("'")
-              .append(", m_product.ad_client_id) <> -1)");
-        }
-        if (!roleOrgIds.isEmpty()) {
-          fromWhere.append(
-              " AND EXISTS (SELECT 1 FROM m_storage_detail sd"
-              + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
-              + " WHERE sd.m_product_id = m_product.m_product_id"
-              + " AND l.ad_org_id IN (").append(buildInList(roleOrgIds)).append("))");
-        }
-        break;
-
-      case "warehouse":
-        selectClause = "SELECT m_warehouse_id AS id, name, name AS label";
-        fromWhere = new StringBuilder(
-            "FROM m_warehouse WHERE isactive='Y' AND ad_client_id = :clientId AND name ILIKE :search");
-        orderBy = "ORDER BY name";
-        if (selectedOrgId != null) {
-          fromWhere.append(
-              " AND EXISTS (SELECT 1 FROM ad_org_warehouse ow"
-              + " WHERE ow.m_warehouse_id = m_warehouse.m_warehouse_id"
-              + " AND ow.ad_org_id = '").append(selectedOrgId).append("')");
-        }
-        if (!roleOrgIds.isEmpty()) {
-          fromWhere.append(
-              " AND EXISTS (SELECT 1 FROM ad_org_warehouse ow"
-              + " WHERE ow.m_warehouse_id = m_warehouse.m_warehouse_id"
-              + " AND ow.ad_org_id IN (").append(buildInList(roleOrgIds)).append("))");
-        }
-        break;
-
-      case "project":
-        selectClause = "SELECT c_project_id AS id, name, name AS label";
-        fromWhere = new StringBuilder(
-            "FROM c_project WHERE isactive='Y' AND ad_client_id = :clientId AND name ILIKE :search");
-        orderBy = "ORDER BY name";
-        break;
-
-      case "org":
-        selectClause = "SELECT ad_org_id AS id, name, name AS label";
-        fromWhere = new StringBuilder(
-            "FROM ad_org WHERE isactive='Y' AND ad_org_id != '0'"
-            + " AND ad_client_id = :clientId AND name ILIKE :search");
-        orderBy = "ORDER BY name";
-        break;
-
-      case "account":
-        selectClause = "SELECT ev.value AS id,"
-            + " ev.value || ' - ' || ev.name AS name,"
-            + " ev.value || ' - ' || ev.name AS label";
-        fromWhere = new StringBuilder(
-            "FROM c_elementvalue ev WHERE ev.isactive='Y' AND ev.issummary='N'"
-            + " AND ev.ad_client_id = :clientId"
-            + " AND (ev.value ILIKE :search OR ev.name ILIKE :search)");
-        orderBy = "ORDER BY ev.value";
-        if (selectedAcctSchemaId != null) {
-          fromWhere.append(
-              " AND ev.c_element_id IN (SELECT c_element_id FROM c_acctschema_element"
-              + " WHERE c_acctschema_id = '").append(selectedAcctSchemaId).append("'")
-              .append(" AND c_element_id IS NOT NULL)");
-        }
-        break;
-
-      case "accounting":
-      case "acctschema":
-        selectClause = "SELECT c_acctschema_id AS id, name, name AS label";
-        fromWhere = new StringBuilder(
-            "FROM c_acctschema WHERE isactive='Y' AND ad_client_id = :clientId AND name ILIKE :search");
-        orderBy = "ORDER BY name";
-        break;
-
-      case "year":
-        selectClause = "SELECT y.c_year_id AS id,"
-            + " y.year || ' (' || c.name || ')' AS name,"
-            + " y.year || ' (' || c.name || ')' AS label";
-        fromWhere = new StringBuilder(
-            "FROM c_year y JOIN c_calendar c ON c.c_calendar_id = y.c_calendar_id"
-            + " WHERE y.isactive='Y' AND y.ad_client_id = :clientId"
-            + " AND (y.year || ' (' || c.name || ')') ILIKE :search");
-        orderBy = "ORDER BY y.year DESC";
-        if (selectedOrgId != null) {
-          fromWhere.append(
-              " AND EXISTS (SELECT 1 FROM ad_org o"
-              + " WHERE o.c_calendar_id = c.c_calendar_id AND o.ad_org_id = '")
-              .append(selectedOrgId).append("')");
-        }
-        break;
-
-      case "currency":
-        // Currency is a global (cross-client) table; no ad_client_id filter.
-        // The client's own currency is sorted first.
-        // clientId is inlined (validated JWT claim) so COUNT and data queries
-        // share the same fromWhere without needing a :clientId bound param.
-        selectClause = "SELECT c_currency_id AS id, iso_code AS name,"
-            + " iso_code || ' - ' || description AS label";
-        fromWhere = new StringBuilder(
-            "FROM c_currency WHERE isactive='Y'"
-            + " AND (iso_code ILIKE :search OR description ILIKE :search)");
-        orderBy = "ORDER BY (CASE WHEN c_currency_id = "
-            + "(SELECT c_currency_id FROM ad_client WHERE ad_client_id = '"
-            + clientId + "') THEN 0 ELSE 1 END), iso_code";
-        useClient = false;  // clientId inlined above, not a bound param
-        break;
-
-      case "tax":
-        selectClause = "SELECT c_tax_id AS id, name, name AS label";
-        fromWhere = new StringBuilder(
-            "FROM c_tax WHERE isactive='Y' AND ad_client_id = :clientId AND name ILIKE :search");
-        orderBy = "ORDER BY name";
-        break;
-
-      default:
-        throw new IllegalArgumentException("Unknown selector type: " + type);
-    }
-
-    String countSql = "SELECT COUNT(*) " + fromWhere;
-    String dataSql  = selectClause + " " + fromWhere + " " + orderBy;
-
-    // Count
     NativeQuery<Object> countQuery = OBDal.getInstance().getSession().createNativeQuery(countSql);
-    bindParams(countQuery, useSearch, useClient, q, clientId, type);
+    bindParams(countQuery, sq.bindClient, req.q, req.clientId);
     Number countResult = (Number) countQuery.uniqueResult();
     int totalCount = countResult != null ? countResult.intValue() : 0;
 
-    // Data
     NativeQuery<Object[]> dataQuery = OBDal.getInstance().getSession().createNativeQuery(dataSql);
-    bindParams(dataQuery, useSearch, useClient, q, clientId, type);
-    dataQuery.setMaxResults(limit);
-    dataQuery.setFirstResult(offset);
+    bindParams(dataQuery, sq.bindClient, req.q, req.clientId);
+    dataQuery.setMaxResults(req.limit);
+    dataQuery.setFirstResult(req.offset);
     List<Object[]> rows = dataQuery.list();
 
     JSONArray items = new JSONArray();
@@ -325,8 +216,164 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     JSONObject result = new JSONObject();
     result.put("items", items);
     result.put("totalCount", totalCount);
-    result.put("hasMore", offset + rows.size() < totalCount);
+    result.put("hasMore", req.offset + rows.size() < totalCount);
     return result;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Query builders — one method per selector type
+  // ---------------------------------------------------------------------------
+
+  private SelectorQuery buildQuery(String type, SelectorRequest req) {
+    switch (type) {
+      case "bpartner":   return buildBpartnerQuery();
+      case "product":    return buildProductQuery(req);
+      case "warehouse":  return buildWarehouseQuery(req);
+      case "project":    return buildProjectQuery();
+      case "org":        return buildOrgQuery();
+      case "account":    return buildAccountQuery(req);
+      case "accounting":
+      case "acctschema": return buildAcctschemaQuery();
+      case "year":       return buildYearQuery(req);
+      case "currency":   return buildCurrencyQuery(req.clientId);
+      case "tax":        return buildTaxQuery();
+      default: throw new IllegalArgumentException("Unknown selector type: " + type);
+    }
+  }
+
+  private SelectorQuery buildBpartnerQuery() {
+    return new SelectorQuery(
+        "SELECT c_bpartner_id AS id, name, name AS label",
+        new StringBuilder("FROM c_bpartner WHERE isactive='Y'"
+            + " AND ad_client_id = :clientId AND name ILIKE :search"),
+        ORDER_BY_NAME, true);
+  }
+
+  private SelectorQuery buildProductQuery(SelectorRequest req) {
+    StringBuilder fromWhere = new StringBuilder(
+        "FROM m_product WHERE isactive='Y' AND ad_client_id = :clientId"
+        + " AND (name ILIKE :search OR value ILIKE :search)");
+    if (!req.warehouseIds.isEmpty()) {
+      fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
+          + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
+          + " WHERE sd.m_product_id = m_product.m_product_id"
+          + " AND l.m_warehouse_id IN (").append(buildInList(req.warehouseIds)).append("))");
+    }
+    if (req.selectedOrgId != null) {
+      fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
+          + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
+          + " WHERE sd.m_product_id = m_product.m_product_id"
+          + " AND ad_isorgincluded(l.ad_org_id, '").append(req.selectedOrgId)
+          .append("', m_product.ad_client_id) <> -1)");
+    }
+    if (!req.roleOrgIds.isEmpty()) {
+      fromWhere.append(" AND EXISTS (SELECT 1 FROM m_storage_detail sd"
+          + " JOIN m_locator l ON l.m_locator_id = sd.m_locator_id"
+          + " WHERE sd.m_product_id = m_product.m_product_id"
+          + " AND l.ad_org_id IN (").append(buildInList(req.roleOrgIds)).append("))");
+    }
+    return new SelectorQuery(
+        "SELECT m_product_id AS id, name, value || ' - ' || name AS label",
+        fromWhere, "ORDER BY value, name", true);
+  }
+
+  private SelectorQuery buildWarehouseQuery(SelectorRequest req) {
+    StringBuilder fromWhere = new StringBuilder(
+        "FROM m_warehouse WHERE isactive='Y' AND ad_client_id = :clientId AND name ILIKE :search");
+    if (req.selectedOrgId != null) {
+      fromWhere.append(" AND EXISTS (SELECT 1 FROM ad_org_warehouse ow"
+          + " WHERE ow.m_warehouse_id = m_warehouse.m_warehouse_id"
+          + " AND ow.ad_org_id = '").append(req.selectedOrgId).append("')");
+    }
+    if (!req.roleOrgIds.isEmpty()) {
+      fromWhere.append(" AND EXISTS (SELECT 1 FROM ad_org_warehouse ow"
+          + " WHERE ow.m_warehouse_id = m_warehouse.m_warehouse_id"
+          + " AND ow.ad_org_id IN (").append(buildInList(req.roleOrgIds)).append("))");
+    }
+    return new SelectorQuery(
+        "SELECT m_warehouse_id AS id, name, name AS label",
+        fromWhere, ORDER_BY_NAME, true);
+  }
+
+  private SelectorQuery buildProjectQuery() {
+    return new SelectorQuery(
+        "SELECT c_project_id AS id, name, name AS label",
+        new StringBuilder("FROM c_project WHERE isactive='Y'"
+            + " AND ad_client_id = :clientId AND name ILIKE :search"),
+        ORDER_BY_NAME, true);
+  }
+
+  private SelectorQuery buildOrgQuery() {
+    return new SelectorQuery(
+        "SELECT ad_org_id AS id, name, name AS label",
+        new StringBuilder("FROM ad_org WHERE isactive='Y' AND ad_org_id != '0'"
+            + " AND ad_client_id = :clientId AND name ILIKE :search"),
+        ORDER_BY_NAME, true);
+  }
+
+  private SelectorQuery buildAccountQuery(SelectorRequest req) {
+    StringBuilder fromWhere = new StringBuilder(
+        "FROM c_elementvalue ev WHERE ev.isactive='Y' AND ev.issummary='N'"
+        + " AND ev.ad_client_id = :clientId"
+        + " AND (ev.value ILIKE :search OR ev.name ILIKE :search)");
+    if (req.selectedAcctSchemaId != null) {
+      fromWhere.append(" AND ev.c_element_id IN"
+          + " (SELECT c_element_id FROM c_acctschema_element"
+          + " WHERE c_acctschema_id = '").append(req.selectedAcctSchemaId)
+          .append("' AND c_element_id IS NOT NULL)");
+    }
+    return new SelectorQuery(
+        "SELECT ev.value AS id, ev.value || ' - ' || ev.name AS name,"
+        + " ev.value || ' - ' || ev.name AS label",
+        fromWhere, "ORDER BY ev.value", true);
+  }
+
+  private SelectorQuery buildAcctschemaQuery() {
+    return new SelectorQuery(
+        "SELECT c_acctschema_id AS id, name, name AS label",
+        new StringBuilder("FROM c_acctschema WHERE isactive='Y'"
+            + " AND ad_client_id = :clientId AND name ILIKE :search"),
+        ORDER_BY_NAME, true);
+  }
+
+  private SelectorQuery buildYearQuery(SelectorRequest req) {
+    StringBuilder fromWhere = new StringBuilder(
+        "FROM c_year y JOIN c_calendar c ON c.c_calendar_id = y.c_calendar_id"
+        + " WHERE y.isactive='Y' AND y.ad_client_id = :clientId"
+        + " AND (y.year || ' (' || c.name || ')') ILIKE :search");
+    if (req.selectedOrgId != null) {
+      fromWhere.append(" AND EXISTS (SELECT 1 FROM ad_org o"
+          + " WHERE o.c_calendar_id = c.c_calendar_id AND o.ad_org_id = '")
+          .append(req.selectedOrgId).append("')");
+    }
+    return new SelectorQuery(
+        "SELECT y.c_year_id AS id,"
+        + " y.year || ' (' || c.name || ')' AS name,"
+        + " y.year || ' (' || c.name || ')' AS label",
+        fromWhere, "ORDER BY y.year DESC", true);
+  }
+
+  private SelectorQuery buildCurrencyQuery(String clientId) {
+    // Currency is a global (cross-client) table; no ad_client_id filter.
+    // clientId is inlined in ORDER BY (validated JWT claim) so COUNT and data queries
+    // share the same fromWhere without needing a :clientId bound param.
+    return new SelectorQuery(
+        "SELECT c_currency_id AS id, iso_code AS name,"
+        + " iso_code || ' - ' || description AS label",
+        new StringBuilder("FROM c_currency WHERE isactive='Y'"
+            + " AND (iso_code ILIKE :search OR description ILIKE :search)"),
+        "ORDER BY (CASE WHEN c_currency_id ="
+        + " (SELECT c_currency_id FROM ad_client WHERE ad_client_id = '"
+        + clientId + "') THEN 0 ELSE 1 END), iso_code",
+        false);
+  }
+
+  private SelectorQuery buildTaxQuery() {
+    return new SelectorQuery(
+        "SELECT c_tax_id AS id, name, name AS label",
+        new StringBuilder("FROM c_tax WHERE isactive='Y'"
+            + " AND ad_client_id = :clientId AND name ILIKE :search"),
+        ORDER_BY_NAME, true);
   }
 
   // ---------------------------------------------------------------------------
@@ -361,12 +408,9 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   // ---------------------------------------------------------------------------
 
   @SuppressWarnings("rawtypes")
-  private void bindParams(NativeQuery query, boolean useSearch, boolean useClient,
-      String q, String clientId, String type) {
-    if (useSearch) {
-      query.setParameter("search", "%" + q + "%");
-    }
-    if (useClient) {
+  private void bindParams(NativeQuery query, boolean bindClient, String q, String clientId) {
+    query.setParameter("search", "%" + q + "%");
+    if (bindClient) {
       query.setParameter("clientId", clientId);
     }
   }
@@ -399,7 +443,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     return Arrays.stream(param.split(","))
         .map(String::trim)
         .map(this::safeId)
-        .filter(id -> id != null)
+        .filter(Objects::nonNull)
         .collect(Collectors.toList());
   }
 
