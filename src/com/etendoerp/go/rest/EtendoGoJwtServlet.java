@@ -209,7 +209,8 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       result.put("account", accountJson);
 
       writeResponse(response, HttpServletResponse.SC_CREATED, result);
-    } catch (SQLException | RuntimeException e) {
+    } catch (RuntimeException e) {
+      rollbackDalChanges("account registration", e);
       log.error("Database error during account registration", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Registration failed due to a server error");
@@ -271,7 +272,8 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       result.put("account", accountJson);
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
-    } catch (SQLException | RuntimeException e) {
+    } catch (RuntimeException e) {
+      rollbackDalChanges("login", e);
       log.error("Database error during login", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Login failed due to a server error");
@@ -497,8 +499,9 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
         return;
       }
 
-      if (!ensureOrganization(conn, writer, onboardingRequest.clientName, clientId, adminContext,
-          currencyId)) {
+      Boolean organizationCreated = ensureOrganization(conn, writer, onboardingRequest.clientName,
+          clientId, adminContext, currencyId);
+      if (organizationCreated == null) {
         return;
       }
 
@@ -510,7 +513,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
         return;
       }
 
-      if (!importOnboardingDataset(writer, clientId, orgId)) {
+      if (!ensureOnboardingDataset(writer, clientId, orgId, organizationCreated)) {
         return;
       }
 
@@ -520,11 +523,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
     } catch (Exception e) {
       log.error("Onboarding failed", e);
-      try {
-        OBDal.getInstance().rollbackAndClose();
-      } catch (Exception rollbackEx) {
-        log.error("Rollback failed", rollbackEx);
-      }
+      rollbackDalChanges("onboarding", e);
       sendProgress(writer, PROGRESS_ERROR, PROGRESS_ERROR,
           "Onboarding failed: " + e.getMessage());
       sendFinalResult(writer, false, "Onboarding failed: " + e.getMessage());
@@ -667,20 +666,21 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     }
     data.starOrgId = EtendoGoJwtSupport.findStarOrgId(OBDal.getInstance().getConnection(), clientId);
     OBContext.setOBContext(data.adminUserId, data.adminRoleId, clientId, data.starOrgId);
-    OBContext.setAdminMode(true);
     return data;
   }
 
-  private boolean ensureOrganization(Connection conn, PrintWriter writer, String clientName,
+  private Boolean ensureOrganization(Connection conn, PrintWriter writer, String clientName,
       String clientId, AdminContextData adminContext, String currencyId) throws SQLException {
     sendProgress(writer, PROGRESS_ORGANIZATION, PROGRESS_IN_PROGRESS,
         "Creating organization: " + clientName + "...");
     if (EtendoGoJwtSupport.organizationExists(conn, clientId)) {
       sendProgress(writer, PROGRESS_ORGANIZATION, "done",
           "Organization already exists, resuming...");
-      return true;
+      return Boolean.FALSE;
     }
-    return createOrganization(writer, clientName, clientId, adminContext.starOrgId, currencyId);
+    return createOrganization(writer, clientName, clientId, adminContext.starOrgId, currencyId)
+        ? Boolean.TRUE
+        : null;
   }
 
   private boolean createOrganization(PrintWriter writer, String clientName, String clientId,
@@ -710,6 +710,16 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
   private String resolveOrganizationId(String clientId) {
     Organization organization = EtendoGoJwtDalHelper.findFirstOrganization(clientId);
     return organization != null ? organization.getId() : null;
+  }
+
+  boolean ensureOnboardingDataset(PrintWriter writer, String clientId, String orgId,
+      boolean importRequired) {
+    if (!importRequired) {
+      sendProgress(writer, PROGRESS_DATASET, "done",
+          "Existing organization detected, skipping onboarding dataset import");
+      return true;
+    }
+    return importOnboardingDataset(writer, clientId, orgId);
   }
 
   boolean importOnboardingDataset(PrintWriter writer, String clientId, String orgId) {
@@ -765,6 +775,15 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       writer.flush();
     } catch (JSONException e) {
       log.warn("Error writing final result", e);
+    }
+  }
+
+  private void rollbackDalChanges(String operation, Exception failure) {
+    try {
+      OBDal.getInstance().rollbackAndClose();
+    } catch (Exception rollbackEx) {
+      log.error("Rollback failed after {}", operation, rollbackEx);
+      log.debug("Original failure while handling {}", operation, failure);
     }
   }
 

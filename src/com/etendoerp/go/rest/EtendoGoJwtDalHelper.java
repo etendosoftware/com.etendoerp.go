@@ -16,7 +16,6 @@
  */
 package com.etendoerp.go.rest;
 
-import java.sql.SQLException;
 import java.util.List;
 
 import org.codehaus.jettison.json.JSONException;
@@ -44,6 +43,7 @@ final class EtendoGoJwtDalHelper {
   private static final String PARAM_CLIENT_ID = "clientId";
   private static final String PARAM_CURRENCY_ISO = "currencyIso";
   private static final String PARAM_STAR_VALUE = "starValue";
+  private static final String PARAM_SYSTEM_USER_ID = "systemUserId";
   private static final String FIELD_CLIENT_ID = "clientId";
   private static final String FIELD_CLIENT_NAME = "clientName";
   private static final String FIELD_ORG_ID = "orgId";
@@ -72,8 +72,7 @@ final class EtendoGoJwtDalHelper {
     return query.uniqueResult();
   }
 
-  static Account createAccount(String email, String passwordHash, String name, String sessionToken)
-      throws SQLException {
+  static Account createAccount(String email, String passwordHash, String name, String sessionToken) {
     Account account = OBProvider.getInstance().get(Account.class);
     account.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
     account.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
@@ -86,7 +85,7 @@ final class EtendoGoJwtDalHelper {
     return account;
   }
 
-  static void updateSessionToken(Account account, String sessionToken) throws SQLException {
+  static void updateSessionToken(Account account, String sessionToken) {
     account.setSessionToken(sessionToken);
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
@@ -141,9 +140,10 @@ final class EtendoGoJwtDalHelper {
   static UserRoles findClientAdminUserRole(String clientId) {
     OBQuery<UserRoles> query = OBDal.getInstance().createQuery(UserRoles.class,
         "as userRole where userRole.role.client.id = :" + PARAM_CLIENT_ID
-            + " and userRole.userContact.id <> '" + SYSTEM_USER_ID + "'"
+            + " and userRole.userContact.id <> :" + PARAM_SYSTEM_USER_ID
             + " order by userRole.role.creationDate");
     query.setNamedParameter(PARAM_CLIENT_ID, clientId);
+    query.setNamedParameter(PARAM_SYSTEM_USER_ID, SYSTEM_USER_ID);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     query.setMaxResult(1);
@@ -165,8 +165,8 @@ final class EtendoGoJwtDalHelper {
     return organizations.isEmpty() ? null : organizations.get(0);
   }
 
-  private static void flushAndCommitDalChanges() throws SQLException {
+  private static void flushAndCommitDalChanges() {
     OBDal.getInstance().flush();
-    OBDal.getInstance().getConnection().commit();
+    OBDal.getInstance().commitAndClose();
   }
 }
