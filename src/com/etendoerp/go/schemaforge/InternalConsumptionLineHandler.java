@@ -70,7 +70,11 @@ public class InternalConsumptionLineHandler implements NeoHandler {
       return null;
     }
     try {
-      JSONObject body = context.getPreviousResult().getBody();
+      NeoResponse previousResult = context.getPreviousResult();
+      if (previousResult == null || previousResult.getBody() == null) {
+        return null;
+      }
+      JSONObject body = previousResult.getBody();
       JSONArray items = body.optJSONArray(FIELD_ITEMS);
       if (items == null || items.length() == 0) {
         return null;
