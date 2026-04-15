@@ -110,27 +110,51 @@ public class OnboardingDatasetNormalizerTest {
 
   /** Verifies that the default normalizer can load packaged sampledata without a repo checkout. */
   @Test
-  public void testDefaultNormalizerLoadsBundledSampledataFromClasspath() throws Exception {
-    Path isolatedWorkingDirectory = Files.createTempDirectory("onboarding-classpath");
-    String previousUserDir = System.getProperty("user.dir");
+  public void testDefaultNormalizerLoadsBundledSampledataFromClasspath() {
+    String xml = classpathBackedNormalizer().buildDatasetXml();
 
-    try {
-      System.setProperty("user.dir", isolatedWorkingDirectory.toString());
-
-      String xml = new OnboardingDatasetNormalizer().buildDatasetXml();
-
-      assertTrue(xml.contains("<Openbravo"));
-      assertTrue(xml.contains("Almacen GO"));
-      assertFalse(xml.contains("<AD_CLIENT>"));
-    } finally {
-      if (previousUserDir == null) {
-        System.clearProperty("user.dir");
-      } else {
-        System.setProperty("user.dir", previousUserDir);
-      }
-    }
+    assertTrue(xml.contains("<Openbravo"));
+    assertTrue(xml.contains("Almacen GO"));
+    assertFalse(xml.contains("<AD_CLIENT>"));
   }
 
+
+  private OnboardingDatasetNormalizer pathBackedNormalizer() {
+    return new OnboardingDatasetNormalizer(sampleDataDir(), this::mockEntityForTable);
+  }
+
+  private OnboardingDatasetNormalizer classpathBackedNormalizer() {
+    return new OnboardingDatasetNormalizer(getClass().getClassLoader(), this::mockEntityForTable);
+  }
+
+  private Entity mockEntityForTable(String tableName) {
+    Entity entity = mock(Entity.class);
+    when(entity.getName()).thenReturn(toLowerCamel(tableName));
+    when(entity.isOrganizationEnabled()).thenReturn(true);
+    when(entity.getPropertyByColumnName(anyString(), eq(false)))
+        .thenAnswer(invocation -> mockProperty(tableName, invocation.getArgument(0)));
+    return entity;
+  }
+
+  private Property mockProperty(String tableName, String columnName) {
+    Property property = mock(Property.class);
+    when(property.getName()).thenReturn(
+        columnName.equals(tableName + "_ID") ? "id" : toLowerCamel(columnName));
+    when(property.isId()).thenReturn(columnName.equals(tableName + "_ID"));
+    when(property.isOneToMany()).thenReturn(false);
+    when(property.isPrimitive()).thenReturn(true);
+    return property;
+  }
+
+  private String toLowerCamel(String value) {
+    String[] parts = value.toLowerCase().split("_");
+    StringBuilder builder = new StringBuilder(parts[0]);
+    for (int i = 1; i < parts.length; i++) {
+      builder.append(Character.toUpperCase(parts[i].charAt(0)));
+      builder.append(parts[i].substring(1));
+    }
+    return builder.toString();
+  }
 
   private Path sampleDataDir() {
     Path moduleRelative = Paths.get("referencedata", "sampledata", "GOClient");
