@@ -149,6 +149,17 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
 
+      // Session endpoint: GET /sws/neo/session — returns org-level defaults (currency, etc.)
+      if ("session".equals(pathInfo.specName)) {
+        if (!"GET".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Session endpoint only supports GET");
+          return;
+        }
+        writeResponse(response, NeoSessionService.resolveSession());
+        return;
+      }
+
       // Find the spec
       SFSpec spec = NeoServletSupport.findSpec(pathInfo.specName);
       if (spec == null) {
