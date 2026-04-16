@@ -32,8 +32,8 @@ import org.openbravo.dal.service.OBDal;
 
 /**
  * NeoHandler that returns pending tasks and alerts for the dashboard widget.
- * Queries real Etendo data: overdue invoices, pending shipments, purchase orders
- * to confirm, and low stock alerts.
+ * Queries real Etendo data: overdue invoices, pending confirmations,
+ * pending shipments, and low stock alerts.
  */
 @Named("widgetPendingTasksHandler")
 public class WidgetPendingTasksHandler implements NeoHandler {
@@ -61,6 +61,9 @@ public class WidgetPendingTasksHandler implements NeoHandler {
         JSONArray data = new JSONArray();
 
         addOverdueInvoices(data, clientId);
+        addSalesOrdersToConfirm(data, clientId);
+        addSalesInvoicesToConfirm(data, clientId);
+        addPurchaseInvoicesToConfirm(data, clientId);
         addPendingShipments(data, clientId);
         addPurchaseOrdersToConfirm(data, clientId);
         addLowStockAlerts(data, clientId);
@@ -112,6 +115,87 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     task.put(JSON_COUNT, count);
     task.put(JSON_TASK_KEY, count > 1 ? "overdueInvoices_plural" : "overdueInvoices");
     task.put("amount", totalAmount);
+    data.put(task);
+  }
+
+  /**
+   * Sales orders pending confirmation: draft sales orders.
+   */
+  private void addSalesOrdersToConfirm(JSONArray data, String clientId) throws Exception {
+    String sql = "SELECT COUNT(*)"
+        + " FROM c_order"
+        + " WHERE issotrx = 'Y' AND docstatus = 'DR'"
+        + " AND ad_client_id = :clientId";
+
+    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
+    long count = ((Number) query.uniqueResult()).longValue();
+
+    if (count == 0) {
+      return;
+    }
+
+    JSONObject task = new JSONObject();
+    task.put("type", TYPE_INFO);
+    task.put("text", count + " sales order" + (count != 1 ? "s" : "") + " pending confirmation");
+    task.put(JSON_NAVIGATION, navigationParams("sales-order", new JSONObject().put("DocStatus", "DR")));
+    task.put("link", "/sales-order?DocStatus=DR");
+    task.put(JSON_COUNT, count);
+    task.put(JSON_TASK_KEY, count > 1 ? "salesOrdersToConfirm_plural" : "salesOrdersToConfirm");
+    data.put(task);
+  }
+
+  /**
+   * Sales invoices pending confirmation: draft sales invoices.
+   */
+  private void addSalesInvoicesToConfirm(JSONArray data, String clientId) throws Exception {
+    String sql = "SELECT COUNT(*)"
+        + " FROM c_invoice"
+        + " WHERE issotrx = 'Y' AND docstatus = 'DR'"
+        + " AND ad_client_id = :clientId";
+
+    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
+    long count = ((Number) query.uniqueResult()).longValue();
+
+    if (count == 0) {
+      return;
+    }
+
+    JSONObject task = new JSONObject();
+    task.put("type", TYPE_INFO);
+    task.put("text", count + " sales invoice" + (count != 1 ? "s" : "") + " pending confirmation");
+    task.put(JSON_NAVIGATION, navigationParams("sales-invoice", new JSONObject().put("DocStatus", "DR")));
+    task.put("link", "/sales-invoice?DocStatus=DR");
+    task.put(JSON_COUNT, count);
+    task.put(JSON_TASK_KEY, count > 1 ? "salesInvoicesToConfirm_plural" : "salesInvoicesToConfirm");
+    data.put(task);
+  }
+
+  /**
+   * Purchase invoices pending confirmation: draft purchase invoices.
+   */
+  private void addPurchaseInvoicesToConfirm(JSONArray data, String clientId) throws Exception {
+    String sql = "SELECT COUNT(*)"
+        + " FROM c_invoice"
+        + " WHERE issotrx = 'N' AND docstatus = 'DR'"
+        + " AND ad_client_id = :clientId";
+
+    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
+    long count = ((Number) query.uniqueResult()).longValue();
+
+    if (count == 0) {
+      return;
+    }
+
+    JSONObject task = new JSONObject();
+    task.put("type", TYPE_INFO);
+    task.put("text", count + " purchase invoice" + (count != 1 ? "s" : "") + " pending confirmation");
+    task.put(JSON_NAVIGATION, navigationParams("purchase-invoice", new JSONObject().put("DocStatus", "DR")));
+    task.put("link", "/purchase-invoice?DocStatus=DR");
+    task.put(JSON_COUNT, count);
+    task.put(JSON_TASK_KEY, count > 1 ? "purchaseInvoicesToConfirm_plural" : "purchaseInvoicesToConfirm");
     data.put(task);
   }
 
