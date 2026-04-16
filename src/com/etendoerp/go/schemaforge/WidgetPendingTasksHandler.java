@@ -18,10 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
-import java.text.DecimalFormat;
-import java.text.DecimalFormatSymbols;
 import java.util.List;
-import java.util.Locale;
 
 import javax.inject.Named;
 
@@ -114,7 +111,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     task.put("link", "/sales-invoice?filter=overdue");
     task.put(JSON_COUNT, count);
     task.put(JSON_TASK_KEY, count > 1 ? "overdueInvoices_plural" : "overdueInvoices");
-    task.put("amount", formatCurrency(totalAmount));
+    task.put("amount", totalAmount);
     data.put(task);
   }
 
@@ -203,15 +200,6 @@ public class WidgetPendingTasksHandler implements NeoHandler {
       task.put("detail", (String) rows.get(0)[0]);
     }
     data.put(task);
-  }
-
-  /**
-   * Formats a BigDecimal as a currency string with $ prefix and comma thousands separator.
-   */
-  private static String formatCurrency(BigDecimal amount) {
-    DecimalFormatSymbols symbols = new DecimalFormatSymbols(Locale.US);
-    DecimalFormat fmt = new DecimalFormat("$#,##0", symbols);
-    return fmt.format(amount);
   }
 
   private JSONObject navigationFilter(String window, String filter) throws Exception {
