@@ -196,6 +196,14 @@ public class NeoDefaultsService {
           NeoDefaultsCascadeHelper.executeCalloutCascade(ctx, adTab, defaults, seqFieldSet);
         }
 
+        // Re-apply C_DocTypeTarget_ID from the tab's HQL subtype filter (e.g. sOSubType LIKE 'OB'
+        // for Quotation tabs) before the generic FK fallback runs. Without this, the fallback picks
+        // the first alphabetically available doctype (Standard Order) instead of the correct one.
+        // Mirrors NeoCrudHandler.executePostCalloutCascade on the create path.
+        if (adTab != null) {
+          DocTypeResolver.reapplyDocTypeFromTabFilter(defaults, adTab, ctx);
+        }
+
         // Classic parity: for each mandatory FK column still unresolved after defaults/callouts,
         // auto-pick the first valid lookup option.
         for (SFField sfField : fields) {
@@ -208,7 +216,7 @@ public class NeoDefaultsService {
           if (propName == null || defaults.has(propName)) {
             continue;
           }
-          tryInjectFirstFromLookup(defaults, dalEntity, propName, adColumn);
+          tryInjectFirstFromLookup(defaults, dalEntity, propName, adColumn, ctx);
         }
 
         // Build response
@@ -787,7 +795,7 @@ public class NeoDefaultsService {
       if (tryInjectFallbackFkDefault(body, dalEntity, propName, col, mCtx.neoCtx)) {
         return;
       }
-      if (tryInjectFirstFromLookup(body, dalEntity, propName, col)) {
+      if (tryInjectFirstFromLookup(body, dalEntity, propName, col, mCtx.neoCtx)) {
         return;
       }
       NeoDefaultsCascadeHelper.injectSafeTypeDefault(body, propName, col);
@@ -1023,7 +1031,7 @@ public class NeoDefaultsService {
    * @return true if a value was injected, false if not applicable or lookup was empty
    */
   private static boolean tryInjectFirstFromLookup(JSONObject body, Entity dalEntity,
-      String propName, Column col) {
+      String propName, Column col, NeoContext ctx) {
     try {
       String baseRefId = NeoSelectorService.getBaseReferenceId(col);
       boolean isFk = NeoSelectorService.isFkReference(baseRefId)
@@ -1043,6 +1051,15 @@ public class NeoDefaultsService {
       if (orgPredicate != null && !orgPredicate.isBlank()) {
         where.append(" and ").append(orgPredicate.getHql());
       }
+
+      // BusinessPartner: restrict to customers for sales windows, vendors for purchase windows,
+      // so that the first-fallback never picks a BP that is invalid for the selector.
+      if ("BusinessPartner".equals(target.entityName)
+          && ctx != null && ctx.getAdTab() != null && ctx.getAdTab().getWindow() != null) {
+        boolean isSales = Boolean.TRUE.equals(ctx.getAdTab().getWindow().isSalesTransaction());
+        where.append(isSales ? " and e.customer = true" : " and e.vendor = true");
+      }
+
       Entity targetEntity = ModelProvider.getInstance().getEntity(target.entityName);
       if (targetEntity == null) {
         return false;

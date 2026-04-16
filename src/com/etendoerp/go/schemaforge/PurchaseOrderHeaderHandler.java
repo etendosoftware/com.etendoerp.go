@@ -36,7 +36,11 @@ public class PurchaseOrderHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse result = new CreateGoodsReceiptHandler().handle(context);
+    NeoResponse result = new CloneOrderHandler().handle(context);
+    if (result != null) {
+      return result;
+    }
+    result = new CreateGoodsReceiptHandler().handle(context);
     if (result != null) {
       return result;
     }

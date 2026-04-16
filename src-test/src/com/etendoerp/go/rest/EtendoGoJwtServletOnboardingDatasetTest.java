@@ -16,6 +16,7 @@
  */
 package com.etendoerp.go.rest;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -62,6 +63,23 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     assertTrue(ndjson.contains("\"success\":false"));
   }
 
+  @Test
+  public void testEnsureOnboardingDatasetSkipsImportForExistingOrganization() {
+    CountingImportService importService = new CountingImportService();
+    TestServlet servlet = new TestServlet(importService);
+    StringWriter output = new StringWriter();
+
+    boolean imported = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", false);
+
+    String ndjson = output.toString();
+    assertTrue(imported);
+    assertEquals(0, importService.importCount);
+    assertTrue(ndjson.contains("\"step\":\"dataset\""));
+    assertTrue(ndjson.contains("\"status\":\"done\""));
+    assertTrue(ndjson.contains("skipping onboarding dataset import"));
+    assertFalse(ndjson.contains("\"status\":\"in_progress\""));
+  }
+
   private static final class TestServlet extends EtendoGoJwtServlet {
     private final OnboardingDatasetImportService importService;
 
@@ -78,6 +96,16 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
   private static final class SuccessfulImportService extends OnboardingDatasetImportService {
     @Override
     public ImportResult importDataset(String clientId, String orgId) {
+      return new ImportResult();
+    }
+  }
+
+  private static final class CountingImportService extends OnboardingDatasetImportService {
+    private int importCount;
+
+    @Override
+    public ImportResult importDataset(String clientId, String orgId) {
+      importCount++;
       return new ImportResult();
     }
   }
