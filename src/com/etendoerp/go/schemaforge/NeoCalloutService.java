@@ -17,12 +17,12 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -42,7 +42,6 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.base.secureApp.LoginUtils;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.erpCommon.ad_callouts.SimpleCallout;
-import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.domain.ModelImplementation;
 import org.openbravo.model.ad.ui.Tab;
@@ -64,6 +63,7 @@ public class NeoCalloutService {
   private static final Logger log = LogManager.getLogger(NeoCalloutService.class);
   private static final String VALUE_KEY = "value";
   private static final String IDENTIFIER_KEY = "_identifier";
+  private static final String FIELD_ENTRIES = "entries";
 
   private NeoCalloutService() {
   }
@@ -105,8 +105,8 @@ public class NeoCalloutService {
             calloutInfo.className, fieldName, calloutInfo.inpFieldName, calloutInfo.columnName);
 
         // Build synthetic request parameters
-        Map<String, String[]> params = buildRequestParams(
-            adTab, fieldName, value, formState, calloutInfo.inpFieldName,
+        Map<String, String[]> params = CalloutRequestBuilder.buildRequestParams(
+            adTab, value, formState, calloutInfo.inpFieldName,
             auxValues);
 
         // Build session attributes from a fully populated VariablesSecureApp
@@ -372,202 +372,11 @@ public class NeoCalloutService {
     return cleanName;
   }
 
-  // ── Request building ───────────────────────────────────────────────
-
   /**
-   * Build the request parameters map from the form state.
-   * Maps form state keys to inp* format and adds callout metadata params.
-   * Loads columns once and builds a lookup map for efficient resolution.
+   * Build a VariablesSecureApp from OBContext with full session population.
+   * Shared by NeoCalloutService and NeoDefaultsService.
    */
-  private static Map<String, String[]> buildRequestParams(Tab adTab,
-      String fieldName, Object value, JSONObject formState, String inpFieldName,
-      JSONObject auxValues) {
-
-    Map<String, String[]> params = new HashMap<>();
-
-    // Set the trigger field and its value
-    params.put("inpLastFieldChanged", new String[]{ inpFieldName });
-    params.put(inpFieldName, new String[]{ value != null ? value.toString() : "" });
-
-    // Set tab and window IDs
-    params.put("inpTabId", new String[]{ adTab.getId() });
-    if (adTab.getWindow() != null) {
-      params.put("inpwindowId", new String[]{ adTab.getWindow().getId() });
-    }
-
-    // Inject essential context params from OBContext (security boundary — always authoritative)
-    OBContext obCtx = OBContext.getOBContext();
-    String calloutOrgId = obCtx.getCurrentOrganization().getId();
-    // When logged in with "*" org (id=0), resolve the first real org so callouts like
-    // SE_OrderLine_PriceList can find the correct price list for the client.
-    if ("0".equals(calloutOrgId)) {
-      String realOrgId = NeoDefaultsService.resolveFirstOrgForClient(obCtx.getCurrentClient().getId());
-      if (realOrgId != null) {
-        calloutOrgId = realOrgId;
-      }
-    }
-    params.put("inpadOrgId", new String[]{ calloutOrgId });
-    params.put("inpadClientId", new String[]{ obCtx.getCurrentClient().getId() });
-    String isSOTrx = adTab.getWindow() != null
-        && Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
-    params.put("isSOTrx", new String[]{ isSOTrx });
-    if (obCtx.getWarehouse() != null) {
-      params.put("inpmWarehouseId", new String[]{ obCtx.getWarehouse().getId() });
-    }
-
-    // Build column lookup maps (once, for all form state keys and default resolution)
-    // Include OBDal property names for mapping frontend keys (e.g., "orderDate" -> "inpdateordered")
-    Map<String, String> propertyNameToInp = new HashMap<>();
-    Map<String, String> cleanNameToInp = new HashMap<>();
-    Map<String, String> dbNameToInp = new HashMap<>();
-    List<Column> columns = Collections.emptyList();
-    if (adTab.getTable() != null) {
-      String tableId = adTab.getTable().getId();
-      Entity dalEntity = null;
-      try {
-        dalEntity = ModelProvider.getInstance().getEntityByTableId(tableId);
-      } catch (Exception e) {
-        log.debug("Could not resolve DAL entity for table: {}", e.getMessage());
-      }
-      OBCriteria<Column> colCriteria = OBDal.getInstance().createCriteria(Column.class);
-      colCriteria.add(Restrictions.eq(Column.PROPERTY_TABLE + ".id", tableId));
-      colCriteria.add(Restrictions.eq(Column.PROPERTY_ACTIVE, true));
-      columns = colCriteria.list();
-      for (Column col : columns) {
-        String dbColName = col.getDBColumnName();
-        String inpName = toInpName(dbColName);
-        dbNameToInp.put(dbColName.toLowerCase(), inpName);
-        cleanNameToInp.put(toCleanFieldName(dbColName).toLowerCase(), inpName);
-        // Map OBDal property name (what the frontend sends)
-        if (dalEntity != null) {
-          try {
-            Property prop = dalEntity.getPropertyByColumnName(dbColName);
-            if (prop != null) {
-              propertyNameToInp.put(prop.getName().toLowerCase(), inpName);
-            }
-          } catch (Exception ignored) {
-            // Not all columns have DAL properties
-          }
-        }
-      }
-    }
-
-    // Map form state fields to inp* parameters.
-    // IMPORTANT: do not overwrite the trigger field (inpFieldName) — the `value` param
-    // is authoritative. The formState may contain a stale value (e.g., search query text
-    // instead of the selected ID).
-    if (formState != null) {
-      @SuppressWarnings("unchecked")
-      Iterator<String> keys = formState.keys();
-      while (keys.hasNext()) {
-        String key = keys.next();
-        // Skip $_identifier companion keys
-        if (key.contains("$_identifier")) continue;
-        String val = formState.optString(key, "");
-        // Try OBDal property name first, then fall back to clean/db names
-        String inpKey = propertyNameToInp.get(key.toLowerCase());
-        if (inpKey == null) {
-          inpKey = resolveToInpName(key, dbNameToInp, cleanNameToInp);
-        }
-        // Never overwrite the trigger field — its value comes from the `value` parameter
-        if (inpKey.equals(inpFieldName)) continue;
-        params.put(inpKey, new String[]{ val });
-      }
-    }
-
-    // Re-assert the real org AFTER formState mapping, because formState may contain
-    // adOrgId="0" (the * org) which maps to inpadOrgId and overwrites our earlier fix.
-    // This authoritative override ensures callouts like SE_OrderLine_PriceList always
-    // receive a real org, not the pseudo-org "0".
-    params.put("inpadOrgId", new String[]{ calloutOrgId });
-
-    // Fill missing columns with their AD defaults so callouts see all fields.
-    // In the classic UI every form field is present in the callout request, even on a new
-    // record. NEO's formState may be sparse (only defaults + user input), so we fill the
-    // gaps using Utility.getDefault — the same resolver the classic UI uses.
-    if (adTab.getTable() != null) {
-      try {
-        VariablesSecureApp vars = buildCalloutVars(obCtx, adTab);
-        DalConnectionProvider conn = new DalConnectionProvider(false);
-        String windowId = adTab.getWindow() != null ? adTab.getWindow().getId() : "";
-        for (Column col : columns) {
-          String inpName = toInpName(col.getDBColumnName());
-          if (params.containsKey(inpName)) {
-            continue;
-          }
-          String resolved = "";
-          try {
-            String defaultExpr = col.getDefaultValue();
-            resolved = Utility.getDefault(conn, vars, col.getDBColumnName(),
-                defaultExpr != null ? defaultExpr.trim() : "", windowId, "");
-          } catch (Exception e) {
-            log.debug("Could not resolve default for column {}: {}",
-                col.getDBColumnName(), e.getMessage());
-          }
-          params.put(inpName, new String[]{ resolved != null ? resolved : "" });
-        }
-      } catch (Exception e) {
-        log.warn("Could not fill callout defaults: {}", e.getMessage());
-      }
-    }
-
-    // For child tabs, inject the parent record ID so callouts can access the parent entity.
-    // E.g., SL_Order_Product reads inpcOrderId to get the order's price list.
-    Long tabLevel = adTab.getTabLevel();
-    log.info("[NEO-CALLOUT] Tab '{}' level={}, formState has id={}", adTab.getName(), tabLevel,
-        formState != null && formState.has("id"));
-    if (tabLevel != null && tabLevel > 0 && formState != null) {
-      Tab parentTab = findParentTab(adTab);
-      log.info("[NEO-CALLOUT] Parent tab: {}", parentTab != null ? parentTab.getName() : "null");
-      if (parentTab != null && parentTab.getTable() != null) {
-        String parentKeyCol = parentTab.getTable().getDBTableName() + "_ID";
-        String inpParentKey = toInpName(parentKeyCol);
-        log.info("[NEO-CALLOUT] Parent key: {} -> {}, already in params: {}", parentKeyCol, inpParentKey, params.containsKey(inpParentKey));
-        // The frontend passes the parent header's "id" in formState
-        // Override even if already set (defaults may have resolved it to empty)
-        String existingVal = params.containsKey(inpParentKey) ? params.get(inpParentKey)[0] : "";
-        if (formState.has("id") && (existingVal == null || existingVal.isEmpty())) {
-          String parentId = formState.optString("id", "");
-          params.put(inpParentKey, new String[]{ parentId });
-          log.info("[NEO-CALLOUT] Injected parent ID: {} = {}", inpParentKey, parentId);
-        } else if (params.containsKey(inpParentKey)) {
-          log.info("[NEO-CALLOUT] Parent key already set: {} = {}", inpParentKey, params.get(inpParentKey)[0]);
-        }
-      }
-    }
-
-    // Process auxiliary values (e.g., businessPartner_LOC -> inpcBpartnerId_LOC)
-    // These are extra values from OBUISEL selectors that callouts may depend on.
-    if (auxValues != null) {
-      @SuppressWarnings("unchecked")
-      Iterator<String> auxKeys = auxValues.keys();
-      while (auxKeys.hasNext()) {
-        String key = auxKeys.next();   // e.g., "businessPartner_LOC"
-        String auxVal = auxValues.optString(key, "");
-        // Split into base field name + suffix
-        int suffixStart = key.lastIndexOf('_');
-        if (suffixStart > 0) {
-          String baseName = key.substring(0, suffixStart);  // "businessPartner"
-          String suffix = key.substring(suffixStart);        // "_LOC"
-          // Resolve base field to inp format
-          String inpBase = propertyNameToInp.get(baseName.toLowerCase());
-          if (inpBase == null) {
-            inpBase = resolveToInpName(baseName, dbNameToInp, cleanNameToInp);
-          }
-          params.put(inpBase + suffix, new String[]{ auxVal });
-        }
-      }
-    }
-
-    return params;
-  }
-
-  /**
-   * Build a VariablesSecureApp populated with the full session context.
-   * Uses LoginUtils.fillSessionArguments (same as classic login) so that
-   * Utility.getDefault can resolve context variables like @#AD_Org_ID@, @IsSOTrx@, etc.
-   */
-  private static VariablesSecureApp buildCalloutVars(OBContext obCtx, Tab adTab) {
+  static VariablesSecureApp buildVars(OBContext obCtx) {
     String userId = obCtx.getUser().getId();
     String clientId = obCtx.getCurrentClient().getId();
     String orgId = obCtx.getCurrentOrganization().getId();
@@ -599,41 +408,10 @@ public class NeoCalloutService {
       vars.setSessionValue("#AD_Role_ID", roleId);
       vars.setSessionValue("#AD_Language", lang);
       vars.setSessionValue("#M_Warehouse_ID", warehouseId);
-    }
-
-    // Set window-level isSOTrx so expressions like @IsSOTrx@ resolve correctly
-    if (adTab.getWindow() != null) {
-      String soTrx = Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
-      vars.setSessionValue("isSOTrx", soTrx);
+      vars.setSessionValue("#User_Client", "'" + clientId + "','0'");
     }
 
     return vars;
-  }
-
-  /**
-   * Resolve a form state key to its inp* name using pre-built lookup maps.
-   */
-  private static String resolveToInpName(String key,
-      Map<String, String> dbNameToInp, Map<String, String> cleanNameToInp) {
-    // Already in inp format
-    if (key.startsWith("inp")) {
-      return key;
-    }
-
-    // Match by DB column name (case-insensitive)
-    String resolved = dbNameToInp.get(key.toLowerCase());
-    if (resolved != null) {
-      return resolved;
-    }
-
-    // Match by clean REST name (case-insensitive)
-    resolved = cleanNameToInp.get(key.toLowerCase());
-    if (resolved != null) {
-      return resolved;
-    }
-
-    // Fallback: prefix with inp and lowercase
-    return "inp" + Character.toLowerCase(key.charAt(0)) + key.substring(1);
   }
 
   /**
@@ -650,7 +428,7 @@ public class NeoCalloutService {
     }
 
     // Step 1: Build VariablesSecureApp with fillSessionArguments (same as classic login)
-    VariablesSecureApp vars = buildCalloutVars(obContext, adTab);
+    VariablesSecureApp vars = CalloutRequestBuilder.buildCalloutVars(obContext, adTab);
 
     // Step 2: Read number formats from Format.xml (same as classic login)
     try {
@@ -692,6 +470,19 @@ public class NeoCalloutService {
   }
 
   /**
+   * Returns true if the column's AD Reference type is numeric (Amount=12, Number=22,
+   * Quantity=29, Integer=11). Used to substitute "0" for empty defaults so that
+   * VariablesBase.NumberFilter accepts the parameter instead of rejecting it with an NPE.
+   */
+  private static boolean isNumericReference(Column col) {
+    if (col.getReference() == null) {
+      return false;
+    }
+    String refId = col.getReference().getId();
+    return "11".equals(refId) || "12".equals(refId) || "22".equals(refId) || "29".equals(refId);
+  }
+
+  /**
    * Find the parent tab of a child tab by walking the window's tab list in sequence order.
    * Returns the nearest tab with a lower tab level that precedes the child tab.
    */
@@ -715,6 +506,7 @@ public class NeoCalloutService {
     return parent;
   }
 
+  // ── Response transformation ────────────────────────────────────────
   // ── Response transformation ────────────────────────────────────────
 
   /**
@@ -813,88 +605,9 @@ public class NeoCalloutService {
         return response;
       }
 
-      Iterator<String> keys = calloutResult.keys();
-      while (keys.hasNext()) {
-        String key = keys.next();
-        JSONObject fieldResult = calloutResult.optJSONObject(key);
-        if (fieldResult == null) {
-          continue;
-        }
+      classifyCalloutFields(calloutResult, adTab, updates, combos, messages, rDisplayNames);
 
-        // Handle special keys
-        if ("MESSAGE".equals(key) || "WARNING".equals(key)
-            || "ERROR".equals(key) || "INFO".equals(key)
-            || "SUCCESS".equals(key)) {
-          JSONObject msg = new JSONObject();
-          msg.put("type", key);
-          msg.put("text", fieldResult.optString(VALUE_KEY, ""));
-          messages.put(msg);
-          continue;
-        }
-
-        // Skip JSEXECUTE (not applicable in REST context)
-        if ("JSEXECUTE".equals(key)) {
-          continue;
-        }
-
-        // Handle _R suffix keys (display representation for combo fields).
-        // E.g., "inpcDoctypetargetId_R" contains the label for "inpcDoctypetargetId".
-        // Store them temporarily and merge after the main loop.
-        if (key.endsWith("_R")) {
-          String baseInpKey = key.substring(0, key.length() - 2);
-          String baseClean = inpToCleanName(baseInpKey, adTab);
-          // Store: we'll merge after the main loop
-          if (!rDisplayNames.containsKey(baseClean)) {
-            rDisplayNames.put(baseClean, fieldResult.optString(VALUE_KEY, ""));
-          }
-          continue;
-        }
-
-        // Determine if this is a combo update (has entries) or simple field update
-        boolean hasEntries = fieldResult.has("entries");
-        String cleanName = inpToCleanName(key, adTab);
-
-        if (hasEntries) {
-          // Combo update
-          JSONObject comboObj = new JSONObject();
-          if (fieldResult.has(VALUE_KEY)) {
-            comboObj.put("selected", fieldResult.opt(VALUE_KEY));
-          }
-          JSONArray rawEntries = fieldResult.optJSONArray("entries");
-          if (rawEntries != null) {
-            JSONArray cleanEntries = new JSONArray();
-            for (int i = 0; i < rawEntries.length(); i++) {
-              JSONObject rawEntry = rawEntries.optJSONObject(i);
-              if (rawEntry != null && rawEntry.length() > 0) {
-                JSONObject cleanEntry = new JSONObject();
-                cleanEntry.put("id",
-                    rawEntry.optString(JsonConstants.ID, ""));
-                cleanEntry.put("identifier",
-                    rawEntry.optString(JsonConstants.IDENTIFIER, ""));
-                cleanEntries.put(cleanEntry);
-              }
-            }
-            comboObj.put("entries", cleanEntries);
-          }
-          combos.put(cleanName, comboObj);
-        } else {
-          // Simple field update
-          JSONObject updateObj = new JSONObject();
-          updateObj.put(VALUE_KEY, fieldResult.opt(VALUE_KEY));
-          updates.put(cleanName, updateObj);
-        }
-      }
-
-      // Merge _R display names as _identifier into their base field update entries.
-      // E.g., "inpcDoctypetargetId_R" → "Purchase Order" merges into
-      // transactionDocument: { value: "...", _identifier: "Purchase Order" }
-      for (Map.Entry<String, String> rEntry : rDisplayNames.entrySet()) {
-        String baseKey = rEntry.getKey();
-        String displayName = rEntry.getValue();
-        if (updates.has(baseKey) && StringUtils.isNotBlank(displayName)) {
-          updates.getJSONObject(baseKey).put(IDENTIFIER_KEY, displayName);
-        }
-      }
+      mergeRDisplayNames(rDisplayNames, updates);
 
       // Resolve _identifier for FK fields where the callout only returned an ID.
       // This avoids the frontend showing stale labels until the record is saved/reloaded.
@@ -914,6 +627,135 @@ public class NeoCalloutService {
     }
 
     return response;
+  }
+
+  /**
+   * Iterate over all fields in the raw callout result and classify them into
+   * updates, combos, messages, or _R display-name entries.
+   */
+  @SuppressWarnings("unchecked")
+  private static void classifyCalloutFields(JSONObject calloutResult, Tab adTab,
+      JSONObject updates, JSONObject combos, JSONArray messages,
+      Map<String, String> rDisplayNames) throws Exception {
+    Iterator<String> keys = calloutResult.keys();
+    while (keys.hasNext()) {
+      classifyCalloutField(keys.next(), calloutResult, adTab, updates, combos, messages, rDisplayNames);
+    }
+  }
+
+  /**
+   * Classifies a single callout result field into updates, combos, messages, or _R display-name
+   * entries. Fields with null value, JSEXECUTE keys, or unrecognized types are skipped silently.
+   */
+  private static void classifyCalloutField(String key, JSONObject calloutResult, Tab adTab,
+      JSONObject updates, JSONObject combos, JSONArray messages,
+      Map<String, String> rDisplayNames) throws Exception {
+    JSONObject fieldResult = calloutResult.optJSONObject(key);
+    if (fieldResult == null) {
+      return;
+    }
+    if (isMessageKey(key)) {
+      messages.put(buildMessageEntry(key, fieldResult));
+      return;
+    }
+    if ("JSEXECUTE".equals(key)) {
+      // Not applicable in REST context
+      return;
+    }
+    if (key.endsWith("_R")) {
+      collectRDisplayName(key, fieldResult, adTab, rDisplayNames);
+      return;
+    }
+    classifyFieldUpdate(key, fieldResult, adTab, updates, combos);
+  }
+
+  /**
+   * Return true if the key represents a message-level response (WARNING, ERROR, etc.).
+   */
+  private static boolean isMessageKey(String key) {
+    return "MESSAGE".equals(key) || "WARNING".equals(key)
+        || "ERROR".equals(key) || "INFO".equals(key) || "SUCCESS".equals(key);
+  }
+
+  /**
+   * Build a message JSON entry from a message-level field result.
+   */
+  private static JSONObject buildMessageEntry(String type, JSONObject fieldResult) throws Exception {
+    JSONObject msg = new JSONObject();
+    msg.put("type", type);
+    msg.put("text", fieldResult.optString(VALUE_KEY, ""));
+    return msg;
+  }
+
+  /**
+   * Store a _R display name entry for later merging into the base field's _identifier.
+   * E.g., "inpcDoctypetargetId_R" → "Purchase Order" is stored for "transactionDocument".
+   */
+  private static void collectRDisplayName(String key, JSONObject fieldResult, Tab adTab,
+      Map<String, String> rDisplayNames) {
+    String baseInpKey = key.substring(0, key.length() - 2);
+    String baseClean = inpToCleanName(baseInpKey, adTab);
+    if (!rDisplayNames.containsKey(baseClean)) {
+      rDisplayNames.put(baseClean, fieldResult.optString(VALUE_KEY, ""));
+    }
+  }
+
+  /**
+   * Classify a field result as either a combo update (has entries) or a simple field update,
+   * and add it to the appropriate output map.
+   */
+  private static void classifyFieldUpdate(String key, JSONObject fieldResult, Tab adTab,
+      JSONObject updates, JSONObject combos) throws Exception {
+    String cleanName = inpToCleanName(key, adTab);
+    if (fieldResult.has(FIELD_ENTRIES)) {
+      combos.put(cleanName, buildComboEntry(fieldResult));
+    } else {
+      JSONObject updateObj = new JSONObject();
+      updateObj.put(VALUE_KEY, fieldResult.opt(VALUE_KEY));
+      updates.put(cleanName, updateObj);
+    }
+  }
+
+  /**
+   * Build a clean combo entry from the raw callout combo field result.
+   * Maps entries to {id, identifier} pairs.
+   */
+  private static JSONObject buildComboEntry(JSONObject fieldResult) throws Exception {
+    JSONObject comboObj = new JSONObject();
+    if (fieldResult.has(VALUE_KEY)) {
+      comboObj.put("selected", fieldResult.opt(VALUE_KEY));
+    }
+    JSONArray rawEntries = fieldResult.optJSONArray(FIELD_ENTRIES);
+    if (rawEntries != null) {
+      JSONArray cleanEntries = new JSONArray();
+      for (int i = 0; i < rawEntries.length(); i++) {
+        JSONObject rawEntry = rawEntries.optJSONObject(i);
+        if (rawEntry != null && rawEntry.length() > 0) {
+          JSONObject cleanEntry = new JSONObject();
+          cleanEntry.put("id", rawEntry.optString(JsonConstants.ID, ""));
+          cleanEntry.put("identifier", rawEntry.optString(JsonConstants.IDENTIFIER, ""));
+          cleanEntries.put(cleanEntry);
+        }
+      }
+      comboObj.put(FIELD_ENTRIES, cleanEntries);
+    }
+    return comboObj;
+  }
+
+  /**
+   * Merge _R display names as _identifier into their base field update entries.
+   * E.g., "inpcDoctypetargetId_R" → "Purchase Order" merges into
+   * transactionDocument: { value: "...", _identifier: "Purchase Order" }
+   */
+  private static void mergeRDisplayNames(Map<String, String> rDisplayNames,
+      JSONObject updates) throws Exception {
+    for (Map.Entry<String, String> rEntry : rDisplayNames.entrySet()) {
+      String baseKey = rEntry.getKey();
+      String displayName = rEntry.getValue();
+      if (updates.has(baseKey) && StringUtils.isNotBlank(displayName)) {
+        updates.getJSONObject(baseKey).put(IDENTIFIER_KEY, displayName);
+      }
+    }
   }
 
   /**

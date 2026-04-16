@@ -41,6 +41,7 @@ import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -58,10 +59,10 @@ public final class NeoDiscoveryHelper {
   private static final Set<String> SELECTOR_REFS = new HashSet<>();
 
   static {
-    SELECTOR_REFS.add("19"); // TableDir
-    SELECTOR_REFS.add("18"); // Table
-    SELECTOR_REFS.add("30"); // Search
-    SELECTOR_REFS.add("95E2A8B50A254B2AAE6774B8C2F28120"); // OBUISEL
+    SELECTOR_REFS.add(NeoSelectorService.REF_TABLEDIR);
+    SELECTOR_REFS.add(NeoSelectorService.REF_TABLE);
+    SELECTOR_REFS.add(NeoSelectorService.REF_SEARCH);
+    SELECTOR_REFS.add(NeoSelectorService.REF_OBUISEL);
   }
 
   private static final Pattern VALIDATION_PARAM_PATTERN = Pattern.compile("@(\\w+)@");
@@ -355,7 +356,7 @@ public final class NeoDiscoveryHelper {
         return "Table";
       case "30":
         return "Search";
-      case "95E2A8B50A254B2AAE6774B8C2F28120":
+      case NeoSelectorService.REF_OBUISEL:
         return "OBUISEL";
       default:
         return null;
