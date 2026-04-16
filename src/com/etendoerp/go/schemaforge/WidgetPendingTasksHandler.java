@@ -18,10 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
-import java.text.DecimalFormat;
-import java.text.DecimalFormatSymbols;
 import java.util.List;
-import java.util.Locale;
 
 import javax.inject.Named;
 
@@ -35,8 +32,8 @@ import org.openbravo.dal.service.OBDal;
 
 /**
  * NeoHandler that returns pending tasks and alerts for the dashboard widget.
- * Queries real Etendo data: overdue invoices, pending shipments, purchase orders
- * to confirm, and low stock alerts.
+ * Queries real Etendo data: overdue invoices, pending confirmations,
+ * pending shipments, and low stock alerts.
  */
 @Named("widgetPendingTasksHandler")
 public class WidgetPendingTasksHandler implements NeoHandler {
@@ -49,6 +46,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
 
   private static final String TYPE_WARNING = "warning";
   private static final String TYPE_INFO = "info";
+  private static final String JSON_NAVIGATION = "navigation";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -63,6 +61,9 @@ public class WidgetPendingTasksHandler implements NeoHandler {
         JSONArray data = new JSONArray();
 
         addOverdueInvoices(data, clientId);
+        addSalesOrdersToConfirm(data, clientId);
+        addSalesInvoicesToConfirm(data, clientId);
+        addPurchaseInvoicesToConfirm(data, clientId);
         addPendingShipments(data, clientId);
         addPurchaseOrdersToConfirm(data, clientId);
         addLowStockAlerts(data, clientId);
@@ -109,10 +110,92 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     JSONObject task = new JSONObject();
     task.put("type", TYPE_WARNING);
     task.put("text", count + " overdue invoice" + (count != 1 ? "s" : ""));
-    task.put("link", "/sales-invoice");
+    task.put(JSON_NAVIGATION, navigationFilter("sales-invoice", "overdue"));
+    task.put("link", "/sales-invoice?filter=overdue");
     task.put(JSON_COUNT, count);
     task.put(JSON_TASK_KEY, count > 1 ? "overdueInvoices_plural" : "overdueInvoices");
-    task.put("amount", formatCurrency(totalAmount));
+    task.put("amount", totalAmount);
+    data.put(task);
+  }
+
+  /**
+   * Sales orders pending confirmation: draft sales orders.
+   */
+  private void addSalesOrdersToConfirm(JSONArray data, String clientId) throws Exception {
+    String sql = "SELECT COUNT(*)"
+        + " FROM c_order"
+        + " WHERE issotrx = 'Y' AND docstatus = 'DR'"
+        + " AND ad_client_id = :clientId";
+
+    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
+    long count = ((Number) query.uniqueResult()).longValue();
+
+    if (count == 0) {
+      return;
+    }
+
+    JSONObject task = new JSONObject();
+    task.put("type", TYPE_INFO);
+    task.put("text", count + " sales order" + (count != 1 ? "s" : "") + " pending confirmation");
+    task.put(JSON_NAVIGATION, navigationParams("sales-order", new JSONObject().put("DocStatus", "DR")));
+    task.put("link", "/sales-order?DocStatus=DR");
+    task.put(JSON_COUNT, count);
+    task.put(JSON_TASK_KEY, count > 1 ? "salesOrdersToConfirm_plural" : "salesOrdersToConfirm");
+    data.put(task);
+  }
+
+  /**
+   * Sales invoices pending confirmation: draft sales invoices.
+   */
+  private void addSalesInvoicesToConfirm(JSONArray data, String clientId) throws Exception {
+    String sql = "SELECT COUNT(*)"
+        + " FROM c_invoice"
+        + " WHERE issotrx = 'Y' AND docstatus = 'DR'"
+        + " AND ad_client_id = :clientId";
+
+    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
+    long count = ((Number) query.uniqueResult()).longValue();
+
+    if (count == 0) {
+      return;
+    }
+
+    JSONObject task = new JSONObject();
+    task.put("type", TYPE_INFO);
+    task.put("text", count + " sales invoice" + (count != 1 ? "s" : "") + " pending confirmation");
+    task.put(JSON_NAVIGATION, navigationParams("sales-invoice", new JSONObject().put("DocStatus", "DR")));
+    task.put("link", "/sales-invoice?DocStatus=DR");
+    task.put(JSON_COUNT, count);
+    task.put(JSON_TASK_KEY, count > 1 ? "salesInvoicesToConfirm_plural" : "salesInvoicesToConfirm");
+    data.put(task);
+  }
+
+  /**
+   * Purchase invoices pending confirmation: draft purchase invoices.
+   */
+  private void addPurchaseInvoicesToConfirm(JSONArray data, String clientId) throws Exception {
+    String sql = "SELECT COUNT(*)"
+        + " FROM c_invoice"
+        + " WHERE issotrx = 'N' AND docstatus = 'DR'"
+        + " AND ad_client_id = :clientId";
+
+    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
+    long count = ((Number) query.uniqueResult()).longValue();
+
+    if (count == 0) {
+      return;
+    }
+
+    JSONObject task = new JSONObject();
+    task.put("type", TYPE_INFO);
+    task.put("text", count + " purchase invoice" + (count != 1 ? "s" : "") + " pending confirmation");
+    task.put(JSON_NAVIGATION, navigationParams("purchase-invoice", new JSONObject().put("DocStatus", "DR")));
+    task.put("link", "/purchase-invoice?DocStatus=DR");
+    task.put(JSON_COUNT, count);
+    task.put(JSON_TASK_KEY, count > 1 ? "purchaseInvoicesToConfirm_plural" : "purchaseInvoicesToConfirm");
     data.put(task);
   }
 
@@ -136,7 +219,8 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     JSONObject task = new JSONObject();
     task.put("type", TYPE_INFO);
     task.put("text", count + " order" + (count != 1 ? "s" : "") + " pending shipment");
-    task.put("link", "/goods-shipment");
+    task.put(JSON_NAVIGATION, navigationParams("goods-shipment", new JSONObject().put("DocStatus", "DR")));
+    task.put("link", "/goods-shipment?DocStatus=DR");
     task.put(JSON_COUNT, count);
     task.put(JSON_TASK_KEY, count > 1 ? "pendingShipments_plural" : "pendingShipments");
     data.put(task);
@@ -162,7 +246,8 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     JSONObject task = new JSONObject();
     task.put("type", TYPE_INFO);
     task.put("text", count + " purchase order" + (count != 1 ? "s" : "") + " to confirm");
-    task.put("link", "/purchase-order");
+    task.put(JSON_NAVIGATION, navigationParams("purchase-order", new JSONObject().put("DocStatus", "DR")));
+    task.put("link", "/purchase-order?DocStatus=DR");
     task.put(JSON_COUNT, count);
     task.put(JSON_TASK_KEY, count > 1 ? "purchaseOrdersToConfirm_plural" : "purchaseOrdersToConfirm");
     data.put(task);
@@ -201,12 +286,19 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     data.put(task);
   }
 
-  /**
-   * Formats a BigDecimal as a currency string with $ prefix and comma thousands separator.
-   */
-  private static String formatCurrency(BigDecimal amount) {
-    DecimalFormatSymbols symbols = new DecimalFormatSymbols(Locale.US);
-    DecimalFormat fmt = new DecimalFormat("$#,##0", symbols);
-    return fmt.format(amount);
+  private JSONObject navigationFilter(String window, String filter) throws Exception {
+    JSONObject navigation = new JSONObject();
+    navigation.put("type", "list");
+    navigation.put("window", window);
+    navigation.put("filter", filter);
+    return navigation;
+  }
+
+  private JSONObject navigationParams(String window, JSONObject params) throws Exception {
+    JSONObject navigation = new JSONObject();
+    navigation.put("type", "list");
+    navigation.put("window", window);
+    navigation.put("params", params);
+    return navigation;
   }
 }
