@@ -25,5 +25,3 @@ Thumbs.db
 
 # Git worktrees
 .worktrees/
-
-WebContent/WEB-INF/classes/com/etendoerp/go/onboarding/sampledata/

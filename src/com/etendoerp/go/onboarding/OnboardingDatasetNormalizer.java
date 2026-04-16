@@ -67,8 +67,7 @@ public class OnboardingDatasetNormalizer {
    * Creates a normalizer that reads the packaged GOClient sourcedata from the runtime classpath.
    */
   public OnboardingDatasetNormalizer() {
-    this(classpathSourceFileProvider(OnboardingDatasetNormalizer.class.getClassLoader()),
-        modelProviderEntityResolver());
+    this(classpathSourceFileProvider(defaultClassLoader()), modelProviderEntityResolver());
   }
 
   OnboardingDatasetNormalizer(ClassLoader classLoader, EntityResolver entityResolver) {
@@ -245,6 +244,14 @@ public class OnboardingDatasetNormalizer {
     }
     return entity;
   }
+
+  private static ClassLoader defaultClassLoader() {
+    ClassLoader contextClassLoader = Thread.currentThread().getContextClassLoader();
+    return contextClassLoader != null
+        ? contextClassLoader
+        : OnboardingDatasetNormalizer.class.getClassLoader();
+  }
+
 
   private static EntityResolver modelProviderEntityResolver() {
     return tableName -> ModelProvider.getInstance().getEntityByTableName(tableName);
