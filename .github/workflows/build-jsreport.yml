@@ -1,0 +1,68 @@
+name: Build jsreport image
+
+on:
+  push:
+    branches:
+      - develop
+      - epic/ETP-3504
+    paths:
+      - compose/Dockerfile
+      - compose/jsreport.config.json
+
+env:
+  AWS_REGION: eu-west-3
+  ECR_REGISTRY: 278186107973.dkr.ecr.eu-west-3.amazonaws.com
+  ECR_REPO: etendo/jsreport
+
+jobs:
+  build-and-push:
+    name: Build & push jsreport to ECR
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        id: tag
+        run: |
+          # develop → develop
+          # epic/ETP-3504 (or any other branch) → replace / with -
+          TAG="${GITHUB_REF_NAME//\//-}"
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Image tag: $TAG"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build image
+        run: |
+          docker build \
+            -t ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ steps.tag.outputs.tag }} \
+            compose/
+
+      - name: Push image
+        run: |
+          docker push ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPO }}:${{ steps.tag.outputs.tag }}
+
+      - name: Force ECS redeploy
+        run: |
+          if [[ "${{ github.ref_name }}" == "develop" ]]; then
+            CLUSTER=etendo-staging
+          else
+            CLUSTER=etendo-experimental
+          fi
+
+          aws ecs update-service \
+            --cluster $CLUSTER \
+            --service jsreport-service \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+          echo "Redeployment triggered on cluster: $CLUSTER"
