@@ -139,9 +139,9 @@ final class EtendoGoJwtDalHelper {
 
   static UserRoles findClientAdminUserRole(String clientId) {
     OBQuery<UserRoles> query = OBDal.getInstance().createQuery(UserRoles.class,
-        "as userRole where userRole.role.client.id = :" + PARAM_CLIENT_ID
-            + " and userRole.userContact.id <> :" + PARAM_SYSTEM_USER_ID
-            + " order by userRole.role.creationDate");
+        "as userrole where userrole.role.client.id = :" + PARAM_CLIENT_ID
+            + " and userrole.userContact.id <> :" + PARAM_SYSTEM_USER_ID
+            + " order by userrole.role.creationDate");
     query.setNamedParameter(PARAM_CLIENT_ID, clientId);
     query.setNamedParameter(PARAM_SYSTEM_USER_ID, SYSTEM_USER_ID);
     query.setFilterOnReadableClients(false);

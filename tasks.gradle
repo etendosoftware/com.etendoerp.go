@@ -1,10 +1,12 @@
 import java.nio.charset.StandardCharsets
 
 final File onboardingModuleDir = file("${rootProject.projectDir}/modules/com.etendoerp.go")
-final String onboardingResourceRoot = "${onboardingModuleDir}/WebContent/WEB-INF/classes/com/etendoerp/go/onboarding/sampledata"
+final String onboardingResourceRoot = "${rootProject.projectDir}/WebContent/WEB-INF/classes/com/etendoerp/go/onboarding/sampledata"
 final File onboardingSourceDir = file("${onboardingModuleDir}/referencedata/sampledata/GOClient")
 final File onboardingTargetDir = file("${onboardingResourceRoot}/GOClient")
 final File onboardingIndexFile = file("${onboardingResourceRoot}/index.txt")
+final File onboardingLegacySrcRoot = file("${onboardingModuleDir}/src/com/etendoerp/go/onboarding/sampledata")
+final File onboardingLegacyResourceRoot = file("${onboardingModuleDir}/etendo-resources/com/etendoerp/go/onboarding/sampledata")
 final List<String> onboardingPackagingTasks = [
     'smartbuild',
     'war',
@@ -14,7 +16,7 @@ final List<String> onboardingPackagingTasks = [
 ]
 
 tasks.register('prepareOnboardingSampledata') {
-    description = 'Stages GOClient onboarding sampledata into WebContent/WEB-INF/classes for WAR packaging'
+    description = 'Stages GOClient onboarding sampledata into root WebContent/WEB-INF/classes for WAR packaging'
 
     inputs.dir(onboardingSourceDir)
     outputs.dir(onboardingTargetDir)
@@ -36,6 +38,8 @@ tasks.register('prepareOnboardingSampledata') {
 
         delete(onboardingTargetDir)
         delete(onboardingIndexFile)
+        delete(onboardingLegacySrcRoot)
+        delete(onboardingLegacyResourceRoot)
 
         onboardingTargetDir.mkdirs()
         onboardingIndexFile.parentFile.mkdirs()
@@ -53,10 +57,12 @@ tasks.register('prepareOnboardingSampledata') {
 }
 
 tasks.register('cleanOnboardingSampledata') {
-    description = 'Removes staged onboarding sampledata from WebContent/WEB-INF/classes'
+    description = 'Removes staged onboarding sampledata from root WebContent/WEB-INF/classes'
 
     doLast {
         delete(file(onboardingResourceRoot))
+        delete(onboardingLegacySrcRoot)
+        delete(onboardingLegacyResourceRoot)
     }
 }
 

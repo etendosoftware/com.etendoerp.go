@@ -452,10 +452,9 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       return;
     }
 
-    Connection conn = OBDal.getInstance().getConnection();
     final String accountEmail;
     try {
-      accountEmail = EtendoGoJwtSupport.requireAccountEmail(conn, token);
+      accountEmail = EtendoGoJwtSupport.requireAccountEmail(currentConnection(), token);
       if (accountEmail == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
@@ -488,8 +487,8 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
     try {
       VariablesSecureApp vars = prepareAdminContext(writer, onboardingRequest.language);
-      String clientId = resolveOrCreateClient(conn, writer, vars, accountEmail, onboardingRequest,
-          currencyId, adminPassword);
+      String clientId = resolveOrCreateClient(writer, vars, accountEmail, onboardingRequest, currencyId,
+          adminPassword);
       if (clientId == null) {
         return;
       }
@@ -499,8 +498,8 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
         return;
       }
 
-      Boolean organizationCreated = ensureOrganization(conn, writer, onboardingRequest.clientName,
-          clientId, adminContext, currencyId);
+      Boolean organizationCreated = ensureOrganization(writer, onboardingRequest.clientName, clientId,
+          adminContext, currencyId);
       if (organizationCreated == null) {
         return;
       }
@@ -583,9 +582,15 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
   private String resolveCurrencyId(String currencyIso, HttpServletResponse response)
       throws IOException {
-    var currency = EtendoGoJwtDalHelper.findCurrencyByIsoCode(currencyIso);
-    if (currency != null) {
-      return currency.getId();
+    OBContext.setOBContext("0", "0", "0", "0");
+    OBContext.setAdminMode(true);
+    try {
+      var currency = EtendoGoJwtDalHelper.findCurrencyByIsoCode(currencyIso);
+      if (currency != null) {
+        return currency.getId();
+      }
+    } finally {
+      OBContext.restorePreviousMode();
     }
     writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Unknown currency: " + currencyIso);
     return null;
@@ -600,28 +605,27 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     return vars;
   }
 
-  private String resolveOrCreateClient(Connection conn, PrintWriter writer, VariablesSecureApp vars,
+  private String resolveOrCreateClient(PrintWriter writer, VariablesSecureApp vars,
       String accountEmail, OnboardingRequestData requestData, String currencyId,
       String adminPassword) throws Exception {
     sendProgress(writer, PROGRESS_CLIENT, PROGRESS_IN_PROGRESS,
         "Creating client: " + requestData.clientName + "...");
-    String clientId = EtendoGoJwtSupport.findClientIdByName(conn, requestData.clientName);
+    String clientId = EtendoGoJwtSupport.findClientIdByName(currentConnection(), requestData.clientName);
     if (clientId != null) {
-      return validateExistingClient(conn, writer, requestData.clientName, clientId) ? clientId : null;
+      return validateExistingClient(writer, requestData.clientName, clientId) ? clientId : null;
     }
 
-    String clientUser = EtendoGoJwtSupport.buildClientUsername(conn, accountEmail,
+    String clientUser = EtendoGoJwtSupport.buildClientUsername(currentConnection(), accountEmail,
         requestData.clientName);
     if (!createClient(vars, currencyId, requestData.clientName, clientUser, adminPassword, writer)) {
       return null;
     }
-    return EtendoGoJwtSupport.findClientIdByName(OBDal.getInstance().getConnection(),
-        requestData.clientName);
+    return EtendoGoJwtSupport.findClientIdByName(currentConnection(), requestData.clientName);
   }
 
-  private boolean validateExistingClient(Connection conn, PrintWriter writer, String clientName,
+  private boolean validateExistingClient(PrintWriter writer, String clientName,
       String clientId) throws SQLException {
-    if (!EtendoGoJwtSupport.hasStarOrganization(conn, clientId)) {
+    if (!EtendoGoJwtSupport.hasStarOrganization(currentConnection(), clientId)) {
       sendProgress(writer, PROGRESS_CLIENT, PROGRESS_ERROR,
           "Client '" + clientName + "' exists but is incomplete. Use a different name.");
       sendFinalResult(writer, false,
@@ -669,11 +673,11 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     return data;
   }
 
-  private Boolean ensureOrganization(Connection conn, PrintWriter writer, String clientName,
+  private Boolean ensureOrganization(PrintWriter writer, String clientName,
       String clientId, AdminContextData adminContext, String currencyId) throws SQLException {
     sendProgress(writer, PROGRESS_ORGANIZATION, PROGRESS_IN_PROGRESS,
         "Creating organization: " + clientName + "...");
-    if (EtendoGoJwtSupport.organizationExists(conn, clientId)) {
+    if (EtendoGoJwtSupport.organizationExists(currentConnection(), clientId)) {
       sendProgress(writer, PROGRESS_ORGANIZATION, "done",
           "Organization already exists, resuming...");
       return Boolean.FALSE;
@@ -842,6 +846,11 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       return false;
     }
   }
+  private Connection currentConnection() {
+    return OBDal.getInstance().getConnection();
+  }
+
+
 
   /**
    * Generate a random URL-safe session token (UUID without hyphens, 32 hex chars).
