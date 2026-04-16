@@ -89,6 +89,22 @@ public class NeoResponse {
   }
 
   /**
+   * Creates a 201 Created response wrapping {@code data} in the standard
+   * {@code {"response":{"data": ...}}} envelope used by NEO action handlers.
+   *
+   * @param data the JSON payload to wrap
+   * @return a NeoResponse with HTTP 201
+   * @throws JSONException if building the envelope fails
+   */
+  public static NeoResponse createdWithData(JSONObject data) throws JSONException {
+    JSONObject responseData = new JSONObject();
+    responseData.put("data", data);
+    JSONObject wrapper = new JSONObject();
+    wrapper.put("response", responseData);
+    return new NeoResponse(201, wrapper);
+  }
+
+  /**
    * Creates a 204 No Content response with no body.
    *
    * @return a NeoResponse with HTTP 204 and null body

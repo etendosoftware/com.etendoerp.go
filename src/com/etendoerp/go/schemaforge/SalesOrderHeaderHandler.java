@@ -37,7 +37,11 @@ public class SalesOrderHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse result = new CreateShipmentHandler().handle(context);
+    NeoResponse result = new CloneOrderHandler().handle(context);
+    if (result != null) {
+      return result;
+    }
+    result = new CreateShipmentHandler().handle(context);
     if (result != null) {
       return result;
     }
