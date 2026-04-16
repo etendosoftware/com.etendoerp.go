@@ -29,6 +29,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -147,8 +148,14 @@ public class CloneOrderHandler implements NeoHandler {
 
   private String generateDocumentNo(Order source) {
     try {
-      String docNo = Utility.getDocumentNo(
-          new DalConnectionProvider(false), source.getClient().getId(), "C_Order", true);
+      // Use the full overload with docTypeId so the sequence is looked up from the order's
+      // specific document type (SO vs PO have different sequences). Passing only the table
+      // name without a doc type picks an arbitrary sequence for C_Order, which causes the
+      // wrong numbering when both SO and PO sequences exist.
+      DalConnectionProvider conn = new DalConnectionProvider(false);
+      VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
+      String docTypeId = source.getDocumentType() != null ? source.getDocumentType().getId() : "";
+      String docNo = Utility.getDocumentNo(conn, vars, "0", "C_Order", "", docTypeId, false, true);
       return StringUtils.isNotBlank(docNo) ? docNo : "*";
     } catch (Exception e) {
       log.warn("Could not generate document number for cloned order, using '*': {}", e.getMessage());
