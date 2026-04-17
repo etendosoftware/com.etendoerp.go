@@ -70,6 +70,7 @@ public class NeoCloneRecordHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(NeoCloneRecordHandler.class);
   static final String ACTION_NAME = "cloneRecord";
+  private static final String PROP_DOCUMENT_NO = "documentNo";
 
   @Inject
   @Any
@@ -159,11 +160,11 @@ public class NeoCloneRecordHandler implements NeoHandler {
       String tableDBName) {
     Property docNoProp = null;
     try {
-      docNoProp = dalEntity.getProperty("documentNo");
+      docNoProp = dalEntity.getProperty(PROP_DOCUMENT_NO);
     } catch (Exception ex) {
       return; // entity has no documentNo property
     }
-    if (docNoProp == null || StringUtils.isNotBlank((String) clone.get("documentNo"))) {
+    if (docNoProp == null || StringUtils.isNotBlank((String) clone.get(PROP_DOCUMENT_NO))) {
       return;
     }
 
@@ -183,41 +184,46 @@ public class NeoCloneRecordHandler implements NeoHandler {
       return;
     }
 
-    // Try doctype-based sequence first (uses C_DocTypeTarget_ID if present, else C_DocType_ID).
-    String docTypeId = resolveDocTypeId(clone);
+    String docNo = fetchDocumentNo(resolveDocTypeId(clone), clientId, tableDBName,
+        dalEntity.getName());
+    if (StringUtils.isNotBlank(docNo)) {
+      clone.set(PROP_DOCUMENT_NO, docNo);
+    } else {
+      log.warn("Could not generate documentNo for {} (table {}): no sequence found for client {}",
+          dalEntity.getName(), tableDBName, clientId);
+    }
+  }
+
+  /**
+   * Tries doctype-based sequence first, then falls back to the table-level sequence.
+   * Returns null when no sequence is found or all lookups fail.
+   */
+  private String fetchDocumentNo(String docTypeId, String clientId, String tableDBName,
+      String entityName) {
+    DalConnectionProvider conn = new DalConnectionProvider(false);
+
+    if (!docTypeId.isEmpty()) {
+      try {
+        CSResponse cs = DocumentNoData.nextDocType(conn, docTypeId, clientId, "Y");
+        if (cs != null && StringUtils.isNotBlank(cs.razon)) {
+          return cs.razon;
+        }
+      } catch (Exception ex) {
+        log.debug("nextDocType failed for {} doctype {}: {}", entityName, docTypeId,
+            ex.getMessage());
+      }
+    }
 
     try {
-      DalConnectionProvider conn = new DalConnectionProvider(false);
-      CSResponse cs = null;
-
-      if (!docTypeId.isEmpty()) {
-        try {
-          cs = DocumentNoData.nextDocType(conn, docTypeId, clientId, "Y");
-        } catch (Exception ex) {
-          log.debug("nextDocType failed for {} doctype {}: {}", dalEntity.getName(), docTypeId,
-              ex.getMessage());
-        }
-      }
-
-      // Fall back to table-level sequence (DocumentNo_{TableName}).
-      if (cs == null || StringUtils.isBlank(cs.razon)) {
-        try {
-          cs = DocumentNoData.nextDoc(conn, "DocumentNo_" + tableDBName, clientId, "Y");
-        } catch (Exception ex) {
-          log.debug("nextDoc fallback failed for table {}: {}", tableDBName, ex.getMessage());
-        }
-      }
-
+      CSResponse cs = DocumentNoData.nextDoc(conn, "DocumentNo_" + tableDBName, clientId, "Y");
       if (cs != null && StringUtils.isNotBlank(cs.razon)) {
-        clone.set("documentNo", cs.razon);
-      } else {
-        log.warn("Could not generate documentNo for {} (table {}): no sequence found for client {}",
-            dalEntity.getName(), tableDBName, clientId);
+        return cs.razon;
       }
     } catch (Exception ex) {
-      log.warn("Unexpected error generating documentNo for {}: {}", dalEntity.getName(),
-          ex.getMessage());
+      log.debug("nextDoc fallback failed for table {}: {}", tableDBName, ex.getMessage());
     }
+
+    return null;
   }
 
   /**
