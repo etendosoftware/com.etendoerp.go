@@ -19,11 +19,14 @@ package com.etendoerp.go.schemaforge;
 
 import javax.inject.Named;
 
+import org.openbravo.base.weld.WeldUtils;
+
 /**
  * NeoHandler for the Sales Order header entity.
  *
  * Dispatches custom ACTION requests to the appropriate handler:
  * <ul>
+ *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler}</li>
  *   <li>{@code createShipment} → {@link CreateShipmentHandler}</li>
  *   <li>{@code createDraftInvoice} / {@code checkDraftInvoice} / {@code listInvoices} → {@link CreateDraftInvoiceHandler}</li>
  * </ul>
@@ -37,7 +40,7 @@ public class SalesOrderHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse result = new CloneOrderHandler().handle(context);
+    NeoResponse result = WeldUtils.getInstanceFromStaticBeanManager(NeoCloneRecordHandler.class).handle(context);
     if (result != null) {
       return result;
     }
