@@ -61,7 +61,6 @@ public class WidgetPendingTasksHandler implements NeoHandler {
         JSONArray data = new JSONArray();
 
         addOverdueInvoices(data, clientId);
-        addPendingShipments(data, clientId);
         addPendingReceptions(data, clientId);
         addPendingSalesDeliveries(data, clientId);
         addLowStockAlerts(data, clientId);
@@ -113,33 +112,6 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     task.put(JSON_COUNT, count);
     task.put(JSON_TASK_KEY, count > 1 ? "overdueInvoices_plural" : "overdueInvoices");
     task.put("amount", totalAmount);
-    data.put(task);
-  }
-
-  /**
-   * Pending shipments: draft goods shipments for sales.
-   */
-  private void addPendingShipments(JSONArray data, String clientId) throws Exception {
-    String sql = "SELECT COUNT(*)"
-        + " FROM m_inout"
-        + " WHERE issotrx = 'Y' AND docstatus = 'DR'"
-        + " AND ad_client_id = :clientId";
-
-    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
-    query.setParameter(PARAM_CLIENT_ID, clientId);
-    long count = ((Number) query.uniqueResult()).longValue();
-
-    if (count == 0) {
-      return;
-    }
-
-    JSONObject task = new JSONObject();
-    task.put("type", TYPE_INFO);
-    task.put("text", count + " order" + (count != 1 ? "s" : "") + " pending shipment");
-    task.put(JSON_NAVIGATION, navigationParams("goods-shipment", new JSONObject().put("DocStatus", "DR")));
-    task.put("link", "/goods-shipment?DocStatus=DR");
-    task.put(JSON_COUNT, count);
-    task.put(JSON_TASK_KEY, count > 1 ? "pendingShipments_plural" : "pendingShipments");
     data.put(task);
   }
 
