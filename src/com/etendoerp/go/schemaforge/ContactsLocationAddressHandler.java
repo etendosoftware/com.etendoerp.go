@@ -121,8 +121,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       bpLoc.setBusinessPartner(bp);
       bpLoc.setLocationAddress(geoLoc);
       bpLoc.setName(str(body, "name", "."));
-      bpLoc.setShipToAddress(Boolean.TRUE);
-      bpLoc.setInvoiceToAddress(Boolean.TRUE);
+      bpLoc.setShipToAddress(boolField(body, "shipToAddress", true));
+      bpLoc.setInvoiceToAddress(boolField(body, "invoiceToAddress", true));
       bpLoc.setPayFromAddress(Boolean.TRUE);
       bpLoc.setRemitToAddress(Boolean.TRUE);
       OBDal.getInstance().save(bpLoc);
@@ -159,6 +159,12 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       String nameVal = nullIfEmpty(body.optString("name", null));
       if (nameVal != null) {
         bpLoc.setName(nameVal);
+      }
+      if (body.has("shipToAddress")) {
+        bpLoc.setShipToAddress(boolField(body, "shipToAddress", Boolean.TRUE.equals(bpLoc.isShipToAddress())));
+      }
+      if (body.has("invoiceToAddress")) {
+        bpLoc.setInvoiceToAddress(boolField(body, "invoiceToAddress", Boolean.TRUE.equals(bpLoc.isInvoiceToAddress())));
       }
 
       OBDal.getInstance().flush();
@@ -281,6 +287,12 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   private static String nullIfEmpty(String s) {
     return (s == null || s.isEmpty() || "null".equals(s)) ? null : s;
+  }
+
+  private static boolean boolField(JSONObject body, String key, boolean defaultVal) {
+    if (!body.has(key)) return defaultVal;
+    String v = body.optString(key, "");
+    return "Y".equalsIgnoreCase(v) || "true".equalsIgnoreCase(v);
   }
 
   private static String str(JSONObject body, String key, String fallback) {
