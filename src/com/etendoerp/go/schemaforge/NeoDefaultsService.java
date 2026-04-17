@@ -102,8 +102,10 @@ public class NeoDefaultsService {
         JSONArray unresolvedFields = new JSONArray();
         JSONArray sequenceFields = new JSONArray();
 
-        // Build a VariablesSecureApp bridge from OBContext for Etendo utility methods
-        VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext());
+        // Build a VariablesSecureApp bridge from OBContext for Etendo utility methods.
+        // Pass the AD_Tab so isSOTrx is set in session — @IsSOTrx@ inside @SQL= defaults
+        // (e.g. M_PriceList_ID on C_Order) needs it to pick the correct sales/purchase row.
+        VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext(), ctx.getAdTab());
         DalConnectionProvider conn = new DalConnectionProvider(false);
 
         // Resolve window ID from SFSpec -> AD_Window (needed by Utility.getDefault)
@@ -204,20 +206,12 @@ public class NeoDefaultsService {
           DocTypeResolver.reapplyDocTypeFromTabFilter(defaults, adTab, ctx);
         }
 
-        // Classic parity: for each mandatory FK column still unresolved after defaults/callouts,
-        // auto-pick the first valid lookup option.
-        for (SFField sfField : fields) {
-          Column adColumn = sfField.getADColumn();
-          if (adColumn == null || !adColumn.isMandatory()) {
-            continue;
-          }
-          String propName = NeoDefaultsCascadeHelper.resolvePropertyName(
-              dalEntity, adColumn.getDBColumnName());
-          if (propName == null || defaults.has(propName)) {
-            continue;
-          }
-          tryInjectFirstFromLookup(defaults, dalEntity, propName, adColumn, ctx);
-        }
+        // Mandatory FK columns that remain unresolved are intentionally left empty here —
+        // the form/UI surfaces them so the user (or the BP/DocType callout chain) fills them in.
+        // Auto-picking the first lookup option produced cross-context picks (e.g. purchase pricelist
+        // on a sales window), diverging from classic Etendo which also leaves these fields empty.
+        // The CREATE path still has its own fallback in injectMandatoryDefaults to avoid NOT NULL
+        // violations when partial payloads reach persistence.
 
         // Build response
         JSONObject response = new JSONObject();
@@ -620,6 +614,27 @@ public class NeoDefaultsService {
    * @return a cached or newly built VariablesSecureApp instance with session variables populated
    */
   public static VariablesSecureApp buildVariablesSecureApp(OBContext obContext) {
+    return buildVariablesSecureApp(obContext, null);
+  }
+
+  /**
+   * Build a VariablesSecureApp from OBContext and an optional AD_Tab, so that the window's
+   * IsSOTrx flag is exposed as a session variable for default resolution. Without this,
+   * expressions like {@code @IsSOTrx@} inside {@code @SQL=...} defaults (e.g. the
+   * {@code M_PriceList_ID} default on {@code C_Order}) resolve to an empty string and pick
+   * a purchase pricelist on a sales window.
+   *
+   * <p>Delegates the session-variable population (including {@code IsSOTrx}) to the shared
+   * {@link NeoCalloutService#buildVars(OBContext, Tab)} builder, and layers caching + the
+   * {@code #Date} variable on top. The cache key includes the resolved {@code isSOTrx} value
+   * so a sales-window entry is not served to a purchase-window caller within the TTL.
+   *
+   * @param obContext the current OBContext containing user, role, org, and warehouse info
+   * @param adTab     the AD_Tab whose window provides the IsSOTrx flag. Pass {@code null}
+   *                  when not in a window context (processes, standalone defaults).
+   * @return a cached or newly built VariablesSecureApp instance with session variables populated
+   */
+  public static VariablesSecureApp buildVariablesSecureApp(OBContext obContext, Tab adTab) {
     String userId = obContext.getUser().getId();
     String clientId = obContext.getCurrentClient().getId();
     String roleId = obContext.getRole().getId();
@@ -639,13 +654,20 @@ public class NeoDefaultsService {
       }
     }
 
-    String cacheKey = userId + "|" + roleId + "|" + orgId + "|" + warehouseId;
+    String soTrx = "";
+    if (adTab != null && adTab.getWindow() != null
+        && adTab.getWindow().isSalesTransaction() != null) {
+      soTrx = Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
+    }
+
+    String cacheKey = userId + "|" + roleId + "|" + orgId + "|" + warehouseId + "|" + soTrx;
     VariablesSecureApp cached = varsCache.getIfPresent(cacheKey);
     if (cached != null) {
       return cached;
     }
 
-    VariablesSecureApp vars = NeoCalloutService.buildVars(obContext);
+    // Shared builder handles OBContext session vars + IsSOTrx (both casings) when adTab is set.
+    VariablesSecureApp vars = NeoCalloutService.buildVars(obContext, adTab);
     vars.setSessionValue("#Date",
         new SimpleDateFormat(DATE_FORMAT).format(new Date()));
 
@@ -701,7 +723,7 @@ public class NeoDefaultsService {
       }
 
       // Build resolution infrastructure once for all columns
-      VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext());
+      VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext(), adTab);
       DalConnectionProvider conn = new DalConnectionProvider(false);
       String windowId = ctx.getSfEntity() != null ? resolveWindowId(ctx.getSfEntity()) : "";
       Map<String, Object> parentValues = loadParentValues(adTab, parentId);
