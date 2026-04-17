@@ -50,6 +50,7 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_ORG_NAME = "orgName";
   private static final String FIELD_ADMIN_USER_ID = "adminUserId";
   private static final String FIELD_ADMIN_USER = "adminUser";
+  private static final String FIELD_ADMIN_USER_NAME = "adminUserName";
 
   private EtendoGoJwtDalHelper() {
   }
@@ -125,6 +126,7 @@ final class EtendoGoJwtDalHelper {
     env.put(FIELD_ORG_NAME, organization != null ? organization.getName() : JSONObject.NULL);
     env.put(FIELD_ADMIN_USER_ID, environmentUser.getId());
     env.put(FIELD_ADMIN_USER, environmentUser.getUsername());
+    env.put(FIELD_ADMIN_USER_NAME, environmentUser.getName());
     return env;
   }
 
