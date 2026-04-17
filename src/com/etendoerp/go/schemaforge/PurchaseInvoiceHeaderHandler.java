@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
 import javax.inject.Named;
 
@@ -30,7 +29,6 @@ import javax.inject.Named;
  *   <li>{@code registerPayment} / {@code invoicePayments} / {@code invoiceAccounts} → {@link RegisterPaymentOutHandler}</li>
  * </ul>
  */
-@ApplicationScoped
 @Named("purchaseInvoiceHeaderHandler")
 public class PurchaseInvoiceHeaderHandler implements NeoHandler {
 

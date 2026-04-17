@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
 import javax.inject.Named;
 
@@ -34,7 +33,6 @@ import javax.inject.Named;
  * Other actions (e.g. {@code documentAction}) return {@code null} here and
  * fall through to the default AD process execution path.
  */
-@ApplicationScoped
 @Named("purchaseOrderHeaderHandler")
 public class PurchaseOrderHeaderHandler implements NeoHandler {
 
