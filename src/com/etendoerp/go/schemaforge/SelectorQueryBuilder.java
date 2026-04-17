@@ -61,15 +61,24 @@ class SelectorQueryBuilder {
   private static final String FIELD_OFFSET = "offset";
   private static final String FIELD_HAS_MORE = "hasMore";
 
-  /** Pattern matching @param@ placeholders in OBUISEL clauses. */
-  static final Pattern PARAM_PATTERN = Pattern.compile("@([A-Za-z_]+)@");
+  /** Pattern matching @param@ and @#param@ (session-level) placeholders in OBUISEL clauses. */
+  static final Pattern PARAM_PATTERN = Pattern.compile("@#?([A-Za-z_]+)@");
 
   // Matches @Param@ and @#Param@ (session-level variables in Etendo)
   static final Pattern VALIDATION_PARAM = Pattern.compile("@#?(\\w+)@");
 
-  // SQL functions that have no HQL equivalent and must cause a clause to be skipped
+  // SQL functions that have no HQL equivalent and must cause a clause to be skipped.
   static final Pattern SQL_ONLY_FUNCTIONS = Pattern.compile(
       "AD_ISORGINCLUDED|AD_ISCHILDORGINCLUDED|AD_ROLE_ORGACCESS", Pattern.CASE_INSENSITIVE);
+
+  // Matches "(SELECT expr FROM DUAL)" — Oracle-ism for inline expressions.
+  // HQL doesn't support FROM DUAL; the fix is to unwrap the subquery into just "(expr)".
+  private static final Pattern SELECT_FROM_DUAL = Pattern.compile(
+      "\\(\\s*SELECT\\s+(.+?)\\s+FROM\\s+DUAL\\s*\\)", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+
+  // Matches "FROM <name> <alias>" in subqueries to detect SQL table names that need HQL translation
+  private static final Pattern FROM_WITH_ALIAS = Pattern.compile(
+      "\\bFROM\\s+(\\w+)\\s+(\\w+)", Pattern.CASE_INSENSITIVE);
 
   private SelectorQueryBuilder() {
   }
@@ -501,7 +510,22 @@ class SelectorQueryBuilder {
       }
     }
     m.appendTail(sb);
-    return new HqlWithParams(sb.toString(), queryParams);
+    // Unwrap "(SELECT expr FROM DUAL)" → "(expr)" — Oracle-ism not supported by HQL
+    String afterDual = SELECT_FROM_DUAL.matcher(sb.toString()).replaceAll("($1)");
+
+    // Strip top-level AND clauses that contain SQL-only functions (AD_ISORGINCLUDED, etc.)
+    // which have no HQL equivalent and would cause a Hibernate parse error.
+    List<String> clauses = splitTopLevelAnd(afterDual);
+    List<String> safeClauses = new ArrayList<>();
+    for (String clause : clauses) {
+      if (SQL_ONLY_FUNCTIONS.matcher(clause).find()) {
+        log.debug("Dropping OBUISEL clause with SQL-only function: {}", clause);
+      } else {
+        safeClauses.add(clause);
+      }
+    }
+    String resolved = safeClauses.isEmpty() ? "" : String.join(SQL_AND, safeClauses);
+    return new HqlWithParams(resolved, queryParams);
   }
 
   /**
@@ -600,6 +624,10 @@ class SelectorQueryBuilder {
       return null;
     }
 
+    // AD validation rules are written in SQL and may use SQL table/column names.
+    // HQL requires entity/property names. Translate SQL names → HQL names when possible.
+    trimmed = translateSqlToHql(trimmed);
+
     // Check if all @Param@ in this clause can be resolved
     Matcher paramMatcher = VALIDATION_PARAM.matcher(trimmed);
     while (paramMatcher.find()) {
@@ -618,7 +646,12 @@ class SelectorQueryBuilder {
         return null;
       }
       String value = rawValue.replace("'", "''");
-      paramMatcher.appendReplacement(resolved, Matcher.quoteReplacement("'" + value + "'"));
+      int matchStart = paramMatcher.start();
+      int matchEnd = paramMatcher.end();
+      boolean alreadyQuoted = matchStart > 0 && trimmed.charAt(matchStart - 1) == '\''
+          && matchEnd < trimmed.length() && trimmed.charAt(matchEnd) == '\'';
+      String replacement = alreadyQuoted ? value : "'" + value + "'";
+      paramMatcher.appendReplacement(resolved, Matcher.quoteReplacement(replacement));
     }
     paramMatcher.appendTail(resolved);
     return resolved.toString();
@@ -637,6 +670,78 @@ class SelectorQueryBuilder {
       return lower;
     }
     return allParams.get(key.toUpperCase());
+  }
+
+  /**
+   * Translates SQL table names and column names to their HQL equivalents in a validation clause.
+   * AD validation rules are written in SQL and may use:
+   * - SQL table names (e.g. {@code FIN_FinAcc_PaymentMethod}) instead of HQL entity names
+   *   (e.g. {@code FinancialMgmtFinAccPaymentMethod})
+   * - SQL column names (e.g. {@code Payin_Allow}) instead of HQL property names
+   *   (e.g. {@code payinAllow})
+   * - FK column names (e.g. {@code FIN_PaymentMethod_ID}) which need {@code .id} appended
+   *   (e.g. {@code paymentMethod.id})
+   *
+   * {@code FROM DUAL} is removed — HQL scalar subqueries work without a FROM clause.
+   */
+  private static String translateSqlToHql(String clause) {
+    // Unwrap "(SELECT expr FROM DUAL)" → "(expr)" before table-name translation
+    clause = SELECT_FROM_DUAL.matcher(clause).replaceAll("($1)");
+    // Step 1: Find "FROM <tableName> <alias>" patterns and build alias→Entity map
+    Map<String, Entity> aliasEntityMap = new HashMap<>();
+    Matcher fromMatcher = FROM_WITH_ALIAS.matcher(clause);
+    StringBuffer step1 = new StringBuffer();
+    while (fromMatcher.find()) {
+      String tableName = fromMatcher.group(1);
+      String alias = fromMatcher.group(2);
+      // Try by HQL entity name first, then by SQL table name.
+      // ModelProvider.getEntity() throws if not found, so we catch and fall through.
+      Entity entity = null;
+      try {
+        entity = ModelProvider.getInstance().getEntity(tableName);
+      } catch (Exception e) {
+        // Not a valid HQL entity name — try as SQL table name below
+      }
+      if (entity != null) {
+        aliasEntityMap.put(alias, entity);
+        continue; // already a valid HQL entity name, no replacement needed
+      }
+      entity = ModelProvider.getInstance().getEntityByTableName(tableName);
+      if (entity != null) {
+        aliasEntityMap.put(alias, entity);
+        log.debug("Translating SQL table name [{}] → HQL entity [{}]", tableName, entity.getName());
+        fromMatcher.appendReplacement(step1,
+            Matcher.quoteReplacement("FROM " + entity.getName() + " " + alias));
+      }
+    }
+    fromMatcher.appendTail(step1);
+    String result = step1.toString();
+
+    // Step 2: Translate alias.columnName → alias.propertyName for each known alias
+    for (Map.Entry<String, Entity> entry : aliasEntityMap.entrySet()) {
+      String alias = entry.getKey();
+      Entity entity = entry.getValue();
+      Pattern colRef = Pattern.compile("\\b" + Pattern.quote(alias) + "\\.(\\w+)");
+      Matcher colMatcher = colRef.matcher(result);
+      StringBuffer step2 = new StringBuffer();
+      while (colMatcher.find()) {
+        String columnName = colMatcher.group(1);
+        Property prop = entity.getPropertyByColumnName(columnName, false);
+        if (prop != null) {
+          // FK columns (associations) need .id appended for HQL comparison
+          String hqlRef = prop.isPrimitive()
+              ? alias + "." + prop.getName()
+              : alias + "." + prop.getName() + ".id";
+          log.debug("Translating column [{}] → HQL property [{}]", columnName, hqlRef);
+          colMatcher.appendReplacement(step2, Matcher.quoteReplacement(hqlRef));
+        }
+        // If property not found, leave original (might be a valid HQL reference already)
+      }
+      colMatcher.appendTail(step2);
+      result = step2.toString();
+    }
+
+    return result;
   }
 
   /**
