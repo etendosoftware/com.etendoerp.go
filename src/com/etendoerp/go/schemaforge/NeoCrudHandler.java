@@ -267,8 +267,8 @@ class NeoCrudHandler {
     }
     if (where.length() > 0) {
       params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, where.toString());
-      params.put(JsonConstants.USE_ALIAS, "true");
     }
+    params.put(JsonConstants.USE_ALIAS, "true");
   }
 
   /**
