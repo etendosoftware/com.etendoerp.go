@@ -25,6 +25,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.geography.Country;
@@ -53,6 +54,10 @@ import org.openbravo.model.common.geography.Region;
 public class ContactsLocationAddressHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ContactsLocationAddressHandler.class);
+  private static final String FIELD_SHIP_TO_ADDRESS = "shipToAddress";
+  private static final String FIELD_INVOICE_TO_ADDRESS = "invoiceToAddress";
+  private static final String FIELD_COUNTRY = "country";
+  private static final String FIELD_REGION = "region";
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
@@ -66,6 +71,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         return handleUpdate(ctx);
       }
     } catch (Exception e) {
+      SessionHandler.getInstance().rollback();
       log.error("ContactsLocationAddressHandler error in {}", method, e);
       return NeoResponse.error(500, "Location handler error: " + e.getMessage());
     }
@@ -121,8 +127,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       bpLoc.setBusinessPartner(bp);
       bpLoc.setLocationAddress(geoLoc);
       bpLoc.setName(str(body, "name", "."));
-      bpLoc.setShipToAddress(boolField(body, "shipToAddress", true));
-      bpLoc.setInvoiceToAddress(boolField(body, "invoiceToAddress", true));
+      bpLoc.setShipToAddress(boolField(body, FIELD_SHIP_TO_ADDRESS, true));
+      bpLoc.setInvoiceToAddress(boolField(body, FIELD_INVOICE_TO_ADDRESS, true));
       bpLoc.setPayFromAddress(Boolean.TRUE);
       bpLoc.setRemitToAddress(Boolean.TRUE);
       OBDal.getInstance().save(bpLoc);
@@ -160,11 +166,13 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       if (nameVal != null) {
         bpLoc.setName(nameVal);
       }
-      if (body.has("shipToAddress")) {
-        bpLoc.setShipToAddress(boolField(body, "shipToAddress", Boolean.TRUE.equals(bpLoc.isShipToAddress())));
+      if (body.has(FIELD_SHIP_TO_ADDRESS)) {
+        bpLoc.setShipToAddress(boolField(body, FIELD_SHIP_TO_ADDRESS,
+            Boolean.TRUE.equals(bpLoc.isShipToAddress())));
       }
-      if (body.has("invoiceToAddress")) {
-        bpLoc.setInvoiceToAddress(boolField(body, "invoiceToAddress", Boolean.TRUE.equals(bpLoc.isInvoiceToAddress())));
+      if (body.has(FIELD_INVOICE_TO_ADDRESS)) {
+        bpLoc.setInvoiceToAddress(boolField(body, FIELD_INVOICE_TO_ADDRESS,
+            Boolean.TRUE.equals(bpLoc.isInvoiceToAddress())));
       }
 
       OBDal.getInstance().flush();
@@ -191,8 +199,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     if (dataArr == null || dataArr.length() == 0) {
       return null;
     }
-    JSONObject record = dataArr.getJSONObject(0);
-    String geoLocId = nullIfEmpty(record.optString("locationAddress", null));
+    JSONObject locationJson = dataArr.getJSONObject(0);
+    String geoLocId = nullIfEmpty(locationJson.optString("locationAddress", null));
     if (geoLocId == null) {
       return null;
     }
@@ -204,7 +212,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       if (geoLoc == null) {
         return null;
       }
-      putGeoLocFields(record, geoLoc);
+      putGeoLocFields(locationJson, geoLoc);
       return NeoResponse.ok(body);
     } finally {
       OBContext.restorePreviousMode();
@@ -220,7 +228,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     geoLoc.setCityName(nullIfEmpty(body.optString("cityName", null)));
     geoLoc.setPostalCode(nullIfEmpty(body.optString("postalCode", null)));
 
-    String countryId = nullIfEmpty(body.optString("country", null));
+    String countryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
     if (countryId != null) {
       Country country = OBDal.getInstance().get(Country.class, countryId);
       if (country != null) {
@@ -228,8 +236,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       }
     }
 
-    String regionId = nullIfEmpty(body.optString("region", null));
-    if (body.has("region")) {
+    String regionId = nullIfEmpty(body.optString(FIELD_REGION, null));
+    if (body.has(FIELD_REGION)) {
       if (regionId != null) {
         Region region = OBDal.getInstance().get(Region.class, regionId);
         geoLoc.setRegion(region);
@@ -239,44 +247,45 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     }
   }
 
-  private static void putGeoLocFields(JSONObject record,
+  private static void putGeoLocFields(JSONObject locationJson,
       org.openbravo.model.common.geography.Location geoLoc) throws Exception {
-    record.put("addressLine1", geoLoc.getAddressLine1() != null ? geoLoc.getAddressLine1() : JSONObject.NULL);
-    record.put("addressLine2", geoLoc.getAddressLine2() != null ? geoLoc.getAddressLine2() : JSONObject.NULL);
-    record.put("cityName",     geoLoc.getCityName()     != null ? geoLoc.getCityName()     : JSONObject.NULL);
-    record.put("postalCode",   geoLoc.getPostalCode()   != null ? geoLoc.getPostalCode()   : JSONObject.NULL);
+    locationJson.put("addressLine1", geoLoc.getAddressLine1() != null ? geoLoc.getAddressLine1() : JSONObject.NULL);
+    locationJson.put("addressLine2", geoLoc.getAddressLine2() != null ? geoLoc.getAddressLine2() : JSONObject.NULL);
+    locationJson.put("cityName",     geoLoc.getCityName()     != null ? geoLoc.getCityName()     : JSONObject.NULL);
+    locationJson.put("postalCode",   geoLoc.getPostalCode()   != null ? geoLoc.getPostalCode()   : JSONObject.NULL);
 
     if (geoLoc.getCountry() != null) {
-      record.put("country",             geoLoc.getCountry().getId());
-      record.put("country$_identifier", geoLoc.getCountry().getName());
+      locationJson.put(FIELD_COUNTRY,             geoLoc.getCountry().getId());
+      locationJson.put("country$_identifier", geoLoc.getCountry().getName());
     } else {
-      record.put("country",             JSONObject.NULL);
-      record.put("country$_identifier", JSONObject.NULL);
+      locationJson.put(FIELD_COUNTRY,             JSONObject.NULL);
+      locationJson.put("country$_identifier", JSONObject.NULL);
     }
     if (geoLoc.getRegion() != null) {
-      record.put("region",             geoLoc.getRegion().getId());
-      record.put("region$_identifier", geoLoc.getRegion().getName());
+      locationJson.put(FIELD_REGION,             geoLoc.getRegion().getId());
+      locationJson.put("region$_identifier", geoLoc.getRegion().getName());
     } else {
-      record.put("region",             JSONObject.NULL);
-      record.put("region$_identifier", JSONObject.NULL);
+      locationJson.put(FIELD_REGION,             JSONObject.NULL);
+      locationJson.put("region$_identifier", JSONObject.NULL);
     }
   }
 
   private static JSONObject buildRecord(org.openbravo.model.common.businesspartner.Location bpLoc,
       org.openbravo.model.common.geography.Location geoLoc) throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("id",             bpLoc.getId());
-    record.put("locationAddress", geoLoc.getId());
-    record.put("name",           bpLoc.getName() != null ? bpLoc.getName() : JSONObject.NULL);
-    record.put("shipToAddress",  Boolean.TRUE.equals(bpLoc.isShipToAddress())   ? "Y" : "N");
-    record.put("invoiceToAddress", Boolean.TRUE.equals(bpLoc.isInvoiceToAddress()) ? "Y" : "N");
-    putGeoLocFields(record, geoLoc);
-    return record;
+    JSONObject locationJson = new JSONObject();
+    locationJson.put("id",             bpLoc.getId());
+    locationJson.put("locationAddress", geoLoc.getId());
+    locationJson.put("name",           bpLoc.getName() != null ? bpLoc.getName() : JSONObject.NULL);
+    locationJson.put(FIELD_SHIP_TO_ADDRESS,  Boolean.TRUE.equals(bpLoc.isShipToAddress()) ? "Y" : "N");
+    locationJson.put(FIELD_INVOICE_TO_ADDRESS,
+        Boolean.TRUE.equals(bpLoc.isInvoiceToAddress()) ? "Y" : "N");
+    putGeoLocFields(locationJson, geoLoc);
+    return locationJson;
   }
 
-  private static NeoResponse wrapRecord(JSONObject record, int httpStatus) throws Exception {
+  private static NeoResponse wrapRecord(JSONObject locationJson, int httpStatus) throws Exception {
     JSONArray dataArr = new JSONArray();
-    dataArr.put(record);
+    dataArr.put(locationJson);
     JSONObject responseData = new JSONObject();
     responseData.put("status", 0);
     responseData.put("data", dataArr);
