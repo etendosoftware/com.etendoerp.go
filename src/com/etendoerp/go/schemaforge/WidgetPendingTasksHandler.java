@@ -66,6 +66,8 @@ public class WidgetPendingTasksHandler implements NeoHandler {
         addPurchaseInvoicesToConfirm(data, clientId);
         addPendingShipments(data, clientId);
         addPurchaseOrdersToConfirm(data, clientId);
+        addPendingReceptions(data, clientId);
+        addPendingSalesDeliveries(data, clientId);
         addLowStockAlerts(data, clientId);
 
         JSONObject responseData = new JSONObject();
@@ -283,6 +285,86 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     if (count == 1) {
       task.put("detail", (String) rows.get(0)[0]);
     }
+    data.put(task);
+  }
+
+  /**
+   * Pending sales deliveries: confirmed sales orders where delivery status < 100%.
+   */
+  private void addPendingSalesDeliveries(JSONArray data, String clientId) throws Exception {
+    String sql = "SELECT COUNT(*)"
+        + " FROM c_order o"
+        + " WHERE o.issotrx = 'Y'"
+        + "   AND o.docstatus = 'CO'"
+        + "   AND o.iscancelled = 'N'"
+        + "   AND o.cancelledorder_id IS NULL"
+        + "   AND o.ad_client_id = :clientId"
+        + "   AND COALESCE(("
+        + "     SELECT CASE"
+        + "       WHEN SUM(ABS(ol.qtyordered)) = 0 THEN 0"
+        + "       ELSE ROUND(COALESCE(SUM(ABS(ol.qtydelivered)), 0)"
+        + "            / SUM(ABS(ol.qtyordered)) * 100, 0)"
+        + "     END"
+        + "     FROM c_orderline ol"
+        + "     WHERE ol.c_order_id = o.c_order_id"
+        + "       AND ol.c_order_discount_id IS NULL"
+        + "   ), 0) < 100";
+
+    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
+    long count = ((Number) query.uniqueResult()).longValue();
+
+    if (count == 0) {
+      return;
+    }
+
+    JSONObject task = new JSONObject();
+    task.put("type", TYPE_INFO);
+    task.put("text", count + " sales order" + (count != 1 ? "s" : "") + " pending delivery");
+    task.put(JSON_NAVIGATION, navigationFilter("sales-order", "pendingDelivery"));
+    task.put("link", "/sales-order?filter=pendingDelivery");
+    task.put(JSON_COUNT, count);
+    task.put(JSON_TASK_KEY, count > 1 ? "pendingSalesDeliveries_plural" : "pendingSalesDeliveries");
+    data.put(task);
+  }
+
+  /**
+   * Pending receptions: confirmed purchase orders where delivery status < 100%.
+   */
+  private void addPendingReceptions(JSONArray data, String clientId) throws Exception {
+    String sql = "SELECT COUNT(*)"
+        + " FROM c_order o"
+        + " WHERE o.issotrx = 'N'"
+        + "   AND o.docstatus = 'CO'"
+        + "   AND o.iscancelled = 'N'"
+        + "   AND o.cancelledorder_id IS NULL"
+        + "   AND o.ad_client_id = :clientId"
+        + "   AND COALESCE(("
+        + "     SELECT CASE"
+        + "       WHEN SUM(ABS(ol.qtyordered)) = 0 THEN 0"
+        + "       ELSE ROUND(COALESCE(SUM(ABS(ol.qtyreserved)), 0)"
+        + "            / SUM(ABS(ol.qtyordered)) * 100, 0)"
+        + "     END"
+        + "     FROM c_orderline ol"
+        + "     WHERE ol.c_order_id = o.c_order_id"
+        + "       AND ol.c_order_discount_id IS NULL"
+        + "   ), 0) < 100";
+
+    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
+    long count = ((Number) query.uniqueResult()).longValue();
+
+    if (count == 0) {
+      return;
+    }
+
+    JSONObject task = new JSONObject();
+    task.put("type", TYPE_INFO);
+    task.put("text", count + " purchase order" + (count != 1 ? "s" : "") + " pending reception");
+    task.put(JSON_NAVIGATION, navigationFilter("purchase-order", "pendingDelivery"));
+    task.put("link", "/purchase-order?filter=pendingDelivery");
+    task.put(JSON_COUNT, count);
+    task.put(JSON_TASK_KEY, count > 1 ? "pendingReceptions_plural" : "pendingReceptions");
     data.put(task);
   }
 
