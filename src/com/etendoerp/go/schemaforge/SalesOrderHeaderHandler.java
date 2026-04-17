@@ -17,9 +17,9 @@
 
 package com.etendoerp.go.schemaforge;
 
+import javax.enterprise.context.ApplicationScoped;
+import javax.inject.Inject;
 import javax.inject.Named;
-
-import org.openbravo.base.weld.WeldUtils;
 
 /**
  * NeoHandler for the Sales Order header entity.
@@ -35,12 +35,16 @@ import org.openbravo.base.weld.WeldUtils;
  * {@code null} when the request does not apply, so this class needs no
  * additional routing conditions.
  */
+@ApplicationScoped
 @Named("salesOrderHeaderHandler")
 public class SalesOrderHeaderHandler implements NeoHandler {
 
+  @Inject
+  private NeoCloneRecordHandler cloneRecordHandler;
+
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse result = WeldUtils.getInstanceFromStaticBeanManager(NeoCloneRecordHandler.class).handle(context);
+    NeoResponse result = cloneRecordHandler.handle(context);
     if (result != null) {
       return result;
     }

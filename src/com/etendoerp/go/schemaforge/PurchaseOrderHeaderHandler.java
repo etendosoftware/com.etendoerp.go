@@ -17,9 +17,9 @@
 
 package com.etendoerp.go.schemaforge;
 
+import javax.enterprise.context.ApplicationScoped;
+import javax.inject.Inject;
 import javax.inject.Named;
-
-import org.openbravo.base.weld.WeldUtils;
 
 /**
  * NeoHandler for the Purchase Order header entity.
@@ -34,12 +34,16 @@ import org.openbravo.base.weld.WeldUtils;
  * Other actions (e.g. {@code documentAction}) return {@code null} here and
  * fall through to the default AD process execution path.
  */
+@ApplicationScoped
 @Named("purchaseOrderHeaderHandler")
 public class PurchaseOrderHeaderHandler implements NeoHandler {
 
+  @Inject
+  private NeoCloneRecordHandler cloneRecordHandler;
+
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse result = WeldUtils.getInstanceFromStaticBeanManager(NeoCloneRecordHandler.class).handle(context);
+    NeoResponse result = cloneRecordHandler.handle(context);
     if (result != null) {
       return result;
     }
