@@ -21,20 +21,16 @@ import javax.inject.Inject;
 import javax.inject.Named;
 
 /**
- * NeoHandler for the Purchase Order header entity.
+ * NeoHandler for the Sales Invoice header entity.
  *
  * Dispatches custom ACTION requests to the appropriate handler:
  * <ul>
- *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler}</li>
- *   <li>{@code createGoodsReceipt} → {@link CreateGoodsReceiptHandler}</li>
- *   <li>{@code createPurchaseInvoice} → {@link CreatePurchaseInvoiceHandler}</li>
+ *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler} (uses {@code CloneInvoiceHook})</li>
+ *   <li>{@code registerPayment} / {@code invoicePayments} / {@code invoiceAccounts} → {@link RegisterPaymentHandler}</li>
  * </ul>
- *
- * Other actions (e.g. {@code documentAction}) return {@code null} here and
- * fall through to the default AD process execution path.
  */
-@Named("purchaseOrderHeaderHandler")
-public class PurchaseOrderHeaderHandler implements NeoHandler {
+@Named("salesInvoiceHeaderHandler")
+public class SalesInvoiceHeaderHandler implements NeoHandler {
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
@@ -45,10 +41,6 @@ public class PurchaseOrderHeaderHandler implements NeoHandler {
     if (result != null) {
       return result;
     }
-    result = new CreateGoodsReceiptHandler().handle(context);
-    if (result != null) {
-      return result;
-    }
-    return new CreatePurchaseInvoiceHandler().handle(context);
+    return new RegisterPaymentHandler().handle(context);
   }
 }
