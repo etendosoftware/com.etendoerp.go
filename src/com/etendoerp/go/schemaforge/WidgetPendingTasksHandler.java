@@ -61,6 +61,8 @@ public class WidgetPendingTasksHandler implements NeoHandler {
         JSONArray data = new JSONArray();
 
         addOverdueInvoices(data, clientId);
+        addCollectionsDueToday(data, clientId);
+        addPaymentsDueToday(data, clientId);
         addPendingReceptions(data, clientId);
         addPendingSalesDeliveries(data, clientId);
         addLowStockAlerts(data, clientId);
@@ -112,6 +114,72 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     task.put(JSON_COUNT, count);
     task.put(JSON_TASK_KEY, count > 1 ? "overdueInvoices_plural" : "overdueInvoices");
     task.put("amount", totalAmount);
+    data.put(task);
+  }
+
+  /**
+   * Collections due today: sales invoices with a payment schedule entry due today or earlier with outstanding > 0.
+   */
+  private void addCollectionsDueToday(JSONArray data, String clientId) throws Exception {
+    String sql = "SELECT COUNT(*)"
+        + " FROM c_invoice ci"
+        + " WHERE ci.issotrx = 'Y'"
+        + "   AND ci.docstatus = 'CO'"
+        + "   AND ci.outstandingamt > 0"
+        + "   AND ci.ad_client_id = :clientId"
+        + "   AND EXISTS ("
+        + "     SELECT 1 FROM fin_payment_schedule fps"
+        + "     WHERE fps.c_invoice_id = ci.c_invoice_id"
+        + "       AND fps.duedate = CURRENT_DATE"
+        + "   )";
+
+    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
+    long count = ((Number) query.uniqueResult()).longValue();
+    if (count == 0) {
+      return;
+    }
+
+    JSONObject task = new JSONObject();
+    task.put("type", TYPE_WARNING);
+    task.put("text", count + " collection" + (count != 1 ? "s" : "") + " due today");
+    task.put(JSON_NAVIGATION, navigationFilter("sales-invoice", "overdue"));
+    task.put("link", "/sales-invoice?filter=overdue");
+    task.put(JSON_COUNT, count);
+    task.put(JSON_TASK_KEY, count > 1 ? "collectionsDueToday_plural" : "collectionsDueToday");
+    data.put(task);
+  }
+
+  /**
+   * Payments due today: purchase invoices with a payment schedule entry due today or earlier with outstanding > 0.
+   */
+  private void addPaymentsDueToday(JSONArray data, String clientId) throws Exception {
+    String sql = "SELECT COUNT(*)"
+        + " FROM c_invoice ci"
+        + " WHERE ci.issotrx = 'N'"
+        + "   AND ci.docstatus = 'CO'"
+        + "   AND ci.outstandingamt > 0"
+        + "   AND ci.ad_client_id = :clientId"
+        + "   AND EXISTS ("
+        + "     SELECT 1 FROM fin_payment_schedule fps"
+        + "     WHERE fps.c_invoice_id = ci.c_invoice_id"
+        + "       AND fps.duedate = CURRENT_DATE"
+        + "   )";
+
+    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
+    long count = ((Number) query.uniqueResult()).longValue();
+    if (count == 0) {
+      return;
+    }
+
+    JSONObject task = new JSONObject();
+    task.put("type", TYPE_WARNING);
+    task.put("text", count + " payment" + (count != 1 ? "s" : "") + " due today");
+    task.put(JSON_NAVIGATION, navigationFilter("purchase-invoice", "overdue"));
+    task.put("link", "/purchase-invoice?filter=overdue");
+    task.put(JSON_COUNT, count);
+    task.put(JSON_TASK_KEY, count > 1 ? "paymentsDueToday_plural" : "paymentsDueToday");
     data.put(task);
   }
 
