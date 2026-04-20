@@ -1365,6 +1365,51 @@ public class NeoDefaultsService {
   }
 
   /**
+   * For order/quotation lines, when 'grossUnitPrice' is present but 'lineGrossAmount' is zero
+   * or missing, compute it as grossUnitPrice × orderedQuantity.
+   *
+   * Same pattern as injectGrossAmountIfMissing for invoice lines: the callout fires when qty
+   * is still 0 and leaves lineGrossAmount = 0; the DB trigger c_orderline_trg then overwrites
+   * line_gross_amount but Hibernate's cache holds the stale zero. Injecting before save avoids
+   * having to refresh the entity to get the correct value in the response.
+   */
+  public static void injectLineGrossAmountIfMissing(JSONObject body) {
+    if (body == null) {
+      return;
+    }
+    double grossUnitPrice;
+    try {
+      grossUnitPrice = body.optDouble("grossUnitPrice", 0);
+    } catch (Exception e) {
+      return;
+    }
+    if (grossUnitPrice <= 0) {
+      return;
+    }
+    double existing = body.optDouble("lineGrossAmount", 0);
+    if (existing != 0) {
+      return;
+    }
+    double qty;
+    try {
+      qty = Double.parseDouble(body.optString("orderedQuantity", "0"));
+    } catch (NumberFormatException e) {
+      return;
+    }
+    if (qty == 0) {
+      return;
+    }
+    try {
+      double computed = grossUnitPrice * qty;
+      body.put("lineGrossAmount", computed);
+      log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} from grossUnitPrice={} × qty={}",
+          computed, grossUnitPrice, qty);
+    } catch (Exception e) {
+      log.debug("Could not compute lineGrossAmount: {}", e.getMessage());
+    }
+  }
+
+  /**
    * Fallback: when lineNetAmount is absent or zero after the callout cascade, compute it as
    * invoicedQuantity × unitPrice. This covers products where SL_Invoice_Amt throws
    * (e.g. products without a standard cost or price list entry in the sales context,
