@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import javax.inject.Inject;
 import javax.inject.Named;
 
 /**
@@ -24,6 +25,7 @@ import javax.inject.Named;
  *
  * Dispatches custom ACTION requests to the appropriate handler:
  * <ul>
+ *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler}</li>
  *   <li>{@code createGoodsReceipt} → {@link CreateGoodsReceiptHandler}</li>
  *   <li>{@code createPurchaseInvoice} → {@link CreatePurchaseInvoiceHandler}</li>
  * </ul>
@@ -34,9 +36,12 @@ import javax.inject.Named;
 @Named("purchaseOrderHeaderHandler")
 public class PurchaseOrderHeaderHandler implements NeoHandler {
 
+  @Inject
+  private NeoCloneRecordHandler cloneRecordHandler;
+
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse result = new CloneOrderHandler().handle(context);
+    NeoResponse result = cloneRecordHandler.handle(context);
     if (result != null) {
       return result;
     }
