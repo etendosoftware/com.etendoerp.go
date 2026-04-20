@@ -1365,29 +1365,24 @@ public class NeoDefaultsService {
   }
 
   /**
-   * For order/quotation lines, when 'grossUnitPrice' is present but 'lineGrossAmount' is zero
-   * or missing, compute it as grossUnitPrice × orderedQuantity.
-   *
-   * Same pattern as injectGrossAmountIfMissing for invoice lines: the callout fires when qty
-   * is still 0 and leaves lineGrossAmount = 0; the DB trigger c_orderline_trg then overwrites
-   * line_gross_amount but Hibernate's cache holds the stale zero. Injecting before save avoids
-   * having to refresh the entity to get the correct value in the response.
+   * For order/quotation lines, when 'lineGrossAmount' is zero or missing, compute it as
+   * effectiveUnitPrice × orderedQuantity. Uses grossUnitPrice if present and non-zero,
+   * falls back to unitPrice for net-price list quotations where the callout does not
+   * populate grossUnitPrice.
    */
   public static void injectLineGrossAmountIfMissing(JSONObject body) {
     if (body == null) {
       return;
     }
-    double grossUnitPrice;
-    try {
-      grossUnitPrice = body.optDouble("grossUnitPrice", 0);
-    } catch (Exception e) {
-      return;
-    }
-    if (grossUnitPrice <= 0) {
-      return;
-    }
     double existing = body.optDouble("lineGrossAmount", 0);
     if (existing != 0) {
+      return;
+    }
+    double effectivePrice = body.optDouble("grossUnitPrice", 0);
+    if (effectivePrice <= 0) {
+      effectivePrice = body.optDouble("unitPrice", 0);
+    }
+    if (effectivePrice <= 0) {
       return;
     }
     double qty;
@@ -1400,10 +1395,10 @@ public class NeoDefaultsService {
       return;
     }
     try {
-      double computed = grossUnitPrice * qty;
+      double computed = effectivePrice * qty;
       body.put("lineGrossAmount", computed);
-      log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} from grossUnitPrice={} × qty={}",
-          computed, grossUnitPrice, qty);
+      log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} from price={} × qty={}",
+          computed, effectivePrice, qty);
     } catch (Exception e) {
       log.debug("Could not compute lineGrossAmount: {}", e.getMessage());
     }
