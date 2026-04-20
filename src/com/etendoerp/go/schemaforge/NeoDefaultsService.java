@@ -26,7 +26,6 @@ import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.dal.service.OBQuery;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
@@ -1136,82 +1135,32 @@ public class NeoDefaultsService {
   }
 
   /**
-   * Auto-pick the first available FK option for mandatory FK columns that have no resolved default.
-   * Replicates Classic Etendo behavior: UIDefinition.getValueInComboReference() always picks the
-   * alphabetically-first combo entry when no explicit default is configured.
+   * Auto-pick the first available combo option for mandatory FK columns that have no resolved
+   * default. Shares the FIC-parity logic with {@link #resolveFirstComboOption}: only columns
+   * whose {@code AD_Reference} renders as a combo in Classic (TableDir=19, Table=18, List=17)
+   * get preselected, and the lookup is routed through {@link NeoSelectorService#querySelectorByColumn}
+   * so {@code AD_Val_Rule} and readable-orgs filters are honored.
    *
-   * <p>Applies to TableDir (17), Table (18), Search (30), and OBUISEL_Selector references.
-   * Skips non-FK columns and columns where a default was already resolved.
+   * <p>Search (30), OBUISEL_Selector, and Tree references are intentionally skipped — Classic
+   * leaves them empty on NEW as well.</p>
    *
-   * <p>TODO(ETP-3813): align this CREATE-path fallback with the FIC-parity logic used in
-   * {@link #resolveFirstComboOption}. Classic FIC only preselects row [0] for combo references
-   * (TableDir=19, Table=18, List=17) via {@code FKComboUIDefinition}/{@code EnumUIDefinition};
-   * Search (30) and OBUISEL_Selector do NOT preselect. This method is still broader (includes
-   * Search + OBUISEL and hardcodes pricelist/BP filters) because it also guards against NOT NULL
-   * violations when partial payloads reach persistence — narrowing it needs validation across
-   * every CREATE flow first to avoid breaking integrations that rely on the current behavior.
-   * Ideally this should also route through {@link NeoSelectorService#querySelectorByColumn}
-   * so AD_Val_Rule is honored instead of hardcoded filters.</p>
-   *
-   * @return true if a value was injected, false if not applicable or lookup was empty
+   * @return true if a value was injected, false if the column is not a combo reference or the
+   *         selector returned no rows
    */
   private static boolean tryInjectFirstFromLookup(JSONObject body, Entity dalEntity,
       String propName, Column col, NeoContext ctx) {
+    Object firstId = resolveFirstComboOption(col, ctx);
+    if (firstId == null) {
+      return false;
+    }
     try {
-      String baseRefId = NeoSelectorService.getBaseReferenceId(col);
-      boolean isFk = NeoSelectorService.isFkReference(baseRefId)
-          || NeoSelectorService.REF_OBUISEL.equals(baseRefId);
-      if (!isFk) {
-        return false;
-      }
-      SelectorMeta target = NeoSelectorService.resolveTarget(col, baseRefId);
-      if (target == null || target.entityName == null) {
-        return false;
-      }
-
-      // Build an org-scoped query — include org "0" for shared master data
-      SelectorQueryBuilder.HqlWithParams orgPredicate =
-          SelectorQueryBuilder.buildReadableOrgsPredicate(target.entityName, "e", true);
-      StringBuilder where = new StringBuilder("as e where e.active = true");
-      if (orgPredicate != null && !orgPredicate.isBlank()) {
-        where.append(" and ").append(orgPredicate.getHql());
-      }
-
-      // BusinessPartner: restrict to customers for sales windows, vendors for purchase windows,
-      // so that the first-fallback never picks a BP that is invalid for the selector.
-      if ("BusinessPartner".equals(target.entityName)
-          && ctx != null && ctx.getAdTab() != null && ctx.getAdTab().getWindow() != null) {
-        boolean isSales = Boolean.TRUE.equals(ctx.getAdTab().getWindow().isSalesTransaction());
-        where.append(isSales ? " and e.customer = true" : " and e.vendor = true");
-      }
-
-      Entity targetEntity = ModelProvider.getInstance().getEntity(target.entityName);
-      if (targetEntity == null) {
-        return false;
-      }
-      String idProp = NeoSelectorService.findIdentifierProperty(targetEntity);
-      if (idProp == null) {
-        return false;
-      }
-      where.append(" order by e.").append(idProp);
-
-      OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(target.entityName,
-          where.toString());
-      if (orgPredicate != null && !orgPredicate.isBlank()) {
-        NeoSelectorExecutionHelper.bindNamedParameters(query, orgPredicate.getParams());
-      }
-      query.setMaxResult(1);
-      List<BaseOBObject> results = query.list();
-      if (results.isEmpty()) {
-        return false;
-      }
-      String firstId = (String) results.get(0).getId();
       body.put(propName, firstId);
-      tryInjectIdentifier(body, dalEntity, propName, firstId);
-      log.debug("Auto-injected first FK option: {} = {}", propName, firstId);
+      tryInjectIdentifier(body, dalEntity, propName, firstId.toString());
+      log.debug("Auto-injected first combo option: {} = {}", propName, firstId);
       return true;
     } catch (Exception e) {
-      log.debug("Could not auto-pick first FK for {}: {}", col.getDBColumnName(), e.getMessage());
+      log.debug("Could not auto-pick first combo option for {}: {}",
+          col.getDBColumnName(), e.getMessage());
       return false;
     }
   }
