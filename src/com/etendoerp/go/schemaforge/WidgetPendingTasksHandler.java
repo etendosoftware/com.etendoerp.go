@@ -43,10 +43,16 @@ public class WidgetPendingTasksHandler implements NeoHandler {
   private static final String PARAM_CLIENT_ID = "clientId";
   private static final String JSON_COUNT = "count";
   private static final String JSON_TASK_KEY = "taskKey";
+  private static final String JSON_TYPE = "type";
+  private static final String JSON_TEXT = "text";
+  private static final String JSON_LINK = "link";
 
   private static final String TYPE_WARNING = "warning";
   private static final String TYPE_INFO = "info";
   private static final String JSON_NAVIGATION = "navigation";
+  private static final String NAVIGATION_TYPE_LIST = "list";
+  private static final String FILTER_OVERDUE = "overdue";
+  private static final String FILTER_PENDING_DELIVERY = "pendingDelivery";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -106,13 +112,13 @@ public class WidgetPendingTasksHandler implements NeoHandler {
         ? (BigDecimal) row[1]
         : new BigDecimal(row[1].toString());
 
-    JSONObject task = new JSONObject();
-    task.put("type", TYPE_WARNING);
-    task.put("text", count + " overdue invoice" + (count != 1 ? "s" : ""));
-    task.put(JSON_NAVIGATION, navigationFilter("sales-invoice", "overdue"));
-    task.put("link", "/sales-invoice?filter=overdue");
-    task.put(JSON_COUNT, count);
-    task.put(JSON_TASK_KEY, count > 1 ? "overdueInvoices_plural" : "overdueInvoices");
+    JSONObject task = buildTask(TYPE_WARNING,
+        count + " overdue invoice" + (count != 1 ? "s" : ""),
+        "sales-invoice",
+        FILTER_OVERDUE,
+        "/sales-invoice?filter=" + FILTER_OVERDUE,
+        count,
+        count > 1 ? "overdueInvoices_plural" : "overdueInvoices");
     task.put("amount", totalAmount);
     data.put(task);
   }
@@ -121,42 +127,23 @@ public class WidgetPendingTasksHandler implements NeoHandler {
    * Collections due today: sales invoices with a payment schedule entry due today or earlier with outstanding > 0.
    */
   private void addCollectionsDueToday(JSONArray data, String clientId) throws Exception {
-    String sql = "SELECT COUNT(*)"
-        + " FROM c_invoice ci"
-        + " WHERE ci.issotrx = 'Y'"
-        + "   AND ci.docstatus = 'CO'"
-        + "   AND ci.outstandingamt > 0"
-        + "   AND ci.ad_client_id = :clientId"
-        + "   AND EXISTS ("
-        + "     SELECT 1 FROM fin_payment_schedule fps"
-        + "     WHERE fps.c_invoice_id = ci.c_invoice_id"
-        + "       AND fps.duedate = CURRENT_DATE"
-        + "   )";
-
-    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
-    query.setParameter(PARAM_CLIENT_ID, clientId);
-    long count = ((Number) query.uniqueResult()).longValue();
-    if (count == 0) {
-      return;
-    }
-
-    JSONObject task = new JSONObject();
-    task.put("type", TYPE_WARNING);
-    task.put("text", count + " collection" + (count != 1 ? "s" : "") + " due today");
-    task.put(JSON_NAVIGATION, navigationFilter("sales-invoice", "overdue"));
-    task.put("link", "/sales-invoice?filter=overdue");
-    task.put(JSON_COUNT, count);
-    task.put(JSON_TASK_KEY, count > 1 ? "collectionsDueToday_plural" : "collectionsDueToday");
-    data.put(task);
+    addDueTodayInvoicesTask(data, clientId, "Y", "collection", "sales-invoice",
+        "/sales-invoice?filter=" + FILTER_OVERDUE, "collectionsDueToday");
   }
 
   /**
    * Payments due today: purchase invoices with a payment schedule entry due today or earlier with outstanding > 0.
    */
   private void addPaymentsDueToday(JSONArray data, String clientId) throws Exception {
+    addDueTodayInvoicesTask(data, clientId, "N", "payment", "purchase-invoice",
+        "/purchase-invoice?filter=" + FILTER_OVERDUE, "paymentsDueToday");
+  }
+
+  private void addDueTodayInvoicesTask(JSONArray data, String clientId, String isSalesTransaction,
+      String entityLabel, String window, String link, String taskKeyBase) throws Exception {
     String sql = "SELECT COUNT(*)"
         + " FROM c_invoice ci"
-        + " WHERE ci.issotrx = 'N'"
+        + " WHERE ci.issotrx = :isSalesTransaction"
         + "   AND ci.docstatus = 'CO'"
         + "   AND ci.outstandingamt > 0"
         + "   AND ci.ad_client_id = :clientId"
@@ -168,19 +155,19 @@ public class WidgetPendingTasksHandler implements NeoHandler {
 
     NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
     query.setParameter(PARAM_CLIENT_ID, clientId);
+    query.setParameter("isSalesTransaction", isSalesTransaction);
     long count = ((Number) query.uniqueResult()).longValue();
     if (count == 0) {
       return;
     }
 
-    JSONObject task = new JSONObject();
-    task.put("type", TYPE_WARNING);
-    task.put("text", count + " payment" + (count != 1 ? "s" : "") + " due today");
-    task.put(JSON_NAVIGATION, navigationFilter("purchase-invoice", "overdue"));
-    task.put("link", "/purchase-invoice?filter=overdue");
-    task.put(JSON_COUNT, count);
-    task.put(JSON_TASK_KEY, count > 1 ? "paymentsDueToday_plural" : "paymentsDueToday");
-    data.put(task);
+    data.put(buildTask(TYPE_WARNING,
+        count + " " + entityLabel + (count != 1 ? "s" : "") + " due today",
+        window,
+        FILTER_OVERDUE,
+        link,
+        count,
+        count > 1 ? taskKeyBase + "_plural" : taskKeyBase));
   }
 
   /**
@@ -204,12 +191,13 @@ public class WidgetPendingTasksHandler implements NeoHandler {
       return;
     }
 
-    JSONObject task = new JSONObject();
-    task.put("type", TYPE_WARNING);
-    task.put("text", count + " low stock alert" + (count != 1 ? "s" : ""));
-    task.put("link", "/physical-inventory");
-    task.put(JSON_COUNT, count);
-    task.put(JSON_TASK_KEY, count > 1 ? "lowStockAlerts_plural" : "lowStockAlerts");
+    JSONObject task = buildTask(TYPE_WARNING,
+        count + " low stock alert" + (count != 1 ? "s" : ""),
+        null,
+        null,
+        "/physical-inventory",
+        count,
+        count > 1 ? "lowStockAlerts_plural" : "lowStockAlerts");
     if (count == 1) {
       task.put("detail", (String) rows.get(0)[0]);
     }
@@ -220,49 +208,26 @@ public class WidgetPendingTasksHandler implements NeoHandler {
    * Pending sales deliveries: confirmed sales orders where delivery status < 100%.
    */
   private void addPendingSalesDeliveries(JSONArray data, String clientId) throws Exception {
-    String sql = "SELECT COUNT(*)"
-        + " FROM c_order o"
-        + " WHERE o.issotrx = 'Y'"
-        + "   AND o.docstatus = 'CO'"
-        + "   AND o.iscancelled = 'N'"
-        + "   AND o.cancelledorder_id IS NULL"
-        + "   AND o.ad_client_id = :clientId"
-        + "   AND COALESCE(("
-        + "     SELECT CASE"
-        + "       WHEN SUM(ABS(ol.qtyordered)) = 0 THEN 0"
-        + "       ELSE ROUND(COALESCE(SUM(ABS(ol.qtydelivered)), 0)"
-        + "            / SUM(ABS(ol.qtyordered)) * 100, 0)"
-        + "     END"
-        + "     FROM c_orderline ol"
-        + "     WHERE ol.c_order_id = o.c_order_id"
-        + "       AND ol.c_order_discount_id IS NULL"
-        + "   ), 0) < 100";
-
-    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
-    query.setParameter(PARAM_CLIENT_ID, clientId);
-    long count = ((Number) query.uniqueResult()).longValue();
-
-    if (count == 0) {
-      return;
-    }
-
-    JSONObject task = new JSONObject();
-    task.put("type", TYPE_INFO);
-    task.put("text", count + " sales order" + (count != 1 ? "s" : "") + " pending delivery");
-    task.put(JSON_NAVIGATION, navigationFilter("sales-order", "pendingDelivery"));
-    task.put("link", "/sales-order?filter=pendingDelivery");
-    task.put(JSON_COUNT, count);
-    task.put(JSON_TASK_KEY, count > 1 ? "pendingSalesDeliveries_plural" : "pendingSalesDeliveries");
-    data.put(task);
+    addPendingOrdersTask(data, clientId, "Y", "qtydelivered", "sales order",
+        "pending delivery", "sales-order", "/sales-order?filter=" + FILTER_PENDING_DELIVERY,
+        "pendingSalesDeliveries");
   }
 
   /**
    * Pending receptions: confirmed purchase orders where delivery status < 100%.
    */
   private void addPendingReceptions(JSONArray data, String clientId) throws Exception {
+    addPendingOrdersTask(data, clientId, "N", "qtyreserved", "purchase order",
+        "pending reception", "purchase-order", "/purchase-order?filter=" + FILTER_PENDING_DELIVERY,
+        "pendingReceptions");
+  }
+
+  private void addPendingOrdersTask(JSONArray data, String clientId, String isSalesTransaction,
+      String progressColumn, String entityLabel, String statusLabel, String window, String link,
+      String taskKeyBase) throws Exception {
     String sql = "SELECT COUNT(*)"
         + " FROM c_order o"
-        + " WHERE o.issotrx = 'N'"
+        + " WHERE o.issotrx = :isSalesTransaction"
         + "   AND o.docstatus = 'CO'"
         + "   AND o.iscancelled = 'N'"
         + "   AND o.cancelledorder_id IS NULL"
@@ -270,7 +235,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
         + "   AND COALESCE(("
         + "     SELECT CASE"
         + "       WHEN SUM(ABS(ol.qtyordered)) = 0 THEN 0"
-        + "       ELSE ROUND(COALESCE(SUM(ABS(ol.qtyreserved)), 0)"
+        + "       ELSE ROUND(COALESCE(SUM(ABS(ol." + progressColumn + ")), 0)"
         + "            / SUM(ABS(ol.qtyordered)) * 100, 0)"
         + "     END"
         + "     FROM c_orderline ol"
@@ -280,25 +245,39 @@ public class WidgetPendingTasksHandler implements NeoHandler {
 
     NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
     query.setParameter(PARAM_CLIENT_ID, clientId);
+    query.setParameter("isSalesTransaction", isSalesTransaction);
     long count = ((Number) query.uniqueResult()).longValue();
 
     if (count == 0) {
       return;
     }
 
+    data.put(buildTask(TYPE_INFO,
+        count + " " + entityLabel + (count != 1 ? "s" : "") + " " + statusLabel,
+        window,
+        FILTER_PENDING_DELIVERY,
+        link,
+        count,
+        count > 1 ? taskKeyBase + "_plural" : taskKeyBase));
+  }
+
+  private JSONObject buildTask(String type, String text, String window, String filter, String link,
+      long count, String taskKey) throws Exception {
     JSONObject task = new JSONObject();
-    task.put("type", TYPE_INFO);
-    task.put("text", count + " purchase order" + (count != 1 ? "s" : "") + " pending reception");
-    task.put(JSON_NAVIGATION, navigationFilter("purchase-order", "pendingDelivery"));
-    task.put("link", "/purchase-order?filter=pendingDelivery");
+    task.put(JSON_TYPE, type);
+    task.put(JSON_TEXT, text);
+    if (window != null && filter != null) {
+      task.put(JSON_NAVIGATION, navigationFilter(window, filter));
+    }
+    task.put(JSON_LINK, link);
     task.put(JSON_COUNT, count);
-    task.put(JSON_TASK_KEY, count > 1 ? "pendingReceptions_plural" : "pendingReceptions");
-    data.put(task);
+    task.put(JSON_TASK_KEY, taskKey);
+    return task;
   }
 
   private JSONObject navigationFilter(String window, String filter) throws Exception {
     JSONObject navigation = new JSONObject();
-    navigation.put("type", "list");
+    navigation.put(JSON_TYPE, NAVIGATION_TYPE_LIST);
     navigation.put("window", window);
     navigation.put("filter", filter);
     return navigation;
@@ -306,7 +285,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
 
   private JSONObject navigationParams(String window, JSONObject params) throws Exception {
     JSONObject navigation = new JSONObject();
-    navigation.put("type", "list");
+    navigation.put(JSON_TYPE, NAVIGATION_TYPE_LIST);
     navigation.put("window", window);
     navigation.put("params", params);
     return navigation;
