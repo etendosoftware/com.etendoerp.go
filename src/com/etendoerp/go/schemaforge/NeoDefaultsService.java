@@ -1320,29 +1320,22 @@ public class NeoDefaultsService {
     return null;
   }
   /**
-   * For tax-inclusive invoice/order lines, when 'grossUnitPrice' is present but 'grossAmount'
-   * (LINE_GROSS_AMOUNT) is zero or missing, compute it as grossUnitPrice × invoicedQuantity.
+   * Always recompute grossAmount (LINE_GROSS_AMOUNT) before persisting, covering both
+   * tax-inclusive and tax-exclusive price lists.
    *
-   * The callout (SL_Invoice_Product) fires at product selection time when qty is still 0,
-   * so it sets grossAmount = grossUnitPrice × 0 = 0. The c_invoiceline_before_trg trigger
-   * then uses LINE_GROSS_AMOUNT to compute PRICEACTUAL for tax-inclusive price lists — if it
-   * is 0, priceActual ends up as 0. This method corrects the stale callout value at save time.
+   * <p><b>Gross price list</b> (grossUnitPrice > 0): {@code grossAmount = grossUnitPrice × qty}.
+   * The price already includes tax, so no lookup needed.</p>
+   *
+   * <p><b>Net price list</b> (grossUnitPrice = 0): {@code grossAmount = lineNetAmount × (1 + rate/100)}.
+   * The tax rate is fetched from C_Tax using the 'tax' field present in the body.
+   * {@code injectLineNetAmountIfMissing} must run before this method so lineNetAmount is available.</p>
+   *
+   * <p>Mirrors the behaviour of {@link #injectLineNetAmountIfMissing}: always recomputes to
+   * override any stale value (e.g. product callout set grossAmount for qty=1 before the user
+   * changed qty).</p>
    */
   public static void injectGrossAmountIfMissing(JSONObject body) {
     if (body == null) {
-      return;
-    }
-    double grossUnitPrice;
-    try {
-      grossUnitPrice = body.optDouble("grossUnitPrice", 0);
-    } catch (Exception e) {
-      return;
-    }
-    if (grossUnitPrice <= 0) {
-      return;
-    }
-    double existingGrossAmount = body.optDouble("grossAmount", 0);
-    if (existingGrossAmount != 0) {
       return;
     }
     double qty;
@@ -1354,14 +1347,52 @@ public class NeoDefaultsService {
     if (qty == 0) {
       return;
     }
-    try {
-      double computed = grossUnitPrice * qty;
-      body.put("grossAmount", computed);
-      log.debug("[NEO-DEFAULTS] Computed grossAmount={} from grossUnitPrice={} × qty={}",
-          computed, grossUnitPrice, qty);
-    } catch (Exception e) {
-      log.debug("Could not compute grossAmount: {}", e.getMessage());
+    double grossUnitPrice = body.optDouble("grossUnitPrice", 0);
+    if (grossUnitPrice > 0) {
+      // Tax-inclusive price list: grossAmount = grossUnitPrice × qty
+      try {
+        double computed = grossUnitPrice * qty;
+        body.put("grossAmount", computed);
+        log.debug("[NEO-DEFAULTS] Computed grossAmount={} from grossUnitPrice={} × qty={}",
+            computed, grossUnitPrice, qty);
+      } catch (Exception e) {
+        log.debug("Could not compute grossAmount: {}", e.getMessage());
+      }
+      return;
     }
+    // Tax-exclusive price list: grossAmount = lineNetAmount × (1 + taxRate / 100)
+    double lineNetAmount = body.optDouble("lineNetAmount", 0);
+    if (lineNetAmount == 0) {
+      return;
+    }
+    String taxId = body.optString("tax", "");
+    if (taxId.isEmpty()) {
+      return;
+    }
+    try {
+      double taxRate = fetchTaxRate(taxId);
+      double computed = lineNetAmount * (1.0 + taxRate / 100.0);
+      body.put("grossAmount", computed);
+      log.debug("[NEO-DEFAULTS] Computed grossAmount={} from lineNetAmount={} × (1 + {}%)",
+          computed, lineNetAmount, taxRate);
+    } catch (Exception e) {
+      log.debug("Could not compute grossAmount from tax rate: {}", e.getMessage());
+    }
+  }
+
+  private static double fetchTaxRate(String taxId) {
+    String sql = "SELECT rate FROM c_tax WHERE c_tax_id = ?";
+    try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
+      ps.setString(1, taxId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          return rs.getDouble(1);
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not fetch tax rate for taxId={}: {}", taxId, e.getMessage());
+    }
+    return 0;
   }
 
   /**
