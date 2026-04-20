@@ -1,11 +1,13 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -20,16 +22,28 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.client.application.ApplicationUtils;
+import org.openbravo.client.application.window.ApplicationDictionaryCachedStructures;
 import org.openbravo.client.kernel.KernelUtils;
+import org.openbravo.client.kernel.RequestContext;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
+import org.openbravo.data.FieldProvider;
+import org.openbravo.erpCommon.utility.ComboTableData;
+import org.openbravo.erpCommon.utility.FieldProviderFactory;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.domain.ReferencedTable;
+import org.openbravo.model.ad.domain.Validation;
+import org.openbravo.model.ad.ui.Field;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.ad.ui.Window;
+import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.userinterface.selector.Selector;
 import org.openbravo.userinterface.selector.SelectorField;
 
@@ -225,6 +239,12 @@ public class NeoSelectorService {
       }
       if (isList) {
         return resolveListSelector(column, search, limit, offset, contextParams);
+      }
+      if (!isObuisel && shouldUseCoreComboSelector(sourceEntity, column, refId)) {
+        log.info("[ComboSelector] routing {} via core ComboTableData (SQL validation rule)",
+            column.getDBColumnName());
+        return resolveClassicSelectorWithCoreCombo(sourceEntity, column, search, limit, offset,
+            contextParams);
       }
 
       SelectorMeta meta = resolveTarget(column, refId);
@@ -717,6 +737,182 @@ public class NeoSelectorService {
    */
   static boolean isListReference(String refId) {
     return REF_LIST.equals(refId);
+  }
+
+  /**
+   * Route classic FK references with SQL validation rules through the core combo SQL path instead
+   * of translating SQL into HQL.
+   */
+  private static boolean shouldUseCoreComboSelector(SFEntity sourceEntity, Column column,
+      String refId) {
+    return sourceEntity != null
+        && isFkReference(refId)
+        && hasSqlValidationRule(column)
+        && resolveComboField(sourceEntity, column) != null;
+  }
+
+  private static boolean hasSqlValidationRule(Column column) {
+    Validation validation = column != null ? column.getValidation() : null;
+    return validation != null && "S".equalsIgnoreCase(validation.getType());
+  }
+
+  /**
+   * Execute a classic FK selector using the same ComboTableData SQL flow used by core.
+   *
+   * <p>ComboTableData does not expose an exact count API. We fetch one extra row so pagination can
+   * determine whether another page exists, and return the minimum total count compatible with that
+   * page, mirroring the core combo datasource behaviour.
+   */
+  private static NeoResponse resolveClassicSelectorWithCoreCombo(SFEntity sourceEntity,
+      Column column, String search, int limit, int offset, Map<String, String> contextParams)
+      throws Exception {
+    Field field = resolveComboField(sourceEntity, column);
+    if (field == null) {
+      return NeoResponse.error(500,
+          "Could not resolve AD_Field for SQL validation selector: " + column.getDBColumnName());
+    }
+
+    // ComboTableData.getVars() always reads from RequestContext.get().getVariablesSecureApp().
+    // In NEO/JWT flow, that is not populated from the token — we must set it explicitly,
+    // same pattern as NeoProcessService.ensureRequestContextVars().
+    OBContext obCtx = OBContext.getOBContext();
+    VariablesSecureApp vars = CalloutRequestBuilder.buildCalloutVars(obCtx,
+        sourceEntity.getADTab());
+    RequestContext.get().setVariableSecureApp(vars);
+
+    ApplicationDictionaryCachedStructures cachedStructures = WeldUtils
+        .getInstanceFromStaticBeanManager(ApplicationDictionaryCachedStructures.class);
+    ComboTableData comboTableData = cachedStructures.getComboTableData(field);
+
+    Map<String, String> selectorParams = buildComboSelectorParams(sourceEntity, contextParams);
+
+     selectorParams.put("CLIENT_LIST", OBContext.getOBContext().getCurrentClient().getId());
+    selectorParams.put("ORG_LIST", Arrays.stream(OBContext.getOBContext().getReadableOrganizations()).collect(Collectors.joining(",")));
+
+    log.info("[ComboSelector] column={} selectorParams={}", column.getDBColumnName(), selectorParams);
+
+    String windowId = field.getTab() != null && field.getTab().getWindow() != null
+        ? field.getTab().getWindow().getId()
+        : null;
+    Map<String, String> resolvedParams = comboTableData.fillSQLParametersIntoMap(
+        new DalConnectionProvider(false), vars, new FieldProviderFactory(selectorParams), windowId,
+        null);
+    log.info("[ComboSelector] resolvedParams={}", resolvedParams);
+
+    if (StringUtils.isNotBlank(search)) {
+      resolvedParams.put("FILTER_VALUE", search);
+    }
+
+    FieldProvider[] rawRows = comboTableData.select(new DalConnectionProvider(false), resolvedParams,
+        false, offset, offset + limit);
+    log.info("[ComboSelector] column={} rawRows={} offset={} limit={} resolvedParams={}",
+        column.getDBColumnName(), rawRows.length, offset, limit, resolvedParams);
+
+    boolean hasMore = rawRows.length > limit;
+    int visibleRows = hasMore ? limit : rawRows.length;
+    int totalCount = hasMore ? offset + limit + 1 : offset + visibleRows;
+
+    JSONArray items = new JSONArray();
+    for (int index = 0; index < visibleRows; index++) {
+      FieldProvider row = rawRows[index];
+      JSONObject item = new JSONObject();
+      item.put("id", row.getField("ID"));
+      item.put(FIELD_LABEL, row.getField("NAME"));
+      items.put(item);
+    }
+
+    return SelectorQueryBuilder.buildSelectorResponse(items, new JSONArray(), totalCount, limit,
+        offset);
+  }
+
+  private static Map<String, String> buildComboSelectorParams(SFEntity sourceEntity,
+      Map<String, String> contextParams) {
+    Map<String, String> selectorParams = new HashMap<>();
+    if (contextParams != null) {
+      selectorParams.putAll(contextParams);
+    }
+
+    String resolvedOrganizationId = resolveContextOrganizationId(sourceEntity, contextParams);
+    copyIfAbsent(selectorParams, "AD_Org_ID", resolvedOrganizationId);
+    copyIfAbsent(selectorParams, "inpadOrgId", resolvedOrganizationId);
+
+    // Normalise casing variants so ComboTableData can find them by their canonical names
+    copyIfAbsent(selectorParams, "IsSOTrx", selectorParams.get("isSOTrx"));
+    copyIfAbsent(selectorParams, "isSOTrx", selectorParams.get("IsSOTrx"));
+
+    // If IsSOTrx is still absent, derive it from the AD_Window.isSalesTransaction() flag.
+    // The NeoEndpoint URL already carries the spec name (e.g. "sales-order"), which maps to
+    // an SFSpec → SFEntity → AD_Tab → AD_Window that knows whether it is a SO/PO window.
+    if (!selectorParams.containsKey("IsSOTrx") || StringUtils.isBlank(selectorParams.get("IsSOTrx"))) {
+      String windowIsSOTrx = resolveIsSOTrxFromWindow(sourceEntity);
+      if (windowIsSOTrx != null) {
+        selectorParams.put("IsSOTrx", windowIsSOTrx);
+        selectorParams.put("isSOTrx", windowIsSOTrx);
+      }
+    }
+
+    copyIfAbsent(selectorParams, "IsReceipt", selectorParams.get("isReceipt"));
+    copyIfAbsent(selectorParams, "isReceipt", selectorParams.get("IsReceipt"));
+    copyIfAbsent(selectorParams, "FIN_ISRECEIPT", selectorParams.get("FIN_ISRECEIPT"));
+    copyIfAbsent(selectorParams, "FIN_ISRECEIPT", selectorParams.get("isReceipt"));
+    copyIfAbsent(selectorParams, "priceList", selectorParams.get("PriceList"));
+    copyIfAbsent(selectorParams, "PriceList", selectorParams.get("priceList"));
+    return selectorParams;
+  }
+
+  /**
+   * Resolve the IsSOTrx value ("Y"/"N") from the AD_Window associated with the given SFEntity.
+   * AD_Window.IsSOTrx indicates whether the window is a Sales Order (Y) or Purchase Order (N)
+   * transaction window. This allows SQL validation rules that reference @IsSOTrx@ to work
+   * correctly even when the client does not explicitly pass the parameter.
+   *
+   * @return "Y", "N", or null if the window cannot be determined
+   */
+  private static String resolveIsSOTrxFromWindow(SFEntity sourceEntity) {
+    try {
+      if (sourceEntity == null) {
+        return null;
+      }
+      Tab tab = sourceEntity.getADTab();
+      if (tab == null) {
+        return null;
+      }
+      Window window = tab.getWindow();
+      if (window == null) {
+        return null;
+      }
+      Boolean isSalesTransaction = window.isSalesTransaction();
+      if (isSalesTransaction == null) {
+        return null;
+      }
+      return isSalesTransaction ? "Y" : "N";
+    } catch (Exception e) {
+      log.debug("Could not resolve IsSOTrx from window for entity {}: {}",
+          sourceEntity != null ? sourceEntity.getName() : "null", e.getMessage());
+      return null;
+    }
+  }
+
+  private static void copyIfAbsent(Map<String, String> target, String key, String value) {
+    if (StringUtils.isBlank(key) || StringUtils.isBlank(value) || target.containsKey(key)) {
+      return;
+    }
+    target.put(key, value);
+  }
+
+  private static Field resolveComboField(SFEntity sourceEntity, Column column) {
+    if (sourceEntity == null || column == null || sourceEntity.getADTab() == null) {
+      return null;
+    }
+
+    OBCriteria<Field> criteria = OBDal.getInstance().createCriteria(Field.class);
+    criteria.add(Restrictions.eq(Field.PROPERTY_TAB, sourceEntity.getADTab()));
+    criteria.add(Restrictions.eq("column", column));
+    criteria.add(Restrictions.eq("active", true));
+    criteria.setMaxResults(1);
+
+    List<Field> fields = criteria.list();
+    return fields.isEmpty() ? null : fields.get(0);
   }
 
   /**
