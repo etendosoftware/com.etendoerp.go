@@ -33,13 +33,20 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
 /**
  * NeoHandler for order line entities (Sales Order, Purchase Order, Sales Quotation).
  *
- * <p>Fixes price editing on tax-included price lists (istaxincluded = 'Y').
- * For those price lists the DB trigger {@code c_orderline_trg} always derives
- * {@code priceActual} from {@code gross_unit_price}, so patching only
- * {@code priceActual} has no lasting effect. After the default CRUD runs we
- * check whether the trigger produced the intended net price; if not, we compute
- * the correct {@code grossUnitPrice} and flush it so the trigger recalculates
- * correctly within the same transaction.
+ * <p>Covers two price-list scenarios on both POST (create) and PATCH (edit):
+ *
+ * <p><b>Tax-included price lists</b> ({@code istaxincluded = 'Y'}, PATCH only): the DB
+ * trigger {@code c_orderline_trg} always derives {@code priceActual} from
+ * {@code gross_unit_price}. On direct edits (PATCH) the frontend sends only the net
+ * {@code unitPrice}, so we recompute {@code grossUnitPrice = unitPrice * (1 + taxRate)}
+ * and flush so the trigger recalculates correctly. On POST the addLine callout chain
+ * already filled {@code grossUnitPrice} before submit, so only a refresh is needed.
+ *
+ * <p><b>Net-price lists</b> ({@code istaxincluded = 'N'}): the trigger sets
+ * {@code gross_unit_price = priceActual} and {@code line_gross_amount = qty * gross_unit_price},
+ * but Hibernate's first-level cache still holds the pre-trigger zeros. A simple
+ * {@code refresh()} re-reads the trigger-computed values so NEO serializes them
+ * in the response.
  *
  * <p>Registered via {@code javaQualifier = "orderLineHandler"} on the lines
  * entity of sales-order, purchase-order and sales-quotation specs.
@@ -59,7 +66,8 @@ public class OrderLineHandler implements NeoHandler {
     if (!NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return null;
     }
-    if (!"PATCH".equals(context.getHttpMethod())) {
+    String method = context.getHttpMethod();
+    if (!"PATCH".equals(method) && !"POST".equals(method)) {
       return null;
     }
 
@@ -79,11 +87,29 @@ public class OrderLineHandler implements NeoHandler {
     }
 
     Order order = line.getSalesOrder();
-    if (order == null || order.getPriceList() == null
-        || !Boolean.TRUE.equals(order.getPriceList().isPriceIncludesTax())) {
+    if (order == null || order.getPriceList() == null) {
       return null;
     }
 
+    boolean taxIncluded = Boolean.TRUE.equals(order.getPriceList().isPriceIncludesTax());
+
+    if (!taxIncluded) {
+      // For net-price lists the trigger already set grossUnitPrice = priceActual and
+      // lineGrossAmount = qty * grossUnitPrice, but the Hibernate cache still holds
+      // pre-trigger zeros. Refresh so NEO returns the correct values.
+      OBDal.getInstance().refresh(line);
+      return null;
+    }
+
+    // Tax-included path only applies to PATCH (direct field edit without callout).
+    // On POST the addLine callout chain already filled grossUnitPrice before submit,
+    // so the trigger computed priceActual correctly — no recomputation needed.
+    if ("POST".equals(method)) {
+      OBDal.getInstance().refresh(line);
+      return null;
+    }
+
+    // Recompute grossUnitPrice from the intended net price (PATCH only).
     BigDecimal sentUnitPrice;
     try {
       sentUnitPrice = new BigDecimal(body.getString("unitPrice"));
@@ -92,9 +118,7 @@ public class OrderLineHandler implements NeoHandler {
       return null;
     }
 
-    // Refresh from DB to read the trigger-computed unitPrice after the first flush.
-    // Within the same transaction PostgreSQL makes our own DML visible via SELECT,
-    // so refresh() returns the trigger-updated value.
+    // Refresh to read the trigger-computed priceActual within the same transaction.
     OBDal.getInstance().refresh(line);
     BigDecimal dbUnitPrice = line.getUnitPrice() != null ? line.getUnitPrice() : BigDecimal.ZERO;
 
@@ -104,7 +128,6 @@ public class OrderLineHandler implements NeoHandler {
       return null;
     }
 
-    // The trigger used a wrong (or zero) grossUnitPrice.
     // Recompute: grossUnitPrice = netUnitPrice * (1 + taxRate / 100).
     TaxRate tax = line.getTax();
     if (tax == null || tax.getRate() == null) {
