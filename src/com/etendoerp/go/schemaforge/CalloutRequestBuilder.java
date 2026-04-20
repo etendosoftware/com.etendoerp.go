@@ -460,20 +460,12 @@ class CalloutRequestBuilder {
   // ── Session / vars helpers ─────────────────────────────────────────
 
   /**
-   * Build a VariablesSecureApp populated with the full session context.
-   * Uses LoginUtils.fillSessionArguments (same as classic login) so that
-   * Utility.getDefault can resolve context variables like @#AD_Org_ID@, @IsSOTrx@, etc.
+   * Build a VariablesSecureApp populated with the full session context plus window-scoped
+   * {@code IsSOTrx}. Thin wrapper over {@link NeoCalloutService#buildVars(OBContext, Tab)}
+   * kept for API stability — {@code NeoSelectorService} and internal callout code call it.
    */
   static VariablesSecureApp buildCalloutVars(OBContext obCtx, Tab adTab) {
-    VariablesSecureApp vars = NeoCalloutService.buildVars(obCtx);
-
-    // Set window-level isSOTrx so expressions like @IsSOTrx@ resolve correctly
-    if (adTab != null && adTab.getWindow() != null) {
-      String soTrx = Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
-      vars.setSessionValue("isSOTrx", soTrx);
-    }
-
-    return vars;
+    return NeoCalloutService.buildVars(obCtx, adTab);
   }
 
   // ── Name resolution helpers ────────────────────────────────────────
