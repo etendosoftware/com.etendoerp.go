@@ -102,8 +102,10 @@ public class NeoDefaultsService {
         JSONArray unresolvedFields = new JSONArray();
         JSONArray sequenceFields = new JSONArray();
 
-        // Build a VariablesSecureApp bridge from OBContext for Etendo utility methods
-        VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext());
+        // Build a VariablesSecureApp bridge from OBContext for Etendo utility methods.
+        // Pass the AD_Tab so isSOTrx is set in session — @IsSOTrx@ inside @SQL= defaults
+        // (e.g. M_PriceList_ID on C_Order) needs it to pick the correct sales/purchase row.
+        VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext(), ctx.getAdTab());
         DalConnectionProvider conn = new DalConnectionProvider(false);
 
         // Resolve window ID from SFSpec -> AD_Window (needed by Utility.getDefault)
@@ -145,6 +147,13 @@ public class NeoDefaultsService {
             String sfFieldDefault = sfField.getDefaultValue();
             Object resolvedValue = resolveFieldDefault(adColumn, parentId, vars, conn, windowId,
                 ctx, sfFieldDefault);
+            // FIC parity: when no explicit default resolves, combo-style references (TableDir,
+            // Table, List) preselect row [0] of their lookup — exactly what
+            // UIDefinition.getValueInComboReference does in Etendo Classic. Search/Selector/Tree
+            // references are intentionally left empty here (FIC leaves them empty too).
+            if (resolvedValue == null) {
+              resolvedValue = resolveFirstComboOption(adColumn, ctx);
+            }
             if (resolvedValue != null) {
               defaults.put(propertyName, resolvedValue);
               // For FK fields, also inject $_identifier so selectors display the label, not the ID
@@ -204,20 +213,13 @@ public class NeoDefaultsService {
           DocTypeResolver.reapplyDocTypeFromTabFilter(defaults, adTab, ctx);
         }
 
-        // Classic parity: for each mandatory FK column still unresolved after defaults/callouts,
-        // auto-pick the first valid lookup option.
-        for (SFField sfField : fields) {
-          Column adColumn = sfField.getADColumn();
-          if (adColumn == null || !adColumn.isMandatory()) {
-            continue;
-          }
-          String propName = NeoDefaultsCascadeHelper.resolvePropertyName(
-              dalEntity, adColumn.getDBColumnName());
-          if (propName == null || defaults.has(propName)) {
-            continue;
-          }
-          tryInjectFirstFromLookup(defaults, dalEntity, propName, adColumn, ctx);
-        }
+        // FK preselection is applied per-column inside pass 1 via resolveFirstComboOption,
+        // scoped to FIC combo references (TableDir, Table, List) — mirroring
+        // UIDefinition.getValueInComboReference. Search/Selector/Tree references are left empty
+        // so the form/UI (or the BP/DocType callout chain) can surface them for user input,
+        // matching Etendo Classic FIC behavior on MODE=NEW.
+        // The CREATE path keeps its own broader fallback in injectMandatoryDefaults to avoid
+        // NOT NULL violations when partial payloads reach persistence.
 
         // Build response
         JSONObject response = new JSONObject();
@@ -620,6 +622,27 @@ public class NeoDefaultsService {
    * @return a cached or newly built VariablesSecureApp instance with session variables populated
    */
   public static VariablesSecureApp buildVariablesSecureApp(OBContext obContext) {
+    return buildVariablesSecureApp(obContext, null);
+  }
+
+  /**
+   * Build a VariablesSecureApp from OBContext and an optional AD_Tab, so that the window's
+   * IsSOTrx flag is exposed as a session variable for default resolution. Without this,
+   * expressions like {@code @IsSOTrx@} inside {@code @SQL=...} defaults (e.g. the
+   * {@code M_PriceList_ID} default on {@code C_Order}) resolve to an empty string and pick
+   * a purchase pricelist on a sales window.
+   *
+   * <p>Delegates the session-variable population (including {@code IsSOTrx}) to the shared
+   * {@link NeoCalloutService#buildVars(OBContext, Tab)} builder, and layers caching + the
+   * {@code #Date} variable on top. The cache key includes the resolved {@code isSOTrx} value
+   * so a sales-window entry is not served to a purchase-window caller within the TTL.
+   *
+   * @param obContext the current OBContext containing user, role, org, and warehouse info
+   * @param adTab     the AD_Tab whose window provides the IsSOTrx flag. Pass {@code null}
+   *                  when not in a window context (processes, standalone defaults).
+   * @return a cached or newly built VariablesSecureApp instance with session variables populated
+   */
+  public static VariablesSecureApp buildVariablesSecureApp(OBContext obContext, Tab adTab) {
     String userId = obContext.getUser().getId();
     String clientId = obContext.getCurrentClient().getId();
     String roleId = obContext.getRole().getId();
@@ -639,13 +662,20 @@ public class NeoDefaultsService {
       }
     }
 
-    String cacheKey = userId + "|" + roleId + "|" + orgId + "|" + warehouseId;
+    String soTrx = "";
+    if (adTab != null && adTab.getWindow() != null
+        && adTab.getWindow().isSalesTransaction() != null) {
+      soTrx = Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
+    }
+
+    String cacheKey = userId + "|" + roleId + "|" + orgId + "|" + warehouseId + "|" + soTrx;
     VariablesSecureApp cached = varsCache.getIfPresent(cacheKey);
     if (cached != null) {
       return cached;
     }
 
-    VariablesSecureApp vars = NeoCalloutService.buildVars(obContext);
+    // Shared builder handles OBContext session vars + IsSOTrx (both casings) when adTab is set.
+    VariablesSecureApp vars = NeoCalloutService.buildVars(obContext, adTab);
     vars.setSessionValue("#Date",
         new SimpleDateFormat(DATE_FORMAT).format(new Date()));
 
@@ -701,7 +731,7 @@ public class NeoDefaultsService {
       }
 
       // Build resolution infrastructure once for all columns
-      VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext());
+      VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext(), adTab);
       DalConnectionProvider conn = new DalConnectionProvider(false);
       String windowId = ctx.getSfEntity() != null ? resolveWindowId(ctx.getSfEntity()) : "";
       Map<String, Object> parentValues = loadParentValues(adTab, parentId);
@@ -1021,12 +1051,107 @@ public class NeoDefaultsService {
   }
 
   /**
+   * Returns {@code true} for AD_Reference IDs whose Etendo Classic UIDefinition invokes
+   * {@code getValueInComboReference} — i.e. combo-style rendering that preselects row [0]
+   * when no explicit default is configured.
+   *
+   * <p>Matches the classes {@code FKComboUIDefinition} (TableDir=19, Table=18) and
+   * {@code EnumUIDefinition} (List=17). Returns {@code false} for Search (30),
+   * OBUISEL_Selector, Tree, and ID references, which leave the field empty on NEW.</p>
+   */
+  private static boolean isFICComboReference(String baseRefId) {
+    return NeoSelectorService.REF_TABLEDIR.equals(baseRefId)
+        || NeoSelectorService.REF_TABLE.equals(baseRefId)
+        || NeoSelectorService.REF_LIST.equals(baseRefId);
+  }
+
+  /**
+   * FIC parity: return the first combo option ID (row [0]) for columns whose AD_Reference
+   * renders as a combo in Etendo Classic. Returns {@code null} when the column is not a
+   * combo reference, has no lookup rows available, or any error occurs.
+   *
+   * <p>Routes through {@link NeoSelectorService#querySelectorByColumn} so the same
+   * {@code AD_Val_Rule}, reference override, and readable-orgs filters that the selector
+   * applies are honored here — exactly like {@code UIDefinition.getValueInComboReference}
+   * delegates to {@code ComboTableData}. No entity-specific filters are hardcoded: all
+   * contextual behavior (e.g. {@code IsSOPriceList=@IsSOTrx@} for M_PriceList) comes from
+   * the column's validation rule.</p>
+   *
+   * <p>Mirrors {@code UIDefinition.getValueInComboReference} lines 712-718 (FK branch) and
+   * 729-750 (List branch).</p>
+   */
+  private static Object resolveFirstComboOption(Column col, NeoContext ctx) {
+    try {
+      String baseRefId = NeoSelectorService.getBaseReferenceId(col);
+      if (!isFICComboReference(baseRefId)) {
+        return null;
+      }
+      Map<String, String> contextParams = buildFICComboContextParams(ctx);
+      NeoResponse selectorResp = NeoSelectorService.querySelectorByColumn(
+          col, col.getDBColumnName(), null, 1, 0, contextParams);
+      if (selectorResp == null || selectorResp.getHttpStatus() != 200) {
+        return null;
+      }
+      JSONObject body = selectorResp.getBody();
+      if (body == null) {
+        return null;
+      }
+      JSONArray items = body.optJSONArray("items");
+      if (items == null || items.length() == 0) {
+        return null;
+      }
+      JSONObject first = items.getJSONObject(0);
+      // For FK refs the id field is "id"; for List refs resolveListSelector also stores
+      // the searchKey under "id". Same key in both paths.
+      String id = first.optString("id", null);
+      if (id == null || id.isEmpty()) {
+        return null;
+      }
+      return id;
+    } catch (Exception e) {
+      log.debug("Could not resolve first combo option for {}: {}",
+          col.getDBColumnName(), e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Build the context-parameter map consumed by {@code SelectorQueryBuilder.resolveValidationSql}
+   * when the selector is invoked from the /defaults path. Provides {@code IsSOTrx} / {@code isSOTrx}
+   * from the window (both casings, mirroring {@code NeoCalloutService.buildVars}) so validation
+   * rules like {@code IsSOPriceList='@IsSOTrx@'} resolve correctly. {@code AD_Org_ID},
+   * {@code AD_Client_ID}, {@code AD_User_ID} and {@code AD_Role_ID} are injected automatically
+   * by {@code buildValidationParamMap} from the current {@link OBContext}.
+   */
+  private static Map<String, String> buildFICComboContextParams(NeoContext ctx) {
+    Map<String, String> params = new java.util.HashMap<>();
+    if (ctx != null && ctx.getAdTab() != null && ctx.getAdTab().getWindow() != null
+        && ctx.getAdTab().getWindow().isSalesTransaction() != null) {
+      String soTrx =
+          Boolean.TRUE.equals(ctx.getAdTab().getWindow().isSalesTransaction()) ? "Y" : "N";
+      params.put("IsSOTrx", soTrx);
+      params.put("isSOTrx", soTrx);
+    }
+    return params;
+  }
+
+  /**
    * Auto-pick the first available FK option for mandatory FK columns that have no resolved default.
    * Replicates Classic Etendo behavior: UIDefinition.getValueInComboReference() always picks the
    * alphabetically-first combo entry when no explicit default is configured.
    *
    * <p>Applies to TableDir (17), Table (18), Search (30), and OBUISEL_Selector references.
    * Skips non-FK columns and columns where a default was already resolved.
+   *
+   * <p>TODO(ETP-3813): align this CREATE-path fallback with the FIC-parity logic used in
+   * {@link #resolveFirstComboOption}. Classic FIC only preselects row [0] for combo references
+   * (TableDir=19, Table=18, List=17) via {@code FKComboUIDefinition}/{@code EnumUIDefinition};
+   * Search (30) and OBUISEL_Selector do NOT preselect. This method is still broader (includes
+   * Search + OBUISEL and hardcodes pricelist/BP filters) because it also guards against NOT NULL
+   * violations when partial payloads reach persistence — narrowing it needs validation across
+   * every CREATE flow first to avoid breaking integrations that rely on the current behavior.
+   * Ideally this should also route through {@link NeoSelectorService#querySelectorByColumn}
+   * so AD_Val_Rule is honored instead of hardcoded filters.</p>
    *
    * @return true if a value was injected, false if not applicable or lookup was empty
    */

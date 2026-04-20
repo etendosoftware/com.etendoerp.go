@@ -377,6 +377,24 @@ public class NeoCalloutService {
    * Shared by NeoCalloutService and NeoDefaultsService.
    */
   static VariablesSecureApp buildVars(OBContext obCtx) {
+    return buildVars(obCtx, null);
+  }
+
+  /**
+   * Build a VariablesSecureApp from OBContext with full session population, plus the
+   * window-scoped {@code IsSOTrx} flag when an AD_Tab is provided.
+   *
+   * <p>Defaults, callouts and selectors all need {@code IsSOTrx} exposed in session so
+   * that AD expressions like {@code @IsSOTrx@} (including {@code @SQL=...} defaults that
+   * filter by sales/purchase transaction) resolve correctly. Setting it here avoids every
+   * endpoint having to duplicate the same 3-line block and prevents regressions when new
+   * endpoints are added.
+   *
+   * @param obCtx the current OBContext
+   * @param adTab the AD_Tab whose window provides the IsSOTrx flag. {@code null} when
+   *              not in a window context (e.g. process defaults).
+   */
+  static VariablesSecureApp buildVars(OBContext obCtx, Tab adTab) {
     String userId = obCtx.getUser().getId();
     String clientId = obCtx.getCurrentClient().getId();
     String orgId = obCtx.getCurrentOrganization().getId();
@@ -409,6 +427,13 @@ public class NeoCalloutService {
       vars.setSessionValue("#AD_Language", lang);
       vars.setSessionValue("#M_Warehouse_ID", warehouseId);
       vars.setSessionValue("#User_Client", "'" + clientId + "','0'");
+    }
+
+    if (adTab != null && adTab.getWindow() != null
+        && adTab.getWindow().isSalesTransaction() != null) {
+      String soTrx = Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
+      vars.setSessionValue("isSOTrx", soTrx);
+      vars.setSessionValue("IsSOTrx", soTrx);
     }
 
     return vars;
