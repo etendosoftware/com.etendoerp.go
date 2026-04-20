@@ -110,41 +110,12 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       throw new OBException("Purchase order not found: " + orderId);
     }
 
-    JSONArray selectedLines = new JSONArray();
-    for (OrderLine ol : order.getOrderLineList()) {
-      if (!ol.isActive() || ol.getProduct() == null) continue;
-      BigDecimal ordered  = ol.getOrderedQuantity()  != null ? ol.getOrderedQuantity()  : BigDecimal.ZERO;
-      BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
-      BigDecimal pending  = ordered.subtract(invoiced);
-      if (pending.compareTo(BigDecimal.ZERO) <= 0) continue;
-      try {
-        JSONObject entry = new JSONObject();
-        entry.put("id", ol.getId());
-        entry.put("orderedQuantity", pending.toPlainString());
-        selectedLines.put(entry);
-      } catch (Exception e) {
-        log.warn("Failed to add line {}: {}", ol.getId(), e.getMessage());
-      }
-    }
+    JSONArray selectedLines = buildSelectedLines(order);
     if (selectedLines.length() == 0) {
       throw new OBException("No pending lines to invoice in this purchase order");
     }
 
-    DocumentType orderDocType = order.getTransactionDocument();
-    DocumentType invoiceDocType = orderDocType != null
-        ? orderDocType.getDocumentTypeForInvoice()
-        : null;
-    // Discard the placeholder doc type ('0' = "** New **", docBasetype="---")
-    // which is stored when no invoice doc type is linked to the PO doc type.
-    if (invoiceDocType != null && !"API".equals(invoiceDocType.getDocumentCategory())) {
-      invoiceDocType = null;
-    }
-    if (invoiceDocType == null) {
-      invoiceDocType = findAPInvoiceDocType(order.getClient().getId());
-    }
-    if (invoiceDocType == null) {
-      throw new OBException("No AP Invoice document type found");
-    }
+    DocumentType invoiceDocType = resolveAPInvoiceDocType(order);
 
     Invoice invoice = OBProvider.getInstance().get(Invoice.class);
     invoice.setClient(order.getClient());
@@ -180,6 +151,50 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     proc.createInvoiceLinesFromDocumentLines(selectedLines, invoice, OrderLine.class);
 
     return invoice;
+  }
+
+  private JSONArray buildSelectedLines(Order order) {
+    JSONArray selectedLines = new JSONArray();
+    for (OrderLine ol : order.getOrderLineList()) {
+      BigDecimal pending = getPendingQuantity(ol);
+      if (pending == null) continue;
+      try {
+        JSONObject entry = new JSONObject();
+        entry.put("id", ol.getId());
+        entry.put("orderedQuantity", pending.toPlainString());
+        selectedLines.put(entry);
+      } catch (Exception e) {
+        log.warn("Failed to add line {}: {}", ol.getId(), e.getMessage());
+      }
+    }
+    return selectedLines;
+  }
+
+  private BigDecimal getPendingQuantity(OrderLine ol) {
+    if (!ol.isActive() || ol.getProduct() == null) return null;
+    BigDecimal ordered  = ol.getOrderedQuantity()  != null ? ol.getOrderedQuantity()  : BigDecimal.ZERO;
+    BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
+    BigDecimal pending  = ordered.subtract(invoiced);
+    return pending.compareTo(BigDecimal.ZERO) > 0 ? pending : null;
+  }
+
+  // Discard the placeholder doc type ('0' = "** New **", docBasetype="---")
+  // which is stored when no invoice doc type is linked to the PO doc type.
+  private DocumentType resolveAPInvoiceDocType(Order order) {
+    DocumentType orderDocType = order.getTransactionDocument();
+    DocumentType invoiceDocType = orderDocType != null
+        ? orderDocType.getDocumentTypeForInvoice()
+        : null;
+    if (invoiceDocType != null && !"API".equals(invoiceDocType.getDocumentCategory())) {
+      invoiceDocType = null;
+    }
+    if (invoiceDocType == null) {
+      invoiceDocType = findAPInvoiceDocType(order.getClient().getId());
+    }
+    if (invoiceDocType == null) {
+      throw new OBException("No AP Invoice document type found");
+    }
+    return invoiceDocType;
   }
 
   private DocumentType findAPInvoiceDocType(String clientId) {

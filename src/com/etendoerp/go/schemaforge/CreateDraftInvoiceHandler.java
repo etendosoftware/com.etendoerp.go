@@ -103,8 +103,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
     }
 
-    String specName = context.getSpecName();
+    return handleCreate(context, recordId);
+  }
 
+  private NeoResponse handleCreate(NeoContext context, String recordId) {
+    String specName = context.getSpecName();
     try {
       OBContext.setAdminMode(true);
       try {
@@ -320,40 +323,12 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       throw new OBException("Order not found: " + orderId);
     }
 
-    boolean hasOverrides = !lineOverrides.isEmpty();
-    JSONArray selectedLines = new JSONArray();
-    for (OrderLine ol : order.getOrderLineList()) {
-      if (!ol.isActive() || ol.getProduct() == null) continue;
-      if (hasOverrides && !lineOverrides.containsKey(ol.getId())) continue;
-      BigDecimal ordered  = ol.getOrderedQuantity()  != null ? ol.getOrderedQuantity()  : BigDecimal.ZERO;
-      BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
-      if (ordered.subtract(invoiced).compareTo(BigDecimal.ZERO) <= 0) continue;
-      try {
-        BigDecimal pending = ordered.subtract(invoiced);
-        if (hasOverrides) {
-          BigDecimal override = lineOverrides.get(ol.getId());
-          pending = override != null ? override.min(pending) : pending;
-        }
-        JSONObject entry = new JSONObject();
-        entry.put("id", ol.getId());
-        entry.put("orderedQuantity", pending.toPlainString());
-        selectedLines.put(entry);
-      } catch (Exception e) {
-        log.warn("Failed to add line {}: {}", ol.getId(), e.getMessage());
-      }
-    }
+    JSONArray selectedLines = buildSelectedLinesForOrder(order, lineOverrides);
     if (selectedLines.length() == 0) {
       throw new OBException("No hay líneas a facturar en este pedido");
     }
 
-    DocumentType orderDocType = order.getTransactionDocument();
-    DocumentType invoiceDocType = orderDocType != null ? orderDocType.getDocumentTypeForInvoice() : null;
-    if (invoiceDocType == null) {
-      invoiceDocType = findARInvoiceDocType(order.getOrganization().getId());
-    }
-    if (invoiceDocType == null) {
-      throw new OBException("No AR Invoice document type found");
-    }
+    DocumentType invoiceDocType = resolveARInvoiceDocType(order);
 
     Invoice invoice = OBProvider.getInstance().get(Invoice.class);
     invoice.setClient(order.getClient());
@@ -384,6 +359,53 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     proc.createInvoiceLinesFromDocumentLines(selectedLines, invoice, OrderLine.class);
 
     return invoice;
+  }
+
+  private JSONArray buildSelectedLinesForOrder(Order order, Map<String, BigDecimal> lineOverrides) {
+    boolean hasOverrides = !lineOverrides.isEmpty();
+    JSONArray selectedLines = new JSONArray();
+    for (OrderLine ol : order.getOrderLineList()) {
+      BigDecimal pending = resolvePendingForLine(ol, hasOverrides, lineOverrides);
+      if (pending == null) continue;
+      try {
+        JSONObject entry = new JSONObject();
+        entry.put("id", ol.getId());
+        entry.put("orderedQuantity", pending.toPlainString());
+        selectedLines.put(entry);
+      } catch (Exception e) {
+        log.warn("Failed to add line {}: {}", ol.getId(), e.getMessage());
+      }
+    }
+    return selectedLines;
+  }
+
+  private BigDecimal resolvePendingForLine(OrderLine ol, boolean hasOverrides,
+      Map<String, BigDecimal> lineOverrides) {
+    if (!ol.isActive() || ol.getProduct() == null) return null;
+    if (hasOverrides && !lineOverrides.containsKey(ol.getId())) return null;
+    BigDecimal ordered  = ol.getOrderedQuantity()  != null ? ol.getOrderedQuantity()  : BigDecimal.ZERO;
+    BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
+    BigDecimal pending  = ordered.subtract(invoiced);
+    if (pending.compareTo(BigDecimal.ZERO) <= 0) return null;
+    if (hasOverrides) {
+      BigDecimal override = lineOverrides.get(ol.getId());
+      return override != null ? override.min(pending) : pending;
+    }
+    return pending;
+  }
+
+  private DocumentType resolveARInvoiceDocType(Order order) {
+    DocumentType orderDocType = order.getTransactionDocument();
+    DocumentType invoiceDocType = orderDocType != null
+        ? orderDocType.getDocumentTypeForInvoice()
+        : null;
+    if (invoiceDocType == null) {
+      invoiceDocType = findARInvoiceDocType(order.getOrganization().getId());
+    }
+    if (invoiceDocType == null) {
+      throw new OBException("No AR Invoice document type found");
+    }
+    return invoiceDocType;
   }
 
   private List<String> parseShipmentIds(JSONObject body, String recordId) {
