@@ -31,8 +31,7 @@ import java.sql.SQLException;
  */
 public class CreateBusinessPartnerSequence extends ModuleScript {
 
-  private static final String SEQUENCE_NAME = "SearchKey_BusinessPartner";
-  private static final String PREFIX_NAME = "'BP-'";
+  private static final String SEQUENCE_NAME = "BusinessPartner_ID";
 
   private static final String SELECT_CLIENTS_WITHOUT_SEQUENCE =
       "SELECT cl.ad_client_id AS client "
@@ -61,7 +60,7 @@ public class CreateBusinessPartnerSequence extends ModuleScript {
           + "  NULL, '#######', "
           + "  'Y', 1, "
           + "  1000000, 1000000, 1000000, "
-          + "  'N', ?, NULL, 'N', "
+          + "  'N', NULL, NULL, 'N', "
           + "  291, '294937FFC81749289BD9BB28E400D4B2' "
           + ")";
 
@@ -88,7 +87,6 @@ public class CreateBusinessPartnerSequence extends ModuleScript {
             insertPs = cp.getPreparedStatement(INSERT_DOCUMENT_NO_SEQUENCE);
             insertPs.setString(1, rs.getString("client"));
             insertPs.setString(2, SEQUENCE_NAME);
-            insertPs.setString(3, PREFIX_NAME);
             insertPs.executeUpdate();
           } finally {
             if (insertPs != null) {
