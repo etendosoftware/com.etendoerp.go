@@ -175,6 +175,9 @@ class CalloutRequestBuilder {
       String inpName = NeoCalloutService.toInpName(dbColName);
       maps.dbNameToInp.put(dbColName.toLowerCase(), inpName);
       maps.cleanNameToInp.put(NeoCalloutService.toCleanFieldName(dbColName).toLowerCase(), inpName);
+      // Also map the raw camelCase column name (e.g. "cInvoiceId" for C_Invoice_ID)
+      // so API keys from the frontend formState are resolved even when they include the table prefix.
+      maps.cleanNameToInp.put(NeoCalloutService.transformColumnName(dbColName).toLowerCase(), inpName);
       if (dalEntity != null) {
         try {
           Property prop = dalEntity.getPropertyByColumnName(dbColName);
