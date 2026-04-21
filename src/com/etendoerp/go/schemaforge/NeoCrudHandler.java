@@ -498,7 +498,7 @@ class NeoCrudHandler {
     // available here to compute the correct net amount even for products where SL_Invoice_Amt
     // throws on the sales invoice context (e.g. tax-exclusive price lists).
     NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
-    NeoDefaultsService.injectLineGrossAmountIfMissing(filteredBody);
+    NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
   }
