@@ -1396,6 +1396,46 @@ public class NeoDefaultsService {
   }
 
   /**
+   * For order/quotation lines, when 'lineGrossAmount' is zero or missing, compute it as
+   * effectiveUnitPrice × orderedQuantity. Uses grossUnitPrice if present and non-zero,
+   * falls back to unitPrice for net-price list quotations where the callout does not
+   * populate grossUnitPrice.
+   */
+  public static void injectLineGrossAmountIfMissing(JSONObject body) {
+    if (body == null) {
+      return;
+    }
+    double existing = body.optDouble("lineGrossAmount", 0);
+    if (existing != 0) {
+      return;
+    }
+    double effectivePrice = body.optDouble("grossUnitPrice", 0);
+    if (effectivePrice <= 0) {
+      effectivePrice = body.optDouble("unitPrice", 0);
+    }
+    if (effectivePrice <= 0) {
+      return;
+    }
+    double qty;
+    try {
+      qty = Double.parseDouble(body.optString("orderedQuantity", "0"));
+    } catch (NumberFormatException e) {
+      return;
+    }
+    if (qty == 0) {
+      return;
+    }
+    try {
+      double computed = effectivePrice * qty;
+      body.put("lineGrossAmount", computed);
+      log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} from price={} × qty={}",
+          computed, effectivePrice, qty);
+    } catch (Exception e) {
+      log.debug("Could not compute lineGrossAmount: {}", e.getMessage());
+    }
+  }
+
+  /**
    * Fallback: when lineNetAmount is absent or zero after the callout cascade, compute it as
    * invoicedQuantity × unitPrice. This covers products where SL_Invoice_Amt throws
    * (e.g. products without a standard cost or price list entry in the sales context,

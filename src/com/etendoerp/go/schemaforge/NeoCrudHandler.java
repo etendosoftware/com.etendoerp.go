@@ -399,6 +399,7 @@ class NeoCrudHandler {
     executePostCalloutCascade(filteredBody, adTab, context, parentIdValue);
     NeoDefaultsService.injectProductDerivedUomIfMissing(filteredBody);
     NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
+    NeoDefaultsService.injectLineGrossAmountIfMissing(filteredBody);
     NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
     // TODO move this compatibility rule into the shared create-defaults helper once the merge settles.
     stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
@@ -498,6 +499,7 @@ class NeoCrudHandler {
     // throws on the sales invoice context (e.g. tax-exclusive price lists).
     NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
     NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
+    NeoDefaultsService.injectLineGrossAmountIfMissing(filteredBody);
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
   }
