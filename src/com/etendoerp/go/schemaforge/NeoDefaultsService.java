@@ -1347,36 +1347,21 @@ public class NeoDefaultsService {
     if (qty == 0) {
       return;
     }
-    double grossUnitPrice = body.optDouble("grossUnitPrice", 0);
-    if (grossUnitPrice > 0) {
-      // Tax-inclusive price list: grossAmount = grossUnitPrice × qty
-      try {
-        double computed = grossUnitPrice * qty;
-        body.put("grossAmount", computed);
-        log.debug("[NEO-DEFAULTS] Computed grossAmount={} from grossUnitPrice={} × qty={}",
-            computed, grossUnitPrice, qty);
-      } catch (Exception e) {
-        log.debug("Could not compute grossAmount: {}", e.getMessage());
-      }
-      return;
-    }
-    // Tax-exclusive price list: grossAmount = lineNetAmount × (1 + taxRate / 100)
-    double lineNetAmount = body.optDouble("lineNetAmount", 0);
-    if (lineNetAmount == 0) {
-      return;
-    }
+    double baseNetAmt = body.optDouble("lineNetAmount", 0);
     String taxId = body.optString("tax", "");
-    if (taxId.isEmpty()) {
+    // For net price lists require a tax to be selected before computing grossAmount.
+    if (baseNetAmt > 0 && taxId.isEmpty()) {
+      return;
+    }
+    double computed = resolveGrossAmount(body.optDouble("grossUnitPrice", 0), qty, baseNetAmt, taxId);
+    if (Double.isNaN(computed)) {
       return;
     }
     try {
-      double taxRate = fetchTaxRate(taxId);
-      double computed = lineNetAmount * (1.0 + taxRate / 100.0);
       body.put("grossAmount", computed);
-      log.debug("[NEO-DEFAULTS] Computed grossAmount={} from lineNetAmount={} × (1 + {}%)",
-          computed, lineNetAmount, taxRate);
+      log.debug("[NEO-DEFAULTS] Computed grossAmount={} (qty={}, tax={})", computed, qty, taxId);
     } catch (Exception e) {
-      log.debug("Could not compute grossAmount from tax rate: {}", e.getMessage());
+      log.debug("Could not set grossAmount: {}", e.getMessage());
     }
   }
 
@@ -1393,6 +1378,23 @@ public class NeoDefaultsService {
       log.debug("Could not fetch tax rate for taxId={}: {}", taxId, e.getMessage());
     }
     return 0;
+  }
+
+  /**
+   * Gross path (grossUnitPrice > 0): grossUnitPrice × qty.
+   * Net path (grossUnitPrice = 0): baseNetAmt × (1 + taxRate/100).
+   * Returns {@link Double#NaN} when computation should be skipped (baseNetAmt <= 0).
+   */
+  private static double resolveGrossAmount(double grossUnitPrice, double qty, double baseNetAmt,
+      String taxId) {
+    if (grossUnitPrice > 0) {
+      return grossUnitPrice * qty;
+    }
+    if (baseNetAmt <= 0) {
+      return Double.NaN;
+    }
+    double rate = (taxId == null || taxId.isEmpty()) ? 0 : fetchTaxRate(taxId);
+    return baseNetAmt * (1.0 + rate / 100.0);
   }
 
   /**
@@ -1416,36 +1418,19 @@ public class NeoDefaultsService {
     if (qty == 0) {
       return;
     }
-    double grossUnitPrice = body.optDouble("grossUnitPrice", 0);
-    if (grossUnitPrice > 0) {
-      // Gross price list: tax already included in grossUnitPrice
-      try {
-        double computed = grossUnitPrice * qty;
-        body.put("lineGrossAmount", computed);
-        log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} from grossUnitPrice={} × qty={}",
-            computed, grossUnitPrice, qty);
-      } catch (Exception e) {
-        log.debug("Could not compute lineGrossAmount: {}", e.getMessage());
-      }
-      return;
-    }
-    // Net price list: lineGrossAmount = unitPrice × qty × (1 + taxRate/100)
     double unitPrice = body.optDouble("unitPrice", 0);
-    if (unitPrice <= 0) {
+    double baseNetAmt = unitPrice > 0 ? unitPrice * qty : 0;
+    String taxId = body.optString("tax", "");
+    double computed = resolveGrossAmount(body.optDouble("grossUnitPrice", 0), qty, baseNetAmt, taxId);
+    if (Double.isNaN(computed)) {
       return;
     }
-    double lineNetAmt = unitPrice * qty;
-    String taxId = body.optString("tax", "");
-    log.info("[NEO-DEFAULTS] injectLineGrossAmount net path: qty={} unitPrice={} taxId={}",
-        qty, unitPrice, taxId.isEmpty() ? "(empty)" : taxId);
     try {
-      double taxRate = taxId.isEmpty() ? 0 : fetchTaxRate(taxId);
-      double computed = lineNetAmt * (1.0 + taxRate / 100.0);
       body.put("lineGrossAmount", computed);
-      log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} from unitPrice={} × qty={} × (1 + {}%)",
-          computed, unitPrice, qty, taxRate);
+      log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} (qty={}, unitPrice={}, tax={})",
+          computed, qty, unitPrice, taxId);
     } catch (Exception e) {
-      log.debug("Could not compute lineGrossAmount: {}", e.getMessage());
+      log.debug("Could not set lineGrossAmount: {}", e.getMessage());
     }
   }
 
