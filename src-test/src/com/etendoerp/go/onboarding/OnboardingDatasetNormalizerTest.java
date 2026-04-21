@@ -46,6 +46,43 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue(OnboardingDatasetDefinition.getExcludedTables().contains("AD_REF_DATA_LOADED"));
   }
 
+  /** Verifies that document types keep their required dependent tables in the curated dataset. */
+  @Test
+  public void testDefinitionIncludesDocumentTypesWithDependentTables() {
+    assertTrue(OnboardingDatasetDefinition.getIncludedTables().contains("C_DOCTYPE"));
+    assertTrue(OnboardingDatasetDefinition.getIncludedTables().contains("AD_SEQUENCE"));
+    assertTrue(OnboardingDatasetDefinition.getIncludedTables().contains("GL_CATEGORY"));
+    assertFalse(OnboardingDatasetDefinition.getExcludedTables().contains("AD_SEQUENCE"));
+  }
+
+  /** Verifies that normalized onboarding XML emits document types together with their dependencies. */
+  @Test
+  public void testNormalizerIncludesDocumentTypesWithDependencies() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue(xml.contains("<cDoctype"));
+    assertTrue(xml.contains("<adSequence"));
+    assertTrue(xml.contains("<glCategory"));
+    assertTrue(xml.contains("Quotation"));
+  }
+
+  /** Verifies that payment terms are kept in the curated onboarding dataset. */
+  @Test
+  public void testDefinitionIncludesPaymentTerms() {
+    assertTrue(OnboardingDatasetDefinition.getIncludedTables().contains("C_PAYMENTTERM"));
+  }
+
+  /** Verifies that normalized onboarding XML emits payment term rows from GOClient. */
+  @Test
+  public void testNormalizerIncludesPaymentTerms() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue(xml.contains("<cPaymentterm"));
+    assertTrue(xml.contains("30 Días"));
+  }
+
+
+
   @Test
   public void testNormalizerBuildsEmptyDatasetWithoutUnsupportedJaxpFailures() throws Exception {
     Path emptySampleDataDir = Files.createTempDirectory("onboarding-empty-sampledata");
