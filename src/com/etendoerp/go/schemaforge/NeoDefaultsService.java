@@ -1396,17 +1396,16 @@ public class NeoDefaultsService {
   }
 
   /**
-   * For order/quotation lines, when 'lineGrossAmount' is zero or missing, compute it as
+   * For order/quotation lines, always recompute 'lineGrossAmount' as
    * effectiveUnitPrice × orderedQuantity. Uses grossUnitPrice if present and non-zero,
    * falls back to unitPrice for net-price list quotations where the callout does not
    * populate grossUnitPrice.
+   *
+   * <p>Always recomputes to override any stale value the product callout may have set
+   * for qty=1 (SL_Order_Amt fires on product change before the user sets the quantity).
    */
   public static void injectLineGrossAmountIfMissing(JSONObject body) {
     if (body == null) {
-      return;
-    }
-    double existing = body.optDouble("lineGrossAmount", 0);
-    if (existing != 0) {
       return;
     }
     double effectivePrice = body.optDouble("grossUnitPrice", 0);
