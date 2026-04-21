@@ -61,7 +61,8 @@ class NeoFavoritesService {
     } catch (PropertyNotFoundException e) {
       return EMPTY_ARRAY;
     } catch (PropertyException e) {
-      log.warn("Could not read {} for user {}: {}", PREF_KEY, ctx.getUser().getId(), e.getMessage());
+      String userId = (ctx.getUser() != null) ? ctx.getUser().getId() : "System";
+      log.warn("Could not read {} for user {}: {}", PREF_KEY, userId, e.getMessage());
       return EMPTY_ARRAY;
     }
   }
