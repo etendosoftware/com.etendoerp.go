@@ -35,6 +35,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
@@ -52,6 +53,10 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 import org.openbravo.common.actionhandler.createlinesfromprocess.CreateInvoiceLinesFromProcess;
 import org.openbravo.base.weld.WeldUtils;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.model.ad.process.ProcessInstance;
+import org.openbravo.model.ad.ui.Process;
+import org.openbravo.service.db.CallProcess;
 
 /**
  * NeoHandler that creates a Sales Invoice in Draft status from a Sales Order
@@ -115,7 +120,17 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         Map<String, BigDecimal> lineOverrides = parseLineOverrides(body);
 
         Invoice invoice;
-        if ("sales-order".equals(specName) || "sales-quotation".equals(specName)) {
+        if ("sales-quotation".equals(specName)) {
+          Order quotation = OBDal.getInstance().get(Order.class, recordId);
+          if (quotation == null) {
+            return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Quotation not found: " + recordId);
+          }
+          if (!"CO".equals(quotation.getDocumentStatus())) {
+            processQuotationDocAction(quotation, "CO");
+          }
+          invoice = createFromOrder(recordId, lineOverrides);
+          processQuotationDocAction(OBDal.getInstance().get(Order.class, recordId), "CL");
+        } else if ("sales-order".equals(specName)) {
           invoice = createFromOrder(recordId, lineOverrides);
         } else if (SPEC_GOODS_SHIPMENT.equals(specName)) {
           List<String> shipmentIds = parseShipmentIds(body, recordId);
@@ -296,6 +311,39 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * Format: { "lines": [ { "orderLineId": "ABC", "quantity": 5 }, ... ] }
    * Returns a map of orderLineId/shipmentLineId -> quantity. Empty map means invoice all.
    */
+  private void processQuotationDocAction(Order order, String docAction) {
+    try {
+      order.setDocumentAction(docAction);
+      OBDal.getInstance().save(order);
+      OBDal.getInstance().flush();
+
+      OBCriteria<Process> crit = OBDal.getInstance().createCriteria(Process.class);
+      crit.add(Restrictions.ilike(Process.PROPERTY_PROCEDURE, "C_Order_Post", MatchMode.EXACT));
+      crit.add(Restrictions.eq(Process.PROPERTY_ACTIVE, true));
+      crit.setMaxResults(1);
+      Process proc = (Process) crit.uniqueResult();
+
+      if (proc == null) {
+        log.warn("C_Order_Post process not found; skipping docAction={} for quotation {}", docAction, order.getId());
+        return;
+      }
+
+      ProcessInstance pInstance = CallProcess.getInstance().call(proc, order.getId(), null);
+      OBDal.getInstance().getSession().refresh(pInstance);
+      OBDal.getInstance().getSession().refresh(order);
+
+      if (pInstance.getResult() != null && pInstance.getResult() == 0L) {
+        String errMsg = StringUtils.defaultString(pInstance.getErrorMsg(), "DocAction " + docAction + " failed");
+        throw new OBException(errMsg.replaceFirst("@ERROR=", ""));
+      }
+    } catch (OBException e) {
+      throw e;
+    } catch (Exception e) {
+      log.error("Error processing docAction={} on quotation {}: {}", docAction, order.getId(), e.getMessage(), e);
+      throw new OBException("Error processing quotation: " + e.getMessage());
+    }
+  }
+
   private Map<String, BigDecimal> parseLineOverrides(JSONObject body) {
     Map<String, BigDecimal> overrides = new HashMap<>();
     if (body == null || !body.has("lines")) {
