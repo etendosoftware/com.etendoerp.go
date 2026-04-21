@@ -81,14 +81,18 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   @Override
   public NeoResponse afterHandle(NeoContext ctx) {
-    // Enrich GET-by-ID response with C_Location fields so the modal can pre-populate the form
-    if (!"GET".equals(ctx.getHttpMethod()) || ctx.getRecordId() == null) {
+    if (!"GET".equals(ctx.getHttpMethod())) {
       return null;
     }
     try {
-      return enrichWithLocationData(ctx);
+      if (ctx.getRecordId() != null) {
+        // Enrich GET-by-ID response with C_Location fields so the modal can pre-populate the form
+        return enrichWithLocationData(ctx);
+      }
+      // Enrich GET list: replace stale "Location" names with a computed display name
+      return enrichListDisplayNames(ctx);
     } catch (Exception e) {
-      log.error("ContactsLocationAddressHandler error enriching GET by ID response", e);
+      log.error("ContactsLocationAddressHandler afterHandle error", e);
       return null;
     }
   }
@@ -217,6 +221,91 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  // ------------------------------------------------------------------ enrich GET list
+
+  private NeoResponse enrichListDisplayNames(NeoContext ctx) throws Exception {
+    NeoResponse previous = ctx.getPreviousResult();
+    if (previous == null || previous.getBody() == null) {
+      return null;
+    }
+    JSONObject body = previous.getBody();
+    JSONObject responseWrapper = body.optJSONObject("response");
+    if (responseWrapper == null) {
+      return null;
+    }
+    JSONArray dataArr = responseWrapper.optJSONArray("data");
+    if (dataArr == null || dataArr.length() == 0) {
+      return null;
+    }
+
+    OBContext.setAdminMode(true);
+    try {
+      boolean modified = false;
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject rec = dataArr.getJSONObject(i);
+        String name = rec.optString("name", "");
+        if (!"Location".equals(name) && !name.isEmpty()) {
+          continue;
+        }
+        String bplId = nullIfEmpty(rec.optString("id", null));
+        if (bplId == null) {
+          continue;
+        }
+        org.openbravo.model.common.businesspartner.Location bpLoc =
+            OBDal.getInstance().get(org.openbravo.model.common.businesspartner.Location.class, bplId);
+        if (bpLoc == null || bpLoc.getLocationAddress() == null) {
+          continue;
+        }
+        String computed = buildDisplayName(bpLoc.getLocationAddress());
+        if (computed != null && !computed.equals(name)) {
+          rec.put("name", computed);
+          modified = true;
+        }
+      }
+      return modified ? NeoResponse.ok(body) : null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private static String buildDisplayName(org.openbravo.model.common.geography.Location geoLoc) {
+    String city = nullIfEmpty(geoLoc.getCityName());
+    String addr = nullIfEmpty(geoLoc.getAddressLine1());
+
+    if (city != null || addr != null) {
+      StringBuilder sb = new StringBuilder();
+      if (city != null) {
+        sb.append(city);
+      }
+      if (addr != null) {
+        if (sb.length() > 0) {
+          sb.append(", ");
+        }
+        sb.append(addr);
+      }
+      return sb.toString();
+    }
+
+    String region = geoLoc.getRegion() != null ? nullIfEmpty(geoLoc.getRegion().getName()) : null;
+    String country = geoLoc.getCountry() != null ? nullIfEmpty(geoLoc.getCountry().getName()) : null;
+
+    if (region != null || country != null) {
+      StringBuilder sb = new StringBuilder();
+      if (region != null) {
+        sb.append(region);
+      }
+      if (country != null) {
+        if (sb.length() > 0) {
+          sb.append(", ");
+        }
+        sb.append(country);
+      }
+      return sb.toString();
+    }
+
+    return null;
   }
 
   // ------------------------------------------------------------------ shared helpers
