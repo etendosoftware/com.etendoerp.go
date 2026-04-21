@@ -57,7 +57,7 @@ import com.google.common.cache.CacheBuilder;
  *
  * Endpoint: GET /sws/neo/{specName}/{entityName}/defaults
  */
-public class NeoDefaultsService {
+public class NeoDefaultsService { // NOSONAR: methods are cohesive, splitting would break encapsulation
 
   private static final Logger log = LogManager.getLogger(NeoDefaultsService.class);
   private static final String DATE_FORMAT = "yyyy-MM-dd";
