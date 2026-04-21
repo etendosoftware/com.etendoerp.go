@@ -58,6 +58,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   private static final String FIELD_INVOICE_TO_ADDRESS = "invoiceToAddress";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_REGION = "region";
+  private static final String FIELD_RESPONSE = "response";
+  private static final String FIELD_DATA = "data";
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
@@ -190,17 +192,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   // ------------------------------------------------------------------ enrich GET
 
   private NeoResponse enrichWithLocationData(NeoContext ctx) throws Exception {
-    NeoResponse previous = ctx.getPreviousResult();
-    if (previous == null || previous.getBody() == null) {
-      return null;
-    }
-    JSONObject body = previous.getBody();
-    JSONObject responseWrapper = body.optJSONObject("response");
-    if (responseWrapper == null) {
-      return null;
-    }
-    JSONArray dataArr = responseWrapper.optJSONArray("data");
-    if (dataArr == null || dataArr.length() == 0) {
+    JSONArray dataArr = extractDataArray(ctx);
+    if (dataArr == null) {
       return null;
     }
     JSONObject locationJson = dataArr.getJSONObject(0);
@@ -217,7 +210,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         return null;
       }
       putGeoLocFields(locationJson, geoLoc);
-      return NeoResponse.ok(body);
+      return NeoResponse.ok(ctx.getPreviousResult().getBody());
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -226,17 +219,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   // ------------------------------------------------------------------ enrich GET list
 
   private NeoResponse enrichListDisplayNames(NeoContext ctx) throws Exception {
-    NeoResponse previous = ctx.getPreviousResult();
-    if (previous == null || previous.getBody() == null) {
-      return null;
-    }
-    JSONObject body = previous.getBody();
-    JSONObject responseWrapper = body.optJSONObject("response");
-    if (responseWrapper == null) {
-      return null;
-    }
-    JSONArray dataArr = responseWrapper.optJSONArray("data");
-    if (dataArr == null || dataArr.length() == 0) {
+    JSONArray dataArr = extractDataArray(ctx);
+    if (dataArr == null) {
       return null;
     }
 
@@ -264,51 +248,36 @@ public class ContactsLocationAddressHandler implements NeoHandler {
           modified = true;
         }
       }
-      return modified ? NeoResponse.ok(body) : null;
+      return modified ? NeoResponse.ok(ctx.getPreviousResult().getBody()) : null;
     } finally {
       OBContext.restorePreviousMode();
     }
   }
 
   private static String buildDisplayName(org.openbravo.model.common.geography.Location geoLoc) {
-    String city = nullIfEmpty(geoLoc.getCityName());
-    String addr = nullIfEmpty(geoLoc.getAddressLine1());
-
-    if (city != null || addr != null) {
-      StringBuilder sb = new StringBuilder();
-      if (city != null) {
-        sb.append(city);
-      }
-      if (addr != null) {
-        if (sb.length() > 0) {
-          sb.append(", ");
-        }
-        sb.append(addr);
-      }
-      return sb.toString();
+    String result = joinNonNull(nullIfEmpty(geoLoc.getCityName()), nullIfEmpty(geoLoc.getAddressLine1()));
+    if (result != null) {
+      return result;
     }
-
     String region = geoLoc.getRegion() != null ? nullIfEmpty(geoLoc.getRegion().getName()) : null;
     String country = geoLoc.getCountry() != null ? nullIfEmpty(geoLoc.getCountry().getName()) : null;
-
-    if (region != null || country != null) {
-      StringBuilder sb = new StringBuilder();
-      if (region != null) {
-        sb.append(region);
-      }
-      if (country != null) {
-        if (sb.length() > 0) {
-          sb.append(", ");
-        }
-        sb.append(country);
-      }
-      return sb.toString();
-    }
-
-    return null;
+    return joinNonNull(region, country);
   }
 
   // ------------------------------------------------------------------ shared helpers
+
+  private static JSONArray extractDataArray(NeoContext ctx) {
+    NeoResponse previous = ctx.getPreviousResult();
+    if (previous == null || previous.getBody() == null) {
+      return null;
+    }
+    JSONObject responseWrapper = previous.getBody().optJSONObject(FIELD_RESPONSE);
+    if (responseWrapper == null) {
+      return null;
+    }
+    JSONArray dataArr = responseWrapper.optJSONArray(FIELD_DATA);
+    return (dataArr == null || dataArr.length() == 0) ? null : dataArr;
+  }
 
   private static void applyGeoLocFields(JSONObject body,
       org.openbravo.model.common.geography.Location geoLoc) throws Exception {
@@ -344,30 +313,29 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     locationJson.put("postalCode",   geoLoc.getPostalCode()   != null ? geoLoc.getPostalCode()   : JSONObject.NULL);
 
     if (geoLoc.getCountry() != null) {
-      locationJson.put(FIELD_COUNTRY,             geoLoc.getCountry().getId());
-      locationJson.put("country$_identifier", geoLoc.getCountry().getName());
+      locationJson.put(FIELD_COUNTRY,          geoLoc.getCountry().getId());
+      locationJson.put("country$_identifier",  geoLoc.getCountry().getName());
     } else {
-      locationJson.put(FIELD_COUNTRY,             JSONObject.NULL);
-      locationJson.put("country$_identifier", JSONObject.NULL);
+      locationJson.put(FIELD_COUNTRY,          JSONObject.NULL);
+      locationJson.put("country$_identifier",  JSONObject.NULL);
     }
     if (geoLoc.getRegion() != null) {
-      locationJson.put(FIELD_REGION,             geoLoc.getRegion().getId());
-      locationJson.put("region$_identifier", geoLoc.getRegion().getName());
+      locationJson.put(FIELD_REGION,           geoLoc.getRegion().getId());
+      locationJson.put("region$_identifier",   geoLoc.getRegion().getName());
     } else {
-      locationJson.put(FIELD_REGION,             JSONObject.NULL);
-      locationJson.put("region$_identifier", JSONObject.NULL);
+      locationJson.put(FIELD_REGION,           JSONObject.NULL);
+      locationJson.put("region$_identifier",   JSONObject.NULL);
     }
   }
 
   private static JSONObject buildRecord(org.openbravo.model.common.businesspartner.Location bpLoc,
       org.openbravo.model.common.geography.Location geoLoc) throws Exception {
     JSONObject locationJson = new JSONObject();
-    locationJson.put("id",             bpLoc.getId());
+    locationJson.put("id",              bpLoc.getId());
     locationJson.put("locationAddress", geoLoc.getId());
-    locationJson.put("name",           bpLoc.getName() != null ? bpLoc.getName() : JSONObject.NULL);
-    locationJson.put(FIELD_SHIP_TO_ADDRESS,  Boolean.TRUE.equals(bpLoc.isShipToAddress()) ? "Y" : "N");
-    locationJson.put(FIELD_INVOICE_TO_ADDRESS,
-        Boolean.TRUE.equals(bpLoc.isInvoiceToAddress()) ? "Y" : "N");
+    locationJson.put("name",            bpLoc.getName() != null ? bpLoc.getName() : JSONObject.NULL);
+    locationJson.put(FIELD_SHIP_TO_ADDRESS,    Boolean.TRUE.equals(bpLoc.isShipToAddress()) ? "Y" : "N");
+    locationJson.put(FIELD_INVOICE_TO_ADDRESS, Boolean.TRUE.equals(bpLoc.isInvoiceToAddress()) ? "Y" : "N");
     putGeoLocFields(locationJson, geoLoc);
     return locationJson;
   }
@@ -377,10 +345,23 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     dataArr.put(locationJson);
     JSONObject responseData = new JSONObject();
     responseData.put("status", 0);
-    responseData.put("data", dataArr);
+    responseData.put(FIELD_DATA, dataArr);
     JSONObject wrapper = new JSONObject();
-    wrapper.put("response", responseData);
+    wrapper.put(FIELD_RESPONSE, responseData);
     return new NeoResponse(httpStatus, wrapper);
+  }
+
+  private static String joinNonNull(String... parts) {
+    StringBuilder sb = new StringBuilder();
+    for (String part : parts) {
+      if (part != null) {
+        if (sb.length() > 0) {
+          sb.append(", ");
+        }
+        sb.append(part);
+      }
+    }
+    return sb.length() > 0 ? sb.toString() : null;
   }
 
   private static String nullIfEmpty(String s) {
