@@ -41,14 +41,41 @@ public class WidgetBestProductsHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(WidgetBestProductsHandler.class);
 
   private static final String BEST_PRODUCTS_QUERY =
-      "SELECT p.name, SUM(il.qtyinvoiced) AS qty, SUM(il.linenetamt) AS amount "
-    + "FROM c_invoiceline il "
-    + "JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
-    + "JOIN m_product p ON p.m_product_id = il.m_product_id "
-    + "WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId "
-    + "GROUP BY p.m_product_id, p.name "
-    + "ORDER BY SUM(il.linenetamt) DESC "
-    + "LIMIT 10";
+      "WITH all_data AS ("
+    + "  SELECT p.m_product_id, p.name, SUM(il.qtyinvoiced) AS qty, SUM(il.linenetamt) AS amount"
+    + "  FROM c_invoiceline il"
+    + "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id"
+    + "  JOIN m_product p ON p.m_product_id = il.m_product_id"
+    + "  WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId"
+    + "  GROUP BY p.m_product_id, p.name"
+    + "), curr_period AS ("
+    + "  SELECT il.m_product_id, SUM(il.linenetamt) AS amount"
+    + "  FROM c_invoiceline il JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id"
+    + "  WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId"
+    + "    AND date_trunc('month', i.dateinvoiced) = ("
+    + "      SELECT date_trunc('month', MAX(dateinvoiced)) FROM c_invoice"
+    + "      WHERE issotrx = 'Y' AND docstatus IN ('CO','CL') AND ad_client_id = :clientId)"
+    + "  GROUP BY il.m_product_id"
+    + "), prev_period AS ("
+    + "  SELECT il.m_product_id, SUM(il.linenetamt) AS amount"
+    + "  FROM c_invoiceline il JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id"
+    + "  WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId"
+    + "    AND date_trunc('month', i.dateinvoiced) = ("
+    + "      SELECT date_trunc('month', MAX(dateinvoiced)) FROM c_invoice"
+    + "      WHERE issotrx = 'Y' AND docstatus IN ('CO','CL') AND ad_client_id = :clientId"
+    + "        AND date_trunc('month', dateinvoiced) < ("
+    + "          SELECT date_trunc('month', MAX(dateinvoiced)) FROM c_invoice"
+    + "          WHERE issotrx = 'Y' AND docstatus IN ('CO','CL') AND ad_client_id = :clientId))"
+    + "  GROUP BY il.m_product_id"
+    + ")"
+    + "SELECT all_data.m_product_id AS id, all_data.name, all_data.qty, all_data.amount,"
+    + "  CASE WHEN prev_period.amount IS NOT NULL AND prev_period.amount > 0"
+    + "    THEN ROUND(((curr_period.amount - prev_period.amount) / prev_period.amount) * 100)"
+    + "    ELSE NULL END AS trend_pct"
+    + " FROM all_data"
+    + " LEFT JOIN curr_period ON all_data.m_product_id = curr_period.m_product_id"
+    + " LEFT JOIN prev_period ON all_data.m_product_id = prev_period.m_product_id"
+    + " ORDER BY all_data.amount DESC LIMIT 10";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -72,9 +99,11 @@ public class WidgetBestProductsHandler implements NeoHandler {
         JSONArray data = new JSONArray();
         for (Object[] row : rows) {
           JSONObject item = new JSONObject();
-          item.put("name", row[0]);
-          item.put("qty", ((BigDecimal) row[1]).longValue());
-          item.put("amount", ((BigDecimal) row[2]).doubleValue());
+          item.put("id",     row[0]);
+          item.put("name",   row[1]);
+          item.put("qty",    ((BigDecimal) row[2]).longValue());
+          item.put("amount", ((BigDecimal) row[3]).doubleValue());
+          if (row[4] != null) item.put("trendPct", ((BigDecimal) row[4]).intValue());
           data.put(item);
         }
 
