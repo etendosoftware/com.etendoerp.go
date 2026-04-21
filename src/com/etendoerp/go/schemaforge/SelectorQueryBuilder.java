@@ -325,8 +325,15 @@ class SelectorQueryBuilder {
 
   /**
    * Append a full-text search predicate across all searchable properties.
-   * Emits an OR clause: {@code (lower(COALESCE(cast(alias.prop as string), '')) LIKE :search)}.
+   *
+   * <p>Emits an OR clause: {@code (lower(COALESCE(cast(<expr> as string), '')) LIKE :search)}.
    * No-op when {@code search} is blank or {@code searchableProps} is empty.
+   *
+   * <p>Each fragment is resolved via {@link #resolveSearchableExpression(String, String)}:
+   * bare property names are prefixed with the alias (standard selectors with
+   * {@code SelectorField.property}), while dotted fragments are used as-is
+   * (custom-HQL selectors whose {@code clause_left_part} already contains the alias,
+   * e.g. {@code bp.name}).
    */
   static void appendCustomSearchFilter(StringBuilder hql,
       List<String> searchableProps, String alias, String search, boolean hasWhere) {
@@ -338,10 +345,27 @@ class SelectorQueryBuilder {
       if (i > 0) {
         hql.append(" OR ");
       }
-      hql.append("lower(COALESCE(cast(").append(alias).append(".")
-          .append(searchableProps.get(i)).append(" as string), '')) LIKE :search");
+      String expr = resolveSearchableExpression(alias, searchableProps.get(i));
+      hql.append("lower(COALESCE(cast(").append(expr).append(" as string), '')) LIKE :search");
     }
     hql.append(")");
+  }
+
+  /**
+   * Resolve a searchable fragment into a fully-qualified HQL expression.
+   *
+   * <p>If the fragment already contains a dot (e.g. {@code bp.name}), it is returned
+   * as-is — OBUISEL custom selectors store the full HQL path including the alias in
+   * {@code clause_left_part}. Otherwise the fragment is a bare property name
+   * (standard {@code SelectorField.property}) and is prefixed with {@code alias.}.
+   *
+   * <p>Package-private for unit testing.
+   */
+  static String resolveSearchableExpression(String alias, String fragment) {
+    if (StringUtils.isBlank(fragment)) {
+      return fragment;
+    }
+    return fragment.contains(".") ? fragment : alias + "." + fragment;
   }
 
   /**
