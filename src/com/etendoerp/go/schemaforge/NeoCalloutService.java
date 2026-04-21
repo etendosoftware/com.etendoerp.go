@@ -846,7 +846,7 @@ public class NeoCalloutService {
       if (taxUpdate == null) {
         return;
       }
-      String taxId = taxUpdate.optString("value");
+      String taxId = taxUpdate.optString(VALUE_KEY);
       if (StringUtils.isBlank(taxId) || "null".equals(taxId)) {
         return;
       }
@@ -859,7 +859,7 @@ public class NeoCalloutService {
         return;
       }
       JSONObject rateUpdate = new JSONObject();
-      rateUpdate.put("value", rate.doubleValue());
+      rateUpdate.put(VALUE_KEY, rate.doubleValue());
       updates.put("taxRate", rateUpdate);
     } catch (Exception e) {
       log.debug("Could not inject tax rate into callout response: {}", e.getMessage());
