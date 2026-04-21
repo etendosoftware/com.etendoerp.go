@@ -1396,23 +1396,15 @@ public class NeoDefaultsService {
   }
 
   /**
-   * For order/quotation lines, always recompute 'lineGrossAmount' as
-   * effectiveUnitPrice × orderedQuantity. Uses grossUnitPrice if present and non-zero,
-   * falls back to unitPrice for net-price list quotations where the callout does not
-   * populate grossUnitPrice.
+   * For order/quotation lines, always recompute 'lineGrossAmount'.
+   * - Gross price list (grossUnitPrice > 0): grossUnitPrice × qty (tax already included).
+   * - Net price list (grossUnitPrice = 0): unitPrice × qty × (1 + taxRate/100).
    *
    * <p>Always recomputes to override any stale value the product callout may have set
    * for qty=1 (SL_Order_Amt fires on product change before the user sets the quantity).
    */
   public static void injectLineGrossAmountIfMissing(JSONObject body) {
     if (body == null) {
-      return;
-    }
-    double effectivePrice = body.optDouble("grossUnitPrice", 0);
-    if (effectivePrice <= 0) {
-      effectivePrice = body.optDouble("unitPrice", 0);
-    }
-    if (effectivePrice <= 0) {
       return;
     }
     double qty;
@@ -1424,11 +1416,34 @@ public class NeoDefaultsService {
     if (qty == 0) {
       return;
     }
+    double grossUnitPrice = body.optDouble("grossUnitPrice", 0);
+    if (grossUnitPrice > 0) {
+      // Gross price list: tax already included in grossUnitPrice
+      try {
+        double computed = grossUnitPrice * qty;
+        body.put("lineGrossAmount", computed);
+        log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} from grossUnitPrice={} × qty={}",
+            computed, grossUnitPrice, qty);
+      } catch (Exception e) {
+        log.debug("Could not compute lineGrossAmount: {}", e.getMessage());
+      }
+      return;
+    }
+    // Net price list: lineGrossAmount = unitPrice × qty × (1 + taxRate/100)
+    double unitPrice = body.optDouble("unitPrice", 0);
+    if (unitPrice <= 0) {
+      return;
+    }
+    double lineNetAmt = unitPrice * qty;
+    String taxId = body.optString("tax", "");
+    log.info("[NEO-DEFAULTS] injectLineGrossAmount net path: qty={} unitPrice={} taxId={}",
+        qty, unitPrice, taxId.isEmpty() ? "(empty)" : taxId);
     try {
-      double computed = effectivePrice * qty;
+      double taxRate = taxId.isEmpty() ? 0 : fetchTaxRate(taxId);
+      double computed = lineNetAmt * (1.0 + taxRate / 100.0);
       body.put("lineGrossAmount", computed);
-      log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} from price={} × qty={}",
-          computed, effectivePrice, qty);
+      log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} from unitPrice={} × qty={} × (1 + {}%)",
+          computed, unitPrice, qty, taxRate);
     } catch (Exception e) {
       log.debug("Could not compute lineGrossAmount: {}", e.getMessage());
     }
