@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.DisplayName;
 
 /**
  * Unit tests for {@link NeoSelectorService} utility methods.
@@ -66,5 +67,68 @@ class NeoSelectorServiceTest {
   @Test
   void testCombineFiltersNoArgsReturnsNull() {
     assertNull(NeoSelectorService.combineFilters());
+  }
+
+  // --------------------------------------------------------------------
+  // resolveSearchableFragment — custom-HQL selectors with blank property
+  // --------------------------------------------------------------------
+
+  /** Standard selector: non-blank property is returned verbatim. */
+  @Test
+  @DisplayName("resolveSearchableFragment prefers non-blank property")
+  void testResolveFragmentPrefersProperty() {
+    assertEquals("name",
+        NeoSelectorService.resolveSearchableFragment("name", "bp.name"));
+  }
+
+  /** Custom HQL selector: blank property + safe dotted clause_left_part. */
+  @Test
+  @DisplayName("resolveSearchableFragment accepts dotted clause_left_part when property is blank")
+  void testResolveFragmentFallsBackToClauseLeftPart() {
+    assertEquals("bp.name",
+        NeoSelectorService.resolveSearchableFragment("", "bp.name"));
+    assertEquals("bp.searchKey",
+        NeoSelectorService.resolveSearchableFragment(null, "bp.searchKey"));
+  }
+
+  /** Deep dotted path (contact.businessPartner.name) is safe. */
+  @Test
+  @DisplayName("resolveSearchableFragment accepts multi-segment dotted paths")
+  void testResolveFragmentDeepPath() {
+    assertEquals("contact.businessPartner.name",
+        NeoSelectorService.resolveSearchableFragment("", "contact.businessPartner.name"));
+  }
+
+  /** Whitespace around a safe clause is stripped. */
+  @Test
+  @DisplayName("resolveSearchableFragment trims safe clause_left_part")
+  void testResolveFragmentTrimsClauseLeftPart() {
+    assertEquals("bp.name",
+        NeoSelectorService.resolveSearchableFragment("", "  bp.name  "));
+  }
+
+  /** Complex expressions (COALESCE, arithmetic, quotes, etc.) are rejected. */
+  @Test
+  @DisplayName("resolveSearchableFragment rejects complex HQL expressions")
+  void testResolveFragmentRejectsComplexExpressions() {
+    assertNull(NeoSelectorService.resolveSearchableFragment(
+        "", "COALESCE(contact.name, usercontact.name)"));
+    assertNull(NeoSelectorService.resolveSearchableFragment(
+        "", "bp.creditLimit - bp.creditUsed"));
+    assertNull(NeoSelectorService.resolveSearchableFragment(
+        "", "bp.name || ' ' || bp.searchKey"));
+    assertNull(NeoSelectorService.resolveSearchableFragment(
+        "", "(select x from Foo f)"));
+    assertNull(NeoSelectorService.resolveSearchableFragment(
+        "", "bp.name = 'x'"));
+  }
+
+  /** Both blank returns null — no search applied. */
+  @Test
+  @DisplayName("resolveSearchableFragment returns null when both property and clause are blank")
+  void testResolveFragmentBothBlank() {
+    assertNull(NeoSelectorService.resolveSearchableFragment(null, null));
+    assertNull(NeoSelectorService.resolveSearchableFragment("", ""));
+    assertNull(NeoSelectorService.resolveSearchableFragment("  ", "  "));
   }
 }
