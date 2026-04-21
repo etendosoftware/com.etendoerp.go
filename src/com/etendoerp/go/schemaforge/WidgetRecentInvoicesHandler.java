@@ -44,7 +44,8 @@ public class WidgetRecentInvoicesHandler implements NeoHandler {
   private static final String RECENT_INVOICES_QUERY =
       "SELECT i.c_invoice_id, bp.name AS client, "
     + "to_char(i.dateinvoiced, 'DD-MM-YYYY') AS date, "
-    + "i.grandtotal AS amount, i.docstatus AS status "
+    + "i.grandtotal AS amount, i.docstatus AS status, "
+    + "i.documentno AS documentno "
     + "FROM c_invoice i "
     + "JOIN c_bpartner bp ON bp.c_bpartner_id = i.c_bpartner_id "
     + "WHERE i.issotrx = 'Y' AND i.ad_client_id = :clientId "
@@ -81,6 +82,7 @@ public class WidgetRecentInvoicesHandler implements NeoHandler {
           item.put("date", String.valueOf(row[2]));
           item.put("amount", ((BigDecimal) row[3]).doubleValue());
           item.put("status", String.valueOf(row[4]));
+          item.put("documentNo", String.valueOf(row[5] != null ? row[5] : ""));
           data.put(item);
         }
 
