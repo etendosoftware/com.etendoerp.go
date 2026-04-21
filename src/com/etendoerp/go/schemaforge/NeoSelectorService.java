@@ -3,8 +3,10 @@ package com.etendoerp.go.schemaforge;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -280,7 +282,11 @@ public class NeoSelectorService {
       // Post-process: enrich Product selector items with prices from the requested price list.
       // This ensures the search drawer shows the price from the document's price list,
       // not a default or unrelated price.
-      if ("ProductByPriceAndWarehouse".equals(meta.entityName)
+      // "Product" covers invoice lines (ProductSimple selector, target entity = M_Product).
+      // "ProductByPriceAndWarehouse" covers order lines (warehouse-based selector).
+      boolean isProductSelector = "ProductByPriceAndWarehouse".equals(meta.entityName)
+          || "Product".equals(meta.entityName);
+      if (isProductSelector
           && contextParams != null
           && contextParams.containsKey("priceList")
           && selectorResult.getHttpStatus() == 200) {
@@ -1488,14 +1494,24 @@ public class NeoSelectorService {
         return response;
       }
 
-      // Collect product IDs
-      List<String> productIds = new ArrayList<>();
+      // Deduplicate items by product ID — ProductSimple returns one row per price list version,
+      // so the same product may appear multiple times when not filtered by price list.
+      Set<String> seenIds = new LinkedHashSet<>();
+      JSONArray deduplicatedItems = new JSONArray();
       for (int i = 0; i < items.length(); i++) {
-        String id = items.getJSONObject(i).optString("id");
-        if (StringUtils.isNotBlank(id)) {
-          productIds.add(id);
+        JSONObject item = items.getJSONObject(i);
+        String itemId = item.optString("id");
+        if (StringUtils.isNotBlank(itemId) && seenIds.add(itemId)) {
+          deduplicatedItems.put(item);
         }
       }
+      if (deduplicatedItems.length() < items.length()) {
+        response.getBody().put("items", deduplicatedItems);
+        items = deduplicatedItems;
+      }
+
+      // Collect product IDs
+      List<String> productIds = new ArrayList<>(seenIds);
       if (productIds.isEmpty()) {
         return response;
       }
@@ -1511,10 +1527,13 @@ public class NeoSelectorService {
 
       String sql = "SELECT pp.m_product_id,"
           + "  COALESCE(pp.pricestd, 0) AS standard_price,"
-          + "  COALESCE(pp.pricelist, 0) AS list_price"
+          + "  COALESCE(pp.pricelist, 0) AS list_price,"
+          + "  pl.istaxincluded AS is_tax_included"
           + " FROM m_productprice pp"
           + " JOIN m_pricelist_version plv"
           + "   ON plv.m_pricelist_version_id = pp.m_pricelist_version_id"
+          + " JOIN m_pricelist pl"
+          + "   ON pl.m_pricelist_id = plv.m_pricelist_id"
           + " WHERE plv.m_pricelist_id = :priceListId"
           + "   AND pp.m_product_id IN (" + inClause + ")"
           + "   AND pp.isactive = 'Y'"
@@ -1543,13 +1562,16 @@ public class NeoSelectorService {
         return response;
       }
 
-      // Inject standardPrice and listPrice into matching items
+      // Inject standardPrice, listPrice, and isTaxIncluded into matching items.
+      // isTaxIncluded tells the frontend whether the price is gross (true) or net (false),
+      // so it can route standardPrice to grossUnitPrice (gross lists) or unitPrice (net lists).
       for (int i = 0; i < items.length(); i++) {
         JSONObject item = items.getJSONObject(i);
         Object[] cols = priceMap.get(item.optString("id"));
         if (cols != null) {
           item.put("standardPrice", cols[1]);
           item.put("listPrice", cols[2]);
+          item.put("isTaxIncluded", "Y".equals(String.valueOf(cols[3])));
         }
       }
 
