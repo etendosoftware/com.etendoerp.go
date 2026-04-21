@@ -499,6 +499,7 @@ class NeoCrudHandler {
     // throws on the sales invoice context (e.g. tax-exclusive price lists).
     NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
     NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
+    NeoDefaultsService.injectLineGrossAmountIfMissing(filteredBody);
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
   }
