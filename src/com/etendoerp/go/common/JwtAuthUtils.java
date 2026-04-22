@@ -17,9 +17,13 @@
 
 package com.etendoerp.go.common;
 
+import java.io.IOException;
+
 import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.Logger;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 
@@ -66,5 +70,30 @@ public class JwtAuthUtils {
     OBContext context = SecureWebServicesUtils.createContext(userId, roleId, orgId, warehouseId, clientId);
     OBContext.setOBContext(context);
     OBContext.setOBContextInSession(request, context);
+  }
+
+  /**
+   * Authenticates the request and, on failure, writes a 401 response and logs the reason.
+   * Returns {@code true} on success, {@code false} when the caller should abort processing.
+   *
+   * @param request  the incoming HTTP request
+   * @param response the HTTP response (used to write the 401 body on failure)
+   * @param log      logger used to record the failure cause
+   * @param context  short label for the endpoint, included in the log message
+   */
+  public static boolean authenticateOrFail(HttpServletRequest request, HttpServletResponse response,
+      Logger log, String context) throws IOException {
+    try {
+      authenticate(request);
+      return true;
+    } catch (OBException e) {
+      log.warn("Unauthorized {}: {}", context, e.getMessage());
+      ServletResponseUtils.sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
+      return false;
+    } catch (Exception e) {
+      log.warn("Unauthorized {}: {}", context, e.getMessage());
+      ServletResponseUtils.sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
+      return false;
+    }
   }
 }

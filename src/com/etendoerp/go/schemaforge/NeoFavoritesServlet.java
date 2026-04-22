@@ -26,14 +26,12 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.http.entity.ContentType;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONException;
-import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.HttpBaseServlet;
-import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.JwtAuthUtils;
+import com.etendoerp.go.common.ServletResponseUtils;
 
 /**
  * Persists and retrieves navigator favorites per user via AD_PREFERENCE.
@@ -52,17 +50,7 @@ public class NeoFavoritesServlet extends HttpBaseServlet {
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     CorsUtils.apply(request, response, ALLOWED_METHODS, ALLOWED_HEADERS, null, false);
-    try {
-      JwtAuthUtils.authenticate(request);
-    } catch (OBException e) {
-      log.warn("Unauthorized favorites GET: {}", e.getMessage());
-      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
-      return;
-    } catch (Exception e) {
-      log.warn("Unauthorized favorites GET: {}", e.getMessage());
-      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
-      return;
-    }
+    if (!JwtAuthUtils.authenticateOrFail(request, response, log, "favorites GET")) return;
 
     try {
       OBContext.setAdminMode();
@@ -73,7 +61,7 @@ public class NeoFavoritesServlet extends HttpBaseServlet {
       response.getWriter().write(json);
     } catch (Exception e) {
       log.error("Error reading favorites: {}", e.getMessage(), e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+      ServletResponseUtils.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while reading favorites.");
     } finally {
       OBContext.restorePreviousMode();
@@ -83,17 +71,7 @@ public class NeoFavoritesServlet extends HttpBaseServlet {
   @Override
   public void doPut(HttpServletRequest request, HttpServletResponse response) throws IOException {
     CorsUtils.apply(request, response, ALLOWED_METHODS, ALLOWED_HEADERS, null, false);
-    try {
-      JwtAuthUtils.authenticate(request);
-    } catch (OBException e) {
-      log.warn("Unauthorized favorites PUT: {}", e.getMessage());
-      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
-      return;
-    } catch (Exception e) {
-      log.warn("Unauthorized favorites PUT: {}", e.getMessage());
-      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
-      return;
-    }
+    if (!JwtAuthUtils.authenticateOrFail(request, response, log, "favorites PUT")) return;
 
     try {
       OBContext.setAdminMode();
@@ -102,7 +80,7 @@ public class NeoFavoritesServlet extends HttpBaseServlet {
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
     } catch (Exception e) {
       log.error("Error saving favorites: {}", e.getMessage(), e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+      ServletResponseUtils.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while saving favorites.");
     } finally {
       OBContext.restorePreviousMode();
@@ -113,18 +91,5 @@ public class NeoFavoritesServlet extends HttpBaseServlet {
   public void doOptions(HttpServletRequest request, HttpServletResponse response) throws IOException {
     CorsUtils.apply(request, response, ALLOWED_METHODS, ALLOWED_HEADERS, null, false);
     response.setStatus(HttpServletResponse.SC_NO_CONTENT);
-  }
-
-  private void sendError(HttpServletResponse response, int status, String message) throws IOException {
-    try {
-      JSONObject body = new JSONObject();
-      body.put("error", message);
-      response.setStatus(status);
-      response.setContentType(ContentType.APPLICATION_JSON.getMimeType());
-      response.setCharacterEncoding(StandardCharsets.UTF_8.name());
-      response.getWriter().write(body.toString());
-    } catch (JSONException ex) {
-      log.error("Failed to write error response", ex);
-    }
   }
 }
