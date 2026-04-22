@@ -20,7 +20,6 @@ package com.etendoerp.go.schemaforge;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.Preferences;
 import org.openbravo.erpCommon.utility.PropertyException;
 import org.openbravo.erpCommon.utility.PropertyNotFoundException;
@@ -78,6 +77,5 @@ class NeoFavoritesService {
     Organization org = ctx.getCurrentOrganization();
     User user = ctx.getUser();
     Preferences.setPreferenceValue(PREF_KEY, json, false, client, org, user, null, null, null);
-    OBDal.getInstance().commitAndClose();
   }
 }

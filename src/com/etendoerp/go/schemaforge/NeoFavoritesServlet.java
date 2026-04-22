@@ -79,6 +79,7 @@ public class NeoFavoritesServlet extends HttpBaseServlet {
       OBContext.setAdminMode();
       String body = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
       NeoFavoritesService.saveFavoritesJson(body);
+      OBDal.getInstance().commitAndClose();
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
     } catch (Exception e) {
       log.error("Error saving favorites: {}", e.getMessage(), e);
