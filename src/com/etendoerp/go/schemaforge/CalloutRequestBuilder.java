@@ -101,9 +101,10 @@ class CalloutRequestBuilder {
     String isSOTrx = adTab.getWindow() != null
         && Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
     params.put("isSOTrx", new String[]{ isSOTrx });
-    if (obCtx.getWarehouse() != null) {
-      params.put("inpmWarehouseId", new String[]{ obCtx.getWarehouse().getId() });
-    }
+    // NOTE: inpmWarehouseId is intentionally NOT set here from session.
+    // It will be injected by injectParentTabParams (parent record's warehouse) when available,
+    // and fall back to the session warehouse only if the parent record has no warehouse.
+    // Setting it here first would block the parent injection guard (!params.containsKey).
 
     // Build column lookup maps once (for form-state mapping, default-filling, aux-value resolution)
     ColumnLookupMaps maps = buildColumnLookupMaps(adTab);
@@ -116,8 +117,15 @@ class CalloutRequestBuilder {
     // Fill missing columns with their AD defaults so callouts see all fields
     fillMissingColumnDefaults(adTab, obCtx, maps.columns, params);
 
-    // For child tabs, inject the parent record ID and fields
+    // For child tabs, inject the parent record ID and fields (including the parent's warehouse).
+    // This must run before the session-warehouse fallback so that the parent's M_Warehouse_ID
+    // takes precedence over the user's session warehouse.
     injectParentTabParams(adTab, formState, params);
+
+    // Session warehouse fallback: only used when no parent record provided a warehouse.
+    if (!params.containsKey("inpmWarehouseId") && obCtx.getWarehouse() != null) {
+      params.put("inpmWarehouseId", new String[]{ obCtx.getWarehouse().getId() });
+    }
 
     // Process auxiliary values (e.g., businessPartner_LOC -> inpcBpartnerId_LOC)
     mapAuxValuesToParams(auxValues, maps, params);
