@@ -41,7 +41,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.CorsUtils;
-import com.etendoerp.go.schemaforge.util.NeoJwtAuth;
+import com.etendoerp.go.common.JwtAuthUtils;
 
 /**
  * Report Selectors Servlet.
@@ -153,7 +153,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     CorsUtils.apply(request, response, "GET, OPTIONS", "Authorization, Content-Type", null, false);
 
     try {
-      NeoJwtAuth.authenticate(request);
+      JwtAuthUtils.authenticate(request);
     } catch (OBException e) {
       log.warn("Unauthorized ReportSelectors request: {}", e.getMessage());
       sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());

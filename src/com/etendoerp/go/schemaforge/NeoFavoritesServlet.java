@@ -31,7 +31,7 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.common.CorsUtils;
-import com.etendoerp.go.schemaforge.util.NeoJwtAuth;
+import com.etendoerp.go.common.JwtAuthUtils;
 
 /**
  * Persists and retrieves navigator favorites per user via AD_PREFERENCE.
@@ -51,7 +51,7 @@ public class NeoFavoritesServlet extends HttpBaseServlet {
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     CorsUtils.apply(request, response, ALLOWED_METHODS, ALLOWED_HEADERS, null, false);
     try {
-      NeoJwtAuth.authenticate(request);
+      JwtAuthUtils.authenticate(request);
     } catch (OBException e) {
       log.warn("Unauthorized favorites GET: {}", e.getMessage());
       sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
@@ -82,7 +82,7 @@ public class NeoFavoritesServlet extends HttpBaseServlet {
   public void doPut(HttpServletRequest request, HttpServletResponse response) throws IOException {
     CorsUtils.apply(request, response, ALLOWED_METHODS, ALLOWED_HEADERS, null, false);
     try {
-      NeoJwtAuth.authenticate(request);
+      JwtAuthUtils.authenticate(request);
     } catch (OBException e) {
       log.warn("Unauthorized favorites PUT: {}", e.getMessage());
       sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());

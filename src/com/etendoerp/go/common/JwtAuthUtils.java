@@ -15,7 +15,7 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge.util;
+package com.etendoerp.go.common;
 
 import javax.servlet.http.HttpServletRequest;
 
@@ -27,15 +27,15 @@ import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
- * Shared JWT authentication helper for NEO Headless servlets.
+ * Shared JWT authentication utility for Etendo GO servlets.
  *
  * Reads the {@code Authorization: Bearer <token>} header, decodes the JWT,
  * and sets up {@link OBContext} for the request. Throws {@link OBException}
  * on any authentication failure so callers can return 401.
  */
-public class NeoJwtAuth {
+public class JwtAuthUtils {
 
-  private NeoJwtAuth() {
+  private JwtAuthUtils() {
   }
 
   /**
