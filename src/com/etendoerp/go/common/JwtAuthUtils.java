@@ -97,7 +97,7 @@ public class JwtAuthUtils {
     return authHeader.substring(BEARER_PREFIX.length());
   }
 
-  private static Claims decodeClaims(String token) {
+  private static Claims decodeClaims(String token) throws Exception {
     DecodedJWT decoded = SecureWebServicesUtils.decodeToken(token);
     Claims claims = new Claims(
         decoded.getClaim(CLAIM_USER).asString(),
