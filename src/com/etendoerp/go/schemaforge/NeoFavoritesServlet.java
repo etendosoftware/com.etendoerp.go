@@ -28,6 +28,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.JwtAuthUtils;
@@ -61,6 +62,7 @@ public class NeoFavoritesServlet extends HttpBaseServlet {
       response.getWriter().write(json);
     } catch (Exception e) {
       log.error("Error reading favorites: {}", e.getMessage(), e);
+      OBDal.getInstance().rollbackAndClose();
       ServletResponseUtils.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while reading favorites.");
     } finally {
@@ -80,6 +82,7 @@ public class NeoFavoritesServlet extends HttpBaseServlet {
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
     } catch (Exception e) {
       log.error("Error saving favorites: {}", e.getMessage(), e);
+      OBDal.getInstance().rollbackAndClose();
       ServletResponseUtils.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while saving favorites.");
     } finally {
