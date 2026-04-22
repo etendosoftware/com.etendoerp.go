@@ -46,7 +46,7 @@ import org.openbravo.dal.service.OBDal;
 public class BusinessPartnerHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(BusinessPartnerHandler.class);
-  private static final String FIELD_SEARCH_KEY = FIELD_SEARCH_KEY;
+  private static final String FIELD_SEARCH_KEY = "searchKey";
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
