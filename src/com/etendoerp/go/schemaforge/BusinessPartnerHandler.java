@@ -26,10 +26,18 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 /**
  * Pre/post-save hook for the businessPartner entity in the contacts spec.
+ *
+ * <p>On GET (defaults endpoint):
+ * <ul>
+ *   <li>{@code afterHandle()} replaces the incorrect AD-sequence placeholder for
+ *       {@code etgoIdentifier} with the real next value from the
+ *       {@code BusinessPartner-EM_Etgo_Identifier} AD sequence.</li>
+ * </ul>
  *
  * <p>On POST (new record):
  * <ul>
@@ -70,6 +78,9 @@ public class BusinessPartnerHandler implements NeoHandler {
 
   @Override
   public NeoResponse afterHandle(NeoContext ctx) {
+    if ("GET".equals(ctx.getHttpMethod())) {
+      return patchDefaultsIdentifier(ctx);
+    }
     if (!"POST".equals(ctx.getHttpMethod())) {
       return null;
     }
@@ -93,6 +104,61 @@ public class BusinessPartnerHandler implements NeoHandler {
       log.error("BusinessPartnerHandler: error updating searchKey from em_etgo_identifier", e);
       return null;
     }
+  }
+
+  private NeoResponse patchDefaultsIdentifier(NeoContext ctx) {
+    NeoResponse previousResult = ctx.getPreviousResult();
+    if (previousResult == null || previousResult.getBody() == null) {
+      return null;
+    }
+    JSONObject body = previousResult.getBody();
+    if (!body.has("defaults")) {
+      return null;
+    }
+    try {
+      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+      long nextValue = queryNextIdentifier(clientId);
+      if (nextValue <= 0) {
+        return null;
+      }
+      body.getJSONObject("defaults").put("etgoIdentifier", "<" + nextValue + ">");
+      JSONArray seqFields = body.optJSONArray("sequenceFields");
+      if (seqFields == null) {
+        seqFields = new JSONArray();
+        body.put("sequenceFields", seqFields);
+      }
+      boolean alreadyPresent = false;
+      for (int i = 0; i < seqFields.length(); i++) {
+        if ("etgoIdentifier".equals(seqFields.getString(i))) {
+          alreadyPresent = true;
+          break;
+        }
+      }
+      if (!alreadyPresent) {
+        seqFields.put("etgoIdentifier");
+      }
+      return NeoResponse.ok(body);
+    } catch (Exception e) {
+      log.error("BusinessPartnerHandler: error patching defaults with etgoIdentifier", e);
+      return null;
+    }
+  }
+
+  private static long queryNextIdentifier(String clientId) throws Exception {
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(
+        "SELECT currentnext FROM ad_sequence" +
+        " WHERE name = 'BusinessPartner-EM_Etgo_Identifier'" +
+        " AND ad_client_id = ?" +
+        " ORDER BY currentnext DESC LIMIT 1")) {
+      ps.setString(1, clientId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          return rs.getLong(1);
+        }
+      }
+    }
+    return -1;
   }
 
   private static String extractRecordId(JSONObject body) {
