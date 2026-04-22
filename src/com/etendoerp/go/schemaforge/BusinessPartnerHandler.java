@@ -46,6 +46,7 @@ import org.openbravo.dal.service.OBDal;
 public class BusinessPartnerHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(BusinessPartnerHandler.class);
+  private static final String FIELD_SEARCH_KEY = FIELD_SEARCH_KEY;
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
@@ -58,8 +59,8 @@ public class BusinessPartnerHandler implements NeoHandler {
     }
     try {
       String name = body.optString("name", null);
-      if (StringUtils.isNotBlank(name) && !body.has("searchKey")) {
-        body.put("searchKey", name);
+      if (StringUtils.isNotBlank(name) && !body.has(FIELD_SEARCH_KEY)) {
+        body.put(FIELD_SEARCH_KEY, name);
       }
     } catch (Exception e) {
       log.error("BusinessPartnerHandler: error injecting temporary searchKey", e);
@@ -145,7 +146,7 @@ public class BusinessPartnerHandler implements NeoHandler {
       if (data == null || data.length() == 0) {
         return;
       }
-      data.getJSONObject(0).put("searchKey", identifier);
+      data.getJSONObject(0).put(FIELD_SEARCH_KEY, identifier);
     } catch (Exception e) {
       log.warn("BusinessPartnerHandler: could not patch searchKey in response", e);
     }
