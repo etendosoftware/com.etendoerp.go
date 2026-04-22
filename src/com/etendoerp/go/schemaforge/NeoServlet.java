@@ -160,12 +160,6 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
 
-      // Favorites endpoint: GET/PUT /sws/neo/favorites — user navigator favorites via AD_PREFERENCE
-      if ("favorites".equals(pathInfo.specName)) {
-        handleFavoritesRequest(method, request, response);
-        return;
-      }
-
       // Find the spec
       SFSpec spec = NeoServletSupport.findSpec(pathInfo.specName);
       if (spec == null) {
@@ -282,28 +276,6 @@ public class NeoServlet extends HttpBaseServlet {
       return;
     }
     handleReportSpec(spec, request, response);
-  }
-
-  /**
-   * Handles GET/PUT /sws/neo/favorites — reads or replaces the current user's favorites
-   * stored as an AD_PREFERENCE with key {@code ETGO_NavigatorFavorites}.
-   */
-  private void handleFavoritesRequest(String method, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    if ("GET".equals(method)) {
-      String json = NeoFavoritesService.getFavoritesJson();
-      response.setContentType(ContentType.APPLICATION_JSON.getMimeType());
-      response.setCharacterEncoding(StandardCharsets.UTF_8.name());
-      response.setStatus(HttpServletResponse.SC_OK);
-      response.getWriter().write(json);
-    } else if ("PUT".equals(method)) {
-      String body = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-      NeoFavoritesService.saveFavoritesJson(body);
-      response.setStatus(HttpServletResponse.SC_NO_CONTENT);
-    } else {
-      sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          "Favorites endpoint supports GET and PUT only");
-    }
   }
 
   /**
