@@ -55,6 +55,7 @@ public class BusinessPartnerHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(BusinessPartnerHandler.class);
   private static final String FIELD_SEARCH_KEY = "searchKey";
+  private static final String FIELD_ETGO_IDENTIFIER = "etgoIdentifier";
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
@@ -121,7 +122,7 @@ public class BusinessPartnerHandler implements NeoHandler {
       if (nextValue <= 0) {
         return null;
       }
-      body.getJSONObject("defaults").put("etgoIdentifier", "<" + nextValue + ">");
+      body.getJSONObject("defaults").put(FIELD_ETGO_IDENTIFIER, "<" + nextValue + ">");
       JSONArray seqFields = body.optJSONArray("sequenceFields");
       if (seqFields == null) {
         seqFields = new JSONArray();
@@ -129,13 +130,13 @@ public class BusinessPartnerHandler implements NeoHandler {
       }
       boolean alreadyPresent = false;
       for (int i = 0; i < seqFields.length(); i++) {
-        if ("etgoIdentifier".equals(seqFields.getString(i))) {
+        if (FIELD_ETGO_IDENTIFIER.equals(seqFields.getString(i))) {
           alreadyPresent = true;
           break;
         }
       }
       if (!alreadyPresent) {
-        seqFields.put("etgoIdentifier");
+        seqFields.put(FIELD_ETGO_IDENTIFIER);
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {
