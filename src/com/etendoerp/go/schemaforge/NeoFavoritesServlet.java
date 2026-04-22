@@ -23,7 +23,6 @@ import java.nio.charset.StandardCharsets;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.commons.lang3.StringUtils;
 import org.apache.http.entity.ContentType;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -31,9 +30,8 @@ import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 
-import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.CorsUtils;
-import com.smf.securewebservices.utils.SecureWebServicesUtils;
+import com.etendoerp.go.schemaforge.util.NeoJwtAuth;
 
 /**
  * Persists and retrieves navigator favorites per user via AD_PREFERENCE.
@@ -53,7 +51,7 @@ public class NeoFavoritesServlet extends HttpBaseServlet {
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     CorsUtils.apply(request, response, ALLOWED_METHODS, ALLOWED_HEADERS, null, false);
     try {
-      authenticateJwt(request);
+      NeoJwtAuth.authenticate(request);
     } catch (OBException e) {
       log.warn("Unauthorized favorites GET: {}", e.getMessage());
       sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
@@ -84,7 +82,7 @@ public class NeoFavoritesServlet extends HttpBaseServlet {
   public void doPut(HttpServletRequest request, HttpServletResponse response) throws IOException {
     CorsUtils.apply(request, response, ALLOWED_METHODS, ALLOWED_HEADERS, null, false);
     try {
-      authenticateJwt(request);
+      NeoJwtAuth.authenticate(request);
     } catch (OBException e) {
       log.warn("Unauthorized favorites PUT: {}", e.getMessage());
       sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
@@ -113,29 +111,5 @@ public class NeoFavoritesServlet extends HttpBaseServlet {
   public void doOptions(HttpServletRequest request, HttpServletResponse response) throws IOException {
     CorsUtils.apply(request, response, ALLOWED_METHODS, ALLOWED_HEADERS, null, false);
     response.setStatus(HttpServletResponse.SC_NO_CONTENT);
-  }
-
-  // JWT authentication — same pattern as ReportSelectorsServlet
-  private void authenticateJwt(HttpServletRequest request) throws Exception {
-    String authHeader = request.getHeader("Authorization");
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      throw new OBException("Missing or invalid Authorization header");
-    }
-    String token = authHeader.substring(7);
-    DecodedJWT decoded = SecureWebServicesUtils.decodeToken(token);
-
-    String userId      = decoded.getClaim("user").asString();
-    String roleId      = decoded.getClaim("role").asString();
-    String orgId       = decoded.getClaim("organization").asString();
-    String warehouseId = decoded.getClaim("warehouse").asString();
-    String clientId    = decoded.getClaim("client").asString();
-
-    if (StringUtils.isAnyBlank(userId, roleId, orgId, clientId)) {
-      throw new OBException("Invalid token: missing required claims");
-    }
-
-    OBContext context = SecureWebServicesUtils.createContext(userId, roleId, orgId, warehouseId, clientId);
-    OBContext.setOBContext(context);
-    OBContext.setOBContextInSession(request, context);
   }
 }
