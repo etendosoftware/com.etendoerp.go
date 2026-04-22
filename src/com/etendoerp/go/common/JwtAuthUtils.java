@@ -99,6 +99,9 @@ public class JwtAuthUtils {
 
   private static Claims decodeClaims(String token) throws Exception {
     DecodedJWT decoded = SecureWebServicesUtils.decodeToken(token);
+    if (decoded == null) {
+      throw new OBException("Invalid token: unable to decode JWT");
+    }
     Claims claims = new Claims(
         decoded.getClaim(CLAIM_USER).asString(),
         decoded.getClaim(CLAIM_ROLE).asString(),
