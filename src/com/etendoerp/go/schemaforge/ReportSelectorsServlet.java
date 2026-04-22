@@ -40,8 +40,9 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.CorsUtils;
-import com.etendoerp.go.common.JwtAuthUtils;
+import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * Report Selectors Servlet.
@@ -153,7 +154,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     CorsUtils.apply(request, response, "GET, OPTIONS", "Authorization, Content-Type", null, false);
 
     try {
-      JwtAuthUtils.authenticate(request);
+      authenticateJwt(request);
     } catch (OBException e) {
       log.warn("Unauthorized ReportSelectors request: {}", e.getMessage());
       sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
@@ -395,6 +396,33 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
         new StringBuilder("FROM c_tax WHERE isactive='Y'"
             + ACTIVE_CLIENT_NAME_SEARCH),
         ORDER_BY_NAME, true);
+  }
+
+  // ---------------------------------------------------------------------------
+  // JWT authentication — same pattern as NeoServlet, no shared state modified
+  // ---------------------------------------------------------------------------
+
+  private void authenticateJwt(HttpServletRequest request) throws Exception {
+    String authHeader = request.getHeader("Authorization");
+    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+      throw new OBException("Missing or invalid Authorization header");
+    }
+    String token = authHeader.substring(7);
+    DecodedJWT decoded = SecureWebServicesUtils.decodeToken(token);
+
+    String userId      = decoded.getClaim("user").asString();
+    String roleId      = decoded.getClaim("role").asString();
+    String orgId       = decoded.getClaim("organization").asString();
+    String warehouseId = decoded.getClaim("warehouse").asString();
+    String clientId    = decoded.getClaim("client").asString();
+
+    if (StringUtils.isAnyBlank(userId, roleId, orgId, clientId)) {
+      throw new OBException("Invalid token: missing required claims");
+    }
+
+    OBContext context = SecureWebServicesUtils.createContext(userId, roleId, orgId, warehouseId, clientId);
+    OBContext.setOBContext(context);
+    OBContext.setOBContextInSession(request, context);
   }
 
   // ---------------------------------------------------------------------------
