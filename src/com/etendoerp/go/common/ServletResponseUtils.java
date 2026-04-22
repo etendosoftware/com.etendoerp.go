@@ -44,6 +44,7 @@ public class ServletResponseUtils {
    * @param response the HTTP response to write to
    * @param status   the HTTP status code (4xx / 5xx)
    * @param message  the error message included in the body
+   * @throws IOException if the response writer cannot be obtained or fails to write
    */
   public static void sendError(HttpServletResponse response, int status, String message) throws IOException {
     try {

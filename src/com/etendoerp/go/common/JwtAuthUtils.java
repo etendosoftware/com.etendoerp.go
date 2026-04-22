@@ -39,6 +39,14 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  */
 public class JwtAuthUtils {
 
+  private static final String AUTH_HEADER = "Authorization";
+  private static final String BEARER_PREFIX = "Bearer ";
+  private static final String CLAIM_USER = "user";
+  private static final String CLAIM_ROLE = "role";
+  private static final String CLAIM_ORG = "organization";
+  private static final String CLAIM_WAREHOUSE = "warehouse";
+  private static final String CLAIM_CLIENT = "client";
+
   private JwtAuthUtils() {
   }
 
@@ -50,36 +58,20 @@ public class JwtAuthUtils {
    * @throws Exception   for any other decode/context failure
    */
   public static void authenticate(HttpServletRequest request) throws Exception {
-    String authHeader = request.getHeader("Authorization");
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      throw new OBException("Missing or invalid Authorization header");
-    }
-    String token = authHeader.substring(7);
-    DecodedJWT decoded = SecureWebServicesUtils.decodeToken(token);
-
-    String userId      = decoded.getClaim("user").asString();
-    String roleId      = decoded.getClaim("role").asString();
-    String orgId       = decoded.getClaim("organization").asString();
-    String warehouseId = decoded.getClaim("warehouse").asString();
-    String clientId    = decoded.getClaim("client").asString();
-
-    if (StringUtils.isAnyBlank(userId, roleId, orgId, clientId)) {
-      throw new OBException("Invalid token: missing required claims");
-    }
-
-    OBContext context = SecureWebServicesUtils.createContext(userId, roleId, orgId, warehouseId, clientId);
-    OBContext.setOBContext(context);
-    OBContext.setOBContextInSession(request, context);
+    String token = extractBearerToken(request);
+    Claims claims = decodeClaims(token);
+    applyContext(request, claims);
   }
 
   /**
    * Authenticates the request and, on failure, writes a 401 response and logs the reason.
-   * Returns {@code true} on success, {@code false} when the caller should abort processing.
    *
    * @param request  the incoming HTTP request
    * @param response the HTTP response (used to write the 401 body on failure)
    * @param log      logger used to record the failure cause
    * @param context  short label for the endpoint, included in the log message
+   * @return {@code true} when authentication succeeded, {@code false} when the caller must abort
+   * @throws IOException if writing the 401 response body fails
    */
   public static boolean authenticateOrFail(HttpServletRequest request, HttpServletResponse response,
       Logger log, String context) throws IOException {
@@ -94,6 +86,50 @@ public class JwtAuthUtils {
       log.warn("Unauthorized {}: {}", context, e.getMessage());
       ServletResponseUtils.sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
       return false;
+    }
+  }
+
+  private static String extractBearerToken(HttpServletRequest request) {
+    String authHeader = request.getHeader(AUTH_HEADER);
+    if (authHeader == null || !authHeader.startsWith(BEARER_PREFIX)) {
+      throw new OBException("Missing or invalid Authorization header");
+    }
+    return authHeader.substring(BEARER_PREFIX.length());
+  }
+
+  private static Claims decodeClaims(String token) {
+    DecodedJWT decoded = SecureWebServicesUtils.decodeToken(token);
+    Claims claims = new Claims(
+        decoded.getClaim(CLAIM_USER).asString(),
+        decoded.getClaim(CLAIM_ROLE).asString(),
+        decoded.getClaim(CLAIM_ORG).asString(),
+        decoded.getClaim(CLAIM_WAREHOUSE).asString(),
+        decoded.getClaim(CLAIM_CLIENT).asString());
+    if (StringUtils.isAnyBlank(claims.userId, claims.roleId, claims.orgId, claims.clientId)) {
+      throw new OBException("Invalid token: missing required claims");
+    }
+    return claims;
+  }
+
+  private static void applyContext(HttpServletRequest request, Claims c) {
+    OBContext ctx = SecureWebServicesUtils.createContext(c.userId, c.roleId, c.orgId, c.warehouseId, c.clientId);
+    OBContext.setOBContext(ctx);
+    OBContext.setOBContextInSession(request, ctx);
+  }
+
+  private static final class Claims {
+    final String userId;
+    final String roleId;
+    final String orgId;
+    final String warehouseId;
+    final String clientId;
+
+    Claims(String userId, String roleId, String orgId, String warehouseId, String clientId) {
+      this.userId = userId;
+      this.roleId = roleId;
+      this.orgId = orgId;
+      this.warehouseId = warehouseId;
+      this.clientId = clientId;
     }
   }
 }
