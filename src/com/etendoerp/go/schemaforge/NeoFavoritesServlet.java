@@ -26,6 +26,8 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.http.entity.ContentType;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
@@ -111,5 +113,18 @@ public class NeoFavoritesServlet extends HttpBaseServlet {
   public void doOptions(HttpServletRequest request, HttpServletResponse response) throws IOException {
     CorsUtils.apply(request, response, ALLOWED_METHODS, ALLOWED_HEADERS, null, false);
     response.setStatus(HttpServletResponse.SC_NO_CONTENT);
+  }
+
+  private void sendError(HttpServletResponse response, int status, String message) throws IOException {
+    try {
+      JSONObject body = new JSONObject();
+      body.put("error", message);
+      response.setStatus(status);
+      response.setContentType(ContentType.APPLICATION_JSON.getMimeType());
+      response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+      response.getWriter().write(body.toString());
+    } catch (JSONException ex) {
+      log.error("Failed to write error response", ex);
+    }
   }
 }
