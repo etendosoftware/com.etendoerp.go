@@ -41,6 +41,7 @@ public class JwtAuthUtils {
   /**
    * Authenticates the request via Bearer JWT and sets up OBContext.
    *
+   * @param request the incoming HTTP request carrying the Authorization header
    * @throws OBException if the token is missing, invalid, or has missing claims
    * @throws Exception   for any other decode/context failure
    */
