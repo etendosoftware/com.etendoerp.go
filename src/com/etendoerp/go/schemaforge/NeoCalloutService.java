@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -45,6 +46,7 @@ import org.openbravo.erpCommon.ad_callouts.SimpleCallout;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.domain.ModelImplementation;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.JsonConstants;
 
@@ -377,6 +379,24 @@ public class NeoCalloutService {
    * Shared by NeoCalloutService and NeoDefaultsService.
    */
   static VariablesSecureApp buildVars(OBContext obCtx) {
+    return buildVars(obCtx, null);
+  }
+
+  /**
+   * Build a VariablesSecureApp from OBContext with full session population, plus the
+   * window-scoped {@code IsSOTrx} flag when an AD_Tab is provided.
+   *
+   * <p>Defaults, callouts and selectors all need {@code IsSOTrx} exposed in session so
+   * that AD expressions like {@code @IsSOTrx@} (including {@code @SQL=...} defaults that
+   * filter by sales/purchase transaction) resolve correctly. Setting it here avoids every
+   * endpoint having to duplicate the same 3-line block and prevents regressions when new
+   * endpoints are added.
+   *
+   * @param obCtx the current OBContext
+   * @param adTab the AD_Tab whose window provides the IsSOTrx flag. {@code null} when
+   *              not in a window context (e.g. process defaults).
+   */
+  static VariablesSecureApp buildVars(OBContext obCtx, Tab adTab) {
     String userId = obCtx.getUser().getId();
     String clientId = obCtx.getCurrentClient().getId();
     String orgId = obCtx.getCurrentOrganization().getId();
@@ -409,6 +429,13 @@ public class NeoCalloutService {
       vars.setSessionValue("#AD_Language", lang);
       vars.setSessionValue("#M_Warehouse_ID", warehouseId);
       vars.setSessionValue("#User_Client", "'" + clientId + "','0'");
+    }
+
+    if (adTab != null && adTab.getWindow() != null
+        && adTab.getWindow().isSalesTransaction() != null) {
+      String soTrx = Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
+      vars.setSessionValue("isSOTrx", soTrx);
+      vars.setSessionValue("IsSOTrx", soTrx);
     }
 
     return vars;
@@ -613,6 +640,10 @@ public class NeoCalloutService {
       // This avoids the frontend showing stale labels until the record is saved/reloaded.
       resolveIdentifiersForFkUpdates(updates, adTab);
 
+      // When the callout sets a 'tax' field, also inject its rate so the frontend
+      // can compute grossAmount in real-time without an extra round-trip.
+      injectTaxRateIfPresent(updates);
+
       response.put("updates", updates);
       response.put("combos", combos);
       response.put("messages", messages);
@@ -801,6 +832,38 @@ public class NeoCalloutService {
       return Character.toLowerCase(stripped.charAt(0)) + stripped.substring(1);
     }
     return stripped;
+  }
+
+  /**
+   * When a callout sets a 'tax' field (C_Tax_ID), load the TaxRate entity and inject
+   * its percentage rate as a synthetic 'taxRate' update. The frontend uses this to compute
+   * grossAmount in real-time for the first line of a document that has no saved lines yet
+   * (where deriving the rate from existing saved lines is not possible).
+   */
+  private static void injectTaxRateIfPresent(JSONObject updates) {
+    try {
+      JSONObject taxUpdate = updates.optJSONObject("tax");
+      if (taxUpdate == null) {
+        return;
+      }
+      String taxId = taxUpdate.optString(VALUE_KEY);
+      if (StringUtils.isBlank(taxId) || "null".equals(taxId)) {
+        return;
+      }
+      TaxRate taxEntity = OBDal.getInstance().get(TaxRate.class, taxId);
+      if (taxEntity == null) {
+        return;
+      }
+      BigDecimal rate = taxEntity.getRate();
+      if (rate == null) {
+        return;
+      }
+      JSONObject rateUpdate = new JSONObject();
+      rateUpdate.put(VALUE_KEY, rate.doubleValue());
+      updates.put("taxRate", rateUpdate);
+    } catch (Exception e) {
+      log.debug("Could not inject tax rate into callout response: {}", e.getMessage());
+    }
   }
 
 }

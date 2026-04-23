@@ -26,7 +26,6 @@ import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.dal.service.OBQuery;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
@@ -102,8 +101,10 @@ public class NeoDefaultsService {
         JSONArray unresolvedFields = new JSONArray();
         JSONArray sequenceFields = new JSONArray();
 
-        // Build a VariablesSecureApp bridge from OBContext for Etendo utility methods
-        VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext());
+        // Build a VariablesSecureApp bridge from OBContext for Etendo utility methods.
+        // Pass the AD_Tab so isSOTrx is set in session — @IsSOTrx@ inside @SQL= defaults
+        // (e.g. M_PriceList_ID on C_Order) needs it to pick the correct sales/purchase row.
+        VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext(), ctx.getAdTab());
         DalConnectionProvider conn = new DalConnectionProvider(false);
 
         // Resolve window ID from SFSpec -> AD_Window (needed by Utility.getDefault)
@@ -145,6 +146,13 @@ public class NeoDefaultsService {
             String sfFieldDefault = sfField.getDefaultValue();
             Object resolvedValue = resolveFieldDefault(adColumn, parentId, vars, conn, windowId,
                 ctx, sfFieldDefault);
+            // FIC parity: when no explicit default resolves, combo-style references (TableDir,
+            // Table, List) preselect row [0] of their lookup — exactly what
+            // UIDefinition.getValueInComboReference does in Etendo Classic. Search/Selector/Tree
+            // references are intentionally left empty here (FIC leaves them empty too).
+            if (resolvedValue == null) {
+              resolvedValue = resolveFirstComboOption(adColumn, ctx);
+            }
             if (resolvedValue != null) {
               defaults.put(propertyName, resolvedValue);
               // For FK fields, also inject $_identifier so selectors display the label, not the ID
@@ -204,20 +212,13 @@ public class NeoDefaultsService {
           DocTypeResolver.reapplyDocTypeFromTabFilter(defaults, adTab, ctx);
         }
 
-        // Classic parity: for each mandatory FK column still unresolved after defaults/callouts,
-        // auto-pick the first valid lookup option.
-        for (SFField sfField : fields) {
-          Column adColumn = sfField.getADColumn();
-          if (adColumn == null || !adColumn.isMandatory()) {
-            continue;
-          }
-          String propName = NeoDefaultsCascadeHelper.resolvePropertyName(
-              dalEntity, adColumn.getDBColumnName());
-          if (propName == null || defaults.has(propName)) {
-            continue;
-          }
-          tryInjectFirstFromLookup(defaults, dalEntity, propName, adColumn, ctx);
-        }
+        // FK preselection is applied per-column inside pass 1 via resolveFirstComboOption,
+        // scoped to FIC combo references (TableDir, Table, List) — mirroring
+        // UIDefinition.getValueInComboReference. Search/Selector/Tree references are left empty
+        // so the form/UI (or the BP/DocType callout chain) can surface them for user input,
+        // matching Etendo Classic FIC behavior on MODE=NEW.
+        // The CREATE path keeps its own broader fallback in injectMandatoryDefaults to avoid
+        // NOT NULL violations when partial payloads reach persistence.
 
         // Build response
         JSONObject response = new JSONObject();
@@ -293,6 +294,12 @@ public class NeoDefaultsService {
   private static Object resolveFieldDefault(Column adColumn, String parentId,
       VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx,
       String sfFieldDefault) {
+    return resolveFieldDefault(adColumn, parentId, vars, conn, windowId, ctx, sfFieldDefault, null);
+  }
+
+  private static Object resolveFieldDefault(Column adColumn, String parentId,
+      VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx,
+      String sfFieldDefault, Map<String, Object> parentValues) {
 
     String dbColumnName = adColumn.getDBColumnName();
 
@@ -331,7 +338,7 @@ public class NeoDefaultsService {
 
     // SQL expressions — resolve parameters and execute
     if (defaultExpr.startsWith("@SQL=")) {
-      return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn);
+      return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn, parentValues);
     }
 
     // Delegate to Utility.getDefault for all other cases:
@@ -529,6 +536,20 @@ public class NeoDefaultsService {
    */
   private static String resolveSQLDefault(String defaultExpr, VariablesSecureApp vars,
       DalConnectionProvider conn, String windowId, Column adColumn) {
+    return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn, null);
+  }
+
+  /**
+   * Resolve a @SQL= default expression, preferring parent record values over session context
+   * for non-session parameters. This ensures that columns like @M_Warehouse_ID@ and @AD_Client_ID@
+   * resolve to the parent record's values (e.g. the inventory's warehouse and client) rather than
+   * the session user's warehouse/client, which may differ when the user belongs to a different org.
+   *
+   * Session parameters (prefixed with #, e.g. @#Date@) always use session context.
+   */
+  private static String resolveSQLDefault(String defaultExpr, VariablesSecureApp vars,
+      DalConnectionProvider conn, String windowId, Column adColumn,
+      Map<String, Object> parentValues) {
     try {
       ArrayList<String> params = new ArrayList<>();
       String sql = parseSQLExpression(defaultExpr, params);
@@ -536,7 +557,18 @@ public class NeoDefaultsService {
       try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
         int paramIndex = 1;
         for (String parameter : params) {
-          String value = Utility.getContext(conn, vars, parameter, windowId);
+          String value = null;
+          // Non-session params: check parent record values first (e.g. @M_Warehouse_ID@, @AD_Client_ID@)
+          if (parentValues != null && !parentValues.isEmpty() && !parameter.startsWith("#")) {
+            Object pv = parentValues.get(parameter.toUpperCase());
+            if (pv != null) {
+              value = String.valueOf(pv);
+              log.debug("[resolveSQLDefault] param @{}@ from parentValues: {}", parameter, value);
+            }
+          }
+          if (value == null || value.isEmpty()) {
+            value = Utility.getContext(conn, vars, parameter, windowId);
+          }
           ps.setObject(paramIndex++, value);
         }
 
@@ -620,6 +652,27 @@ public class NeoDefaultsService {
    * @return a cached or newly built VariablesSecureApp instance with session variables populated
    */
   public static VariablesSecureApp buildVariablesSecureApp(OBContext obContext) {
+    return buildVariablesSecureApp(obContext, null);
+  }
+
+  /**
+   * Build a VariablesSecureApp from OBContext and an optional AD_Tab, so that the window's
+   * IsSOTrx flag is exposed as a session variable for default resolution. Without this,
+   * expressions like {@code @IsSOTrx@} inside {@code @SQL=...} defaults (e.g. the
+   * {@code M_PriceList_ID} default on {@code C_Order}) resolve to an empty string and pick
+   * a purchase pricelist on a sales window.
+   *
+   * <p>Delegates the session-variable population (including {@code IsSOTrx}) to the shared
+   * {@link NeoCalloutService#buildVars(OBContext, Tab)} builder, and layers caching + the
+   * {@code #Date} variable on top. The cache key includes the resolved {@code isSOTrx} value
+   * so a sales-window entry is not served to a purchase-window caller within the TTL.
+   *
+   * @param obContext the current OBContext containing user, role, org, and warehouse info
+   * @param adTab     the AD_Tab whose window provides the IsSOTrx flag. Pass {@code null}
+   *                  when not in a window context (processes, standalone defaults).
+   * @return a cached or newly built VariablesSecureApp instance with session variables populated
+   */
+  public static VariablesSecureApp buildVariablesSecureApp(OBContext obContext, Tab adTab) {
     String userId = obContext.getUser().getId();
     String clientId = obContext.getCurrentClient().getId();
     String roleId = obContext.getRole().getId();
@@ -639,13 +692,20 @@ public class NeoDefaultsService {
       }
     }
 
-    String cacheKey = userId + "|" + roleId + "|" + orgId + "|" + warehouseId;
+    String soTrx = "";
+    if (adTab != null && adTab.getWindow() != null
+        && adTab.getWindow().isSalesTransaction() != null) {
+      soTrx = Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
+    }
+
+    String cacheKey = userId + "|" + roleId + "|" + orgId + "|" + warehouseId + "|" + soTrx;
     VariablesSecureApp cached = varsCache.getIfPresent(cacheKey);
     if (cached != null) {
       return cached;
     }
 
-    VariablesSecureApp vars = NeoCalloutService.buildVars(obContext);
+    // Shared builder handles OBContext session vars + IsSOTrx (both casings) when adTab is set.
+    VariablesSecureApp vars = NeoCalloutService.buildVars(obContext, adTab);
     vars.setSessionValue("#Date",
         new SimpleDateFormat(DATE_FORMAT).format(new Date()));
 
@@ -701,7 +761,7 @@ public class NeoDefaultsService {
       }
 
       // Build resolution infrastructure once for all columns
-      VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext());
+      VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext(), adTab);
       DalConnectionProvider conn = new DalConnectionProvider(false);
       String windowId = ctx.getSfEntity() != null ? resolveWindowId(ctx.getSfEntity()) : "";
       Map<String, Object> parentValues = loadParentValues(adTab, parentId);
@@ -813,7 +873,7 @@ public class NeoDefaultsService {
       MandatoryDefaultContext mCtx) {
     try {
       Object resolved = resolveFieldDefault(col, mCtx.parentId, mCtx.vars, mCtx.conn,
-          mCtx.windowId, mCtx.neoCtx);
+          mCtx.windowId, mCtx.neoCtx, null, mCtx.parentValues);
       if (resolved != null) {
         applyResolvedDefault(body, col, propName, resolved, mCtx.neoCtx);
         tryInjectIdentifier(body,
@@ -1021,72 +1081,117 @@ public class NeoDefaultsService {
   }
 
   /**
-   * Auto-pick the first available FK option for mandatory FK columns that have no resolved default.
-   * Replicates Classic Etendo behavior: UIDefinition.getValueInComboReference() always picks the
-   * alphabetically-first combo entry when no explicit default is configured.
+   * Returns {@code true} for AD_Reference IDs whose Etendo Classic UIDefinition invokes
+   * {@code getValueInComboReference} — i.e. combo-style rendering that preselects row [0]
+   * when no explicit default is configured.
    *
-   * <p>Applies to TableDir (17), Table (18), Search (30), and OBUISEL_Selector references.
-   * Skips non-FK columns and columns where a default was already resolved.
+   * <p>Matches the classes {@code FKComboUIDefinition} (TableDir=19, Table=18) and
+   * {@code EnumUIDefinition} (List=17). Returns {@code false} for Search (30),
+   * OBUISEL_Selector, Tree, and ID references, which leave the field empty on NEW.</p>
+   */
+  private static boolean isFICComboReference(String baseRefId) {
+    return NeoSelectorService.REF_TABLEDIR.equals(baseRefId)
+        || NeoSelectorService.REF_TABLE.equals(baseRefId)
+        || NeoSelectorService.REF_LIST.equals(baseRefId);
+  }
+
+  /**
+   * FIC parity: return the first combo option ID (row [0]) for columns whose AD_Reference
+   * renders as a combo in Etendo Classic. Returns {@code null} when the column is not a
+   * combo reference, has no lookup rows available, or any error occurs.
    *
-   * @return true if a value was injected, false if not applicable or lookup was empty
+   * <p>Routes through {@link NeoSelectorService#querySelectorByColumn} so the same
+   * {@code AD_Val_Rule}, reference override, and readable-orgs filters that the selector
+   * applies are honored here — exactly like {@code UIDefinition.getValueInComboReference}
+   * delegates to {@code ComboTableData}. No entity-specific filters are hardcoded: all
+   * contextual behavior (e.g. {@code IsSOPriceList=@IsSOTrx@} for M_PriceList) comes from
+   * the column's validation rule.</p>
+   *
+   * <p>Mirrors {@code UIDefinition.getValueInComboReference} lines 712-718 (FK branch) and
+   * 729-750 (List branch).</p>
+   */
+  private static Object resolveFirstComboOption(Column col, NeoContext ctx) {
+    try {
+      String baseRefId = NeoSelectorService.getBaseReferenceId(col);
+      if (!isFICComboReference(baseRefId)) {
+        return null;
+      }
+      Map<String, String> contextParams = buildFICComboContextParams(ctx);
+      NeoResponse selectorResp = NeoSelectorService.querySelectorByColumn(
+          col, col.getDBColumnName(), null, 1, 0, contextParams);
+      if (selectorResp == null || selectorResp.getHttpStatus() != 200) {
+        return null;
+      }
+      JSONObject body = selectorResp.getBody();
+      if (body == null) {
+        return null;
+      }
+      JSONArray items = body.optJSONArray("items");
+      if (items == null || items.length() == 0) {
+        return null;
+      }
+      JSONObject first = items.getJSONObject(0);
+      // For FK refs the id field is "id"; for List refs resolveListSelector also stores
+      // the searchKey under "id". Same key in both paths.
+      String id = first.optString("id", null);
+      if (id == null || id.isEmpty()) {
+        return null;
+      }
+      return id;
+    } catch (Exception e) {
+      log.debug("Could not resolve first combo option for {}: {}",
+          col.getDBColumnName(), e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Build the context-parameter map consumed by {@code SelectorQueryBuilder.resolveValidationSql}
+   * when the selector is invoked from the /defaults path. Provides {@code IsSOTrx} / {@code isSOTrx}
+   * from the window (both casings, mirroring {@code NeoCalloutService.buildVars}) so validation
+   * rules like {@code IsSOPriceList='@IsSOTrx@'} resolve correctly. {@code AD_Org_ID},
+   * {@code AD_Client_ID}, {@code AD_User_ID} and {@code AD_Role_ID} are injected automatically
+   * by {@code buildValidationParamMap} from the current {@link OBContext}.
+   */
+  private static Map<String, String> buildFICComboContextParams(NeoContext ctx) {
+    Map<String, String> params = new java.util.HashMap<>();
+    if (ctx != null && ctx.getAdTab() != null && ctx.getAdTab().getWindow() != null
+        && ctx.getAdTab().getWindow().isSalesTransaction() != null) {
+      String soTrx =
+          Boolean.TRUE.equals(ctx.getAdTab().getWindow().isSalesTransaction()) ? "Y" : "N";
+      params.put("IsSOTrx", soTrx);
+      params.put("isSOTrx", soTrx);
+    }
+    return params;
+  }
+
+  /**
+   * Auto-pick the first available combo option for mandatory FK columns that have no resolved
+   * default. Shares the FIC-parity logic with {@link #resolveFirstComboOption}: only columns
+   * whose {@code AD_Reference} renders as a combo in Classic (TableDir=19, Table=18, List=17)
+   * get preselected, and the lookup is routed through {@link NeoSelectorService#querySelectorByColumn}
+   * so {@code AD_Val_Rule} and readable-orgs filters are honored.
+   *
+   * <p>Search (30), OBUISEL_Selector, and Tree references are intentionally skipped — Classic
+   * leaves them empty on NEW as well.</p>
+   *
+   * @return true if a value was injected, false if the column is not a combo reference or the
+   *         selector returned no rows
    */
   private static boolean tryInjectFirstFromLookup(JSONObject body, Entity dalEntity,
       String propName, Column col, NeoContext ctx) {
+    Object firstId = resolveFirstComboOption(col, ctx);
+    if (firstId == null) {
+      return false;
+    }
     try {
-      String baseRefId = NeoSelectorService.getBaseReferenceId(col);
-      boolean isFk = NeoSelectorService.isFkReference(baseRefId)
-          || NeoSelectorService.REF_OBUISEL.equals(baseRefId);
-      if (!isFk) {
-        return false;
-      }
-      SelectorMeta target = NeoSelectorService.resolveTarget(col, baseRefId);
-      if (target == null || target.entityName == null) {
-        return false;
-      }
-
-      // Build an org-scoped query — include org "0" for shared master data
-      SelectorQueryBuilder.HqlWithParams orgPredicate =
-          SelectorQueryBuilder.buildReadableOrgsPredicate(target.entityName, "e", true);
-      StringBuilder where = new StringBuilder("as e where e.active = true");
-      if (orgPredicate != null && !orgPredicate.isBlank()) {
-        where.append(" and ").append(orgPredicate.getHql());
-      }
-
-      // BusinessPartner: restrict to customers for sales windows, vendors for purchase windows,
-      // so that the first-fallback never picks a BP that is invalid for the selector.
-      if ("BusinessPartner".equals(target.entityName)
-          && ctx != null && ctx.getAdTab() != null && ctx.getAdTab().getWindow() != null) {
-        boolean isSales = Boolean.TRUE.equals(ctx.getAdTab().getWindow().isSalesTransaction());
-        where.append(isSales ? " and e.customer = true" : " and e.vendor = true");
-      }
-
-      Entity targetEntity = ModelProvider.getInstance().getEntity(target.entityName);
-      if (targetEntity == null) {
-        return false;
-      }
-      String idProp = NeoSelectorService.findIdentifierProperty(targetEntity);
-      if (idProp == null) {
-        return false;
-      }
-      where.append(" order by e.").append(idProp);
-
-      OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(target.entityName,
-          where.toString());
-      if (orgPredicate != null && !orgPredicate.isBlank()) {
-        NeoSelectorExecutionHelper.bindNamedParameters(query, orgPredicate.getParams());
-      }
-      query.setMaxResult(1);
-      List<BaseOBObject> results = query.list();
-      if (results.isEmpty()) {
-        return false;
-      }
-      String firstId = (String) results.get(0).getId();
       body.put(propName, firstId);
-      tryInjectIdentifier(body, dalEntity, propName, firstId);
-      log.debug("Auto-injected first FK option: {} = {}", propName, firstId);
+      tryInjectIdentifier(body, dalEntity, propName, firstId.toString());
+      log.debug("Auto-injected first combo option: {} = {}", propName, firstId);
       return true;
     } catch (Exception e) {
-      log.debug("Could not auto-pick first FK for {}: {}", col.getDBColumnName(), e.getMessage());
+      log.debug("Could not auto-pick first combo option for {}: {}",
+          col.getDBColumnName(), e.getMessage());
       return false;
     }
   }
@@ -1246,29 +1351,22 @@ public class NeoDefaultsService {
     return null;
   }
   /**
-   * For tax-inclusive invoice/order lines, when 'grossUnitPrice' is present but 'grossAmount'
-   * (LINE_GROSS_AMOUNT) is zero or missing, compute it as grossUnitPrice × invoicedQuantity.
+   * Always recompute grossAmount (LINE_GROSS_AMOUNT) before persisting, covering both
+   * tax-inclusive and tax-exclusive price lists.
    *
-   * The callout (SL_Invoice_Product) fires at product selection time when qty is still 0,
-   * so it sets grossAmount = grossUnitPrice × 0 = 0. The c_invoiceline_before_trg trigger
-   * then uses LINE_GROSS_AMOUNT to compute PRICEACTUAL for tax-inclusive price lists — if it
-   * is 0, priceActual ends up as 0. This method corrects the stale callout value at save time.
+   * <p><b>Gross price list</b> (grossUnitPrice > 0): {@code grossAmount = grossUnitPrice × qty}.
+   * The price already includes tax, so no lookup needed.</p>
+   *
+   * <p><b>Net price list</b> (grossUnitPrice = 0): {@code grossAmount = lineNetAmount × (1 + rate/100)}.
+   * The tax rate is fetched from C_Tax using the 'tax' field present in the body.
+   * {@code injectLineNetAmountIfMissing} must run before this method so lineNetAmount is available.</p>
+   *
+   * <p>Mirrors the behaviour of {@link #injectLineNetAmountIfMissing}: always recomputes to
+   * override any stale value (e.g. product callout set grossAmount for qty=1 before the user
+   * changed qty).</p>
    */
   public static void injectGrossAmountIfMissing(JSONObject body) {
     if (body == null) {
-      return;
-    }
-    double grossUnitPrice;
-    try {
-      grossUnitPrice = body.optDouble("grossUnitPrice", 0);
-    } catch (Exception e) {
-      return;
-    }
-    if (grossUnitPrice <= 0) {
-      return;
-    }
-    double existingGrossAmount = body.optDouble("grossAmount", 0);
-    if (existingGrossAmount != 0) {
       return;
     }
     double qty;
@@ -1280,13 +1378,132 @@ public class NeoDefaultsService {
     if (qty == 0) {
       return;
     }
+    double baseNetAmt = body.optDouble("lineNetAmount", 0);
+    String taxId = body.optString("tax", "");
+    // For net price lists require a tax to be selected before computing grossAmount.
+    if (baseNetAmt > 0 && taxId.isEmpty()) {
+      return;
+    }
+    double computed = resolveGrossAmount(body.optDouble("grossUnitPrice", 0), qty, baseNetAmt, taxId);
+    if (Double.isNaN(computed)) {
+      return;
+    }
     try {
-      double computed = grossUnitPrice * qty;
       body.put("grossAmount", computed);
-      log.debug("[NEO-DEFAULTS] Computed grossAmount={} from grossUnitPrice={} × qty={}",
-          computed, grossUnitPrice, qty);
+      log.debug("[NEO-DEFAULTS] Computed grossAmount={} (qty={}, tax={})", computed, qty, taxId);
     } catch (Exception e) {
-      log.debug("Could not compute grossAmount: {}", e.getMessage());
+      log.debug("Could not set grossAmount: {}", e.getMessage());
+    }
+  }
+
+  private static double fetchTaxRate(String taxId) {
+    String sql = "SELECT rate FROM c_tax WHERE c_tax_id = ?";
+    try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
+      ps.setString(1, taxId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          return rs.getDouble(1);
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not fetch tax rate for taxId={}: {}", taxId, e.getMessage());
+    }
+    return 0;
+  }
+
+  /**
+   * Gross path (grossUnitPrice > 0): grossUnitPrice × qty.
+   * Net path (grossUnitPrice = 0): baseNetAmt × (1 + taxRate/100).
+   * Returns {@link Double#NaN} when computation should be skipped (baseNetAmt <= 0).
+   */
+  private static double resolveGrossAmount(double grossUnitPrice, double qty, double baseNetAmt,
+      String taxId) {
+    if (grossUnitPrice > 0) {
+      return grossUnitPrice * qty;
+    }
+    if (baseNetAmt <= 0) {
+      return Double.NaN;
+    }
+    double rate = (taxId == null || taxId.isEmpty()) ? 0 : fetchTaxRate(taxId);
+    return baseNetAmt * (1.0 + rate / 100.0);
+  }
+
+  /**
+   * For order/quotation lines, always recompute 'lineGrossAmount'.
+   * - Gross price list (grossUnitPrice > 0): grossUnitPrice × qty (tax already included).
+   * - Net price list (grossUnitPrice = 0): unitPrice × qty × (1 + taxRate/100).
+   *
+   * <p>Always recomputes to override any stale value the product callout may have set
+   * for qty=1 (SL_Order_Amt fires on product change before the user sets the quantity).
+   */
+  public static void injectLineGrossAmountIfMissing(JSONObject body) {
+    if (body == null) {
+      return;
+    }
+    double qty;
+    try {
+      qty = Double.parseDouble(body.optString("orderedQuantity", "0"));
+    } catch (NumberFormatException e) {
+      return;
+    }
+    if (qty == 0) {
+      return;
+    }
+    double unitPrice = body.optDouble("unitPrice", 0);
+    double baseNetAmt = unitPrice > 0 ? unitPrice * qty : 0;
+    String taxId = body.optString("tax", "");
+    double computed = resolveGrossAmount(body.optDouble("grossUnitPrice", 0), qty, baseNetAmt, taxId);
+    if (Double.isNaN(computed)) {
+      return;
+    }
+    try {
+      body.put("lineGrossAmount", computed);
+      log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} (qty={}, unitPrice={}, tax={})",
+          computed, qty, unitPrice, taxId);
+    } catch (Exception e) {
+      log.debug("Could not set lineGrossAmount: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Fallback: when lineNetAmount is absent or zero after the callout cascade, compute it as
+   * invoicedQuantity × unitPrice. This covers products where SL_Invoice_Amt throws
+   * (e.g. products without a standard cost or price list entry in the sales context,
+   * such as products on tax-exclusive price lists where PriceAdjustment fails).
+   *
+   * <p>Called from both the CREATE path (after executePostCalloutCascade) and the UPDATE path
+   * (after filterWriteRequest, before persist). For the UPDATE path the frontend sends all
+   * editable line fields including invoicedQuantity and unitPrice, so both values are available
+   * even though lineNetAmount itself is stripped by the readOnly filter.</p>
+   */
+  public static void injectLineNetAmountIfMissing(JSONObject body) {
+    if (body == null) {
+      return;
+    }
+    // Always recompute lineNetAmount = invoicedQuantity × unitPrice to override any stale
+    // value the product callout may have set for qty=1. lineNetAmount = QtyInvoiced × PriceActual
+    // is the invariant for all invoice line types (gross and net price lists alike, since
+    // unitPrice always holds the net unit price regardless of the price list configuration).
+    double qty;
+    try {
+      qty = Double.parseDouble(body.optString("invoicedQuantity", "0"));
+    } catch (NumberFormatException e) {
+      return;
+    }
+    if (qty == 0) {
+      return;
+    }
+    double unitPrice = body.optDouble("unitPrice", 0);
+    if (unitPrice == 0) {
+      return;
+    }
+    try {
+      double computed = qty * unitPrice;
+      body.put("lineNetAmount", computed);
+      log.debug("[NEO-DEFAULTS] Set lineNetAmount={} from qty={} × unitPrice={}",
+          computed, qty, unitPrice);
+    } catch (Exception e) {
+      log.debug("Could not compute lineNetAmount: {}", e.getMessage());
     }
   }
 

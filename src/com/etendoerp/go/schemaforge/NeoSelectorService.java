@@ -3,8 +3,10 @@ package com.etendoerp.go.schemaforge;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -280,7 +282,11 @@ public class NeoSelectorService {
       // Post-process: enrich Product selector items with prices from the requested price list.
       // This ensures the search drawer shows the price from the document's price list,
       // not a default or unrelated price.
-      if ("ProductByPriceAndWarehouse".equals(meta.entityName)
+      // "Product" covers invoice lines (ProductSimple selector, target entity = M_Product).
+      // "ProductByPriceAndWarehouse" covers order lines (warehouse-based selector).
+      boolean isProductSelector = "ProductByPriceAndWarehouse".equals(meta.entityName)
+          || "Product".equals(meta.entityName);
+      if (isProductSelector
           && contextParams != null
           && contextParams.containsKey("priceList")
           && selectorResult.getHttpStatus() == 200) {
@@ -1200,26 +1206,72 @@ public class NeoSelectorService {
   }
 
   /**
-   * Add grid-column and searchable-property entries for a selector field that has a property path.
-   * Fields with a blank property are skipped.
-   * Fields whose property ends with {@code _identifier} are excluded from search
-   * (virtual DAL property, not Hibernate-mapped).
+   * Pattern for "safe" HQL path fragments that can be inlined into a search filter.
+   * Accepts bare property names ({@code name}) and dotted paths ({@code bp.name},
+   * {@code contact.businessPartner.name}). Rejects anything containing spaces,
+   * operators, parentheses, commas, quotes, function calls, etc., because those
+   * cannot be safely inlined into an HQL predicate without parsing.
+   */
+  private static final java.util.regex.Pattern SAFE_HQL_PATH =
+      java.util.regex.Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_.]*$");
+
+  /**
+   * Add grid-column and searchable-property entries for a selector field.
+   *
+   * <p>Fields with a non-blank {@code property} follow the standard path.
+   * For custom-HQL selectors, searchable fields commonly have {@code property=''}
+   * and define their HQL fragment in {@code clause_left_part} (e.g. {@code bp.name},
+   * {@code bp.searchKey}). When {@code property} is blank but {@code clause_left_part}
+   * is a safe HQL path, it is used as the searchable fragment so the {@code q} filter
+   * still applies. Complex expressions (functions, arithmetic, subqueries) are rejected
+   * to avoid emitting broken HQL — we skip search on those columns rather than guess.
+   *
+   * <p>Fields whose resolved fragment ends with {@code _identifier} are excluded from
+   * search (virtual DAL property, not Hibernate-mapped).
    */
   private static void collectGridAndSearchFields(SelectorField sf,
       List<RichFieldMeta> gridFields, List<String> searchableProps) {
     String prop = sf.getProperty();
-    if (StringUtils.isBlank(prop)) {
-      return;
-    }
-    if (Boolean.TRUE.equals(sf.isShowingrid())) {
+    String searchFragment = resolveSearchableFragment(prop, sf.getClauseLeftPart());
+
+    if (StringUtils.isNotBlank(prop) && Boolean.TRUE.equals(sf.isShowingrid())) {
       String propKey = getLastSegment(prop);
       Long sortNo = sf.getSortno();
       gridFields.add(new RichFieldMeta(propKey, sf.getName(), prop,
           sortNo != null ? sortNo : 0L));
     }
-    if (Boolean.TRUE.equals(sf.isSearchinsuggestionbox()) && !prop.endsWith("_identifier")) {
-      searchableProps.add(prop);
+    if (Boolean.TRUE.equals(sf.isSearchinsuggestionbox())
+        && StringUtils.isNotBlank(searchFragment)
+        && !searchFragment.endsWith("_identifier")) {
+      searchableProps.add(searchFragment);
     }
+  }
+
+  /**
+   * Resolve the HQL fragment used as the searchable property for a selector field.
+   *
+   * <ul>
+   *   <li>Prefers {@code property} when non-blank (standard selectors).</li>
+   *   <li>Falls back to {@code clauseLeftPart} when the property is blank and the
+   *       clause is a simple HQL path (see {@link #SAFE_HQL_PATH}).</li>
+   *   <li>Returns {@code null} when no safe fragment can be derived.</li>
+   * </ul>
+   *
+   * <p>Package-private for unit testing.
+   */
+  static String resolveSearchableFragment(String property, String clauseLeftPart) {
+    if (StringUtils.isNotBlank(property)) {
+      return property;
+    }
+    if (StringUtils.isBlank(clauseLeftPart)) {
+      return null;
+    }
+    String trimmed = clauseLeftPart.trim();
+    if (SAFE_HQL_PATH.matcher(trimmed).matches()) {
+      return trimmed;
+    }
+    log.debug("Skipping search on selector field with unsafe clause_left_part: {}", trimmed);
+    return null;
   }
 
   /**
@@ -1442,14 +1494,24 @@ public class NeoSelectorService {
         return response;
       }
 
-      // Collect product IDs
-      List<String> productIds = new ArrayList<>();
+      // Deduplicate items by product ID — ProductSimple returns one row per price list version,
+      // so the same product may appear multiple times when not filtered by price list.
+      Set<String> seenIds = new LinkedHashSet<>();
+      JSONArray deduplicatedItems = new JSONArray();
       for (int i = 0; i < items.length(); i++) {
-        String id = items.getJSONObject(i).optString("id");
-        if (StringUtils.isNotBlank(id)) {
-          productIds.add(id);
+        JSONObject item = items.getJSONObject(i);
+        String itemId = item.optString("id");
+        if (StringUtils.isNotBlank(itemId) && seenIds.add(itemId)) {
+          deduplicatedItems.put(item);
         }
       }
+      if (deduplicatedItems.length() < items.length()) {
+        response.getBody().put("items", deduplicatedItems);
+        items = deduplicatedItems;
+      }
+
+      // Collect product IDs
+      List<String> productIds = new ArrayList<>(seenIds);
       if (productIds.isEmpty()) {
         return response;
       }
@@ -1465,10 +1527,13 @@ public class NeoSelectorService {
 
       String sql = "SELECT pp.m_product_id,"
           + "  COALESCE(pp.pricestd, 0) AS standard_price,"
-          + "  COALESCE(pp.pricelist, 0) AS list_price"
+          + "  COALESCE(pp.pricelist, 0) AS list_price,"
+          + "  pl.istaxincluded AS is_tax_included"
           + " FROM m_productprice pp"
           + " JOIN m_pricelist_version plv"
           + "   ON plv.m_pricelist_version_id = pp.m_pricelist_version_id"
+          + " JOIN m_pricelist pl"
+          + "   ON pl.m_pricelist_id = plv.m_pricelist_id"
           + " WHERE plv.m_pricelist_id = :priceListId"
           + "   AND pp.m_product_id IN (" + inClause + ")"
           + "   AND pp.isactive = 'Y'"
@@ -1497,13 +1562,16 @@ public class NeoSelectorService {
         return response;
       }
 
-      // Inject standardPrice and listPrice into matching items
+      // Inject standardPrice, listPrice, and isTaxIncluded into matching items.
+      // isTaxIncluded tells the frontend whether the price is gross (true) or net (false),
+      // so it can route standardPrice to grossUnitPrice (gross lists) or unitPrice (net lists).
       for (int i = 0; i < items.length(); i++) {
         JSONObject item = items.getJSONObject(i);
         Object[] cols = priceMap.get(item.optString("id"));
         if (cols != null) {
           item.put("standardPrice", cols[1]);
           item.put("listPrice", cols[2]);
+          item.put("isTaxIncluded", "Y".equals(String.valueOf(cols[3])));
         }
       }
 

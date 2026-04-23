@@ -399,6 +399,8 @@ class NeoCrudHandler {
     executePostCalloutCascade(filteredBody, adTab, context, parentIdValue);
     NeoDefaultsService.injectProductDerivedUomIfMissing(filteredBody);
     NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
+    NeoDefaultsService.injectLineGrossAmountIfMissing(filteredBody);
+    NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
     // TODO move this compatibility rule into the shared create-defaults helper once the merge settles.
     stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
     // Coerce String primitives injected by injectMandatoryDefaults to their correct Java types.
@@ -491,6 +493,13 @@ class NeoCrudHandler {
       NeoFieldFilter fieldFilter, DefaultJsonDataService jsonService,
       Map<String, String> params) throws Exception {
     JSONObject filteredBody = fieldFilter.filterWriteRequest(context.getRequestBody());
+    // Inject lineNetAmount when absent from filteredBody (stripped by readOnly filter).
+    // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
+    // available here to compute the correct net amount even for products where SL_Invoice_Amt
+    // throws on the sales invoice context (e.g. tax-exclusive price lists).
+    NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
+    NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
+    NeoDefaultsService.injectLineGrossAmountIfMissing(filteredBody);
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
   }
