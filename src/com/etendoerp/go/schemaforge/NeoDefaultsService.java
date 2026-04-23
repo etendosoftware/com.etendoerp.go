@@ -294,6 +294,12 @@ public class NeoDefaultsService {
   private static Object resolveFieldDefault(Column adColumn, String parentId,
       VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx,
       String sfFieldDefault) {
+    return resolveFieldDefault(adColumn, parentId, vars, conn, windowId, ctx, sfFieldDefault, null);
+  }
+
+  private static Object resolveFieldDefault(Column adColumn, String parentId,
+      VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx,
+      String sfFieldDefault, Map<String, Object> parentValues) {
 
     String dbColumnName = adColumn.getDBColumnName();
 
@@ -332,7 +338,7 @@ public class NeoDefaultsService {
 
     // SQL expressions — resolve parameters and execute
     if (defaultExpr.startsWith("@SQL=")) {
-      return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn);
+      return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn, parentValues);
     }
 
     // Delegate to Utility.getDefault for all other cases:
@@ -530,6 +536,20 @@ public class NeoDefaultsService {
    */
   private static String resolveSQLDefault(String defaultExpr, VariablesSecureApp vars,
       DalConnectionProvider conn, String windowId, Column adColumn) {
+    return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn, null);
+  }
+
+  /**
+   * Resolve a @SQL= default expression, preferring parent record values over session context
+   * for non-session parameters. This ensures that columns like @M_Warehouse_ID@ and @AD_Client_ID@
+   * resolve to the parent record's values (e.g. the inventory's warehouse and client) rather than
+   * the session user's warehouse/client, which may differ when the user belongs to a different org.
+   *
+   * Session parameters (prefixed with #, e.g. @#Date@) always use session context.
+   */
+  private static String resolveSQLDefault(String defaultExpr, VariablesSecureApp vars,
+      DalConnectionProvider conn, String windowId, Column adColumn,
+      Map<String, Object> parentValues) {
     try {
       ArrayList<String> params = new ArrayList<>();
       String sql = parseSQLExpression(defaultExpr, params);
@@ -537,7 +557,18 @@ public class NeoDefaultsService {
       try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
         int paramIndex = 1;
         for (String parameter : params) {
-          String value = Utility.getContext(conn, vars, parameter, windowId);
+          String value = null;
+          // Non-session params: check parent record values first (e.g. @M_Warehouse_ID@, @AD_Client_ID@)
+          if (parentValues != null && !parentValues.isEmpty() && !parameter.startsWith("#")) {
+            Object pv = parentValues.get(parameter.toUpperCase());
+            if (pv != null) {
+              value = String.valueOf(pv);
+              log.debug("[resolveSQLDefault] param @{}@ from parentValues: {}", parameter, value);
+            }
+          }
+          if (value == null || value.isEmpty()) {
+            value = Utility.getContext(conn, vars, parameter, windowId);
+          }
           ps.setObject(paramIndex++, value);
         }
 
@@ -842,7 +873,7 @@ public class NeoDefaultsService {
       MandatoryDefaultContext mCtx) {
     try {
       Object resolved = resolveFieldDefault(col, mCtx.parentId, mCtx.vars, mCtx.conn,
-          mCtx.windowId, mCtx.neoCtx);
+          mCtx.windowId, mCtx.neoCtx, null, mCtx.parentValues);
       if (resolved != null) {
         applyResolvedDefault(body, col, propName, resolved, mCtx.neoCtx);
         tryInjectIdentifier(body,
