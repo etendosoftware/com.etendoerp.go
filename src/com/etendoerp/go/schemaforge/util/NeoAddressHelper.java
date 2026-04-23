@@ -37,7 +37,7 @@ public final class NeoAddressHelper {
    * Each component is omitted when blank. Returns {@code null} when all components
    * are blank.
    *
-   * @param loc the location record; must not be {@code null}
+   * @param loc the location record; if {@code null}, returns {@code null}
    * @return formatted city line, or {@code null} if no data is present
    */
   public static String formatCityLine(Location loc) {
