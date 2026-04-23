@@ -51,6 +51,43 @@ public class OrderLineHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (!NeoEndpointType.CRUD.equals(context.getEndpointType())) {
+      return null;
+    }
+    if (!"POST".equals(context.getHttpMethod())) {
+      return null;
+    }
+
+    JSONObject body = context.getRequestBody();
+    if (body.optDouble("grossUnitPrice", -1) <= 0) {
+      return null;
+    }
+
+    // parentId is injected by NeoCrudHandler from the request body before this hook runs.
+    String orderId = body.optString("parentId", null);
+    if (orderId == null || orderId.isEmpty()) {
+      return null;
+    }
+
+    Order order = OBDal.getInstance().get(Order.class, orderId);
+    if (order == null || order.getPriceList() == null) {
+      return null;
+    }
+
+    // For net price lists (istaxincluded=N) the frontend selector incorrectly maps
+    // standardPrice → grossUnitPrice (standardPrice is the net price, not gross).
+    // Reset grossUnitPrice to 0 before the CRUD runs so the backend callout chain
+    // does not treat it as a gross price and NeoDefaultsService takes the net path:
+    // lineGrossAmount = unitPrice × qty × (1 + taxRate).
+    if (!Boolean.TRUE.equals(order.getPriceList().isPriceIncludesTax())) {
+      try {
+        body.put("grossUnitPrice", 0);
+        log.debug("[OrderLineHandler] Net price list '{}' — reset grossUnitPrice to 0 on new line",
+            order.getPriceList().getIdentifier());
+      } catch (Exception e) {
+        log.warn("[OrderLineHandler] Could not reset grossUnitPrice: {}", e.getMessage());
+      }
+    }
     return null;
   }
 

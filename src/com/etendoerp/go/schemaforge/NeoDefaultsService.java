@@ -294,6 +294,12 @@ public class NeoDefaultsService {
   private static Object resolveFieldDefault(Column adColumn, String parentId,
       VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx,
       String sfFieldDefault) {
+    return resolveFieldDefault(adColumn, parentId, vars, conn, windowId, ctx, sfFieldDefault, null);
+  }
+
+  private static Object resolveFieldDefault(Column adColumn, String parentId,
+      VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx,
+      String sfFieldDefault, Map<String, Object> parentValues) {
 
     String dbColumnName = adColumn.getDBColumnName();
 
@@ -332,7 +338,7 @@ public class NeoDefaultsService {
 
     // SQL expressions — resolve parameters and execute
     if (defaultExpr.startsWith("@SQL=")) {
-      return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn);
+      return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn, parentValues);
     }
 
     // Delegate to Utility.getDefault for all other cases:
@@ -530,6 +536,20 @@ public class NeoDefaultsService {
    */
   private static String resolveSQLDefault(String defaultExpr, VariablesSecureApp vars,
       DalConnectionProvider conn, String windowId, Column adColumn) {
+    return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn, null);
+  }
+
+  /**
+   * Resolve a @SQL= default expression, preferring parent record values over session context
+   * for non-session parameters. This ensures that columns like @M_Warehouse_ID@ and @AD_Client_ID@
+   * resolve to the parent record's values (e.g. the inventory's warehouse and client) rather than
+   * the session user's warehouse/client, which may differ when the user belongs to a different org.
+   *
+   * Session parameters (prefixed with #, e.g. @#Date@) always use session context.
+   */
+  private static String resolveSQLDefault(String defaultExpr, VariablesSecureApp vars,
+      DalConnectionProvider conn, String windowId, Column adColumn,
+      Map<String, Object> parentValues) {
     try {
       ArrayList<String> params = new ArrayList<>();
       String sql = parseSQLExpression(defaultExpr, params);
@@ -537,7 +557,18 @@ public class NeoDefaultsService {
       try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
         int paramIndex = 1;
         for (String parameter : params) {
-          String value = Utility.getContext(conn, vars, parameter, windowId);
+          String value = null;
+          // Non-session params: check parent record values first (e.g. @M_Warehouse_ID@, @AD_Client_ID@)
+          if (parentValues != null && !parentValues.isEmpty() && !parameter.startsWith("#")) {
+            Object pv = parentValues.get(parameter.toUpperCase());
+            if (pv != null) {
+              value = String.valueOf(pv);
+              log.debug("[resolveSQLDefault] param @{}@ from parentValues: {}", parameter, value);
+            }
+          }
+          if (value == null || value.isEmpty()) {
+            value = Utility.getContext(conn, vars, parameter, windowId);
+          }
           ps.setObject(paramIndex++, value);
         }
 
@@ -842,7 +873,7 @@ public class NeoDefaultsService {
       MandatoryDefaultContext mCtx) {
     try {
       Object resolved = resolveFieldDefault(col, mCtx.parentId, mCtx.vars, mCtx.conn,
-          mCtx.windowId, mCtx.neoCtx);
+          mCtx.windowId, mCtx.neoCtx, null, mCtx.parentValues);
       if (resolved != null) {
         applyResolvedDefault(body, col, propName, resolved, mCtx.neoCtx);
         tryInjectIdentifier(body,
@@ -1055,8 +1086,14 @@ public class NeoDefaultsService {
    * when no explicit default is configured.
    *
    * <p>Matches the classes {@code FKComboUIDefinition} (TableDir=19, Table=18) and
-   * {@code EnumUIDefinition} (List=17). Returns {@code false} for Search (30),
-   * OBUISEL_Selector, Tree, and ID references, which leave the field empty on NEW.</p>
+   * {@code EnumUIDefinition} (List=17). Returns {@code false} for Search (30), Tree, and ID
+   * references, which leave the field empty on NEW.</p>
+   *
+   * <p>Note: this is a pure check on the base reference id and does not detect columns whose
+   * {@code AD_Reference_ID} is Table/TableDir but which have an OBUISEL_Selector override on
+   * {@code AD_Reference_Value_ID}. Those render as {@code SearchUIDefinition} in Classic and
+   * must also skip preselection; {@link #resolveFirstComboOption} guards against that via
+   * {@link NeoSelectorService#hasObuiselSelector}.</p>
    */
   private static boolean isFICComboReference(String baseRefId) {
     return NeoSelectorService.REF_TABLEDIR.equals(baseRefId)
@@ -1085,7 +1122,18 @@ public class NeoDefaultsService {
       if (!isFICComboReference(baseRefId)) {
         return null;
       }
+      // Columns whose AD_Reference is Table/TableDir but carry an OBUISEL_Selector override
+      // render as SearchUIDefinition in Etendo Classic (not FKComboUIDefinition), so FIC does
+      // not preselect them on MODE=NEW. Mirrors the selector-override branch in UIDefinition.
+      if (NeoSelectorService.hasObuiselSelector(col)) {
+        return null;
+      }
       Map<String, String> contextParams = buildFICComboContextParams(ctx);
+      // FIC parity for unresolvable validation params (e.g. "C_BPartner_Location.C_BPartner_ID
+      // = @C_BPartner_ID@" on a new document) is handled at the query level:
+      // SelectorQueryBuilder.resolveValidationClause substitutes NULL for missing vars,
+      // mirroring Classic's ComboTableData, so the filter returns no rows instead of
+      // matching everything.
       NeoResponse selectorResp = NeoSelectorService.querySelectorByColumn(
           col, col.getDBColumnName(), null, 1, 0, contextParams);
       if (selectorResp == null || selectorResp.getHttpStatus() != 200) {
@@ -1347,36 +1395,21 @@ public class NeoDefaultsService {
     if (qty == 0) {
       return;
     }
-    double grossUnitPrice = body.optDouble("grossUnitPrice", 0);
-    if (grossUnitPrice > 0) {
-      // Tax-inclusive price list: grossAmount = grossUnitPrice × qty
-      try {
-        double computed = grossUnitPrice * qty;
-        body.put("grossAmount", computed);
-        log.debug("[NEO-DEFAULTS] Computed grossAmount={} from grossUnitPrice={} × qty={}",
-            computed, grossUnitPrice, qty);
-      } catch (Exception e) {
-        log.debug("Could not compute grossAmount: {}", e.getMessage());
-      }
-      return;
-    }
-    // Tax-exclusive price list: grossAmount = lineNetAmount × (1 + taxRate / 100)
-    double lineNetAmount = body.optDouble("lineNetAmount", 0);
-    if (lineNetAmount == 0) {
-      return;
-    }
+    double baseNetAmt = body.optDouble("lineNetAmount", 0);
     String taxId = body.optString("tax", "");
-    if (taxId.isEmpty()) {
+    // For net price lists require a tax to be selected before computing grossAmount.
+    if (baseNetAmt > 0 && taxId.isEmpty()) {
+      return;
+    }
+    double computed = resolveGrossAmount(body.optDouble("grossUnitPrice", 0), qty, baseNetAmt, taxId);
+    if (Double.isNaN(computed)) {
       return;
     }
     try {
-      double taxRate = fetchTaxRate(taxId);
-      double computed = lineNetAmount * (1.0 + taxRate / 100.0);
       body.put("grossAmount", computed);
-      log.debug("[NEO-DEFAULTS] Computed grossAmount={} from lineNetAmount={} × (1 + {}%)",
-          computed, lineNetAmount, taxRate);
+      log.debug("[NEO-DEFAULTS] Computed grossAmount={} (qty={}, tax={})", computed, qty, taxId);
     } catch (Exception e) {
-      log.debug("Could not compute grossAmount from tax rate: {}", e.getMessage());
+      log.debug("Could not set grossAmount: {}", e.getMessage());
     }
   }
 
@@ -1396,23 +1429,32 @@ public class NeoDefaultsService {
   }
 
   /**
-   * For order/quotation lines, always recompute 'lineGrossAmount' as
-   * effectiveUnitPrice × orderedQuantity. Uses grossUnitPrice if present and non-zero,
-   * falls back to unitPrice for net-price list quotations where the callout does not
-   * populate grossUnitPrice.
+   * Gross path (grossUnitPrice > 0): grossUnitPrice × qty.
+   * Net path (grossUnitPrice = 0): baseNetAmt × (1 + taxRate/100).
+   * Returns {@link Double#NaN} when computation should be skipped (baseNetAmt <= 0).
+   */
+  private static double resolveGrossAmount(double grossUnitPrice, double qty, double baseNetAmt,
+      String taxId) {
+    if (grossUnitPrice > 0) {
+      return grossUnitPrice * qty;
+    }
+    if (baseNetAmt <= 0) {
+      return Double.NaN;
+    }
+    double rate = (taxId == null || taxId.isEmpty()) ? 0 : fetchTaxRate(taxId);
+    return baseNetAmt * (1.0 + rate / 100.0);
+  }
+
+  /**
+   * For order/quotation lines, always recompute 'lineGrossAmount'.
+   * - Gross price list (grossUnitPrice > 0): grossUnitPrice × qty (tax already included).
+   * - Net price list (grossUnitPrice = 0): unitPrice × qty × (1 + taxRate/100).
    *
    * <p>Always recomputes to override any stale value the product callout may have set
    * for qty=1 (SL_Order_Amt fires on product change before the user sets the quantity).
    */
   public static void injectLineGrossAmountIfMissing(JSONObject body) {
     if (body == null) {
-      return;
-    }
-    double effectivePrice = body.optDouble("grossUnitPrice", 0);
-    if (effectivePrice <= 0) {
-      effectivePrice = body.optDouble("unitPrice", 0);
-    }
-    if (effectivePrice <= 0) {
       return;
     }
     double qty;
@@ -1424,13 +1466,19 @@ public class NeoDefaultsService {
     if (qty == 0) {
       return;
     }
+    double unitPrice = body.optDouble("unitPrice", 0);
+    double baseNetAmt = unitPrice > 0 ? unitPrice * qty : 0;
+    String taxId = body.optString("tax", "");
+    double computed = resolveGrossAmount(body.optDouble("grossUnitPrice", 0), qty, baseNetAmt, taxId);
+    if (Double.isNaN(computed)) {
+      return;
+    }
     try {
-      double computed = effectivePrice * qty;
       body.put("lineGrossAmount", computed);
-      log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} from price={} × qty={}",
-          computed, effectivePrice, qty);
+      log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} (qty={}, unitPrice={}, tax={})",
+          computed, qty, unitPrice, taxId);
     } catch (Exception e) {
-      log.debug("Could not compute lineGrossAmount: {}", e.getMessage());
+      log.debug("Could not set lineGrossAmount: {}", e.getMessage());
     }
   }
 
