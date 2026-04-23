@@ -294,6 +294,12 @@ public class NeoDefaultsService {
   private static Object resolveFieldDefault(Column adColumn, String parentId,
       VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx,
       String sfFieldDefault) {
+    return resolveFieldDefault(adColumn, parentId, vars, conn, windowId, ctx, sfFieldDefault, null);
+  }
+
+  private static Object resolveFieldDefault(Column adColumn, String parentId,
+      VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx,
+      String sfFieldDefault, Map<String, Object> parentValues) {
 
     String dbColumnName = adColumn.getDBColumnName();
 
@@ -332,7 +338,7 @@ public class NeoDefaultsService {
 
     // SQL expressions — resolve parameters and execute
     if (defaultExpr.startsWith("@SQL=")) {
-      return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn);
+      return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn, parentValues);
     }
 
     // Delegate to Utility.getDefault for all other cases:
@@ -530,6 +536,20 @@ public class NeoDefaultsService {
    */
   private static String resolveSQLDefault(String defaultExpr, VariablesSecureApp vars,
       DalConnectionProvider conn, String windowId, Column adColumn) {
+    return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn, null);
+  }
+
+  /**
+   * Resolve a @SQL= default expression, preferring parent record values over session context
+   * for non-session parameters. This ensures that columns like @M_Warehouse_ID@ and @AD_Client_ID@
+   * resolve to the parent record's values (e.g. the inventory's warehouse and client) rather than
+   * the session user's warehouse/client, which may differ when the user belongs to a different org.
+   *
+   * Session parameters (prefixed with #, e.g. @#Date@) always use session context.
+   */
+  private static String resolveSQLDefault(String defaultExpr, VariablesSecureApp vars,
+      DalConnectionProvider conn, String windowId, Column adColumn,
+      Map<String, Object> parentValues) {
     try {
       ArrayList<String> params = new ArrayList<>();
       String sql = parseSQLExpression(defaultExpr, params);
@@ -537,7 +557,18 @@ public class NeoDefaultsService {
       try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
         int paramIndex = 1;
         for (String parameter : params) {
-          String value = Utility.getContext(conn, vars, parameter, windowId);
+          String value = null;
+          // Non-session params: check parent record values first (e.g. @M_Warehouse_ID@, @AD_Client_ID@)
+          if (parentValues != null && !parentValues.isEmpty() && !parameter.startsWith("#")) {
+            Object pv = parentValues.get(parameter.toUpperCase());
+            if (pv != null) {
+              value = String.valueOf(pv);
+              log.debug("[resolveSQLDefault] param @{}@ from parentValues: {}", parameter, value);
+            }
+          }
+          if (value == null || value.isEmpty()) {
+            value = Utility.getContext(conn, vars, parameter, windowId);
+          }
           ps.setObject(paramIndex++, value);
         }
 
@@ -842,7 +873,7 @@ public class NeoDefaultsService {
       MandatoryDefaultContext mCtx) {
     try {
       Object resolved = resolveFieldDefault(col, mCtx.parentId, mCtx.vars, mCtx.conn,
-          mCtx.windowId, mCtx.neoCtx);
+          mCtx.windowId, mCtx.neoCtx, null, mCtx.parentValues);
       if (resolved != null) {
         applyResolvedDefault(body, col, propName, resolved, mCtx.neoCtx);
         tryInjectIdentifier(body,
@@ -1055,8 +1086,14 @@ public class NeoDefaultsService {
    * when no explicit default is configured.
    *
    * <p>Matches the classes {@code FKComboUIDefinition} (TableDir=19, Table=18) and
-   * {@code EnumUIDefinition} (List=17). Returns {@code false} for Search (30),
-   * OBUISEL_Selector, Tree, and ID references, which leave the field empty on NEW.</p>
+   * {@code EnumUIDefinition} (List=17). Returns {@code false} for Search (30), Tree, and ID
+   * references, which leave the field empty on NEW.</p>
+   *
+   * <p>Note: this is a pure check on the base reference id and does not detect columns whose
+   * {@code AD_Reference_ID} is Table/TableDir but which have an OBUISEL_Selector override on
+   * {@code AD_Reference_Value_ID}. Those render as {@code SearchUIDefinition} in Classic and
+   * must also skip preselection; {@link #resolveFirstComboOption} guards against that via
+   * {@link NeoSelectorService#hasObuiselSelector}.</p>
    */
   private static boolean isFICComboReference(String baseRefId) {
     return NeoSelectorService.REF_TABLEDIR.equals(baseRefId)
@@ -1085,7 +1122,18 @@ public class NeoDefaultsService {
       if (!isFICComboReference(baseRefId)) {
         return null;
       }
+      // Columns whose AD_Reference is Table/TableDir but carry an OBUISEL_Selector override
+      // render as SearchUIDefinition in Etendo Classic (not FKComboUIDefinition), so FIC does
+      // not preselect them on MODE=NEW. Mirrors the selector-override branch in UIDefinition.
+      if (NeoSelectorService.hasObuiselSelector(col)) {
+        return null;
+      }
       Map<String, String> contextParams = buildFICComboContextParams(ctx);
+      // FIC parity for unresolvable validation params (e.g. "C_BPartner_Location.C_BPartner_ID
+      // = @C_BPartner_ID@" on a new document) is handled at the query level:
+      // SelectorQueryBuilder.resolveValidationClause substitutes NULL for missing vars,
+      // mirroring Classic's ComboTableData, so the filter returns no rows instead of
+      // matching everything.
       NeoResponse selectorResp = NeoSelectorService.querySelectorByColumn(
           col, col.getDBColumnName(), null, 1, 0, contextParams);
       if (selectorResp == null || selectorResp.getHttpStatus() != 200) {
