@@ -41,6 +41,9 @@ public final class NeoAddressHelper {
    * @return formatted city line, or {@code null} if no data is present
    */
   public static String formatCityLine(Location loc) {
+    if (loc == null) {
+      return null;
+    }
     String postal = loc.getPostalCode();
     String city = loc.getCityName();
     String region = loc.getRegion() != null ? loc.getRegion().getName() : null;
