@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 
 import javax.inject.Named;
 
@@ -31,16 +32,17 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 /**
- * NeoHandler that returns the top 10 clients by revenue for the last 12 months.
- * The 12-month window is anchored to the most recent invoice date (treating it
- * as "today"), so demo/test databases without current-date data still show results.
+ * NeoHandler that returns the top 10 clients by revenue for the requested date range.
+ * When no range is supplied it falls back to the last 12 months anchored to the most
+ * recent invoice date so demo/test databases with stale data still return results.
  */
 @Named("widgetTopClientsHandler")
 public class WidgetTopClientsHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(WidgetTopClientsHandler.class);
 
-  private static final String TOP_CLIENTS_QUERY =
+  // Used when no range param is present — anchors to MAX(dateinvoiced) for demo-data safety
+  private static final String TOP_CLIENTS_FALLBACK =
       "WITH max_date AS ( "
     + "  SELECT MAX(dateinvoiced) AS last_date "
     + "  FROM c_invoice "
@@ -56,6 +58,18 @@ public class WidgetTopClientsHandler implements NeoHandler {
     + "ORDER BY SUM(i.grandtotal) DESC "
     + "LIMIT 10";
 
+  // Template used when an explicit range is supplied — %s is replaced with a safe SQL date expr
+  private static final String TOP_CLIENTS_RANGED =
+      "SELECT bp.name, SUM(i.grandtotal) AS total "
+    + "FROM c_invoice i "
+    + "JOIN c_bpartner bp ON bp.c_bpartner_id = i.c_bpartner_id "
+    + "WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') "
+    + "  AND i.ad_client_id = :clientId "
+    + "  AND i.dateinvoiced >= %s "
+    + "GROUP BY bp.c_bpartner_id, bp.name "
+    + "ORDER BY SUM(i.grandtotal) DESC "
+    + "LIMIT 10";
+
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!"GET".equals(context.getHttpMethod())) {
@@ -66,14 +80,12 @@ public class WidgetTopClientsHandler implements NeoHandler {
       OBContext.setAdminMode(true);
       try {
         String clientId = OBContext.getOBContext().getCurrentClient().getId();
+        Map<String, String> params = context.getQueryParams();
+        String range = params != null ? params.get("range") : null;
 
-        @SuppressWarnings("unchecked")
-        NativeQuery<Object[]> query = OBDal.getInstance()
-            .getSession()
-            .createNativeQuery(TOP_CLIENTS_QUERY);
-        query.setParameter("clientId", clientId);
-
-        List<Object[]> rows = query.list();
+        List<Object[]> rows = (range != null && !range.isEmpty())
+            ? queryWithRange(clientId, range)
+            : queryFallback(clientId);
 
         JSONArray data = new JSONArray();
         for (Object[] row : rows) {
@@ -97,6 +109,33 @@ public class WidgetTopClientsHandler implements NeoHandler {
     } catch (Exception e) {
       log.error("Error fetching top clients", e);
       return NeoResponse.error(500, "Top clients handler failed: " + e.getMessage());
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private List<Object[]> queryWithRange(String clientId, String range) {
+    String sql = String.format(TOP_CLIENTS_RANGED, rangeToSqlDateFrom(range));
+    NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    query.setParameter("clientId", clientId);
+    return query.list();
+  }
+
+  @SuppressWarnings("unchecked")
+  private List<Object[]> queryFallback(String clientId) {
+    NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(TOP_CLIENTS_FALLBACK);
+    query.setParameter("clientId", clientId);
+    return query.list();
+  }
+
+  /** Maps a frontend range key to a safe, hardcoded PostgreSQL date expression. */
+  private static String rangeToSqlDateFrom(String range) {
+    switch (range) {
+      case "last30d":  return "NOW() - INTERVAL '30 days'";
+      case "last90d":  return "NOW() - INTERVAL '90 days'";
+      case "mtd":      return "date_trunc('month', NOW())";
+      case "ytd":      return "date_trunc('year', NOW())";
+      case "lastYear":
+      default:         return "NOW() - INTERVAL '12 months'";
     }
   }
 }
