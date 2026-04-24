@@ -69,6 +69,8 @@ class NeoCrudHandler {
   private static final String METHOD_DELETE = "DELETE";
   private static final String METHOD_PATCH = "PATCH";
   private static final String PARAM_PARENT_ID = "parentId";
+  private static final String HQL_AND_OPERATOR = " and ";
+  private static final String JSON_IDENTIFIER = "_identifier";
   private static final Set<String> CONTACTS_PRECREATE_BILLING_FIELDS = new HashSet<>(
       Arrays.asList(
           "priceList",
@@ -272,7 +274,7 @@ class NeoCrudHandler {
       String parentFilter = resolveParentFilter(adTab, parentId);
       if (StringUtils.isNotBlank(parentFilter)) {
         if (where.length() > 0) {
-          where.append(" and ");
+          where.append(HQL_AND_OPERATOR);
         }
         where.append("(").append(parentFilter).append(")");
       }
@@ -280,7 +282,7 @@ class NeoCrudHandler {
     String neoWhere = params.remove(NeoCrudHelper.NEO_WHERE_PARAM);
     if (StringUtils.isNotBlank(neoWhere)) {
       if (where.length() > 0) {
-        where.append(" and ");
+        where.append(HQL_AND_OPERATOR);
       }
       where.append("(").append(neoWhere).append(")");
     }
@@ -645,7 +647,7 @@ class NeoCrudHandler {
     }
 
     StringBuilder where = new StringBuilder(" as e where ")
-        .append(String.join(" and ", predicates))
+        .append(String.join(HQL_AND_OPERATOR, predicates))
         .append(" order by e.").append(resolvedProperty).append(" asc");
 
     try {
@@ -718,7 +720,7 @@ class NeoCrudHandler {
     try {
       if (value == null) {
         entry.put("id", "");
-        entry.put("_identifier", "");
+        entry.put(JSON_IDENTIFIER, "");
       } else if (value instanceof BaseOBObject) {
         BaseOBObject bob = (BaseOBObject) value;
         Object id = bob.getId();
@@ -730,11 +732,11 @@ class NeoCrudHandler {
           identifier = idStr;
         }
         entry.put("id", idStr);
-        entry.put("_identifier", StringUtils.isBlank(identifier) ? idStr : identifier);
+        entry.put(JSON_IDENTIFIER, StringUtils.isBlank(identifier) ? idStr : identifier);
       } else {
         String str = value.toString();
         entry.put("id", str);
-        entry.put("_identifier", str);
+        entry.put(JSON_IDENTIFIER, str);
       }
     } catch (Exception e) {
       log.error("Failed to serialize distinct entry: {}", e.getMessage(), e);

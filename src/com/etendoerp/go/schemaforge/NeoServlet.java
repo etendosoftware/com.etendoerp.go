@@ -186,7 +186,7 @@ public class NeoServlet extends HttpBaseServlet {
           writeResponse(response, null);
           return;
         }
-        if ("DELETE".equals(method)) {
+        if (METHOD_DELETE.equals(method)) {
           NeoFiltersService.deletePreset(pathInfo.entityName, pathInfo.recordId);
           OBDal.getInstance().flush();
           writeResponse(response, null);
