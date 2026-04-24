@@ -160,6 +160,43 @@ public class NeoServlet extends HttpBaseServlet {
         return;
       }
 
+      // Filters endpoint — per-user, per-window named filter presets
+      //   GET    /sws/neo/filters/{window}          → all presets for that window
+      //   PUT    /sws/neo/filters/{window}/{preset} → save/overwrite a named preset
+      //   DELETE /sws/neo/filters/{window}/{preset} → remove a named preset
+      if ("filters".equals(pathInfo.specName)) {
+        if (pathInfo.entityName == null) {
+          sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+              "Window name required: /sws/neo/filters/{window}");
+          return;
+        }
+        if ("GET".equals(method)) {
+          writeResponse(response, NeoFiltersService.getWindowPresets(pathInfo.entityName));
+          return;
+        }
+        if (pathInfo.recordId == null) {
+          sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+              "Preset name required: /sws/neo/filters/{window}/{preset}");
+          return;
+        }
+        if ("PUT".equals(method)) {
+          String body = readRequestBody(request);
+          NeoFiltersService.savePreset(pathInfo.entityName, pathInfo.recordId, body);
+          OBDal.getInstance().flush();
+          writeResponse(response, null);
+          return;
+        }
+        if (METHOD_DELETE.equals(method)) {
+          NeoFiltersService.deletePreset(pathInfo.entityName, pathInfo.recordId);
+          OBDal.getInstance().flush();
+          writeResponse(response, null);
+          return;
+        }
+        sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+            "Filters endpoint only supports GET, PUT and DELETE");
+        return;
+      }
+
       // Find the spec
       SFSpec spec = NeoServletSupport.findSpec(pathInfo.specName);
       if (spec == null) {

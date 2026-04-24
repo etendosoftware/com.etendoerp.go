@@ -19,10 +19,12 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -32,11 +34,15 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
@@ -63,6 +69,8 @@ class NeoCrudHandler {
   private static final String METHOD_DELETE = "DELETE";
   private static final String METHOD_PATCH = "PATCH";
   private static final String PARAM_PARENT_ID = "parentId";
+  private static final String HQL_AND_OPERATOR = " and ";
+  private static final String JSON_IDENTIFIER = "_identifier";
   private static final Set<String> CONTACTS_PRECREATE_BILLING_FIELDS = new HashSet<>(
       Arrays.asList(
           "priceList",
@@ -102,6 +110,19 @@ class NeoCrudHandler {
     }
     Tab adTab = entity.getADTab();
     Map<String, String> queryParams = servlet.extractQueryParams(request);
+
+    // Short-circuit for `?_distinct=<field>` on a list GET: returns the
+    // paginated set of distinct values for the given scalar field, so UI
+    // filter selectors can show all possible options without loading the
+    // entire dataset or inventing them client-side. Runs through the same
+    // tab-where + parent-filter + readable-client/org filtering as the
+    // standard list fetch, just with a different projection.
+    if ("GET".equals(method) && queryParams != null
+        && StringUtils.isNotBlank(queryParams.get(JsonConstants.DISTINCT_PARAMETER))) {
+      servlet.writeResponse(response, handleDistinctFetch(adTab, queryParams));
+      return;
+    }
+
     NeoContext neoContext = NeoContext.builder()
         .specName(pathInfo.specName)
         .entityName(pathInfo.entityName)
@@ -253,7 +274,7 @@ class NeoCrudHandler {
       String parentFilter = resolveParentFilter(adTab, parentId);
       if (StringUtils.isNotBlank(parentFilter)) {
         if (where.length() > 0) {
-          where.append(" and ");
+          where.append(HQL_AND_OPERATOR);
         }
         where.append("(").append(parentFilter).append(")");
       }
@@ -261,14 +282,14 @@ class NeoCrudHandler {
     String neoWhere = params.remove(NeoCrudHelper.NEO_WHERE_PARAM);
     if (StringUtils.isNotBlank(neoWhere)) {
       if (where.length() > 0) {
-        where.append(" and ");
+        where.append(HQL_AND_OPERATOR);
       }
       where.append("(").append(neoWhere).append(")");
     }
     if (where.length() > 0) {
       params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, where.toString());
-      params.put(JsonConstants.USE_ALIAS, "true");
     }
+    params.put(JsonConstants.USE_ALIAS, "true");
   }
 
   /**
@@ -535,5 +556,191 @@ class NeoCrudHandler {
       log.error("Error resolving parent filter for tab '{}': {}", childTab.getName(), e.getMessage(), e);
       return null;
     }
+  }
+
+  /**
+   * Parses an integer from a raw query-string value, falling back to
+   * {@code fallback} when the value is blank or malformed.
+   */
+  private static int parseIntOrDefault(String raw, int fallback) {
+    if (StringUtils.isBlank(raw)) {
+      return fallback;
+    }
+    try {
+      return Integer.parseInt(raw.trim());
+    } catch (NumberFormatException e) {
+      return fallback;
+    }
+  }
+
+  private static final int DISTINCT_DEFAULT_PAGE_SIZE = 50;
+  private static final int DISTINCT_MAX_PAGE_SIZE = 200;
+
+  /**
+   * Handles a {@code ?_distinct=<field>} list GET: returns the paginated set of
+   * distinct values of a single scalar property, reusing the same tab where
+   * clause and parent filter as the standard list fetch. {@link OBQuery}
+   * automatically applies readable-client/organization/active filters from the
+   * current {@link OBContext}.
+   */
+  private NeoResponse handleDistinctFetch(Tab adTab, Map<String, String> queryParams) {
+    if (adTab == null || adTab.getTable() == null) {
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Distinct query requires a tab with a linked table");
+    }
+    String fieldName = queryParams.get(JsonConstants.DISTINCT_PARAMETER);
+    if (StringUtils.isBlank(fieldName)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "_distinct requires a field name");
+    }
+
+    String dalEntityName = adTab.getTable().getName();
+    Entity entityDef;
+    try {
+      entityDef = ModelProvider.getInstance().getEntity(dalEntityName);
+    } catch (Exception e) {
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Unknown DAL entity: " + dalEntityName);
+    }
+    Property prop = resolveDistinctProperty(entityDef, fieldName);
+    if (prop == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Unknown field '" + fieldName + "' on entity " + dalEntityName);
+    }
+    String resolvedProperty = prop.getName();
+
+    int startRow = Math.max(0,
+        parseIntOrDefault(queryParams.get(JsonConstants.STARTROW_PARAMETER), 0));
+    int endRow = parseIntOrDefault(queryParams.get(JsonConstants.ENDROW_PARAMETER),
+        startRow + DISTINCT_DEFAULT_PAGE_SIZE - 1);
+    int requestedSize = (endRow >= startRow) ? (endRow - startRow + 1) : DISTINCT_DEFAULT_PAGE_SIZE;
+    int pageSize = Math.max(1, Math.min(requestedSize, DISTINCT_MAX_PAGE_SIZE));
+
+    String parentId = queryParams.get(PARAM_PARENT_ID);
+    String search = queryParams.get("_distinctSearch");
+
+    // Build the same where clause used by the list GET (tab HQL where with
+    // @token@ substitution + parent filter for child tabs). Prefixed with
+    // "as e" so OBQuery picks up the alias for its own client/org filters.
+    List<String> predicates = new ArrayList<>();
+    predicates.add("e." + resolvedProperty + " IS NOT NULL");
+
+    String tabWhere = adTab.getHqlwhereclause();
+    if (StringUtils.isNotBlank(tabWhere)) {
+      if (parentId != null && tabWhere.contains("@")) {
+        tabWhere = tabWhere.replaceAll("@[A-Za-z_.]+@", "'" + parentId.replace("'", "''") + "'");
+      }
+      if (!tabWhere.contains("@")) {
+        // Skip when unresolved @session_tokens@ remain — OBQuery can't bind
+        // them and the list fetch relies on DefaultJsonDataService to resolve.
+        predicates.add("(" + tabWhere + ")");
+      }
+    }
+    if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
+      String parentFilter = resolveParentFilter(adTab, parentId);
+      if (StringUtils.isNotBlank(parentFilter)) {
+        predicates.add("(" + parentFilter + ")");
+      }
+    }
+    if (StringUtils.isNotBlank(search)) {
+      predicates.add("LOWER(CAST(e." + resolvedProperty + " AS string)) LIKE :search");
+    }
+
+    StringBuilder where = new StringBuilder(" as e where ")
+        .append(String.join(HQL_AND_OPERATOR, predicates))
+        .append(" order by e.").append(resolvedProperty).append(" asc");
+
+    try {
+      OBQuery<BaseOBObject> obQuery = OBDal.getInstance()
+          .createQuery(dalEntityName, where.toString());
+      obQuery.setSelectClause("DISTINCT e." + resolvedProperty);
+      if (StringUtils.isNotBlank(search)) {
+        obQuery.setNamedParameter("search", "%" + search.toLowerCase() + "%");
+      }
+      obQuery.setFirstResult(startRow);
+      obQuery.setMaxResult(pageSize + 1); // fetch one extra to detect hasMore
+
+      List<Object> results = obQuery.createQuery(Object.class).list();
+      boolean hasMore = results.size() > pageSize;
+      List<Object> page = hasMore ? new ArrayList<>(results.subList(0, pageSize)) : results;
+
+      JSONArray data = new JSONArray();
+      for (Object value : page) {
+        data.put(toDistinctEntry(value));
+      }
+
+      JSONObject payload = new JSONObject();
+      payload.put("data", data);
+      payload.put("startRow", startRow);
+      payload.put("endRow", startRow + page.size() - 1);
+      payload.put("hasMore", hasMore);
+      JSONObject envelope = new JSONObject();
+      envelope.put("response", payload);
+      return NeoResponse.ok(envelope);
+    } catch (Exception e) {
+      log.error("Distinct fetch failed for {} / {}: {}",
+          dalEntityName, resolvedProperty, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Failed to compute distinct values");
+    }
+  }
+
+  /**
+   * Resolves a distinct field name against the DAL entity, trying the raw name
+   * first and falling back to case-insensitive matches against property names
+   * and AD column names.
+   */
+  private static Property resolveDistinctProperty(Entity entityDef, String fieldName) {
+    if (entityDef == null) {
+      return null;
+    }
+    Property direct = entityDef.getProperty(fieldName, false);
+    if (direct != null) {
+      return direct;
+    }
+    for (Property p : entityDef.getProperties()) {
+      if (p.getName().equalsIgnoreCase(fieldName)) {
+        return p;
+      }
+      if (p.getColumnName() != null && p.getColumnName().equalsIgnoreCase(fieldName)) {
+        return p;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Builds a {@code {"id": ..., "_identifier": ...}} entry for a single distinct
+   * value. Scalar values (String enum codes, numbers, dates) use the stringified
+   * value for both fields so the frontend can render a label without a second
+   * lookup. FK references expose the target entity's id and its DAL identifier.
+   */
+  private static JSONObject toDistinctEntry(Object value) {
+    JSONObject entry = new JSONObject();
+    try {
+      if (value == null) {
+        entry.put("id", "");
+        entry.put(JSON_IDENTIFIER, "");
+      } else if (value instanceof BaseOBObject) {
+        BaseOBObject bob = (BaseOBObject) value;
+        Object id = bob.getId();
+        String idStr = id == null ? "" : id.toString();
+        String identifier;
+        try {
+          identifier = bob.getIdentifier();
+        } catch (Exception e) {
+          identifier = idStr;
+        }
+        entry.put("id", idStr);
+        entry.put(JSON_IDENTIFIER, StringUtils.isBlank(identifier) ? idStr : identifier);
+      } else {
+        String str = value.toString();
+        entry.put("id", str);
+        entry.put(JSON_IDENTIFIER, str);
+      }
+    } catch (Exception e) {
+      log.error("Failed to serialize distinct entry: {}", e.getMessage(), e);
+    }
+    return entry;
   }
 }
