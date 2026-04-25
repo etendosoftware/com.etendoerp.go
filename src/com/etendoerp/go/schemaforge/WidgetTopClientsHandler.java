@@ -27,9 +27,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
 
 /**
  * NeoHandler that returns the top 10 clients by revenue for the requested date range.
@@ -84,8 +82,8 @@ public class WidgetTopClientsHandler implements NeoHandler {
         String range = params != null ? params.get("range") : null;
 
         List<Object[]> rows = (range != null && !range.isEmpty())
-            ? queryWithRange(clientId, range)
-            : queryFallback(clientId);
+            ? WidgetQueryHelper.executeRangedQuery(TOP_CLIENTS_RANGED, clientId, range)
+            : WidgetQueryHelper.executeFallbackQuery(TOP_CLIENTS_FALLBACK, clientId);
 
         JSONArray data = new JSONArray();
         for (Object[] row : rows) {
@@ -112,30 +110,4 @@ public class WidgetTopClientsHandler implements NeoHandler {
     }
   }
 
-  @SuppressWarnings("unchecked")
-  private List<Object[]> queryWithRange(String clientId, String range) {
-    String sql = String.format(TOP_CLIENTS_RANGED, rangeToSqlDateFrom(range));
-    NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql);
-    query.setParameter("clientId", clientId);
-    return query.list();
-  }
-
-  @SuppressWarnings("unchecked")
-  private List<Object[]> queryFallback(String clientId) {
-    NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(TOP_CLIENTS_FALLBACK);
-    query.setParameter("clientId", clientId);
-    return query.list();
-  }
-
-  /** Maps a frontend range key to a safe, hardcoded PostgreSQL date expression. */
-  private static String rangeToSqlDateFrom(String range) {
-    switch (range) {
-      case "last30d":  return "NOW() - INTERVAL '30 days'";
-      case "last90d":  return "NOW() - INTERVAL '90 days'";
-      case "mtd":      return "date_trunc('month', NOW())";
-      case "ytd":      return "date_trunc('year', NOW())";
-      case "lastYear":
-      default:         return "NOW() - INTERVAL '12 months'";
-    }
-  }
 }

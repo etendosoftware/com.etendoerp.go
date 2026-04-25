@@ -27,9 +27,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
 
 /**
  * NeoHandler that returns the top 10 best-selling products by quantity for the requested
@@ -130,8 +128,8 @@ public class WidgetBestSellersHandler implements NeoHandler {
         String range = params != null ? params.get("range") : null;
 
         List<Object[]> rows = (range != null && !range.isEmpty())
-            ? queryWithRange(clientId, range)
-            : queryFallback(clientId);
+            ? WidgetQueryHelper.executeRangedQuery(BEST_SELLERS_RANGED, clientId, range)
+            : WidgetQueryHelper.executeFallbackQuery(BEST_SELLERS_FALLBACK, clientId);
 
         JSONArray data = new JSONArray();
         for (Object[] row : rows) {
@@ -161,29 +159,4 @@ public class WidgetBestSellersHandler implements NeoHandler {
     }
   }
 
-  @SuppressWarnings("unchecked")
-  private List<Object[]> queryWithRange(String clientId, String range) {
-    String sql = String.format(BEST_SELLERS_RANGED, rangeToSqlDateFrom(range));
-    NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql);
-    query.setParameter("clientId", clientId);
-    return query.list();
-  }
-
-  @SuppressWarnings("unchecked")
-  private List<Object[]> queryFallback(String clientId) {
-    NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(BEST_SELLERS_FALLBACK);
-    query.setParameter("clientId", clientId);
-    return query.list();
-  }
-
-  private static String rangeToSqlDateFrom(String range) {
-    switch (range) {
-      case "last30d":  return "NOW() - INTERVAL '30 days'";
-      case "last90d":  return "NOW() - INTERVAL '90 days'";
-      case "mtd":      return "date_trunc('month', NOW())";
-      case "ytd":      return "date_trunc('year', NOW())";
-      case "lastYear":
-      default:         return "NOW() - INTERVAL '12 months'";
-    }
-  }
 }
