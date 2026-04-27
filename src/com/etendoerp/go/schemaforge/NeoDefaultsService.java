@@ -1476,7 +1476,7 @@ public class NeoDefaultsService {
       return;
     }
     try {
-      double rounded = new java.math.BigDecimal(computed)
+      double rounded = java.math.BigDecimal.valueOf(computed)
           .setScale(2, java.math.RoundingMode.HALF_UP).doubleValue();
       body.put("lineGrossAmount", rounded);
       log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} (qty={}, unitPrice={}, tax={})",
