@@ -922,6 +922,7 @@ public class NeoServlet extends HttpBaseServlet {
           .specName(pathInfo.specName)
           .entityName(pathInfo.entityName)
           .httpMethod("POST")
+          .endpointType(NeoEndpointType.CALLOUT)
           .requestBody(requestBody)
           .adTab(tab)
           .sfEntity(sfEntity)
@@ -945,6 +946,31 @@ public class NeoServlet extends HttpBaseServlet {
         if (cascade.hasResults()) {
           mergeCalloutResponse(calloutResult.getBody(), cascade.toJSON());
           log.debug("[NEO-CALLOUT] Cascade merged additional fields into response");
+        }
+      }
+
+      // Post-hook: give the entity's NeoHandler a chance to enrich the callout response
+      // (e.g. add a synthetic 'taxRate' update when the trigger is C_Tax_ID). Same dispatch
+      // shape as `handleWithHooks` — looked up by the entity's Java_Qualifier and merged
+      // without overwriting fields already set by the underlying callout.
+      if (calloutResult.getHttpStatus() == 200 && calloutResult.getBody() != null) {
+        String qualifier = sfEntity.getJavaQualifier();
+        if (StringUtils.isNotBlank(qualifier)) {
+          NeoHandler handler = lookupHandler(qualifier);
+          if (handler != null) {
+            try {
+              neoContext.setPreviousResult(calloutResult);
+              NeoResponse handlerResult = handler.afterCallout(neoContext);
+              if (handlerResult != null && handlerResult.getBody() != null) {
+                mergeCalloutResponse(calloutResult.getBody(), handlerResult.getBody());
+                log.debug("[NEO-CALLOUT] Handler '{}' merged additional fields via afterCallout",
+                    qualifier);
+              }
+            } catch (Exception e) {
+              log.warn("[NEO-CALLOUT] afterCallout for handler '{}' failed (non-fatal): {}",
+                  qualifier, e.getMessage());
+            }
+          }
         }
       }
 
