@@ -416,8 +416,19 @@ class NeoCrudHandler {
     // on create because they often carry values set by callouts or defaults (e.g., taxCategory
     // populated from productCategory). filterWriteRequest is for PATCH/PUT only.
     JSONObject filteredBody = fieldFilter.filterCreateRequest(requestBody);
+    // Snapshot the keys submitted by the user BEFORE injectMandatoryDefaults adds backend
+    // defaults. The callout cascade is allowed to refine missing/derived fields, but it must
+    // not overwrite values the user explicitly chose (e.g. paymentTerms manually changed in
+    // the form after a businessPartner callout already ran).
+    Set<String> userSubmittedFields = new HashSet<>();
+    if (filteredBody != null) {
+      Iterator<String> userKeyIter = filteredBody.keys();
+      while (userKeyIter.hasNext()) {
+        userSubmittedFields.add(userKeyIter.next());
+      }
+    }
     NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
-    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue);
+    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, userSubmittedFields);
     NeoDefaultsService.injectProductDerivedUomIfMissing(filteredBody);
     NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
     NeoDefaultsService.injectLineGrossAmountIfMissing(filteredBody);
@@ -439,7 +450,7 @@ class NeoCrudHandler {
   }
 
   private void executePostCalloutCascade(JSONObject filteredBody, Tab adTab,
-      NeoContext context, String parentIdValue) {
+      NeoContext context, String parentIdValue, Set<String> protectedFields) {
     if (adTab == null || adTab.getTabLevel() == null || adTab.getTabLevel() != 0) {
       return;
     }
@@ -457,7 +468,11 @@ class NeoCrudHandler {
       }
     }
 
-    NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields);
+    Set<String> effectiveProtected = protectedFields != null
+        ? protectedFields
+        : java.util.Collections.emptySet();
+    NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields,
+        effectiveProtected);
     DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
     NeoDefaultsCascadeHelper.removeEmptyFkValues(filteredBody, adTab);
     NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);

@@ -162,4 +162,14 @@ public class OrderLineHandler implements NeoHandler {
 
     return null;
   }
+
+  /**
+   * Callout post-hook: enrich the response with a synthetic {@code taxRate} update
+   * when the user changed the line tax. Logic shared with invoice lines lives in
+   * {@link LineCalloutTaxRateHelper}.
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    return LineCalloutTaxRateHelper.augmentTaxRate(context);
+  }
 }
