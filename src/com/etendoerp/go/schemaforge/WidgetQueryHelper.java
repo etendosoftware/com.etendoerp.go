@@ -19,6 +19,9 @@ package com.etendoerp.go.schemaforge;
 
 import java.util.List;
 
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.service.OBDal;
 
@@ -59,5 +62,22 @@ final class WidgetQueryHelper {
     NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql);
     query.setParameter("clientId", clientId);
     return query.list();
+  }
+
+  /** Dispatches to ranged or fallback query depending on whether {@code range} is set. */
+  static List<Object[]> resolveQuery(String fallbackSql, String rangedSql, String clientId, String range) {
+    return (range != null && !range.isEmpty())
+        ? executeRangedQuery(rangedSql, clientId, range)
+        : executeFallbackQuery(fallbackSql, clientId);
+  }
+
+  /** Wraps a data array into the standard {@code {"response":{"data":[...],"count":N}}} envelope. */
+  static NeoResponse buildDataResponse(JSONArray data) throws JSONException {
+    JSONObject responseData = new JSONObject();
+    responseData.put("data", data);
+    responseData.put("count", data.length());
+    JSONObject wrapper = new JSONObject();
+    wrapper.put("response", responseData);
+    return NeoResponse.ok(wrapper);
   }
 }

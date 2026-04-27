@@ -80,10 +80,7 @@ public class WidgetTopClientsHandler implements NeoHandler {
         String clientId = OBContext.getOBContext().getCurrentClient().getId();
         Map<String, String> params = context.getQueryParams();
         String range = params != null ? params.get("range") : null;
-
-        List<Object[]> rows = (range != null && !range.isEmpty())
-            ? WidgetQueryHelper.executeRangedQuery(TOP_CLIENTS_RANGED, clientId, range)
-            : WidgetQueryHelper.executeFallbackQuery(TOP_CLIENTS_FALLBACK, clientId);
+        List<Object[]> rows = WidgetQueryHelper.resolveQuery(TOP_CLIENTS_FALLBACK, TOP_CLIENTS_RANGED, clientId, range);
 
         JSONArray data = new JSONArray();
         for (Object[] row : rows) {
@@ -93,14 +90,7 @@ public class WidgetTopClientsHandler implements NeoHandler {
           data.put(item);
         }
 
-        JSONObject responseData = new JSONObject();
-        responseData.put("data", data);
-        responseData.put("count", data.length());
-
-        JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
-
-        return NeoResponse.ok(wrapper);
+        return WidgetQueryHelper.buildDataResponse(data);
       } finally {
         OBContext.restorePreviousMode();
       }
