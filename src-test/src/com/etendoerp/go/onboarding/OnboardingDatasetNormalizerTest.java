@@ -113,6 +113,7 @@ public class OnboardingDatasetNormalizerTest {
     assertFalse(xml.contains("<AD_USER>"));
     assertFalse(xml.contains("<AD_ROLE>"));
     assertFalse(xml.contains("<AD_REF_DATA_LOADED>"));
+    assertFalse(OnboardingDatasetDefinition.getIncludedTables().contains("C_PAYMENTTERM_TRL"));
   }
 
   /** Verifies that representative foundation business records remain in the normalized XML. */
@@ -123,6 +124,9 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue(xml.contains("Agua"));
     assertTrue(xml.contains("Consumidor Final"));
     assertTrue(xml.contains("Cuenta de Banco"));
+    assertTrue(xml.contains("30 Días"));
+    assertTrue(xml.contains("Inmediato"));
+    assertTrue(xml.contains("Juan Perez"));
     assertTrue(xml.contains("Efectivo"));
   }
 
@@ -132,6 +136,7 @@ public class OnboardingDatasetNormalizerTest {
     String xml = pathBackedNormalizer().buildDatasetXml();
 
     assertFalse(xml.contains("<SALESREP_ID>"));
+    assertFalse(xml.contains("<AD_LANGUAGE>"));
   }
 
   /** Verifies that sourcedata table and column tags do not leak into the final XML. */
