@@ -177,6 +177,12 @@ public class NeoFieldFilter {
         // that DefaultJsonDataService adds to the JSON
         if (!prop.isPrimitive() && prop.getTargetEntity() != null) {
           included.add(propName + "$_identifier");
+          // When a javaQualifier alias exists, the $_identifier must also be renamed
+          // so the frontend receives "account$_identifier" instead of "finFinancialAccount$_identifier"
+          if (qualifier != null && !qualifier.equals(propName)) {
+            propToApiMap.put(propName + "$_identifier", qualifier + "$_identifier");
+            apiKeyMap.put(qualifier + "$_identifier", propName + "$_identifier");
+          }
         }
 
         if (!Boolean.TRUE.equals(sfField.isReadOnly())) {
