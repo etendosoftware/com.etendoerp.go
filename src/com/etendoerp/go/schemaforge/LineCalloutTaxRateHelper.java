@@ -56,6 +56,10 @@ final class LineCalloutTaxRateHelper {
 
   private static final Logger log = LogManager.getLogger(LineCalloutTaxRateHelper.class);
   private static final String C_TAX_ID = "C_Tax_ID";
+  private static final String VALUE_KEY = "value";
+  private static final String TAX_KEY = "tax";
+  private static final String TAX_RATE_KEY = "taxRate";
+  private static final String TAX_IDENTIFIER_KEY = "tax$_identifier";
 
   private LineCalloutTaxRateHelper() {
   }
@@ -81,51 +85,81 @@ final class LineCalloutTaxRateHelper {
    * response are visible regardless of the merge).
    */
   static NeoResponse augmentTaxRate(NeoContext context) {
-    if (context == null
-        || !NeoEndpointType.CALLOUT.equals(context.getEndpointType())) {
-      return null;
-    }
-    JSONObject body = context.getRequestBody();
+    JSONObject body = readRequestBody(context);
     if (body == null) {
       return null;
     }
-    String fieldName = body.optString("field", null);
-    Object triggerValue = body.opt("value");
-
-    NeoResponse previous = context.getPreviousResult();
-    JSONObject existingUpdates = previous != null && previous.getBody() != null
-        ? previous.getBody().optJSONObject("updates")
-        : null;
+    JSONObject existingUpdates = readExistingUpdates(context.getPreviousResult());
 
     // Path A: response already carries a tax update (e.g. SL_Order_Product set
     // tax for the new product). Normalize the identifier in place so the addRow
-    // shows the same label that GET will return after save.
-    if (existingUpdates != null && existingUpdates.has("tax")) {
-      String taxIdInResponse = existingUpdates.optJSONObject("tax") != null
-          ? existingUpdates.optJSONObject("tax").optString("value", null)
-          : null;
-      if (StringUtils.isNotBlank(taxIdInResponse) && !"null".equals(taxIdInResponse)) {
-        TaxRate taxEntity = loadTaxRate(taxIdInResponse);
-        if (taxEntity != null && StringUtils.isNotBlank(taxEntity.getName())) {
-          try {
-            JSONObject idEntry = new JSONObject();
-            idEntry.put("value", taxEntity.getName());
-            existingUpdates.put("tax$_identifier", idEntry);
-          } catch (Exception e) {
-            log.debug("Could not normalize tax$_identifier: {}", e.getMessage());
-          }
-        }
-      }
-      // taxRate is already injected by NeoCalloutService.injectTaxRateIfPresent
-      // when the response carries tax; nothing else to do here.
+    // shows the same label that GET will return after save. taxRate is already
+    // injected by NeoCalloutService.injectTaxRateIfPresent in this case.
+    if (existingUpdates != null && existingUpdates.has(TAX_KEY)) {
+      normalizeTaxIdentifier(existingUpdates);
       return null;
     }
 
     // Path B: trigger is the tax FK and the response does not carry tax.
-    if (StringUtils.isBlank(fieldName) || triggerValue == null) {
+    return buildTaxRateForTrigger(context, body, existingUpdates);
+  }
+
+  /**
+   * @return the request body when the context is a valid CALLOUT, {@code null}
+   *         otherwise.
+   */
+  private static JSONObject readRequestBody(NeoContext context) {
+    if (context == null
+        || !NeoEndpointType.CALLOUT.equals(context.getEndpointType())) {
       return null;
     }
-    if (existingUpdates != null && existingUpdates.has("taxRate")) {
+    return context.getRequestBody();
+  }
+
+  private static JSONObject readExistingUpdates(NeoResponse previous) {
+    if (previous == null || previous.getBody() == null) {
+      return null;
+    }
+    return previous.getBody().optJSONObject("updates");
+  }
+
+  /**
+   * Mutates the given {@code updates} object in place: when it contains a
+   * {@code tax} entry, replace its {@code tax$_identifier} with the DAL
+   * {@link TaxRate#getName() name}. No-op when the tax id cannot be resolved.
+   */
+  private static void normalizeTaxIdentifier(JSONObject updates) {
+    JSONObject taxEntry = updates.optJSONObject(TAX_KEY);
+    if (taxEntry == null) {
+      return;
+    }
+    String taxId = taxEntry.optString(VALUE_KEY, null);
+    TaxRate taxEntity = loadTaxRate(taxId);
+    if (taxEntity == null || StringUtils.isBlank(taxEntity.getName())) {
+      return;
+    }
+    try {
+      JSONObject identifierEntry = new JSONObject();
+      identifierEntry.put(VALUE_KEY, taxEntity.getName());
+      updates.put(TAX_IDENTIFIER_KEY, identifierEntry);
+    } catch (Exception e) {
+      log.debug("Could not normalize tax$_identifier: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Build the synthetic {@code taxRate} update when the trigger field is the
+   * tax FK on a transaction line and the response does not already carry a
+   * {@code taxRate} entry.
+   */
+  private static NeoResponse buildTaxRateForTrigger(NeoContext context,
+      JSONObject requestBody, JSONObject existingUpdates) {
+    if (existingUpdates != null && existingUpdates.has(TAX_RATE_KEY)) {
+      return null;
+    }
+    String fieldName = requestBody.optString("field", null);
+    Object triggerValue = requestBody.opt(VALUE_KEY);
+    if (StringUtils.isBlank(fieldName) || triggerValue == null) {
       return null;
     }
     if (!triggerIsTaxColumn(context.getAdTab(), fieldName)) {
@@ -135,13 +169,12 @@ final class LineCalloutTaxRateHelper {
     if (taxEntity == null || taxEntity.getRate() == null) {
       return null;
     }
-
     try {
       JSONObject responseBody = new JSONObject();
       JSONObject updates = new JSONObject();
       JSONObject rateEntry = new JSONObject();
-      rateEntry.put("value", taxEntity.getRate().doubleValue());
-      updates.put("taxRate", rateEntry);
+      rateEntry.put(VALUE_KEY, taxEntity.getRate().doubleValue());
+      updates.put(TAX_RATE_KEY, rateEntry);
       responseBody.put("updates", updates);
       responseBody.put("combos", new JSONObject());
       return NeoResponse.ok(responseBody);
