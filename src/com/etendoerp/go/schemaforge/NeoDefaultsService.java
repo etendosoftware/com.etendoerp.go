@@ -1467,16 +1467,20 @@ public class NeoDefaultsService {
       return;
     }
     double unitPrice = body.optDouble("unitPrice", 0);
-    double baseNetAmt = unitPrice > 0 ? unitPrice * qty : 0;
+    double discount = body.optDouble("discount", 0);
+    double discountFactor = 1.0 - discount / 100.0;
+    double baseNetAmt = unitPrice > 0 ? unitPrice * qty * discountFactor : 0;
     String taxId = body.optString("tax", "");
     double computed = resolveGrossAmount(body.optDouble("grossUnitPrice", 0), qty, baseNetAmt, taxId);
     if (Double.isNaN(computed)) {
       return;
     }
     try {
-      body.put("lineGrossAmount", computed);
+      double rounded = java.math.BigDecimal.valueOf(computed)
+          .setScale(2, java.math.RoundingMode.HALF_UP).doubleValue();
+      body.put("lineGrossAmount", rounded);
       log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} (qty={}, unitPrice={}, tax={})",
-          computed, qty, unitPrice, taxId);
+          rounded, qty, unitPrice, taxId);
     } catch (Exception e) {
       log.debug("Could not set lineGrossAmount: {}", e.getMessage());
     }
