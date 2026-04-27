@@ -687,6 +687,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
         : null;
   }
 
+  private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
   private boolean createOrganization(PrintWriter writer, String clientName, String clientId,
       String starOrgId, String currencyId) {
     Client client = OBDal.getInstance().get(Client.class, clientId);
@@ -697,8 +698,9 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       return false;
     }
     InitialOrgSetup orgSetup = new InitialOrgSetup(client);
-    OBError orgResult = orgSetup.createOrganization(clientName, "", "0", starOrgId, null,
-        "", "", false, null, currencyId, false, false, false, false, false);
+    OBError orgResult = orgSetup.createOrganization(clientName, "",
+        LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID, starOrgId, null, "", "", true, null, currencyId,
+        false, false, false, false, false);
     if (!"Success".equals(orgResult.getType())) {
       String errorMsg = orgResult.getMessage() != null
           ? orgResult.getMessage()

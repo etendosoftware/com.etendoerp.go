@@ -78,10 +78,8 @@ public class OnboardingDatasetNormalizerTest {
     String xml = pathBackedNormalizer().buildDatasetXml();
 
     assertTrue(xml.contains("<cPaymentterm"));
-    assertTrue(xml.contains("30 Días"));
+    assertTrue(xml.contains("30 D\u00EDas"));
   }
-
-
 
   @Test
   public void testNormalizerBuildsEmptyDatasetWithoutUnsupportedJaxpFailures() throws Exception {
