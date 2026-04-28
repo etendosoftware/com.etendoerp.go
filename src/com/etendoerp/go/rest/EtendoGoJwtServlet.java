@@ -100,6 +100,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
   private static final String PROGRESS_ERROR = "error";
   private static final String PROGRESS_ORGANIZATION = "organization";
   private static final String PROGRESS_DATASET = "dataset";
+  private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
 
   // --- CORS ---
 
@@ -687,7 +688,6 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
         : null;
   }
 
-  private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
   private boolean createOrganization(PrintWriter writer, String clientName, String clientId,
       String starOrgId, String currencyId) {
     Client client = OBDal.getInstance().get(Client.class, clientId);

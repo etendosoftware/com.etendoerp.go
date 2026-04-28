@@ -24,6 +24,9 @@ import java.util.Optional;
 import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
 
+import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.erpCommon.businessUtility.InitialOrgSetupAccountingContext;
 import org.openbravo.erpCommon.businessUtility.InitialOrgSetupAccountingHandler;
@@ -36,6 +39,7 @@ import org.openbravo.erpCommon.businessUtility.InitialOrgSetupAccountingResult;
  */
 @ApplicationScoped
 public class GoInitialOrgSetupAccountingHandler implements InitialOrgSetupAccountingHandler {
+  private static final Logger log = LogManager.getLogger(GoInitialOrgSetupAccountingHandler.class);
 
   @Inject
   private AccountingPackageResolver packageResolver;
@@ -59,7 +63,8 @@ public class GoInitialOrgSetupAccountingHandler implements InitialOrgSetupAccoun
         && context.getClient() != null
         && context.getOrganization() != null
         && context.getOrganizationType() != null
-        && context.getOrganizationType().isLegalEntityWithAccounting();
+        && context.getOrganizationType().isLegalEntityWithAccounting()
+        && StringUtils.isNotBlank(context.getCurrencyId());
   }
 
   @Override
@@ -68,7 +73,9 @@ public class GoInitialOrgSetupAccountingHandler implements InitialOrgSetupAccoun
     try {
       return cloneReadyAccountingPackage(context);
     } catch (Exception e) {
-      return InitialOrgSetupAccountingResult.error(e.getMessage());
+      log.error("Error wiring initial organization accounting setup", e);
+      return InitialOrgSetupAccountingResult.error(
+          StringUtils.defaultIfBlank(e.getMessage(), e.toString()));
     } finally {
       OBContext.restorePreviousMode();
     }

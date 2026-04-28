@@ -17,11 +17,13 @@
 package com.etendoerp.go.onboarding;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -65,7 +67,7 @@ public class AccountingPackageResolverAndClonerTest {
           .resolve(CLIENT_ID, CURRENCY_ID);
 
       assertEquals(1, candidates.size());
-      assertSame(sourceOrganization, candidates.get(0).getSourceOrganization());
+      assertEquals(sourceOrganization.getId(), candidates.get(0).getSourceOrganization().getId());
       assertSame(sourceOrganization.getGeneralLedger(), candidates.get(0).getLedger());
       assertSame(sourceOrganization.getCalendar(), candidates.get(0).getCalendar());
       verify(query).setNamedParameter("clientId", CLIENT_ID);
@@ -99,8 +101,8 @@ public class AccountingPackageResolverAndClonerTest {
 
     boolean stripped = sanitizeCombinationDimensions(combination, SOURCE_ORG_ID);
 
-    org.junit.Assert.assertFalse(stripped);
-    org.mockito.Mockito.verify(combination, org.mockito.Mockito.never()).setProduct(null);
+    assertFalse(stripped);
+    verify(combination, never()).setProduct(null);
   }
 
   private boolean sanitizeCombinationDimensions(AccountingCombination combination, String sourceOrgId)

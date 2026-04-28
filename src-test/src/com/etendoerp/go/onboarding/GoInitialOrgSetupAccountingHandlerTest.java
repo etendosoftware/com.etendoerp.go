@@ -57,6 +57,7 @@ public class GoInitialOrgSetupAccountingHandlerTest {
     assertFalse(handler.applies(contextBuilder().organization(null).build()));
     assertFalse(handler.applies(contextBuilder().organizationType(null).build()));
     assertFalse(handler.applies(contextBuilder().organizationType(organizationType(false)).build()));
+    assertFalse(handler.applies(contextBuilder().currencyId(null).build()));
     assertTrue(handler.applies(contextBuilder().build()));
   }
 

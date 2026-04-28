@@ -358,6 +358,7 @@ class AccountingPackageCloner {
 
   private <T extends BaseOBObject> OBQuery<T> query(Class<T> entityClass, String whereClause,
       Object... parameters) {
+    validateNamedParameters(parameters);
     final OBQuery<T> query = OBDal.getInstance().createQuery(entityClass, whereClause);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
@@ -365,5 +366,11 @@ class AccountingPackageCloner {
       query.setNamedParameter((String) parameters[i], parameters[i + 1]);
     }
     return query;
+  }
+
+  private void validateNamedParameters(Object... parameters) {
+    if (parameters.length % 2 != 0) {
+      throw new IllegalArgumentException("Named query parameters must be provided in pairs");
+    }
   }
 }

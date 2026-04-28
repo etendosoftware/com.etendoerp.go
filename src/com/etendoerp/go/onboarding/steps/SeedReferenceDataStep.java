@@ -44,6 +44,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.model.financialmgmt.payment.PaymentTerm;
+import org.openbravo.model.financialmgmt.payment.PaymentTermLine;
 import org.openbravo.model.financialmgmt.tax.TaxCategory;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.pricing.pricelist.PriceList;
@@ -357,8 +358,22 @@ public class SeedReferenceDataStep implements OnboardingStep {
     paymentTerm.setNextBusinessDay(false);
     paymentTerm.setDefault(netDays == 0L);
     paymentTerm.setValid(true);
-    paymentTerm.setMaturityDate3(0L);
     OBDal.getInstance().save(paymentTerm);
+
+    PaymentTermLine paymentTermLine = OBProvider.getInstance().get(PaymentTermLine.class);
+    paymentTermLine.setNewOBObject(true);
+    paymentTermLine.setClient(client);
+    paymentTermLine.setOrganization(org);
+    paymentTermLine.setPaymentTerms(paymentTerm);
+    paymentTermLine.setLineNo(10L);
+    paymentTermLine.setPercentageDue(new BigDecimal("100"));
+    paymentTermLine.setRest(true);
+    paymentTermLine.setExcludeTax(false);
+    paymentTermLine.setFixedDueDate(false);
+    paymentTermLine.setOverduePaymentDaysRule(netDays);
+    paymentTermLine.setOffsetMonthDue(0L);
+    paymentTermLine.setNextBusinessDay(false);
+    OBDal.getInstance().save(paymentTermLine);
     return paymentTerm;
   }
 

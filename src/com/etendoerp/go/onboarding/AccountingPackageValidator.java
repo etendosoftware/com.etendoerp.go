@@ -22,6 +22,7 @@ import java.util.Optional;
 
 import javax.enterprise.context.ApplicationScoped;
 
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.common.enterprise.Organization;
@@ -164,8 +165,9 @@ class AccountingPackageValidator {
         PARAM_ORG_ID, sourceOrgId, PARAM_LEDGER_ID, ledgerId);
   }
 
-  private <T extends org.openbravo.base.structure.BaseOBObject> long count(Class<T> entityClass,
+  private <T extends BaseOBObject> long count(Class<T> entityClass,
       String whereClause, Object... parameters) {
+    validateNamedParameters(parameters);
     final OBQuery<T> query = OBDal.getInstance().createQuery(entityClass, whereClause);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
@@ -173,5 +175,11 @@ class AccountingPackageValidator {
       query.setNamedParameter((String) parameters[i], parameters[i + 1]);
     }
     return query.count();
+  }
+
+  private void validateNamedParameters(Object... parameters) {
+    if (parameters.length % 2 != 0) {
+      throw new IllegalArgumentException("Named query parameters must be provided in pairs");
+    }
   }
 }
