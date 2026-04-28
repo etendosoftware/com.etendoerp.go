@@ -746,10 +746,20 @@ public class NeoDefaultsService {
    * @param ctx     the NeoContext with OBContext and spec/entity info
    */
   public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx) {
-    injectMandatoryDefaults(body, adTab, ctx, null);
+    injectMandatoryDefaults(body, adTab, ctx, null, true);
   }
 
   public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx, String parentId) {
+    injectMandatoryDefaults(body, adTab, ctx, parentId, true);
+  }
+
+  /**
+   * @param runCascade whether to run the trailing callout cascade after column iteration.
+   *                   Set to {@code false} when the caller will run the cascade explicitly
+   *                   right after, to avoid duplicating the (expensive) cascade pass.
+   */
+  public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx,
+      String parentId, boolean runCascade) {
     if (body == null || adTab == null || ctx == null) {
       return;
     }
@@ -791,7 +801,11 @@ public class NeoDefaultsService {
       // Fallback 3: run callout cascade with all fields in body.
       // Callouts configured in AD_Column derive dependent fields (e.g. BP → address,
       // price list, payment terms) without hardcoding any field relationships.
-      NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body);
+      // Skipped when the caller will run the cascade explicitly right after, to avoid
+      // duplicating the (expensive) cascade pass.
+      if (runCascade) {
+        NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body);
+      }
 
     } catch (Exception e) {
       log.error("Error injecting mandatory defaults for tab {}: {}",
