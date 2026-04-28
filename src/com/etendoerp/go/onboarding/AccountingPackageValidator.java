@@ -41,6 +41,10 @@ import org.openbravo.model.financialmgmt.tax.TaxZone;
 @ApplicationScoped
 class AccountingPackageValidator {
   private static final String ACCOUNT_ELEMENT_TYPE = "AC";
+  private static final String PARAM_ORG_ID = "orgId";
+  private static final String PARAM_LEDGER_ID = "ledgerId";
+  private static final String PARAM_CALENDAR_ID = "calendarId";
+  private static final String LEDGER_FILTER = "as e where e.accountingSchema.id = :ledgerId";
 
   Optional<String> validate(AccountingPackageCandidate candidate) {
     final List<String> missingParts = new ArrayList<>();
@@ -52,23 +56,23 @@ class AccountingPackageValidator {
     requireCount(missingParts, "organization accounting schema",
         count(OrganizationAcctSchema.class,
             "as e where e.organization.id = :orgId and e.accountingSchema.id = :ledgerId",
-            "orgId", sourceOrgId, "ledgerId", ledgerId));
+            PARAM_ORG_ID, sourceOrgId, PARAM_LEDGER_ID, ledgerId));
     requireCount(missingParts, "accounting schema defaults",
         count(AcctSchemaDefault.class,
-            "as e where e.accountingSchema.id = :ledgerId",
-            "ledgerId", ledgerId));
+            LEDGER_FILTER,
+            PARAM_LEDGER_ID, ledgerId));
     requireCount(missingParts, "accounting schema elements",
         count(AcctSchemaElement.class,
-            "as e where e.accountingSchema.id = :ledgerId",
-            "ledgerId", ledgerId));
+            LEDGER_FILTER,
+            PARAM_LEDGER_ID, ledgerId));
     requireCount(missingParts, "accounting schema GL entries",
         count(AcctSchemaGL.class,
-            "as e where e.accountingSchema.id = :ledgerId",
-            "ledgerId", ledgerId));
+            LEDGER_FILTER,
+            PARAM_LEDGER_ID, ledgerId));
     requireCount(missingParts, "accounting schema tables",
         count(AcctSchemaTable.class,
-            "as e where e.accountingSchema.id = :ledgerId",
-            "ledgerId", ledgerId));
+            LEDGER_FILTER,
+            PARAM_LEDGER_ID, ledgerId));
 
     final String accountElementId = findAccountElementId(ledgerId);
     if (accountElementId == null) {
@@ -83,31 +87,31 @@ class AccountingPackageValidator {
     requireCount(missingParts, "calendar years",
         count(Year.class,
             "as e where e.calendar.id = :calendarId",
-            "calendarId", calendarId));
+            PARAM_CALENDAR_ID, calendarId));
     requireCount(missingParts, "calendar periods",
         count(Period.class,
             "as e where e.year.calendar.id = :calendarId",
-            "calendarId", calendarId));
+            PARAM_CALENDAR_ID, calendarId));
     requireCount(missingParts, "period controls",
         count(PeriodControl.class,
             "as e where e.organization.id = :orgId and e.period.year.calendar.id = :calendarId",
-            "orgId", sourceOrgId, "calendarId", calendarId));
+            PARAM_ORG_ID, sourceOrgId, PARAM_CALENDAR_ID, calendarId));
     requireCount(missingParts, "tax rates",
         count(TaxRate.class,
             "as e where e.organization.id = :orgId",
-            "orgId", sourceOrgId));
+            PARAM_ORG_ID, sourceOrgId));
     requireZero(missingParts, "tax accounts",
         countTaxRatesMissingAccounts(sourceOrgId, ledgerId));
 
     final long taxZoneCount = count(TaxZone.class,
         "as e where e.tax.organization.id = :orgId",
-        "orgId", sourceOrgId);
+        PARAM_ORG_ID, sourceOrgId);
     if (taxZoneCount > 0) {
       final long scopedTaxZoneCount = count(TaxZone.class,
           "as e where e.tax.organization.id = :orgId"
               + " and (e.fromCountry is not null or e.fromRegion is not null"
               + " or e.destinationCountry is not null or e.destinationRegion is not null)",
-          "orgId", sourceOrgId);
+          PARAM_ORG_ID, sourceOrgId);
       if (scopedTaxZoneCount != taxZoneCount) {
         missingParts.add("tax zones");
       }
@@ -128,7 +132,7 @@ class AccountingPackageValidator {
             + " and e.type = :type"
             + " and e.accountingElement is not null"
             + " order by e.sequenceNumber asc");
-    query.setNamedParameter("ledgerId", ledgerId);
+    query.setNamedParameter(PARAM_LEDGER_ID, ledgerId);
     query.setNamedParameter("type", ACCOUNT_ELEMENT_TYPE);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
@@ -157,7 +161,7 @@ class AccountingPackageValidator {
             + " and not exists (select 1 from " + TaxRateAccounts.ENTITY_NAME + " as ta"
             + " where ta." + TaxRateAccounts.PROPERTY_TAX + ".id = e.id"
             + " and ta." + TaxRateAccounts.PROPERTY_ACCOUNTINGSCHEMA + ".id = :ledgerId)",
-        "orgId", sourceOrgId, "ledgerId", ledgerId);
+        PARAM_ORG_ID, sourceOrgId, PARAM_LEDGER_ID, ledgerId);
   }
 
   private <T extends org.openbravo.base.structure.BaseOBObject> long count(Class<T> entityClass,

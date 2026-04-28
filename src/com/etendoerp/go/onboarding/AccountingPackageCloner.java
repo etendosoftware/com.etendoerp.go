@@ -39,7 +39,8 @@ import org.openbravo.model.financialmgmt.tax.TaxZone;
 
 @ApplicationScoped
 class AccountingPackageCloner {
-  private static final String ZERO_ORG_ID = "0";
+  private static final String PARAM_ORG_ID = "orgId";
+  private static final String PARAM_LEDGER_ID = "ledgerId";
 
   void cloneInto(InitialOrgSetupAccountingContext context, AccountingPackageCandidate candidate) {
     final Organization targetOrganization = context.getOrganization();
@@ -74,7 +75,7 @@ class AccountingPackageCloner {
   private void ensureOrganizationAcctSchema(Organization targetOrganization, AcctSchema targetLedger) {
     final OrganizationAcctSchema existing = uniqueResult(OrganizationAcctSchema.class,
         "as e where e.organization.id = :orgId and e.accountingSchema.id = :ledgerId",
-        "orgId", targetOrganization.getId(), "ledgerId", targetLedger.getId());
+        PARAM_ORG_ID, targetOrganization.getId(), PARAM_LEDGER_ID, targetLedger.getId());
     if (existing != null) {
       return;
     }
@@ -92,7 +93,7 @@ class AccountingPackageCloner {
     final Map<String, TaxCategory> clonesBySourceId = new HashMap<>();
     final List<TaxCategory> sourceTaxCategories = list(TaxCategory.class,
         "as e where e.organization.id = :orgId order by e.name asc, e.id asc",
-        "orgId", candidate.getSourceOrganization().getId());
+        PARAM_ORG_ID, candidate.getSourceOrganization().getId());
 
     for (TaxCategory sourceTaxCategory : sourceTaxCategories) {
       final TaxCategory clonedTaxCategory = (TaxCategory) DalUtil.copy(sourceTaxCategory, false);
@@ -112,7 +113,7 @@ class AccountingPackageCloner {
     final List<org.openbravo.model.common.businesspartner.TaxCategory> sourceTaxCategories = list(
         org.openbravo.model.common.businesspartner.TaxCategory.class,
         "as e where e.organization.id = :orgId order by e.name asc, e.id asc",
-        "orgId", candidate.getSourceOrganization().getId());
+        PARAM_ORG_ID, candidate.getSourceOrganization().getId());
 
     for (org.openbravo.model.common.businesspartner.TaxCategory sourceTaxCategory : sourceTaxCategories) {
       final org.openbravo.model.common.businesspartner.TaxCategory clonedTaxCategory =
@@ -133,7 +134,7 @@ class AccountingPackageCloner {
     final Map<String, TaxRate> clonesBySourceId = new HashMap<>();
     final List<TaxRate> sourceTaxes = list(TaxRate.class,
         "as e where e.organization.id = :orgId order by e.lineNo asc, e.name asc, e.id asc",
-        "orgId", candidate.getSourceOrganization().getId());
+        PARAM_ORG_ID, candidate.getSourceOrganization().getId());
 
     for (TaxRate sourceTax : sourceTaxes) {
       final TaxRate clonedTax = (TaxRate) DalUtil.copy(sourceTax, false);
@@ -163,7 +164,7 @@ class AccountingPackageCloner {
       Map<String, TaxRate> taxesBySourceId) {
     final List<TaxRate> sourceTaxes = list(TaxRate.class,
         "as e where e.organization.id = :orgId order by e.id asc",
-        "orgId", candidate.getSourceOrganization().getId());
+        PARAM_ORG_ID, candidate.getSourceOrganization().getId());
 
     for (TaxRate sourceTax : sourceTaxes) {
       final TaxRate clonedTax = taxesBySourceId.get(sourceTax.getId());
@@ -187,7 +188,7 @@ class AccountingPackageCloner {
       Map<String, TaxRate> taxesBySourceId) {
     final List<TaxZone> sourceTaxZones = list(TaxZone.class,
         "as e where e.tax.organization.id = :orgId order by e.id asc",
-        "orgId", candidate.getSourceOrganization().getId());
+        PARAM_ORG_ID, candidate.getSourceOrganization().getId());
 
     for (TaxZone sourceTaxZone : sourceTaxZones) {
       final TaxRate clonedTax = taxesBySourceId.get(sourceTaxZone.getTax().getId());
@@ -209,7 +210,7 @@ class AccountingPackageCloner {
     final List<TaxRateAccounts> sourceTaxAccounts = list(TaxRateAccounts.class,
         "as e where e.tax.organization.id = :orgId and e.accountingSchema.id = :ledgerId"
             + " order by e.tax.id asc, e.id asc",
-        "orgId", candidate.getSourceOrganization().getId(), "ledgerId", candidate.getLedger().getId());
+        PARAM_ORG_ID, candidate.getSourceOrganization().getId(), PARAM_LEDGER_ID, candidate.getLedger().getId());
 
     for (TaxRateAccounts sourceTaxAccount : sourceTaxAccounts) {
       final TaxRate clonedTax = taxesBySourceId.get(sourceTaxAccount.getTax().getId());

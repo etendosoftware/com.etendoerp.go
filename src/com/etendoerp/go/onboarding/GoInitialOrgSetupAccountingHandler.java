@@ -30,6 +30,10 @@ import org.openbravo.erpCommon.businessUtility.InitialOrgSetupAccountingHandler;
 import org.openbravo.erpCommon.businessUtility.InitialOrgSetupAccountingResult;
 
 
+/**
+ * Provides Etendo Go onboarding accounting setup by cloning a ready accounting package
+ * from an existing legal-with-accounting organization in the same client and currency.
+ */
 @ApplicationScoped
 public class GoInitialOrgSetupAccountingHandler implements InitialOrgSetupAccountingHandler {
 
