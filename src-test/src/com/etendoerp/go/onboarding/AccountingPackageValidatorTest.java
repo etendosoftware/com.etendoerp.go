@@ -30,6 +30,7 @@ import java.util.Optional;
 
 import org.junit.Test;
 import org.mockito.MockedStatic;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.common.enterprise.Organization;
@@ -154,7 +155,7 @@ public class AccountingPackageValidatorTest {
     }
   }
 
-  private <T extends org.openbravo.base.structure.BaseOBObject> void stubCountQuery(OBDal obDal,
+  private <T extends BaseOBObject> void stubCountQuery(OBDal obDal,
       Class<T> entityClass, QueryScenario scenario) {
     when(obDal.createQuery(eq(entityClass), anyString()))
         .thenAnswer(invocation -> scenario.countQuery(entityClass));

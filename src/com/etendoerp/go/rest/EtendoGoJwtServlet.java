@@ -698,8 +698,11 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       return false;
     }
     InitialOrgSetup orgSetup = new InitialOrgSetup(client);
+    // Onboarding imports accounting-ready sample data after the organization exists.
+    // For fresh clients there is no ready package organization yet, so forcing accounting
+    // during InitialOrgSetup would fail before dataset import can run.
     OBError orgResult = orgSetup.createOrganization(clientName, "",
-        LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID, starOrgId, null, "", "", true, null, currencyId,
+        LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID, starOrgId, null, "", "", false, null, currencyId,
         false, false, false, false, false);
     if (!"Success".equals(orgResult.getType())) {
       String errorMsg = orgResult.getMessage() != null

@@ -27,20 +27,29 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.calendar.Calendar;
 
+/**
+ * Resolves ready legal-with-accounting organizations that can provide an onboarding
+ * accounting package for the requested client and ledger currency.
+ */
 @ApplicationScoped
 class AccountingPackageResolver {
 
-  List<AccountingPackageCandidate> resolve(String clientId, String currencyId) {
-    final String whereClause = "as org where org.client.id = :clientId"
-        + " and org.organizationType.legalEntityWithAccounting = true"
-        + " and org.ready = true"
-        + " and org.allowPeriodControl = true"
-        + " and org.generalLedger is not null"
-        + " and org.calendar is not null"
-        + " and org.generalLedger.currency.id = :currencyId"
-        + " order by org.name asc";
+  private static final String RESOLVE_CANDIDATES_WHERE = "as org where org.client.id = :clientId"
+      + " and org.organizationType.legalEntityWithAccounting = true"
+      + " and org.ready = true"
+      + " and org.allowPeriodControl = true"
+      + " and org.generalLedger is not null"
+      + " and org.calendar is not null"
+      + " and org.generalLedger.currency.id = :currencyId"
+      + " order by org.name asc";
 
-    final OBQuery<Organization> query = OBDal.getInstance().createQuery(Organization.class, whereClause);
+  /**
+   * Resolves accounting package candidates for the given client and currency.
+   */
+  List<AccountingPackageCandidate> resolve(String clientId, String currencyId) {
+    final OBQuery<Organization> query = OBDal.getInstance().createQuery(Organization.class,
+        RESOLVE_CANDIDATES_WHERE);
+
     query.setNamedParameter("clientId", clientId);
     query.setNamedParameter("currencyId", currencyId);
     query.setFilterOnReadableClients(false);
