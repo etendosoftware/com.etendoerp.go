@@ -754,6 +754,16 @@ public class NeoDefaultsService {
   }
 
   /**
+   * Injects missing mandatory default values into a create payload.
+   *
+   * <p>This overload lets callers decide whether the default injection pass should
+   * also execute the trailing callout cascade. Use {@code runCascade=false} when
+   * the caller runs the cascade immediately afterward.</p>
+   *
+   * @param body       the filtered request body — columns already present are skipped
+   * @param adTab      the AD_Tab for the entity being created
+   * @param ctx        the NeoContext with OBContext and spec/entity info
+   * @param parentId   optional parent record id used for child-tab defaults
    * @param runCascade whether to run the trailing callout cascade after column iteration.
    *                   Set to {@code false} when the caller will run the cascade explicitly
    *                   right after, to avoid duplicating the (expensive) cascade pass.

@@ -196,6 +196,13 @@ public class NeoCalloutService {
     }
   }
 
+  /**
+   * Scalar callout metadata for one AD column.
+   *
+   * <p>This intentionally stores only immutable values read from DAL entities. Keeping
+   * {@link Column}, {@link Callout}, or other DAL objects in the JVM cache would retain
+   * Hibernate proxies outside their owning session.</p>
+   */
   static class ColumnCalloutMetadata {
     final String dbColumnName;
     final String calloutName;
@@ -249,18 +256,7 @@ public class NeoCalloutService {
     // Fallback: try DB column name, clean REST name, and inp name
     if (matchedColumn == null) {
       for (ColumnCalloutMetadata col : columns) {
-        String dbColName = col.dbColumnName;
-        if (dbColName.equalsIgnoreCase(fieldName)) {
-          matchedColumn = col;
-          break;
-        }
-        String cleanName = toCleanFieldName(dbColName);
-        if (cleanName.equalsIgnoreCase(fieldName)) {
-          matchedColumn = col;
-          break;
-        }
-        String inpName = toInpName(dbColName);
-        if (inpName.equalsIgnoreCase(fieldName)) {
+        if (matchesColumnFieldName(col.dbColumnName, fieldName)) {
           matchedColumn = col;
           break;
         }
@@ -282,6 +278,25 @@ public class NeoCalloutService {
     return new CalloutInfo(matchedColumn.className, inpName, matchedColumn.dbColumnName);
   }
 
+  /**
+   * Checks whether a REST field name refers to a DB column using any supported naming form.
+   *
+   * @param dbColumnName the AD column DB name, such as {@code C_BPartner_ID}
+   * @param fieldName    the request field name to match
+   * @return {@code true} when the field matches the DB name, clean REST name, or inp name
+   */
+  private static boolean matchesColumnFieldName(String dbColumnName, String fieldName) {
+    return dbColumnName.equalsIgnoreCase(fieldName)
+        || toCleanFieldName(dbColumnName).equalsIgnoreCase(fieldName)
+        || toInpName(dbColumnName).equalsIgnoreCase(fieldName);
+  }
+
+  /**
+   * Loads callout metadata for all active columns in a table and materializes it as scalars.
+   *
+   * @param tableId the AD_Table id whose active columns should be inspected
+   * @return scalar metadata entries suitable for JVM-level caching
+   */
   static List<ColumnCalloutMetadata> loadColumnCalloutMetadata(String tableId) {
     OBCriteria<Column> colCriteria = OBDal.getInstance().createCriteria(Column.class);
     colCriteria.add(Restrictions.eq(Column.PROPERTY_TABLE + ".id", tableId));
