@@ -43,6 +43,9 @@ final class NeoSelectorPolicy {
 
   private static final Logger log = LogManager.getLogger(NeoSelectorPolicy.class);
   private static final Map<String, String> REFERENCE_OVERRIDE_FILTERS;
+  private static final String ENTITY_BUSINESS_PARTNER = "BusinessPartner";
+  private static final String ENTITY_PRODUCT_BY_PRICE_AND_WAREHOUSE =
+      "ProductByPriceAndWarehouse";
 
   static {
     Map<String, String> overrides = new HashMap<>();
@@ -73,39 +76,47 @@ final class NeoSelectorPolicy {
     if (contextParams == null || contextParams.isEmpty() || entityName == null) {
       return null;
     }
-    String a = (alias != null && !alias.isEmpty()) ? alias : "e";
-
-    if ("BusinessPartner".equals(entityName)) {
-      List<String> conditions = new ArrayList<>();
-      String isCustomer = contextParams.get("isCustomer");
-      if ("Y".equalsIgnoreCase(isCustomer)) {
-        conditions.add(a + ".customer = true");
-      } else if ("N".equalsIgnoreCase(isCustomer)) {
-        conditions.add(a + ".customer = false");
-      }
-      String isVendor = contextParams.get("isVendor");
-      if ("Y".equalsIgnoreCase(isVendor)) {
-        conditions.add(a + ".vendor = true");
-      } else if ("N".equalsIgnoreCase(isVendor)) {
-        conditions.add(a + ".vendor = false");
-      }
-      return conditions.isEmpty() ? null : String.join(" AND ", conditions);
+    String effectiveAlias = (alias != null && !alias.isEmpty()) ? alias : "e";
+    if (ENTITY_BUSINESS_PARTNER.equals(entityName)) {
+      return resolveBusinessPartnerFilter(contextParams, effectiveAlias);
     }
-
-    if ("ProductByPriceAndWarehouse".equals(entityName)) {
-      String priceListId = contextParams.get("priceList");
-      if (StringUtils.isNotBlank(priceListId) && priceListId.matches("[A-Za-z0-9\\-]+")) {
-        return a + ".productPrice.priceListVersion.priceList.id = '" + priceListId + "'";
-      }
-      String isSOTrx = contextParams.get("isSOTrx");
-      if ("Y".equalsIgnoreCase(isSOTrx)) {
-        return a + ".productPrice.priceListVersion.priceList.salesPriceList = true";
-      } else if ("N".equalsIgnoreCase(isSOTrx)) {
-        return a + ".productPrice.priceListVersion.priceList.salesPriceList = false";
-      }
+    if (ENTITY_PRODUCT_BY_PRICE_AND_WAREHOUSE.equals(entityName)) {
+      return resolveProductByPriceFilter(contextParams, effectiveAlias);
     }
-
     return null;
+  }
+
+  private static String resolveBusinessPartnerFilter(Map<String, String> contextParams,
+      String alias) {
+    List<String> conditions = new ArrayList<>();
+    addBooleanEqualsCondition(conditions, alias + ".customer", contextParams.get("isCustomer"));
+    addBooleanEqualsCondition(conditions, alias + ".vendor", contextParams.get("isVendor"));
+    return conditions.isEmpty() ? null : String.join(" AND ", conditions);
+  }
+
+  private static String resolveProductByPriceFilter(Map<String, String> contextParams,
+      String alias) {
+    String priceListId = contextParams.get("priceList");
+    if (StringUtils.isNotBlank(priceListId) && priceListId.matches("[A-Za-z0-9\\-]+")) {
+      return alias + ".productPrice.priceListVersion.priceList.id = '" + priceListId + "'";
+    }
+    String isSOTrx = contextParams.get("isSOTrx");
+    if ("Y".equalsIgnoreCase(isSOTrx)) {
+      return alias + ".productPrice.priceListVersion.priceList.salesPriceList = true";
+    }
+    if ("N".equalsIgnoreCase(isSOTrx)) {
+      return alias + ".productPrice.priceListVersion.priceList.salesPriceList = false";
+    }
+    return null;
+  }
+
+  private static void addBooleanEqualsCondition(List<String> conditions, String fieldExpr,
+      String flag) {
+    if ("Y".equalsIgnoreCase(flag)) {
+      conditions.add(fieldExpr + " = true");
+    } else if ("N".equalsIgnoreCase(flag)) {
+      conditions.add(fieldExpr + " = false");
+    }
   }
 
   static Column resolveVirtualSelectorColumn(SFEntity entity, String columnName) {
@@ -150,84 +161,105 @@ final class NeoSelectorPolicy {
         return response;
       }
 
-      Set<String> seenIds = new LinkedHashSet<>();
-      JSONArray deduplicatedItems = new JSONArray();
-      for (int i = 0; i < items.length(); i++) {
-        JSONObject item = items.getJSONObject(i);
-        String itemId = item.optString("id");
-        if (StringUtils.isNotBlank(itemId) && seenIds.add(itemId)) {
-          deduplicatedItems.put(item);
-        }
+      DeduplicatedItems deduplicated = deduplicateProductItems(items);
+      if (deduplicated.items.length() < items.length()) {
+        response.getBody().put("items", deduplicated.items);
+        items = deduplicated.items;
       }
-      if (deduplicatedItems.length() < items.length()) {
-        response.getBody().put("items", deduplicatedItems);
-        items = deduplicatedItems;
-      }
-
-      List<String> productIds = new ArrayList<>(seenIds);
-      if (productIds.isEmpty()) {
+      if (deduplicated.productIds.isEmpty()) {
         return response;
       }
 
-      StringBuilder inClause = new StringBuilder();
-      for (int i = 0; i < productIds.size(); i++) {
-        if (i > 0) {
-          inClause.append(", ");
-        }
-        inClause.append(":pid").append(i);
-      }
-
-      String sql = "SELECT pp.m_product_id,"
-          + "  COALESCE(pp.pricestd, 0) AS standard_price,"
-          + "  COALESCE(pp.pricelist, 0) AS list_price,"
-          + "  pl.istaxincluded AS is_tax_included"
-          + " FROM m_productprice pp"
-          + " JOIN m_pricelist_version plv"
-          + "   ON plv.m_pricelist_version_id = pp.m_pricelist_version_id"
-          + " JOIN m_pricelist pl"
-          + "   ON pl.m_pricelist_id = plv.m_pricelist_id"
-          + " WHERE plv.m_pricelist_id = :priceListId"
-          + "   AND pp.m_product_id IN (" + inClause + ")"
-          + "   AND pp.isactive = 'Y'"
-          + "   AND plv.isactive = 'Y'"
-          + "   AND plv.validfrom = ("
-          + "     SELECT MAX(v.validfrom) FROM m_pricelist_version v"
-          + "     WHERE v.m_pricelist_id = :priceListId"
-          + "       AND v.isactive = 'Y'"
-          + "       AND v.validfrom <= NOW()"
-          + "   )";
-
-      @SuppressWarnings("rawtypes")
-      NativeQuery nq = OBDal.getInstance().getSession().createNativeQuery(sql);
-      nq.setParameter("priceListId", priceListId);
-      for (int i = 0; i < productIds.size(); i++) {
-        nq.setParameter("pid" + i, productIds.get(i));
-      }
-
-      Map<String, Object[]> priceMap = new HashMap<>();
-      for (Object row : nq.list()) {
-        Object[] cols = (Object[]) row;
-        priceMap.put(String.valueOf(cols[0]), cols);
-      }
-
+      Map<String, Object[]> priceMap = loadProductPrices(priceListId, deduplicated.productIds);
       if (priceMap.isEmpty()) {
         return response;
       }
 
-      for (int i = 0; i < items.length(); i++) {
-        JSONObject item = items.getJSONObject(i);
-        Object[] cols = priceMap.get(item.optString("id"));
-        if (cols != null) {
-          item.put("standardPrice", cols[1]);
-          item.put("listPrice", cols[2]);
-          item.put("isTaxIncluded", "Y".equals(String.valueOf(cols[3])));
-        }
-      }
-
+      injectPrices(items, priceMap);
     } catch (Exception e) {
       log.warn("Failed to enrich product selector with prices for priceList {}: {}",
           priceListId, e.getMessage());
     }
     return response;
+  }
+
+  private static DeduplicatedItems deduplicateProductItems(JSONArray items) throws Exception {
+    Set<String> seenIds = new LinkedHashSet<>();
+    JSONArray deduplicatedItems = new JSONArray();
+    for (int i = 0; i < items.length(); i++) {
+      JSONObject item = items.getJSONObject(i);
+      String itemId = item.optString("id");
+      if (StringUtils.isNotBlank(itemId) && seenIds.add(itemId)) {
+        deduplicatedItems.put(item);
+      }
+    }
+    return new DeduplicatedItems(deduplicatedItems, new ArrayList<>(seenIds));
+  }
+
+  private static Map<String, Object[]> loadProductPrices(String priceListId, List<String> productIds) {
+    String sql = buildProductPriceSql(productIds.size());
+    @SuppressWarnings("rawtypes")
+    NativeQuery nq = OBDal.getInstance().getSession().createNativeQuery(sql);
+    nq.setParameter("priceListId", priceListId);
+    for (int i = 0; i < productIds.size(); i++) {
+      nq.setParameter("pid" + i, productIds.get(i));
+    }
+    Map<String, Object[]> priceMap = new HashMap<>();
+    for (Object row : nq.list()) {
+      Object[] cols = (Object[]) row;
+      priceMap.put(String.valueOf(cols[0]), cols);
+    }
+    return priceMap;
+  }
+
+  private static String buildProductPriceSql(int productCount) {
+    StringBuilder inClause = new StringBuilder();
+    for (int i = 0; i < productCount; i++) {
+      if (i > 0) {
+        inClause.append(", ");
+      }
+      inClause.append(":pid").append(i);
+    }
+    return "SELECT pp.m_product_id,"
+        + "  COALESCE(pp.pricestd, 0) AS standard_price,"
+        + "  COALESCE(pp.pricelist, 0) AS list_price,"
+        + "  pl.istaxincluded AS is_tax_included"
+        + " FROM m_productprice pp"
+        + " JOIN m_pricelist_version plv"
+        + "   ON plv.m_pricelist_version_id = pp.m_pricelist_version_id"
+        + " JOIN m_pricelist pl"
+        + "   ON pl.m_pricelist_id = plv.m_pricelist_id"
+        + " WHERE plv.m_pricelist_id = :priceListId"
+        + "   AND pp.m_product_id IN (" + inClause + ")"
+        + "   AND pp.isactive = 'Y'"
+        + "   AND plv.isactive = 'Y'"
+        + "   AND plv.validfrom = ("
+        + "     SELECT MAX(v.validfrom) FROM m_pricelist_version v"
+        + "     WHERE v.m_pricelist_id = :priceListId"
+        + "       AND v.isactive = 'Y'"
+        + "       AND v.validfrom <= NOW()"
+        + "   )";
+  }
+
+  private static void injectPrices(JSONArray items, Map<String, Object[]> priceMap) throws Exception {
+    for (int i = 0; i < items.length(); i++) {
+      JSONObject item = items.getJSONObject(i);
+      Object[] cols = priceMap.get(item.optString("id"));
+      if (cols != null) {
+        item.put("standardPrice", cols[1]);
+        item.put("listPrice", cols[2]);
+        item.put("isTaxIncluded", "Y".equals(String.valueOf(cols[3])));
+      }
+    }
+  }
+
+  private static final class DeduplicatedItems {
+    private final JSONArray items;
+    private final List<String> productIds;
+
+    private DeduplicatedItems(JSONArray items, List<String> productIds) {
+      this.items = items;
+      this.productIds = productIds;
+    }
   }
 }

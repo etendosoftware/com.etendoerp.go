@@ -31,6 +31,14 @@ public final class ProtocolErrorAdapters {
   private ProtocolErrorAdapters() {
   }
 
+  /**
+   * Build a JSON-RPC 2.0 error envelope for MCP responses.
+   *
+   * @param id JSON-RPC request id, or {@code null} for unknown ids
+   * @param code JSON-RPC error code
+   * @param message human-readable error message
+   * @return JSON-RPC error object with {@code jsonrpc}, {@code id}, and {@code error} fields
+   */
   public static JSONObject buildJsonRpcError(Object id, int code, String message) throws JSONException {
     JSONObject error = new JSONObject();
     error.put("code", code);
@@ -43,6 +51,13 @@ public final class ProtocolErrorAdapters {
     return resp;
   }
 
+  /**
+   * Write a minimal JSON error response of the form {@code {"error":"..."}}.
+   *
+   * @param response HTTP response to write to
+   * @param status HTTP status code
+   * @param message error message to serialize
+   */
   public static void writeSimpleJsonError(HttpServletResponse response, int status, String message)
       throws IOException {
     response.setStatus(status);
@@ -50,6 +65,16 @@ public final class ProtocolErrorAdapters {
     response.getWriter().write("{\"error\":\"" + escapeJson(message) + "\"}");
   }
 
+  /**
+   * Write the REST error envelope used by Etendo Go account endpoints.
+   *
+   * @param response HTTP response to write to
+   * @param status HTTP status code
+   * @param message error message body
+   * @param messageField JSON field name for the message value
+   * @param statusField JSON field name for the numeric status value
+   * @param wrapperField top-level wrapper field name
+   */
   public static void writeRestError(HttpServletResponse response, int status, String message,
       String messageField, String statusField, String wrapperField) throws IOException {
     response.setStatus(status);
@@ -69,6 +94,14 @@ public final class ProtocolErrorAdapters {
     }
   }
 
+  /**
+   * Write an OAuth2 RFC 6749 style error response.
+   *
+   * @param response HTTP response to write to
+   * @param status HTTP status code
+   * @param error OAuth2 error code
+   * @param description OAuth2 error description
+   */
   public static void writeOAuthError(HttpServletResponse response, int status, String error,
       String description) throws IOException {
     try {
@@ -84,6 +117,12 @@ public final class ProtocolErrorAdapters {
     }
   }
 
+  /**
+   * Escape a string for safe inclusion in small inline JSON fallback payloads.
+   *
+   * @param value raw text to escape
+   * @return escaped JSON-safe text, or an empty string when {@code value} is null
+   */
   public static String escapeJson(String value) {
     if (value == null) {
       return "";

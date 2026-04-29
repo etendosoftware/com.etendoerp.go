@@ -212,7 +212,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
       writeResponse(response, HttpServletResponse.SC_CREATED, result);
     } catch (RuntimeException e) {
-      rollbackDalChanges("account registration", e);
+      EtendoGoDalHelper.rollbackDalChanges("account registration", e, log);
       log.error("Database error during account registration", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Registration failed due to a server error");
@@ -275,7 +275,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
-      rollbackDalChanges("login", e);
+      EtendoGoDalHelper.rollbackDalChanges("login", e, log);
       log.error("Database error during login", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Login failed due to a server error");
@@ -518,7 +518,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
         return;
       }
 
-      commitDalChanges("onboarding");
+      EtendoGoDalHelper.commitDalChanges("onboarding", log);
 
       sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
       sendProgress(writer, "finalize", "done", "Environment ready");
@@ -526,7 +526,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
     } catch (Exception e) {
       log.error("Onboarding failed", e);
-      rollbackDalChanges("onboarding", e);
+      EtendoGoDalHelper.rollbackDalChanges("onboarding", e, log);
       sendProgress(writer, PROGRESS_ERROR, PROGRESS_ERROR,
           "Onboarding failed: " + e.getMessage());
       sendFinalResult(writer, false, "Onboarding failed: " + e.getMessage());
@@ -742,7 +742,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       sendProgress(writer, PROGRESS_DATASET, "done", "Onboarding dataset imported");
       return true;
     } catch (Exception e) {
-      rollbackDalChanges("onboarding dataset import", e);
+      EtendoGoDalHelper.rollbackDalChanges("onboarding dataset import", e, log);
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Onboarding dataset import failed";
       sendProgress(writer, PROGRESS_DATASET, PROGRESS_ERROR, errorMessage);
@@ -791,24 +791,6 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     }
   }
 
-  private void commitDalChanges(String operation) {
-    try {
-      OBDal.getInstance().commitAndClose();
-    } catch (Exception commitEx) {
-      log.error("Commit failed after {}", operation, commitEx);
-      throw commitEx;
-    }
-  }
-
-
-  private void rollbackDalChanges(String operation, Exception failure) {
-    try {
-      OBDal.getInstance().rollbackAndClose();
-    } catch (Exception rollbackEx) {
-      log.error("Rollback failed after {}", operation, rollbackEx);
-      log.debug("Original failure while handling {}", operation, failure);
-    }
-  }
 
   // --- Password utilities ---
 

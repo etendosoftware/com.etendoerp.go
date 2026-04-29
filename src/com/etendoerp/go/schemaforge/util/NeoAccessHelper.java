@@ -79,6 +79,13 @@ public final class NeoAccessHelper {
     return !criteria.list().isEmpty();
   }
 
+  /**
+   * Checks whether the current role has access to the given OBUIAPP process definition.
+   *
+   * @param processId the ID of the OBUIAPP process definition to check
+   * @return {@code true} if the current role has an active OBUIAPP process-access record,
+   *         or if the role is the system administrator role
+   */
   public static boolean hasObuiappProcessAccess(String processId) {
     String roleId = OBContext.getOBContext().getRole().getId();
     if ("0".equals(roleId)) {
@@ -112,6 +119,13 @@ public final class NeoAccessHelper {
     }
   }
 
+  /**
+   * Resolve the shared fallback OBUIAPP process for button columns that do not declare one explicitly.
+   *
+   * @param column the AD_Column being evaluated
+   * @return the fallback OBUIAPP process when the column matches the shared Posted convention,
+   *         or {@code null} when no fallback applies
+   */
   public static org.openbravo.client.application.Process resolveFallbackObuiappProcess(
       org.openbravo.model.ad.datamodel.Column column) {
     if (column == null || !"Posted".equals(column.getDBColumnName())) {

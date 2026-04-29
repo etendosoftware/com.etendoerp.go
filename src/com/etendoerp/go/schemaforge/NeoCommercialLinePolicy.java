@@ -34,6 +34,7 @@ final class NeoCommercialLinePolicy {
 
   private static final Logger log = LogManager.getLogger(NeoCommercialLinePolicy.class);
   private static final String VALUE_KEY = "value";
+  private static final String FIELD_GROSS_UNIT_PRICE = "grossUnitPrice";
 
   private NeoCommercialLinePolicy() {
   }
@@ -56,7 +57,7 @@ final class NeoCommercialLinePolicy {
     if (baseNetAmt > 0 && taxId.isEmpty()) {
       return;
     }
-    double computed = resolveGrossAmount(body.optDouble("grossUnitPrice", 0), qty, baseNetAmt, taxId);
+    double computed = resolveGrossAmount(body.optDouble(FIELD_GROSS_UNIT_PRICE, 0), qty, baseNetAmt, taxId);
     if (Double.isNaN(computed)) {
       return;
     }
@@ -86,7 +87,7 @@ final class NeoCommercialLinePolicy {
     double discountFactor = 1.0 - discount / 100.0;
     double baseNetAmt = unitPrice > 0 ? unitPrice * qty * discountFactor : 0;
     String taxId = body.optString("tax", "");
-    double computed = resolveGrossAmount(body.optDouble("grossUnitPrice", 0), qty, baseNetAmt, taxId);
+    double computed = resolveGrossAmount(body.optDouble(FIELD_GROSS_UNIT_PRICE, 0), qty, baseNetAmt, taxId);
     if (Double.isNaN(computed)) {
       return;
     }
@@ -130,11 +131,11 @@ final class NeoCommercialLinePolicy {
 
   static void normalizeOrderLineSelectorPriceMapping(JSONObject body, boolean priceIncludesTax,
       String priceListIdentifier) {
-    if (body == null || priceIncludesTax || body.optDouble("grossUnitPrice", -1) <= 0) {
+    if (body == null || priceIncludesTax || body.optDouble(FIELD_GROSS_UNIT_PRICE, -1) <= 0) {
       return;
     }
     try {
-      body.put("grossUnitPrice", 0);
+      body.put(FIELD_GROSS_UNIT_PRICE, 0);
       log.debug(
           "[NEO-LINE-POLICY] Net price list '{}' — reset grossUnitPrice to 0 on new line",
           priceListIdentifier);

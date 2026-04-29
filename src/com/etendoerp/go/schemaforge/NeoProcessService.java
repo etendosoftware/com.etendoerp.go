@@ -85,6 +85,8 @@ public class NeoProcessService {
   public static final String ERROR = "error";
   public static final String SUCCESS = "success";
   public static final String PROCESS_ID = "processId";
+  private static final String ACCESS_DENIED_FOR_CURRENT_ROLE =
+      "Access denied to process for current role";
 
   private NeoProcessService() {
   }
@@ -101,7 +103,7 @@ public class NeoProcessService {
       params = new JSONObject();
     }
     if (!NeoAccessHelper.hasProcessAccess(process.getId())) {
-      return NeoResponse.error(403, "Access denied to process for current role");
+      return NeoResponse.error(403, ACCESS_DENIED_FOR_CURRENT_ROLE);
     }
     try {
       OBContext.setAdminMode();
@@ -443,7 +445,7 @@ public class NeoProcessService {
   public static NeoResponse executeObuiappProcess(Process process,
       JSONObject params) throws Exception {
     if (!NeoAccessHelper.hasProcessAccess(process.getId())) {
-      return NeoResponse.error(403, "Access denied to process for current role");
+      return NeoResponse.error(403, ACCESS_DENIED_FOR_CURRENT_ROLE);
     }
     return executeObuiappHandler(process.getJavaClassName(), process.getId(), params);
   }
@@ -463,7 +465,7 @@ public class NeoProcessService {
       org.openbravo.client.application.Process obuiappProcess,
       JSONObject params) {
     if (!NeoAccessHelper.hasObuiappProcessAccess(obuiappProcess.getId())) {
-      return NeoResponse.error(403, "Access denied to process for current role");
+      return NeoResponse.error(403, ACCESS_DENIED_FOR_CURRENT_ROLE);
     }
     if (params == null) {
       params = new JSONObject();

@@ -69,6 +69,7 @@ public class NeoSelectorService {
 
   private static final int DEFAULT_LIMIT = 20;
   private static final int MAX_LIMIT = 100;
+  private static final String PARAM_PRICE_LIST = "priceList";
 
   /** AD_Reference base IDs for FK types — shared across Neo* and MCP classes. */
   public static final String REF_TABLE = "18";
@@ -203,31 +204,24 @@ public class NeoSelectorService {
   private static NeoResponse querySelectorByColumn(SFEntity sourceEntity, Column column, String columnName,
       String search, int limit, int offset, Map<String, String> contextParams) {
     try {
-      if (limit <= 0) {
-        limit = DEFAULT_LIMIT;
-      }
-      if (limit > MAX_LIMIT) {
-        limit = MAX_LIMIT;
-      }
-      if (offset < 0) {
-        offset = 0;
-      }
+      int safeLimit = normalizeLimit(limit);
+      int safeOffset = Math.max(offset, 0);
 
       String refId = getBaseReferenceId(column);
       boolean isObuisel = hasObuiselSelector(column);
       boolean isList = isListReference(refId);
-      if (!isObuisel && !isFkReference(refId) && !isList) {
-        return NeoResponse.error(400,
-            "Field is not a FK reference: " + columnName);
+      NeoResponse invalidReference = validateReferenceType(columnName, refId, isObuisel, isList);
+      if (invalidReference != null) {
+        return invalidReference;
       }
       if (isList) {
-        return resolveListSelector(column, search, limit, offset, contextParams);
+        return resolveListSelector(column, search, safeLimit, safeOffset, contextParams);
       }
       if (!isObuisel && shouldUseCoreComboSelector(sourceEntity, column, refId)) {
         log.info("[ComboSelector] routing {} via core ComboTableData (SQL validation rule)",
             column.getDBColumnName());
-        return resolveClassicSelectorWithCoreCombo(sourceEntity, column, search, limit, offset,
-            contextParams);
+        return resolveClassicSelectorWithCoreCombo(
+            sourceEntity, column, search, safeLimit, safeOffset, contextParams);
       }
 
       SelectorMeta meta = resolveTarget(column, refId);
@@ -236,53 +230,84 @@ public class NeoSelectorService {
             "Could not resolve target for: " + columnName);
       }
 
-      // Resolve validation rule filter from context params
       String validationFilter = SelectorQueryBuilder.resolveValidationFilter(
           column, meta.entityName, contextParams);
       String contextOrganizationId = resolveContextOrganizationId(sourceEntity, contextParams);
-      String filterAlias = meta.isRich && meta.isCustomQuery
-          && StringUtils.isNotBlank(meta.entityAlias) ? meta.entityAlias : "e";
-      String combinedFilter = combineFilters(
-          remapFilterAlias(validationFilter, filterAlias),
-          remapFilterAlias(NeoSelectorPolicy.resolveReferenceOverrideFilter(
-              column != null && column.getReferenceSearchKey() != null
-                  ? column.getReferenceSearchKey().getId()
-                  : null),
-              filterAlias),
-          NeoSelectorPolicy.resolveContextParamFilter(meta.entityName, contextParams, filterAlias));
-
-      // Build and execute query.
-      // Context-param filters (isCustomer, isVendor…) are resolved with the correct entity alias:
-      //   - custom-HQL rich selectors use meta.entityAlias (e.g. "bp" for BusinessPartner)
-      //   - standard rich selectors and simple selectors always use "e"
-      NeoResponse selectorResult;
-      if (meta.isRich) {
-        String ctxAlias = (meta.isCustomQuery && meta.entityAlias != null) ? meta.entityAlias : "e";
-        String ctxParamFilter = NeoSelectorPolicy.resolveContextParamFilter(meta.entityName, contextParams, ctxAlias);
-        selectorResult = executeRichQuery(meta, search, limit, offset, combineFilters(combinedFilter, ctxParamFilter), contextOrganizationId);
-      } else {
-        String ctxParamFilter = NeoSelectorPolicy.resolveContextParamFilter(meta.entityName, contextParams, "e");
-        selectorResult = executeQuery(meta, search, limit, offset, combineFilters(combinedFilter, ctxParamFilter), contextOrganizationId);
-      }
-      // Post-process: enrich Product selector items with prices from the requested price list.
-      // This ensures the search drawer shows the price from the document's price list,
-      // not a default or unrelated price.
-      // "Product" covers invoice lines (ProductSimple selector, target entity = M_Product).
-      // "ProductByPriceAndWarehouse" covers order lines (warehouse-based selector).
-      boolean isProductSelector = "ProductByPriceAndWarehouse".equals(meta.entityName)
-          || "Product".equals(meta.entityName);
-      if (isProductSelector
-          && contextParams != null
-          && contextParams.containsKey("priceList")
-          && selectorResult.getHttpStatus() == 200) {
-        selectorResult = NeoSelectorPolicy.enrichProductSelectorWithPrices(selectorResult, contextParams.get("priceList"));
-      }
-      return selectorResult;
+      String filterAlias = resolveFilterAlias(meta);
+      String combinedFilter = buildCombinedFilter(
+          column, meta, contextParams, validationFilter, filterAlias);
+      NeoResponse selectorResult = executeSelectorQuery(
+          meta, search, safeLimit, safeOffset, contextOrganizationId, combinedFilter, contextParams);
+      return enrichProductSelectorIfNeeded(selectorResult, meta, contextParams);
 
     } catch (Exception e) {
       log.error("Error querying selector by column {}", columnName, e);
       return NeoResponse.error(500, e.getMessage());
     }
+  }
+
+  private static int normalizeLimit(int limit) {
+    if (limit <= 0) {
+      return DEFAULT_LIMIT;
+    }
+    return Math.min(limit, MAX_LIMIT);
+  }
+
+  private static NeoResponse validateReferenceType(String columnName, String refId,
+      boolean isObuisel, boolean isList) {
+    if (!isObuisel && !isFkReference(refId) && !isList) {
+      return NeoResponse.error(400, "Field is not a FK reference: " + columnName);
+    }
+    return null;
+  }
+
+  private static String resolveFilterAlias(SelectorMeta meta) {
+    return meta.isRich && meta.isCustomQuery && StringUtils.isNotBlank(meta.entityAlias)
+        ? meta.entityAlias
+        : "e";
+  }
+
+  private static String buildCombinedFilter(Column column, SelectorMeta meta,
+      Map<String, String> contextParams, String validationFilter, String filterAlias) {
+    return combineFilters(
+        remapFilterAlias(validationFilter, filterAlias),
+        remapFilterAlias(NeoSelectorPolicy.resolveReferenceOverrideFilter(
+            column != null && column.getReferenceSearchKey() != null
+                ? column.getReferenceSearchKey().getId()
+                : null),
+            filterAlias),
+        NeoSelectorPolicy.resolveContextParamFilter(meta.entityName, contextParams, filterAlias));
+  }
+
+  private static NeoResponse executeSelectorQuery(SelectorMeta meta, String search, int limit, int offset,
+      String contextOrganizationId, String combinedFilter, Map<String, String> contextParams) throws Exception {
+    if (meta.isRich) {
+      String ctxAlias = (meta.isCustomQuery && meta.entityAlias != null) ? meta.entityAlias : "e";
+      String ctxParamFilter =
+          NeoSelectorPolicy.resolveContextParamFilter(meta.entityName, contextParams, ctxAlias);
+      return executeRichQuery(
+          meta, search, limit, offset, combineFilters(combinedFilter, ctxParamFilter),
+          contextOrganizationId);
+    }
+    String ctxParamFilter =
+        NeoSelectorPolicy.resolveContextParamFilter(meta.entityName, contextParams, "e");
+    return executeQuery(
+        meta, search, limit, offset, combineFilters(combinedFilter, ctxParamFilter),
+        contextOrganizationId);
+  }
+
+  private static NeoResponse enrichProductSelectorIfNeeded(NeoResponse selectorResult, SelectorMeta meta,
+      Map<String, String> contextParams) {
+    boolean isProductSelector = "ProductByPriceAndWarehouse".equals(meta.entityName)
+        || "Product".equals(meta.entityName);
+    if (isProductSelector
+        && contextParams != null
+        && contextParams.containsKey(PARAM_PRICE_LIST)
+        && selectorResult.getHttpStatus() == 200) {
+      return NeoSelectorPolicy.enrichProductSelectorWithPrices(
+          selectorResult, contextParams.get(PARAM_PRICE_LIST));
+    }
+    return selectorResult;
   }
 
   /**

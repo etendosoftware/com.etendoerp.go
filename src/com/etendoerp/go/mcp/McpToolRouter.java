@@ -80,6 +80,7 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 public class McpToolRouter {
 
   private static final Logger log = LogManager.getLogger(McpToolRouter.class);
+  private static final String ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX = "' for current role";
 
   /**
    * Route a tool call to its handler.
@@ -593,7 +594,8 @@ public class McpToolRouter {
 
     // Check RBAC
     if (!NeoAccessUtils.hasProcessAccess(adProcess.getId())) {
-      return wrapAsErrorContent("Access denied to process '" + specName + "' for current role");
+      return wrapAsErrorContent("Access denied to process '" + specName
+          + ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX);
     }
 
     JSONObject parameters = args != null ? args.optJSONObject("parameters") : null;
@@ -618,7 +620,8 @@ public class McpToolRouter {
 
     // Check RBAC
     if (!NeoAccessUtils.hasProcessAccess(adProcess.getId())) {
-      return wrapAsErrorContent("Access denied to report '" + specName + "' for current role");
+      return wrapAsErrorContent("Access denied to report '" + specName
+          + ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX);
     }
 
     String format = args != null ? args.optString("format", "pdf") : "pdf";
@@ -660,7 +663,8 @@ public class McpToolRouter {
     }
     SFSpec spec = findSpecOrThrow(specName);
     if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
-      throw new SecurityException("Access denied to spec '" + specName + "' for current role");
+      throw new SecurityException("Access denied to spec '" + specName
+          + ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX);
     }
   }
 
