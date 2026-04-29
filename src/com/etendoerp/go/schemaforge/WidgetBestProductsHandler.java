@@ -38,93 +38,22 @@ public class WidgetBestProductsHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(WidgetBestProductsHandler.class);
 
-  // All-time ranking; trend comparison anchored to MAX(dateinvoiced) month
-  private static final String BEST_PRODUCTS_FALLBACK =
-      "WITH all_data AS ("
-    + "  SELECT p.m_product_id, p.name, SUM(il.qtyinvoiced) AS qty, SUM(il.linenetamt) AS amount"
-    + "  FROM c_invoiceline il"
-    + "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id"
-    + "  JOIN m_product p ON p.m_product_id = il.m_product_id"
-    + "  WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId"
-    + "  GROUP BY p.m_product_id, p.name"
-    + "), curr_period AS ("
-    + "  SELECT il.m_product_id, SUM(il.linenetamt) AS amount"
-    + "  FROM c_invoiceline il JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id"
-    + "  WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId"
-    + "    AND date_trunc('month', i.dateinvoiced) = ("
-    + "      SELECT date_trunc('month', MAX(dateinvoiced)) FROM c_invoice"
-    + "      WHERE issotrx = 'Y' AND docstatus IN ('CO','CL') AND ad_client_id = :clientId)"
-    + "  GROUP BY il.m_product_id"
-    + "), prev_period AS ("
-    + "  SELECT il.m_product_id, SUM(il.linenetamt) AS amount"
-    + "  FROM c_invoiceline il JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id"
-    + "  WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId"
-    + "    AND date_trunc('month', i.dateinvoiced) = ("
-    + "      SELECT date_trunc('month', MAX(dateinvoiced)) FROM c_invoice"
-    + "      WHERE issotrx = 'Y' AND docstatus IN ('CO','CL') AND ad_client_id = :clientId"
-    + "        AND date_trunc('month', dateinvoiced) < ("
-    + "          SELECT date_trunc('month', MAX(dateinvoiced)) FROM c_invoice"
-    + "          WHERE issotrx = 'Y' AND docstatus IN ('CO','CL') AND ad_client_id = :clientId))"
-    + "  GROUP BY il.m_product_id"
-    + ")"
-    + " SELECT all_data.m_product_id AS id, all_data.name, all_data.qty, all_data.amount,"
-    + "  CASE WHEN prev_period.amount IS NOT NULL AND prev_period.amount > 0"
-    + "    THEN ROUND(((curr_period.amount - prev_period.amount) / prev_period.amount) * 100)"
-    + "    ELSE NULL END AS trend_pct"
-    + " FROM all_data"
-    + " LEFT JOIN curr_period ON all_data.m_product_id = curr_period.m_product_id"
-    + " LEFT JOIN prev_period ON all_data.m_product_id = prev_period.m_product_id"
-    + " ORDER BY all_data.amount DESC LIMIT 10";
-
-  // Range-filtered ranking; %s is a safe hardcoded SQL date expression.
-  // curr_period = current calendar month; prev_period = most recent month before current that has data.
-  private static final String BEST_PRODUCTS_RANGED =
-      "WITH all_data AS ("
-    + "  SELECT p.m_product_id, p.name, SUM(il.qtyinvoiced) AS qty, SUM(il.linenetamt) AS amount"
-    + "  FROM c_invoiceline il"
-    + "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id"
-    + "  JOIN m_product p ON p.m_product_id = il.m_product_id"
-    + "  WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId"
-    + "    AND i.dateinvoiced >= %s"
-    + "  GROUP BY p.m_product_id, p.name"
-    + "), curr_period AS ("
-    + "  SELECT il.m_product_id, SUM(il.linenetamt) AS amount"
-    + "  FROM c_invoiceline il JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id"
-    + "  WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId"
-    + "    AND date_trunc('month', i.dateinvoiced) = date_trunc('month', NOW())"
-    + "  GROUP BY il.m_product_id"
-    + "), prev_period AS ("
-    + "  SELECT il.m_product_id, SUM(il.linenetamt) AS amount"
-    + "  FROM c_invoiceline il JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id"
-    + "  WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId"
-    + "    AND date_trunc('month', i.dateinvoiced) = ("
-    + "      SELECT date_trunc('month', MAX(dateinvoiced)) FROM c_invoice"
-    + "      WHERE issotrx = 'Y' AND docstatus IN ('CO','CL') AND ad_client_id = :clientId"
-    + "        AND date_trunc('month', dateinvoiced) < date_trunc('month', NOW()))"
-    + "  GROUP BY il.m_product_id"
-    + ")"
-    + " SELECT all_data.m_product_id AS id, all_data.name, all_data.qty, all_data.amount,"
-    + "  CASE WHEN prev_period.amount IS NOT NULL AND prev_period.amount > 0"
-    + "    THEN ROUND(((curr_period.amount - prev_period.amount) / prev_period.amount) * 100)"
-    + "    ELSE NULL END AS trend_pct"
-    + " FROM all_data"
-    + " LEFT JOIN curr_period ON all_data.m_product_id = curr_period.m_product_id"
-    + " LEFT JOIN prev_period ON all_data.m_product_id = prev_period.m_product_id"
-    + " ORDER BY all_data.amount DESC LIMIT 10";
-
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!"GET".equals(context.getHttpMethod())) {
       return NeoResponse.error(405, "Method not allowed");
     }
 
+    WidgetQueryPolicyRegistry.WidgetQueryPolicy policy =
+        WidgetQueryPolicyRegistry.bestProducts();
     try {
       OBContext.setAdminMode(true);
       try {
         String clientId = OBContext.getOBContext().getCurrentClient().getId();
         Map<String, String> params = context.getQueryParams();
         String range = params != null ? params.get("range") : null;
-        List<Object[]> rows = WidgetQueryHelper.resolveQuery(BEST_PRODUCTS_FALLBACK, BEST_PRODUCTS_RANGED, clientId, range);
+        List<Object[]> rows = WidgetQueryHelper.resolveQuery(
+            policy.fallbackSql, policy.rangedSql, clientId, range);
 
         JSONArray data = new JSONArray();
         for (Object[] row : rows) {

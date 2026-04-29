@@ -89,9 +89,7 @@ public final class NeoButtonActionHelper {
     Process classicProcess = column.getProcess();
     org.openbravo.client.application.Process obuiappProcess = column.getOBUIAPPProcess();
     if (classicProcess == null && obuiappProcess == null) {
-      if ("Posted".equals(column.getDBColumnName())) {
-        obuiappProcess = NeoAccessHelper.resolveDefaultPostProcess();
-      }
+      obuiappProcess = NeoAccessHelper.resolveFallbackObuiappProcess(column);
       if (obuiappProcess == null) {
         return null;
       }
@@ -133,9 +131,7 @@ public final class NeoButtonActionHelper {
     org.openbravo.client.application.Process obuiappProcess = targetColumn.getOBUIAPPProcess();
     Process adProcess = targetColumn.getProcess();
     if (adProcess == null && obuiappProcess == null) {
-      if ("Posted".equals(targetColumn.getDBColumnName())) {
-        obuiappProcess = NeoAccessHelper.resolveDefaultPostProcess();
-      }
+      obuiappProcess = NeoAccessHelper.resolveFallbackObuiappProcess(targetColumn);
       if (adProcess == null && obuiappProcess == null) {
         return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
             "No process linked to button: " + pathInfo.actionName);

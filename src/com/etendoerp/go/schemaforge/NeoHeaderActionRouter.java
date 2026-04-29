@@ -14,35 +14,29 @@
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
  */
-
 package com.etendoerp.go.schemaforge;
 
-import javax.inject.Inject;
-import javax.inject.Named;
-
 /**
- * NeoHandler for the Sales Invoice header entity.
- *
- * Dispatches custom ACTION requests to the appropriate handler:
- * <ul>
- *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler} (uses {@code CloneInvoiceHook})</li>
- *   <li>{@code registerPayment} / {@code invoicePayments} / {@code invoiceAccounts} → {@link RegisterPaymentHandler}</li>
- * </ul>
+ * Shared dispatch helper for header handlers that fan out ACTION requests to multiple delegates.
  */
-@Named("salesInvoiceHeaderHandler")
-public class SalesInvoiceHeaderHandler implements NeoHandler {
+final class NeoHeaderActionRouter {
 
-  @Inject
-  private NeoCloneRecordHandler cloneRecordHandler;
+  private NeoHeaderActionRouter() {
+  }
 
-  @Inject
-  private RegisterPaymentHandler registerPaymentHandler;
-
-  @Override
-  public NeoResponse handle(NeoContext context) {
-    return NeoHeaderActionRouter.dispatch(
-        context,
-        cloneRecordHandler,
-        registerPaymentHandler);
+  static NeoResponse dispatch(NeoContext context, NeoHandler... handlers) {
+    if (handlers == null) {
+      return null;
+    }
+    for (NeoHandler handler : handlers) {
+      if (handler == null) {
+        continue;
+      }
+      NeoResponse result = handler.handle(context);
+      if (result != null) {
+        return result;
+      }
+    }
+    return null;
   }
 }

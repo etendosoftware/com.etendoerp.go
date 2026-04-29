@@ -3,7 +3,6 @@ package com.etendoerp.go.schemaforge;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -18,7 +17,6 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
-import org.hibernate.query.NativeQuery;
 import org.hibernate.query.Query;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
@@ -89,23 +87,6 @@ public class NeoSelectorService {
   static final java.util.Set<String> SESSION_PARAMS = new java.util.HashSet<>(
       java.util.Arrays.asList(AD_ORG_ID, "AD_Client_ID", "AD_User_ID", "AD_Role_ID"));
 
-  /**
-   * HQL filters applied by AD_Reference_Value_ID when the standard AD_Ref_Table.hqlwhereclause
-   * is not set (or belongs to a module we cannot modify). Keyed by AD_Reference_Value_ID.
-   */
-  private static final java.util.Map<String, String> REFERENCE_OVERRIDE_FILTERS;
-  static {
-    java.util.Map<String, String> m = new java.util.HashMap<>();
-    m.put("166", "e.salesPriceList = true");
-    m.put("800031", "e.salesPriceList = false");
-    m.put("EED0EF97D4A7421687F3B365D009E7A6",
-        "exists (select 1 from FinancialMgmtFinAccPaymentMethod fapm"
-            + " where fapm.paymentMethod = e and fapm.active = true)");
-    m.put("DF1CEA94B3564A33AFDB37C07E1CE353",
-        "exists (select 1 from FinancialMgmtFinAccPaymentMethod fapm"
-            + " where fapm.account = e and fapm.active = true)");
-    REFERENCE_OVERRIDE_FILTERS = java.util.Collections.unmodifiableMap(m);
-  }
 
   private NeoSelectorService() {
   }
@@ -186,7 +167,7 @@ public class NeoSelectorService {
       SFField sfField = findFieldByColumnName(entity.getId(), columnName);
       Column column = sfField != null ? sfField.getADColumn() : null;
       if (column == null) {
-        column = resolveVirtualSelectorColumn(entity, columnName);
+        column = NeoSelectorPolicy.resolveVirtualSelectorColumn(entity, columnName);
       }
       if (column == null) {
         return NeoResponse.error(404,
@@ -263,8 +244,12 @@ public class NeoSelectorService {
           && StringUtils.isNotBlank(meta.entityAlias) ? meta.entityAlias : "e";
       String combinedFilter = combineFilters(
           remapFilterAlias(validationFilter, filterAlias),
-          remapFilterAlias(resolveReferenceOverrideFilter(column), filterAlias),
-          resolveContextParamFilter(meta.entityName, contextParams, filterAlias));
+          remapFilterAlias(NeoSelectorPolicy.resolveReferenceOverrideFilter(
+              column != null && column.getReferenceSearchKey() != null
+                  ? column.getReferenceSearchKey().getId()
+                  : null),
+              filterAlias),
+          NeoSelectorPolicy.resolveContextParamFilter(meta.entityName, contextParams, filterAlias));
 
       // Build and execute query.
       // Context-param filters (isCustomer, isVendor…) are resolved with the correct entity alias:
@@ -273,10 +258,10 @@ public class NeoSelectorService {
       NeoResponse selectorResult;
       if (meta.isRich) {
         String ctxAlias = (meta.isCustomQuery && meta.entityAlias != null) ? meta.entityAlias : "e";
-        String ctxParamFilter = resolveContextParamFilter(meta.entityName, contextParams, ctxAlias);
+        String ctxParamFilter = NeoSelectorPolicy.resolveContextParamFilter(meta.entityName, contextParams, ctxAlias);
         selectorResult = executeRichQuery(meta, search, limit, offset, combineFilters(combinedFilter, ctxParamFilter), contextOrganizationId);
       } else {
-        String ctxParamFilter = resolveContextParamFilter(meta.entityName, contextParams, "e");
+        String ctxParamFilter = NeoSelectorPolicy.resolveContextParamFilter(meta.entityName, contextParams, "e");
         selectorResult = executeQuery(meta, search, limit, offset, combineFilters(combinedFilter, ctxParamFilter), contextOrganizationId);
       }
       // Post-process: enrich Product selector items with prices from the requested price list.
@@ -290,7 +275,7 @@ public class NeoSelectorService {
           && contextParams != null
           && contextParams.containsKey("priceList")
           && selectorResult.getHttpStatus() == 200) {
-        selectorResult = enrichProductSelectorWithPrices(selectorResult, contextParams.get("priceList"));
+        selectorResult = NeoSelectorPolicy.enrichProductSelectorWithPrices(selectorResult, contextParams.get("priceList"));
       }
       return selectorResult;
 
@@ -660,37 +645,6 @@ public class NeoSelectorService {
     return results.isEmpty() ? null : results.get(0);
   }
 
-  private static Column resolveVirtualSelectorColumn(SFEntity entity, String columnName) {
-    if (entity == null || StringUtils.isBlank(columnName)) {
-      return null;
-    }
-
-    Tab tab = entity.getADTab();
-    String tableName = tab != null && tab.getTable() != null
-        ? tab.getTable().getDBTableName()
-        : null;
-
-    boolean isBPartnerLocationWrapper = "C_BPartner_Location".equalsIgnoreCase(tableName)
-        || "locationAddress".equals(entity.getName());
-    boolean isLocationVirtualColumn = "C_Country_ID".equalsIgnoreCase(columnName)
-        || "C_Region_ID".equalsIgnoreCase(columnName);
-    if (!isBPartnerLocationWrapper || !isLocationVirtualColumn) {
-      return null;
-    }
-
-    OBCriteria<Column> criteria = OBDal.getInstance().createCriteria(Column.class);
-    criteria.createAlias(Column.PROPERTY_TABLE, "tbl");
-    criteria.add(Restrictions.eq("tbl.dBTableName", "C_Location"));
-    criteria.add(Restrictions.eq(Column.PROPERTY_DBCOLUMNNAME, columnName));
-    criteria.setMaxResults(1);
-
-    List<Column> results = criteria.list();
-    if (results.isEmpty()) {
-      return null;
-    }
-    log.debug("Resolved virtual selector column {} for entity {}", columnName, entity.getName());
-    return results.get(0);
-  }
 
   /**
    * Get the base reference ID (18, 19, or 30) checking parent references.
@@ -1416,171 +1370,7 @@ public class NeoSelectorService {
     return String.join(SelectorQueryBuilder.SQL_AND, parts);
   }
 
-  private static String resolveReferenceOverrideFilter(Column column) {
-    if (column == null || column.getReferenceSearchKey() == null) {
-      return null;
-    }
-    return REFERENCE_OVERRIDE_FILTERS.get(column.getReferenceSearchKey().getId());
-  }
 
-  private static String resolveContextParamFilter(String entityName,
-      Map<String, String> contextParams, String alias) {
-    if (contextParams == null || contextParams.isEmpty() || entityName == null) {
-      return null;
-    }
-    String a = (alias != null && !alias.isEmpty()) ? alias : "e";
-
-    // BusinessPartner: filter by customer/vendor flag
-    if ("BusinessPartner".equals(entityName)) {
-      java.util.List<String> conditions = new java.util.ArrayList<>();
-      String isCustomer = contextParams.get("isCustomer");
-      if ("Y".equalsIgnoreCase(isCustomer)) {
-        conditions.add(a + ".customer = true");
-      } else if ("N".equalsIgnoreCase(isCustomer)) {
-        conditions.add(a + ".customer = false");
-      }
-      String isVendor = contextParams.get("isVendor");
-      if ("Y".equalsIgnoreCase(isVendor)) {
-        conditions.add(a + ".vendor = true");
-      } else if ("N".equalsIgnoreCase(isVendor)) {
-        conditions.add(a + ".vendor = false");
-      }
-      return conditions.isEmpty() ? null : String.join(" AND ", conditions);
-    }
-
-    // ProductByPriceAndWarehouse: filter so the selector only shows products from the
-    // relevant price lists. The view has one row per (product × price list version × warehouse).
-    // Priority: specific price list (most precise) > sales/purchase flag (fallback when header
-    // has no price list set yet, e.g. new document).
-    if ("ProductByPriceAndWarehouse".equals(entityName)) {
-      String priceListId = contextParams.get("priceList");
-      // Accept only safe ID strings (hex/UUID chars) to prevent HQL injection.
-      if (StringUtils.isNotBlank(priceListId) && priceListId.matches("[A-Za-z0-9\\-]+")) {
-        return a + ".productPrice.priceListVersion.priceList.id = '" + priceListId + "'";
-      }
-      // Fallback: filter by sales/purchase flag so purchase prices never show in a sales
-      // document (and vice versa) even before a price list is selected.
-      String isSOTrx = contextParams.get("isSOTrx");
-      if ("Y".equalsIgnoreCase(isSOTrx)) {
-        return a + ".productPrice.priceListVersion.priceList.salesPriceList = true";
-      } else if ("N".equalsIgnoreCase(isSOTrx)) {
-        return a + ".productPrice.priceListVersion.priceList.salesPriceList = false";
-      }
-    }
-
-    return null;
-  }
-
-  /**
-   * Enriches Product selector response items with {@code standardPrice} and {@code listPrice}
-   * from the most recent active version of the given price list.
-   *
-   * <p>Items not present in the price list are left unchanged (no price injected).
-   * This ensures the search drawer always shows the price from the document's price list
-   * rather than a global default or an unrelated price list.
-   *
-   * @param response    the selector NeoResponse (must be HTTP 200 with an {@code items} array)
-   * @param priceListId the M_PriceList_ID requested by the client
-   * @return the same response object with price fields added to matching items
-   */
-  private static NeoResponse enrichProductSelectorWithPrices(
-      NeoResponse response, String priceListId) {
-    if (response == null || response.getBody() == null || StringUtils.isBlank(priceListId)) {
-      return response;
-    }
-    try {
-      JSONArray items = response.getBody().optJSONArray("items");
-      if (items == null || items.length() == 0) {
-        return response;
-      }
-
-      // Deduplicate items by product ID — ProductSimple returns one row per price list version,
-      // so the same product may appear multiple times when not filtered by price list.
-      Set<String> seenIds = new LinkedHashSet<>();
-      JSONArray deduplicatedItems = new JSONArray();
-      for (int i = 0; i < items.length(); i++) {
-        JSONObject item = items.getJSONObject(i);
-        String itemId = item.optString("id");
-        if (StringUtils.isNotBlank(itemId) && seenIds.add(itemId)) {
-          deduplicatedItems.put(item);
-        }
-      }
-      if (deduplicatedItems.length() < items.length()) {
-        response.getBody().put("items", deduplicatedItems);
-        items = deduplicatedItems;
-      }
-
-      // Collect product IDs
-      List<String> productIds = new ArrayList<>(seenIds);
-      if (productIds.isEmpty()) {
-        return response;
-      }
-
-      // Build positional IN clause — avoids list-binding issues with some Hibernate versions
-      StringBuilder inClause = new StringBuilder();
-      for (int i = 0; i < productIds.size(); i++) {
-        if (i > 0) {
-          inClause.append(", ");
-        }
-        inClause.append(":pid").append(i);
-      }
-
-      String sql = "SELECT pp.m_product_id,"
-          + "  COALESCE(pp.pricestd, 0) AS standard_price,"
-          + "  COALESCE(pp.pricelist, 0) AS list_price,"
-          + "  pl.istaxincluded AS is_tax_included"
-          + " FROM m_productprice pp"
-          + " JOIN m_pricelist_version plv"
-          + "   ON plv.m_pricelist_version_id = pp.m_pricelist_version_id"
-          + " JOIN m_pricelist pl"
-          + "   ON pl.m_pricelist_id = plv.m_pricelist_id"
-          + " WHERE plv.m_pricelist_id = :priceListId"
-          + "   AND pp.m_product_id IN (" + inClause + ")"
-          + "   AND pp.isactive = 'Y'"
-          + "   AND plv.isactive = 'Y'"
-          + "   AND plv.validfrom = ("
-          + "     SELECT MAX(v.validfrom) FROM m_pricelist_version v"
-          + "     WHERE v.m_pricelist_id = :priceListId"
-          + "       AND v.isactive = 'Y'"
-          + "       AND v.validfrom <= NOW()"
-          + "   )";
-
-      @SuppressWarnings("rawtypes")
-      NativeQuery nq = OBDal.getInstance().getSession().createNativeQuery(sql);
-      nq.setParameter("priceListId", priceListId);
-      for (int i = 0; i < productIds.size(); i++) {
-        nq.setParameter("pid" + i, productIds.get(i));
-      }
-
-      Map<String, Object[]> priceMap = new HashMap<>();
-      for (Object row : nq.list()) {
-        Object[] cols = (Object[]) row;
-        priceMap.put(String.valueOf(cols[0]), cols);
-      }
-
-      if (priceMap.isEmpty()) {
-        return response;
-      }
-
-      // Inject standardPrice, listPrice, and isTaxIncluded into matching items.
-      // isTaxIncluded tells the frontend whether the price is gross (true) or net (false),
-      // so it can route standardPrice to grossUnitPrice (gross lists) or unitPrice (net lists).
-      for (int i = 0; i < items.length(); i++) {
-        JSONObject item = items.getJSONObject(i);
-        Object[] cols = priceMap.get(item.optString("id"));
-        if (cols != null) {
-          item.put("standardPrice", cols[1]);
-          item.put("listPrice", cols[2]);
-          item.put("isTaxIncluded", "Y".equals(String.valueOf(cols[3])));
-        }
-      }
-
-    } catch (Exception e) {
-      log.warn("Failed to enrich product selector with prices for priceList {}: {}",
-          priceListId, e.getMessage());
-    }
-    return response;
-  }
 
   private static String remapFilterAlias(String filter, String alias) {
     if (StringUtils.isBlank(filter) || StringUtils.isBlank(alias) || "e".equals(alias)) {

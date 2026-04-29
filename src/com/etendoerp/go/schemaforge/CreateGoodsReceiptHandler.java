@@ -115,24 +115,11 @@ public class CreateGoodsReceiptHandler implements NeoHandler {
           "No Goods Receipt document type found (docBaseType=MMR, isSOTrx=false)");
     }
 
-    ShipmentInOut receipt = OBProvider.getInstance().get(ShipmentInOut.class);
-    receipt.setClient(order.getClient());
-    receipt.setOrganization(order.getOrganization());
-    receipt.setBusinessPartner(order.getBusinessPartner());
-    receipt.setPartnerAddress(order.getPartnerAddress());
-    receipt.setWarehouse(order.getWarehouse());
-    receipt.setMovementDate(new Date());
-    receipt.setAccountingDate(new Date());
-    receipt.setDocumentType(docType);
-    String documentNo = Utility.getDocumentNo(
-        new DalConnectionProvider(false), order.getClient().getId(), "M_InOut", true);
-    receipt.setDocumentNo(StringUtils.isNotBlank(documentNo) ? documentNo : "*");
-    receipt.setSalesTransaction(false);
-    receipt.setSalesOrder(order);
-    receipt.setProcessed(false);
-    receipt.setDocumentStatus("DR");
-    receipt.setMovementType("V+");
-    return receipt;
+    return NeoCommercialDocumentFactory.createShipmentReceiptHeader(
+        order,
+        docType,
+        false,
+        "V+");
   }
 
   private void createReceiptLines(ShipmentInOut receipt, Order order) {

@@ -112,6 +112,14 @@ public final class NeoAccessHelper {
     }
   }
 
+  public static org.openbravo.client.application.Process resolveFallbackObuiappProcess(
+      org.openbravo.model.ad.datamodel.Column column) {
+    if (column == null || !"Posted".equals(column.getDBColumnName())) {
+      return null;
+    }
+    return resolveDefaultPostProcess();
+  }
+
   /**
    * Returns the AD process linked to the given spec.
    *

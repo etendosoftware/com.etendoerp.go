@@ -38,6 +38,7 @@ import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.common.ProtocolErrorAdapters;
 
 /**
  * MCP (Model Context Protocol) servlet implementing Streamable HTTP transport.
@@ -420,15 +421,7 @@ public class McpServlet extends HttpServlet {
   // ── JSON-RPC error builder ──────────────────────────────────────────────
 
   private JSONObject buildJsonRpcError(Object id, int code, String message) throws JSONException {
-    JSONObject error = new JSONObject();
-    error.put("code", code);
-    error.put("message", message != null ? message : "Internal error");
-
-    JSONObject resp = new JSONObject();
-    resp.put("jsonrpc", "2.0");
-    resp.put("id", id != null ? id : JSONObject.NULL);
-    resp.put("error", error);
-    return resp;
+    return ProtocolErrorAdapters.buildJsonRpcError(id, code, message);
   }
 
   // ── Utility methods ─────────────────────────────────────────────────────
@@ -450,25 +443,14 @@ public class McpServlet extends HttpServlet {
 
   private void sendJsonError(HttpServletRequest request, HttpServletResponse response,
       int status, String message) throws IOException {
-    response.setStatus(status);
-    response.setContentType(CONTENT_TYPE_JSON);
     if (status == HttpServletResponse.SC_UNAUTHORIZED) {
       String metaUrl = buildBaseUrl(request) + "/sws/mcp/.well-known/oauth-protected-resource";
       response.setHeader("WWW-Authenticate",
           "Bearer resource_metadata=\"" + metaUrl + "\"");
     }
-    response.getWriter().write("{\"error\":\"" + escapeJson(message) + "\"}");
+    ProtocolErrorAdapters.writeSimpleJsonError(response, status, message);
   }
 
-  private String escapeJson(String value) {
-    if (value == null) {
-      return "";
-    }
-    return value.replace("\\", "\\\\")
-        .replace("\"", "\\\"")
-        .replace("\n", "\\n")
-        .replace("\r", "\\r");
-  }
 
   @SuppressWarnings("unchecked")
   private JSONObject mapToJsonObject(Map<String, Object> map) throws JSONException {

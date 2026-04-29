@@ -48,6 +48,7 @@ import org.openbravo.erpCommon.utility.SequenceIdData;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.CorsUtils;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
+import com.etendoerp.go.common.ProtocolErrorAdapters;
 
 /**
  * OAuth2 servlet handling token issuance, client CRUD, revocation, and introspection.
@@ -1619,15 +1620,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
    */
   private void writeError(HttpServletResponse response, int status, String error,
       String description) throws IOException {
-    try {
-      JSONObject body = new JSONObject();
-      body.put("error", error);
-      body.put("error_description", description);
-      writeJsonResponse(response, status, body);
-    } catch (JSONException e) {
-      log.error("Failed to build error response", e);
-      response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
-    }
+    ProtocolErrorAdapters.writeOAuthError(response, status, error, description);
   }
 
   /**

@@ -39,16 +39,18 @@ public class PurchaseOrderHeaderHandler implements NeoHandler {
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
 
+  @Inject
+  private CreateGoodsReceiptHandler createGoodsReceiptHandler;
+
+  @Inject
+  private CreatePurchaseInvoiceHandler createPurchaseInvoiceHandler;
+
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse result = cloneRecordHandler.handle(context);
-    if (result != null) {
-      return result;
-    }
-    result = new CreateGoodsReceiptHandler().handle(context);
-    if (result != null) {
-      return result;
-    }
-    return new CreatePurchaseInvoiceHandler().handle(context);
+    return NeoHeaderActionRouter.dispatch(
+        context,
+        cloneRecordHandler,
+        createGoodsReceiptHandler,
+        createPurchaseInvoiceHandler);
   }
 }

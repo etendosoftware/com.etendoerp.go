@@ -20,7 +20,6 @@ package com.etendoerp.go.schemaforge;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -71,18 +70,6 @@ class NeoCrudHandler {
   private static final String PARAM_PARENT_ID = "parentId";
   private static final String HQL_AND_OPERATOR = " and ";
   private static final String JSON_IDENTIFIER = "_identifier";
-  private static final Set<String> CONTACTS_PRECREATE_BILLING_FIELDS = new HashSet<>(
-      Arrays.asList(
-          "priceList",
-          "paymentMethod",
-          "paymentTerms",
-          "account",
-          "customerBlocking",
-          "purchasePricelist",
-          "pOPaymentMethod",
-          "pOPaymentTerms",
-          "pOFinancialAccount",
-          "vendorBlocking"));
 
   private final NeoServlet servlet;
 
@@ -435,12 +422,10 @@ class NeoCrudHandler {
     long perfInjectDefaults = System.nanoTime();
     executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, userSubmittedFields);
     long perfCalloutCascade = System.nanoTime();
-    NeoDefaultsService.injectProductDerivedUomIfMissing(filteredBody);
-    NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
-    NeoDefaultsService.injectLineGrossAmountIfMissing(filteredBody);
-    NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
-    // TODO move this compatibility rule into the shared create-defaults helper once the merge settles.
-    stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
+    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(filteredBody);
     // Coerce String primitives injected by injectMandatoryDefaults to their correct Java types.
     // Utility.getDefault() always returns String; JsonToDataConverter has no String→BigDecimal/
     // Integer/Boolean path and falls through to return value, causing OBDal type mismatches.
@@ -528,22 +513,6 @@ class NeoCrudHandler {
     }
   }
 
-  private void stripContactsPreCreateBillingDefaults(JSONObject body, NeoContext context, Tab adTab) {
-    if (body == null || context == null || adTab == null) {
-      return;
-    }
-    if (!("contacts".equalsIgnoreCase(context.getSpecName())
-        && "businessPartner".equals(context.getEntityName())
-        && adTab.getTabLevel() != null
-        && adTab.getTabLevel() == 0)) {
-      return;
-    }
-
-    for (String key : CONTACTS_PRECREATE_BILLING_FIELDS) {
-      body.remove(key);
-      body.remove(key + "$_identifier");
-    }
-  }
 
   /**
    * Executes the PUT/PATCH (update) JSON service operation and returns the raw result string.
@@ -556,9 +525,9 @@ class NeoCrudHandler {
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
     // available here to compute the correct net amount even for products where SL_Invoice_Amt
     // throws on the sales invoice context (e.g. tax-exclusive price lists).
-    NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
-    NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
-    NeoDefaultsService.injectLineGrossAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
   }

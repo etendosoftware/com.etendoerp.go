@@ -51,6 +51,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.CorsUtils;
+import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -517,6 +518,8 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
         return;
       }
 
+      commitDalChanges("onboarding");
+
       sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
       sendProgress(writer, "finalize", "done", "Environment ready");
       sendFinalResult(writer, true, "Environment created successfully");
@@ -739,6 +742,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       sendProgress(writer, PROGRESS_DATASET, "done", "Onboarding dataset imported");
       return true;
     } catch (Exception e) {
+      rollbackDalChanges("onboarding dataset import", e);
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Onboarding dataset import failed";
       sendProgress(writer, PROGRESS_DATASET, PROGRESS_ERROR, errorMessage);
@@ -786,6 +790,16 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       log.warn("Error writing final result", e);
     }
   }
+
+  private void commitDalChanges(String operation) {
+    try {
+      OBDal.getInstance().commitAndClose();
+    } catch (Exception commitEx) {
+      log.error("Commit failed after {}", operation, commitEx);
+      throw commitEx;
+    }
+  }
+
 
   private void rollbackDalChanges(String operation, Exception failure) {
     try {
@@ -912,24 +926,13 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
    */
   private void writeError(HttpServletResponse response, int status, String message)
       throws IOException {
-    response.setStatus(status);
-    response.setContentType("application/json");
-    response.setCharacterEncoding(UTF_8);
-    try (PrintWriter writer = response.getWriter()) {
-      try {
-        JSONObject error = new JSONObject();
-        error.put(FIELD_MESSAGE, message);
-        error.put(FIELD_STATUS, status);
-
-        JSONObject wrapper = new JSONObject();
-        wrapper.put(PROGRESS_ERROR, error);
-
-        writer.write(wrapper.toString());
-      } catch (JSONException e) {
-        // Fallback to plain text if JSON construction fails
-        writer.write("{\"error\":{\"message\":\"" + message + "\",\"status\":" + status + "}}");
-      }
-    }
+    ProtocolErrorAdapters.writeRestError(
+        response,
+        status,
+        message,
+        FIELD_MESSAGE,
+        FIELD_STATUS,
+        PROGRESS_ERROR);
   }
 
   private static class OnboardingRequestData {
