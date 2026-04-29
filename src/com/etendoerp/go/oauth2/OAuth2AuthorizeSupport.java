@@ -45,15 +45,15 @@ final class OAuth2AuthorizeSupport {
     }
   }
 
-  /**
-   * Parse the authorize request payload from an HTTP request body.
-   *
-   * @param request HTTP request whose body should be parsed
-   * @return parsed JSON payload
-   * @throws IOException when the request body cannot be read
-   * @throws JSONException when the request body is not valid JSON
-   */
   interface JsonBodyParser {
+    /**
+     * Parse the authorize request payload from an HTTP request body.
+     *
+     * @param request HTTP request whose body should be parsed
+     * @return parsed JSON payload
+     * @throws IOException when the request body cannot be read
+     * @throws JSONException when the request body is not valid JSON
+     */
     JSONObject parse(HttpServletRequest request) throws IOException, JSONException;
   }
 
