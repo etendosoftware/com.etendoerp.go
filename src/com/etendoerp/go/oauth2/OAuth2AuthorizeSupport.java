@@ -45,6 +45,9 @@ final class OAuth2AuthorizeSupport {
     }
   }
 
+  /**
+   * Parse the authorize request payload from either JSON body or form/query parameters.
+   */
   interface JsonBodyParser {
     JSONObject parse(HttpServletRequest request) throws IOException, JSONException;
   }
@@ -53,27 +56,26 @@ final class OAuth2AuthorizeSupport {
   }
 
   static AuthorizeRequestData parseAuthorizeRequest(HttpServletRequest request,
-      String applicationJson, String fieldToken, String fieldClientId, String fieldRedirectUri,
-      String fieldCodeChallenge, String fieldState, String fieldScope, JsonBodyParser parser)
+      String applicationJson, JsonBodyParser parser)
       throws IOException, JSONException {
     String contentType = request.getContentType();
     if (contentType != null && contentType.contains(applicationJson)) {
       JSONObject body = parser.parse(request);
       return new AuthorizeRequestData(
-          body.optString(fieldToken, null),
-          body.optString(fieldClientId, null),
-          body.optString(fieldRedirectUri, null),
-          body.optString(fieldCodeChallenge, null),
-          body.optString(fieldState, null),
-          body.optString(fieldScope, null));
+          body.optString("token", null),
+          body.optString("client_id", null),
+          body.optString("redirect_uri", null),
+          body.optString("code_challenge", null),
+          body.optString("state", null),
+          body.optString("scope", null));
     }
     return new AuthorizeRequestData(
-        request.getParameter(fieldToken),
-        request.getParameter(fieldClientId),
-        request.getParameter(fieldRedirectUri),
-        request.getParameter(fieldCodeChallenge),
-        request.getParameter(fieldState),
-        request.getParameter(fieldScope));
+        request.getParameter("token"),
+        request.getParameter("client_id"),
+        request.getParameter("redirect_uri"),
+        request.getParameter("code_challenge"),
+        request.getParameter("state"),
+        request.getParameter("scope"));
   }
 
   static void writeAuthorizeSuccess(HttpServletResponse response, String redirectUri,

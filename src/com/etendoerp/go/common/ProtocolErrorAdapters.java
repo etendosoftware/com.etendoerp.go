@@ -38,6 +38,7 @@ public final class ProtocolErrorAdapters {
    * @param code JSON-RPC error code
    * @param message human-readable error message
    * @return JSON-RPC error object with {@code jsonrpc}, {@code id}, and {@code error} fields
+   * @throws JSONException when the JSON error envelope cannot be constructed
    */
   public static JSONObject buildJsonRpcError(Object id, int code, String message) throws JSONException {
     JSONObject error = new JSONObject();
@@ -57,6 +58,7 @@ public final class ProtocolErrorAdapters {
    * @param response HTTP response to write to
    * @param status HTTP status code
    * @param message error message to serialize
+   * @throws IOException when the response writer cannot be written
    */
   public static void writeSimpleJsonError(HttpServletResponse response, int status, String message)
       throws IOException {
@@ -74,6 +76,7 @@ public final class ProtocolErrorAdapters {
    * @param messageField JSON field name for the message value
    * @param statusField JSON field name for the numeric status value
    * @param wrapperField top-level wrapper field name
+   * @throws IOException when the response writer cannot be written
    */
   public static void writeRestError(HttpServletResponse response, int status, String message,
       String messageField, String statusField, String wrapperField) throws IOException {
@@ -101,6 +104,7 @@ public final class ProtocolErrorAdapters {
    * @param status HTTP status code
    * @param error OAuth2 error code
    * @param description OAuth2 error description
+   * @throws IOException when the response cannot be written
    */
   public static void writeOAuthError(HttpServletResponse response, int status, String error,
       String description) throws IOException {

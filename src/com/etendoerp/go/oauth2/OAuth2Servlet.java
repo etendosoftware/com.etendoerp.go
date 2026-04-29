@@ -443,7 +443,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
           client.put(FIELD_AD_USER_ID, rs.getString(FIELD_DB_AD_USER_ID));
           client.put(FIELD_AD_ROLE_ID, rs.getString(FIELD_DB_AD_ROLE_ID));
           client.put(FIELD_SCOPES, rs.getString(FIELD_SCOPES));
-          client.put(FIELD_REDIRECT_URIS_JSON, rs.getString("redirect_uris"));
+          client.put(FIELD_REDIRECT_URIS_JSON, rs.getString(FIELD_REDIRECT_URIS));
           client.put(FIELD_IS_ACTIVE, "Y".equals(rs.getString("isactive")));
           clients.put(client);
         }
@@ -894,24 +894,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
     response.sendRedirect(appUrl.toString());
   }
 
-  private static final class AuthorizeRequestData {
-    private final String jwtToken;
-    private final String clientId;
-    private final String redirectUri;
-    private final String codeChallenge;
-    private final String state;
-    private final String scope;
-
-    private AuthorizeRequestData(String jwtToken, String clientId, String redirectUri,
-        String codeChallenge, String state, String scope) {
-      this.jwtToken = jwtToken;
-      this.clientId = clientId;
-      this.redirectUri = redirectUri;
-      this.codeChallenge = codeChallenge;
-      this.state = state;
-      this.scope = scope;
-    }
-  }
 
 
   /**
@@ -923,8 +905,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       OAuth2AuthorizeSupport.AuthorizeRequestData authorizeRequest =
           OAuth2AuthorizeSupport.parseAuthorizeRequest(
-              request, APPLICATION_JSON, FIELD_TOKEN, FIELD_CLIENT_ID_REQUEST, FIELD_REDIRECT_URI,
-              FIELD_CODE_CHALLENGE, FIELD_STATE, FIELD_SCOPE, this::parseJsonBody);
+              request, APPLICATION_JSON, this::parseJsonBody);
       if (!validateAuthorizePostRequest(response, authorizeRequest)) {
         return;
       }
@@ -1468,7 +1449,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
         client.id = rs.getString(DB_OAUTH2_CLIENT_ID);
         client.secretHash = rs.getString("client_secret_hash");
         client.scopes = rs.getString(FIELD_SCOPES);
-        client.redirectUrisJson = rs.getString("redirect_uris");
+        client.redirectUrisJson = rs.getString(FIELD_REDIRECT_URIS);
         client.adClientId = rs.getString("ad_client_id");
         client.adUserId = rs.getString(FIELD_DB_AD_USER_ID);
         client.adRoleId = rs.getString(FIELD_DB_AD_ROLE_ID);
@@ -1498,7 +1479,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
         client.put(FIELD_AD_USER_ID, rs.getString(FIELD_DB_AD_USER_ID));
         client.put(FIELD_AD_ROLE_ID, rs.getString(FIELD_DB_AD_ROLE_ID));
         client.put(FIELD_SCOPES, rs.getString(FIELD_SCOPES));
-        client.put(FIELD_REDIRECT_URIS_JSON, rs.getString("redirect_uris"));
+        client.put(FIELD_REDIRECT_URIS_JSON, rs.getString(FIELD_REDIRECT_URIS));
         client.put(FIELD_IS_ACTIVE, "Y".equals(rs.getString("isactive")));
         return client;
       }

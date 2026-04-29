@@ -56,6 +56,7 @@ public class McpResourceProvider {
   private static final String URI_SPECS_PREFIX = URI_SPECS + "/";
   private static final String URI_PROCESSES_PREFIX = "neo://processes/";
 
+  private static final String ACCESS_DENIED_TO_SPEC_PREFIX = "Access denied to spec '";
   /**
    * List all available MCP resources.
    * Returns one static resource (neo://specs) plus one resource per active spec.
@@ -152,42 +153,47 @@ public class McpResourceProvider {
 
     JSONArray specsArray = new JSONArray();
     for (SFSpec spec : specs) {
-      if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
-        continue;
+      JSONObject specObj = buildAccessibleSpecSummary(spec);
+      if (specObj != null) {
+        specsArray.put(specObj);
       }
-      JSONObject specObj = new JSONObject();
-      specObj.put("name", spec.getName());
-      specObj.put("type", spec.getSpecType());
-      specObj.put(FIELD_DESCRIPTION, spec.getDescription());
-
-      if ("W".equals(spec.getSpecType())) {
-        Window window = spec.getADWindow();
-        if (window != null) {
-          specObj.put("windowName", window.getName());
-        }
-      } else if ("P".equals(spec.getSpecType()) || "R".equals(spec.getSpecType())) {
-        Process process = spec.getProcess();
-        if (process != null) {
-          specObj.put(FIELD_PROCESS_NAME, process.getName());
-        }
-        if ("R".equals(spec.getSpecType())) {
-          specObj.put("isReport", true);
-        }
-      }
-
-      OBCriteria<SFEntity> entityCriteria = OBDal.getInstance().createCriteria(SFEntity.class);
-      entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
-      entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
-      entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-      specObj.put("entityCount", entityCriteria.list().size());
-
-      specsArray.put(specObj);
-
     }
     JSONObject result = new JSONObject();
     result.put("specs", specsArray);
     result.put("count", specsArray.length());
     return result;
+  }
+
+  private JSONObject buildAccessibleSpecSummary(SFSpec spec) throws Exception {
+    if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
+      return null;
+    }
+    JSONObject specObj = new JSONObject();
+    specObj.put("name", spec.getName());
+    specObj.put("type", spec.getSpecType());
+    specObj.put(FIELD_DESCRIPTION, spec.getDescription());
+
+    if ("W".equals(spec.getSpecType())) {
+      Window window = spec.getADWindow();
+      if (window != null) {
+        specObj.put("windowName", window.getName());
+      }
+    } else if ("P".equals(spec.getSpecType()) || "R".equals(spec.getSpecType())) {
+      Process process = spec.getProcess();
+      if (process != null) {
+        specObj.put(FIELD_PROCESS_NAME, process.getName());
+      }
+      if ("R".equals(spec.getSpecType())) {
+        specObj.put("isReport", true);
+      }
+    }
+
+    OBCriteria<SFEntity> entityCriteria = OBDal.getInstance().createCriteria(SFEntity.class);
+    entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
+    entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
+    entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
+    specObj.put("entityCount", entityCriteria.list().size());
+    return specObj;
   }
 
   /**
@@ -196,7 +202,7 @@ public class McpResourceProvider {
   private JSONObject readSpec(String specName) throws Exception {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
-      throw new SecurityException("Access denied to spec '" + specName + "'");
+      throw new SecurityException(ACCESS_DENIED_TO_SPEC_PREFIX + specName + "'");
     }
 
     JSONObject result = new JSONObject();
@@ -236,7 +242,7 @@ public class McpResourceProvider {
   private JSONObject readEntity(String specName, String entityName) throws Exception {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
-      throw new SecurityException("Access denied to spec '" + specName + "'");
+      throw new SecurityException(ACCESS_DENIED_TO_SPEC_PREFIX + specName + "'");
     }
     SFEntity entity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
     JSONObject result = buildEntityJson(entity, true);
@@ -252,7 +258,7 @@ public class McpResourceProvider {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     String specType = spec.getSpecType();
     if (!McpToolRouterSupport.hasSpecAccess(spec, specType)) {
-      throw new SecurityException("Access denied to spec '" + specName + "'");
+      throw new SecurityException(ACCESS_DENIED_TO_SPEC_PREFIX + specName + "'");
     }
 
     if (!"P".equals(specType) && !"R".equals(specType)) {
