@@ -1565,6 +1565,9 @@ public class NeoSelectorService {
       // Inject standardPrice, listPrice, and isTaxIncluded into matching items.
       // isTaxIncluded tells the frontend whether the price is gross (true) or net (false),
       // so it can route standardPrice to grossUnitPrice (gross lists) or unitPrice (net lists).
+      // Also update _aux._PSTD/_PLIST so that Classic callouts (SL_Invoice_Product,
+      // SL_Order_Product) receive the correct price-list prices via inpmProductId_PSTD/_PLIST.
+      // Without this, callouts read from entity defaults (often the purchase price) instead.
       for (int i = 0; i < items.length(); i++) {
         JSONObject item = items.getJSONObject(i);
         Object[] cols = priceMap.get(item.optString("id"));
@@ -1572,6 +1575,13 @@ public class NeoSelectorService {
           item.put("standardPrice", cols[1]);
           item.put("listPrice", cols[2]);
           item.put("isTaxIncluded", "Y".equals(String.valueOf(cols[3])));
+          JSONObject aux = item.optJSONObject("_aux");
+          if (aux == null) {
+            aux = new JSONObject();
+            item.put("_aux", aux);
+          }
+          aux.put("_PSTD", String.valueOf(cols[1]));
+          aux.put("_PLIST", String.valueOf(cols[2]));
         }
       }
 
