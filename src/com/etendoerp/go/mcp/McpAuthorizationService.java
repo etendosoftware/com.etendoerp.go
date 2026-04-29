@@ -42,6 +42,15 @@ final class McpAuthorizationService {
     return new HashSet<>(Arrays.asList(scopes.trim().split("\\s+")));
   }
 
+  static void authorizeResourceRead(Set<String> scopes) {
+    if (hasScope(scopes, SCOPE_READ)) {
+      return;
+    }
+    throw new SecurityException(
+        "MCP resources require scope '" + SCOPE_READ + "'");
+  }
+
+
   static void authorizeToolCall(String toolName, Set<String> scopes) {
     String requiredScope = requiredScopeFor(toolName);
     if (hasScope(scopes, requiredScope)) {

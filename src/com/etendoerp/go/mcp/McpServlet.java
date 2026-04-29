@@ -292,9 +292,9 @@ public class McpServlet extends HttpServlet {
       case "tools/call":
         return handleToolsCall(identity, params);
       case "resources/list":
-        return handleResourcesList();
+        return handleResourcesList(identity);
       case "resources/read":
-        return handleResourcesRead(params);
+        return handleResourcesRead(identity, params);
       default:
         throw new McpMethodNotFoundException("Method not found: " + method);
     }
@@ -379,7 +379,9 @@ public class McpServlet extends HttpServlet {
 
   // ── Handler: resources/list ─────────────────────────────────────────────
 
-  private JSONObject handleResourcesList() throws Exception {
+  private JSONObject handleResourcesList(AuthIdentity identity) throws Exception {
+    Set<String> scopes = parseScopes(identity.scopes);
+    McpAuthorizationService.authorizeResourceRead(scopes);
     OBContext.setAdminMode(true);
     try {
       McpResourceProvider provider = new McpResourceProvider();
@@ -393,12 +395,14 @@ public class McpServlet extends HttpServlet {
 
   // ── Handler: resources/read ─────────────────────────────────────────────
 
-  private JSONObject handleResourcesRead(JSONObject params) throws Exception {
+  private JSONObject handleResourcesRead(AuthIdentity identity, JSONObject params) throws Exception {
     String uri = params != null ? params.optString("uri", "") : "";
     if (uri.isEmpty()) {
       throw new IllegalArgumentException("Missing 'uri' parameter for resources/read");
     }
 
+    Set<String> scopes = parseScopes(identity.scopes);
+    McpAuthorizationService.authorizeResourceRead(scopes);
     OBContext.setAdminMode(true);
     try {
       McpResourceProvider provider = new McpResourceProvider();

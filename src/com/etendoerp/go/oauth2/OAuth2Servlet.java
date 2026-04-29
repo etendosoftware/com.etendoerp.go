@@ -106,6 +106,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     private static final String FIELD_AD_ROLE_ID = "adRoleId";
     private static final String FIELD_DB_AD_ROLE_ID = "ad_role_id";
     private static final String FIELD_SCOPES = "scopes";
+    private static final String FIELD_REDIRECT_URIS_JSON = "redirectUrisJson";
     private static final String FIELD_SCOPE = "scope";
     private static final String FIELD_IS_ACTIVE = "isActive";
     private static final String FIELD_ACTIVE = "active";
@@ -133,7 +134,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   // --- SQL constants ---
 
   private static final String SQL_FIND_CLIENT =
-      "SELECT etgo_oauth2_client_id, client_secret_hash, scopes, ad_client_id, ad_user_id, ad_role_id "
+      "SELECT etgo_oauth2_client_id, client_secret_hash, scopes, redirect_uris, ad_client_id, ad_user_id, ad_role_id "
       + "FROM etgo_oauth2_client WHERE client_identifier = ? AND isactive = 'Y'";
 
   private static final String SQL_INSERT_TOKEN =
@@ -155,18 +156,18 @@ public class OAuth2Servlet extends HttpBaseServlet {
       + "WHERE etgo_oauth2_token_id = ?";
 
   private static final String SQL_LIST_CLIENTS =
-      "SELECT etgo_oauth2_client_id, name, client_identifier, ad_user_id, ad_role_id, scopes, isactive "
+      "SELECT etgo_oauth2_client_id, name, client_identifier, ad_user_id, ad_role_id, scopes, redirect_uris, isactive "
       + "FROM etgo_oauth2_client ORDER BY name";
 
   private static final String SQL_INSERT_CLIENT =
       "INSERT INTO etgo_oauth2_client "
       + "(etgo_oauth2_client_id, ad_client_id, ad_org_id, isactive, "
       + "created, createdby, updated, updatedby, "
-      + "name, client_identifier, client_secret_hash, ad_user_id, ad_role_id, scopes, ad_module_id) "
-      + "VALUES (?, '0', '0', ?, now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, '0')";
+      + "name, client_identifier, client_secret_hash, ad_user_id, ad_role_id, scopes, redirect_uris, ad_module_id) "
+      + "VALUES (?, '0', '0', ?, now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, ?, '0')";
 
   private static final String SQL_UPDATE_CLIENT =
-      "UPDATE etgo_oauth2_client SET name = ?, scopes = ?, ad_user_id = ?, ad_role_id = ?, "
+      "UPDATE etgo_oauth2_client SET name = ?, scopes = ?, redirect_uris = ?, ad_user_id = ?, ad_role_id = ?, "
       + "isactive = ?, updated = now(), updatedby = ? "
       + "WHERE etgo_oauth2_client_id = ?";
 
@@ -192,20 +193,20 @@ public class OAuth2Servlet extends HttpBaseServlet {
       + "WHERE etgo_oauth2_client_id = ?";
 
   private static final String SQL_FIND_CLIENT_BY_ID =
-      "SELECT etgo_oauth2_client_id, name, client_identifier, ad_user_id, ad_role_id, scopes, isactive "
+      "SELECT etgo_oauth2_client_id, name, client_identifier, ad_user_id, ad_role_id, scopes, redirect_uris, isactive "
       + "FROM etgo_oauth2_client WHERE etgo_oauth2_client_id = ?";
 
   private static final String SQL_FIND_CLIENT_BY_IDENTIFIER =
       "SELECT etgo_oauth2_client_id, name, client_identifier, client_secret_hash, "
-      + "ad_user_id, ad_role_id, scopes, isactive "
+      + "ad_user_id, ad_role_id, scopes, redirect_uris, isactive "
       + "FROM etgo_oauth2_client WHERE client_identifier = ?";
 
   private static final String SQL_INSERT_DCR_CLIENT =
       "INSERT INTO etgo_oauth2_client "
       + "(etgo_oauth2_client_id, ad_client_id, ad_org_id, isactive, "
       + "created, createdby, updated, updatedby, "
-      + "name, client_identifier, client_secret_hash, ad_user_id, ad_role_id, scopes, ad_module_id) "
-      + "VALUES (?, '0', '0', 'Y', now(), '0', now(), '0', ?, ?, '', '0', '0', ?, '0')";
+      + "name, client_identifier, client_secret_hash, ad_user_id, ad_role_id, scopes, redirect_uris, ad_module_id) "
+      + "VALUES (?, '0', '0', 'Y', now(), '0', now(), '0', ?, ?, '', '0', '0', ?, ?, '0')";
 
   // --- CORS ---
 
@@ -442,6 +443,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
           client.put(FIELD_AD_USER_ID, rs.getString(FIELD_DB_AD_USER_ID));
           client.put(FIELD_AD_ROLE_ID, rs.getString(FIELD_DB_AD_ROLE_ID));
           client.put(FIELD_SCOPES, rs.getString(FIELD_SCOPES));
+          client.put(FIELD_REDIRECT_URIS_JSON, rs.getString("redirect_uris"));
           client.put(FIELD_IS_ACTIVE, "Y".equals(rs.getString("isactive")));
           clients.put(client);
         }
@@ -477,6 +479,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String adRoleId = body.optString(FIELD_AD_ROLE_ID, null);
       String scopes = body.optString(FIELD_SCOPES, SCOPE_NEO_READ);
       boolean isActive = body.optBoolean(FIELD_IS_ACTIVE, true);
+      String redirectUrisJson = body.optString(FIELD_REDIRECT_URIS_JSON, "[]");
 
       if (name == null || name.trim().isEmpty()) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
@@ -512,6 +515,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
         ps.setString(8, adUserId.trim());         // ad_user_id
         ps.setString(9, adRoleId.trim());         // ad_role_id
         ps.setString(10, scopes.trim());          // scopes
+        ps.setString(11, redirectUrisJson);       // redirect_uris
         ps.executeUpdate();
       }
 
@@ -523,6 +527,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       result.put(FIELD_AD_USER_ID, adUserId.trim());
       result.put(FIELD_AD_ROLE_ID, adRoleId.trim());
       result.put(FIELD_SCOPES, scopes.trim());
+      result.put(FIELD_REDIRECT_URIS_JSON, redirectUrisJson);
       result.put(FIELD_IS_ACTIVE, isActive);
 
       writeJsonResponse(response, HttpServletResponse.SC_CREATED, result);
@@ -562,6 +567,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String scopes = body.optString(FIELD_SCOPES, existing.getString(FIELD_SCOPES));
       String adUserId = body.optString(FIELD_AD_USER_ID, existing.getString(FIELD_AD_USER_ID));
       String adRoleId = body.optString(FIELD_AD_ROLE_ID, existing.getString(FIELD_AD_ROLE_ID));
+      String redirectUrisJson = body.optString(
+          FIELD_REDIRECT_URIS_JSON, existing.optString(FIELD_REDIRECT_URIS_JSON, "[]"));
       boolean isActive = body.has(FIELD_IS_ACTIVE)
           ? body.getBoolean(FIELD_IS_ACTIVE)
           : existing.getBoolean(FIELD_IS_ACTIVE);
@@ -570,11 +577,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
       try (PreparedStatement ps = conn.prepareStatement(SQL_UPDATE_CLIENT)) {
         ps.setString(1, name.trim());
         ps.setString(2, scopes.trim());
-        ps.setString(3, adUserId.trim());
-        ps.setString(4, adRoleId.trim());
-        ps.setString(5, isActive ? "Y" : "N");
-        ps.setString(6, adminUserId);
-        ps.setString(7, id);
+        ps.setString(3, redirectUrisJson);
+        ps.setString(4, adUserId.trim());
+        ps.setString(5, adRoleId.trim());
+        ps.setString(6, isActive ? "Y" : "N");
+        ps.setString(7, adminUserId);
+        ps.setString(8, id);
         int rows = ps.executeUpdate();
         if (rows == 0) {
           writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND,
@@ -590,6 +598,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       result.put(FIELD_AD_USER_ID, adUserId.trim());
       result.put(FIELD_AD_ROLE_ID, adRoleId.trim());
       result.put(FIELD_SCOPES, scopes.trim());
+      result.put(FIELD_REDIRECT_URIS_JSON, redirectUrisJson);
       result.put(FIELD_IS_ACTIVE, isActive);
 
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
@@ -1216,6 +1225,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
         ps.setString(2, clientName);         // name
         ps.setString(3, clientIdentifier);   // client_identifier
         ps.setString(4, scopes);             // scopes
+        ps.setString(5, redirectUris);       // redirect_uris
         ps.executeUpdate();
       }
 
@@ -1417,6 +1427,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
           "Unknown or inactive client_id");
       return false;
     }
+    if (!OAuth2ClientPolicy.isRegisteredRedirectUri(client.redirectUrisJson, redirectUri)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          "redirect_uri is not registered for this client_id");
+      return false;
+    }
     if (!OAuth2ClientPolicy.isSafeRedirectUri(redirectUri)) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
           "redirect_uri must use https, http://localhost, or http://127.0.0.1");
@@ -1453,6 +1468,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
         client.id = rs.getString(DB_OAUTH2_CLIENT_ID);
         client.secretHash = rs.getString("client_secret_hash");
         client.scopes = rs.getString(FIELD_SCOPES);
+        client.redirectUrisJson = rs.getString("redirect_uris");
         client.adClientId = rs.getString("ad_client_id");
         client.adUserId = rs.getString(FIELD_DB_AD_USER_ID);
         client.adRoleId = rs.getString(FIELD_DB_AD_ROLE_ID);
@@ -1482,6 +1498,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
         client.put(FIELD_AD_USER_ID, rs.getString(FIELD_DB_AD_USER_ID));
         client.put(FIELD_AD_ROLE_ID, rs.getString(FIELD_DB_AD_ROLE_ID));
         client.put(FIELD_SCOPES, rs.getString(FIELD_SCOPES));
+        client.put(FIELD_REDIRECT_URIS_JSON, rs.getString("redirect_uris"));
         client.put(FIELD_IS_ACTIVE, "Y".equals(rs.getString("isactive")));
         return client;
       }
@@ -1568,6 +1585,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     String id;
     String secretHash;
     String scopes;
+    String redirectUrisJson;
     String adClientId;
     String adUserId;
     String adRoleId;

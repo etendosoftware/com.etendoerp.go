@@ -73,4 +73,23 @@ final class OAuth2ClientPolicy {
       return false;
     }
   }
+  static boolean isRegisteredRedirectUri(String redirectUrisJson, String redirectUri) {
+    if (redirectUri == null || redirectUri.isEmpty()
+        || redirectUrisJson == null || redirectUrisJson.isEmpty()) {
+      return false;
+    }
+    try {
+      JSONArray redirectUris = new JSONArray(redirectUrisJson);
+      for (int i = 0; i < redirectUris.length(); i++) {
+        if (redirectUri.equals(redirectUris.getString(i))) {
+          return true;
+        }
+      }
+      return false;
+    } catch (JSONException e) {
+      return false;
+    }
+  }
+
+
 }
