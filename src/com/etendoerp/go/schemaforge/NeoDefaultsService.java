@@ -133,7 +133,7 @@ public class NeoDefaultsService {
           }
           if (isSequenceField(adColumn)) {
             sequenceSFFields.add(sfField);  // defer to pass 2
-            continue;
+              continue;
           }
 
           String dbColumnName = adColumn.getDBColumnName();
@@ -1392,8 +1392,13 @@ public class NeoDefaultsService {
     return null;
   }
   /**
-   * Always recompute grossAmount (LINE_GROSS_AMOUNT) before persisting, covering both
-   * tax-inclusive and tax-exclusive price lists.
+   * Architecture note (TODO: review for full removal — ETP-3662):
+   * This method originally always recomputed grossAmount to fix a stale value left by the
+   * product callout (SL_Invoice_Amt fires for qty=1 before the user changes the quantity).
+   * That workaround predates the Schema Forge frontend, which now computes grossAmount
+   * client-side for every field change (qty, listPrice, tax) before the POST/PATCH is sent.
+   * Once all windows that use grossAmount have migrated to client-side computation this
+   * method can be removed along with its call sites in NeoCrudHandler.
    *
    * <p><b>Gross price list</b> (grossUnitPrice > 0): {@code grossAmount = grossUnitPrice × qty}.
    * The price already includes tax, so no lookup needed.</p>
@@ -1401,13 +1406,16 @@ public class NeoDefaultsService {
    * <p><b>Net price list</b> (grossUnitPrice = 0): {@code grossAmount = lineNetAmount × (1 + rate/100)}.
    * The tax rate is fetched from C_Tax using the 'tax' field present in the body.
    * {@code injectLineNetAmountIfMissing} must run before this method so lineNetAmount is available.</p>
-   *
-   * <p>Mirrors the behaviour of {@link #injectLineNetAmountIfMissing}: always recomputes to
-   * override any stale value (e.g. product callout set grossAmount for qty=1 before the user
-   * changed qty).</p>
    */
   public static void injectGrossAmountIfMissing(JSONObject body) {
     if (body == null) {
+      return;
+    }
+    // Client-side computation is the source of truth: if the frontend already sent a non-zero
+    // grossAmount, trust it and skip the server-side fallback entirely.
+    double clientValue = body.optDouble("grossAmount", 0);
+    if (clientValue != 0) {
+      log.debug("[NEO-DEFAULTS] grossAmount={} supplied by client, skipping server injection", clientValue);
       return;
     }
     double qty;
@@ -1470,15 +1478,33 @@ public class NeoDefaultsService {
   }
 
   /**
-   * For order/quotation lines, always recompute 'lineGrossAmount'.
-   * - Gross price list (grossUnitPrice > 0): grossUnitPrice × qty (tax already included).
-   * - Net price list (grossUnitPrice = 0): unitPrice × qty × (1 + taxRate/100).
+   * For order/quotation lines: respects the client-computed {@code lineGrossAmount} when present.
+   * Falls back to server-side computation only when the client did not send a value.
    *
-   * <p>Always recomputes to override any stale value the product callout may have set
-   * for qty=1 (SL_Order_Amt fires on product change before the user sets the quantity).
+   * <p><b>Architecture note (TODO: review for full removal — ETP-3662):</b><br>
+   * This method originally always recomputed lineGrossAmount to fix a stale value left by the
+   * product callout (SL_Order_Amt fires for qty=1 before the user changes the quantity). That
+   * workaround predates the Schema Forge frontend, which now computes lineGrossAmount client-side
+   * for every field change (qty, listPrice, discount, tax) before the POST/PATCH is sent.<br>
+   * As a result the server-side formula is no longer the source of truth for order/quotation
+   * windows. Once all windows that use {@code lineGrossAmount} have migrated to client-side
+   * computation this method can be removed entirely along with its call sites in NeoCrudHandler.
+   *
+   * <p>Fallback formula (gross price list): {@code grossUnitPrice × qty}.<br>
+   * Fallback formula (net price list):      {@code unitPrice × qty}.
+   * Note: unitPrice (PriceActual) is already post-discount — applying discountFactor here
+   * would double the discount.
    */
   public static void injectLineGrossAmountIfMissing(JSONObject body) {
     if (body == null) {
+      return;
+    }
+    // Client-side computation is the source of truth: if the frontend already sent a non-zero
+    // lineGrossAmount, trust it and skip the server-side fallback entirely.
+    double clientValue = body.optDouble("lineGrossAmount", 0);
+    if (clientValue != 0) {
+      log.debug("[NEO-DEFAULTS] lineGrossAmount={} supplied by client, skipping server injection",
+          clientValue);
       return;
     }
     double qty;
@@ -1491,9 +1517,9 @@ public class NeoDefaultsService {
       return;
     }
     double unitPrice = body.optDouble("unitPrice", 0);
-    double discount = body.optDouble("discount", 0);
-    double discountFactor = 1.0 - discount / 100.0;
-    double baseNetAmt = unitPrice > 0 ? unitPrice * qty * discountFactor : 0;
+    // unitPrice (PriceActual) = PriceList × (1 − discount/100): already post-discount.
+    // Do NOT apply discountFactor again — that would double the discount.
+    double baseNetAmt = unitPrice > 0 ? unitPrice * qty : 0;
     String taxId = body.optString("tax", "");
     double computed = resolveGrossAmount(body.optDouble("grossUnitPrice", 0), qty, baseNetAmt, taxId);
     if (Double.isNaN(computed)) {
@@ -1503,7 +1529,7 @@ public class NeoDefaultsService {
       double rounded = java.math.BigDecimal.valueOf(computed)
           .setScale(2, java.math.RoundingMode.HALF_UP).doubleValue();
       body.put("lineGrossAmount", rounded);
-      log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} (qty={}, unitPrice={}, tax={})",
+      log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} (fallback, qty={}, unitPrice={}, tax={})",
           rounded, qty, unitPrice, taxId);
     } catch (Exception e) {
       log.debug("Could not set lineGrossAmount: {}", e.getMessage());
