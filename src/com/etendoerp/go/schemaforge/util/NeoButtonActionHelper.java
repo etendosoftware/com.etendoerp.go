@@ -150,6 +150,10 @@ public final class NeoButtonActionHelper {
     params.put("inpRecordId", pathInfo.recordId);
     addTabParams(entity, pathInfo, params);
     if (obuiappProcess != null) {
+      if (!NeoAccessHelper.hasObuiappProcessAccess(obuiappProcess.getId())) {
+        return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
+            "Access denied to process for current role");
+      }
       return NeoProcessService.executeObuiappProcess(obuiappProcess, params);
     }
     if (!NeoAccessHelper.hasProcessAccess(adProcess.getId())) {

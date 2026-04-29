@@ -20,9 +20,6 @@ package com.etendoerp.go.mcp;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -69,6 +66,7 @@ public class McpServlet extends HttpServlet {
   private static final String SERVER_VERSION = "1.0.0";
 
   private static final String CONTENT_TYPE_JSON = "application/json;charset=UTF-8";
+  private static final String LEGACY_JWT_FALLBACK_SCOPES = "neo:read";
 
   // ── CORS ───────────────────────────────────────────────────────────────
 
@@ -264,7 +262,7 @@ public class McpServlet extends HttpServlet {
           jwt.getClaim("role").asString(),
           jwt.getClaim("client").asString(),
           jwt.getClaim("organization").asString(),
-          "neo:*");
+          LEGACY_JWT_FALLBACK_SCOPES);
     } catch (Exception e) {
       log.warn("Both OAuth2 and JWT authentication failed for MCP request");
       sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
@@ -371,7 +369,7 @@ public class McpServlet extends HttpServlet {
           OBContext.setAdminMode(true);
           try {
             McpToolRouter router = new McpToolRouter();
-            return router.route(toolName, arguments);
+            return router.route(toolName, arguments, parseScopes(identity.scopes));
           } finally {
             OBContext.restorePreviousMode();
           }
@@ -447,10 +445,7 @@ public class McpServlet extends HttpServlet {
   }
 
   private Set<String> parseScopes(String scopes) {
-    if (scopes == null || scopes.trim().isEmpty()) {
-      return Collections.emptySet();
-    }
-    return new HashSet<>(Arrays.asList(scopes.trim().split("\\s+")));
+    return McpAuthorizationService.parseScopes(scopes);
   }
 
   private void sendJsonError(HttpServletRequest request, HttpServletResponse response,

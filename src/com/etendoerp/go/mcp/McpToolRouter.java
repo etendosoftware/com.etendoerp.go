@@ -90,14 +90,17 @@ public class McpToolRouter {
    *
    * @param toolName  MCP tool name (e.g. "neo_list", "complete_order")
    * @param arguments tool arguments (may be null)
+   * @param scopes    OAuth2 scopes granted to this call
    * @return MCP result object with "content" array
    */
-  public JSONObject route(String toolName, JSONObject arguments) {
+  public JSONObject route(String toolName, JSONObject arguments, java.util.Set<String> scopes) {
+    McpAuthorizationService.authorizeToolCall(toolName, scopes);
     try {
       OBContext.setAdminMode();
       try {
         // Resolve spec name from tool name or arguments
         String specName = ToolRegistry.resolveSpecName(toolName, arguments);
+        authorizeSpecAccess(specName);
 
         switch (toolName) {
           case "neo_discover":
@@ -648,6 +651,16 @@ public class McpToolRouter {
       fallback.put("hint", "Use the REST endpoint POST /sws/neo/" + specName
           + " with exportType and params to generate the report via HTTP");
       return wrapAsErrorContent(fallback.toString(2));
+    }
+  }
+
+  private void authorizeSpecAccess(String specName) throws Exception {
+    if (StringUtils.isBlank(specName)) {
+      return;
+    }
+    SFSpec spec = findSpecOrThrow(specName);
+    if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
+      throw new SecurityException("Access denied to spec '" + specName + "' for current role");
     }
   }
 

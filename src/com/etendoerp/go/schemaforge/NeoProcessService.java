@@ -54,6 +54,7 @@ import org.openbravo.service.db.DalBaseProcess;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Service for executing AD_Process definitions via the Neo headless API.
@@ -113,6 +114,9 @@ public class NeoProcessService {
   public static NeoResponse executeProcess(Process process, JSONObject params) {
     if (params == null) {
       params = new JSONObject();
+    }
+    if (!NeoAccessHelper.hasProcessAccess(process.getId())) {
+      return NeoResponse.error(403, "Access denied to process for current role");
     }
     try {
       OBContext.setAdminMode();
@@ -453,6 +457,9 @@ public class NeoProcessService {
    */
   public static NeoResponse executeObuiappProcess(Process process,
       JSONObject params) throws Exception {
+    if (!NeoAccessHelper.hasProcessAccess(process.getId())) {
+      return NeoResponse.error(403, "Access denied to process for current role");
+    }
     return executeObuiappHandler(process.getJavaClassName(), process.getId(), params);
   }
 
@@ -470,6 +477,9 @@ public class NeoProcessService {
   public static NeoResponse executeObuiappProcess(
       org.openbravo.client.application.Process obuiappProcess,
       JSONObject params) {
+    if (!NeoAccessHelper.hasObuiappProcessAccess(obuiappProcess.getId())) {
+      return NeoResponse.error(403, "Access denied to process for current role");
+    }
     if (params == null) {
       params = new JSONObject();
     }

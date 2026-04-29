@@ -79,6 +79,24 @@ public final class NeoAccessHelper {
     return !criteria.list().isEmpty();
   }
 
+  public static boolean hasObuiappProcessAccess(String processId) {
+    String roleId = OBContext.getOBContext().getRole().getId();
+    if ("0".equals(roleId)) {
+      return true;
+    }
+    OBCriteria<org.openbravo.client.application.ProcessAccess> criteria = OBDal.getInstance()
+        .createCriteria(org.openbravo.client.application.ProcessAccess.class);
+    criteria.add(Restrictions.eq(
+        org.openbravo.client.application.ProcessAccess.PROPERTY_OBUIAPPPROCESS + ".id",
+        processId));
+    criteria.add(Restrictions.eq(
+        org.openbravo.client.application.ProcessAccess.PROPERTY_ROLE + ".id", roleId));
+    criteria.add(Restrictions.eq(
+        org.openbravo.client.application.ProcessAccess.PROPERTY_ACTIVE, true));
+    criteria.setMaxResults(1);
+    return !criteria.list().isEmpty();
+  }
+
   /**
    * Resolves the default post (accounting) process used for the Posted button.
    *
