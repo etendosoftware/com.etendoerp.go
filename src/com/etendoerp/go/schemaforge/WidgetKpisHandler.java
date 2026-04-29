@@ -68,8 +68,7 @@ public class WidgetKpisHandler implements NeoHandler {
   private static final String HAS_ACTIVITY_SQL =
       "SELECT 1 FROM c_invoice "
       + "WHERE ad_client_id = :clientId "
-      + "AND docstatus IN ('CO','CL') "
-      + "FETCH FIRST 1 ROW ONLY";
+      + "AND docstatus IN ('CO','CL')";
 
   @Override
   public NeoResponse handle(NeoContext context) {
