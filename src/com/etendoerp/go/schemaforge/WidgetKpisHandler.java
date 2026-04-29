@@ -42,6 +42,7 @@ public class WidgetKpisHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(WidgetKpisHandler.class);
 
   private static final String FORMAT_CURRENCY = "currency";
+  private static final String CLIENT_ID_PARAM = "clientId";
 
   private static final String REVENUE_SQL =
       "SELECT "
@@ -64,6 +65,11 @@ public class WidgetKpisHandler implements NeoHandler {
       + "  AND i.docstatus = 'CO' "
       + "  AND i.outstandingamt > 0";
 
+  private static final String HAS_ACTIVITY_SQL =
+      "SELECT 1 FROM c_invoice "
+      + "WHERE ad_client_id = :clientId "
+      + "AND docstatus IN ('CO','CL')";
+
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!"GET".equals(context.getHttpMethod())) {
@@ -74,6 +80,15 @@ public class WidgetKpisHandler implements NeoHandler {
       OBContext.setAdminMode(true);
       try {
         String clientId = OBContext.getOBContext().getCurrentClient().getId();
+
+        if (!queryHasActivity(clientId)) {
+          JSONObject responseData = new JSONObject();
+          responseData.put("data", new JSONArray());
+          responseData.put("count", 0);
+          JSONObject wrapper = new JSONObject();
+          wrapper.put("response", responseData);
+          return NeoResponse.ok(wrapper);
+        }
 
         BigDecimal[] revenue = queryInvoiceTotals(clientId, "Y");
         BigDecimal[] expenses = queryInvoiceTotals(clientId, "N");
@@ -128,7 +143,7 @@ public class WidgetKpisHandler implements NeoHandler {
     NativeQuery<Object[]> query = OBDal.getInstance()
         .getSession()
         .createNativeQuery(REVENUE_SQL);
-    query.setParameter("clientId", clientId);
+    query.setParameter(CLIENT_ID_PARAM, clientId);
     query.setParameter("isSoTrx", isSoTrx);
 
     List<Object[]> rows = query.list();
@@ -144,13 +159,25 @@ public class WidgetKpisHandler implements NeoHandler {
   }
 
   /**
+   * Returns true if the client has at least one completed/closed invoice.
+   * Uses FETCH FIRST 1 ROW ONLY to stop at the first match.
+   */
+  private boolean queryHasActivity(String clientId) {
+    NativeQuery<Object> query = OBDal.getInstance()
+        .getSession()
+        .createNativeQuery(HAS_ACTIVITY_SQL);
+    query.setParameter(CLIENT_ID_PARAM, clientId);
+    return query.setMaxResults(1).uniqueResult() != null;
+  }
+
+  /**
    * Counts pending sales invoices (outstanding amount > 0, completed status).
    */
   private long queryPendingInvoices(String clientId) {
     NativeQuery<Number> query = OBDal.getInstance()
         .getSession()
         .createNativeQuery(PENDING_SQL);
-    query.setParameter("clientId", clientId);
+    query.setParameter(CLIENT_ID_PARAM, clientId);
 
     Number result = query.uniqueResult();
     return result != null ? result.longValue() : 0L;

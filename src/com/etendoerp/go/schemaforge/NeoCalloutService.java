@@ -24,6 +24,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -44,6 +45,7 @@ import org.openbravo.base.secureApp.LoginUtils;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.erpCommon.ad_callouts.SimpleCallout;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.domain.Callout;
 import org.openbravo.model.ad.domain.ModelImplementation;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
@@ -66,6 +68,19 @@ public class NeoCalloutService {
   private static final String VALUE_KEY = "value";
   private static final String IDENTIFIER_KEY = "_identifier";
   private static final String FIELD_ENTRIES = "entries";
+
+  // Per-JVM cache of scalar AD_Column/callout metadata by tableId. Do not cache DAL
+  // entities here: Hibernate proxies are session-bound and will fail on later requests.
+  private static final Map<String, List<ColumnCalloutMetadata>> CALLOUT_METADATA_BY_TABLE =
+      new ConcurrentHashMap<>();
+
+  /**
+   * Invalidate the metadata caches. Call after any operation that mutates AD_Column
+   * or AD_ModelImplementation (e.g., module install/upgrade, manual AD edits).
+   */
+  public static void clearMetadataCache() {
+    CALLOUT_METADATA_BY_TABLE.clear();
+  }
 
   private NeoCalloutService() {
   }
@@ -182,6 +197,25 @@ public class NeoCalloutService {
   }
 
   /**
+   * Scalar callout metadata for one AD column.
+   *
+   * <p>This intentionally stores only immutable values read from DAL entities. Keeping
+   * {@link Column}, {@link Callout}, or other DAL objects in the JVM cache would retain
+   * Hibernate proxies outside their owning session.</p>
+   */
+  static class ColumnCalloutMetadata {
+    final String dbColumnName;
+    final String calloutName;
+    final String className;
+
+    ColumnCalloutMetadata(String dbColumnName, String calloutName, String className) {
+      this.dbColumnName = dbColumnName;
+      this.calloutName = calloutName;
+      this.className = className;
+    }
+  }
+
+  /**
    * Resolve the callout class for a given field name on a tab.
    * Looks up the AD_Column by matching the field name (clean REST name
    * or DB column name), then resolves the callout Java class.
@@ -197,46 +231,18 @@ public class NeoCalloutService {
 
     String tableId = adTab.getTable().getId();
 
-    // Find columns for this table
-    OBCriteria<Column> colCriteria = OBDal.getInstance().createCriteria(Column.class);
-    colCriteria.add(Restrictions.eq(Column.PROPERTY_TABLE + ".id", tableId));
-    colCriteria.add(Restrictions.eq(Column.PROPERTY_ACTIVE, true));
-    List<Column> columns = colCriteria.list();
+    List<ColumnCalloutMetadata> columns = CALLOUT_METADATA_BY_TABLE.computeIfAbsent(tableId,
+        NeoCalloutService::loadColumnCalloutMetadata);
 
     // Try to match the field name against column names.
     // First try OBDal property name (e.g., "businessPartner" for C_BPartner_ID) — this
     // is what the frontend sends, matching the names used in GET responses.
-    Column matchedColumn = null;
-    try {
-      Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(tableId);
-      if (dalEntity != null) {
-        for (Column col : columns) {
-          Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-          if (prop != null && prop.getName().equals(fieldName)) {
-            matchedColumn = col;
-            break;
-          }
-        }
-      }
-    } catch (Exception e) {
-      log.debug("Could not resolve property name for field '{}': {}", fieldName, e.getMessage());
-    }
+    ColumnCalloutMetadata matchedColumn = findColumnByDalPropertyName(tableId, fieldName, columns);
 
     // Fallback: try DB column name, clean REST name, and inp name
     if (matchedColumn == null) {
-      for (Column col : columns) {
-        String dbColName = col.getDBColumnName();
-        if (dbColName.equalsIgnoreCase(fieldName)) {
-          matchedColumn = col;
-          break;
-        }
-        String cleanName = toCleanFieldName(dbColName);
-        if (cleanName.equalsIgnoreCase(fieldName)) {
-          matchedColumn = col;
-          break;
-        }
-        String inpName = toInpName(dbColName);
-        if (inpName.equalsIgnoreCase(fieldName)) {
+      for (ColumnCalloutMetadata col : columns) {
+        if (matchesColumnFieldName(col.dbColumnName, fieldName)) {
           matchedColumn = col;
           break;
         }
@@ -249,29 +255,87 @@ public class NeoCalloutService {
       return null;
     }
 
-    if (matchedColumn.getCallout() == null) {
-      log.debug("Column '{}' has no callout configured", matchedColumn.getDBColumnName());
+    if (StringUtils.isBlank(matchedColumn.className)) {
+      log.debug("Column '{}' has no callout configured", matchedColumn.dbColumnName);
       return null;
     }
 
-    // Resolve callout class name from AD_ModelImplementation
-    List<ModelImplementation> implementations =
-        matchedColumn.getCallout().getADModelImplementationList();
-    if (implementations == null || implementations.isEmpty()) {
-      log.warn("Callout '{}' for column '{}' has no model implementation",
-          matchedColumn.getCallout().getName(), matchedColumn.getDBColumnName());
-      return null;
-    }
+    String inpName = toInpName(matchedColumn.dbColumnName);
+    return new CalloutInfo(matchedColumn.className, inpName, matchedColumn.dbColumnName);
+  }
 
-    String className = implementations.get(0).getJavaClassName();
-    if (StringUtils.isBlank(className)) {
-      log.warn("Callout implementation for column '{}' has no Java class name",
-          matchedColumn.getDBColumnName());
-      return null;
-    }
+  /**
+   * Checks whether a REST field name refers to a DB column using any supported naming form.
+   *
+   * @param dbColumnName the AD column DB name, such as {@code C_BPartner_ID}
+   * @param fieldName    the request field name to match
+   * @return {@code true} when the field matches the DB name, clean REST name, or inp name
+   */
+  private static boolean matchesColumnFieldName(String dbColumnName, String fieldName) {
+    return dbColumnName.equalsIgnoreCase(fieldName)
+        || toCleanFieldName(dbColumnName).equalsIgnoreCase(fieldName)
+        || toInpName(dbColumnName).equalsIgnoreCase(fieldName);
+  }
 
-    String inpName = toInpName(matchedColumn.getDBColumnName());
-    return new CalloutInfo(className, inpName, matchedColumn.getDBColumnName());
+  /**
+   * Finds a column by matching the field name against the DAL property name.
+   *
+   * @param tableId   the AD_Table id
+   * @param fieldName the request field name to match
+   * @param columns   cached column callout metadata for the table
+   * @return matching column metadata, or {@code null} when not found
+   */
+  private static ColumnCalloutMetadata findColumnByDalPropertyName(
+      String tableId, String fieldName, List<ColumnCalloutMetadata> columns) {
+    try {
+      Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(tableId);
+      if (dalEntity != null) {
+        for (ColumnCalloutMetadata col : columns) {
+          Property prop = dalEntity.getPropertyByColumnName(col.dbColumnName);
+          if (prop != null && prop.getName().equals(fieldName)) {
+            return col;
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve property name for field '{}': {}", fieldName, e.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * Loads callout metadata for all active columns in a table and materializes it as scalars.
+   *
+   * @param tableId the AD_Table id whose active columns should be inspected
+   * @return scalar metadata entries suitable for JVM-level caching
+   */
+  static List<ColumnCalloutMetadata> loadColumnCalloutMetadata(String tableId) {
+    OBCriteria<Column> colCriteria = OBDal.getInstance().createCriteria(Column.class);
+    colCriteria.add(Restrictions.eq(Column.PROPERTY_TABLE + ".id", tableId));
+    colCriteria.add(Restrictions.eq(Column.PROPERTY_ACTIVE, true));
+    List<Column> columns = colCriteria.list();
+    List<ColumnCalloutMetadata> metadata = new java.util.ArrayList<>(columns.size());
+    for (Column column : columns) {
+      String className = "";
+      String calloutName = null;
+      Callout callout = column.getCallout();
+      if (callout != null) {
+        calloutName = callout.getName();
+        List<ModelImplementation> implementations = callout.getADModelImplementationList();
+        if (implementations == null || implementations.isEmpty()) {
+          log.warn("Callout '{}' for column '{}' has no model implementation",
+              calloutName, column.getDBColumnName());
+        } else {
+          className = StringUtils.defaultString(implementations.get(0).getJavaClassName());
+          if (StringUtils.isBlank(className)) {
+            log.warn("Callout implementation for column '{}' has no Java class name",
+                column.getDBColumnName());
+          }
+        }
+      }
+      metadata.add(new ColumnCalloutMetadata(column.getDBColumnName(), calloutName, className));
+    }
+    return metadata;
   }
 
   // ── Field name mapping ─────────────────────────────────────────────
