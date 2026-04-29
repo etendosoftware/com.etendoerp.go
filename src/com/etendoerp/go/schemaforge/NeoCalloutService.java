@@ -237,21 +237,7 @@ public class NeoCalloutService {
     // Try to match the field name against column names.
     // First try OBDal property name (e.g., "businessPartner" for C_BPartner_ID) — this
     // is what the frontend sends, matching the names used in GET responses.
-    ColumnCalloutMetadata matchedColumn = null;
-    try {
-      Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(tableId);
-      if (dalEntity != null) {
-        for (ColumnCalloutMetadata col : columns) {
-          Property prop = dalEntity.getPropertyByColumnName(col.dbColumnName);
-          if (prop != null && prop.getName().equals(fieldName)) {
-            matchedColumn = col;
-            break;
-          }
-        }
-      }
-    } catch (Exception e) {
-      log.debug("Could not resolve property name for field '{}': {}", fieldName, e.getMessage());
-    }
+    ColumnCalloutMetadata matchedColumn = findColumnByDalPropertyName(tableId, fieldName, columns);
 
     // Fallback: try DB column name, clean REST name, and inp name
     if (matchedColumn == null) {
@@ -289,6 +275,32 @@ public class NeoCalloutService {
     return dbColumnName.equalsIgnoreCase(fieldName)
         || toCleanFieldName(dbColumnName).equalsIgnoreCase(fieldName)
         || toInpName(dbColumnName).equalsIgnoreCase(fieldName);
+  }
+
+  /**
+   * Finds a column by matching the field name against the DAL property name.
+   *
+   * @param tableId   the AD_Table id
+   * @param fieldName the request field name to match
+   * @param columns   cached column callout metadata for the table
+   * @return matching column metadata, or {@code null} when not found
+   */
+  private static ColumnCalloutMetadata findColumnByDalPropertyName(
+      String tableId, String fieldName, List<ColumnCalloutMetadata> columns) {
+    try {
+      Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(tableId);
+      if (dalEntity != null) {
+        for (ColumnCalloutMetadata col : columns) {
+          Property prop = dalEntity.getPropertyByColumnName(col.dbColumnName);
+          if (prop != null && prop.getName().equals(fieldName)) {
+            return col;
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve property name for field '{}': {}", fieldName, e.getMessage());
+    }
+    return null;
   }
 
   /**
