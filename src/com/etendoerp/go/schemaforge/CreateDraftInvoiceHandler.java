@@ -150,7 +150,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     the primary key of the source document
    * @return HTTP 201 with invoice id/documentNo on success, or an error response
    */
-  private NeoResponse handleCreate(NeoContext context, String recordId) {
+  protected NeoResponse handleCreate(NeoContext context, String recordId) {
     String specName = context.getSpecName();
     try {
       OBContext.setAdminMode(true);
@@ -217,7 +217,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     the current NEO request context
    * @return HTTP 200 with the existence payload, or an error response
    */
-  private NeoResponse handleCheck(NeoContext context) {
+  protected NeoResponse handleCheck(NeoContext context) {
     String recordId = context.getRecordId();
     String specName = context.getSpecName();
     try {
@@ -271,7 +271,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * This works even when C_Invoice.C_Order_ID is not set (e.g. invoices created
    * from classic Etendo UI that link via C_InvoiceLine.C_OrderLine_ID).
    */
-  private NeoResponse handleList(NeoContext context) {
+  protected NeoResponse handleList(NeoContext context) {
     String recordId = context.getRecordId();
     if (StringUtils.isBlank(recordId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
@@ -333,7 +333,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     the spec name determining the lookup strategy
    * @return list of matching draft invoices, newest first; empty list if none found
    */
-  private List<Invoice> findExistingDrafts(List<String> recordIds, String specName) {
+  protected List<Invoice> findExistingDrafts(List<String> recordIds, String specName) {
     if (recordIds.isEmpty()) return java.util.Collections.emptyList();
     String hql;
     if (SPEC_SALES_ORDER.equals(specName) || SPEC_SALES_QUOTATION.equals(specName)) {
@@ -374,7 +374,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * here is exactly the next number the classic UI would assign — no
    * sequence names are hard-coded anywhere in this class.
    */
-  private void ensureDocumentNo(Invoice invoice) {
+  protected void ensureDocumentNo(Invoice invoice) {
     if (StringUtils.isNotBlank(invoice.getDocumentNo())) {
       return;
     }
@@ -383,7 +383,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       log.warn(
           "Could not generate documentNo for invoice {} (docType={}, client={}). " + "Verify the DocType's DocNoSequence_ID is set, or that the table-level " + "AD_Sequence for C_Invoice exists for the client.",
           invoice.getId(), invoice.getDocumentType() != null ? invoice.getDocumentType().getId() : "null",
-          invoice.getClient().getId());
+          invoice.getClient() != null ? invoice.getClient().getId() : "null");
       return;
     }
     log.info("Generated documentNo='{}' for invoice {}", docNo, invoice.getId());
@@ -398,7 +398,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * consistent with whatever the classic UI / native invoice processes would
    * produce.
    */
-  private String generateInvoiceDocumentNo(final Invoice invoice) {
+  protected String generateInvoiceDocumentNo(final Invoice invoice) {
     final Entity invoiceEntity = ModelProvider.getInstance().getEntity(Invoice.class);
     return Utility.getDocumentNo(OBDal.getInstance().getConnection(false), new DalConnectionProvider(false),
         RequestContext.get().getVariablesSecureApp(), "", invoiceEntity.getTableName(),
@@ -413,7 +413,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * to "CA" after generating an order — direct write via OBDal, no
    * {@code C_Order_Post} invocation.
    */
-  private void markQuotationAsInvoiceCreated(String quotationId) {
+  protected void markQuotationAsInvoiceCreated(String quotationId) {
     Order quotation = OBDal.getInstance().get(Order.class, quotationId);
     if (quotation == null) {
       return;
@@ -427,7 +427,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * Format: { "lines": [ { "orderLineId": "ABC", "quantity": 5 }, ... ] }
    * Returns a map of orderLineId/shipmentLineId -> quantity. Empty map means invoice all.
    */
-  private Map<String, BigDecimal> parseLineOverrides(JSONObject body) {
+  protected Map<String, BigDecimal> parseLineOverrides(JSONObject body) {
     Map<String, BigDecimal> overrides = new HashMap<>();
     if (body == null || !body.has("lines")) {
       return overrides;
@@ -467,7 +467,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     if the order is not found, has no invoiceable lines, or
    *     no AR Invoice document type can be resolved
    */
-  private Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides) {
+  protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides) {
     Order order = OBDal.getInstance().get(Order.class, orderId);
     if (order == null) {
       throw new OBException("Order not found: " + orderId);
@@ -528,7 +528,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * @return JSON array of {@code {id, orderedQuantity}} objects; may be empty if
    *     all lines are already fully invoiced
    */
-  private JSONArray buildSelectedLinesForOrder(Order order, Map<String, BigDecimal> lineOverrides) {
+  protected JSONArray buildSelectedLinesForOrder(Order order, Map<String, BigDecimal> lineOverrides) {
     boolean hasOverrides = !lineOverrides.isEmpty();
     JSONArray selectedLines = new JSONArray();
     for (OrderLine ol : order.getOrderLineList()) {
@@ -561,7 +561,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     {@code hasOverrides} is {@code true}
    * @return quantity to invoice, or {@code null} to skip this line
    */
-  private BigDecimal resolvePendingForLine(OrderLine ol, boolean hasOverrides, Map<String, BigDecimal> lineOverrides) {
+  protected BigDecimal resolvePendingForLine(OrderLine ol, boolean hasOverrides, Map<String, BigDecimal> lineOverrides) {
     if (!ol.isActive() || ol.getProduct() == null) return null;
     if (hasOverrides && !lineOverrides.containsKey(ol.getId())) return null;
     BigDecimal ordered = ol.getOrderedQuantity() != null ? ol.getOrderedQuantity() : BigDecimal.ZERO;
@@ -596,7 +596,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * No sequence names are hard-coded; the choice is driven entirely by what
    * the AD has configured in {@code C_DocType.DocNoSequence_ID}.
    */
-  private DocumentType resolveARInvoiceDocType(Order order) {
+  protected DocumentType resolveARInvoiceDocType(Order order) {
     DocumentType orderDocType = order.getTransactionDocument();
     DocumentType linkedFromOrder = orderDocType != null ? orderDocType.getDocumentTypeForInvoice() : null;
 
@@ -626,7 +626,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     fallback ID used when {@code shipmentIds} is absent or empty
    * @return non-empty list of shipment IDs to invoice
    */
-  private List<String> parseShipmentIds(JSONObject body, String recordId) {
+  protected List<String> parseShipmentIds(JSONObject body, String recordId) {
     List<String> ids = new java.util.ArrayList<>();
     if (body != null && body.has(PARAM_SHIPMENT_IDS)) {
       try {
@@ -661,7 +661,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     if a shipment is not found, shipments span multiple
    *     business partners, or no AR Invoice document type exists
    */
-  private Invoice createFromShipments(List<String> shipmentIds, Map<String, BigDecimal> lineOverrides) {
+  protected Invoice createFromShipments(List<String> shipmentIds, Map<String, BigDecimal> lineOverrides) {
     List<ShipmentInOut> shipments = loadAndValidateShipments(shipmentIds);
 
     ShipmentInOut first = shipments.get(0);
@@ -686,7 +686,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * @throws OBException
    *     if any ID is not found or shipments span multiple BPs
    */
-  private List<ShipmentInOut> loadAndValidateShipments(List<String> shipmentIds) {
+  protected List<ShipmentInOut> loadAndValidateShipments(List<String> shipmentIds) {
     List<ShipmentInOut> shipments = new java.util.ArrayList<>();
     for (String id : shipmentIds) {
       ShipmentInOut s = OBDal.getInstance().get(ShipmentInOut.class, id);
@@ -724,7 +724,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     if no AR Invoice document type is found or the BP lacks
    *     mandatory payment terms / payment method
    */
-  private Invoice createInvoiceHeaderFromShipment(ShipmentInOut first, List<ShipmentInOut> shipments) {
+  protected Invoice createInvoiceHeaderFromShipment(ShipmentInOut first, List<ShipmentInOut> shipments) {
     BusinessPartner bp = first.getBusinessPartner();
     Order linkedOrder = first.getSalesOrder();
 
@@ -790,7 +790,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     map of {@code M_InOutLine_ID → quantity} caps; empty means
    *     use full movement quantity for all lines
    */
-  private void addShipmentLinesToInvoice(Invoice invoice, List<ShipmentInOut> shipments,
+  protected void addShipmentLinesToInvoice(Invoice invoice, List<ShipmentInOut> shipments,
       Map<String, BigDecimal> lineOverrides) {
     boolean hasOverrides = !lineOverrides.isEmpty();
     long lineNo = 10;
@@ -821,7 +821,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     caller-supplied quantity caps per shipment line
    * @return quantity to invoice, or {@code null} to skip this line
    */
-  private BigDecimal resolveShipmentLineQty(ShipmentInOutLine sl, boolean hasOverrides,
+  protected BigDecimal resolveShipmentLineQty(ShipmentInOutLine sl, boolean hasOverrides,
       Map<String, BigDecimal> lineOverrides) {
     if (!sl.isActive() || (hasOverrides && !lineOverrides.containsKey(sl.getId()))) {
       return null;
@@ -850,7 +850,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     sequential line number to assign (10, 20, …)
    * @return a transient {@link InvoiceLine} ready to be saved
    */
-  private InvoiceLine createShipmentInvoiceLine(Invoice invoice, ShipmentInOutLine sl, BigDecimal qty, long lineNo) {
+  protected InvoiceLine createShipmentInvoiceLine(Invoice invoice, ShipmentInOutLine sl, BigDecimal qty, long lineNo) {
     InvoiceLine il = OBProvider.getInstance().get(InvoiceLine.class);
     il.setOrganization(sl.getOrganization());
     il.setInvoice(invoice);
@@ -885,7 +885,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * This helper fills it in using either {@code grossUnitPrice * qty} when
    * available, or {@code lineNetAmount * (1 + taxRate/100)} as a fallback.
    */
-  private void ensureLineGrossAmounts(Invoice invoice) {
+  protected void ensureLineGrossAmounts(Invoice invoice) {
     int precision = invoice.getCurrency().getStandardPrecision().intValue();
     for (InvoiceLine il : invoice.getInvoiceLineList()) {
       BigDecimal current = il.getGrossAmount();
@@ -911,7 +911,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     the number of decimal places (from the invoice currency)
    * @return the computed gross amount, never {@code null}
    */
-  private BigDecimal calculateLineGross(InvoiceLine il, int precision) {
+  protected BigDecimal calculateLineGross(InvoiceLine il, int precision) {
     BigDecimal qty = il.getInvoicedQuantity() != null ? il.getInvoicedQuantity() : BigDecimal.ZERO;
     BigDecimal grossPrice = il.getGrossUnitPrice();
     if (grossPrice != null && grossPrice.compareTo(BigDecimal.ZERO) > 0) {
@@ -940,7 +940,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * @param invoice
    *     the invoice whose totals should be recalculated
    */
-  private void recalculateTotals(Invoice invoice) {
+  protected void recalculateTotals(Invoice invoice) {
     int precision = invoice.getCurrency().getStandardPrecision().intValue();
 
     // Pass 1: ensure lineNetAmount is set; accumulate taxable base per tax
@@ -1011,7 +1011,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     the {@code AD_Org_ID} of the target invoice's organization
    * @return the best matching {@link DocumentType}, or {@code null} if none exists
    */
-  private DocumentType findARInvoiceDocType(String orgId) {
+  protected DocumentType findARInvoiceDocType(String orgId) {
     List<DocumentType> withSeq = OBDal.getInstance().createCriteria(DocumentType.class).add(
         Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, "ARI")).add(
         Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, true)).add(
@@ -1049,7 +1049,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     the document types to summarize
    * @return a bracketed string listing each type's key attributes
    */
-  private String summarizeDocTypes(List<DocumentType> list) {
+  protected String summarizeDocTypes(List<DocumentType> list) {
     StringBuilder sb = new StringBuilder("[");
     for (int i = 0; i < list.size(); i++) {
       DocumentType d = list.get(i);
@@ -1074,7 +1074,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     the target organization ID
    * @return the best match, or {@code null} if the list is empty
    */
-  private DocumentType pickByOrg(List<DocumentType> candidates, String orgId) {
+  protected DocumentType pickByOrg(List<DocumentType> candidates, String orgId) {
     for (DocumentType dt : candidates) {
       if (orgId.equals(dt.getOrganization().getId())) {
         return dt;
