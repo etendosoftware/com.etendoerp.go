@@ -9,6 +9,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
+import javax.servlet.annotation.MultipartConfig;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -49,6 +50,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * which point directly to AD_Window, AD_Tab, and AD_Column.
  * Hooks are discovered via CDI using the Java_Qualifier on ETGO_SF_Entity.
  */
+@MultipartConfig(maxFileSize = 10L * 1024 * 1024, maxRequestSize = 12L * 1024 * 1024, fileSizeThreshold = 1024 * 1024)
 public class NeoServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
@@ -194,6 +196,19 @@ public class NeoServlet extends HttpBaseServlet {
         }
         sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
             "Filters endpoint only supports GET, PUT and DELETE");
+        return;
+      }
+
+      // Certificate endpoint: GET (status) or POST (upload)
+      if ("certificate".equals(pathInfo.specName)) {
+        if ("GET".equals(method)) {
+          writeResponse(response, NeoCertificateHelper.handleCertificateGet(request));
+        } else if ("POST".equals(method)) {
+          writeResponse(response, NeoCertificateHelper.handleCertificateUpload(request));
+        } else {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Certificate endpoint supports GET and POST");
+        }
         return;
       }
 
