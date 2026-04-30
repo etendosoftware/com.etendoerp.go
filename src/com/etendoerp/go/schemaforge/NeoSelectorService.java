@@ -50,7 +50,6 @@ public class NeoSelectorService {
 
   private static final int DEFAULT_LIMIT = 20;
   private static final int MAX_LIMIT = 100;
-  private static final String PARAM_PRICE_LIST = "priceList";
 
   /** AD_Reference base IDs for FK types — shared across Neo* and MCP classes. */
   public static final String REF_TABLE = "18";

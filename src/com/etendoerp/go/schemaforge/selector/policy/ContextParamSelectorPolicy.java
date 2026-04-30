@@ -30,6 +30,7 @@ public final class ContextParamSelectorPolicy implements SelectorContextPolicy {
       "ProductByPriceAndWarehouse";
 
   public ContextParamSelectorPolicy() {
+    // Stateless policy; public constructor supports registry composition without CDI.
   }
 
   /**

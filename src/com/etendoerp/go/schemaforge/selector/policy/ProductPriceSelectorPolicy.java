@@ -39,6 +39,7 @@ public final class ProductPriceSelectorPolicy implements SelectorEnrichmentPolic
   private static final Logger log = LogManager.getLogger(ProductPriceSelectorPolicy.class);
 
   public ProductPriceSelectorPolicy() {
+    // Stateless policy; public constructor supports registry composition without CDI.
   }
 
   @Override
