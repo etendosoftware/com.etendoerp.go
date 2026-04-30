@@ -16,250 +16,34 @@
  */
 package com.etendoerp.go.schemaforge;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
-import org.apache.commons.lang3.StringUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONArray;
-import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
-import org.hibernate.query.NativeQuery;
-import org.openbravo.dal.service.OBCriteria;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 
 /**
- * Selector policies that are specific to business concepts rather than selector execution.
+ * Selector policy facade for business-specific selector behavior.
  */
 final class NeoSelectorPolicy {
-
-  private static final Logger log = LogManager.getLogger(NeoSelectorPolicy.class);
-  private static final Map<String, String> REFERENCE_OVERRIDE_FILTERS;
-  private static final String ENTITY_BUSINESS_PARTNER = "BusinessPartner";
-  private static final String ENTITY_PRODUCT_BY_PRICE_AND_WAREHOUSE =
-      "ProductByPriceAndWarehouse";
-
-  static {
-    Map<String, String> overrides = new HashMap<>();
-    overrides.put("166", "e.salesPriceList = true");
-    overrides.put("800031", "e.salesPriceList = false");
-    overrides.put("EED0EF97D4A7421687F3B365D009E7A6",
-        "exists (select 1 from FinancialMgmtFinAccPaymentMethod fapm"
-            + " where fapm.paymentMethod = e and fapm.active = true)");
-    overrides.put("DF1CEA94B3564A33AFDB37C07E1CE353",
-        "exists (select 1 from FinancialMgmtFinAccPaymentMethod fapm"
-            + " where fapm.account = e and fapm.active = true)");
-    REFERENCE_OVERRIDE_FILTERS = java.util.Collections.unmodifiableMap(overrides);
-  }
-
 
   private NeoSelectorPolicy() {
   }
 
   static String resolveReferenceOverrideFilter(String referenceSearchKeyId) {
-    if (referenceSearchKeyId == null) {
-      return null;
-    }
-    return REFERENCE_OVERRIDE_FILTERS.get(referenceSearchKeyId);
+    return ReferenceOverrideSelectorPolicy.resolveFilter(referenceSearchKeyId);
   }
 
   static String resolveContextParamFilter(String entityName,
       Map<String, String> contextParams, String alias) {
-    if (contextParams == null || contextParams.isEmpty() || entityName == null) {
-      return null;
-    }
-    String effectiveAlias = (alias != null && !alias.isEmpty()) ? alias : "e";
-    if (ENTITY_BUSINESS_PARTNER.equals(entityName)) {
-      return resolveBusinessPartnerFilter(contextParams, effectiveAlias);
-    }
-    if (ENTITY_PRODUCT_BY_PRICE_AND_WAREHOUSE.equals(entityName)) {
-      return resolveProductByPriceFilter(contextParams, effectiveAlias);
-    }
-    return null;
-  }
-
-  private static String resolveBusinessPartnerFilter(Map<String, String> contextParams,
-      String alias) {
-    List<String> conditions = new ArrayList<>();
-    addBooleanEqualsCondition(conditions, alias + ".customer", contextParams.get("isCustomer"));
-    addBooleanEqualsCondition(conditions, alias + ".vendor", contextParams.get("isVendor"));
-    return conditions.isEmpty() ? null : String.join(" AND ", conditions);
-  }
-
-  private static String resolveProductByPriceFilter(Map<String, String> contextParams,
-      String alias) {
-    String priceListId = contextParams.get("priceList");
-    if (StringUtils.isNotBlank(priceListId) && priceListId.matches("[A-Za-z0-9\\-]+")) {
-      return alias + ".productPrice.priceListVersion.priceList.id = '" + priceListId + "'";
-    }
-    String isSOTrx = contextParams.get("isSOTrx");
-    if ("Y".equalsIgnoreCase(isSOTrx)) {
-      return alias + ".productPrice.priceListVersion.priceList.salesPriceList = true";
-    }
-    if ("N".equalsIgnoreCase(isSOTrx)) {
-      return alias + ".productPrice.priceListVersion.priceList.salesPriceList = false";
-    }
-    return null;
-  }
-
-  private static void addBooleanEqualsCondition(List<String> conditions, String fieldExpr,
-      String flag) {
-    if ("Y".equalsIgnoreCase(flag)) {
-      conditions.add(fieldExpr + " = true");
-    } else if ("N".equalsIgnoreCase(flag)) {
-      conditions.add(fieldExpr + " = false");
-    }
+    return ContextParamSelectorPolicy.resolveFilter(entityName, contextParams, alias);
   }
 
   static Column resolveVirtualSelectorColumn(SFEntity entity, String columnName) {
-    if (entity == null || StringUtils.isBlank(columnName)) {
-      return null;
-    }
-
-    org.openbravo.model.ad.ui.Tab tab = entity.getADTab();
-    String tableName = tab != null && tab.getTable() != null
-        ? tab.getTable().getDBTableName()
-        : null;
-
-    boolean isBPartnerLocationWrapper = "C_BPartner_Location".equalsIgnoreCase(tableName)
-        || "locationAddress".equals(entity.getName());
-    boolean isLocationVirtualColumn = "C_Country_ID".equalsIgnoreCase(columnName)
-        || "C_Region_ID".equalsIgnoreCase(columnName);
-    if (!isBPartnerLocationWrapper || !isLocationVirtualColumn) {
-      return null;
-    }
-
-    OBCriteria<Column> criteria = OBDal.getInstance().createCriteria(Column.class);
-    criteria.createAlias(Column.PROPERTY_TABLE, "tbl");
-    criteria.add(Restrictions.eq("tbl.dBTableName", "C_Location"));
-    criteria.add(Restrictions.eq(Column.PROPERTY_DBCOLUMNNAME, columnName));
-    criteria.setMaxResults(1);
-
-    List<Column> results = criteria.list();
-    if (results.isEmpty()) {
-      return null;
-    }
-    log.debug("Resolved virtual selector column {} for entity {}", columnName, entity.getName());
-    return results.get(0);
+    return AddressVirtualSelectorPolicy.resolveVirtualSelectorColumn(entity, columnName);
   }
 
   static NeoResponse enrichProductSelectorWithPrices(NeoResponse response, String priceListId) {
-    if (response == null || response.getBody() == null || StringUtils.isBlank(priceListId)) {
-      return response;
-    }
-    try {
-      JSONArray items = response.getBody().optJSONArray("items");
-      if (items == null || items.length() == 0) {
-        return response;
-      }
-
-      DeduplicatedItems deduplicated = deduplicateProductItems(items);
-      if (deduplicated.items.length() < items.length()) {
-        response.getBody().put("items", deduplicated.items);
-        items = deduplicated.items;
-      }
-      if (deduplicated.productIds.isEmpty()) {
-        return response;
-      }
-
-      Map<String, Object[]> priceMap = loadProductPrices(priceListId, deduplicated.productIds);
-      if (priceMap.isEmpty()) {
-        return response;
-      }
-
-      injectPrices(items, priceMap);
-    } catch (Exception e) {
-      log.warn("Failed to enrich product selector with prices for priceList {}: {}",
-          priceListId, e.getMessage());
-    }
-    return response;
-  }
-
-  private static DeduplicatedItems deduplicateProductItems(JSONArray items) throws Exception {
-    Set<String> seenIds = new LinkedHashSet<>();
-    JSONArray deduplicatedItems = new JSONArray();
-    for (int i = 0; i < items.length(); i++) {
-      JSONObject item = items.getJSONObject(i);
-      String itemId = item.optString("id");
-      if (StringUtils.isNotBlank(itemId) && seenIds.add(itemId)) {
-        deduplicatedItems.put(item);
-      }
-    }
-    return new DeduplicatedItems(deduplicatedItems, new ArrayList<>(seenIds));
-  }
-
-  private static Map<String, Object[]> loadProductPrices(String priceListId, List<String> productIds) {
-    String sql = buildProductPriceSql(productIds.size());
-    @SuppressWarnings("rawtypes")
-    NativeQuery nq = OBDal.getInstance().getSession().createNativeQuery(sql);
-    nq.setParameter("priceListId", priceListId);
-    for (int i = 0; i < productIds.size(); i++) {
-      nq.setParameter("pid" + i, productIds.get(i));
-    }
-    Map<String, Object[]> priceMap = new HashMap<>();
-    for (Object row : nq.list()) {
-      Object[] cols = (Object[]) row;
-      priceMap.put(String.valueOf(cols[0]), cols);
-    }
-    return priceMap;
-  }
-
-  private static String buildProductPriceSql(int productCount) {
-    StringBuilder inClause = new StringBuilder();
-    for (int i = 0; i < productCount; i++) {
-      if (i > 0) {
-        inClause.append(", ");
-      }
-      inClause.append(":pid").append(i);
-    }
-    return "SELECT pp.m_product_id,"
-        + "  COALESCE(pp.pricestd, 0) AS standard_price,"
-        + "  COALESCE(pp.pricelist, 0) AS list_price,"
-        + "  pl.istaxincluded AS is_tax_included"
-        + " FROM m_productprice pp"
-        + " JOIN m_pricelist_version plv"
-        + "   ON plv.m_pricelist_version_id = pp.m_pricelist_version_id"
-        + " JOIN m_pricelist pl"
-        + "   ON pl.m_pricelist_id = plv.m_pricelist_id"
-        + " WHERE plv.m_pricelist_id = :priceListId"
-        + "   AND pp.m_product_id IN (" + inClause + ")"
-        + "   AND pp.isactive = 'Y'"
-        + "   AND plv.isactive = 'Y'"
-        + "   AND plv.validfrom = ("
-        + "     SELECT MAX(v.validfrom) FROM m_pricelist_version v"
-        + "     WHERE v.m_pricelist_id = :priceListId"
-        + "       AND v.isactive = 'Y'"
-        + "       AND v.validfrom <= NOW()"
-        + "   )";
-  }
-
-  private static void injectPrices(JSONArray items, Map<String, Object[]> priceMap) throws Exception {
-    for (int i = 0; i < items.length(); i++) {
-      JSONObject item = items.getJSONObject(i);
-      Object[] cols = priceMap.get(item.optString("id"));
-      if (cols != null) {
-        item.put("standardPrice", cols[1]);
-        item.put("listPrice", cols[2]);
-        item.put("isTaxIncluded", "Y".equals(String.valueOf(cols[3])));
-      }
-    }
-  }
-
-  private static final class DeduplicatedItems {
-    private final JSONArray items;
-    private final List<String> productIds;
-
-    private DeduplicatedItems(JSONArray items, List<String> productIds) {
-      this.items = items;
-      this.productIds = productIds;
-    }
+    return ProductPriceSelectorPolicy.enrichProductSelectorWithPrices(response, priceListId);
   }
 }
