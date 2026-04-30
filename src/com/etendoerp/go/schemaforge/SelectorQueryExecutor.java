@@ -83,13 +83,12 @@ final class SelectorQueryExecutor {
     dataQuery.setMaxResult(limit);
     dataQuery.setFirstResult(offset);
 
-    Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
     JSONArray items = new JSONArray();
     for (BaseOBObject bob : dataQuery.list()) {
       JSONObject item = new JSONObject();
       item.put("id", SelectorQueryBuilder.normalizeEntityId(bob.getId().toString()));
       if (meta.displayProperty != null && meta.displayProperty.contains(".")) {
-        Object labelValue = resolvePropertyValue(bob, meta.displayProperty, entityDef);
+        Object labelValue = resolvePropertyValue(bob, meta.displayProperty);
         item.put(FIELD_LABEL, labelValue != null ? labelValue : bob.getIdentifier());
       } else {
         item.put(FIELD_LABEL, bob.getIdentifier());
@@ -131,19 +130,18 @@ final class SelectorQueryExecutor {
     dataQuery.setFirstResult(offset);
 
     JSONArray columns = SelectorQueryBuilder.buildGridColumnMetadata(meta.gridFields);
-    Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
     JSONArray items = new JSONArray();
     List<String> entityIds = new ArrayList<>();
     for (BaseOBObject bob : dataQuery.list()) {
       JSONObject item = new JSONObject();
-      String itemId = resolveRichItemId(bob, meta, entityDef);
+      String itemId = resolveRichItemId(bob, meta);
       item.put("id", itemId);
       item.put(FIELD_LABEL, bob.getIdentifier());
       entityIds.add(itemId);
       entityIds.add(bob.getId().toString());
 
       for (RichFieldMeta fieldMeta : meta.gridFields) {
-        Object value = resolvePropertyValue(bob, fieldMeta.property, entityDef);
+        Object value = resolvePropertyValue(bob, fieldMeta.property);
         item.put(fieldMeta.propertyKey, value != null ? value : JSONObject.NULL);
       }
       SelectorAuxResolver.appendAuxFields(item, bob, meta.auxFields);
@@ -224,9 +222,9 @@ final class SelectorQueryExecutor {
     return SelectorQueryBuilder.buildSelectorResponse(items, columns, totalCount, limit, offset);
   }
 
-  private static String resolveRichItemId(BaseOBObject bob, SelectorMeta meta, Entity entityDef) {
+  private static String resolveRichItemId(BaseOBObject bob, SelectorMeta meta) {
     if (meta.valueProperty != null && !"id".equals(meta.valueProperty)) {
-      Object val = resolvePropertyValue(bob, meta.valueProperty, entityDef);
+      Object val = resolvePropertyValue(bob, meta.valueProperty);
       if (val != null) {
         return val.toString();
       }
@@ -234,7 +232,7 @@ final class SelectorQueryExecutor {
     return SelectorQueryBuilder.normalizeEntityId(bob.getId().toString());
   }
 
-  private static Object resolvePropertyValue(BaseOBObject bob, String propertyPath, Entity entityDef) {
+  private static Object resolvePropertyValue(BaseOBObject bob, String propertyPath) {
     try {
       String[] parts = propertyPath.split("\\.");
       Object current = bob;

@@ -55,10 +55,6 @@ public class NeoSelectorService {
   public static final String REF_OBUISEL = "95E2A8B50A254B2AAE6774B8C2F28120";
   private static final String AD_ORG_ID = "AD_Org_ID";
 
-  // JSON field name constants
-  private static final String PARAM_SEARCH = "search";
-  private static final String FIELD_LABEL = "label";
-  private static final String PROP_ORGANIZATION = "organization";
 
   // Session-level params resolved server-side (should not appear in selectorParams)
   static final java.util.Set<String> SESSION_PARAMS = new java.util.HashSet<>(
@@ -69,8 +65,11 @@ public class NeoSelectorService {
   }
 
   /**
-   * List all available selectors for an entity.
-   * Only returns fields that are included and have a FK reference type.
+   * List all FK-capable selector fields exposed for the given Schema Forge entity.
+   *
+   * @param specId the ETGO_SF_Spec identifier
+   * @param entityName the entity name inside the spec
+   * @return selector metadata for included FK fields, or an error response when the entity is missing
    */
   @SuppressWarnings("unchecked")
   public static NeoResponse listSelectors(String specId, String entityName) {
@@ -112,12 +111,14 @@ public class NeoSelectorService {
   /**
    * Query selector values for a specific FK field.
    *
-   * @param specId     the ETGO_SF_Spec ID
+   * @param specId the ETGO_SF_Spec ID
    * @param entityName the entity name within the spec
-   * @param columnName the DB column name (e.g., C_BPartner_ID)
-   * @param search     optional search text (filters on display property)
-   * @param limit      page size (default 20, max 100)
-   * @param offset     page offset (default 0)
+   * @param columnName the DB column name (for example, {@code C_BPartner_ID})
+   * @param search optional search text applied to the selector label/property
+   * @param limit requested page size; normalized to the selector bounds
+   * @param offset requested page offset; negative values are clamped to zero
+   * @param contextParams validated request context used for selector policies and validation rules
+   * @return a paginated selector response or an error when the field or target metadata cannot be resolved
    */
   @SuppressWarnings("unchecked")
   public static NeoResponse querySelector(String specId, String entityName,
@@ -364,6 +365,12 @@ public class NeoSelectorService {
     return REF_LIST.equals(refId);
   }
 
+  /**
+   * Load active label mappings for an AD reference list.
+   *
+   * @param referenceId the AD_Reference_Value_ID of the list reference
+   * @return a map from search key to display label for active list entries
+   */
   public static Map<String, String> getListLabels(String referenceId) {
     return ListReferenceSelectorExecutor.getListLabels(referenceId);
   }

@@ -41,6 +41,14 @@ final class SelectorContextResolver {
   private static final Logger log = LogManager.getLogger(SelectorContextResolver.class);
   private static final String AD_ORG_ID = "AD_Org_ID";
   private static final String PROP_ORGANIZATION = "organization";
+  private static final String PARAM_INPUT_ORG_ID = "inpadOrgId";
+  private static final String PARAM_IS_SO_TRX = "IsSOTrx";
+  private static final String PARAM_IS_SO_TRX_LOWER = "isSOTrx";
+  private static final String PARAM_IS_RECEIPT = "IsReceipt";
+  private static final String PARAM_IS_RECEIPT_LOWER = "isReceipt";
+  private static final String PARAM_FIN_IS_RECEIPT = "FIN_ISRECEIPT";
+  private static final String PARAM_PRICE_LIST = "PriceList";
+  private static final String PARAM_PRICE_LIST_LOWER = "priceList";
 
   private SelectorContextResolver() {
   }
@@ -54,27 +62,27 @@ final class SelectorContextResolver {
 
     String resolvedOrganizationId = resolveContextOrganizationId(sourceEntity, contextParams);
     copyIfAbsent(selectorParams, AD_ORG_ID, resolvedOrganizationId);
-    copyIfAbsent(selectorParams, "inpadOrgId", resolvedOrganizationId);
+    copyIfAbsent(selectorParams, PARAM_INPUT_ORG_ID, resolvedOrganizationId);
 
     // Normalise casing variants so ComboTableData can find them by their canonical names.
-    copyIfAbsent(selectorParams, "IsSOTrx", selectorParams.get("isSOTrx"));
-    copyIfAbsent(selectorParams, "isSOTrx", selectorParams.get("IsSOTrx"));
+    copyIfAbsent(selectorParams, PARAM_IS_SO_TRX, selectorParams.get(PARAM_IS_SO_TRX_LOWER));
+    copyIfAbsent(selectorParams, PARAM_IS_SO_TRX_LOWER, selectorParams.get(PARAM_IS_SO_TRX));
 
-    if (!selectorParams.containsKey("IsSOTrx")
-        || StringUtils.isBlank(selectorParams.get("IsSOTrx"))) {
+    if (!selectorParams.containsKey(PARAM_IS_SO_TRX)
+        || StringUtils.isBlank(selectorParams.get(PARAM_IS_SO_TRX))) {
       String windowIsSOTrx = resolveIsSOTrxFromWindow(sourceEntity);
       if (windowIsSOTrx != null) {
-        selectorParams.put("IsSOTrx", windowIsSOTrx);
-        selectorParams.put("isSOTrx", windowIsSOTrx);
+        selectorParams.put(PARAM_IS_SO_TRX, windowIsSOTrx);
+        selectorParams.put(PARAM_IS_SO_TRX_LOWER, windowIsSOTrx);
       }
     }
 
-    copyIfAbsent(selectorParams, "IsReceipt", selectorParams.get("isReceipt"));
-    copyIfAbsent(selectorParams, "isReceipt", selectorParams.get("IsReceipt"));
-    copyIfAbsent(selectorParams, "FIN_ISRECEIPT", selectorParams.get("FIN_ISRECEIPT"));
-    copyIfAbsent(selectorParams, "FIN_ISRECEIPT", selectorParams.get("isReceipt"));
-    copyIfAbsent(selectorParams, "priceList", selectorParams.get("PriceList"));
-    copyIfAbsent(selectorParams, "PriceList", selectorParams.get("priceList"));
+    copyIfAbsent(selectorParams, PARAM_IS_RECEIPT, selectorParams.get(PARAM_IS_RECEIPT_LOWER));
+    copyIfAbsent(selectorParams, PARAM_IS_RECEIPT_LOWER, selectorParams.get(PARAM_IS_RECEIPT));
+    copyIfAbsent(selectorParams, PARAM_FIN_IS_RECEIPT, selectorParams.get(PARAM_FIN_IS_RECEIPT));
+    copyIfAbsent(selectorParams, PARAM_FIN_IS_RECEIPT, selectorParams.get(PARAM_IS_RECEIPT_LOWER));
+    copyIfAbsent(selectorParams, PARAM_PRICE_LIST_LOWER, selectorParams.get(PARAM_PRICE_LIST));
+    copyIfAbsent(selectorParams, PARAM_PRICE_LIST, selectorParams.get(PARAM_PRICE_LIST_LOWER));
     return selectorParams;
   }
 
@@ -85,7 +93,7 @@ final class SelectorContextResolver {
     }
     String organizationId = StringUtils.trimToNull(contextParams.get(AD_ORG_ID));
     if (organizationId == null) {
-      organizationId = StringUtils.trimToNull(contextParams.get("inpadOrgId"));
+      organizationId = StringUtils.trimToNull(contextParams.get(PARAM_INPUT_ORG_ID));
     }
     if (organizationId == null) {
       organizationId = resolveOrgFromParentRecord(sourceEntity, contextParams.get("parentId"));
@@ -151,11 +159,11 @@ final class SelectorContextResolver {
     return extractOrganizationId(parentRecord);
   }
 
-  private static String extractOrganizationId(BaseOBObject record) {
-    if (record == null) {
+  private static String extractOrganizationId(BaseOBObject recordObject) {
+    if (recordObject == null) {
       return null;
     }
-    Object organization = record.get(PROP_ORGANIZATION);
+    Object organization = recordObject.get(PROP_ORGANIZATION);
     if (organization instanceof BaseOBObject) {
       Object organizationId = ((BaseOBObject) organization).getId();
       return organizationId != null ? organizationId.toString() : null;
