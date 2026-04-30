@@ -1391,17 +1391,4 @@ public class NeoDefaultsService {
     }
     return null;
   }
-  /**
-   * Compatibility entry point for commercial line net amount defaults.
-   */
-  public static void injectLineNetAmountIfMissing(JSONObject body) {
-    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
-  }
-
-  /**
-   * Compatibility entry point for commercial line UOM defaults.
-   */
-  public static void injectProductDerivedUomIfMissing(JSONObject body) {
-    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(body);
-  }
 }

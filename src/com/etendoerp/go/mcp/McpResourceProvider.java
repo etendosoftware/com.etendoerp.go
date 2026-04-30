@@ -63,54 +63,73 @@ public class McpResourceProvider {
    * List all available MCP resources.
    * Returns one static resource (neo://specs) plus one resource per active spec.
    *
-  * @return a JSONArray of resource descriptors
-  * @throws Exception if schema metadata cannot be read
+   * @return a JSONArray of resource descriptors
+   * @throws Exception if schema metadata cannot be read
    */
   public JSONArray listResources() throws Exception {
     JSONArray resources = new JSONArray();
+    resources.put(buildSpecsListResource());
 
-    // Static resource: list of all specs
+    for (SFSpec spec : listActiveSpecs()) {
+      appendSpecResources(resources, spec);
+    }
+
+    return resources;
+  }
+
+  private JSONObject buildSpecsListResource() throws Exception {
     JSONObject specsList = new JSONObject();
     specsList.put("uri", URI_SPECS);
     specsList.put("name", "Available NEO Specs");
     specsList.put(FIELD_DESCRIPTION,
         "List of all NEO Headless API specs configured in this instance");
     specsList.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
-    resources.put(specsList);
+    return specsList;
+  }
 
-    // Dynamic resources: one per active spec
+  private List<SFSpec> listActiveSpecs() {
     OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
     criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
     criteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
+    return criteria.list();
+  }
 
-    for (SFSpec spec : criteria.list()) {
-      if (spec != null) {
-        String specType = spec.getSpecType();
-        if (McpToolRouterSupport.hasSpecAccess(spec, specType)) {
-          String specName = spec.getName();
-
-          JSONObject specResource = new JSONObject();
-          specResource.put("uri", URI_SPECS_PREFIX + specName);
-          specResource.put("name", "Spec: " + specName);
-          specResource.put(FIELD_DESCRIPTION,
-              spec.getDescription() != null ? spec.getDescription() : "Schema for " + specName);
-          specResource.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
-          resources.put(specResource);
-
-          if ("P".equals(specType) || "R".equals(specType)) {
-            JSONObject processResource = new JSONObject();
-            processResource.put("uri", URI_PROCESSES_PREFIX + specName);
-            processResource.put("name", "Process: " + specName);
-            processResource.put(FIELD_DESCRIPTION,
-                ("R".equals(specType) ? "Report" : "Process") + " parameters for " + specName);
-            processResource.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
-            resources.put(processResource);
-          }
-        }
-      }
+  private void appendSpecResources(JSONArray resources, SFSpec spec) throws Exception {
+    if (spec == null) {
+      return;
     }
+    String specType = spec.getSpecType();
+    if (!McpToolRouterSupport.hasSpecAccess(spec, specType)) {
+      return;
+    }
+    resources.put(buildSpecResource(spec));
+    appendProcessResource(resources, spec, specType);
+  }
 
-    return resources;
+  private JSONObject buildSpecResource(SFSpec spec) throws Exception {
+    String specName = spec.getName();
+    JSONObject specResource = new JSONObject();
+    specResource.put("uri", URI_SPECS_PREFIX + specName);
+    specResource.put("name", "Spec: " + specName);
+    specResource.put(FIELD_DESCRIPTION,
+        spec.getDescription() != null ? spec.getDescription() : "Schema for " + specName);
+    specResource.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
+    return specResource;
+  }
+
+  private void appendProcessResource(JSONArray resources, SFSpec spec, String specType)
+      throws Exception {
+    if (!"P".equals(specType) && !"R".equals(specType)) {
+      return;
+    }
+    String specName = spec.getName();
+    JSONObject processResource = new JSONObject();
+    processResource.put("uri", URI_PROCESSES_PREFIX + specName);
+    processResource.put("name", "Process: " + specName);
+    processResource.put(FIELD_DESCRIPTION,
+        ("R".equals(specType) ? "Report" : "Process") + " parameters for " + specName);
+    processResource.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
+    resources.put(processResource);
   }
 
   /**
