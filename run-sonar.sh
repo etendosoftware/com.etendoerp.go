@@ -7,7 +7,7 @@ POLL_INTERVAL=5      # seconds between polls
 MAX_WAIT=300         # max seconds to wait for analysis
 REPORT_DIR="sonar-reports"
 BASE_REF=""
-CHANGED_ONLY="false"
+CHANGED_ONLY="true"
 ALLOW_DIRTY="false"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CLASSIC_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
@@ -29,6 +29,10 @@ while [[ $# -gt 0 ]]; do
     --report-dir)
       REPORT_DIR="${2:-}"
       shift 2
+      ;;
+    --all-issues)
+      CHANGED_ONLY="false"
+      shift
       ;;
     *)
       echo "ERROR: Unknown argument: $1"
@@ -139,6 +143,40 @@ PYEOF
   rm -f "$tmp_status" "$tmp_filtered"
 }
 
+prompt_for_base_ref() {
+  [[ "$CHANGED_ONLY" == "true" ]] || return 0
+
+  if [[ -n "$BASE_REF" ]]; then
+    return 0
+  fi
+
+  if [[ -t 0 ]]; then
+    echo "==> PR validation mode is enabled by default."
+    echo "Enter the PR base commit or target ref used by Sonar Cloud (examples: origin/main, origin/epic/ETP-3504, abc1234)."
+    read -r -p "Base commit/ref: " BASE_REF
+    return 0
+  fi
+
+  echo "ERROR: PR validation mode requires a base commit/ref."
+  echo "Run with --base-ref <commit-or-ref>, or use --all-issues for full-project reports."
+  exit 1
+}
+
+validate_base_ref() {
+  [[ "$CHANGED_ONLY" == "true" ]] || return 0
+
+  if [[ -z "$BASE_REF" ]]; then
+    echo "ERROR: Base commit/ref cannot be empty in PR validation mode."
+    exit 1
+  fi
+
+  if ! git rev-parse --verify --quiet "$BASE_REF^{commit}" >/dev/null; then
+    echo "ERROR: Base commit/ref not found: $BASE_REF"
+    echo "Fetch the target branch or pass a valid commit SHA."
+    exit 1
+  fi
+}
+
 load_env_file "$SCRIPT_DIR/.env"
 load_env_file "$CLASSIC_ROOT/.env"
 
@@ -160,6 +198,9 @@ fi
 
 SONAR_HOST_URL="${SONAR_HOST_URL%/}"
 export SONAR_HOST_URL SONAR_TOKEN REPORT_DIR BASE_REF CHANGED_ONLY
+
+prompt_for_base_ref
+validate_base_ref
 
 # ── Step 0: Clean report directory and enforce clean tree ──────────────────
 echo "==> Cleaning report directory: $REPORT_DIR"
@@ -348,10 +389,6 @@ echo "Dashboard: $SONAR_HOST_URL/dashboard?id=$PROJECT_KEY"
 echo "Reports saved in: $REPORT_DIR/"
 
 if [[ "$CHANGED_ONLY" == "true" ]]; then
-  if [[ -z "$BASE_REF" ]]; then
-    echo "ERROR: --changed-only requires --base-ref <ref>"
-    exit 1
-  fi
 
   echo "==> Filtering issues to changed files against: $BASE_REF"
   git diff --name-only "$BASE_REF"...HEAD > "$REPORT_DIR/changed-files.txt"
@@ -387,4 +424,6 @@ print(f"    Saved: {report_dir}/sonar-issues-by-file-pr-only.json ({len(filtered
 PYEOF
 
   echo "PR-only reports saved in: $REPORT_DIR/"
+else
+  echo "Full-project reports saved in: $REPORT_DIR/"
 fi
