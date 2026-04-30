@@ -22,10 +22,12 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertSame;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Field;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -69,8 +71,8 @@ public class SalesOrderHeaderHandlerTest {
 
   /** Wraps a single JSON record in the standard NEO response envelope. */
   private static JSONObject singleRecordBody(String id) throws JSONException {
-    JSONObject record = new JSONObject().put("id", id).put("documentNo", "1000000");
-    JSONArray data = new JSONArray().put(record);
+    JSONObject orderRec = new JSONObject().put("id", id).put("documentNo", "1000000");
+    JSONArray data = new JSONArray().put(orderRec);
     JSONObject response = new JSONObject().put("data", data);
     return new JSONObject().put("response", response);
   }
@@ -334,5 +336,42 @@ public class SalesOrderHeaderHandlerTest {
 
     assertNotNull(result);
     assertEquals(200, result.getHttpStatus());
+  }
+
+  // ── handle() dispatch ──────────────────────────────────────────────────────
+
+  private static SalesOrderHeaderHandler handlerWithMockClone(NeoCloneRecordHandler mockClone)
+      throws Exception {
+    SalesOrderHeaderHandler handler = new SalesOrderHeaderHandler();
+    Field field = SalesOrderHeaderHandler.class.getDeclaredField("cloneRecordHandler");
+    field.setAccessible(true);
+    field.set(handler, mockClone);
+    return handler;
+  }
+
+  @Test
+  public void handle_shortCircuits_whenCloneHandlerResponds() throws Exception {
+    NeoCloneRecordHandler mockClone = mock(NeoCloneRecordHandler.class);
+    SalesOrderHeaderHandler handler = handlerWithMockClone(mockClone);
+
+    NeoResponse expected = NeoResponse.ok(new JSONObject().put("action", "clone"));
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).fieldName("cloneRecord").build();
+    when(mockClone.handle(ctx)).thenReturn(expected);
+
+    assertSame(expected, handler.handle(ctx));
+  }
+
+  @Test
+  public void handle_returnsNull_whenNoHandlerMatches() throws Exception {
+    NeoCloneRecordHandler mockClone = mock(NeoCloneRecordHandler.class);
+    SalesOrderHeaderHandler handler = handlerWithMockClone(mockClone);
+
+    // CRUD endpoint — all downstream handlers return null without DB access
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
+    when(mockClone.handle(ctx)).thenReturn(null);
+
+    assertNull(handler.handle(ctx));
   }
 }
