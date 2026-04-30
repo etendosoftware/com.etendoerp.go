@@ -31,19 +31,47 @@ public final class NeoSelectorPolicy {
   private NeoSelectorPolicy() {
   }
 
+  /**
+   * Resolve a hardcoded reference-search-key filter override.
+   *
+   * @param referenceSearchKeyId AD_Reference_Value identifier used by the selector
+   * @return the additional filter clause, or {@code null} when no override applies
+   */
   public static String resolveReferenceOverrideFilter(String referenceSearchKeyId) {
     return ReferenceOverrideSelectorPolicy.resolveFilter(referenceSearchKeyId);
   }
 
+  /**
+   * Resolve an entity-specific filter from validated selector context parameters.
+   *
+   * @param entityName target DAL entity name
+   * @param contextParams validated selector context parameters
+   * @param alias HQL alias used by the selector query
+   * @return the derived filter clause, or {@code null} when no policy applies
+   */
   public static String resolveContextParamFilter(String entityName,
       Map<String, String> contextParams, String alias) {
     return ContextParamSelectorPolicy.resolveFilter(entityName, contextParams, alias);
   }
 
+  /**
+   * Resolve a virtual selector column exposed by a wrapper entity.
+   *
+   * @param entity source Schema Forge entity
+   * @param columnName requested DB column name
+   * @return the backing AD column, or {@code null} when the wrapper policy does not apply
+   */
   public static Column resolveVirtualSelectorColumn(SFEntity entity, String columnName) {
     return AddressVirtualSelectorPolicy.resolveVirtualSelectorColumn(entity, columnName);
   }
 
+  /**
+   * Enrich product selector results with price-list values.
+   *
+   * @param response selector response to enrich
+   * @param priceListId active price list identifier
+   * @return the enriched response, or the original response when enrichment does not apply
+   */
   public static NeoResponse enrichProductSelectorWithPrices(NeoResponse response, String priceListId) {
     return ProductPriceSelectorPolicy.enrichProductSelectorWithPrices(response, priceListId);
   }

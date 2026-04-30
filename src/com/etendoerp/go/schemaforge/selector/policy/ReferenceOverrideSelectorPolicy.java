@@ -40,6 +40,12 @@ public final class ReferenceOverrideSelectorPolicy {
   private ReferenceOverrideSelectorPolicy() {
   }
 
+  /**
+   * Resolve a hardcoded filter override for a reference-search-key identifier.
+   *
+   * @param referenceSearchKeyId AD_Reference_Value identifier used by the selector
+   * @return the additional filter clause, or {@code null} when no override applies
+   */
   public static String resolveFilter(String referenceSearchKeyId) {
     if (referenceSearchKeyId == null) {
       return null;

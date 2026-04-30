@@ -36,6 +36,13 @@ public final class AddressVirtualSelectorPolicy {
   private AddressVirtualSelectorPolicy() {
   }
 
+  /**
+   * Resolve the backing location column for a virtual address wrapper selector.
+   *
+   * @param entity source Schema Forge entity
+   * @param columnName requested DB column name
+   * @return the backing location column, or {@code null} when the wrapper policy does not apply
+   */
   public static Column resolveVirtualSelectorColumn(SFEntity entity, String columnName) {
     if (entity == null || StringUtils.isBlank(columnName)) {
       return null;

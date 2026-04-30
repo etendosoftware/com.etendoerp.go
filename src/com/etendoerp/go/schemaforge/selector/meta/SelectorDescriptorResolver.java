@@ -47,10 +47,23 @@ public final class SelectorDescriptorResolver {
   private SelectorDescriptorResolver() {
   }
 
+  /**
+   * Check whether the column resolves to an OBUISEL selector definition.
+   *
+   * @param column AD column being inspected
+   * @return {@code true} when the column is backed by an active OBUISEL selector
+   */
   public static boolean hasObuiselSelector(Column column) {
     return findObuiselSelector(column) != null;
   }
 
+  /**
+   * Resolve the selector metadata for one AD column.
+   *
+   * @param column AD column being resolved
+   * @param baseRefId normalized base reference identifier
+   * @return resolved selector metadata, or {@code null} when the target cannot be resolved
+   */
   public static SelectorMeta resolveTarget(Column column, String baseRefId) {
     Selector obuisel = findObuiselSelector(column);
     if (obuisel != null) {
@@ -69,6 +82,13 @@ public final class SelectorDescriptorResolver {
     return meta;
   }
 
+  /**
+   * Resolve a safe searchable fragment from selector metadata.
+   *
+   * @param property DAL property defined on the selector field
+   * @param clauseLeftPart custom HQL fragment used when the property is blank
+   * @return a safe searchable fragment, or {@code null} when none can be derived
+   */
   public static String resolveSearchableFragment(String property, String clauseLeftPart) {
     if (StringUtils.isNotBlank(property)) {
       return property;
@@ -84,6 +104,12 @@ public final class SelectorDescriptorResolver {
     return null;
   }
 
+  /**
+   * Find the default identifier property for a DAL entity.
+   *
+   * @param entity target DAL entity
+   * @return the preferred identifier property name, falling back to common defaults
+   */
   public static String findIdentifierProperty(Entity entity) {
     for (Property prop : entity.getIdentifierProperties()) {
       if (!prop.isPrimitive()) {

@@ -788,63 +788,67 @@ class SelectorQueryBuilder {
    * {@code FROM DUAL} is removed — HQL scalar subqueries work without a FROM clause.
    */
   private static String translateSqlToHql(String clause) {
-    // Unwrap "(SELECT expr FROM DUAL)" → "(expr)" before table-name translation
     clause = SELECT_FROM_DUAL.matcher(clause).replaceAll("($1)");
-    // Step 1: Find "FROM <tableName> <alias>" patterns and build alias→Entity map
     Map<String, Entity> aliasEntityMap = new HashMap<>();
+    String translatedFrom = translateFromAliases(clause, aliasEntityMap);
+    return translateColumnReferences(translatedFrom, aliasEntityMap);
+  }
+
+  private static String translateFromAliases(String clause, Map<String, Entity> aliasEntityMap) {
     Matcher fromMatcher = FROM_WITH_ALIAS.matcher(clause);
-    StringBuffer step1 = new StringBuffer();
+    StringBuffer translated = new StringBuffer();
     while (fromMatcher.find()) {
-      String tableName = fromMatcher.group(1);
+      Entity entity = resolveFromEntity(fromMatcher.group(1));
       String alias = fromMatcher.group(2);
-      // Try by HQL entity name first, then by SQL table name.
-      // ModelProvider.getEntity() throws if not found, so we catch and fall through.
-      Entity entity = null;
-      try {
-        entity = ModelProvider.getInstance().getEntity(tableName);
-      } catch (Exception e) {
-        // Not a valid HQL entity name — try as SQL table name below
-      }
       if (entity != null) {
         aliasEntityMap.put(alias, entity);
-        continue; // already a valid HQL entity name, no replacement needed
       }
-      entity = ModelProvider.getInstance().getEntityByTableName(tableName);
-      if (entity != null) {
-        aliasEntityMap.put(alias, entity);
-        log.debug("Translating SQL table name [{}] → HQL entity [{}]", tableName, entity.getName());
-        fromMatcher.appendReplacement(step1,
+      if (entity != null && !entity.getName().equals(fromMatcher.group(1))) {
+        log.debug("Translating SQL table name [{}] → HQL entity [{}]", fromMatcher.group(1), entity.getName());
+        fromMatcher.appendReplacement(translated,
             Matcher.quoteReplacement("FROM " + entity.getName() + " " + alias));
       }
     }
-    fromMatcher.appendTail(step1);
-    String result = step1.toString();
+    fromMatcher.appendTail(translated);
+    return translated.toString();
+  }
 
-    // Step 2: Translate alias.columnName → alias.propertyName for each known alias
-    for (Map.Entry<String, Entity> entry : aliasEntityMap.entrySet()) {
-      String alias = entry.getKey();
-      Entity entity = entry.getValue();
-      Pattern colRef = Pattern.compile("\\b" + Pattern.quote(alias) + "\\.(\\w+)");
-      Matcher colMatcher = colRef.matcher(result);
-      StringBuffer step2 = new StringBuffer();
-      while (colMatcher.find()) {
-        String columnName = colMatcher.group(1);
-        Property prop = entity.getPropertyByColumnName(columnName, false);
-        if (prop != null) {
-          // FK columns (associations) need .id appended for HQL comparison
-          String hqlRef = prop.isPrimitive()
-              ? alias + "." + prop.getName()
-              : alias + "." + prop.getName() + ".id";
-          log.debug("Translating column [{}] → HQL property [{}]", columnName, hqlRef);
-          colMatcher.appendReplacement(step2, Matcher.quoteReplacement(hqlRef));
-        }
-        // If property not found, leave original (might be a valid HQL reference already)
+  private static Entity resolveFromEntity(String tableName) {
+    try {
+      Entity hqlEntity = ModelProvider.getInstance().getEntity(tableName);
+      if (hqlEntity != null) {
+        return hqlEntity;
       }
-      colMatcher.appendTail(step2);
-      result = step2.toString();
+    } catch (Exception e) {
+      // Not a valid HQL entity name — fall through to SQL table lookup.
     }
+    return ModelProvider.getInstance().getEntityByTableName(tableName);
+  }
 
+  private static String translateColumnReferences(String clause, Map<String, Entity> aliasEntityMap) {
+    String result = clause;
+    for (Map.Entry<String, Entity> entry : aliasEntityMap.entrySet()) {
+      result = translateAliasColumns(result, entry.getKey(), entry.getValue());
+    }
     return result;
+  }
+
+  private static String translateAliasColumns(String clause, String alias, Entity entity) {
+    Pattern colRef = Pattern.compile("\\b" + Pattern.quote(alias) + "\\.(\\w+)");
+    Matcher colMatcher = colRef.matcher(clause);
+    StringBuffer translated = new StringBuffer();
+    while (colMatcher.find()) {
+      Property prop = entity.getPropertyByColumnName(colMatcher.group(1), false);
+      if (prop != null) {
+        String hqlRef = prop.isPrimitive()
+            ? alias + "." + prop.getName()
+            : alias + "." + prop.getName() + ".id";
+        log.debug("Translating column [{}] → HQL property [{}]", colMatcher.group(1), hqlRef);
+        colMatcher.appendReplacement(translated, Matcher.quoteReplacement(hqlRef));
+      }
+    }
+    colMatcher.appendTail(translated);
+    return translated.toString();
   }
 
   /**

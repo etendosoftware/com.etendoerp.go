@@ -32,6 +32,14 @@ public final class ContextParamSelectorPolicy {
   private ContextParamSelectorPolicy() {
   }
 
+  /**
+   * Resolve an entity-specific selector filter from validated context parameters.
+   *
+   * @param entityName target DAL entity name
+   * @param contextParams validated selector context parameters
+   * @param alias HQL alias used by the selector query
+   * @return the derived filter clause, or {@code null} when no policy applies
+   */
   public static String resolveFilter(String entityName, Map<String, String> contextParams, String alias) {
     if (contextParams == null || contextParams.isEmpty() || entityName == null) {
       return null;

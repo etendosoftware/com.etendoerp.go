@@ -53,6 +53,13 @@ public final class SelectorContextResolver {
   private SelectorContextResolver() {
   }
 
+  /**
+   * Build the normalized parameter map passed to ComboTableData selectors.
+   *
+   * @param sourceEntity source Schema Forge entity providing window/tab context
+   * @param contextParams validated request context parameters
+   * @return a selector parameter map with canonical casing and server-derived defaults
+   */
   public static Map<String, String> buildComboSelectorParams(SFEntity sourceEntity,
       Map<String, String> contextParams) {
     Map<String, String> selectorParams = new HashMap<>();
@@ -86,6 +93,13 @@ public final class SelectorContextResolver {
     return selectorParams;
   }
 
+  /**
+   * Resolve the effective organization identifier for a selector request.
+   *
+   * @param sourceEntity source entity used to derive organization from parent records when needed
+   * @param contextParams validated selector context parameters
+   * @return the effective organization identifier, or {@code null} when no organization applies
+   */
   public static String resolveContextOrganizationId(SFEntity sourceEntity,
       Map<String, String> contextParams) {
     if (contextParams == null) {
@@ -104,6 +118,13 @@ public final class SelectorContextResolver {
     return organizationId;
   }
 
+  /**
+   * Copy a parameter into the target map only when the key is absent and the value is non-blank.
+   *
+   * @param target destination parameter map
+   * @param key parameter name to insert
+   * @param value parameter value to insert when valid
+   */
   public static void copyIfAbsent(Map<String, String> target, String key, String value) {
     if (StringUtils.isBlank(key) || StringUtils.isBlank(value) || target.containsKey(key)) {
       return;

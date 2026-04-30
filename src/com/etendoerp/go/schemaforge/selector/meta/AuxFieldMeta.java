@@ -18,15 +18,26 @@ package com.etendoerp.go.schemaforge.selector.meta;
 
 /**
  * Metadata for an auxiliary output field in an OBUISEL selector.
- * Auxiliary fields are defined with isOutField=Y and a SUFFIX (e.g., "_LOC").
- * They provide extra data (like a default location ID) alongside the selected value.
+ * Auxiliary fields are defined with isOutField=Y and a suffix such as {@code _LOC}.
  */
 public class AuxFieldMeta {
-  public final String suffix;              // e.g., "_LOC", "_CON"
-  public final String hqlAlias;            // e.g., "locationid" (from displayColumnAlias)
-  public final String name;                // display name of the field
-  public final String property;            // DAL property path (if available)
+  /** Suffix appended to the selector field name in NEO responses. */
+  public final String suffix;
+  /** Lowercase alias exposed by custom HQL selectors when the value is not DAL-addressable. */
+  public final String hqlAlias;
+  /** Human-readable field name from selector metadata. */
+  public final String name;
+  /** DAL property path used to navigate the selected entity when available. */
+  public final String property;
 
+  /**
+   * Create auxiliary field metadata.
+   *
+   * @param suffix response suffix appended to the selector field key
+   * @param hqlAlias alias used in custom HQL result sets, or {@code null}
+   * @param name display name of the auxiliary field
+   * @param property DAL property path used for direct entity navigation, or {@code null}
+   */
   public AuxFieldMeta(String suffix, String hqlAlias, String name, String property) {
     this.suffix = suffix;
     this.hqlAlias = hqlAlias;

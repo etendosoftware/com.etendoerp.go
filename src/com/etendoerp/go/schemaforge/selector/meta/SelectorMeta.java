@@ -20,28 +20,39 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Resolved target metadata for a selector.
- * Holds entity name, display/value properties, where clause,
- * and (for rich OBUISEL selectors) grid fields, searchable properties,
- * custom HQL, and auxiliary field descriptors.
- *
- * <p>Use the {@link Builder} for rich (OBUISEL) selectors that require all fields.
- * The 3-argument constructor covers simple selectors (TableDir, Table, Search).
+ * Resolved selector descriptor used by the NEO selector execution pipeline.
  */
 public class SelectorMeta {
+  /** Target DAL entity name queried by the selector. */
   public final String entityName;
+  /** Display property used as the selector label or default ordering key. */
   public final String displayProperty;
+  /** Optional HQL where clause coming from selector metadata. */
   public final String whereClause;
+  /** Whether the selector is an OBUISEL rich selector. */
   public final boolean isRich;
+  /** Whether the rich selector is backed by a custom HQL definition. */
   public final boolean isCustomQuery;
+  /** Property that supplies the selected value; defaults to {@code id}. */
   public final String valueProperty;
+  /** Visible grid field metadata for rich selectors. */
   public final List<RichFieldMeta> gridFields;
+  /** Searchable property fragments used to build the suggestion-box filter. */
   public final List<String> searchableProperties;
+  /** Full custom HQL definition for selectors marked as custom query. */
   public final String customHql;
+  /** Entity alias used by the selector HQL. */
   public final String entityAlias;
+  /** Auxiliary output field metadata exposed under {@code _aux}. */
   public final List<AuxFieldMeta> auxFields;
 
-  /** Constructor for simple selectors (TableDir, Table, Search). */
+  /**
+   * Create metadata for simple selectors such as TableDir, Table, or Search.
+   *
+   * @param entityName target DAL entity name
+   * @param displayProperty display property used for labels and ordering
+   * @param whereClause optional HQL filter from dictionary metadata
+   */
   public SelectorMeta(String entityName, String displayProperty, String whereClause) {
     this.entityName = entityName;
     this.displayProperty = displayProperty;
@@ -56,7 +67,6 @@ public class SelectorMeta {
     this.auxFields = new ArrayList<>();
   }
 
-  /** Private full constructor — use {@link Builder} for rich selectors. */
   private SelectorMeta(Builder builder) {
     this.entityName = builder.entityName;
     this.displayProperty = builder.displayProperty;
@@ -71,13 +81,10 @@ public class SelectorMeta {
     this.auxFields = builder.auxFields;
   }
 
-  /** Builder for rich (OBUISEL) selectors. */
+  /** Builder for rich OBUISEL selector metadata. */
   public static final class Builder {
-    // Required
     private final String entityName;
     private final String displayProperty;
-
-    // Optional / defaulted
     private String whereClause;
     private boolean isRich;
     private boolean isCustomQuery;
@@ -88,21 +95,37 @@ public class SelectorMeta {
     private String entityAlias = "e";
     private List<AuxFieldMeta> auxFields = new ArrayList<>();
 
+    /**
+     * Create a builder for one rich selector.
+     *
+     * @param entityName target DAL entity name
+     * @param displayProperty default display property
+     */
     public Builder(String entityName, String displayProperty) {
       this.entityName = entityName;
       this.displayProperty = displayProperty;
     }
 
+    /** Set the optional HQL where clause. */
     public Builder whereClause(String val) { this.whereClause = val; return this; }
+    /** Mark whether the selector is rich. */
     public Builder isRich(boolean val) { this.isRich = val; return this; }
+    /** Mark whether the selector is a custom query selector. */
     public Builder isCustomQuery(boolean val) { this.isCustomQuery = val; return this; }
+    /** Override the property used as the selected value. */
     public Builder valueProperty(String val) { this.valueProperty = val; return this; }
+    /** Supply visible grid field metadata. */
     public Builder gridFields(List<RichFieldMeta> val) { this.gridFields = val; return this; }
+    /** Supply searchable property fragments. */
     public Builder searchableProperties(List<String> val) { this.searchableProperties = val; return this; }
+    /** Supply the raw custom HQL definition. */
     public Builder customHql(String val) { this.customHql = val; return this; }
+    /** Supply the HQL entity alias. */
     public Builder entityAlias(String val) { this.entityAlias = val; return this; }
+    /** Supply auxiliary output metadata. */
     public Builder auxFields(List<AuxFieldMeta> val) { this.auxFields = val; return this; }
 
+    /** Build the immutable selector metadata instance. */
     public SelectorMeta build() {
       return new SelectorMeta(this);
     }

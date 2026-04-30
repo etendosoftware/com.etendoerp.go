@@ -318,12 +318,20 @@ public class NeoSelectorService {
 
 
   /**
-   * Get the base reference ID (18, 19, or 30) checking parent references.
+   * Return the set of server-side session parameter names excluded from client selector requirements.
+   *
+   * @return session parameter names known to be resolved on the server
    */
   public static java.util.Set<String> getSessionParams() {
     return SESSION_PARAMS;
   }
 
+  /**
+   * Resolve the normalized base reference identifier for a selector column.
+   *
+   * @param column AD column being inspected
+   * @return the effective base reference identifier, following parent references when needed
+   */
   public static String getBaseReferenceId(Column column) {
     String refId = column.getReference().getId();
 
@@ -364,7 +372,10 @@ public class NeoSelectorService {
   }
 
   /**
-   * Returns {@code true} if the given AD_Reference ID represents a list reference type (List=17).
+   * Returns {@code true} when the reference identifier represents an AD List selector.
+   *
+   * @param refId AD reference identifier
+   * @return {@code true} for list references, {@code false} otherwise
    */
   public static boolean isListReference(String refId) {
     return REF_LIST.equals(refId);
@@ -381,18 +392,44 @@ public class NeoSelectorService {
   }
 
 
+  /**
+   * Check whether the given column resolves to an OBUISEL selector definition.
+   *
+   * @param column AD column being inspected
+   * @return {@code true} when an active OBUISEL selector exists for the column
+   */
   public static boolean hasObuiselSelector(Column column) {
     return SelectorDescriptorResolver.hasObuiselSelector(column);
   }
 
+  /**
+   * Resolve selector metadata for one AD column.
+   *
+   * @param column AD column being resolved
+   * @param baseRefId normalized base reference identifier
+   * @return resolved selector metadata, or {@code null} when no target can be resolved
+   */
   public static SelectorMeta resolveTarget(Column column, String baseRefId) {
     return SelectorDescriptorResolver.resolveTarget(column, baseRefId);
   }
 
+  /**
+   * Resolve a safe searchable fragment from selector field metadata.
+   *
+   * @param property DAL property defined on the selector field
+   * @param clauseLeftPart custom HQL clause fragment used when the property is blank
+   * @return a safe searchable fragment, or {@code null} when none can be derived
+   */
   public static String resolveSearchableFragment(String property, String clauseLeftPart) {
     return SelectorDescriptorResolver.resolveSearchableFragment(property, clauseLeftPart);
   }
 
+  /**
+   * Find the preferred identifier property for a DAL entity.
+   *
+   * @param entity target DAL entity
+   * @return preferred identifier property name, falling back to common defaults
+   */
   public static String findIdentifierProperty(Entity entity) {
     return SelectorDescriptorResolver.findIdentifierProperty(entity);
   }

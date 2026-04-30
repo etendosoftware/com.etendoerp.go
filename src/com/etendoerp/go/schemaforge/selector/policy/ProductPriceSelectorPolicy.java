@@ -40,6 +40,13 @@ public final class ProductPriceSelectorPolicy {
   private ProductPriceSelectorPolicy() {
   }
 
+  /**
+   * Enrich selector rows with prices from the active price list.
+   *
+   * @param response selector response to enrich
+   * @param priceListId active price list identifier
+   * @return the enriched response, or the original response when enrichment does not apply
+   */
   public static NeoResponse enrichProductSelectorWithPrices(NeoResponse response, String priceListId) {
     if (response == null || response.getBody() == null || StringUtils.isBlank(priceListId)) {
       return response;
