@@ -108,47 +108,11 @@ public class NeoProcessService {
     try {
       OBContext.setAdminMode();
       try {
-        // Validate mandatory parameters
         NeoResponse validationError = validateMandatoryParams(process, params);
         if (validationError != null) {
           return validationError;
         }
-
-        String uiPattern = process.getUIPattern();
-        if (UI_PATTERN_STANDARD.equals(uiPattern)
-            && StringUtils.isNotBlank(process.getJavaClassName())) {
-          return executeObuiappProcess(process, params);
-        }
-
-        // Resolve classname: try AD_Process.classname first, then AD_Model_Object (Process Class subtab)
-        String className = process.getJavaClassName();
-        if (StringUtils.isBlank(className)) {
-          className = resolveModelImplementationClass(process);
-        }
-
-        if (StringUtils.isNotBlank(className)) {
-          Class<?> cls = loadClass(className);
-          if (cls == null) {
-            return NeoResponse.error(500,
-                "Process class not found: " + className);
-          }
-          if (DalBaseProcess.class.isAssignableFrom(cls)) {
-            return executeClassicProcess(process, cls, params);
-          }
-          if (org.openbravo.scheduling.Process.class.isAssignableFrom(cls)) {
-            return executeSchedulingProcess(process, cls, params);
-          }
-          return NeoResponse.error(500,
-              "Process class is not a supported handler type: " + className);
-        }
-
-        if (StringUtils.isNotBlank(process.getProcedure())) {
-          return executeDbProcedure(process, params);
-        }
-
-        return NeoResponse.error(400,
-            "Process has no executable handler: " + process.getName());
-
+        return executeResolvedProcess(process, params);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -158,6 +122,55 @@ public class NeoProcessService {
       return NeoResponse.error(500,
           "Process execution failed: " + e.getMessage());
     }
+  }
+
+  private static NeoResponse executeResolvedProcess(Process process, JSONObject params)
+      throws Exception {
+    if (isStandardUiProcess(process)) {
+      return executeObuiappProcess(process, params);
+    }
+
+    String className = resolveProcessClassName(process);
+    if (StringUtils.isNotBlank(className)) {
+      return executeClassBackedProcess(process, params, className);
+    }
+
+    if (StringUtils.isNotBlank(process.getProcedure())) {
+      return executeDbProcedure(process, params);
+    }
+
+    return NeoResponse.error(400,
+        "Process has no executable handler: " + process.getName());
+  }
+
+  private static boolean isStandardUiProcess(Process process) {
+    return UI_PATTERN_STANDARD.equals(process.getUIPattern())
+        && StringUtils.isNotBlank(process.getJavaClassName());
+  }
+
+  private static String resolveProcessClassName(Process process) {
+    String className = process.getJavaClassName();
+    if (StringUtils.isBlank(className)) {
+      return resolveModelImplementationClass(process);
+    }
+    return className;
+  }
+
+  private static NeoResponse executeClassBackedProcess(Process process, JSONObject params,
+      String className) throws Exception {
+    Class<?> cls = loadClass(className);
+    if (cls == null) {
+      return NeoResponse.error(500,
+          "Process class not found: " + className);
+    }
+    if (DalBaseProcess.class.isAssignableFrom(cls)) {
+      return executeClassicProcess(process, cls, params);
+    }
+    if (org.openbravo.scheduling.Process.class.isAssignableFrom(cls)) {
+      return executeSchedulingProcess(process, cls, params);
+    }
+    return NeoResponse.error(500,
+        "Process class is not a supported handler type: " + className);
   }
 
   /**
