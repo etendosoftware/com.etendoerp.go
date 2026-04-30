@@ -25,162 +25,121 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 
 /**
- * Unit tests for {@link NeoDefaultsService#injectLineGrossAmountIfMissing}.
+ * Unit tests for {@link NeoDefaultsService#injectLineNetAmountIfMissing}.
  *
  * <p>These tests do NOT require a database connection. All tests exercise the
- * net-price-list path with {@code tax=""} so {@code fetchTaxRate()} short-circuits
- * to 0%, making the tax factor 1.0 and removing the need for a live DB.</p>
+ * server-side computation of {@code lineNetAmount = invoicedQuantity × unitPrice},
+ * which runs after {@code filterWriteRequest} strips the read-only {@code lineNetAmount}
+ * field from the PATCH body.</p>
  *
- * <p>The gross-price-list path ({@code grossUnitPrice > 0}) requires no tax lookup
- * either, so it is also covered without DB access.</p>
+ * <p>Since ETP-3662, {@code lineGrossAmount} / {@code grossAmount} are computed
+ * client-side and sent with the request; the server no longer recomputes them.
+ * {@code injectLineNetAmountIfMissing} covers only the net amount fallback for
+ * invoice lines.</p>
  */
 public class NeoDefaultsServiceTest {
 
   // ── Helpers ──────────────────────────────────────────────────────────────────
 
-  /**
-   * Asserts that two doubles are equal within a small epsilon (0.005 — half a cent).
-   */
   private static void assertAmountEquals(double expected, double actual) {
     assertEquals("expected " + expected + " but got " + actual,
         expected, actual, 0.005);
   }
 
-  // ── injectLineGrossAmountIfMissing — client value respected ───────────────────
+  // ── injectLineNetAmountIfMissing — null body → no NPE ─────────────────────
 
-  /**
-   * When the body already contains a non-zero {@code lineGrossAmount} the method
-   * must return early without overwriting it (client is the source of truth).
-   */
-  @Test
-  public void testClientValueRespected() throws Exception {
-    JSONObject body = new JSONObject();
-    body.put("orderedQuantity", "3");
-    body.put("unitPrice", 29.70);
-    body.put("discount", 10);
-    body.put("tax", "");
-    body.put("lineGrossAmount", 107.81);
-
-    NeoDefaultsService.injectLineGrossAmountIfMissing(body);
-
-    assertAmountEquals(107.81, body.getDouble("lineGrossAmount"));
-  }
-
-  // ── injectLineGrossAmountIfMissing — no unitPrice → no injection ──────────────
-
-  /**
-   * When {@code unitPrice} is absent the server cannot compute a meaningful value;
-   * {@code lineGrossAmount} must NOT be injected.
-   */
-  @Test
-  public void testNoUnitPriceNoInjection() throws Exception {
-    JSONObject body = new JSONObject();
-    body.put("orderedQuantity", "3");
-    body.put("tax", "");
-
-    NeoDefaultsService.injectLineGrossAmountIfMissing(body);
-
-    assertFalse("lineGrossAmount should not be injected when unitPrice is missing",
-        body.has("lineGrossAmount"));
-  }
-
-  // ── injectLineGrossAmountIfMissing — no orderedQuantity → no injection ─────────
-
-  /**
-   * When {@code orderedQuantity} is absent (zero) the formula is undefined;
-   * no injection must occur.
-   */
-  @Test
-  public void testNoQtyNoInjection() throws Exception {
-    JSONObject body = new JSONObject();
-    body.put("unitPrice", 29.70);
-    body.put("tax", "");
-
-    NeoDefaultsService.injectLineGrossAmountIfMissing(body);
-
-    assertFalse("lineGrossAmount should not be injected when orderedQuantity is missing",
-        body.has("lineGrossAmount"));
-  }
-
-  // ── injectLineGrossAmountIfMissing — null body → no NPE ───────────────────────
-
-  /**
-   * Null body must be silently ignored (defensive null-check in the implementation).
-   */
   @Test
   public void testNullBodyIsIgnored() {
     // Should not throw
-    NeoDefaultsService.injectLineGrossAmountIfMissing(null);
+    NeoDefaultsService.injectLineNetAmountIfMissing(null);
   }
 
-  // ── injectLineGrossAmountIfMissing — net-path regression: no double discount ───
+  // ── injectLineNetAmountIfMissing — zero qty → no injection ─────────────────
 
-  /**
-   * Regression test for the double-discount bug fixed in ETP-3662.
-   *
-   * <p>Scenario: listPrice=33, discount=10%, unitPrice=29.70 (pre-computed by client),
-   * qty=3, tax="" (0% → factor=1.0).</p>
-   *
-   * <p>Correct formula: {@code unitPrice × qty × taxFactor = 29.70 × 3 × 1.0 = 89.10}.
-   * The old (buggy) formula applied discountFactor again:
-   * {@code unitPrice × qty × discountFactor × taxFactor = 29.70 × 3 × 0.9 × 1.0 = 80.19}.
-   * This test verifies the fix produces 89.10, not 80.19.</p>
-   */
   @Test
-  public void testNetPathNoDoubleDiscount() throws Exception {
+  public void testZeroQtyNoInjection() throws Exception {
     JSONObject body = new JSONObject();
-    body.put("orderedQuantity", "3");
-    body.put("unitPrice", 29.70);   // already post-discount (29.70 = 33 × 0.9)
-    body.put("discount", 10);       // must NOT be applied again server-side
-    body.put("tax", "");            // empty taxId → fetchTaxRate returns 0 → factor = 1.0
+    body.put("invoicedQuantity", "0");
+    body.put("unitPrice", 29.70);
 
-    NeoDefaultsService.injectLineGrossAmountIfMissing(body);
+    NeoDefaultsService.injectLineNetAmountIfMissing(body);
 
-    assertTrue("lineGrossAmount should be injected", body.has("lineGrossAmount"));
-    double injected = body.getDouble("lineGrossAmount");
-    assertAmountEquals(89.10, injected);  // correct: 29.70 × 3 × 1.0
-    // Prove old bug value is wrong
-    assertFalse("double-discount value 80.19 must not be produced",
-        Math.abs(injected - 80.19) < 0.005);
+    assertFalse("lineNetAmount should not be injected when invoicedQuantity is zero",
+        body.has("lineNetAmount"));
   }
 
-  // ── injectLineGrossAmountIfMissing — gross-price-list path ────────────────────
+  // ── injectLineNetAmountIfMissing — missing qty → no injection ──────────────
 
-  /**
-   * When {@code grossUnitPrice > 0} the formula is {@code grossUnitPrice × qty},
-   * no tax lookup is required.
-   */
   @Test
-  public void testGrossPathUsesGrossUnitPrice() throws Exception {
+  public void testMissingQtyNoInjection() throws Exception {
     JSONObject body = new JSONObject();
-    body.put("orderedQuantity", "2");
-    body.put("unitPrice", 0);         // ignored on gross path
-    body.put("grossUnitPrice", 53.24);
-    body.put("tax", "SOME-TAX-ID");   // irrelevant — gross path skips tax lookup
+    body.put("unitPrice", 29.70);
 
-    NeoDefaultsService.injectLineGrossAmountIfMissing(body);
+    NeoDefaultsService.injectLineNetAmountIfMissing(body);
 
-    assertTrue("lineGrossAmount should be injected on gross path", body.has("lineGrossAmount"));
-    assertAmountEquals(106.48, body.getDouble("lineGrossAmount")); // 53.24 × 2
+    assertFalse("lineNetAmount should not be injected when invoicedQuantity is absent",
+        body.has("lineNetAmount"));
   }
 
-  // ── injectLineGrossAmountIfMissing — orderedQuantity as string ────────────────
+  // ── injectLineNetAmountIfMissing — zero unitPrice → no injection ───────────
 
-  /**
-   * {@code orderedQuantity} arrives as a JSON string in some request paths.
-   * The method parses it via {@code Double.parseDouble} — verify this works.
-   */
   @Test
-  public void testOrdQtyAsStringIsParsed() throws Exception {
+  public void testZeroUnitPriceNoInjection() throws Exception {
     JSONObject body = new JSONObject();
-    body.put("orderedQuantity", "5");
+    body.put("invoicedQuantity", "3");
+    body.put("unitPrice", 0);
+
+    NeoDefaultsService.injectLineNetAmountIfMissing(body);
+
+    assertFalse("lineNetAmount should not be injected when unitPrice is zero",
+        body.has("lineNetAmount"));
+  }
+
+  // ── injectLineNetAmountIfMissing — normal path ────────────────────────────
+
+  @Test
+  public void testNormalPathComputation() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("invoicedQuantity", "3");
+    body.put("unitPrice", 29.70);
+
+    NeoDefaultsService.injectLineNetAmountIfMissing(body);
+
+    assertTrue("lineNetAmount should be injected", body.has("lineNetAmount"));
+    assertAmountEquals(89.10, body.getDouble("lineNetAmount")); // 29.70 × 3
+  }
+
+  // ── injectLineNetAmountIfMissing — invoicedQuantity as string ─────────────
+
+  @Test
+  public void testInvoicedQtyAsStringIsParsed() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("invoicedQuantity", "5");
     body.put("unitPrice", 10.00);
-    body.put("tax", "");
 
-    NeoDefaultsService.injectLineGrossAmountIfMissing(body);
+    NeoDefaultsService.injectLineNetAmountIfMissing(body);
 
-    assertTrue("lineGrossAmount should be injected", body.has("lineGrossAmount"));
-    assertAmountEquals(50.00, body.getDouble("lineGrossAmount")); // 10 × 5 × 1.0
+    assertTrue("lineNetAmount should be injected", body.has("lineNetAmount"));
+    assertAmountEquals(50.00, body.getDouble("lineNetAmount")); // 10 × 5
+  }
+
+  // ── injectLineNetAmountIfMissing — always recomputes (no early-return) ─────
+
+  /**
+   * Since ETP-3662 the method always recomputes lineNetAmount to override any stale
+   * value left by the product callout (which computes for qty=1). Verify that an
+   * existing lineNetAmount is overwritten with the correct value.
+   */
+  @Test
+  public void testAlwaysRecomputes() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("invoicedQuantity", "3");
+    body.put("unitPrice", 29.70);
+    body.put("lineNetAmount", 999.99); // stale value from callout
+
+    NeoDefaultsService.injectLineNetAmountIfMissing(body);
+
+    assertAmountEquals(89.10, body.getDouble("lineNetAmount")); // overwritten: 29.70 × 3
   }
 
 }
