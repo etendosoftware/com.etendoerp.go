@@ -102,43 +102,60 @@ public class SalesOrderHeaderHandlerTest {
 
   // ── guard conditions (no DB needed) ───────────────────────────────────────
 
+  /**
+   * Verifies that afterHandle returns null for POST requests without invoking DB logic.
+   */
   @Test
-  public void afterHandle_returnsNull_forPostMethod() {
+  public void testAfterHandleReturnsNullForPostMethod() {
     NeoContext ctx = NeoContext.builder()
         .httpMethod("POST").endpointType(NeoEndpointType.ACTION).build();
     assertNull(new SalesOrderHeaderHandler().afterHandle(ctx));
   }
 
+  /**
+   * Verifies that afterHandle returns null for PATCH requests without invoking DB logic.
+   */
   @Test
-  public void afterHandle_returnsNull_forPatchMethod() {
+  public void testAfterHandleReturnsNullForPatchMethod() {
     NeoContext ctx = NeoContext.builder()
         .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD).build();
     assertNull(new SalesOrderHeaderHandler().afterHandle(ctx));
   }
 
+  /**
+   * Verifies that afterHandle returns null when no previous result is set on the context.
+   */
   @Test
-  public void afterHandle_returnsNull_whenPreviousResultIsNull() {
+  public void testAfterHandleReturnsNullWhenPreviousResultIsNull() {
     NeoContext ctx = getCtxWithId("order-1");
-    // previousResult not set → null
     assertNull(new SalesOrderHeaderHandler().afterHandle(ctx));
   }
 
+  /**
+   * Verifies that afterHandle returns null when the previous result carries a null body.
+   */
   @Test
-  public void afterHandle_returnsNull_whenBodyIsNull() {
+  public void testAfterHandleReturnsNullWhenBodyIsNull() {
     NeoContext ctx = getCtxWithId("order-1");
     ctx.setPreviousResult(new NeoResponse(200, null));
     assertNull(new SalesOrderHeaderHandler().afterHandle(ctx));
   }
 
+  /**
+   * Verifies that afterHandle returns null when the response JSON lacks the "response" wrapper.
+   */
   @Test
-  public void afterHandle_returnsNull_whenNoResponseWrapper() throws JSONException {
+  public void testAfterHandleReturnsNullWhenNoResponseWrapper() throws JSONException {
     NeoContext ctx = getCtxWithId("order-1");
     ctx.setPreviousResult(NeoResponse.ok(new JSONObject().put("something", "else")));
     assertNull(new SalesOrderHeaderHandler().afterHandle(ctx));
   }
 
+  /**
+   * Verifies that afterHandle returns null when the data array in the response is empty.
+   */
   @Test
-  public void afterHandle_returnsNull_whenDataArrayIsEmpty() throws JSONException {
+  public void testAfterHandleReturnsNullWhenDataArrayIsEmpty() throws JSONException {
     JSONObject body = new JSONObject().put("response",
         new JSONObject().put("data", new JSONArray()));
     NeoContext ctx = getCtxWithId("order-1");
@@ -148,8 +165,11 @@ public class SalesOrderHeaderHandlerTest {
 
   // ── single-record GET ──────────────────────────────────────────────────────
 
+  /**
+   * Verifies that afterHandle annotates hasLinkedDocuments=true when the DB query finds a linked document.
+   */
   @Test
-  public void afterHandle_singleRecord_annotatesTrue_whenLinkedDocumentExists() throws Exception {
+  public void testAfterHandleSingleRecordAnnotatesTrueWhenLinkedDocumentExists() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -159,7 +179,7 @@ public class SalesOrderHeaderHandlerTest {
       when(conn.prepareStatement(anyString())).thenReturn(ps);
       ResultSet rs = mock(ResultSet.class);
       when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(true); // linked document found
+      when(rs.next()).thenReturn(true);
 
       JSONObject body = singleRecordBody("order-1");
       NeoContext ctx = ctxWithPreviousResult("order-1", body);
@@ -173,8 +193,11 @@ public class SalesOrderHeaderHandlerTest {
     }
   }
 
+  /**
+   * Verifies that afterHandle annotates hasLinkedDocuments=false when the DB query returns no rows.
+   */
   @Test
-  public void afterHandle_singleRecord_annotatesFalse_whenNoLinkedDocuments() throws Exception {
+  public void testAfterHandleSingleRecordAnnotatesFalseWhenNoLinkedDocuments() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -184,7 +207,7 @@ public class SalesOrderHeaderHandlerTest {
       when(conn.prepareStatement(anyString())).thenReturn(ps);
       ResultSet rs = mock(ResultSet.class);
       when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(false); // no linked documents
+      when(rs.next()).thenReturn(false);
 
       JSONObject body = singleRecordBody("order-2");
       NeoContext ctx = ctxWithPreviousResult("order-2", body);
@@ -199,8 +222,11 @@ public class SalesOrderHeaderHandlerTest {
 
   // ── list GET (batch) ───────────────────────────────────────────────────────
 
+  /**
+   * Verifies that afterHandle annotates only the ids returned by the batch query as true.
+   */
   @Test
-  public void afterHandle_list_annotatesMatchingIds_asTrue() throws Exception {
+  public void testAfterHandleListAnnotatesMatchingIdsAsTrue() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -210,7 +236,6 @@ public class SalesOrderHeaderHandlerTest {
       when(conn.prepareStatement(anyString())).thenReturn(ps);
       ResultSet rs = mock(ResultSet.class);
       when(ps.executeQuery()).thenReturn(rs);
-      // Only "order-1" has linked documents
       when(rs.next()).thenReturn(true, false);
       when(rs.getString(1)).thenReturn("order-1");
 
@@ -227,8 +252,11 @@ public class SalesOrderHeaderHandlerTest {
     }
   }
 
+  /**
+   * Verifies that afterHandle annotates all list records as false when none have linked documents.
+   */
   @Test
-  public void afterHandle_list_annotatesAllFalse_whenNoneHaveLinkedDocuments() throws Exception {
+  public void testAfterHandleListAnnotatesAllFalseWhenNoneHaveLinkedDocuments() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -238,7 +266,7 @@ public class SalesOrderHeaderHandlerTest {
       when(conn.prepareStatement(anyString())).thenReturn(ps);
       ResultSet rs = mock(ResultSet.class);
       when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(false); // empty result set
+      when(rs.next()).thenReturn(false);
 
       JSONObject body = listBody("order-3", "order-4");
       NeoContext ctx = listCtxWithPreviousResult(body);
@@ -252,8 +280,11 @@ public class SalesOrderHeaderHandlerTest {
     }
   }
 
+  /**
+   * Verifies that afterHandle returns a 200 response after annotating the list.
+   */
   @Test
-  public void afterHandle_list_returnsOkWithOriginalBody_afterAnnotation() throws Exception {
+  public void testAfterHandleListReturnsOkWithOriginalBodyAfterAnnotation() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -277,8 +308,11 @@ public class SalesOrderHeaderHandlerTest {
 
   // ── DB error resilience ────────────────────────────────────────────────────
 
+  /**
+   * Verifies that afterHandle annotates hasLinkedDocuments=false and does not throw when the single-record DB query fails.
+   */
   @Test
-  public void afterHandle_singleRecord_returnsFalse_whenDbQueryThrows() throws Exception {
+  public void testAfterHandleSingleRecordReturnsFalseWhenDbQueryThrows() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -293,15 +327,17 @@ public class SalesOrderHeaderHandlerTest {
 
       NeoResponse result = new SalesOrderHeaderHandler().afterHandle(ctx);
 
-      // checkLinkedDocuments catches the exception and returns false
       assertNotNull(result);
       JSONArray data = result.getBody().getJSONObject("response").getJSONArray("data");
       assertFalse(data.getJSONObject(0).getBoolean("hasLinkedDocuments"));
     }
   }
 
+  /**
+   * Verifies that afterHandle annotates all list records as false and does not throw when the batch DB query fails.
+   */
   @Test
-  public void afterHandle_list_annotatesAllFalse_whenBatchQueryThrows() throws Exception {
+  public void testAfterHandleListAnnotatesAllFalseWhenBatchQueryThrows() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -316,7 +352,6 @@ public class SalesOrderHeaderHandlerTest {
 
       NeoResponse result = new SalesOrderHeaderHandler().afterHandle(ctx);
 
-      // batchCheckLinkedDocuments catches the exception and returns empty set → all false
       assertNotNull(result);
       JSONArray data = result.getBody().getJSONObject("response").getJSONArray("data");
       assertFalse(data.getJSONObject(0).getBoolean("hasLinkedDocuments"));
@@ -324,14 +359,17 @@ public class SalesOrderHeaderHandlerTest {
     }
   }
 
+  /**
+   * Verifies that afterHandle returns a valid response when all list records lack an id field,
+   * skipping the batch DB query entirely.
+   */
   @Test
-  public void afterHandle_list_returnsResponse_whenAllRecordsHaveNoId() throws JSONException {
+  public void testAfterHandleListReturnsResponseWhenAllRecordsHaveNoId() throws JSONException {
     JSONArray data = new JSONArray();
     data.put(new JSONObject().put("documentNo", "NO-ID-DOC"));
     JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
     NeoContext ctx = listCtxWithPreviousResult(body);
 
-    // annotateListWithLinkedDocuments collects no ids → returns early without DB call
     NeoResponse result = new SalesOrderHeaderHandler().afterHandle(ctx);
 
     assertNotNull(result);
@@ -349,8 +387,11 @@ public class SalesOrderHeaderHandlerTest {
     return handler;
   }
 
+  /**
+   * Verifies that handle returns the clone response immediately when the clone handler matches.
+   */
   @Test
-  public void handle_shortCircuits_whenCloneHandlerResponds() throws Exception {
+  public void testHandleShortCircuitsWhenCloneHandlerResponds() throws Exception {
     NeoCloneRecordHandler mockClone = mock(NeoCloneRecordHandler.class);
     SalesOrderHeaderHandler handler = handlerWithMockClone(mockClone);
 
@@ -362,12 +403,14 @@ public class SalesOrderHeaderHandlerTest {
     assertSame(expected, handler.handle(ctx));
   }
 
+  /**
+   * Verifies that handle returns null when no downstream handler matches the context.
+   */
   @Test
-  public void handle_returnsNull_whenNoHandlerMatches() throws Exception {
+  public void testHandleReturnsNullWhenNoHandlerMatches() throws Exception {
     NeoCloneRecordHandler mockClone = mock(NeoCloneRecordHandler.class);
     SalesOrderHeaderHandler handler = handlerWithMockClone(mockClone);
 
-    // CRUD endpoint — all downstream handlers return null without DB access
     NeoContext ctx = NeoContext.builder()
         .httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
     when(mockClone.handle(ctx)).thenReturn(null);
