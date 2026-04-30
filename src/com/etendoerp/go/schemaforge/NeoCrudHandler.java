@@ -427,11 +427,15 @@ class NeoCrudHandler {
         userSubmittedFields.add(userKeyIter.next());
       }
     }
-    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+    long perfTotalStart = System.nanoTime();
+    long perfStart = perfTotalStart;
+    // runCascade=false: the cascade is run explicitly right after by executePostCalloutCascade,
+    // so we skip the duplicated pass embedded in injectMandatoryDefaults.
+    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue, false);
+    long perfInjectDefaults = System.nanoTime();
     executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, userSubmittedFields);
+    long perfCalloutCascade = System.nanoTime();
     NeoDefaultsService.injectProductDerivedUomIfMissing(filteredBody);
-    NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
-    NeoDefaultsService.injectLineGrossAmountIfMissing(filteredBody);
     NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
     // TODO move this compatibility rule into the shared create-defaults helper once the merge settles.
     stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
@@ -445,8 +449,19 @@ class NeoCrudHandler {
     if (filteredBody != null) {
       filteredBody.remove("id");
     }
+    long perfPreSave = System.nanoTime();
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
-    return jsonService.add(params, wrappedBody);
+    String result = jsonService.add(params, wrappedBody);
+    long perfEnd = System.nanoTime();
+    log.info(
+        "[NEO-PERF] executePostCreate entity={} injectDefaults={}ms calloutCascade={}ms otherDefaults+coerce={}ms jsonService.add={}ms total={}ms",
+        dalEntityName,
+        (perfInjectDefaults - perfStart) / 1_000_000L,
+        (perfCalloutCascade - perfInjectDefaults) / 1_000_000L,
+        (perfPreSave - perfCalloutCascade) / 1_000_000L,
+        (perfEnd - perfPreSave) / 1_000_000L,
+        (perfEnd - perfTotalStart) / 1_000_000L);
+    return result;
   }
 
   private void executePostCalloutCascade(JSONObject filteredBody, Tab adTab,
@@ -471,11 +486,17 @@ class NeoCrudHandler {
     Set<String> effectiveProtected = protectedFields != null
         ? protectedFields
         : java.util.Collections.emptySet();
+    long t0 = System.nanoTime();
     NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields,
         effectiveProtected);
+    long t1 = System.nanoTime();
     DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
     NeoDefaultsCascadeHelper.removeEmptyFkValues(filteredBody, adTab);
-    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+    long t2 = System.nanoTime();
+    log.info(
+        "[NEO-PERF]   executePostCalloutCascade calloutCascade={}ms docTypeReapply+removeEmpty={}ms",
+        (t1 - t0) / 1_000_000L,
+        (t2 - t1) / 1_000_000L);
   }
 
   /**
@@ -534,8 +555,6 @@ class NeoCrudHandler {
     // available here to compute the correct net amount even for products where SL_Invoice_Amt
     // throws on the sales invoice context (e.g. tax-exclusive price lists).
     NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
-    NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
-    NeoDefaultsService.injectLineGrossAmountIfMissing(filteredBody);
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
   }

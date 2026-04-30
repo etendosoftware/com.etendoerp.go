@@ -25,5 +25,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="EM_ETGO_ISPERSON" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <check name="EM_ETGO_ISPERSON_CHK"><![CDATA[EM_ETGO_ISPERSON IN ('Y', 'N')]]></check>
     </table>
   </database>

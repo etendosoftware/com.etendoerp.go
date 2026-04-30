@@ -133,7 +133,7 @@ public class NeoDefaultsService {
           }
           if (isSequenceField(adColumn)) {
             sequenceSFFields.add(sfField);  // defer to pass 2
-            continue;
+              continue;
           }
 
           String dbColumnName = adColumn.getDBColumnName();
@@ -746,10 +746,30 @@ public class NeoDefaultsService {
    * @param ctx     the NeoContext with OBContext and spec/entity info
    */
   public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx) {
-    injectMandatoryDefaults(body, adTab, ctx, null);
+    injectMandatoryDefaults(body, adTab, ctx, null, true);
   }
 
   public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx, String parentId) {
+    injectMandatoryDefaults(body, adTab, ctx, parentId, true);
+  }
+
+  /**
+   * Injects missing mandatory default values into a create payload.
+   *
+   * <p>This overload lets callers decide whether the default injection pass should
+   * also execute the trailing callout cascade. Use {@code runCascade=false} when
+   * the caller runs the cascade immediately afterward.</p>
+   *
+   * @param body       the filtered request body — columns already present are skipped
+   * @param adTab      the AD_Tab for the entity being created
+   * @param ctx        the NeoContext with OBContext and spec/entity info
+   * @param parentId   optional parent record id used for child-tab defaults
+   * @param runCascade whether to run the trailing callout cascade after column iteration.
+   *                   Set to {@code false} when the caller will run the cascade explicitly
+   *                   right after, to avoid duplicating the (expensive) cascade pass.
+   */
+  public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx,
+      String parentId, boolean runCascade) {
     if (body == null || adTab == null || ctx == null) {
       return;
     }
@@ -791,7 +811,11 @@ public class NeoDefaultsService {
       // Fallback 3: run callout cascade with all fields in body.
       // Callouts configured in AD_Column derive dependent fields (e.g. BP → address,
       // price list, payment terms) without hardcoding any field relationships.
-      NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body);
+      // Skipped when the caller will run the cascade explicitly right after, to avoid
+      // duplicating the (expensive) cascade pass.
+      if (runCascade) {
+        NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body);
+      }
 
     } catch (Exception e) {
       log.error("Error injecting mandatory defaults for tab {}: {}",
@@ -1367,125 +1391,6 @@ public class NeoDefaultsService {
     }
     return null;
   }
-  /**
-   * Always recompute grossAmount (LINE_GROSS_AMOUNT) before persisting, covering both
-   * tax-inclusive and tax-exclusive price lists.
-   *
-   * <p><b>Gross price list</b> (grossUnitPrice > 0): {@code grossAmount = grossUnitPrice × qty}.
-   * The price already includes tax, so no lookup needed.</p>
-   *
-   * <p><b>Net price list</b> (grossUnitPrice = 0): {@code grossAmount = lineNetAmount × (1 + rate/100)}.
-   * The tax rate is fetched from C_Tax using the 'tax' field present in the body.
-   * {@code injectLineNetAmountIfMissing} must run before this method so lineNetAmount is available.</p>
-   *
-   * <p>Mirrors the behaviour of {@link #injectLineNetAmountIfMissing}: always recomputes to
-   * override any stale value (e.g. product callout set grossAmount for qty=1 before the user
-   * changed qty).</p>
-   */
-  public static void injectGrossAmountIfMissing(JSONObject body) {
-    if (body == null) {
-      return;
-    }
-    double qty;
-    try {
-      qty = Double.parseDouble(body.optString("invoicedQuantity", "0"));
-    } catch (NumberFormatException e) {
-      return;
-    }
-    if (qty == 0) {
-      return;
-    }
-    double baseNetAmt = body.optDouble("lineNetAmount", 0);
-    String taxId = body.optString("tax", "");
-    // For net price lists require a tax to be selected before computing grossAmount.
-    if (baseNetAmt > 0 && taxId.isEmpty()) {
-      return;
-    }
-    double computed = resolveGrossAmount(body.optDouble("grossUnitPrice", 0), qty, baseNetAmt, taxId);
-    if (Double.isNaN(computed)) {
-      return;
-    }
-    try {
-      body.put("grossAmount", computed);
-      log.debug("[NEO-DEFAULTS] Computed grossAmount={} (qty={}, tax={})", computed, qty, taxId);
-    } catch (Exception e) {
-      log.debug("Could not set grossAmount: {}", e.getMessage());
-    }
-  }
-
-  private static double fetchTaxRate(String taxId) {
-    String sql = "SELECT rate FROM c_tax WHERE c_tax_id = ?";
-    try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
-      ps.setString(1, taxId);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          return rs.getDouble(1);
-        }
-      }
-    } catch (Exception e) {
-      log.debug("Could not fetch tax rate for taxId={}: {}", taxId, e.getMessage());
-    }
-    return 0;
-  }
-
-  /**
-   * Gross path (grossUnitPrice > 0): grossUnitPrice × qty.
-   * Net path (grossUnitPrice = 0): baseNetAmt × (1 + taxRate/100).
-   * Returns {@link Double#NaN} when computation should be skipped (baseNetAmt <= 0).
-   */
-  private static double resolveGrossAmount(double grossUnitPrice, double qty, double baseNetAmt,
-      String taxId) {
-    if (grossUnitPrice > 0) {
-      return grossUnitPrice * qty;
-    }
-    if (baseNetAmt <= 0) {
-      return Double.NaN;
-    }
-    double rate = (taxId == null || taxId.isEmpty()) ? 0 : fetchTaxRate(taxId);
-    return baseNetAmt * (1.0 + rate / 100.0);
-  }
-
-  /**
-   * For order/quotation lines, always recompute 'lineGrossAmount'.
-   * - Gross price list (grossUnitPrice > 0): grossUnitPrice × qty (tax already included).
-   * - Net price list (grossUnitPrice = 0): unitPrice × qty × (1 + taxRate/100).
-   *
-   * <p>Always recomputes to override any stale value the product callout may have set
-   * for qty=1 (SL_Order_Amt fires on product change before the user sets the quantity).
-   */
-  public static void injectLineGrossAmountIfMissing(JSONObject body) {
-    if (body == null) {
-      return;
-    }
-    double qty;
-    try {
-      qty = Double.parseDouble(body.optString("orderedQuantity", "0"));
-    } catch (NumberFormatException e) {
-      return;
-    }
-    if (qty == 0) {
-      return;
-    }
-    double unitPrice = body.optDouble("unitPrice", 0);
-    double discount = body.optDouble("discount", 0);
-    double discountFactor = 1.0 - discount / 100.0;
-    double baseNetAmt = unitPrice > 0 ? unitPrice * qty * discountFactor : 0;
-    String taxId = body.optString("tax", "");
-    double computed = resolveGrossAmount(body.optDouble("grossUnitPrice", 0), qty, baseNetAmt, taxId);
-    if (Double.isNaN(computed)) {
-      return;
-    }
-    try {
-      double rounded = java.math.BigDecimal.valueOf(computed)
-          .setScale(2, java.math.RoundingMode.HALF_UP).doubleValue();
-      body.put("lineGrossAmount", rounded);
-      log.debug("[NEO-DEFAULTS] Computed lineGrossAmount={} (qty={}, unitPrice={}, tax={})",
-          rounded, qty, unitPrice, taxId);
-    } catch (Exception e) {
-      log.debug("Could not set lineGrossAmount: {}", e.getMessage());
-    }
-  }
-
   /**
    * Fallback: when lineNetAmount is absent or zero after the callout cascade, compute it as
    * invoicedQuantity × unitPrice. This covers products where SL_Invoice_Amt throws

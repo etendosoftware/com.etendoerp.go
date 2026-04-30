@@ -22,10 +22,31 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import java.util.Collections;
+import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.domain.Callout;
+import org.openbravo.model.ad.domain.ModelImplementation;
+import org.openbravo.model.ad.ui.Tab;
 
 /**
  * Unit tests for {@link NeoCalloutService}.
@@ -33,6 +54,11 @@ import org.junit.Test;
  * These tests do not require a database connection.
  */
 public class NeoCalloutServiceTest {
+
+  @After
+  public void clearCalloutMetadataCache() {
+    NeoCalloutService.clearMetadataCache();
+  }
 
   // ── toInpName tests ────────────────────────────────────────────────
 
@@ -131,6 +157,97 @@ public class NeoCalloutServiceTest {
   @Test
   public void testToCleanFieldNameNull() {
     assertEquals("", NeoCalloutService.toCleanFieldName(null));
+  }
+
+  // ── Callout metadata cache tests ─────────────────────────────────────
+
+  @Test
+  public void testLoadColumnCalloutMetadataStoresOnlyScalarValues() {
+    NeoCalloutService.clearMetadataCache();
+
+    OBDal obDal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<Column> criteria = mock(OBCriteria.class);
+    Column column = mock(Column.class);
+    Callout callout = mock(Callout.class);
+    ModelImplementation implementation = mock(ModelImplementation.class);
+
+    when(obDal.createCriteria(Column.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(column));
+    when(column.getDBColumnName()).thenReturn("C_BPartner_ID");
+    when(column.getCallout()).thenReturn(callout);
+    when(callout.getName()).thenReturn("Business Partner Callout");
+    when(callout.getADModelImplementationList())
+        .thenReturn(Collections.singletonList(implementation));
+    when(implementation.getJavaClassName()).thenReturn("com.example.BPartnerCallout");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      List<NeoCalloutService.ColumnCalloutMetadata> metadata =
+          NeoCalloutService.loadColumnCalloutMetadata("C_ORDER");
+
+      assertEquals(1, metadata.size());
+      NeoCalloutService.ColumnCalloutMetadata item = metadata.get(0);
+      assertEquals("C_BPartner_ID", item.dbColumnName);
+      assertEquals("Business Partner Callout", item.calloutName);
+      assertEquals("com.example.BPartnerCallout", item.className);
+    }
+  }
+
+  @Test
+  public void testResolveCalloutUsesCachedScalarMetadataWithoutTouchingDalAgain() {
+    NeoCalloutService.clearMetadataCache();
+
+    OBDal obDal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<Column> criteria = mock(OBCriteria.class);
+    Column column = mock(Column.class);
+    Callout callout = mock(Callout.class);
+    ModelImplementation implementation = mock(ModelImplementation.class);
+    Tab tab = mock(Tab.class);
+    Table table = mock(Table.class);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+    Property property = mock(Property.class);
+
+    when(tab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("C_ORDER");
+    when(obDal.createCriteria(Column.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(column));
+    when(column.getDBColumnName()).thenReturn("C_BPartner_ID");
+    when(column.getCallout()).thenReturn(callout);
+    when(callout.getName()).thenReturn("Business Partner Callout");
+    when(callout.getADModelImplementationList())
+        .thenReturn(Collections.singletonList(implementation));
+    when(implementation.getJavaClassName()).thenReturn("com.example.BPartnerCallout");
+    when(modelProvider.getEntityByTableId("C_ORDER")).thenReturn(entity);
+    when(entity.getPropertyByColumnName("C_BPartner_ID")).thenReturn(property);
+    when(property.getName()).thenReturn("businessPartner");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelProviderMock = mockStatic(ModelProvider.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      modelProviderMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+
+      NeoCalloutService.CalloutInfo first =
+          NeoCalloutService.resolveCallout(tab, "businessPartner");
+
+      assertNotNull(first);
+      assertEquals("com.example.BPartnerCallout", first.className);
+      assertEquals("inpcBpartnerId", first.inpFieldName);
+      assertEquals("C_BPartner_ID", first.columnName);
+
+      NeoCalloutService.CalloutInfo second =
+          NeoCalloutService.resolveCallout(tab, "businessPartner");
+
+      assertNotNull(second);
+      assertEquals("com.example.BPartnerCallout", second.className);
+      verify(obDal, times(1)).createCriteria(Column.class);
+      verify(callout, times(1)).getADModelImplementationList();
+    }
   }
 
   // ── Response transformation tests ──────────────────────────────────

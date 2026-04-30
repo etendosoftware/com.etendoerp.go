@@ -37,7 +37,6 @@ public final class OnboardingDatasetDefinition {
       "AD_REF_DATA_LOADED",
       "AD_ROLE",
       "AD_ROLE_ORGACCESS",
-      "AD_SEQUENCE",
       "AD_TREE",
       "AD_TREENODE",
       "AD_USER",
@@ -48,9 +47,14 @@ public final class OnboardingDatasetDefinition {
 
   private static final Set<String> INCLUDED_TABLES = Set.of(
       "AD_ORG_WAREHOUSE",
+      "AD_SEQUENCE",
       "C_BP_GROUP",
+      "C_BPARTNER",
+      "C_BPARTNER_LOCATION",
       "C_CALENDAR",
+      "C_DOCTYPE",
       "C_LOCATION",
+      "C_PAYMENTTERM",
       "C_PERIOD",
       "C_TAX",
       "C_TAXCATEGORY",
@@ -59,6 +63,7 @@ public final class OnboardingDatasetDefinition {
       "FIN_FINANCIAL_ACCOUNT",
       "FIN_MATCHING_ALGORITHM",
       "FIN_PAYMENTMETHOD",
+      "GL_CATEGORY",
       "M_DISCOUNTSCHEMA",
       "M_LOCATOR",
       "M_PRICELIST",
@@ -74,7 +79,8 @@ public final class OnboardingDatasetDefinition {
       "CREATEDBY",
       "UPDATED",
       "UPDATEDBY",
-      "SALESREP_ID"
+      "SALESREP_ID",
+      "AD_LANGUAGE"
   );
 
   private OnboardingDatasetDefinition() {

@@ -46,6 +46,41 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue(OnboardingDatasetDefinition.getExcludedTables().contains("AD_REF_DATA_LOADED"));
   }
 
+  /** Verifies that document types keep their required dependent tables in the curated dataset. */
+  @Test
+  public void testDefinitionIncludesDocumentTypesWithDependentTables() {
+    assertTrue(OnboardingDatasetDefinition.getIncludedTables().contains("C_DOCTYPE"));
+    assertTrue(OnboardingDatasetDefinition.getIncludedTables().contains("AD_SEQUENCE"));
+    assertTrue(OnboardingDatasetDefinition.getIncludedTables().contains("GL_CATEGORY"));
+    assertFalse(OnboardingDatasetDefinition.getExcludedTables().contains("AD_SEQUENCE"));
+  }
+
+  /** Verifies that normalized onboarding XML emits document types together with their dependencies. */
+  @Test
+  public void testNormalizerIncludesDocumentTypesWithDependencies() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue(xml.contains("<cDoctype"));
+    assertTrue(xml.contains("<adSequence"));
+    assertTrue(xml.contains("<glCategory"));
+    assertTrue(xml.contains("Quotation"));
+  }
+
+  /** Verifies that payment terms are kept in the curated onboarding dataset. */
+  @Test
+  public void testDefinitionIncludesPaymentTerms() {
+    assertTrue(OnboardingDatasetDefinition.getIncludedTables().contains("C_PAYMENTTERM"));
+  }
+
+  /** Verifies that normalized onboarding XML emits payment term rows from GOClient. */
+  @Test
+  public void testNormalizerIncludesPaymentTerms() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue(xml.contains("<cPaymentterm"));
+    assertTrue(xml.contains("30 Días"));
+  }
+
   @Test
   public void testNormalizerBuildsEmptyDatasetWithoutUnsupportedJaxpFailures() throws Exception {
     Path emptySampleDataDir = Files.createTempDirectory("onboarding-empty-sampledata");
@@ -78,6 +113,13 @@ public class OnboardingDatasetNormalizerTest {
     assertFalse(xml.contains("<AD_REF_DATA_LOADED>"));
   }
 
+  /** Verifies that translation-only payment term tables are excluded from onboarding metadata. */
+  @Test
+  public void testDefinitionExcludesPaymentTermTranslations() {
+    assertFalse(OnboardingDatasetDefinition.getIncludedTables().contains("C_PAYMENTTERM_TRL"));
+  }
+
+
   /** Verifies that representative foundation business records remain in the normalized XML. */
   @Test
   public void testNormalizerKeepsFoundationBusinessContent() {
@@ -86,6 +128,9 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue(xml.contains("Agua"));
     assertTrue(xml.contains("Consumidor Final"));
     assertTrue(xml.contains("Cuenta de Banco"));
+    assertTrue(xml.contains("30 Días"));
+    assertTrue(xml.contains("Inmediato"));
+    assertTrue(xml.contains("Juan Perez"));
     assertTrue(xml.contains("Efectivo"));
   }
 
@@ -96,6 +141,15 @@ public class OnboardingDatasetNormalizerTest {
 
     assertFalse(xml.contains("<SALESREP_ID>"));
   }
+
+  /** Verifies that system-scoped language rows are stripped from the normalized XML. */
+  @Test
+  public void testNormalizerStripsSystemScopedLanguageRows() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertFalse(xml.contains("<AD_LANGUAGE>"));
+  }
+
 
   /** Verifies that sourcedata table and column tags do not leak into the final XML. */
   @Test
