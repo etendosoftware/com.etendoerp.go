@@ -129,6 +129,10 @@ public class NeoServlet extends HttpBaseServlet {
       sendError(response, HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
       return;
     }
+    if (pathInfo == null) {
+      sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Unable to parse request path");
+      return;
+    }
 
     // 3. Resolve spec, entity, and tab
     try {

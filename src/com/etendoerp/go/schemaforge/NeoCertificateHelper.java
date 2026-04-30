@@ -35,8 +35,10 @@ import javax.servlet.http.Part;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.client.application.process.BaseProcessActionHandler;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.OrganizationInformation;
 
 import com.etendoerp.sif.general.process.AddCertificateToOrg;
 
@@ -55,32 +57,39 @@ public class NeoCertificateHelper {
 
   private static final Logger log = LogManager.getLogger(NeoCertificateHelper.class);
   private static final String DATE_FORMAT = "dd/MM/yyyy";
+  private static final String PARAM_ORG_ID = "orgId";
 
   // RPJ certs (Representante Persona Jurídica): organizationIdentifier=VATES-A39200019
   // OID 2.5.4.97 — some JDK versions return the OID string instead of the attribute name.
   private static final Pattern NIF_ORG_ID_PATTERN = Pattern.compile(
-      "(?:organizationIdentifier|OID\\.2\\.5\\.4\\.97)=[A-Z0-9-]*?" +
-      "([A-Z][0-9]{7}[A-Z0-9]|[0-9]{8}[A-Z])",
+      "(?:organizationIdentifier|OID\\.2\\.5\\.4\\.97)=[A-Z\\d-]*?" +
+      "([A-Z]\\d{7}[A-Z\\d]|\\d{8}[A-Z])",
       Pattern.CASE_INSENSITIVE);
 
   // Personal / autónomo certs: SERIALNUMBER=IDCES-12345678Z or VATID-ES12345678Z
   // Uses a lazy prefix so any alphanumeric-hyphen prefix is skipped before the 9-char NIF.
   private static final Pattern NIF_SERIAL_PATTERN = Pattern.compile(
-      "(?:SERIALNUMBER|OID\\.2\\.5\\.4\\.5)=[A-Z0-9-]*?" +
-      "([A-Z][0-9]{7}[A-Z0-9]|[0-9]{8}[A-Z])",
+      "(?:SERIALNUMBER|OID\\.2\\.5\\.4\\.5)=[A-Z\\d-]*?" +
+      "([A-Z]\\d{7}[A-Z\\d]|\\d{8}[A-Z])",
       Pattern.CASE_INSENSITIVE);
 
   // Fallback: "CN=NAME (R: A39200019)" — org NIF after "R:" inside CN
   private static final Pattern NIF_CN_R_PATTERN = Pattern.compile(
-      "CN=[^,]*\\(R:\\s*([A-Z][0-9]{7}[A-Z0-9]|[0-9]{8}[A-Z])\\)",
+      "CN=[^,]*\\(R:\\s*([A-Z]\\d{7}[A-Z\\d]|\\d{8}[A-Z])\\)",
       Pattern.CASE_INSENSITIVE);
 
   private NeoCertificateHelper() {
   }
 
+  /**
+   * Handles GET /sws/neo/certificate — returns the active certificate status for an organization.
+   *
+   * @param request HTTP request; must include {@code orgId} query parameter
+   * @return NeoResponse with {@code exists} boolean and {@code validTo} date when found
+   */
   public static NeoResponse handleCertificateGet(HttpServletRequest request) {
     try {
-      String orgId = request.getParameter("orgId");
+      String orgId = request.getParameter(PARAM_ORG_ID);
       if (orgId == null || orgId.isBlank()) {
         return NeoResponse.error(400, "Required parameter: orgId");
       }
@@ -90,7 +99,7 @@ public class NeoCertificateHelper {
           "SELECT expiration_date FROM etsg_certificate" +
           " WHERE ad_org_id = :orgId AND isactive = 'Y'" +
           " ORDER BY expiration_date DESC LIMIT 1");
-      q.setParameter("orgId", orgId);
+      q.setParameter(PARAM_ORG_ID, orgId);
       Object row = q.uniqueResult();
       JSONObject resp = new JSONObject();
       if (row != null) {
@@ -103,10 +112,20 @@ public class NeoCertificateHelper {
       return NeoResponse.ok(resp);
     } catch (Exception e) {
       log.error("Certificate GET failed", e);
-      return NeoResponse.error(500, e.getMessage());
+      return NeoResponse.error(500, "Internal error retrieving certificate status");
     }
   }
 
+  /**
+   * Handles POST /sws/neo/certificate — uploads a PKCS#12 certificate for an organization.
+   *
+   * Validates the NIF embedded in the certificate against the organisation's registered NIF.
+   * When the organisation has no NIF, returns a {@code pendingNifConfirmation} prompt so the
+   * client can ask the user to confirm; re-post with {@code setOrgNif=true} to apply.
+   *
+   * @param request HTTP multipart/form-data request with fields: certificate, orgId, password
+   * @return NeoResponse with cert details on success, or error with HTTP status
+   */
   public static NeoResponse handleCertificateUpload(HttpServletRequest request) {
     try {
       String contentType = request.getContentType();
@@ -114,8 +133,8 @@ public class NeoCertificateHelper {
         return NeoResponse.error(400, "Expected multipart/form-data");
       }
 
-      Part filePart  = request.getPart("certificate");
-      String orgId   = request.getParameter("orgId");
+      Part filePart   = request.getPart("certificate");
+      String orgId    = request.getParameter(PARAM_ORG_ID);
       String password = request.getParameter("password");
 
       if (filePart == null || orgId == null || orgId.isBlank()
@@ -137,7 +156,7 @@ public class NeoCertificateHelper {
       }
 
       if (primaryCert != null) {
-        String certNif = parseNifFromDn(primaryCert.getSubjectDN().getName());
+        String certNif = parseNifFromDn(primaryCert.getSubjectX500Principal().getName());
         if (certNif != null) {
           String orgNif = getOrgNif(orgId);
           if (orgNif == null) {
@@ -157,27 +176,7 @@ public class NeoCertificateHelper {
         }
       }
 
-      // Build parameters map expected by AddCertificateToOrg.doExecute()
-      Map<String, Object> fileParams = new HashMap<>();
-      fileParams.put("content", new ByteArrayInputStream(certBytes));
-      fileParams.put("fileName", fileName);
-
-      Map<String, Object> parameters = new HashMap<>();
-      parameters.put(AddCertificateToOrg.PARAM_CERTIFICATE_FILE, fileParams);
-
-      // Build content JSON expected by AddCertificateToOrg.doExecute()
-      JSONObject params = new JSONObject();
-      params.put(AddCertificateToOrg.PARAM_CERTIFICATE_PASSWORD, password);
-      JSONObject content = new JSONObject();
-      content.put(AddCertificateToOrg.PARAM_ORG_ID, orgId);
-      content.put("_params", params);
-
-      // Invoke protected doExecute via reflection (same pattern used by NeoProcessService)
-      AddCertificateToOrg handler = new AddCertificateToOrg();
-      Method doExecute = BaseProcessActionHandler.class
-          .getDeclaredMethod("doExecute", Map.class, String.class);
-      doExecute.setAccessible(true);
-      JSONObject result = (JSONObject) doExecute.invoke(handler, parameters, content.toString());
+      JSONObject result = invokeCertificateProcess(certBytes, fileName, orgId, password);
 
       JSONObject message = result.optJSONObject("message");
       if (message != null && "error".equals(message.optString("severity"))) {
@@ -193,7 +192,7 @@ public class NeoCertificateHelper {
 
     } catch (Exception e) {
       log.error("Certificate upload failed", e);
-      return NeoResponse.error(500, e.getMessage());
+      return NeoResponse.error(500, "Internal error processing certificate upload");
     }
   }
 
@@ -230,32 +229,17 @@ public class NeoCertificateHelper {
   // ── DB helpers ──────────────────────────────────────────────────────────────
 
   /**
-   * Returns the tax ID configured for the given organisation, or null if not found.
-   * Reads taxid directly from ad_orginfo (PK = ad_org_id).
-   *
-   * Uses a SAVEPOINT so a query failure cannot abort the caller's transaction.
+   * Returns the tax ID configured for the given organisation, or null if not found or blank.
    */
   private static String getOrgNif(String orgId) {
-    var session = OBDal.getInstance().getSession();
-    String sp = "nif_lookup";
     try {
-      session.doWork(conn -> conn.createStatement().execute("SAVEPOINT " + sp));
-
-      @SuppressWarnings("unchecked")
-      var q = session.createNativeQuery(
-          "SELECT taxid FROM ad_orginfo WHERE ad_org_id = :orgId AND isactive = 'Y'");
-      q.setParameter("orgId", orgId);
-      q.setMaxResults(1);
-      Object result = q.uniqueResult();
-
-      session.doWork(conn -> conn.createStatement().execute("RELEASE SAVEPOINT " + sp));
-      if (result == null) return null;
-      String taxid = result.toString().trim();
+      OrganizationInformation orgInfo = OBDal.getInstance().get(OrganizationInformation.class, orgId);
+      if (orgInfo == null) return null;
+      String taxid = orgInfo.getTaxID();
+      if (taxid == null) return null;
+      taxid = taxid.trim();
       return (taxid.isEmpty() || "?".equals(taxid)) ? null : taxid;
     } catch (Exception e) {
-      try {
-        session.doWork(conn -> conn.createStatement().execute("ROLLBACK TO SAVEPOINT " + sp));
-      } catch (Exception ignored) { /* session already unusable */ }
       log.warn("Could not retrieve org NIF for orgId {}: {}", orgId, e.getMessage());
       return null;
     }
@@ -270,14 +254,39 @@ public class NeoCertificateHelper {
       OBDal.getInstance().getSession()
           .createNativeQuery("UPDATE ad_orginfo SET taxid = :nif WHERE ad_org_id = :orgId")
           .setParameter("nif", nif)
-          .setParameter("orgId", orgId)
+          .setParameter(PARAM_ORG_ID, orgId)
           .executeUpdate();
-    } catch (Exception e) {
+    } catch (OBException e) {
       log.warn("Could not set org NIF for orgId {}: {}", orgId, e.getMessage());
     }
   }
 
   // ── PKCS#12 helpers ─────────────────────────────────────────────────────────
+
+  /**
+   * Invokes {@link AddCertificateToOrg#doExecute} via reflection to store the certificate.
+   */
+  private static JSONObject invokeCertificateProcess(byte[] certBytes, String fileName,
+      String orgId, String password) throws Exception {
+    Map<String, Object> fileParams = new HashMap<>();
+    fileParams.put("content", new ByteArrayInputStream(certBytes));
+    fileParams.put("fileName", fileName);
+
+    Map<String, Object> parameters = new HashMap<>();
+    parameters.put(AddCertificateToOrg.PARAM_CERTIFICATE_FILE, fileParams);
+
+    JSONObject params = new JSONObject();
+    params.put(AddCertificateToOrg.PARAM_CERTIFICATE_PASSWORD, password);
+    JSONObject content = new JSONObject();
+    content.put(AddCertificateToOrg.PARAM_ORG_ID, orgId);
+    content.put("_params", params);
+
+    AddCertificateToOrg handler = new AddCertificateToOrg();
+    Method doExecute = BaseProcessActionHandler.class
+        .getDeclaredMethod("doExecute", Map.class, String.class);
+    doExecute.setAccessible(true);
+    return (JSONObject) doExecute.invoke(handler, parameters, content.toString());
+  }
 
   private static X509Certificate parsePrimaryX509Cert(byte[] certBytes, String password)
       throws Exception {
@@ -297,8 +306,8 @@ public class NeoCertificateHelper {
     try {
       SimpleDateFormat sdf = new SimpleDateFormat(DATE_FORMAT);
       JSONObject details = new JSONObject();
-      details.put("subject",   cert.getSubjectDN().getName());
-      details.put("issuer",    cert.getIssuerDN().getName());
+      details.put("subject",   cert.getSubjectX500Principal().getName());
+      details.put("issuer",    cert.getIssuerX500Principal().getName());
       details.put("validFrom", sdf.format(cert.getNotBefore()));
       details.put("validTo",   sdf.format(cert.getNotAfter()));
       details.put("algorithm", cert.getSigAlgName());
