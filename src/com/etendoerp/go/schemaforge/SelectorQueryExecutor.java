@@ -205,7 +205,7 @@ final class SelectorQueryExecutor {
       Object[] row = (rawRow instanceof Object[]) ? (Object[]) rawRow : new Object[]{ rawRow };
       JSONObject item = new JSONObject();
 
-      String recordId = SelectorQueryBuilder.extractRecordId(row, idColIdx);
+      String recordId = SelectorResponseSupport.extractRecordId(row, idColIdx);
       item.put("id", recordId);
       entityIds.add(recordId);
       item.put(FIELD_LABEL,

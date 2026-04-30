@@ -20,6 +20,7 @@ import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.structure.BaseOBObject;
 
 import com.etendoerp.go.schemaforge.selector.meta.RichFieldMeta;
 
@@ -65,5 +66,13 @@ final class SelectorResponseSupport {
       return rawId.substring(32);
     }
     return rawId;
+  }
+
+  static String extractRecordId(Object[] row, Integer idColIdx) {
+    Object idVal = (idColIdx != null && idColIdx < row.length) ? row[idColIdx] : row[0];
+    String recordId = idVal instanceof BaseOBObject
+        ? ((BaseOBObject) idVal).getId().toString()
+        : String.valueOf(idVal);
+    return normalizeEntityId(recordId);
   }
 }

@@ -56,13 +56,6 @@ class SelectorQueryBuilder {
   static final String SQL_AND = " AND ";
   static final String SQL_WHERE = " WHERE ";
 
-  private static final String FIELD_LABEL = "label";
-  private static final String FIELD_ITEMS = "items";
-  private static final String FIELD_COLUMNS = "columns";
-  private static final String FIELD_TOTAL_COUNT = "totalCount";
-  private static final String FIELD_LIMIT = "limit";
-  private static final String FIELD_OFFSET = "offset";
-  private static final String FIELD_HAS_MORE = "hasMore";
 
   /** Pattern matching @param@ and @#param@ (session-level) placeholders in OBUISEL clauses. */
   static final Pattern PARAM_PATTERN = Pattern.compile("@#?([A-Za-z_]+)@");
@@ -408,17 +401,6 @@ class SelectorQueryBuilder {
     return SelectorResponseSupport.normalizeEntityId(rawId);
   }
 
-  /**
-   * Extract and normalize the record ID from an HQL Object[] row.
-   * Handles BaseOBObject, composite 64-char UUIDs, and plain string values.
-   */
-  static String extractRecordId(Object[] row, Integer idColIdx) {
-    Object idVal = (idColIdx != null && idColIdx < row.length) ? row[idColIdx] : row[0];
-    String recordId = idVal instanceof BaseOBObject
-        ? ((BaseOBObject) idVal).getId().toString()
-        : String.valueOf(idVal);
-    return SelectorResponseSupport.normalizeEntityId(recordId);
-  }
 
   /**
    * Extract the display label from an HQL Object[] row.
