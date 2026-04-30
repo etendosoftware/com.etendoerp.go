@@ -30,12 +30,11 @@ import javax.inject.Named;
  *   <li>{@code createDraftInvoice} / {@code checkDraftInvoice} / {@code listInvoices} → {@link CreateDraftInvoiceHandler}</li>
  * </ul>
  *
- * Each delegate handler contains its own spec/field matching logic and returns
- * {@code null} when the request does not apply, so this class needs no
- * additional routing conditions.
+ * GET post-hook (hasLinkedDocuments annotation) is inherited from
+ * {@link AbstractOrderHeaderHandler}.
  */
 @Named("salesOrderHeaderHandler")
-public class SalesOrderHeaderHandler implements NeoHandler {
+public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;

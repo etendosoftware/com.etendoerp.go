@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -70,6 +71,18 @@ class NeoCrudHandler {
   private static final String PARAM_PARENT_ID = "parentId";
   private static final String HQL_AND_OPERATOR = " and ";
   private static final String JSON_IDENTIFIER = "_identifier";
+  private static final Set<String> CONTACTS_PRECREATE_BILLING_FIELDS = new HashSet<>(
+      Arrays.asList(
+          "priceList",
+          "paymentMethod",
+          "paymentTerms",
+          "account",
+          "customerBlocking",
+          "purchasePricelist",
+          "pOPaymentMethod",
+          "pOPaymentTerms",
+          "pOFinancialAccount",
+          "vendorBlocking"));
 
   private final NeoServlet servlet;
 
@@ -426,6 +439,7 @@ class NeoCrudHandler {
     NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
     NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);
     NeoCommercialLinePolicy.injectLineNetAmountIfMissing(filteredBody);
+    stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
     // Coerce String primitives injected by injectMandatoryDefaults to their correct Java types.
     // Utility.getDefault() always returns String; JsonToDataConverter has no String→BigDecimal/
     // Integer/Boolean path and falls through to return value, causing OBDal type mismatches.
@@ -510,6 +524,23 @@ class NeoCrudHandler {
           log.debug("Could not resolve parent column for '{}': {}", col.getDBColumnName(), ex.getMessage());
         }
       }
+    }
+  }
+
+  private void stripContactsPreCreateBillingDefaults(JSONObject body, NeoContext context, Tab adTab) {
+    if (body == null || context == null || adTab == null) {
+      return;
+    }
+    if (!("contacts".equalsIgnoreCase(context.getSpecName())
+        && "businessPartner".equals(context.getEntityName())
+        && adTab.getTabLevel() != null
+        && adTab.getTabLevel() == 0)) {
+      return;
+    }
+
+    for (String key : CONTACTS_PRECREATE_BILLING_FIELDS) {
+      body.remove(key);
+      body.remove(key + "$_identifier");
     }
   }
 

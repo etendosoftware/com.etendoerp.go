@@ -167,6 +167,13 @@ public final class ProductPriceSelectorPolicy implements SelectorEnrichmentPolic
         item.put("standardPrice", cols[1]);
         item.put("listPrice", cols[2]);
         item.put("isTaxIncluded", "Y".equals(String.valueOf(cols[3])));
+        JSONObject aux = item.optJSONObject("_aux");
+        if (aux == null) {
+          aux = new JSONObject();
+          item.put("_aux", aux);
+        }
+        aux.put("_PSTD", String.valueOf(cols[1]));
+        aux.put("_PLIST", String.valueOf(cols[2]));
       }
     }
   }

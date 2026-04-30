@@ -450,7 +450,6 @@ public class NeoSelectorService {
   }
 
 
-
   private static String remapFilterAlias(String filter, String alias) {
     if (StringUtils.isBlank(filter) || StringUtils.isBlank(alias) || "e".equals(alias)) {
       return filter;

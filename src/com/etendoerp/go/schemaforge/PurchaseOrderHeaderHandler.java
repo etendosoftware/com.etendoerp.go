@@ -30,11 +30,11 @@ import javax.inject.Named;
  *   <li>{@code createPurchaseInvoice} → {@link CreatePurchaseInvoiceHandler}</li>
  * </ul>
  *
- * Other actions (e.g. {@code documentAction}) return {@code null} here and
- * fall through to the default AD process execution path.
+ * GET post-hook (hasLinkedDocuments annotation) is inherited from
+ * {@link AbstractOrderHeaderHandler}.
  */
 @Named("purchaseOrderHeaderHandler")
-public class PurchaseOrderHeaderHandler implements NeoHandler {
+public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
