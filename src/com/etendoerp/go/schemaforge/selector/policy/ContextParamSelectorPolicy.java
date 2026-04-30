@@ -14,7 +14,7 @@
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
  */
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.selector.policy;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -23,7 +23,7 @@ import java.util.Map;
 import org.apache.commons.lang3.StringUtils;
 
 /** Entity-specific selector filters derived from validated context parameters. */
-final class ContextParamSelectorPolicy {
+public final class ContextParamSelectorPolicy {
 
   private static final String ENTITY_BUSINESS_PARTNER = "BusinessPartner";
   private static final String ENTITY_PRODUCT_BY_PRICE_AND_WAREHOUSE =
@@ -32,7 +32,7 @@ final class ContextParamSelectorPolicy {
   private ContextParamSelectorPolicy() {
   }
 
-  static String resolveFilter(String entityName, Map<String, String> contextParams, String alias) {
+  public static String resolveFilter(String entityName, Map<String, String> contextParams, String alias) {
     if (contextParams == null || contextParams.isEmpty() || entityName == null) {
       return null;
     }

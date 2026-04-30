@@ -14,21 +14,23 @@
  * Contributor(s): Futit Services S.L.
  *************************************************************************
  */
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.selector.meta;
+
+import java.util.List;
 
 /**
- * Metadata for a single field in a rich (OBUISEL) selector grid.
+ * Container for the three field lists produced by classifying OBUISEL selector fields:
+ * grid display columns, searchable properties, and auxiliary output fields.
  */
-class RichFieldMeta {
-  final String propertyKey;  // last segment of property path
-  final String label;        // display name
-  final String property;     // full DAL property path
-  final long sortNo;
+public class ObuiselFieldLists {
+  public final List<RichFieldMeta> gridFields;
+  public final List<String> searchableProps;
+  public final List<AuxFieldMeta> auxFields;
 
-  RichFieldMeta(String propertyKey, String label, String property, long sortNo) {
-    this.propertyKey = propertyKey;
-    this.label = label;
-    this.property = property;
-    this.sortNo = sortNo;
+  public ObuiselFieldLists(List<RichFieldMeta> gridFields, List<String> searchableProps,
+      List<AuxFieldMeta> auxFields) {
+    this.gridFields = gridFields;
+    this.searchableProps = searchableProps;
+    this.auxFields = auxFields;
   }
 }

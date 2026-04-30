@@ -14,7 +14,7 @@
  * Contributor(s): Futit Services S.L.
  *************************************************************************
  */
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.selector.meta;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -28,21 +28,21 @@ import java.util.List;
  * <p>Use the {@link Builder} for rich (OBUISEL) selectors that require all fields.
  * The 3-argument constructor covers simple selectors (TableDir, Table, Search).
  */
-class SelectorMeta {
-  final String entityName;
-  final String displayProperty;
-  final String whereClause;
-  final boolean isRich;
-  final boolean isCustomQuery;
-  final String valueProperty;
-  final List<RichFieldMeta> gridFields;
-  final List<String> searchableProperties;
-  final String customHql;
-  final String entityAlias;
-  final List<AuxFieldMeta> auxFields;
+public class SelectorMeta {
+  public final String entityName;
+  public final String displayProperty;
+  public final String whereClause;
+  public final boolean isRich;
+  public final boolean isCustomQuery;
+  public final String valueProperty;
+  public final List<RichFieldMeta> gridFields;
+  public final List<String> searchableProperties;
+  public final String customHql;
+  public final String entityAlias;
+  public final List<AuxFieldMeta> auxFields;
 
   /** Constructor for simple selectors (TableDir, Table, Search). */
-  SelectorMeta(String entityName, String displayProperty, String whereClause) {
+  public SelectorMeta(String entityName, String displayProperty, String whereClause) {
     this.entityName = entityName;
     this.displayProperty = displayProperty;
     this.whereClause = whereClause;
@@ -72,7 +72,7 @@ class SelectorMeta {
   }
 
   /** Builder for rich (OBUISEL) selectors. */
-  static final class Builder {
+  public static final class Builder {
     // Required
     private final String entityName;
     private final String displayProperty;
@@ -88,22 +88,22 @@ class SelectorMeta {
     private String entityAlias = "e";
     private List<AuxFieldMeta> auxFields = new ArrayList<>();
 
-    Builder(String entityName, String displayProperty) {
+    public Builder(String entityName, String displayProperty) {
       this.entityName = entityName;
       this.displayProperty = displayProperty;
     }
 
-    Builder whereClause(String val) { this.whereClause = val; return this; }
-    Builder isRich(boolean val) { this.isRich = val; return this; }
-    Builder isCustomQuery(boolean val) { this.isCustomQuery = val; return this; }
-    Builder valueProperty(String val) { this.valueProperty = val; return this; }
-    Builder gridFields(List<RichFieldMeta> val) { this.gridFields = val; return this; }
-    Builder searchableProperties(List<String> val) { this.searchableProperties = val; return this; }
-    Builder customHql(String val) { this.customHql = val; return this; }
-    Builder entityAlias(String val) { this.entityAlias = val; return this; }
-    Builder auxFields(List<AuxFieldMeta> val) { this.auxFields = val; return this; }
+    public Builder whereClause(String val) { this.whereClause = val; return this; }
+    public Builder isRich(boolean val) { this.isRich = val; return this; }
+    public Builder isCustomQuery(boolean val) { this.isCustomQuery = val; return this; }
+    public Builder valueProperty(String val) { this.valueProperty = val; return this; }
+    public Builder gridFields(List<RichFieldMeta> val) { this.gridFields = val; return this; }
+    public Builder searchableProperties(List<String> val) { this.searchableProperties = val; return this; }
+    public Builder customHql(String val) { this.customHql = val; return this; }
+    public Builder entityAlias(String val) { this.entityAlias = val; return this; }
+    public Builder auxFields(List<AuxFieldMeta> val) { this.auxFields = val; return this; }
 
-    SelectorMeta build() {
+    public SelectorMeta build() {
       return new SelectorMeta(this);
     }
   }

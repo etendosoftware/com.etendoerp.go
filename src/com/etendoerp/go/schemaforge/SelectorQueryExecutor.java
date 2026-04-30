@@ -32,6 +32,8 @@ import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
+import com.etendoerp.go.schemaforge.selector.meta.RichFieldMeta;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 
 /**
  * Executes resolved selector query plans against DAL/HQL and maps rows into selector responses.

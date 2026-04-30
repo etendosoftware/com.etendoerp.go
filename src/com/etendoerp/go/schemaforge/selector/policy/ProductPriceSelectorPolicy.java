@@ -14,7 +14,7 @@
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
  */
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.selector.policy;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -30,16 +30,17 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.service.OBDal;
+import com.etendoerp.go.schemaforge.NeoResponse;
 
 /** Enriches product selector rows with price-list information. */
-final class ProductPriceSelectorPolicy {
+public final class ProductPriceSelectorPolicy {
 
   private static final Logger log = LogManager.getLogger(ProductPriceSelectorPolicy.class);
 
   private ProductPriceSelectorPolicy() {
   }
 
-  static NeoResponse enrichProductSelectorWithPrices(NeoResponse response, String priceListId) {
+  public static NeoResponse enrichProductSelectorWithPrices(NeoResponse response, String priceListId) {
     if (response == null || response.getBody() == null || StringUtils.isBlank(priceListId)) {
       return response;
     }

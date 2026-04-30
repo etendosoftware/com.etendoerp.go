@@ -1,4 +1,4 @@
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.selector.meta;
 
 import java.util.HashSet;
 import java.util.List;
@@ -9,11 +9,12 @@ import java.util.regex.Pattern;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.model.ad.datamodel.Column;
+import com.etendoerp.go.schemaforge.NeoSelectorService;
 
 /**
  * Builds selector discovery descriptors returned by the NEO metadata endpoints.
  */
-class SelectorDescriptorBuilder {
+public class SelectorDescriptorBuilder {
 
   private static final String KEY_COLUMN_NAME = "columnName";
   private static final String KEY_REFERENCE_TYPE = "referenceType";
@@ -27,7 +28,7 @@ class SelectorDescriptorBuilder {
   private SelectorDescriptorBuilder() {
   }
 
-  static JSONObject buildListSelectorItem(Column column) throws Exception {
+  public static JSONObject buildListSelectorItem(Column column) throws Exception {
     JSONObject item = new JSONObject();
     item.put(KEY_COLUMN_NAME, column.getDBColumnName());
     item.put(KEY_REFERENCE_TYPE, "List");
@@ -35,7 +36,7 @@ class SelectorDescriptorBuilder {
     return item;
   }
 
-  static JSONObject buildSelectorItem(Column column, String refId,
+  public static JSONObject buildSelectorItem(Column column, String refId,
       SelectorMeta meta, Set<String> sessionParams) throws Exception {
     JSONObject item = new JSONObject();
     item.put(KEY_COLUMN_NAME, column.getDBColumnName());

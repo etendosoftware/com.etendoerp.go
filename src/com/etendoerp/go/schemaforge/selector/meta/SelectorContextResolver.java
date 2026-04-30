@@ -14,7 +14,7 @@
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
  */
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.selector.meta;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -36,7 +36,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 /**
  * Resolves selector context parameters from request metadata and server-side AD context.
  */
-final class SelectorContextResolver {
+public final class SelectorContextResolver {
 
   private static final Logger log = LogManager.getLogger(SelectorContextResolver.class);
   private static final String AD_ORG_ID = "AD_Org_ID";
@@ -53,7 +53,7 @@ final class SelectorContextResolver {
   private SelectorContextResolver() {
   }
 
-  static Map<String, String> buildComboSelectorParams(SFEntity sourceEntity,
+  public static Map<String, String> buildComboSelectorParams(SFEntity sourceEntity,
       Map<String, String> contextParams) {
     Map<String, String> selectorParams = new HashMap<>();
     if (contextParams != null) {
@@ -86,7 +86,7 @@ final class SelectorContextResolver {
     return selectorParams;
   }
 
-  static String resolveContextOrganizationId(SFEntity sourceEntity,
+  public static String resolveContextOrganizationId(SFEntity sourceEntity,
       Map<String, String> contextParams) {
     if (contextParams == null) {
       return null;
@@ -104,7 +104,7 @@ final class SelectorContextResolver {
     return organizationId;
   }
 
-  static void copyIfAbsent(Map<String, String> target, String key, String value) {
+  public static void copyIfAbsent(Map<String, String> target, String key, String value) {
     if (StringUtils.isBlank(key) || StringUtils.isBlank(value) || target.containsKey(key)) {
       return;
     }

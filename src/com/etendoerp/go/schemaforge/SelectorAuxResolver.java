@@ -26,6 +26,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import com.etendoerp.go.schemaforge.selector.meta.AuxFieldMeta;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
 

@@ -14,23 +14,23 @@
  * Contributor(s): Futit Services S.L.
  *************************************************************************
  */
-package com.etendoerp.go.schemaforge;
-
-import java.util.List;
+package com.etendoerp.go.schemaforge.selector.meta;
 
 /**
- * Container for the three field lists produced by classifying OBUISEL selector fields:
- * grid display columns, searchable properties, and auxiliary output fields.
+ * Metadata for an auxiliary output field in an OBUISEL selector.
+ * Auxiliary fields are defined with isOutField=Y and a SUFFIX (e.g., "_LOC").
+ * They provide extra data (like a default location ID) alongside the selected value.
  */
-class ObuiselFieldLists {
-  final List<RichFieldMeta> gridFields;
-  final List<String> searchableProps;
-  final List<AuxFieldMeta> auxFields;
+public class AuxFieldMeta {
+  public final String suffix;              // e.g., "_LOC", "_CON"
+  public final String hqlAlias;            // e.g., "locationid" (from displayColumnAlias)
+  public final String name;                // display name of the field
+  public final String property;            // DAL property path (if available)
 
-  ObuiselFieldLists(List<RichFieldMeta> gridFields, List<String> searchableProps,
-      List<AuxFieldMeta> auxFields) {
-    this.gridFields = gridFields;
-    this.searchableProps = searchableProps;
-    this.auxFields = auxFields;
+  public AuxFieldMeta(String suffix, String hqlAlias, String name, String property) {
+    this.suffix = suffix;
+    this.hqlAlias = hqlAlias;
+    this.name = name;
+    this.property = property;
   }
 }

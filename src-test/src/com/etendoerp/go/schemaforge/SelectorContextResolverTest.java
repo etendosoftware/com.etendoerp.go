@@ -25,6 +25,7 @@ import java.util.Map;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorContextResolver;
 
 class SelectorContextResolverTest {
 

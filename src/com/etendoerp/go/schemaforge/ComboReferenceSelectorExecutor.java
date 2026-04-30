@@ -43,6 +43,7 @@ import org.openbravo.model.ad.ui.Field;
 import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorContextResolver;
 
 /** Executes classic ComboTableData selectors for SQL validation-rule references. */
 final class ComboReferenceSelectorExecutor {

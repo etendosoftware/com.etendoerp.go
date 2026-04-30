@@ -14,13 +14,13 @@
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
  */
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.selector.policy;
 
 import java.util.HashMap;
 import java.util.Map;
 
 /** Reference-id based selector filter overrides. */
-final class ReferenceOverrideSelectorPolicy {
+public final class ReferenceOverrideSelectorPolicy {
 
   private static final Map<String, String> REFERENCE_OVERRIDE_FILTERS;
 
@@ -40,7 +40,7 @@ final class ReferenceOverrideSelectorPolicy {
   private ReferenceOverrideSelectorPolicy() {
   }
 
-  static String resolveFilter(String referenceSearchKeyId) {
+  public static String resolveFilter(String referenceSearchKeyId) {
     if (referenceSearchKeyId == null) {
       return null;
     }

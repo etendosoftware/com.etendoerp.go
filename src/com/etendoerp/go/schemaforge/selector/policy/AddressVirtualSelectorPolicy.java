@@ -14,7 +14,7 @@
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
  */
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.selector.policy;
 
 import java.util.List;
 
@@ -29,14 +29,14 @@ import org.openbravo.model.ad.datamodel.Column;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 
 /** Resolves virtual selector columns for the contact address wrapper entity. */
-final class AddressVirtualSelectorPolicy {
+public final class AddressVirtualSelectorPolicy {
 
   private static final Logger log = LogManager.getLogger(AddressVirtualSelectorPolicy.class);
 
   private AddressVirtualSelectorPolicy() {
   }
 
-  static Column resolveVirtualSelectorColumn(SFEntity entity, String columnName) {
+  public static Column resolveVirtualSelectorColumn(SFEntity entity, String columnName) {
     if (entity == null || StringUtils.isBlank(columnName)) {
       return null;
     }

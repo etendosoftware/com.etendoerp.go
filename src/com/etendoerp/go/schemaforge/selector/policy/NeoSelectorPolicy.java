@@ -14,36 +14,37 @@
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
  */
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.selector.policy;
 
 import java.util.Map;
 
 import org.openbravo.model.ad.datamodel.Column;
 
+import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 
 /**
  * Selector policy facade for business-specific selector behavior.
  */
-final class NeoSelectorPolicy {
+public final class NeoSelectorPolicy {
 
   private NeoSelectorPolicy() {
   }
 
-  static String resolveReferenceOverrideFilter(String referenceSearchKeyId) {
+  public static String resolveReferenceOverrideFilter(String referenceSearchKeyId) {
     return ReferenceOverrideSelectorPolicy.resolveFilter(referenceSearchKeyId);
   }
 
-  static String resolveContextParamFilter(String entityName,
+  public static String resolveContextParamFilter(String entityName,
       Map<String, String> contextParams, String alias) {
     return ContextParamSelectorPolicy.resolveFilter(entityName, contextParams, alias);
   }
 
-  static Column resolveVirtualSelectorColumn(SFEntity entity, String columnName) {
+  public static Column resolveVirtualSelectorColumn(SFEntity entity, String columnName) {
     return AddressVirtualSelectorPolicy.resolveVirtualSelectorColumn(entity, columnName);
   }
 
-  static NeoResponse enrichProductSelectorWithPrices(NeoResponse response, String priceListId) {
+  public static NeoResponse enrichProductSelectorWithPrices(NeoResponse response, String priceListId) {
     return ProductPriceSelectorPolicy.enrichProductSelectorWithPrices(response, priceListId);
   }
 }

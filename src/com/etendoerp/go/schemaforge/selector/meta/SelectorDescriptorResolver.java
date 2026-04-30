@@ -14,7 +14,7 @@
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
  */
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.selector.meta;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -28,6 +28,7 @@ import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import com.etendoerp.go.schemaforge.NeoSelectorService;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.domain.ReferencedTable;
@@ -37,7 +38,7 @@ import org.openbravo.userinterface.selector.SelectorField;
 /**
  * Resolves AD selector metadata into executable selector descriptors.
  */
-final class SelectorDescriptorResolver {
+public final class SelectorDescriptorResolver {
 
   private static final Logger log = LogManager.getLogger(SelectorDescriptorResolver.class);
   private static final java.util.regex.Pattern SAFE_HQL_PATH =
@@ -46,11 +47,11 @@ final class SelectorDescriptorResolver {
   private SelectorDescriptorResolver() {
   }
 
-  static boolean hasObuiselSelector(Column column) {
+  public static boolean hasObuiselSelector(Column column) {
     return findObuiselSelector(column) != null;
   }
 
-  static SelectorMeta resolveTarget(Column column, String baseRefId) {
+  public static SelectorMeta resolveTarget(Column column, String baseRefId) {
     Selector obuisel = findObuiselSelector(column);
     if (obuisel != null) {
       return resolveObuiselSelector(obuisel);
@@ -68,7 +69,7 @@ final class SelectorDescriptorResolver {
     return meta;
   }
 
-  static String resolveSearchableFragment(String property, String clauseLeftPart) {
+  public static String resolveSearchableFragment(String property, String clauseLeftPart) {
     if (StringUtils.isNotBlank(property)) {
       return property;
     }
@@ -83,7 +84,7 @@ final class SelectorDescriptorResolver {
     return null;
   }
 
-  static String findIdentifierProperty(Entity entity) {
+  public static String findIdentifierProperty(Entity entity) {
     for (Property prop : entity.getIdentifierProperties()) {
       if (!prop.isPrimitive()) {
         continue;

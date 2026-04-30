@@ -25,6 +25,11 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
+import com.etendoerp.go.schemaforge.selector.meta.AuxFieldMeta;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorContextResolver;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorDescriptorResolver;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
+import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 
 /**
  * Generic dynamic selector service for FK fields.
@@ -315,11 +320,11 @@ public class NeoSelectorService {
   /**
    * Get the base reference ID (18, 19, or 30) checking parent references.
    */
-  static java.util.Set<String> getSessionParams() {
+  public static java.util.Set<String> getSessionParams() {
     return SESSION_PARAMS;
   }
 
-  static String getBaseReferenceId(Column column) {
+  public static String getBaseReferenceId(Column column) {
     String refId = column.getReference().getId();
 
     // Check if this is 17, 18, 19, or 30 directly
@@ -361,7 +366,7 @@ public class NeoSelectorService {
   /**
    * Returns {@code true} if the given AD_Reference ID represents a list reference type (List=17).
    */
-  static boolean isListReference(String refId) {
+  public static boolean isListReference(String refId) {
     return REF_LIST.equals(refId);
   }
 
@@ -376,19 +381,19 @@ public class NeoSelectorService {
   }
 
 
-  static boolean hasObuiselSelector(Column column) {
+  public static boolean hasObuiselSelector(Column column) {
     return SelectorDescriptorResolver.hasObuiselSelector(column);
   }
 
-  static SelectorMeta resolveTarget(Column column, String baseRefId) {
+  public static SelectorMeta resolveTarget(Column column, String baseRefId) {
     return SelectorDescriptorResolver.resolveTarget(column, baseRefId);
   }
 
-  static String resolveSearchableFragment(String property, String clauseLeftPart) {
+  public static String resolveSearchableFragment(String property, String clauseLeftPart) {
     return SelectorDescriptorResolver.resolveSearchableFragment(property, clauseLeftPart);
   }
 
-  static String findIdentifierProperty(Entity entity) {
+  public static String findIdentifierProperty(Entity entity) {
     return SelectorDescriptorResolver.findIdentifierProperty(entity);
   }
 
