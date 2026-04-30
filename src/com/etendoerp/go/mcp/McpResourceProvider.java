@@ -84,31 +84,29 @@ public class McpResourceProvider {
     criteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
 
     for (SFSpec spec : criteria.list()) {
-      if (spec == null) {
-        continue;
-      }
-      String specType = spec.getSpecType();
-      if (!McpToolRouterSupport.hasSpecAccess(spec, specType)) {
-        continue;
-      }
-      String specName = spec.getName();
+      if (spec != null) {
+        String specType = spec.getSpecType();
+        if (McpToolRouterSupport.hasSpecAccess(spec, specType)) {
+          String specName = spec.getName();
 
-      JSONObject specResource = new JSONObject();
-      specResource.put("uri", URI_SPECS_PREFIX + specName);
-      specResource.put("name", "Spec: " + specName);
-      specResource.put(FIELD_DESCRIPTION,
-          spec.getDescription() != null ? spec.getDescription() : "Schema for " + specName);
-      specResource.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
-      resources.put(specResource);
+          JSONObject specResource = new JSONObject();
+          specResource.put("uri", URI_SPECS_PREFIX + specName);
+          specResource.put("name", "Spec: " + specName);
+          specResource.put(FIELD_DESCRIPTION,
+              spec.getDescription() != null ? spec.getDescription() : "Schema for " + specName);
+          specResource.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
+          resources.put(specResource);
 
-      if ("P".equals(specType) || "R".equals(specType)) {
-        JSONObject processResource = new JSONObject();
-        processResource.put("uri", URI_PROCESSES_PREFIX + specName);
-        processResource.put("name", "Process: " + specName);
-        processResource.put(FIELD_DESCRIPTION,
-            ("R".equals(specType) ? "Report" : "Process") + " parameters for " + specName);
-        processResource.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
-        resources.put(processResource);
+          if ("P".equals(specType) || "R".equals(specType)) {
+            JSONObject processResource = new JSONObject();
+            processResource.put("uri", URI_PROCESSES_PREFIX + specName);
+            processResource.put("name", "Process: " + specName);
+            processResource.put(FIELD_DESCRIPTION,
+                ("R".equals(specType) ? "Report" : "Process") + " parameters for " + specName);
+            processResource.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
+            resources.put(processResource);
+          }
+        }
       }
     }
 
