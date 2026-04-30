@@ -94,6 +94,8 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     }
   }
 
+  // placeholders contains only "?" literals — all values are bound via setString(); no injection risk.
+  @SuppressWarnings("java:S2077")
   private Set<String> batchCheckLinkedDocuments(List<String> ids) {
     String placeholders = ids.stream().map(id -> "?").collect(Collectors.joining(","));
     String sql =
