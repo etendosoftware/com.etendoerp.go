@@ -211,15 +211,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   // --- CORS ---
 
-  private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
-    CorsUtils.apply(request, response, "GET, POST, PUT, DELETE, OPTIONS",
-        "Content-Type, Authorization, Accept", null, false);
-  }
 
   @Override
   public void service(HttpServletRequest request, HttpServletResponse response)
       throws javax.servlet.ServletException, IOException {
-    setCorsHeaders(request, response);
+    CorsUtils.apply(request, response, "GET, POST, PUT, DELETE, OPTIONS",
+        "Content-Type, Authorization, Accept", null, false);
     if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
       return;
@@ -384,10 +381,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
       return;
     }
 
-    Set<String> requestedScopes = resolveRequestedScopes(response, scopeParam);
-    if (requestedScopes == null) {
+    if (OAuth2ClientPolicy.hasUnsupportedScopes(scopeParam, VALID_SCOPES)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
+          MESSAGE_SCOPE_EXCEEDS_PERMISSIONS);
       return;
     }
+    Set<String> requestedScopes = OAuth2ClientPolicy.parseScopes(scopeParam, VALID_SCOPES);
     Set<String> allowedScopes = OAuth2ClientPolicy.parseScopes(client.scopes, VALID_SCOPES);
     if (!requestedScopes.isEmpty()
         && !OAuth2ClientPolicy.isScopeAllowed(requestedScopes, allowedScopes, WILDCARD_SCOPE)) {
@@ -414,15 +413,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
     log.info("OAuth2 token issued for client: {}", clientId);
   }
 
-  private Set<String> resolveRequestedScopes(HttpServletResponse response, String scopeParam)
-      throws IOException {
-    if (OAuth2ClientPolicy.hasUnsupportedScopes(scopeParam, VALID_SCOPES)) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
-          MESSAGE_SCOPE_EXCEEDS_PERMISSIONS);
-      return null;
-    }
-    return OAuth2ClientPolicy.parseScopes(scopeParam, VALID_SCOPES);
-  }
 
   // --- Client CRUD (B3) ---
 
