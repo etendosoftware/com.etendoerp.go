@@ -348,71 +348,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
         return;
       }
 
-      // --- Client Credentials flow (existing) ---
-
-      // Validate required fields
-      if (clientId == null || clientId.isEmpty() || clientSecret == null || clientSecret.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
-            "client_id and client_secret are required");
-        return;
-      }
-
-      // Look up client in database
-      ClientRecord client = findClient(clientId);
-      if (client == null) {
-        log.warn("OAuth2 token request for unknown client_id: {}", clientId);
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, ERROR_INVALID_CLIENT,
-            "Client authentication failed");
-        return;
-      }
-
-      // Verify secret
-      if (!OAuth2Utils.verifySecret(clientSecret, client.secretHash)) {
-        log.warn("OAuth2 token request with invalid secret for client_id: {}", clientId);
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, ERROR_INVALID_CLIENT,
-            "Client authentication failed");
-        return;
-      }
-
-      // Parse and validate scopes
-      if (OAuth2ClientPolicy.hasUnsupportedScopes(scopeParam, VALID_SCOPES)) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
-            MESSAGE_SCOPE_EXCEEDS_PERMISSIONS);
-        return;
-      }
-      Set<String> requestedScopes = OAuth2ClientPolicy.parseScopes(scopeParam, VALID_SCOPES);
-      Set<String> allowedScopes = OAuth2ClientPolicy.parseScopes(client.scopes, VALID_SCOPES);
-
-      if (!requestedScopes.isEmpty()
-          && !OAuth2ClientPolicy.isScopeAllowed(requestedScopes, allowedScopes, WILDCARD_SCOPE)) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
-            MESSAGE_SCOPE_EXCEEDS_PERMISSIONS);
-        return;
-      }
-
-      // Use client's full scopes if none requested
-      Set<String> grantedScopes = requestedScopes.isEmpty() ? allowedScopes : requestedScopes;
-      String grantedScopeStr = String.join(" ", grantedScopes);
-
-      // Generate access token and refresh token
-      String accessToken = OAuth2Utils.generateSecureToken();
-      String tokenHash = OAuth2Utils.hashToken(accessToken);
-      String refreshToken = OAuth2Utils.generateSecureToken();
-      String refreshTokenHash = OAuth2Utils.hashToken(refreshToken);
-      Timestamp expiresAt = new Timestamp(System.currentTimeMillis() + (TOKEN_EXPIRY_SECONDS * 1000L));
-
-      storeToken(client, tokenHash, refreshTokenHash, grantedScopeStr, expiresAt);
-
-      // Build RFC 6749 response
-      JSONObject result = new JSONObject();
-      result.put(FIELD_ACCESS_TOKEN, accessToken);
-      result.put(FIELD_TOKEN_TYPE, TOKEN_TYPE_BEARER);
-      result.put(FIELD_EXPIRES_IN, TOKEN_EXPIRY_SECONDS);
-      result.put(FIELD_REFRESH_TOKEN, refreshToken);
-      result.put(FIELD_SCOPE, grantedScopeStr);
-
-      writeJsonResponse(response, HttpServletResponse.SC_OK, result);
-      log.info("OAuth2 token issued for client: {}", clientId);
+      handleClientCredentialsGrant(response, clientId, clientSecret, scopeParam);
 
     } catch (JSONException e) {
       log.error("Failed to build OAuth2 response", e);
@@ -423,6 +359,69 @@ public class OAuth2Servlet extends HttpBaseServlet {
         writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
           MESSAGE_INTERNAL_SERVER_ERROR);
     }
+  }
+
+  private void handleClientCredentialsGrant(HttpServletResponse response, String clientId,
+      String clientSecret, String scopeParam) throws IOException, SQLException, JSONException {
+    if (clientId == null || clientId.isEmpty() || clientSecret == null || clientSecret.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          "client_id and client_secret are required");
+      return;
+    }
+
+    ClientRecord client = findClient(clientId);
+    if (client == null) {
+      log.warn("OAuth2 token request for unknown client_id: {}", clientId);
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, ERROR_INVALID_CLIENT,
+          "Client authentication failed");
+      return;
+    }
+
+    if (!OAuth2Utils.verifySecret(clientSecret, client.secretHash)) {
+      log.warn("OAuth2 token request with invalid secret for client_id: {}", clientId);
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, ERROR_INVALID_CLIENT,
+          "Client authentication failed");
+      return;
+    }
+
+    Set<String> requestedScopes = resolveRequestedScopes(response, scopeParam);
+    if (requestedScopes == null) {
+      return;
+    }
+    Set<String> allowedScopes = OAuth2ClientPolicy.parseScopes(client.scopes, VALID_SCOPES);
+    if (!requestedScopes.isEmpty()
+        && !OAuth2ClientPolicy.isScopeAllowed(requestedScopes, allowedScopes, WILDCARD_SCOPE)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
+          MESSAGE_SCOPE_EXCEEDS_PERMISSIONS);
+      return;
+    }
+
+    Set<String> grantedScopes = requestedScopes.isEmpty() ? allowedScopes : requestedScopes;
+    String accessToken = OAuth2Utils.generateSecureToken();
+    String refreshToken = OAuth2Utils.generateSecureToken();
+    Timestamp expiresAt = new Timestamp(System.currentTimeMillis() + (TOKEN_EXPIRY_SECONDS * 1000L));
+    storeToken(client, OAuth2Utils.hashToken(accessToken), OAuth2Utils.hashToken(refreshToken),
+        String.join(" ", grantedScopes), expiresAt);
+
+    JSONObject result = new JSONObject();
+    result.put(FIELD_ACCESS_TOKEN, accessToken);
+    result.put(FIELD_TOKEN_TYPE, TOKEN_TYPE_BEARER);
+    result.put(FIELD_EXPIRES_IN, TOKEN_EXPIRY_SECONDS);
+    result.put(FIELD_REFRESH_TOKEN, refreshToken);
+    result.put(FIELD_SCOPE, String.join(" ", grantedScopes));
+
+    writeJsonResponse(response, HttpServletResponse.SC_OK, result);
+    log.info("OAuth2 token issued for client: {}", clientId);
+  }
+
+  private Set<String> resolveRequestedScopes(HttpServletResponse response, String scopeParam)
+      throws IOException {
+    if (OAuth2ClientPolicy.hasUnsupportedScopes(scopeParam, VALID_SCOPES)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
+          MESSAGE_SCOPE_EXCEEDS_PERMISSIONS);
+      return null;
+    }
+    return OAuth2ClientPolicy.parseScopes(scopeParam, VALID_SCOPES);
   }
 
   // --- Client CRUD (B3) ---
