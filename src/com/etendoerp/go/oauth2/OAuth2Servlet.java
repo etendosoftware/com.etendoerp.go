@@ -31,26 +31,25 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
-
-import org.apache.commons.lang3.StringUtils;
 import java.util.concurrent.ConcurrentHashMap;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.HttpBaseServlet;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.SequenceIdData;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
-import com.etendoerp.go.oauth2.OAuth2ClientPolicy;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -376,6 +375,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
       }
 
       // Parse and validate scopes
+      if (OAuth2ClientPolicy.hasUnsupportedScopes(scopeParam, VALID_SCOPES)) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
+            MESSAGE_SCOPE_EXCEEDS_PERMISSIONS);
+        return;
+      }
       Set<String> requestedScopes = OAuth2ClientPolicy.parseScopes(scopeParam, VALID_SCOPES);
       Set<String> allowedScopes = OAuth2ClientPolicy.parseScopes(client.scopes, VALID_SCOPES);
 
@@ -1228,7 +1232,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       writeJsonResponse(response, HttpServletResponse.SC_CREATED, result);
       log.info("DCR client registered: {} ({})", clientName, clientIdentifier);
 
-    } catch (IllegalArgumentException e) {
+    } catch (IllegalArgumentException | OBException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST, e.getMessage());
     } catch (JSONException e) {
       log.error("Error processing DCR request", e);
@@ -1419,6 +1423,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
     if (!OAuth2ClientPolicy.isSafeRedirectUri(redirectUri)) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
           "redirect_uri must use https, http://localhost, or http://127.0.0.1");
+      return false;
+    }
+    if (OAuth2ClientPolicy.hasUnsupportedScopes(scope, VALID_SCOPES)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
+          MESSAGE_SCOPE_EXCEEDS_PERMISSIONS);
       return false;
     }
     Set<String> requestedScopes = OAuth2ClientPolicy.parseScopes(scope, VALID_SCOPES);

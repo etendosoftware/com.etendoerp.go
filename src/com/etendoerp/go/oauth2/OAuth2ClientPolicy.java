@@ -43,6 +43,17 @@ final class OAuth2ClientPolicy {
     return scopes;
   }
 
+  static boolean hasUnsupportedScopes(String scopeStr, Set<String> validScopes) {
+    if (scopeStr == null || scopeStr.trim().isEmpty()) {
+      return false;
+    }
+    if (validScopes == null) {
+      return true;
+    }
+    Set<String> requestedScopes = new HashSet<>(Arrays.asList(scopeStr.trim().split("\\s+")));
+    return !validScopes.containsAll(requestedScopes);
+  }
+
   static boolean isScopeAllowed(Set<String> requested, Set<String> allowed, String wildcardScope) {
     if (requested == null || allowed == null) {
       return false;
