@@ -141,7 +141,7 @@ final class ComboReferenceSelectorExecutor {
       items.put(item);
     }
 
-    return SelectorQueryBuilder.buildSelectorResponse(items, new JSONArray(), totalCount, limit,
+    return SelectorResponseSupport.buildSelectorResponse(items, new JSONArray(), totalCount, limit,
         offset);
   }
 }

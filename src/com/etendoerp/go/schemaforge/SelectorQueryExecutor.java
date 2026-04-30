@@ -98,7 +98,7 @@ final class SelectorQueryExecutor {
       items.put(item);
     }
 
-    return SelectorQueryBuilder.buildSelectorResponse(items, new JSONArray(), totalCount, limit, offset);
+    return SelectorResponseSupport.buildSelectorResponse(items, new JSONArray(), totalCount, limit, offset);
   }
 
   private static NeoResponse executeRichQuery(SelectorMeta meta,
@@ -131,7 +131,7 @@ final class SelectorQueryExecutor {
     dataQuery.setMaxResult(limit);
     dataQuery.setFirstResult(offset);
 
-    JSONArray columns = SelectorQueryBuilder.buildGridColumnMetadata(meta.gridFields);
+    JSONArray columns = SelectorResponseSupport.buildGridColumnMetadata(meta.gridFields);
     JSONArray items = new JSONArray();
     List<String> entityIds = new ArrayList<>();
     for (BaseOBObject bob : dataQuery.list()) {
@@ -150,7 +150,7 @@ final class SelectorQueryExecutor {
       items.put(item);
     }
 
-    return SelectorQueryBuilder.buildSelectorResponse(items, columns, totalCount, limit, offset);
+    return SelectorResponseSupport.buildSelectorResponse(items, columns, totalCount, limit, offset);
   }
 
   @SuppressWarnings("unchecked")
@@ -197,7 +197,7 @@ final class SelectorQueryExecutor {
     dataQuery.setFirstResult(offset);
 
     Integer idColIdx = SelectorQueryBuilder.resolveIdColumnIndex(meta, alias, colIndexMap, selectExprs);
-    JSONArray columns = SelectorQueryBuilder.buildGridColumnMetadata(meta.gridFields);
+    JSONArray columns = SelectorResponseSupport.buildGridColumnMetadata(meta.gridFields);
     Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
     JSONArray items = new JSONArray();
     List<String> entityIds = new ArrayList<>();
@@ -221,7 +221,7 @@ final class SelectorQueryExecutor {
       SelectorAuxResolver.resolveAuxFieldsViaHql(items, entityIds, rawHql, fromIdx, alias, meta);
     }
 
-    return SelectorQueryBuilder.buildSelectorResponse(items, columns, totalCount, limit, offset);
+    return SelectorResponseSupport.buildSelectorResponse(items, columns, totalCount, limit, offset);
   }
 
   private static String resolveRichItemId(BaseOBObject bob, SelectorMeta meta) {

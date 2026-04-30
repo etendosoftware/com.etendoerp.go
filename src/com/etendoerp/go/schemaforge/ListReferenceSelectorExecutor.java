@@ -61,7 +61,7 @@ final class ListReferenceSelectorExecutor {
       item.put(FIELD_LABEL, listItem.getName());
       items.put(item);
     }
-    return SelectorQueryBuilder.buildSelectorResponse(items, new JSONArray(), totalCount, limit, offset);
+    return SelectorResponseSupport.buildSelectorResponse(items, new JSONArray(), totalCount, limit, offset);
   }
 
   static Map<String, String> getListLabels(String referenceId) {

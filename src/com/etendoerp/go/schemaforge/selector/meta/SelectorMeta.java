@@ -106,26 +106,83 @@ public class SelectorMeta {
       this.displayProperty = displayProperty;
     }
 
-    /** Set the optional HQL where clause. */
+    /**
+     * Set the optional HQL where clause.
+     *
+     * @param val HQL filter clause from selector metadata
+     * @return this builder
+     */
     public Builder whereClause(String val) { this.whereClause = val; return this; }
-    /** Mark whether the selector is rich. */
+
+    /**
+     * Mark whether the selector is rich.
+     *
+     * @param val {@code true} for a rich selector
+     * @return this builder
+     */
     public Builder isRich(boolean val) { this.isRich = val; return this; }
-    /** Mark whether the selector is a custom query selector. */
+
+    /**
+     * Mark whether the selector is backed by custom HQL.
+     *
+     * @param val {@code true} when the selector uses custom query mode
+     * @return this builder
+     */
     public Builder isCustomQuery(boolean val) { this.isCustomQuery = val; return this; }
-    /** Override the property used as the selected value. */
+
+    /**
+     * Override the property used as the selected value.
+     *
+     * @param val DAL property path used as the selector value
+     * @return this builder
+     */
     public Builder valueProperty(String val) { this.valueProperty = val; return this; }
-    /** Supply visible grid field metadata. */
+
+    /**
+     * Supply visible grid field metadata.
+     *
+     * @param val grid field metadata in display order
+     * @return this builder
+     */
     public Builder gridFields(List<RichFieldMeta> val) { this.gridFields = val; return this; }
-    /** Supply searchable property fragments. */
+
+    /**
+     * Supply searchable property fragments.
+     *
+     * @param val searchable property fragments used for suggestion-box filtering
+     * @return this builder
+     */
     public Builder searchableProperties(List<String> val) { this.searchableProperties = val; return this; }
-    /** Supply the raw custom HQL definition. */
+
+    /**
+     * Supply the raw custom HQL definition.
+     *
+     * @param val custom selector HQL
+     * @return this builder
+     */
     public Builder customHql(String val) { this.customHql = val; return this; }
-    /** Supply the HQL entity alias. */
+
+    /**
+     * Supply the HQL entity alias.
+     *
+     * @param val selector HQL alias
+     * @return this builder
+     */
     public Builder entityAlias(String val) { this.entityAlias = val; return this; }
-    /** Supply auxiliary output metadata. */
+
+    /**
+     * Supply auxiliary output metadata.
+     *
+     * @param val auxiliary output field metadata
+     * @return this builder
+     */
     public Builder auxFields(List<AuxFieldMeta> val) { this.auxFields = val; return this; }
 
-    /** Build the immutable selector metadata instance. */
+    /**
+     * Build the immutable selector metadata instance.
+     *
+     * @return resolved selector metadata
+     */
     public SelectorMeta build() {
       return new SelectorMeta(this);
     }

@@ -116,20 +116,6 @@ class SelectorQueryBuilder {
     }
   }
 
-  /**
-   * Build the standard paginated selector response JSON.
-   */
-  static NeoResponse buildSelectorResponse(JSONArray items, JSONArray columns,
-      int totalCount, int limit, int offset) throws Exception {
-    JSONObject result = new JSONObject();
-    result.put(FIELD_ITEMS, items);
-    result.put(FIELD_COLUMNS, columns);
-    result.put(FIELD_TOTAL_COUNT, totalCount);
-    result.put(FIELD_LIMIT, limit);
-    result.put(FIELD_OFFSET, offset);
-    result.put(FIELD_HAS_MORE, (offset + limit) < totalCount);
-    return NeoResponse.ok(result);
-  }
 
   /**
    * Build the OBQuery where-string for a standard rich (OBUISEL) query.
@@ -152,21 +138,6 @@ class SelectorQueryBuilder {
     return new HqlWithParams(whereClause, queryParams);
   }
 
-  /**
-   * Build the column-metadata JSONArray from a list of grid field descriptors.
-   */
-  static JSONArray buildGridColumnMetadata(List<RichFieldMeta> gridFields)
-      throws Exception {
-    JSONArray columns = new JSONArray();
-    for (RichFieldMeta fieldMeta : gridFields) {
-      JSONObject col = new JSONObject();
-      col.put("name", fieldMeta.propertyKey);
-      col.put(FIELD_LABEL, fieldMeta.label);
-      col.put("sortNo", fieldMeta.sortNo);
-      columns.put(col);
-    }
-    return columns;
-  }
 
   /**
    * Build the FROM-onwards HQL fragment for a custom-HQL selector query.
@@ -434,10 +405,7 @@ class SelectorQueryBuilder {
    * used as a fallback row identifier. Prefer resolving via valueProperty when available.
    */
   static String normalizeEntityId(String rawId) {
-    if (rawId != null && rawId.length() == 64 && rawId.matches("[0-9A-Fa-f]{64}")) {
-      return rawId.substring(32);
-    }
-    return rawId;
+    return SelectorResponseSupport.normalizeEntityId(rawId);
   }
 
   /**
@@ -449,7 +417,7 @@ class SelectorQueryBuilder {
     String recordId = idVal instanceof BaseOBObject
         ? ((BaseOBObject) idVal).getId().toString()
         : String.valueOf(idVal);
-    return normalizeEntityId(recordId);
+    return SelectorResponseSupport.normalizeEntityId(recordId);
   }
 
   /**
