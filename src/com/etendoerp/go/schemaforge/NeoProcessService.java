@@ -102,7 +102,7 @@ public class NeoProcessService {
     if (params == null) {
       params = new JSONObject();
     }
-    if (!NeoAccessHelper.hasProcessAccess(process.getId())) {
+    if (process == null || !NeoAccessHelper.hasProcessAccess(process.getId())) {
       return NeoResponse.error(403, ACCESS_DENIED_FOR_CURRENT_ROLE);
     }
     try {
@@ -464,7 +464,8 @@ public class NeoProcessService {
   public static NeoResponse executeObuiappProcess(
       org.openbravo.client.application.Process obuiappProcess,
       JSONObject params) {
-    if (!NeoAccessHelper.hasObuiappProcessAccess(obuiappProcess.getId())) {
+    if (obuiappProcess == null
+        || !NeoAccessHelper.hasObuiappProcessAccess(obuiappProcess.getId())) {
       return NeoResponse.error(403, ACCESS_DENIED_FOR_CURRENT_ROLE);
     }
     if (params == null) {

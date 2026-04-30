@@ -21,16 +21,21 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.openbravo.base.exception.OBException;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 
 final class OAuth2ClientPolicy {
+  private static final Logger log = LogManager.getLogger(OAuth2ClientPolicy.class);
 
   private OAuth2ClientPolicy() {
   }
 
   static Set<String> parseScopes(String scopeStr, Set<String> validScopes) {
-    if (scopeStr == null || scopeStr.trim().isEmpty()) {
+    if (scopeStr == null || scopeStr.trim().isEmpty() || validScopes == null) {
       return Collections.emptySet();
     }
     Set<String> scopes = new HashSet<>(Arrays.asList(scopeStr.trim().split("\\s+")));
@@ -39,17 +44,20 @@ final class OAuth2ClientPolicy {
   }
 
   static boolean isScopeAllowed(Set<String> requested, Set<String> allowed, String wildcardScope) {
+    if (requested == null || allowed == null) {
+      return false;
+    }
     return allowed.contains(wildcardScope) || allowed.containsAll(requested);
   }
 
   static String normalizeRedirectUris(JSONArray redirectUris) throws JSONException {
     if (redirectUris == null || redirectUris.length() == 0) {
-      throw new IllegalArgumentException("redirect_uris is required");
+      throw new OBException("redirect_uris is required");
     }
     for (int i = 0; i < redirectUris.length(); i++) {
       String redirectUri = redirectUris.getString(i);
       if (!isSafeRedirectUri(redirectUri)) {
-        throw new IllegalArgumentException(
+        throw new OBException(
             "redirect_uris must use https, http://localhost, or http://127.0.0.1");
       }
     }
@@ -73,6 +81,13 @@ final class OAuth2ClientPolicy {
       return false;
     }
   }
+  /**
+   * Checks whether a redirect URI is present in the registered redirect URI JSON array.
+   *
+   * @param redirectUrisJson JSON array string with registered redirect URIs
+   * @param redirectUri redirect URI to validate
+   * @return {@code true} when the URI is explicitly registered for the client
+   */
   static boolean isRegisteredRedirectUri(String redirectUrisJson, String redirectUri) {
     if (redirectUri == null || redirectUri.isEmpty()
         || redirectUrisJson == null || redirectUrisJson.isEmpty()) {
@@ -87,6 +102,7 @@ final class OAuth2ClientPolicy {
       }
       return false;
     } catch (JSONException e) {
+      log.error("Invalid JSON format for redirect URIs: {}", redirectUrisJson, e);
       return false;
     }
   }

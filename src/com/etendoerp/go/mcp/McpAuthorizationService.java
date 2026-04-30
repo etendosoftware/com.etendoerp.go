@@ -21,6 +21,8 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 
+import org.openbravo.base.exception.OBSecurityException;
+
 /**
  * Enforces MCP tool authorization at execution time.
  */
@@ -46,7 +48,7 @@ final class McpAuthorizationService {
     if (hasScope(scopes, SCOPE_READ)) {
       return;
     }
-    throw new SecurityException(
+    throw new OBSecurityException(
         "MCP resources require scope '" + SCOPE_READ + "'");
   }
 
@@ -56,13 +58,13 @@ final class McpAuthorizationService {
     if (hasScope(scopes, requiredScope)) {
       return;
     }
-    throw new SecurityException(
+    throw new OBSecurityException(
         "MCP tool '" + toolName + "' requires scope '" + requiredScope + "'");
   }
 
   private static String requiredScopeFor(String toolName) {
     if (toolName == null || toolName.trim().isEmpty()) {
-      throw new SecurityException("MCP tool name is required");
+      throw new OBSecurityException("MCP tool name is required");
     }
     switch (toolName) {
       case "neo_discover":

@@ -26,6 +26,8 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.base.exception.OBSecurityException;
+
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.ProcessParameter;
 import org.openbravo.model.ad.ui.Window;
@@ -201,8 +203,8 @@ public class McpResourceProvider {
    */
   private JSONObject readSpec(String specName) throws Exception {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-    if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
-      throw new SecurityException(ACCESS_DENIED_TO_SPEC_PREFIX + specName + "'");
+    if (spec == null || !McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
+      throw new OBSecurityException(ACCESS_DENIED_TO_SPEC_PREFIX + specName + "'");
     }
 
     JSONObject result = new JSONObject();
@@ -241,8 +243,8 @@ public class McpResourceProvider {
    */
   private JSONObject readEntity(String specName, String entityName) throws Exception {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-    if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
-      throw new SecurityException(ACCESS_DENIED_TO_SPEC_PREFIX + specName + "'");
+    if (spec == null || !McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
+      throw new OBSecurityException(ACCESS_DENIED_TO_SPEC_PREFIX + specName + "'");
     }
     SFEntity entity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
     JSONObject result = buildEntityJson(entity, true);
@@ -256,9 +258,9 @@ public class McpResourceProvider {
    */
   private JSONObject readProcess(String specName) throws Exception {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-    String specType = spec.getSpecType();
-    if (!McpToolRouterSupport.hasSpecAccess(spec, specType)) {
-      throw new SecurityException(ACCESS_DENIED_TO_SPEC_PREFIX + specName + "'");
+    String specType = spec != null ? spec.getSpecType() : null;
+    if (spec == null || !McpToolRouterSupport.hasSpecAccess(spec, specType)) {
+      throw new OBSecurityException(ACCESS_DENIED_TO_SPEC_PREFIX + specName + "'");
     }
 
     if (!"P".equals(specType) && !"R".equals(specType)) {

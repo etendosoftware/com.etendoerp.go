@@ -16,6 +16,10 @@
  */
 package com.etendoerp.go.oauth2;
 
+import java.net.URLEncoder;
+import java.util.HashSet;
+import java.util.Set;
+
 import java.io.IOException;
 
 import javax.servlet.http.HttpServletRequest;
@@ -85,26 +89,39 @@ final class OAuth2AuthorizeSupport {
 
   static void writeAuthorizeSuccess(HttpServletResponse response, String redirectUri,
       String state, String authCode, OAuth2Servlet servlet) throws IOException, JSONException {
-    StringBuilder redirect = new StringBuilder(redirectUri);
-    redirect.append(redirectUri.contains("?") ? "&" : "?");
-    redirect.append("code=").append(authCode);
-    if (state != null && !state.isEmpty()) {
-      redirect.append("&state=").append(state);
+    if (redirectUri == null) {
+      throw new IllegalArgumentException("redirectUri cannot be null");
     }
+    int fragmentIndex = redirectUri.indexOf('#');
+    String urlWithoutFragment = fragmentIndex != -1 ? redirectUri.substring(0, fragmentIndex) : redirectUri;
+    String fragment = fragmentIndex != -1 ? redirectUri.substring(fragmentIndex) : "";
+    StringBuilder redirect = new StringBuilder(urlWithoutFragment);
+    redirect.append(urlWithoutFragment.contains("?") ? "&" : "?");
+    redirect.append("code=").append(URLEncoder.encode(authCode, "UTF-8"));
+    if (state != null && !state.isEmpty()) {
+      redirect.append("&state=").append(URLEncoder.encode(state, "UTF-8"));
+    }
+    redirect.append(fragment);
     JSONObject result = new JSONObject();
     result.put("redirect_url", redirect.toString());
     servlet.writeJsonResponse(response, HttpServletResponse.SC_OK, result);
   }
   static OAuth2Servlet.AuthCodeData buildAuthCodeData(AuthorizeRequestData authorizeRequest,
-      String userId, String roleId, java.util.Set<String> requestedScopes,
-      java.util.Set<String> allowedScopes, long authCodeExpiryMs) {
+      String userId, String roleId, Set<String> requestedScopes,
+      Set<String> allowedScopes, long authCodeExpiryMs) {
+    if (authorizeRequest == null || requestedScopes == null || allowedScopes == null) {
+      throw new IllegalArgumentException("Authorize data and scopes cannot be null");
+    }
     OAuth2Servlet.AuthCodeData codeData = new OAuth2Servlet.AuthCodeData();
     codeData.clientId = authorizeRequest.clientId;
     codeData.userId = userId;
     codeData.roleId = roleId;
     codeData.redirectUri = authorizeRequest.redirectUri;
     codeData.codeChallenge = authorizeRequest.codeChallenge;
-    java.util.Set<String> grantedScopes = requestedScopes.isEmpty() ? allowedScopes : requestedScopes;
+    Set<String> grantedScopes = new HashSet<>(allowedScopes);
+    if (!requestedScopes.isEmpty()) {
+      grantedScopes.retainAll(requestedScopes);
+    }
     codeData.scopes = String.join(" ", grantedScopes);
     codeData.expiresAt = System.currentTimeMillis() + authCodeExpiryMs;
     codeData.used = false;

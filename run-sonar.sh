@@ -6,16 +6,167 @@ PROJECT_KEY="etendosoftware_com.etendoerp.go_4f22c2cf-5ab2-4734-8244-f9eb74bbbb7
 POLL_INTERVAL=5      # seconds between polls
 MAX_WAIT=300         # max seconds to wait for analysis
 REPORT_DIR="sonar-reports"
+BASE_REF=""
+CHANGED_ONLY="false"
+ALLOW_DIRTY="false"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+CLASSIC_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
-: "${SONAR_HOST_URL:?Set SONAR_HOST_URL in your environment}"
-: "${SONAR_TOKEN:?Set SONAR_TOKEN in your environment}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --base-ref)
+      BASE_REF="${2:-}"
+      shift 2
+      ;;
+    --changed-only)
+      CHANGED_ONLY="true"
+      shift
+      ;;
+    --allow-dirty)
+      ALLOW_DIRTY="true"
+      shift
+      ;;
+    --report-dir)
+      REPORT_DIR="${2:-}"
+      shift 2
+      ;;
+    *)
+      echo "ERROR: Unknown argument: $1"
+      exit 1
+      ;;
+  esac
+done
+
+load_env_file() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+  while IFS='=' read -r key value; do
+    [[ -n "$key" ]] || continue
+    [[ "$key" =~ ^# ]] && continue
+    case "$key" in
+      SONAR_HOST_URL|SONAR_TOKEN)
+        if [[ -z "${!key:-}" ]]; then
+          export "$key=$value"
+        fi
+        ;;
+    esac
+  done < "$env_file"
+}
+
+load_gradle_property() {
+  local key="$1"
+  local file="$CLASSIC_ROOT/gradle.properties"
+  [[ -f "$file" ]] || return 0
+  awk -F'=' -v k="$key" '$1==k {sub(/^[^=]*=/, ""); print; exit}' "$file"
+}
+
+prompt_for_sonar_env_file() {
+  local preferred_env="$SCRIPT_DIR/.env"
+  if [[ -t 0 ]]; then
+    echo "ERROR: Missing Sonar configuration."
+    echo "Complete one of these files with SONAR_HOST_URL and SONAR_TOKEN before running Sonar:"
+    echo "  - $preferred_env"
+    echo "  - $CLASSIC_ROOT/.env"
+    echo
+    echo "Example:"
+    echo "SONAR_HOST_URL=https://sonar.example.com"
+    echo "SONAR_TOKEN=your_token_here"
+    echo
+    read -r -p "Press Enter after completing the .env file, or Ctrl-C to cancel... " _
+    load_env_file "$preferred_env"
+    load_env_file "$CLASSIC_ROOT/.env"
+    return
+  fi
+
+  echo "ERROR: Missing Sonar configuration."
+  echo "Create and complete one of these files with SONAR_HOST_URL and SONAR_TOKEN:"
+  echo "  - $preferred_env"
+  echo "  - $CLASSIC_ROOT/.env"
+  echo
+  echo "Example:"
+  echo "SONAR_HOST_URL=https://sonar.example.com"
+  echo "SONAR_TOKEN=your_token_here"
+  exit 1
+}
+
+ensure_clean_worktree() {
+  [[ "$ALLOW_DIRTY" == "true" ]] && return 0
+
+  local status_output
+  status_output="$(git status --porcelain --untracked-files=all)"
+
+  if [[ -z "$status_output" ]]; then
+    return 0
+  fi
+
+  local tmp_status tmp_filtered
+  tmp_status="$(mktemp)"
+  tmp_filtered="$(mktemp)"
+  printf '%s\n' "$status_output" > "$tmp_status"
+
+  python3 - "$REPORT_DIR" "$tmp_status" "$tmp_filtered" <<'PYEOF'
+import sys
+from pathlib import Path
+
+report_dir = sys.argv[1].rstrip('/')
+status_file = Path(sys.argv[2])
+filtered_file = Path(sys.argv[3])
+ignore_paths = {'.scannerwork', '.env', report_dir}
+
+with status_file.open() as src, filtered_file.open('w') as out:
+    for raw in src:
+        line = raw.rstrip('\n')
+        if not line:
+            continue
+        path = line[3:] if len(line) > 3 else line
+        path = path.strip()
+        if path in ignore_paths:
+            continue
+        if any(path == p or path.startswith(p + '/') for p in ignore_paths):
+            continue
+        out.write(line + '\n')
+PYEOF
+
+  if [[ -s "$tmp_filtered" ]]; then
+    echo "ERROR: run-sonar.sh requires a clean working tree for precise PR validation."
+    echo "Uncommitted changes:"
+    cat "$tmp_filtered"
+    rm -f "$tmp_status" "$tmp_filtered"
+    echo "Commit or stash changes first, or rerun with --allow-dirty for exploratory use."
+    exit 1
+  fi
+
+  rm -f "$tmp_status" "$tmp_filtered"
+}
+
+load_env_file "$SCRIPT_DIR/.env"
+load_env_file "$CLASSIC_ROOT/.env"
+
+if [[ -z "${SONAR_HOST_URL:-}" || -z "${SONAR_TOKEN:-}" ]]; then
+  prompt_for_sonar_env_file
+fi
+
+if [[ -z "${SONAR_HOST_URL:-}" ]]; then
+  SONAR_HOST_URL="$(load_gradle_property sonarHostUrl)"
+fi
+if [[ -z "${SONAR_TOKEN:-}" ]]; then
+  SONAR_TOKEN="$(load_gradle_property sonarToken)"
+fi
+
+if [[ -z "${SONAR_HOST_URL:-}" || -z "${SONAR_TOKEN:-}" ]]; then
+  echo "ERROR: Sonar configuration is still incomplete after reading .env and gradle.properties."
+  exit 1
+fi
 
 SONAR_HOST_URL="${SONAR_HOST_URL%/}"
+export SONAR_HOST_URL SONAR_TOKEN REPORT_DIR BASE_REF CHANGED_ONLY
 
-# ── Step 0: Clean report directory ─────────────────────────────────
+# ── Step 0: Clean report directory and enforce clean tree ──────────────────
 echo "==> Cleaning report directory: $REPORT_DIR"
 rm -rf "$REPORT_DIR"
 mkdir -p "$REPORT_DIR"
+rm -rf .scannerwork
+ensure_clean_worktree
 
 # ── Step 1: Run scanner ────────────────────────────────────────────
 echo "==> Running sonar-scanner..."
@@ -195,3 +346,45 @@ PYEOF
 echo ""
 echo "Dashboard: $SONAR_HOST_URL/dashboard?id=$PROJECT_KEY"
 echo "Reports saved in: $REPORT_DIR/"
+
+if [[ "$CHANGED_ONLY" == "true" ]]; then
+  if [[ -z "$BASE_REF" ]]; then
+    echo "ERROR: --changed-only requires --base-ref <ref>"
+    exit 1
+  fi
+
+  echo "==> Filtering issues to changed files against: $BASE_REF"
+  git diff --name-only "$BASE_REF"...HEAD > "$REPORT_DIR/changed-files.txt"
+
+  python3 - <<'PYEOF'
+import json, os
+from pathlib import Path
+
+report_dir = Path(os.environ.get("REPORT_DIR", "sonar-reports"))
+changed = {line.strip() for line in (report_dir / "changed-files.txt").read_text().splitlines() if line.strip()}
+issues_by_file = json.loads((report_dir / "sonar-issues-by-file.json").read_text())
+issues = json.loads((report_dir / "sonar-issues.json").read_text())
+
+filtered_by_file = {path: data for path, data in issues_by_file.items() if path in changed}
+filtered_issues = [
+    issue for issue in issues.get("issues", [])
+    if issue.get("component", "").split(":", 1)[-1] in changed
+]
+
+(report_dir / "sonar-issues-pr-only.json").write_text(json.dumps({
+    "baseRef": os.environ.get("BASE_REF", ""),
+    "changedFiles": sorted(changed),
+    "total": len(filtered_issues),
+    "issues": filtered_issues
+}, indent=2))
+
+(report_dir / "sonar-issues-by-file-pr-only.json").write_text(
+    json.dumps(filtered_by_file, indent=2)
+ )
+
+print(f"    Saved: {report_dir}/sonar-issues-pr-only.json ({len(filtered_issues)} issues)")
+print(f"    Saved: {report_dir}/sonar-issues-by-file-pr-only.json ({len(filtered_by_file)} files)")
+PYEOF
+
+  echo "PR-only reports saved in: $REPORT_DIR/"
+fi

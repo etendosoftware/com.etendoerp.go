@@ -31,6 +31,8 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
+
+import org.apache.commons.lang3.StringUtils;
 import java.util.concurrent.ConcurrentHashMap;
 
 import javax.servlet.http.HttpServletRequest;
@@ -443,7 +445,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
           client.put(FIELD_AD_USER_ID, rs.getString(FIELD_DB_AD_USER_ID));
           client.put(FIELD_AD_ROLE_ID, rs.getString(FIELD_DB_AD_ROLE_ID));
           client.put(FIELD_SCOPES, rs.getString(FIELD_SCOPES));
-          client.put(FIELD_REDIRECT_URIS_JSON, rs.getString(FIELD_REDIRECT_URIS));
+          client.put(FIELD_REDIRECT_URIS_JSON, StringUtils.defaultString(
+              rs.getString(FIELD_REDIRECT_URIS), "[]"));
           client.put(FIELD_IS_ACTIVE, "Y".equals(rs.getString("isactive")));
           clients.put(client);
         }
@@ -906,7 +909,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       OAuth2AuthorizeSupport.AuthorizeRequestData authorizeRequest =
           OAuth2AuthorizeSupport.parseAuthorizeRequest(
               request, APPLICATION_JSON, this::parseJsonBody);
-      if (!validateAuthorizePostRequest(response, authorizeRequest)) {
+      if (authorizeRequest == null || !validateAuthorizePostRequest(response, authorizeRequest)) {
         return;
       }
 
@@ -1479,7 +1482,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
         client.put(FIELD_AD_USER_ID, rs.getString(FIELD_DB_AD_USER_ID));
         client.put(FIELD_AD_ROLE_ID, rs.getString(FIELD_DB_AD_ROLE_ID));
         client.put(FIELD_SCOPES, rs.getString(FIELD_SCOPES));
-        client.put(FIELD_REDIRECT_URIS_JSON, rs.getString(FIELD_REDIRECT_URIS));
+        client.put(FIELD_REDIRECT_URIS_JSON, StringUtils.defaultString(
+            rs.getString(FIELD_REDIRECT_URIS), "[]"));
         client.put(FIELD_IS_ACTIVE, "Y".equals(rs.getString("isactive")));
         return client;
       }

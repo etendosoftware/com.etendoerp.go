@@ -24,6 +24,7 @@ import static org.junit.Assert.assertTrue;
 
 import java.util.Set;
 
+import org.openbravo.base.exception.OBSecurityException;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -172,7 +173,7 @@ public class McpToolRouterTest {
   // ── McpAuthorizationService ────────────────────────────────────────────
 
   /** Tests that write tools require write scope at execution time. */
-  @Test(expected = SecurityException.class)
+  @Test(expected = OBSecurityException.class)
   public void testAuthorizeToolCallRejectsCreateWithoutWriteScope() {
     McpAuthorizationService.authorizeToolCall("neo_create", Set.of("neo:read"));
   }
@@ -184,7 +185,7 @@ public class McpToolRouterTest {
   }
 
   /** Tests that report tools require report scope at execution time. */
-  @Test(expected = SecurityException.class)
+  @Test(expected = OBSecurityException.class)
   public void testAuthorizeToolCallRejectsReportWithoutReportScope() {
     McpAuthorizationService.authorizeToolCall("generate_invoice_report", Set.of("neo:read"));
   }

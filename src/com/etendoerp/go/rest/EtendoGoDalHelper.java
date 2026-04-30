@@ -16,6 +16,8 @@
  */
 package com.etendoerp.go.rest;
 
+import org.openbravo.base.exception.OBException;
+
 import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.service.OBDal;
 
@@ -28,8 +30,10 @@ final class EtendoGoDalHelper {
     try {
       OBDal.getInstance().commitAndClose();
     } catch (Exception commitEx) {
-      log.error("Commit failed after {}", operation, commitEx);
-      throw commitEx;
+      if (log != null) {
+        log.error("Commit failed after {}", operation, commitEx);
+      }
+      throw new OBException("Commit failed after " + operation, commitEx);
     }
   }
 
@@ -37,8 +41,10 @@ final class EtendoGoDalHelper {
     try {
       OBDal.getInstance().rollbackAndClose();
     } catch (Exception rollbackEx) {
-      log.error("Rollback failed after {}", operation, rollbackEx);
-      log.debug("Original failure while handling {}", operation, failure);
+      if (log != null) {
+        log.error("Rollback failed after {}", operation, rollbackEx);
+        log.debug("Original failure while handling {}", operation, failure);
+      }
     }
   }
 }

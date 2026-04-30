@@ -380,7 +380,7 @@ public class McpServlet extends HttpServlet {
   // ── Handler: resources/list ─────────────────────────────────────────────
 
   private JSONObject handleResourcesList(AuthIdentity identity) throws Exception {
-    Set<String> scopes = parseScopes(identity.scopes);
+    Set<String> scopes = parseScopes(identity != null ? identity.scopes : null);
     McpAuthorizationService.authorizeResourceRead(scopes);
     OBContext.setAdminMode(true);
     try {
