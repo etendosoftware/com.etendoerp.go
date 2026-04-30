@@ -31,13 +31,34 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 
 /** Enriches product selector rows with price-list information. */
-public final class ProductPriceSelectorPolicy {
+public final class ProductPriceSelectorPolicy implements SelectorEnrichmentPolicy {
 
   private static final Logger log = LogManager.getLogger(ProductPriceSelectorPolicy.class);
 
-  private ProductPriceSelectorPolicy() {
+  public ProductPriceSelectorPolicy() {
+  }
+
+  @Override
+  public boolean supports(SelectorMeta meta, Map<String, String> contextParams) {
+    return meta != null
+        && ("ProductByPriceAndWarehouse".equals(meta.entityName) || "Product".equals(meta.entityName))
+        && contextParams != null
+        && contextParams.containsKey("priceList");
+  }
+
+  @Override
+  /**
+   * Enrich selector rows with prices from the active price list.
+   *
+   * @param response selector response to enrich
+   * @param priceListId active price list identifier
+   * @return the enriched response, or the original response when enrichment does not apply
+   */
+  public NeoResponse enrich(NeoResponse response, SelectorMeta meta, Map<String, String> contextParams) {
+    return enrichProductSelectorWithPrices(response, contextParams.get("priceList"));
   }
 
   /**

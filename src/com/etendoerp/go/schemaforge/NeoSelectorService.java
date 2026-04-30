@@ -276,16 +276,7 @@ public class NeoSelectorService {
 
   private static NeoResponse enrichProductSelectorIfNeeded(NeoResponse selectorResult, SelectorMeta meta,
       Map<String, String> contextParams) {
-    boolean isProductSelector = "ProductByPriceAndWarehouse".equals(meta.entityName)
-        || "Product".equals(meta.entityName);
-    if (isProductSelector
-        && contextParams != null
-        && contextParams.containsKey(PARAM_PRICE_LIST)
-        && selectorResult.getHttpStatus() == 200) {
-      return NeoSelectorPolicy.enrichProductSelectorWithPrices(
-          selectorResult, contextParams.get(PARAM_PRICE_LIST));
-    }
-    return selectorResult;
+    return NeoSelectorPolicy.enrichSelectorResult(selectorResult, meta, contextParams);
   }
 
 

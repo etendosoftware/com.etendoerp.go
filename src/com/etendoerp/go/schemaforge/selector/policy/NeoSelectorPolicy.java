@@ -22,11 +22,17 @@ import org.openbravo.model.ad.datamodel.Column;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
+import java.util.List;
 
 /**
  * Selector policy facade for business-specific selector behavior.
  */
 public final class NeoSelectorPolicy {
+  private static final SelectorPolicyRegistry REGISTRY = new SelectorPolicyRegistry(
+      List.of(new ContextParamSelectorPolicy()),
+      List.of(new ProductPriceSelectorPolicy()));
+
 
   private NeoSelectorPolicy() {
   }
@@ -51,7 +57,7 @@ public final class NeoSelectorPolicy {
    */
   public static String resolveContextParamFilter(String entityName,
       Map<String, String> contextParams, String alias) {
-    return ContextParamSelectorPolicy.resolveFilter(entityName, contextParams, alias);
+    return REGISTRY.resolveContextFilter(entityName, contextParams, alias);
   }
 
   /**
@@ -66,13 +72,15 @@ public final class NeoSelectorPolicy {
   }
 
   /**
-   * Enrich product selector results with price-list values.
+   * Enrich selector results through the registered enrichment policies.
    *
    * @param response selector response to enrich
-   * @param priceListId active price list identifier
-   * @return the enriched response, or the original response when enrichment does not apply
+   * @param meta resolved selector metadata
+   * @param contextParams validated selector context parameters
+   * @return the enriched response after all matching policies have run
    */
-  public static NeoResponse enrichProductSelectorWithPrices(NeoResponse response, String priceListId) {
-    return ProductPriceSelectorPolicy.enrichProductSelectorWithPrices(response, priceListId);
+  public static NeoResponse enrichSelectorResult(NeoResponse response, SelectorMeta meta,
+      Map<String, String> contextParams) {
+    return REGISTRY.enrichSelectorResult(response, meta, contextParams);
   }
 }

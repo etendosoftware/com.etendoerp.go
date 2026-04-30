@@ -23,13 +23,13 @@ import java.util.Map;
 import org.apache.commons.lang3.StringUtils;
 
 /** Entity-specific selector filters derived from validated context parameters. */
-public final class ContextParamSelectorPolicy {
+public final class ContextParamSelectorPolicy implements SelectorContextPolicy {
 
   private static final String ENTITY_BUSINESS_PARTNER = "BusinessPartner";
   private static final String ENTITY_PRODUCT_BY_PRICE_AND_WAREHOUSE =
       "ProductByPriceAndWarehouse";
 
-  private ContextParamSelectorPolicy() {
+  public ContextParamSelectorPolicy() {
   }
 
   /**
@@ -40,7 +40,14 @@ public final class ContextParamSelectorPolicy {
    * @param alias HQL alias used by the selector query
    * @return the derived filter clause, or {@code null} when no policy applies
    */
-  public static String resolveFilter(String entityName, Map<String, String> contextParams, String alias) {
+  @Override
+  public boolean supports(String entityName) {
+    return ENTITY_BUSINESS_PARTNER.equals(entityName)
+        || ENTITY_PRODUCT_BY_PRICE_AND_WAREHOUSE.equals(entityName);
+  }
+
+  @Override
+  public String resolveFilter(String entityName, Map<String, String> contextParams, String alias) {
     if (contextParams == null || contextParams.isEmpty() || entityName == null) {
       return null;
     }
