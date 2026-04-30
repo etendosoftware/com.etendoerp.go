@@ -84,6 +84,9 @@ public class McpResourceProvider {
     criteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
 
     for (SFSpec spec : criteria.list()) {
+      if (spec == null) {
+        continue;
+      }
       String specType = spec.getSpecType();
       if (!McpToolRouterSupport.hasSpecAccess(spec, specType)) {
         continue;

@@ -96,7 +96,7 @@ public final class ProductPriceSelectorPolicy implements SelectorEnrichmentPolic
       injectPrices(items, priceMap);
     } catch (Exception e) {
       log.warn("Failed to enrich product selector with prices for priceList {}: {}",
-          priceListId, e.getMessage());
+          priceListId, e.getMessage(), e);
     }
     return response;
   }

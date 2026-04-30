@@ -388,6 +388,10 @@ public class McpServlet extends HttpServlet {
       JSONObject result = new JSONObject();
       result.put("resources", provider.listResources());
       return result;
+    } catch (org.openbravo.base.exception.OBException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new org.openbravo.base.exception.OBException(e);
     } finally {
       OBContext.restorePreviousMode();
     }

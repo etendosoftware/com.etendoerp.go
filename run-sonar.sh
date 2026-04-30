@@ -15,7 +15,11 @@ CLASSIC_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --base-ref)
-      BASE_REF="${2:-}"
+      if [[ -z "${2:-}" ]]; then
+        echo "ERROR: --base-ref requires a value"
+        exit 1
+      fi
+      BASE_REF="$2"
       shift 2
       ;;
     --changed-only)
@@ -44,7 +48,7 @@ done
 load_env_file() {
   local env_file="$1"
   [[ -f "$env_file" ]] || return 0
-  while IFS='=' read -r key value; do
+  while IFS='=' read -r key value || [[ -n "$key" ]]; do
     [[ -n "$key" ]] || continue
     [[ "$key" =~ ^# ]] && continue
     case "$key" in
@@ -413,6 +417,10 @@ echo "Reports saved in: $REPORT_DIR/"
 if [[ "$CHANGED_ONLY" == "true" ]]; then
 
   echo "==> Filtering issues to changed files against: $BASE_REF"
+  if ! git rev-parse --verify "$BASE_REF" >/dev/null 2>&1; then
+    echo "ERROR: Invalid base reference: $BASE_REF"
+    exit 1
+  fi
   git diff --name-only "$BASE_REF"...HEAD > "$REPORT_DIR/changed-files.txt"
 
   python3 - <<'PYEOF'

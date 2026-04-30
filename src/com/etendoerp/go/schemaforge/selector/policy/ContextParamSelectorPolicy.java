@@ -74,7 +74,7 @@ public final class ContextParamSelectorPolicy implements SelectorContextPolicy {
       String alias) {
     String priceListId = contextParams.get("priceList");
     if (StringUtils.isNotBlank(priceListId) && priceListId.matches("[A-Za-z0-9\\-]+")) {
-      return alias + ".productPrice.priceListVersion.priceList.id = '" + priceListId + "'";
+      return alias + ".productPrice.priceListVersion.priceList.id = :priceListId";
     }
     String isSOTrx = contextParams.get("isSOTrx");
     if ("Y".equalsIgnoreCase(isSOTrx)) {

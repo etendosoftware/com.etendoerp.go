@@ -18,7 +18,9 @@ public interface SelectorContextPolicy {
    * @param entityName target DAL entity name
    * @param contextParams validated selector context parameters
    * @param alias HQL alias used by the selector query
-   * @return an HQL filter fragment, or {@code null} when the policy does not contribute a filter
+   * @return an HQL filter fragment, or {@code null} when the policy does not contribute a filter.
+   *         Implementations must ensure that values from {@code contextParams} are handled safely
+   *         to prevent HQL injection (e.g., using named parameter binding).
    */
   String resolveFilter(String entityName, Map<String, String> contextParams, String alias);
 }

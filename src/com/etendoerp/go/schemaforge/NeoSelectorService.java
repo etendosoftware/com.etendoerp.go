@@ -1,6 +1,8 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -186,7 +188,7 @@ public class NeoSelectorService {
       String search, int limit, int offset, Map<String, String> contextParams) {
     try {
       int safeLimit = normalizeLimit(limit);
-      int safeOffset = Math.max(offset, 0);
+      int safeOffset = normalizeOffset(offset);
 
       String refId = getBaseReferenceId(column);
       boolean isObuisel = hasObuiselSelector(column);
@@ -217,7 +219,7 @@ public class NeoSelectorService {
       String contextOrganizationId = SelectorContextResolver.resolveContextOrganizationId(sourceEntity, contextParams);
       String filterAlias = resolveFilterAlias(meta);
       String combinedFilter = buildCombinedFilter(
-          column, meta, contextParams, validationFilter, filterAlias);
+          column, validationFilter, filterAlias);
       NeoResponse selectorResult = executeSelectorQuery(
           meta, search, safeLimit, safeOffset, contextOrganizationId, combinedFilter, contextParams);
       return enrichProductSelectorIfNeeded(selectorResult, meta, contextParams);
@@ -235,6 +237,10 @@ public class NeoSelectorService {
     return Math.min(limit, MAX_LIMIT);
   }
 
+  private static int normalizeOffset(int offset) {
+    return Math.max(offset, 0);
+  }
+
   private static NeoResponse validateReferenceType(String columnName, String refId,
       boolean isObuisel, boolean isList) {
     if (!isObuisel && !isFkReference(refId) && !isList) {
@@ -249,28 +255,34 @@ public class NeoSelectorService {
         : "e";
   }
 
-  private static String buildCombinedFilter(Column column, SelectorMeta meta,
-      Map<String, String> contextParams, String validationFilter, String filterAlias) {
+  private static String buildCombinedFilter(Column column, String validationFilter,
+      String filterAlias) {
     return combineFilters(
         remapFilterAlias(validationFilter, filterAlias),
         remapFilterAlias(NeoSelectorPolicy.resolveReferenceOverrideFilter(
             column != null && column.getReferenceSearchKey() != null
                 ? column.getReferenceSearchKey().getId()
                 : null),
-            filterAlias),
-        NeoSelectorPolicy.resolveContextParamFilter(meta.entityName, contextParams, filterAlias));
+            filterAlias));
   }
 
   private static NeoResponse executeSelectorQuery(SelectorMeta meta, String search, int limit, int offset,
       String contextOrganizationId, String combinedFilter, Map<String, String> contextParams) throws Exception {
-    String ctxAlias = meta.isRich && meta.isCustomQuery && StringUtils.isNotBlank(meta.entityAlias)
+    Map<String, String> safeContextParams = contextParams != null ? contextParams : Collections.emptyMap();
+    String ctxAlias = (meta.isRich && meta.isCustomQuery && StringUtils.isNotBlank(meta.entityAlias))
         ? meta.entityAlias
         : "e";
     String ctxParamFilter = NeoSelectorPolicy.resolveContextParamFilter(
-        meta.entityName, contextParams, ctxAlias);
+        meta.entityName, safeContextParams, ctxAlias);
+    Map<String, Object> ctxFilterParams = new HashMap<>();
+    String priceListId = safeContextParams.get("priceList");
+    if (StringUtils.isNotBlank(priceListId) && ctxParamFilter != null
+        && ctxParamFilter.contains(":priceListId")) {
+      ctxFilterParams.put("priceListId", priceListId);
+    }
     return SelectorQueryExecutor.execute(
         meta, search, limit, offset, combineFilters(combinedFilter, ctxParamFilter),
-        contextOrganizationId);
+        contextOrganizationId, ctxFilterParams);
   }
 
   private static NeoResponse enrichProductSelectorIfNeeded(NeoResponse selectorResult, SelectorMeta meta,

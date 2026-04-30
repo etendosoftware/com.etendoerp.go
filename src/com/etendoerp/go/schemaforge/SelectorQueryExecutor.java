@@ -49,15 +49,23 @@ final class SelectorQueryExecutor {
 
   static NeoResponse execute(SelectorMeta meta, String search, int limit, int offset,
       String validationFilter, String contextOrganizationId) throws Exception {
+    return execute(meta, search, limit, offset, validationFilter, contextOrganizationId, null);
+  }
+
+  static NeoResponse execute(SelectorMeta meta, String search, int limit, int offset,
+      String validationFilter, String contextOrganizationId,
+      Map<String, Object> extraFilterParams) throws Exception {
     if (meta.isRich) {
-      return executeRichQuery(meta, search, limit, offset, validationFilter, contextOrganizationId);
+      return executeRichQuery(meta, search, limit, offset, validationFilter, contextOrganizationId,
+          extraFilterParams);
     }
-    return executeQuery(meta, search, limit, offset, validationFilter, contextOrganizationId);
+    return executeQuery(meta, search, limit, offset, validationFilter, contextOrganizationId,
+        extraFilterParams);
   }
 
   private static NeoResponse executeQuery(SelectorMeta meta,
       String search, int limit, int offset, String validationFilter,
-      String contextOrganizationId) throws Exception {
+      String contextOrganizationId, Map<String, Object> extraFilterParams) throws Exception {
 
     StringBuilder hql = new StringBuilder();
     Map<String, Object> queryParams = new HashMap<>();
@@ -66,6 +74,9 @@ final class SelectorQueryExecutor {
     NeoSelectorExecutionHelper.appendSelectorOrganizationFilter(hql, queryParams, meta,
         contextOrganizationId);
     NeoSelectorExecutionHelper.appendSimpleSearchFilter(hql, meta.displayProperty, search);
+    if (extraFilterParams != null) {
+      queryParams.putAll(extraFilterParams);
+    }
 
     String whereStr = NeoSelectorExecutionHelper.buildSimpleWhereClause(hql);
 
@@ -103,10 +114,11 @@ final class SelectorQueryExecutor {
 
   private static NeoResponse executeRichQuery(SelectorMeta meta,
       String search, int limit, int offset, String validationFilter,
-      String contextOrganizationId) throws Exception {
+      String contextOrganizationId, Map<String, Object> extraFilterParams) throws Exception {
 
     if (meta.isCustomQuery && StringUtils.isNotBlank(meta.customHql)) {
-      return executeCustomHqlQuery(meta, search, limit, offset, validationFilter, contextOrganizationId);
+      return executeCustomHqlQuery(meta, search, limit, offset, validationFilter,
+          contextOrganizationId, extraFilterParams);
     }
 
     String alias = "e";
@@ -117,6 +129,7 @@ final class SelectorQueryExecutor {
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
         .createQuery(meta.entityName, whereClause.getHql());
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, whereClause.getParams());
+    NeoSelectorExecutionHelper.bindNamedParameters(countQuery, extraFilterParams);
     if (hasSearch) {
       countQuery.setNamedParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
     }
@@ -125,6 +138,7 @@ final class SelectorQueryExecutor {
     String dataWhere = whereClause.getHql() + " ORDER BY " + alias + "." + meta.displayProperty;
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance().createQuery(meta.entityName, dataWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, whereClause.getParams());
+    NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, extraFilterParams);
     if (hasSearch) {
       dataQuery.setNamedParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
     }
@@ -156,7 +170,7 @@ final class SelectorQueryExecutor {
   @SuppressWarnings("unchecked")
   private static NeoResponse executeCustomHqlQuery(SelectorMeta meta,
       String search, int limit, int offset, String validationFilter,
-      String contextOrganizationId) throws Exception {
+      String contextOrganizationId, Map<String, Object> extraFilterParams) throws Exception {
 
     String alias = meta.entityAlias;
     String rawHql = meta.customHql.replace("@additional_filters@", "1=1");
@@ -176,10 +190,15 @@ final class SelectorQueryExecutor {
     String[] selectExprs = selectPart.replaceFirst("(?i)^select\\s+", "").split(",");
     Map<String, Integer> colIndexMap = SelectorQueryBuilder.buildSelectColumnIndexMap(selectExprs);
 
+    Map<String, Object> fromParams = new HashMap<>(fromClause.getParams());
+    if (extraFilterParams != null) {
+      fromParams.putAll(extraFilterParams);
+    }
+
     String countHql = "SELECT COUNT(" + alias + ")" + fromClause.getHql();
     org.hibernate.query.Query<Long> countQuery = OBDal.getInstance()
         .getSession().createQuery(countHql, Long.class);
-    NeoSelectorExecutionHelper.bindNamedParameters(countQuery, fromClause.getParams());
+    NeoSelectorExecutionHelper.bindNamedParameters(countQuery, fromParams);
     if (hasSearch) {
       countQuery.setParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
     }
@@ -189,7 +208,7 @@ final class SelectorQueryExecutor {
     String dataHql = selectPart + fromClause.getHql() + " ORDER BY " + alias + "."
         + meta.displayProperty;
     org.hibernate.query.Query<?> dataQuery = OBDal.getInstance().getSession().createQuery(dataHql);
-    NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, fromClause.getParams());
+    NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, fromParams);
     if (hasSearch) {
       dataQuery.setParameter(PARAM_SEARCH, "%" + search.toLowerCase() + "%");
     }

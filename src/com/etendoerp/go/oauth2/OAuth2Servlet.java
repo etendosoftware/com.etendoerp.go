@@ -559,10 +559,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
         return;
       }
 
-      String name = body.optString("name", existing.getString("name"));
-      String scopes = body.optString(FIELD_SCOPES, existing.getString(FIELD_SCOPES));
-      String adUserId = body.optString(FIELD_AD_USER_ID, existing.getString(FIELD_AD_USER_ID));
-      String adRoleId = body.optString(FIELD_AD_ROLE_ID, existing.getString(FIELD_AD_ROLE_ID));
+      String name = body.optString("name", existing.optString("name", ""));
+      String scopes = body.optString(FIELD_SCOPES, existing.optString(FIELD_SCOPES, ""));
+      String adUserId = body.optString(FIELD_AD_USER_ID, existing.optString(FIELD_AD_USER_ID, ""));
+      String adRoleId = body.optString(FIELD_AD_ROLE_ID, existing.optString(FIELD_AD_ROLE_ID, ""));
       String redirectUrisJson = body.optString(
           FIELD_REDIRECT_URIS_JSON, existing.optString(FIELD_REDIRECT_URIS_JSON, "[]"));
       boolean isActive = body.has(FIELD_IS_ACTIVE)
@@ -1404,7 +1404,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
           "Unknown or inactive client_id");
       return false;
     }
-    if (!OAuth2ClientPolicy.isRegisteredRedirectUri(client.redirectUrisJson, redirectUri)) {
+    if (!OAuth2ClientPolicy.isRegisteredRedirectUri(
+        StringUtils.defaultString(client.redirectUrisJson, "[]"), redirectUri)) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
           "redirect_uri is not registered for this client_id");
       return false;
