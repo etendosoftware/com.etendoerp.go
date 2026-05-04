@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.math.BigDecimal;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -48,7 +47,6 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.domain.Callout;
 import org.openbravo.model.ad.domain.ModelImplementation;
 import org.openbravo.model.ad.ui.Tab;
-import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.JsonConstants;
 
@@ -706,7 +704,7 @@ public class NeoCalloutService {
 
       // When the callout sets a 'tax' field, also inject its rate so the frontend
       // can compute grossAmount in real-time without an extra round-trip.
-      injectTaxRateIfPresent(updates);
+      NeoCommercialLinePolicy.injectTaxRateIfPresent(updates);
 
       response.put("updates", updates);
       response.put("combos", combos);
@@ -898,36 +896,5 @@ public class NeoCalloutService {
     return stripped;
   }
 
-  /**
-   * When a callout sets a 'tax' field (C_Tax_ID), load the TaxRate entity and inject
-   * its percentage rate as a synthetic 'taxRate' update. The frontend uses this to compute
-   * grossAmount in real-time for the first line of a document that has no saved lines yet
-   * (where deriving the rate from existing saved lines is not possible).
-   */
-  private static void injectTaxRateIfPresent(JSONObject updates) {
-    try {
-      JSONObject taxUpdate = updates.optJSONObject("tax");
-      if (taxUpdate == null) {
-        return;
-      }
-      String taxId = taxUpdate.optString(VALUE_KEY);
-      if (StringUtils.isBlank(taxId) || "null".equals(taxId)) {
-        return;
-      }
-      TaxRate taxEntity = OBDal.getInstance().get(TaxRate.class, taxId);
-      if (taxEntity == null) {
-        return;
-      }
-      BigDecimal rate = taxEntity.getRate();
-      if (rate == null) {
-        return;
-      }
-      JSONObject rateUpdate = new JSONObject();
-      rateUpdate.put(VALUE_KEY, rate.doubleValue());
-      updates.put("taxRate", rateUpdate);
-    } catch (Exception e) {
-      log.debug("Could not inject tax rate into callout response: {}", e.getMessage());
-    }
-  }
 
 }

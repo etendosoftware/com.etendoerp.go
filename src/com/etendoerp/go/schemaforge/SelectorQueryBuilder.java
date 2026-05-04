@@ -30,6 +30,9 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import com.etendoerp.go.schemaforge.selector.meta.AuxFieldMeta;
+import com.etendoerp.go.schemaforge.selector.meta.RichFieldMeta;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
@@ -53,13 +56,6 @@ class SelectorQueryBuilder {
   static final String SQL_AND = " AND ";
   static final String SQL_WHERE = " WHERE ";
 
-  private static final String FIELD_LABEL = "label";
-  private static final String FIELD_ITEMS = "items";
-  private static final String FIELD_COLUMNS = "columns";
-  private static final String FIELD_TOTAL_COUNT = "totalCount";
-  private static final String FIELD_LIMIT = "limit";
-  private static final String FIELD_OFFSET = "offset";
-  private static final String FIELD_HAS_MORE = "hasMore";
 
   /** Pattern matching @param@ and @#param@ (session-level) placeholders in OBUISEL clauses. */
   static final Pattern PARAM_PATTERN = Pattern.compile("@#?([A-Za-z_]+)@");
@@ -113,20 +109,6 @@ class SelectorQueryBuilder {
     }
   }
 
-  /**
-   * Build the standard paginated selector response JSON.
-   */
-  static NeoResponse buildSelectorResponse(JSONArray items, JSONArray columns,
-      int totalCount, int limit, int offset) throws Exception {
-    JSONObject result = new JSONObject();
-    result.put(FIELD_ITEMS, items);
-    result.put(FIELD_COLUMNS, columns);
-    result.put(FIELD_TOTAL_COUNT, totalCount);
-    result.put(FIELD_LIMIT, limit);
-    result.put(FIELD_OFFSET, offset);
-    result.put(FIELD_HAS_MORE, (offset + limit) < totalCount);
-    return NeoResponse.ok(result);
-  }
 
   /**
    * Build the OBQuery where-string for a standard rich (OBUISEL) query.
@@ -149,21 +131,6 @@ class SelectorQueryBuilder {
     return new HqlWithParams(whereClause, queryParams);
   }
 
-  /**
-   * Build the column-metadata JSONArray from a list of grid field descriptors.
-   */
-  static JSONArray buildGridColumnMetadata(List<RichFieldMeta> gridFields)
-      throws Exception {
-    JSONArray columns = new JSONArray();
-    for (RichFieldMeta fieldMeta : gridFields) {
-      JSONObject col = new JSONObject();
-      col.put("name", fieldMeta.propertyKey);
-      col.put(FIELD_LABEL, fieldMeta.label);
-      col.put("sortNo", fieldMeta.sortNo);
-      columns.put(col);
-    }
-    return columns;
-  }
 
   /**
    * Build the FROM-onwards HQL fragment for a custom-HQL selector query.
@@ -431,23 +398,9 @@ class SelectorQueryBuilder {
    * used as a fallback row identifier. Prefer resolving via valueProperty when available.
    */
   static String normalizeEntityId(String rawId) {
-    if (rawId != null && rawId.length() == 64 && rawId.matches("[0-9A-Fa-f]{64}")) {
-      return rawId.substring(32);
-    }
-    return rawId;
+    return SelectorResponseSupport.normalizeEntityId(rawId);
   }
 
-  /**
-   * Extract and normalize the record ID from an HQL Object[] row.
-   * Handles BaseOBObject, composite 64-char UUIDs, and plain string values.
-   */
-  static String extractRecordId(Object[] row, Integer idColIdx) {
-    Object idVal = (idColIdx != null && idColIdx < row.length) ? row[idColIdx] : row[0];
-    String recordId = idVal instanceof BaseOBObject
-        ? ((BaseOBObject) idVal).getId().toString()
-        : String.valueOf(idVal);
-    return normalizeEntityId(recordId);
-  }
 
   /**
    * Extract the display label from an HQL Object[] row.
@@ -785,63 +738,67 @@ class SelectorQueryBuilder {
    * {@code FROM DUAL} is removed — HQL scalar subqueries work without a FROM clause.
    */
   private static String translateSqlToHql(String clause) {
-    // Unwrap "(SELECT expr FROM DUAL)" → "(expr)" before table-name translation
     clause = SELECT_FROM_DUAL.matcher(clause).replaceAll("($1)");
-    // Step 1: Find "FROM <tableName> <alias>" patterns and build alias→Entity map
     Map<String, Entity> aliasEntityMap = new HashMap<>();
+    String translatedFrom = translateFromAliases(clause, aliasEntityMap);
+    return translateColumnReferences(translatedFrom, aliasEntityMap);
+  }
+
+  private static String translateFromAliases(String clause, Map<String, Entity> aliasEntityMap) {
     Matcher fromMatcher = FROM_WITH_ALIAS.matcher(clause);
-    StringBuffer step1 = new StringBuffer();
+    StringBuffer translated = new StringBuffer();
     while (fromMatcher.find()) {
-      String tableName = fromMatcher.group(1);
+      Entity entity = resolveFromEntity(fromMatcher.group(1));
       String alias = fromMatcher.group(2);
-      // Try by HQL entity name first, then by SQL table name.
-      // ModelProvider.getEntity() throws if not found, so we catch and fall through.
-      Entity entity = null;
-      try {
-        entity = ModelProvider.getInstance().getEntity(tableName);
-      } catch (Exception e) {
-        // Not a valid HQL entity name — try as SQL table name below
-      }
       if (entity != null) {
         aliasEntityMap.put(alias, entity);
-        continue; // already a valid HQL entity name, no replacement needed
       }
-      entity = ModelProvider.getInstance().getEntityByTableName(tableName);
-      if (entity != null) {
-        aliasEntityMap.put(alias, entity);
-        log.debug("Translating SQL table name [{}] → HQL entity [{}]", tableName, entity.getName());
-        fromMatcher.appendReplacement(step1,
+      if (entity != null && !entity.getName().equals(fromMatcher.group(1))) {
+        log.debug("Translating SQL table name [{}] → HQL entity [{}]", fromMatcher.group(1), entity.getName());
+        fromMatcher.appendReplacement(translated,
             Matcher.quoteReplacement("FROM " + entity.getName() + " " + alias));
       }
     }
-    fromMatcher.appendTail(step1);
-    String result = step1.toString();
+    fromMatcher.appendTail(translated);
+    return translated.toString();
+  }
 
-    // Step 2: Translate alias.columnName → alias.propertyName for each known alias
-    for (Map.Entry<String, Entity> entry : aliasEntityMap.entrySet()) {
-      String alias = entry.getKey();
-      Entity entity = entry.getValue();
-      Pattern colRef = Pattern.compile("\\b" + Pattern.quote(alias) + "\\.(\\w+)");
-      Matcher colMatcher = colRef.matcher(result);
-      StringBuffer step2 = new StringBuffer();
-      while (colMatcher.find()) {
-        String columnName = colMatcher.group(1);
-        Property prop = entity.getPropertyByColumnName(columnName, false);
-        if (prop != null) {
-          // FK columns (associations) need .id appended for HQL comparison
-          String hqlRef = prop.isPrimitive()
-              ? alias + "." + prop.getName()
-              : alias + "." + prop.getName() + ".id";
-          log.debug("Translating column [{}] → HQL property [{}]", columnName, hqlRef);
-          colMatcher.appendReplacement(step2, Matcher.quoteReplacement(hqlRef));
-        }
-        // If property not found, leave original (might be a valid HQL reference already)
+  private static Entity resolveFromEntity(String tableName) {
+    try {
+      Entity hqlEntity = ModelProvider.getInstance().getEntity(tableName);
+      if (hqlEntity != null) {
+        return hqlEntity;
       }
-      colMatcher.appendTail(step2);
-      result = step2.toString();
+    } catch (Exception e) {
+      // Not a valid HQL entity name — fall through to SQL table lookup.
     }
+    return ModelProvider.getInstance().getEntityByTableName(tableName);
+  }
 
+  private static String translateColumnReferences(String clause, Map<String, Entity> aliasEntityMap) {
+    String result = clause;
+    for (Map.Entry<String, Entity> entry : aliasEntityMap.entrySet()) {
+      result = translateAliasColumns(result, entry.getKey(), entry.getValue());
+    }
     return result;
+  }
+
+  private static String translateAliasColumns(String clause, String alias, Entity entity) {
+    Pattern colRef = Pattern.compile("\\b" + Pattern.quote(alias) + "\\.(\\w+)");
+    Matcher colMatcher = colRef.matcher(clause);
+    StringBuffer translated = new StringBuffer();
+    while (colMatcher.find()) {
+      Property prop = entity.getPropertyByColumnName(colMatcher.group(1), false);
+      if (prop != null) {
+        String hqlRef = prop.isPrimitive()
+            ? alias + "." + prop.getName()
+            : alias + "." + prop.getName() + ".id";
+        log.debug("Translating column [{}] → HQL property [{}]", colMatcher.group(1), hqlRef);
+        colMatcher.appendReplacement(translated, Matcher.quoteReplacement(hqlRef));
+      }
+    }
+    colMatcher.appendTail(translated);
+    return translated.toString();
   }
 
   /**
