@@ -53,6 +53,8 @@ import org.openbravo.model.common.enterprise.Organization;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
+import com.etendoerp.go.onboarding.OnboardingDefaultCustomerService;
+import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -514,7 +516,8 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
         return;
       }
 
-      if (!ensureOnboardingDataset(writer, clientId, orgId, organizationCreated)) {
+      if (!ensureOnboardingDataset(writer, clientId, orgId, organizationCreated,
+          adminContext.adminUserId, adminContext.adminRoleId)) {
         return;
       }
 
@@ -725,13 +728,18 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
   }
 
   boolean ensureOnboardingDataset(PrintWriter writer, String clientId, String orgId,
-      boolean importRequired) {
+      boolean importRequired, String adminUserId, String adminRoleId) {
+    if (importRequired && !importOnboardingDataset(writer, clientId, orgId)) {
+      return false;
+    }
     if (!importRequired) {
       sendProgress(writer, PROGRESS_DATASET, "done",
           "Existing organization detected, skipping onboarding dataset import");
-      return true;
     }
-    return importOnboardingDataset(writer, clientId, orgId);
+    if (!generateOnboardingSequences(writer, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
+    }
+    return ensureDefaultCustomer(writer, clientId, orgId, adminUserId, adminRoleId);
   }
 
   boolean importOnboardingDataset(PrintWriter writer, String clientId, String orgId) {
@@ -749,6 +757,51 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       sendFinalResult(writer, false, errorMessage);
       return false;
     }
+  }
+
+  boolean generateOnboardingSequences(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, "sequences", PROGRESS_IN_PROGRESS,
+        "Generating organization sequences...");
+    try {
+      int count = createOnboardingSequenceGeneratorService().generateSequences(clientId, orgId,
+          adminUserId, adminRoleId);
+      sendProgress(writer, "sequences", "done",
+          "Organization sequences generated: " + count);
+      return true;
+    } catch (Exception e) {
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Organization sequence generation failed";
+      sendProgress(writer, "sequences", PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  boolean ensureDefaultCustomer(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, "customer", PROGRESS_IN_PROGRESS,
+        "Creating default customer...");
+    try {
+      createOnboardingDefaultCustomerService().ensureDefaultCustomer(clientId, orgId,
+          adminUserId, adminRoleId);
+      sendProgress(writer, "customer", "done", "Default customer ready");
+      return true;
+    } catch (Exception e) {
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Default customer creation failed";
+      sendProgress(writer, "customer", PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  OnboardingDefaultCustomerService createOnboardingDefaultCustomerService() {
+    return new OnboardingDefaultCustomerService();
+  }
+
+  OnboardingSequenceGeneratorService createOnboardingSequenceGeneratorService() {
+    return new OnboardingSequenceGeneratorService();
   }
 
   OnboardingDatasetImportService createOnboardingDatasetImportService() {
