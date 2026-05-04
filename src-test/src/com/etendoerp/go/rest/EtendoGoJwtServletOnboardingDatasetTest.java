@@ -66,6 +66,10 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     assertEquals(1, importService.importCount);
     assertEquals(1, sequenceService.generateCount);
     assertEquals(1, customerService.seedCount);
+    assertEquals("CLIENT-1", sequenceService.clientId);
+    assertEquals("ORG-1", sequenceService.orgId);
+    assertEquals("USER-1", sequenceService.userId);
+    assertEquals("ROLE-1", sequenceService.roleId);
     assertEquals("CLIENT-1", customerService.clientId);
     assertEquals("ORG-1", customerService.orgId);
     assertEquals("USER-1", customerService.userId);
@@ -149,10 +153,6 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
   }
 
   private static final class TestServlet extends EtendoGoJwtServlet {
-    private final OnboardingDatasetImportService importService;
-    private final OnboardingSequenceGeneratorService sequenceGeneratorService;
-    private final OnboardingDefaultCustomerService defaultCustomerService;
-
     private TestServlet(OnboardingDatasetImportService importService) {
       this(importService, new CountingSequenceGeneratorService(), new CountingDefaultCustomerService());
     }
@@ -165,24 +165,9 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     private TestServlet(OnboardingDatasetImportService importService,
         OnboardingSequenceGeneratorService sequenceGeneratorService,
         OnboardingDefaultCustomerService defaultCustomerService) {
-      this.importService = importService;
-      this.sequenceGeneratorService = sequenceGeneratorService;
-      this.defaultCustomerService = defaultCustomerService;
-    }
-
-    @Override
-    OnboardingDatasetImportService createOnboardingDatasetImportService() {
-      return importService;
-    }
-
-    @Override
-    OnboardingSequenceGeneratorService createOnboardingSequenceGeneratorService() {
-      return sequenceGeneratorService;
-    }
-
-    @Override
-    OnboardingDefaultCustomerService createOnboardingDefaultCustomerService() {
-      return defaultCustomerService;
+      this.onboardingDatasetImportService = importService;
+      this.onboardingSequenceGeneratorService = sequenceGeneratorService;
+      this.onboardingDefaultCustomerService = defaultCustomerService;
     }
   }
 

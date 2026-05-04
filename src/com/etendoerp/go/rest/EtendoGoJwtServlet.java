@@ -103,7 +103,15 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
   private static final String PROGRESS_ERROR = "error";
   private static final String PROGRESS_ORGANIZATION = "organization";
   private static final String PROGRESS_DATASET = "dataset";
+  private static final String PROGRESS_SEQUENCES = "sequences";
+  private static final String PROGRESS_CUSTOMER = "customer";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
+
+  OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
+  OnboardingSequenceGeneratorService onboardingSequenceGeneratorService =
+      new OnboardingSequenceGeneratorService();
+  OnboardingDefaultCustomerService onboardingDefaultCustomerService =
+      new OnboardingDefaultCustomerService();
 
   // --- CORS ---
 
@@ -746,7 +754,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     sendProgress(writer, PROGRESS_DATASET, PROGRESS_IN_PROGRESS,
         "Importing onboarding dataset...");
     try {
-      createOnboardingDatasetImportService().importDataset(clientId, orgId);
+      onboardingDatasetImportService.importDataset(clientId, orgId);
       sendProgress(writer, PROGRESS_DATASET, "done", "Onboarding dataset imported");
       return true;
     } catch (Exception e) {
@@ -761,18 +769,18 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
   boolean generateOnboardingSequences(PrintWriter writer, String clientId, String orgId,
       String adminUserId, String adminRoleId) {
-    sendProgress(writer, "sequences", PROGRESS_IN_PROGRESS,
+    sendProgress(writer, PROGRESS_SEQUENCES, PROGRESS_IN_PROGRESS,
         "Generating organization sequences...");
     try {
-      int count = createOnboardingSequenceGeneratorService().generateSequences(clientId, orgId,
-          adminUserId, adminRoleId);
-      sendProgress(writer, "sequences", "done",
+      int count = onboardingSequenceGeneratorService.generateSequences(clientId, orgId, adminUserId,
+          adminRoleId);
+      sendProgress(writer, PROGRESS_SEQUENCES, "done",
           "Organization sequences generated: " + count);
       return true;
     } catch (Exception e) {
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Organization sequence generation failed";
-      sendProgress(writer, "sequences", PROGRESS_ERROR, errorMessage);
+      sendProgress(writer, PROGRESS_SEQUENCES, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);
       return false;
     }
@@ -780,33 +788,22 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
   boolean ensureDefaultCustomer(PrintWriter writer, String clientId, String orgId,
       String adminUserId, String adminRoleId) {
-    sendProgress(writer, "customer", PROGRESS_IN_PROGRESS,
+    sendProgress(writer, PROGRESS_CUSTOMER, PROGRESS_IN_PROGRESS,
         "Creating default customer...");
     try {
-      createOnboardingDefaultCustomerService().ensureDefaultCustomer(clientId, orgId,
-          adminUserId, adminRoleId);
-      sendProgress(writer, "customer", "done", "Default customer ready");
+      onboardingDefaultCustomerService.ensureDefaultCustomer(clientId, orgId, adminUserId,
+          adminRoleId);
+      sendProgress(writer, PROGRESS_CUSTOMER, "done", "Default customer ready");
       return true;
     } catch (Exception e) {
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Default customer creation failed";
-      sendProgress(writer, "customer", PROGRESS_ERROR, errorMessage);
+      sendProgress(writer, PROGRESS_CUSTOMER, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);
       return false;
     }
   }
 
-  OnboardingDefaultCustomerService createOnboardingDefaultCustomerService() {
-    return new OnboardingDefaultCustomerService();
-  }
-
-  OnboardingSequenceGeneratorService createOnboardingSequenceGeneratorService() {
-    return new OnboardingSequenceGeneratorService();
-  }
-
-  OnboardingDatasetImportService createOnboardingDatasetImportService() {
-    return new OnboardingDatasetImportService();
-  }
 
 
   /**

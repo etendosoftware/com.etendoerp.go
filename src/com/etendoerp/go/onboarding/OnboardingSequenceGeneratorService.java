@@ -33,6 +33,21 @@ import com.etendoerp.sequences.SequencesGenerator;
  */
 public class OnboardingSequenceGeneratorService {
 
+  /**
+   * Runs the sequence generator for the onboarding organization and its child tree.
+   *
+   * @param clientId
+   *     client that owns the organization
+   * @param orgId
+   *     root organization that receives generated sequences
+   * @param adminUserId
+   *     administrator user used to execute the process
+   * @param adminRoleId
+   *     administrator role used to execute the process
+   * @return number of generated sequence combinations
+   * @throws Exception
+   *     when the underlying sequence generator cannot complete
+   */
   public int generateSequences(String clientId, String orgId, String adminUserId, String adminRoleId)
       throws Exception {
     validateContext(clientId, orgId, adminUserId, adminRoleId);

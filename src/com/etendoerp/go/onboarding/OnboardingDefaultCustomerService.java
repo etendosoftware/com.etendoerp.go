@@ -34,6 +34,19 @@ public class OnboardingDefaultCustomerService {
   static final String DEFAULT_CUSTOMER_SEARCH_KEY = "ONBOARDING_DEFAULT_CUSTOMER";
   static final String DEFAULT_CUSTOMER_NAME = "Default Customer";
 
+  /**
+   * Ensures the onboarding organization has a minimal customer business partner.
+   *
+   * @param clientId
+   *     client that owns the customer
+   * @param orgId
+   *     organization where the customer is created
+   * @param adminUserId
+   *     administrator user used to execute DAL changes
+   * @param adminRoleId
+   *     administrator role used to execute DAL changes
+   * @return existing or newly created default customer id
+   */
   public String ensureDefaultCustomer(String clientId, String orgId, String adminUserId,
       String adminRoleId) {
     validateContext(clientId, orgId, adminUserId, adminRoleId);
