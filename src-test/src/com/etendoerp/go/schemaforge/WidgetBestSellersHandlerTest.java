@@ -9,7 +9,6 @@ import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
 import java.util.Collections;
-import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -110,7 +109,7 @@ class WidgetBestSellersHandlerTest {
     // SQL returns null for trend_pct when prev_period has no data
     Object[] row = { "seller-id", "Seller A", new BigDecimal("42"), "Units", null };
     queryHelperMock.when(() -> WidgetQueryHelper.resolveQuery(any(), any(), any(), any()))
-        .thenReturn(List.of(row));
+        .thenReturn(Collections.singletonList(row));
     queryHelperMock.when(() -> WidgetQueryHelper.buildDataResponse(any()))
         .thenCallRealMethod();
 
@@ -126,7 +125,7 @@ class WidgetBestSellersHandlerTest {
     // After COALESCE fix: curr_period qty=0, prev_period qty=5 → trendPct = -100
     Object[] row = { "seller-id", "Seller A", new BigDecimal("5"), "Units", new BigDecimal("-100") };
     queryHelperMock.when(() -> WidgetQueryHelper.resolveQuery(any(), any(), any(), any()))
-        .thenReturn(List.of(row));
+        .thenReturn(Collections.singletonList(row));
     queryHelperMock.when(() -> WidgetQueryHelper.buildDataResponse(any()))
         .thenCallRealMethod();
 
@@ -142,7 +141,7 @@ class WidgetBestSellersHandlerTest {
   void testHandle_rowFields_areCorrectlyMapped() throws Exception {
     Object[] row = { "seller-id", "Product X", new BigDecimal("15"), "Kg", new BigDecimal("25") };
     queryHelperMock.when(() -> WidgetQueryHelper.resolveQuery(any(), any(), any(), any()))
-        .thenReturn(List.of(row));
+        .thenReturn(Collections.singletonList(row));
     queryHelperMock.when(() -> WidgetQueryHelper.buildDataResponse(any()))
         .thenCallRealMethod();
 
