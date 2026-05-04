@@ -18,7 +18,9 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.lang.reflect.Method;
+import java.security.GeneralSecurityException;
 import java.security.KeyStore;
 import java.security.cert.X509Certificate;
 import java.text.SimpleDateFormat;
@@ -148,33 +150,10 @@ public class NeoCertificateHelper {
       // Pre-parse the cert to validate NIF before invoking the store process.
       // If parsing fails (wrong password, corrupt file) we skip NIF check and let
       // AddCertificateToOrg return the appropriate user-facing error.
-      X509Certificate primaryCert = null;
-      try {
-        primaryCert = parsePrimaryX509Cert(certBytes, password);
-      } catch (Exception e) {
-        log.debug("Pre-parse skipped (likely wrong password or corrupt file): {}", e.getMessage());
-      }
+      X509Certificate primaryCert = tryParseCert(certBytes, password);
 
-      if (primaryCert != null) {
-        String certNif = parseNifFromDn(primaryCert.getSubjectX500Principal().getName());
-        if (certNif != null) {
-          String orgNif = getOrgNif(orgId);
-          if (orgNif == null) {
-            // Org has no NIF configured — ask the user to confirm using the cert NIF.
-            // If they confirmed (setOrgNif=true), write it now and proceed.
-            if (!"true".equals(request.getParameter("setOrgNif"))) {
-              JSONObject pending = new JSONObject();
-              pending.put("pendingNifConfirmation", true);
-              pending.put("certNif", certNif);
-              return NeoResponse.ok(pending);
-            }
-            setOrgNifInDb(orgId, certNif);
-          } else if (!normalizeNif(certNif).equals(normalizeNif(orgNif))) {
-            return NeoResponse.error(422,
-                "Certificate NIF (" + certNif + ") does not match organisation NIF (" + orgNif + ").");
-          }
-        }
-      }
+      NeoResponse nifCheck = validateNifOrGetPendingResponse(primaryCert, orgId, request);
+      if (nifCheck != null) return nifCheck;
 
       JSONObject result = invokeCertificateProcess(certBytes, fileName, orgId, password);
 
@@ -194,6 +173,53 @@ public class NeoCertificateHelper {
       log.error("Certificate upload failed", e);
       return NeoResponse.error(500, "Internal error processing certificate upload");
     }
+  }
+
+  /**
+   * Attempts to parse the primary certificate from PKCS#12 bytes.
+   * Returns null if parsing fails (wrong password, corrupt file) so the caller
+   * can proceed and let AddCertificateToOrg surface the appropriate error.
+   */
+  private static X509Certificate tryParseCert(byte[] certBytes, String password) {
+    try {
+      return parsePrimaryX509Cert(certBytes, password);
+    } catch (Exception e) {
+      log.debug("Pre-parse skipped (likely wrong password or corrupt file): {}", e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Validates the NIF embedded in the certificate against the organisation's NIF.
+   *
+   * Returns a {@link NeoResponse} when the caller should stop and return early:
+   *   - {@code pendingNifConfirmation} prompt when the org has no NIF and confirmation is pending.
+   *   - 422 error when the cert NIF does not match the org NIF.
+   * Returns null when validation passes and the upload should continue.
+   */
+  private static NeoResponse validateNifOrGetPendingResponse(X509Certificate cert,
+      String orgId, HttpServletRequest request) throws Exception {
+    if (cert == null) return null;
+    String certNif = parseNifFromDn(cert.getSubjectX500Principal().getName());
+    if (certNif == null) return null;
+    String orgNif = getOrgNif(orgId);
+    if (orgNif == null) {
+      // Org has no NIF configured — ask the user to confirm using the cert NIF.
+      // If they confirmed (setOrgNif=true), write it now and proceed.
+      if (!"true".equals(request.getParameter("setOrgNif"))) {
+        JSONObject pending = new JSONObject();
+        pending.put("pendingNifConfirmation", true);
+        pending.put("certNif", certNif);
+        return NeoResponse.ok(pending);
+      }
+      setOrgNifInDb(orgId, certNif);
+      return null;
+    }
+    if (!normalizeNif(certNif).equals(normalizeNif(orgNif))) {
+      return NeoResponse.error(422,
+          "Certificate NIF (" + certNif + ") does not match organisation NIF (" + orgNif + ").");
+    }
+    return null;
   }
 
   // ── NIF extraction ──────────────────────────────────────────────────────────
@@ -289,7 +315,7 @@ public class NeoCertificateHelper {
   }
 
   private static X509Certificate parsePrimaryX509Cert(byte[] certBytes, String password)
-      throws Exception {
+      throws GeneralSecurityException, IOException {
     KeyStore ks = KeyStore.getInstance("PKCS12");
     try (ByteArrayInputStream bais = new ByteArrayInputStream(certBytes)) {
       ks.load(bais, password.toCharArray());
