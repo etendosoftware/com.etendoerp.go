@@ -44,18 +44,18 @@ NeoServlet (/sws/neo/*)
 ```
 
 Key components:
-
-| Class | Lines | Responsibility |
-|-------|-------|----------------|
-| `NeoServlet` | 953 | Main entry point. JWT auth, path parsing, routing, parent-child filtering. |
-| `NeoHandler` | 22 | CDI hook interface. Return `NeoResponse` or `null` to fall through. |
-| `NeoContext` | 147 | Immutable request context (builder pattern). Carries spec, entity, method, body, tab, OBContext. |
-| `NeoResponse` | 65 | Response wrapper with static builders: `ok()`, `created()`, `noContent()`, `error()`. |
-| `NeoSelectorService` | -- | FK dropdown resolution and querying (TableDir, Table, Search, OBUISEL). Supports custom HQL selectors. |
-| `NeoProcessService` | 564 | Process execution (OBUIAPP, Classic). Parameter validation. Process metadata. |
-| `PopulateSpecHelper` | 273 | Auto-populates entities and fields from AD metadata. |
-| `PopulateSpecProcess` | 55 | AD_Process (button) wrapper around PopulateSpecHelper. |
-
+| Class / package | Responsibility |
+|-------|----------------|
+| `NeoServlet` | Main entry point. JWT auth, path parsing, routing, parent-child filtering. |
+| `NeoHandler` | CDI hook interface. Return `NeoResponse` or `null` to fall through. |
+| `NeoContext` | Immutable request context (builder pattern). Carries spec, entity, method, body, tab, OBContext. |
+| `NeoResponse` | Response wrapper with static builders: `ok()`, `created()`, `noContent()`, `error()`. |
+| `NeoSelectorService` | Selector facade for FK dropdown listing and querying. Delegates metadata discovery and policy dispatch to selector subpackages. |
+| `schemaforge.selector.meta` | Selector descriptor and context metadata (`SelectorMeta`, `RichFieldMeta`, `SelectorContextResolver`, `SelectorDescriptorResolver`). |
+| `schemaforge.selector.policy` | Selector policy SPI/registry for context filters, reference overrides, virtual columns, and response enrichment. |
+| `NeoProcessService` | Process execution (OBUIAPP, Classic, scheduling, DB procedure). Parameter validation and process metadata. |
+| `PopulateSpecHelper` | Auto-populates entities and fields from AD metadata. |
+| `PopulateSpecProcess` | AD_Process (button) wrapper around PopulateSpecHelper. |
 ---
 
 ## 3. Database Schema
@@ -285,6 +285,17 @@ Response (rich OBUISEL selector):
 OBUISEL selectors with custom HQL queries are fully supported. The service uses `Session.createQuery()` to execute the custom HQL with org security filtering, validation rules, search across searchable properties, and pagination.
 
 The service resolves `@param@` placeholders in OBUISEL HQL where clauses: `@AD_Org_ID@`, `@AD_Client_ID@`, `@AD_User_ID@`, `@AD_Role_ID@`.
+
+**Internal package split:**
+
+| Layer | Package / classes | Notes |
+|---|---|---|
+| Request facade | `NeoSelectorService` | Resolves the requested field and orchestrates list/query responses. |
+| Metadata | `com.etendoerp.go.schemaforge.selector.meta` | Reads AD/OBUISEL metadata and normalizes selector descriptors. |
+| Policies | `com.etendoerp.go.schemaforge.selector.policy` | Applies registered context filters and post-query enrichments through `SelectorPolicyRegistry`. |
+| Execution | `SelectorQueryExecutor`, `SelectorQueryBuilder`, `ComboReferenceSelectorExecutor`, `ListReferenceSelectorExecutor`, `SelectorResponseSupport` | Executes HQL/reference lookups and shapes the response. These remain in `schemaforge` to avoid widening package-private contracts. |
+
+New entity-specific selector behavior should be implemented as a selector policy where possible, not as another hardcoded branch in `NeoSelectorService`.
 
 ### 4.5 Button Actions (Process Execution on Records)
 

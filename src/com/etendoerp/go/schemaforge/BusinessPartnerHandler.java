@@ -16,6 +16,8 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.util.Set;
+
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -67,6 +69,18 @@ public class BusinessPartnerHandler implements NeoHandler {
   private static final String FIELD_SEARCH_KEY = "searchKey";
   private static final String FIELD_ETGO_IDENTIFIER = "etgoIdentifier";
   private static final String FIELD_NAME = "name";
+
+  private static final Set<String> PRECREATE_BILLING_FIELDS = Set.of(
+      "priceList",
+      "paymentMethod",
+      "paymentTerms",
+      "account",
+      "customerBlocking",
+      "purchasePricelist",
+      "pOPaymentMethod",
+      "pOPaymentTerms",
+      "pOFinancialAccount",
+      "vendorBlocking");
   private static final String FIELD_FIRSTNAME = "etgoFirstname";
   private static final String FIELD_LASTNAME = "etgoLastname";
 
@@ -84,8 +98,8 @@ public class BusinessPartnerHandler implements NeoHandler {
     try {
       deriveNameFromPerson(ctx, body);
 
-      // POST only: inject searchKey = name as temporary mandatory-field placeholder.
       if ("POST".equals(method)) {
+        stripPreCreateBillingDefaults(body);
         String name = body.optString(FIELD_NAME, null);
         if (StringUtils.isNotBlank(name) && !body.has(FIELD_SEARCH_KEY)) {
           body.put(FIELD_SEARCH_KEY, name);
@@ -97,6 +111,14 @@ public class BusinessPartnerHandler implements NeoHandler {
     }
     return null;
   }
+
+  private void stripPreCreateBillingDefaults(JSONObject body) {
+    for (String key : PRECREATE_BILLING_FIELDS) {
+      body.remove(key);
+      body.remove(key + "$_identifier");
+    }
+  }
+
 
   /**
    * Derives {@code name} from {@code etgoFirstname} + {@code etgoLastname} when:
