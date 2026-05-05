@@ -33,11 +33,13 @@ import org.openbravo.model.pricing.pricelist.PriceListVersion;
  * Single source of truth for resolving the unique {@link PriceListVersion} of a
  * {@link PriceList} in the simplified Etendo Go interface.
  *
- * <p>The invariant <i>one price list = one version</i> is enforced by
- * {@link PriceListEventHandler} (auto-creates the first version) and
- * {@link PriceListVersionEventHandler} (rejects subsequent inserts). This class
- * exposes that invariant semantically — callers say "give me the version of
- * this price list" instead of indexing into a list and hoping for the best.
+ * <p>In Etendo Go, a price list is expected to have exactly one version:
+ * {@link PriceListEventHandler} auto-creates the first version on price list
+ * insert, and the GO UI does not expose any way to create additional ones.
+ * The invariant is not hard-enforced at the persistence layer so that Etendo
+ * Classic / Enterprise users keep the ability to manage multiple versions
+ * natively. This class exposes the GO-side semantic ("give me the version of
+ * this price list") and logs a warning if it ever finds more than one.
  */
 public final class PriceListVersionResolver {
 
@@ -68,8 +70,8 @@ public final class PriceListVersionResolver {
       return null;
     }
     if (results.size() > 1) {
-      log.warn("Price list '{}' has {} versions; expected exactly one. "
-          + "Returning the first; check PriceListVersionEventHandler.",
+      log.warn("Price list '{}' has {} versions; Etendo Go expects exactly one. "
+          + "Returning the first. This is normal if the list was edited in Classic.",
           priceList.getName(), results.size());
     }
     return results.get(0);
