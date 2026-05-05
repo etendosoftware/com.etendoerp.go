@@ -39,6 +39,8 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.ProcessParameter;
 
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+
 /**
  * Service for generating Jasper reports via the Neo headless API.
  *
@@ -110,6 +112,9 @@ public class NeoReportService {
    */
   public static void generateReport(Process process, JSONObject params,
       String exportType, OutputStream outputStream) {
+    if (!NeoAccessHelper.hasProcessAccess(process.getId())) {
+      throw new SecurityException("Access denied to report for current role");
+    }
     try {
       OBContext.setAdminMode();
       try {

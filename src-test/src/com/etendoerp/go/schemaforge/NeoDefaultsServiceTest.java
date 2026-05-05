@@ -25,7 +25,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 
 /**
- * Unit tests for {@link NeoDefaultsService#injectLineNetAmountIfMissing}.
+ * Unit tests for {@link NeoCommercialLinePolicy#injectLineNetAmountIfMissing}.
  *
  * <p>These tests do NOT require a database connection. All tests exercise the
  * server-side computation of {@code lineNetAmount = invoicedQuantity × unitPrice},
@@ -51,7 +51,7 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testNullBodyIsIgnored() {
     // Should not throw
-    NeoDefaultsService.injectLineNetAmountIfMissing(null);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(null);
   }
 
   // ── injectLineNetAmountIfMissing — zero qty → no injection ─────────────────
@@ -62,7 +62,7 @@ public class NeoDefaultsServiceTest {
     body.put("invoicedQuantity", "0");
     body.put("unitPrice", 29.70);
 
-    NeoDefaultsService.injectLineNetAmountIfMissing(body);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
 
     assertFalse("lineNetAmount should not be injected when invoicedQuantity is zero",
         body.has("lineNetAmount"));
@@ -75,7 +75,7 @@ public class NeoDefaultsServiceTest {
     JSONObject body = new JSONObject();
     body.put("unitPrice", 29.70);
 
-    NeoDefaultsService.injectLineNetAmountIfMissing(body);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
 
     assertFalse("lineNetAmount should not be injected when invoicedQuantity is absent",
         body.has("lineNetAmount"));
@@ -89,7 +89,7 @@ public class NeoDefaultsServiceTest {
     body.put("invoicedQuantity", "3");
     body.put("unitPrice", 0);
 
-    NeoDefaultsService.injectLineNetAmountIfMissing(body);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
 
     assertFalse("lineNetAmount should not be injected when unitPrice is zero",
         body.has("lineNetAmount"));
@@ -103,7 +103,7 @@ public class NeoDefaultsServiceTest {
     body.put("invoicedQuantity", "3");
     body.put("unitPrice", 29.70);
 
-    NeoDefaultsService.injectLineNetAmountIfMissing(body);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
 
     assertTrue("lineNetAmount should be injected", body.has("lineNetAmount"));
     assertAmountEquals(89.10, body.getDouble("lineNetAmount")); // 29.70 × 3
@@ -117,7 +117,7 @@ public class NeoDefaultsServiceTest {
     body.put("invoicedQuantity", "5");
     body.put("unitPrice", 10.00);
 
-    NeoDefaultsService.injectLineNetAmountIfMissing(body);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
 
     assertTrue("lineNetAmount should be injected", body.has("lineNetAmount"));
     assertAmountEquals(50.00, body.getDouble("lineNetAmount")); // 10 × 5
@@ -137,7 +137,7 @@ public class NeoDefaultsServiceTest {
     body.put("unitPrice", 29.70);
     body.put("lineNetAmount", 999.99); // stale value from callout
 
-    NeoDefaultsService.injectLineNetAmountIfMissing(body);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
 
     assertAmountEquals(89.10, body.getDouble("lineNetAmount")); // overwritten: 29.70 × 3
   }

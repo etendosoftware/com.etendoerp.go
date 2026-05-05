@@ -39,16 +39,18 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
 
+  @Inject
+  private CreateShipmentHandler createShipmentHandler;
+
+  @Inject
+  private CreateDraftInvoiceHandler createDraftInvoiceHandler;
+
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse result = cloneRecordHandler.handle(context);
-    if (result != null) {
-      return result;
-    }
-    result = new CreateShipmentHandler().handle(context);
-    if (result != null) {
-      return result;
-    }
-    return new CreateDraftInvoiceHandler().handle(context);
+    return NeoHeaderActionRouter.dispatch(
+        context,
+        cloneRecordHandler,
+        createShipmentHandler,
+        createDraftInvoiceHandler);
   }
 }

@@ -25,3 +25,6 @@ Thumbs.db
 
 # Git worktrees
 .worktrees/
+.env
+.scannerwork/
+sonar-reports/
