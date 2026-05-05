@@ -20,7 +20,6 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
@@ -31,13 +30,8 @@ import org.junit.Test;
 /**
  * Unit tests for {@link SalesInvoiceHeaderHandler}.
  *
- * <p>Covers two responsibilities:
- * <ul>
- *   <li>{@code handle()} dispatches ACTION requests to the right downstream handler</li>
- *   <li>{@code afterHandle()} delegates to {@link BpEmailAnnotatorHandler}</li>
- * </ul>
- *
- * <p>The annotation logic itself is covered in {@link BpEmailAnnotatorHandlerTest}.
+ * <p>Covers ACTION dispatching: {@code handle()} routes requests to the right downstream handler
+ * (clone record / register payment) or returns null when none matches.
  */
 public class SalesInvoiceHeaderHandlerTest {
 
@@ -45,35 +39,20 @@ public class SalesInvoiceHeaderHandlerTest {
    * Creates a {@link SalesInvoiceHeaderHandler} with its {@code @Inject} fields replaced by the
    * provided mocks via reflection, bypassing CDI in the unit-test context.
    *
-   * @param mockClone     mock for {@link NeoCloneRecordHandler}
-   * @param mockPayment   mock for {@link RegisterPaymentHandler}
-   * @param mockAnnotator mock for {@link BpEmailAnnotatorHandler}
+   * @param mockClone   mock for {@link NeoCloneRecordHandler}
+   * @param mockPayment mock for {@link RegisterPaymentHandler}
    */
   private static SalesInvoiceHeaderHandler handlerWithMocks(
-      NeoCloneRecordHandler mockClone,
-      RegisterPaymentHandler mockPayment,
-      BpEmailAnnotatorHandler mockAnnotator) throws Exception {
+      NeoCloneRecordHandler mockClone, RegisterPaymentHandler mockPayment) throws Exception {
     SalesInvoiceHeaderHandler handler = new SalesInvoiceHeaderHandler();
-    setField(handler, "cloneRecordHandler", mockClone);
-    setField(handler, "registerPaymentHandler", mockPayment);
-    setField(handler, "bpEmailAnnotatorHandler", mockAnnotator);
+    Field cloneField = SalesInvoiceHeaderHandler.class.getDeclaredField("cloneRecordHandler");
+    cloneField.setAccessible(true);
+    cloneField.set(handler, mockClone);
+    Field paymentField = SalesInvoiceHeaderHandler.class.getDeclaredField("registerPaymentHandler");
+    paymentField.setAccessible(true);
+    paymentField.set(handler, mockPayment);
     return handler;
   }
-
-  /**
-   * Sets a private field on a {@link SalesInvoiceHeaderHandler} instance via reflection.
-   *
-   * @param target    the handler instance to mutate
-   * @param fieldName the declared field name
-   * @param value     the value to assign
-   */
-  private static void setField(SalesInvoiceHeaderHandler target, String fieldName, Object value) throws Exception {
-    Field field = SalesInvoiceHeaderHandler.class.getDeclaredField(fieldName);
-    field.setAccessible(true);
-    field.set(target, value);
-  }
-
-  // ── handle() dispatch ──────────────────────────────────────────────────────
 
   /**
    * Verifies that handle returns the register-payment response when the payment handler matches.
@@ -82,8 +61,7 @@ public class SalesInvoiceHeaderHandlerTest {
   public void testHandleDispatchesToRegisterPaymentHandler() throws Exception {
     NeoCloneRecordHandler mockClone = mock(NeoCloneRecordHandler.class);
     RegisterPaymentHandler mockPayment = mock(RegisterPaymentHandler.class);
-    BpEmailAnnotatorHandler mockAnnotator = mock(BpEmailAnnotatorHandler.class);
-    SalesInvoiceHeaderHandler handler = handlerWithMocks(mockClone, mockPayment, mockAnnotator);
+    SalesInvoiceHeaderHandler handler = handlerWithMocks(mockClone, mockPayment);
 
     NeoResponse expected = NeoResponse.ok(new JSONObject().put("action", "registerPayment"));
     NeoContext ctx = NeoContext.builder()
@@ -100,8 +78,7 @@ public class SalesInvoiceHeaderHandlerTest {
   public void testHandleReturnsNullWhenNoHandlerMatches() throws Exception {
     NeoCloneRecordHandler mockClone = mock(NeoCloneRecordHandler.class);
     RegisterPaymentHandler mockPayment = mock(RegisterPaymentHandler.class);
-    BpEmailAnnotatorHandler mockAnnotator = mock(BpEmailAnnotatorHandler.class);
-    SalesInvoiceHeaderHandler handler = handlerWithMocks(mockClone, mockPayment, mockAnnotator);
+    SalesInvoiceHeaderHandler handler = handlerWithMocks(mockClone, mockPayment);
 
     NeoContext ctx = NeoContext.builder()
         .httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
@@ -109,44 +86,5 @@ public class SalesInvoiceHeaderHandlerTest {
     when(mockPayment.handle(ctx)).thenReturn(null);
 
     assertNull(handler.handle(ctx));
-  }
-
-  // ── afterHandle() delegation ───────────────────────────────────────────────
-
-  /**
-   * Verifies that afterHandle returns the response produced by BpEmailAnnotatorHandler.
-   */
-  @Test
-  public void testAfterHandleDelegatesToBpEmailAnnotator() throws Exception {
-    NeoCloneRecordHandler mockClone = mock(NeoCloneRecordHandler.class);
-    RegisterPaymentHandler mockPayment = mock(RegisterPaymentHandler.class);
-    BpEmailAnnotatorHandler mockAnnotator = mock(BpEmailAnnotatorHandler.class);
-    SalesInvoiceHeaderHandler handler = handlerWithMocks(mockClone, mockPayment, mockAnnotator);
-
-    NeoResponse expected = NeoResponse.ok(new JSONObject().put("annotated", true));
-    NeoContext ctx = NeoContext.builder()
-        .specName("sales-invoice").entityName("header")
-        .httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
-    when(mockAnnotator.afterHandle(ctx)).thenReturn(expected);
-
-    assertSame(expected, handler.afterHandle(ctx));
-    verify(mockAnnotator).afterHandle(ctx);
-  }
-
-  /**
-   * Verifies that afterHandle returns null when the annotator decides not to annotate (e.g. non-GET).
-   */
-  @Test
-  public void testAfterHandleReturnsNullWhenAnnotatorReturnsNull() throws Exception {
-    NeoCloneRecordHandler mockClone = mock(NeoCloneRecordHandler.class);
-    RegisterPaymentHandler mockPayment = mock(RegisterPaymentHandler.class);
-    BpEmailAnnotatorHandler mockAnnotator = mock(BpEmailAnnotatorHandler.class);
-    SalesInvoiceHeaderHandler handler = handlerWithMocks(mockClone, mockPayment, mockAnnotator);
-
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).build();
-    when(mockAnnotator.afterHandle(ctx)).thenReturn(null);
-
-    assertNull(handler.afterHandle(ctx));
   }
 }

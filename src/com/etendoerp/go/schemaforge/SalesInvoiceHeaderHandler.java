@@ -28,9 +28,6 @@ import javax.inject.Named;
  *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler} (uses {@code CloneInvoiceHook})</li>
  *   <li>{@code registerPayment} / {@code invoicePayments} / {@code invoiceAccounts} → {@link RegisterPaymentHandler}</li>
  * </ul>
- *
- * GET post-hook: delegates to {@link BpEmailAnnotatorHandler} so each invoice record carries
- * {@code bpEmail} (from {@code C_BPartner.EM_Etgo_Email}) for the Send Email modal.
  */
 @Named("salesInvoiceHeaderHandler")
 public class SalesInvoiceHeaderHandler implements NeoHandler {
@@ -41,19 +38,11 @@ public class SalesInvoiceHeaderHandler implements NeoHandler {
   @Inject
   private RegisterPaymentHandler registerPaymentHandler;
 
-  @Inject
-  private BpEmailAnnotatorHandler bpEmailAnnotatorHandler;
-
   @Override
   public NeoResponse handle(NeoContext context) {
     return NeoHeaderActionRouter.dispatch(
         context,
         cloneRecordHandler,
         registerPaymentHandler);
-  }
-
-  @Override
-  public NeoResponse afterHandle(NeoContext context) {
-    return bpEmailAnnotatorHandler.afterHandle(context);
   }
 }
