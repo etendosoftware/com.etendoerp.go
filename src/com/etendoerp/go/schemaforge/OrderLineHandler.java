@@ -74,20 +74,10 @@ public class OrderLineHandler implements NeoHandler {
       return null;
     }
 
-    // For net price lists (istaxincluded=N) the frontend selector incorrectly maps
-    // standardPrice → grossUnitPrice (standardPrice is the net price, not gross).
-    // Reset grossUnitPrice to 0 before the CRUD runs so the backend callout chain
-    // does not treat it as a gross price and NeoDefaultsService takes the net path:
-    // lineGrossAmount = unitPrice × qty × (1 + taxRate).
-    if (!Boolean.TRUE.equals(order.getPriceList().isPriceIncludesTax())) {
-      try {
-        body.put("grossUnitPrice", 0);
-        log.debug("[OrderLineHandler] Net price list '{}' — reset grossUnitPrice to 0 on new line",
-            order.getPriceList().getIdentifier());
-      } catch (Exception e) {
-        log.warn("[OrderLineHandler] Could not reset grossUnitPrice: {}", e.getMessage());
-      }
-    }
+    NeoCommercialLinePolicy.normalizeOrderLineSelectorPriceMapping(
+        body,
+        Boolean.TRUE.equals(order.getPriceList().isPriceIncludesTax()),
+        order.getPriceList().getIdentifier());
     return null;
   }
 

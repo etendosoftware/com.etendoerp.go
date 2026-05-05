@@ -22,6 +22,9 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import java.util.Set;
+
+import org.openbravo.base.exception.OBSecurityException;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -165,5 +168,33 @@ public class McpToolRouterTest {
     assertEquals("complete-order", ToolRegistry.snakeToKebab(TOOL_COMPLETE_ORDER));
     assertEquals("sales-order-lines", ToolRegistry.snakeToKebab("sales_order_lines"));
     assertEquals("invoices", ToolRegistry.snakeToKebab("invoices"));
+  }
+
+  // ── McpAuthorizationService ────────────────────────────────────────────
+
+  /** Tests that write tools require write scope at execution time. */
+  @Test(expected = OBSecurityException.class)
+  public void testAuthorizeToolCallRejectsCreateWithoutWriteScope() {
+    McpAuthorizationService.authorizeToolCall("neo_create", Set.of("neo:read"));
+  }
+
+  /** Tests that write scope allows write tools at execution time. */
+  @Test
+  public void testAuthorizeToolCallAllowsCreateWithWriteScope() {
+    McpAuthorizationService.authorizeToolCall("neo_create", Set.of("neo:write"));
+  }
+
+  /** Tests that report tools require report scope at execution time. */
+  @Test(expected = OBSecurityException.class)
+  public void testAuthorizeToolCallRejectsReportWithoutReportScope() {
+    McpAuthorizationService.authorizeToolCall("generate_invoice_report", Set.of("neo:read"));
+  }
+
+  /** Tests that the wildcard scope allows every tool type at execution time. */
+  @Test
+  public void testAuthorizeToolCallAllowsWildcardScope() {
+    McpAuthorizationService.authorizeToolCall("neo_create", Set.of("neo:*"));
+    McpAuthorizationService.authorizeToolCall("complete_order", Set.of("neo:*"));
+    McpAuthorizationService.authorizeToolCall("generate_invoice_report", Set.of("neo:*"));
   }
 }

@@ -81,6 +81,22 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue(xml.contains("30 Días"));
   }
 
+  /** Verifies that business partner rows are excluded while the shared BP group catalog stays available. */
+  @Test
+  public void testDefinitionExcludesBusinessPartnerRowsButKeepsBpGroup() {
+    assertFalse(OnboardingDatasetDefinition.getIncludedTables().contains("C_BPARTNER"));
+    assertFalse(OnboardingDatasetDefinition.getIncludedTables().contains("C_BPARTNER_LOCATION"));
+    assertTrue(OnboardingDatasetDefinition.getIncludedTables().contains("C_BP_GROUP"));
+  }
+
+  /** Verifies that normalized onboarding XML does not import business partner entity rows. */
+  @Test
+  public void testNormalizerExcludesBusinessPartnersFromDatasetXml() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertFalse(xml.contains("<cBpartner>"));
+    assertFalse(xml.contains("<cBpartnerLocation>"));
+  }
 
   @Test
   public void testNormalizerBuildsEmptyDatasetWithoutUnsupportedJaxpFailures() throws Exception {
@@ -122,18 +138,17 @@ public class OnboardingDatasetNormalizerTest {
   }
 
 
-  /** Verifies that representative foundation business records remain in the normalized XML. */
+  /** Verifies that the remaining onboarding dataset still keeps shared setup content after removing BP rows. */
   @Test
-  public void testNormalizerKeepsFoundationBusinessContent() {
+  public void testNormalizerKeepsSharedSetupContent() {
     String xml = pathBackedNormalizer().buildDatasetXml();
 
     assertTrue(xml.contains("Agua"));
-    assertTrue(xml.contains("Consumidor Final"));
     assertTrue(xml.contains("Cuenta de Banco"));
     assertTrue(xml.contains("30 Días"));
     assertTrue(xml.contains("Inmediato"));
-    assertTrue(xml.contains("Juan Perez"));
     assertTrue(xml.contains("Efectivo"));
+    assertTrue(xml.contains("Consumidor Final"));
   }
 
   /** Verifies that user-scoped sales representative columns are stripped from product rows. */
