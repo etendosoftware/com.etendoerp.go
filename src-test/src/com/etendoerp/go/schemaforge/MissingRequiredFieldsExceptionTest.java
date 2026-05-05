@@ -37,11 +37,13 @@ import org.junit.Test;
  */
 public class MissingRequiredFieldsExceptionTest {
 
-  /** Verifies that the field list is stored and accessible via {@code getFields()}. */
+  /**
+   * Verifies that the field list is stored and accessible via {@code getFields()},
+   * and that the exception message contains the error code.
+   */
   @Test
-  public void exceptionExposesFieldList() {
-    MissingRequiredFieldsException ex =
-        new MissingRequiredFieldsException(Arrays.asList("bpartner", "priceList"));
+  public void testExceptionExposesFieldList() {
+    MissingRequiredFieldsException ex = new MissingRequiredFieldsException(Arrays.asList("bpartner", "priceList"));
     assertNotNull(ex.getFields());
     assertEquals(2, ex.getFields().size());
     assertTrue(ex.getFields().contains("bpartner"));
@@ -49,19 +51,24 @@ public class MissingRequiredFieldsExceptionTest {
     assertTrue(ex.getMessage().contains(MissingRequiredFieldsException.ERROR_CODE));
   }
 
-  /** Verifies that passing {@code null} as the field list is treated as an empty list. */
+  /**
+   * Verifies that passing {@code null} as the field list is treated as an empty list
+   * rather than propagating a NullPointerException.
+   */
   @Test
-  public void exceptionTreatsNullAsEmptyList() {
+  public void testExceptionTreatsNullAsEmptyList() {
     MissingRequiredFieldsException ex = new MissingRequiredFieldsException(null);
     assertNotNull(ex.getFields());
     assertEquals(0, ex.getFields().size());
   }
 
-  /** Verifies that {@code getFields()} returns an unmodifiable view to prevent external mutation. */
+  /**
+   * Verifies that {@code getFields()} returns an unmodifiable view so callers
+   * cannot mutate the internal field list after construction.
+   */
   @Test
-  public void exceptionFieldListIsImmutable() {
-    MissingRequiredFieldsException ex =
-        new MissingRequiredFieldsException(Collections.singletonList("contact"));
+  public void testExceptionFieldListIsImmutable() {
+    MissingRequiredFieldsException ex = new MissingRequiredFieldsException(Collections.singletonList("contact"));
     try {
       ex.getFields().add("priceList");
       fail("Expected UnsupportedOperationException — getFields() must return an unmodifiable view");
@@ -70,51 +77,49 @@ public class MissingRequiredFieldsExceptionTest {
     }
   }
 
-  /** Verifies that a {@code null} body returns an empty list without throwing. */
+  /**
+   * Verifies that a {@code null} body returns an empty list without throwing,
+   * even before the DAL is initialized.
+   */
   @Test
-  public void findMissingMandatoryFieldsHandlesNullBody() {
-    // Should never throw on null inputs, even before DAL is initialized.
+  public void testFindMissingMandatoryFieldsHandlesNullBody() {
     java.util.List<String> result = NeoDefaultsService.findMissingMandatoryFields(null, null);
     assertNotNull(result);
     assertEquals(0, result.size());
   }
 
-  /** Verifies that a {@code null} tab returns an empty list without throwing. */
+  /**
+   * Verifies that a {@code null} tab returns an empty list without throwing,
+   * exercising the fast-path guard at the top of the method.
+   */
   @Test
-  public void findMissingMandatoryFieldsHandlesNullTab() {
-    java.util.List<String> result =
-        NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null);
+  public void testFindMissingMandatoryFieldsHandlesNullTab() {
+    java.util.List<String> result = NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null);
     assertNotNull(result);
     assertEquals(0, result.size());
   }
 
   /**
-   * Verifies that the fast-path null-tab check is not bypassed when {@code userSubmittedFields}
-   * is provided — the method must return empty without attempting DAL access.
+   * Verifies that the fast-path null-tab check is not bypassed when
+   * {@code userSubmittedFields} is provided — the method must return empty
+   * without attempting DAL access.
    */
   @Test
-  public void findMissingMandatoryFieldsWithUserSubmittedFieldsHandlesNullTab() {
-    // userSubmittedFields provided but tab is null — fast-path must still return empty
-    java.util.Set<String> submitted = new java.util.HashSet<>(
-        java.util.Arrays.asList("businessPartner", "priceList"));
-    java.util.List<String> result =
-        NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null, submitted);
+  public void testFindMissingMandatoryFieldsWithUserSubmittedFieldsHandlesNullTab() {
+    java.util.Set<String> submitted = new java.util.HashSet<>(java.util.Arrays.asList("businessPartner", "priceList"));
+    java.util.List<String> result = NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null, submitted);
     assertNotNull(result);
     assertEquals(0, result.size());
   }
 
   /**
-   * Verifies that the 2-param backward-compatible overload produces the same result as
-   * calling the 3-param variant with {@code null} for the user-submission filter.
+   * Verifies that the 2-param backward-compatible overload produces the same result
+   * as calling the 3-param variant with {@code null} for the user-submission filter.
    */
   @Test
-  public void findMissingMandatoryFieldsBackwardCompatOverloadDelegatesToThreeParam() {
-    // The 2-param overload must behave identically to calling the 3-param with null filter.
-    // Both return empty when tab is null.
-    java.util.List<String> twoParam =
-        NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null);
-    java.util.List<String> threeParam =
-        NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null, null);
+  public void testFindMissingMandatoryFieldsBackwardCompatOverloadDelegatesToThreeParam() {
+    java.util.List<String> twoParam = NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null);
+    java.util.List<String> threeParam = NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null, null);
     assertEquals(twoParam, threeParam);
   }
 }
