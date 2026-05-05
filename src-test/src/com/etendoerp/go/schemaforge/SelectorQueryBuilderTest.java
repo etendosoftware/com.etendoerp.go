@@ -157,4 +157,138 @@ class SelectorQueryBuilderTest {
     assertFalse(result.contains(" WHERE (lower"),
         "should not introduce a second WHERE: " + result);
   }
+
+  // --------------------------------------------------------------------
+  // simplifyConstantCaseExpressions
+  // --------------------------------------------------------------------
+
+  /**
+   * When both literals match ('N'='N'), the CASE is replaced by a direct equality.
+   * This covers the vendor payment-method filter after @FIN_ISRECEIPT@ substitution.
+   */
+  @Test
+  @DisplayName("simplifyConstantCaseExpressions rewrites always-true CASE to direct equality")
+  void testSimplifyAlwaysTrueCase() {
+    String input = "EXISTS (SELECT 1 FROM FinancialMgmtFinAccPaymentMethod fapm "
+        + "WHERE e.id=fapm.paymentMethod.id AND fapm.active='Y' "
+        + "AND fapm.payoutAllow = (CASE WHEN 'N'='N' THEN 'Y' ELSE fapm.payoutAllow END))";
+
+    String result = SelectorQueryBuilder.simplifyConstantCaseExpressions(input);
+
+    assertTrue(result.contains("fapm.payoutAllow = 'Y'"),
+        "Always-true CASE should collapse to direct equality: " + result);
+    assertFalse(result.contains("CASE WHEN"),
+        "No CASE WHEN should remain: " + result);
+  }
+
+  /**
+   * When literals differ ('N'='Y'), the CASE expression is always false — the
+   * term should be dropped via the 1=1 cleanup.
+   */
+  @Test
+  @DisplayName("simplifyConstantCaseExpressions drops always-false CASE (AND 1=1 cleanup)")
+  void testSimplifyAlwaysFalseCase() {
+    String input = "EXISTS (SELECT 1 FROM FinancialMgmtFinAccPaymentMethod fapm "
+        + "WHERE e.id=fapm.paymentMethod.id AND fapm.active='Y' "
+        + "AND fapm.payinAllow = (CASE WHEN 'N'='Y' THEN 'Y' ELSE fapm.payinAllow END))";
+
+    String result = SelectorQueryBuilder.simplifyConstantCaseExpressions(input);
+
+    assertFalse(result.contains("CASE WHEN"),
+        "No CASE WHEN should remain: " + result);
+    assertFalse(result.contains("AND 1=1"),
+        "AND 1=1 tautology should be stripped: " + result);
+  }
+
+  /**
+   * Customer payment-method filter: @FIN_ISRECEIPT@='Y' → always-true CASE on payinAllow.
+   */
+  @Test
+  @DisplayName("simplifyConstantCaseExpressions handles payinAllow with FIN_ISRECEIPT=Y")
+  void testSimplifyCustomerPaymentMethod() {
+    String input = "EXISTS (SELECT 1 FROM FinancialMgmtFinAccPaymentMethod fapm "
+        + "WHERE e.id=fapm.paymentMethod.id AND fapm.active='Y' "
+        + "AND fapm.payinAllow = (CASE WHEN 'Y'='Y' THEN 'Y' ELSE fapm.payinAllow END))";
+
+    String result = SelectorQueryBuilder.simplifyConstantCaseExpressions(input);
+
+    assertTrue(result.contains("fapm.payinAllow = 'Y'"),
+        "Customer always-true CASE should collapse to direct equality: " + result);
+    assertFalse(result.contains("CASE WHEN"), "No CASE WHEN should remain: " + result);
+  }
+
+  /** HQL without CASE WHEN is returned unchanged. */
+  @Test
+  @DisplayName("simplifyConstantCaseExpressions returns HQL unchanged when no CASE WHEN present")
+  void testSimplifyNoCaseWhen() {
+    String input = "EXISTS (SELECT 1 FROM FinancialMgmtFinAccPaymentMethod fapm "
+        + "WHERE e.id=fapm.paymentMethod.id AND fapm.active='Y')";
+
+    String result = SelectorQueryBuilder.simplifyConstantCaseExpressions(input);
+
+    assertEquals(input, result, "HQL without CASE WHEN should be returned unchanged");
+  }
+
+  /** Null input is returned as null without throwing. */
+  @Test
+  @DisplayName("simplifyConstantCaseExpressions handles null input gracefully")
+  void testSimplifyNull() {
+    assertEquals(null, SelectorQueryBuilder.simplifyConstantCaseExpressions(null));
+  }
+
+  // --------------------------------------------------------------------
+  // unwrapSelectFromDual — SELECT FROM DUAL tempered-greedy fix
+  // --------------------------------------------------------------------
+
+  /**
+   * The FIN_PaymentMethodsWithAccountIsReceiptControl rule embeds two
+   * (SELECT … FROM DUAL) subexpressions inside an outer EXISTS (SELECT … FROM …).
+   * The tempered-greedy pattern must unwrap only the inner FROM DUAL clauses
+   * without consuming the outer EXISTS subquery.
+   */
+  @Test
+  @DisplayName("unwrapSelectFromDual removes nested FROM DUAL clauses without consuming outer EXISTS")
+  void testSelectFromDualNestedInExists() {
+    String sql = "EXISTS (SELECT 1 FROM FIN_FinAcc_PaymentMethod fapm "
+        + "WHERE FIN_PaymentMethod.FIN_PaymentMethod_ID=fapm.FIN_PaymentMethod_ID "
+        + "AND fapm.isActive='Y' "
+        + "AND fapm.Payin_Allow = (SELECT CASE WHEN '@FIN_ISRECEIPT@'='Y' THEN 'Y' ELSE fapm.Payin_Allow END FROM DUAL) "
+        + "AND fapm.Payout_Allow = (SELECT CASE WHEN '@FIN_ISRECEIPT@'='N' THEN 'Y' ELSE fapm.Payout_Allow END FROM DUAL))";
+
+    String result = SelectorQueryBuilder.unwrapSelectFromDual(sql);
+
+    assertTrue(result.contains("EXISTS (SELECT 1"),
+        "Outer EXISTS SELECT must be preserved: " + result);
+    assertFalse(result.contains("FROM DUAL"),
+        "All FROM DUAL clauses must be unwrapped: " + result);
+    assertTrue(result.contains("CASE WHEN '@FIN_ISRECEIPT@'='Y' THEN 'Y' ELSE fapm.Payin_Allow END"),
+        "Inner CASE expression must be preserved: " + result);
+  }
+
+  /**
+   * A simple (SELECT expr FROM DUAL) is unwrapped to (expr).
+   */
+  @Test
+  @DisplayName("unwrapSelectFromDual unwraps simple top-level SELECT FROM DUAL")
+  void testSelectFromDualSimple() {
+    String result = SelectorQueryBuilder.unwrapSelectFromDual("(SELECT 'Y' FROM DUAL)");
+
+    assertFalse(result.contains("FROM DUAL"), "FROM DUAL must be removed: " + result);
+    assertTrue(result.contains("'Y'"), "Expression must be preserved: " + result);
+  }
+
+  /** Null input is returned as null without throwing. */
+  @Test
+  @DisplayName("unwrapSelectFromDual handles null input gracefully")
+  void testSelectFromDualNull() {
+    assertEquals(null, SelectorQueryBuilder.unwrapSelectFromDual(null));
+  }
+
+  /** SQL without FROM DUAL is returned unchanged. */
+  @Test
+  @DisplayName("unwrapSelectFromDual returns SQL unchanged when no FROM DUAL present")
+  void testSelectFromDualNoOp() {
+    String sql = "EXISTS (SELECT 1 FROM FIN_FinAcc_PaymentMethod fapm WHERE fapm.active='Y')";
+    assertEquals(sql, SelectorQueryBuilder.unwrapSelectFromDual(sql));
+  }
 }
