@@ -37,6 +37,7 @@ import org.junit.Test;
  */
 public class MissingRequiredFieldsExceptionTest {
 
+  /** Verifies that the field list is stored and accessible via {@code getFields()}. */
   @Test
   public void exceptionExposesFieldList() {
     MissingRequiredFieldsException ex =
@@ -48,6 +49,7 @@ public class MissingRequiredFieldsExceptionTest {
     assertTrue(ex.getMessage().contains(MissingRequiredFieldsException.ERROR_CODE));
   }
 
+  /** Verifies that passing {@code null} as the field list is treated as an empty list. */
   @Test
   public void exceptionTreatsNullAsEmptyList() {
     MissingRequiredFieldsException ex = new MissingRequiredFieldsException(null);
@@ -55,6 +57,7 @@ public class MissingRequiredFieldsExceptionTest {
     assertEquals(0, ex.getFields().size());
   }
 
+  /** Verifies that {@code getFields()} returns an unmodifiable view to prevent external mutation. */
   @Test
   public void exceptionFieldListIsImmutable() {
     MissingRequiredFieldsException ex =
@@ -67,6 +70,7 @@ public class MissingRequiredFieldsExceptionTest {
     }
   }
 
+  /** Verifies that a {@code null} body returns an empty list without throwing. */
   @Test
   public void findMissingMandatoryFieldsHandlesNullBody() {
     // Should never throw on null inputs, even before DAL is initialized.
@@ -75,11 +79,42 @@ public class MissingRequiredFieldsExceptionTest {
     assertEquals(0, result.size());
   }
 
+  /** Verifies that a {@code null} tab returns an empty list without throwing. */
   @Test
   public void findMissingMandatoryFieldsHandlesNullTab() {
     java.util.List<String> result =
         NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null);
     assertNotNull(result);
     assertEquals(0, result.size());
+  }
+
+  /**
+   * Verifies that the fast-path null-tab check is not bypassed when {@code userSubmittedFields}
+   * is provided — the method must return empty without attempting DAL access.
+   */
+  @Test
+  public void findMissingMandatoryFieldsWithUserSubmittedFieldsHandlesNullTab() {
+    // userSubmittedFields provided but tab is null — fast-path must still return empty
+    java.util.Set<String> submitted = new java.util.HashSet<>(
+        java.util.Arrays.asList("businessPartner", "priceList"));
+    java.util.List<String> result =
+        NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null, submitted);
+    assertNotNull(result);
+    assertEquals(0, result.size());
+  }
+
+  /**
+   * Verifies that the 2-param backward-compatible overload produces the same result as
+   * calling the 3-param variant with {@code null} for the user-submission filter.
+   */
+  @Test
+  public void findMissingMandatoryFieldsBackwardCompatOverloadDelegatesToThreeParam() {
+    // The 2-param overload must behave identically to calling the 3-param with null filter.
+    // Both return empty when tab is null.
+    java.util.List<String> twoParam =
+        NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null);
+    java.util.List<String> threeParam =
+        NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null, null);
+    assertEquals(twoParam, threeParam);
   }
 }
