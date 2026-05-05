@@ -18,6 +18,7 @@
 package com.etendoerp.go.apps;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyFactory;
@@ -119,14 +120,14 @@ public class JwtIssuerService {
 
   private static RSAPrivateKey loadPrivateKey(Path path)
       throws IOException, NoSuchAlgorithmException, InvalidKeySpecException {
-    byte[] der = decodePem(Files.readString(path), "PRIVATE KEY");
+    byte[] der = decodePem(Files.readString(path, StandardCharsets.UTF_8), "PRIVATE KEY");
     return (RSAPrivateKey) KeyFactory.getInstance("RSA")
         .generatePrivate(new PKCS8EncodedKeySpec(der));
   }
 
   private static RSAPublicKey loadPublicKey(Path path)
       throws IOException, NoSuchAlgorithmException, InvalidKeySpecException {
-    byte[] der = decodePem(Files.readString(path), "PUBLIC KEY");
+    byte[] der = decodePem(Files.readString(path, StandardCharsets.UTF_8), "PUBLIC KEY");
     return (RSAPublicKey) KeyFactory.getInstance("RSA")
         .generatePublic(new X509EncodedKeySpec(der));
   }
