@@ -128,6 +128,7 @@ public class OnboardingDatasetNormalizerTest {
     assertFalse(xml.contains("<AD_USER>"));
     assertFalse(xml.contains("<AD_ROLE>"));
     assertFalse(xml.contains("<AD_REF_DATA_LOADED>"));
+    assertFalse(OnboardingDatasetDefinition.getIncludedTables().contains("C_PAYMENTTERM_TRL"));
   }
 
   /** Verifies that translation-only payment term tables are excluded from onboarding metadata. */
@@ -156,6 +157,7 @@ public class OnboardingDatasetNormalizerTest {
     String xml = pathBackedNormalizer().buildDatasetXml();
 
     assertFalse(xml.contains("<SALESREP_ID>"));
+    assertFalse(xml.contains("<AD_LANGUAGE>"));
   }
 
   /** Verifies that system-scoped language rows are stripped from the normalized XML. */
