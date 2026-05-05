@@ -124,10 +124,15 @@ public class NeoServlet extends HttpBaseServlet {
       handleSpecRequest(pathInfo, method, request, response);
     } catch (Exception e) {
       log.error("Error processing NEO request: {}", e.getMessage(), e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          getInternalErrorMessage(e));
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  private String getInternalErrorMessage(Exception e) {
+    return e instanceof OBException ? e.getMessage() : "Internal Server Error";
   }
 
   private boolean authenticateRequest(HttpServletRequest request, HttpServletResponse response)
