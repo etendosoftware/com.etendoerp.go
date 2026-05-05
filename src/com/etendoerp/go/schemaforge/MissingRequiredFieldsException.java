@@ -34,6 +34,11 @@ public class MissingRequiredFieldsException extends RuntimeException {
 
   private final List<String> fields;
 
+  /**
+   * Creates a new exception carrying the names of the mandatory fields that were left empty.
+   *
+   * @param fields DAL property names of the missing fields; {@code null} is treated as empty
+   */
   public MissingRequiredFieldsException(List<String> fields) {
     super(ERROR_CODE + ": " + (fields == null ? "[]" : fields.toString()));
     this.fields = fields == null ? Collections.emptyList()

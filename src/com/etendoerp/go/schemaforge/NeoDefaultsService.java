@@ -1170,6 +1170,8 @@ public class NeoDefaultsService {
    * (after filterWriteRequest, before persist). For the UPDATE path the frontend sends all
    * editable line fields including invoicedQuantity and unitPrice, so both values are available
    * even though lineNetAmount itself is stripped by the readOnly filter.</p>
+   *
+   * @param body the JSON request body to inspect and mutate; no-op when {@code null}
    */
   public static void injectLineNetAmountIfMissing(JSONObject body) {
     if (body == null) {
@@ -1210,6 +1212,8 @@ public class NeoDefaultsService {
    * the c_invoiceline_trg trigger requires that C_UOM_ID matches the product's UOM, but
    * callouts return uOM as empty (the classic UI auto-fills it via readOnly logic), so NEO
    * must derive it here before persisting.
+   *
+   * @param body the JSON request body to inspect and mutate; no-op when {@code null}
    */
   public static void injectProductDerivedUomIfMissing(JSONObject body) {
     if (body == null) {
@@ -1393,7 +1397,13 @@ public class NeoDefaultsService {
     return missing;
   }
 
-  /** Backward-compatible overload — checks all mandatory columns (no user-submission filter). */
+  /**
+   * Backward-compatible overload — checks all mandatory columns without a user-submission filter.
+   *
+   * @param body  the request payload after defaults injection and callout cascade
+   * @param adTab the AD_Tab being saved
+   * @return DAL property names of mandatory columns left without a value; never null
+   */
   public static List<String> findMissingMandatoryFields(JSONObject body, Tab adTab) {
     return findMissingMandatoryFields(body, adTab, null);
   }
