@@ -83,8 +83,8 @@ class SelectorQueryBuilder {
   // Matches: LHS_EXPR = (CASE WHEN 'LIT1' = 'LIT2' THEN 'THEN_LIT' ELSE ELSE_EXPR END)
   // Used to simplify constant CASE expressions that arise from FROM DUAL unwrapping.
   private static final Pattern LITERAL_CASE_WHEN = Pattern.compile(
-      "(\\w+(?:\\.\\w+)*)\\s*=\\s*" +
-      "\\(CASE\\s+WHEN\\s+'([^']*)'\\s*=\\s*'([^']*)'\\s+THEN\\s+'([^']*)'\\s+ELSE\\s+(\\w+(?:\\.\\w+)*)\\s+END\\)",
+      "(\\w++(?:\\.\\w++)*+)\\s*+=\\s*+" +
+      "\\(CASE\\s++WHEN\\s++'([^']*+)'\\s*+=\\s*+'([^']*+)'\\s++THEN\\s++'([^']*+)'\\s++ELSE\\s++(\\w++(?:\\.\\w++)*+)\\s++END\\)",
       Pattern.CASE_INSENSITIVE);
 
   private SelectorQueryBuilder() {
@@ -591,7 +591,7 @@ class SelectorQueryBuilder {
       m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
     }
     m.appendTail(sb);
-    return sb.toString().replaceAll("(?i)\\s*AND\\s+1=1\\b", "");
+    return sb.toString().replaceAll("(?i)\\s*+AND\\s++1=1\\b", "");
   }
 
   /**
