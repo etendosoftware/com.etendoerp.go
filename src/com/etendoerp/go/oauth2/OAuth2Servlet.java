@@ -36,17 +36,20 @@ import java.util.concurrent.ConcurrentHashMap;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.HttpBaseServlet;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.SequenceIdData;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.CorsUtils;
+import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -83,6 +86,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
     private static final String MESSAGE_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
     private static final String MESSAGE_CLIENT_NOT_FOUND = "Client not found: ";
     private static final String PATH_AUTHORIZE = "/authorize";
+  private static final String ERROR_INVALID_CLIENT = "invalid_client";
+  private static final String ERROR_INVALID_SCOPE = "invalid_scope";
+  private static final String MESSAGE_SCOPE_EXCEEDS_PERMISSIONS =
+      "Requested scope exceeds client permissions";
   private static final String GRANT_TYPE_CLIENT_CREDENTIALS = "client_credentials";
   private static final String GRANT_TYPE_AUTHORIZATION_CODE = "authorization_code";
   private static final String GRANT_TYPE_REFRESH_TOKEN = "refresh_token";
@@ -100,6 +107,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     private static final String FIELD_AD_ROLE_ID = "adRoleId";
     private static final String FIELD_DB_AD_ROLE_ID = "ad_role_id";
     private static final String FIELD_SCOPES = "scopes";
+    private static final String FIELD_REDIRECT_URIS_JSON = "redirectUrisJson";
     private static final String FIELD_SCOPE = "scope";
     private static final String FIELD_IS_ACTIVE = "isActive";
     private static final String FIELD_ACTIVE = "active";
@@ -109,6 +117,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     private static final String FIELD_EXPIRES_IN = "expires_in";
     private static final String FIELD_REFRESH_TOKEN = GRANT_TYPE_REFRESH_TOKEN;
     private static final String FIELD_REDIRECT_URI = "redirect_uri";
+    private static final String FIELD_REDIRECT_URIS = "redirect_uris";
     private static final String FIELD_CODE_CHALLENGE = "code_challenge";
     private static final String FIELD_STATE = "state";
     private static final String DB_OAUTH2_CLIENT_ID = "etgo_oauth2_client_id";
@@ -126,7 +135,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   // --- SQL constants ---
 
   private static final String SQL_FIND_CLIENT =
-      "SELECT etgo_oauth2_client_id, client_secret_hash, scopes, ad_client_id, ad_user_id, ad_role_id "
+      "SELECT etgo_oauth2_client_id, client_secret_hash, scopes, redirect_uris, ad_client_id, ad_user_id, ad_role_id "
       + "FROM etgo_oauth2_client WHERE client_identifier = ? AND isactive = 'Y'";
 
   private static final String SQL_INSERT_TOKEN =
@@ -148,18 +157,18 @@ public class OAuth2Servlet extends HttpBaseServlet {
       + "WHERE etgo_oauth2_token_id = ?";
 
   private static final String SQL_LIST_CLIENTS =
-      "SELECT etgo_oauth2_client_id, name, client_identifier, ad_user_id, ad_role_id, scopes, isactive "
+      "SELECT etgo_oauth2_client_id, name, client_identifier, ad_user_id, ad_role_id, scopes, redirect_uris, isactive "
       + "FROM etgo_oauth2_client ORDER BY name";
 
   private static final String SQL_INSERT_CLIENT =
       "INSERT INTO etgo_oauth2_client "
       + "(etgo_oauth2_client_id, ad_client_id, ad_org_id, isactive, "
       + "created, createdby, updated, updatedby, "
-      + "name, client_identifier, client_secret_hash, ad_user_id, ad_role_id, scopes, ad_module_id) "
-      + "VALUES (?, '0', '0', ?, now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, '0')";
+      + "name, client_identifier, client_secret_hash, ad_user_id, ad_role_id, scopes, redirect_uris, ad_module_id) "
+      + "VALUES (?, '0', '0', ?, now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, ?, '0')";
 
   private static final String SQL_UPDATE_CLIENT =
-      "UPDATE etgo_oauth2_client SET name = ?, scopes = ?, ad_user_id = ?, ad_role_id = ?, "
+      "UPDATE etgo_oauth2_client SET name = ?, scopes = ?, redirect_uris = ?, ad_user_id = ?, ad_role_id = ?, "
       + "isactive = ?, updated = now(), updatedby = ? "
       + "WHERE etgo_oauth2_client_id = ?";
 
@@ -185,32 +194,29 @@ public class OAuth2Servlet extends HttpBaseServlet {
       + "WHERE etgo_oauth2_client_id = ?";
 
   private static final String SQL_FIND_CLIENT_BY_ID =
-      "SELECT etgo_oauth2_client_id, name, client_identifier, ad_user_id, ad_role_id, scopes, isactive "
+      "SELECT etgo_oauth2_client_id, name, client_identifier, ad_user_id, ad_role_id, scopes, redirect_uris, isactive "
       + "FROM etgo_oauth2_client WHERE etgo_oauth2_client_id = ?";
 
   private static final String SQL_FIND_CLIENT_BY_IDENTIFIER =
       "SELECT etgo_oauth2_client_id, name, client_identifier, client_secret_hash, "
-      + "ad_user_id, ad_role_id, scopes, isactive "
+      + "ad_user_id, ad_role_id, scopes, redirect_uris, isactive "
       + "FROM etgo_oauth2_client WHERE client_identifier = ?";
 
   private static final String SQL_INSERT_DCR_CLIENT =
       "INSERT INTO etgo_oauth2_client "
       + "(etgo_oauth2_client_id, ad_client_id, ad_org_id, isactive, "
       + "created, createdby, updated, updatedby, "
-      + "name, client_identifier, client_secret_hash, ad_user_id, ad_role_id, scopes, ad_module_id) "
-      + "VALUES (?, '0', '0', 'Y', now(), '0', now(), '0', ?, ?, '', '0', '0', ?, '0')";
+      + "name, client_identifier, client_secret_hash, ad_user_id, ad_role_id, scopes, redirect_uris, ad_module_id) "
+      + "VALUES (?, '0', '0', 'Y', now(), '0', now(), '0', ?, ?, '', '0', '0', ?, ?, '0')";
 
   // --- CORS ---
 
-  private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
-    CorsUtils.apply(request, response, "GET, POST, PUT, DELETE, OPTIONS",
-        "Content-Type, Authorization, Accept", null, false);
-  }
 
   @Override
   public void service(HttpServletRequest request, HttpServletResponse response)
       throws javax.servlet.ServletException, IOException {
-    setCorsHeaders(request, response);
+    CorsUtils.apply(request, response, "GET, POST, PUT, DELETE, OPTIONS",
+        "Content-Type, Authorization, Accept", null, false);
     if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
       response.setStatus(HttpServletResponse.SC_NO_CONTENT);
       return;
@@ -339,65 +345,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
         return;
       }
 
-      // --- Client Credentials flow (existing) ---
-
-      // Validate required fields
-      if (clientId == null || clientId.isEmpty() || clientSecret == null || clientSecret.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
-            "client_id and client_secret are required");
-        return;
-      }
-
-      // Look up client in database
-      ClientRecord client = findClient(clientId);
-      if (client == null) {
-        log.warn("OAuth2 token request for unknown client_id: {}", clientId);
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "invalid_client",
-            "Client authentication failed");
-        return;
-      }
-
-      // Verify secret
-      if (!OAuth2Utils.verifySecret(clientSecret, client.secretHash)) {
-        log.warn("OAuth2 token request with invalid secret for client_id: {}", clientId);
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "invalid_client",
-            "Client authentication failed");
-        return;
-      }
-
-      // Parse and validate scopes
-      Set<String> requestedScopes = parseScopes(scopeParam);
-      Set<String> allowedScopes = parseScopes(client.scopes);
-
-      if (!requestedScopes.isEmpty() && !isScopeAllowed(requestedScopes, allowedScopes)) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_scope",
-            "Requested scope exceeds client permissions");
-        return;
-      }
-
-      // Use client's full scopes if none requested
-      Set<String> grantedScopes = requestedScopes.isEmpty() ? allowedScopes : requestedScopes;
-      String grantedScopeStr = String.join(" ", grantedScopes);
-
-      // Generate access token and refresh token
-      String accessToken = OAuth2Utils.generateSecureToken();
-      String tokenHash = OAuth2Utils.hashToken(accessToken);
-      String refreshToken = OAuth2Utils.generateSecureToken();
-      String refreshTokenHash = OAuth2Utils.hashToken(refreshToken);
-      Timestamp expiresAt = new Timestamp(System.currentTimeMillis() + (TOKEN_EXPIRY_SECONDS * 1000L));
-
-      storeToken(client, tokenHash, refreshTokenHash, grantedScopeStr, expiresAt);
-
-      // Build RFC 6749 response
-      JSONObject result = new JSONObject();
-      result.put(FIELD_ACCESS_TOKEN, accessToken);
-      result.put(FIELD_TOKEN_TYPE, TOKEN_TYPE_BEARER);
-      result.put(FIELD_EXPIRES_IN, TOKEN_EXPIRY_SECONDS);
-      result.put(FIELD_REFRESH_TOKEN, refreshToken);
-      result.put(FIELD_SCOPE, grantedScopeStr);
-
-      writeJsonResponse(response, HttpServletResponse.SC_OK, result);
-      log.info("OAuth2 token issued for client: {}", clientId);
+      handleClientCredentialsGrant(response, clientId, clientSecret, scopeParam);
 
     } catch (JSONException e) {
       log.error("Failed to build OAuth2 response", e);
@@ -409,6 +357,62 @@ public class OAuth2Servlet extends HttpBaseServlet {
           MESSAGE_INTERNAL_SERVER_ERROR);
     }
   }
+
+  private void handleClientCredentialsGrant(HttpServletResponse response, String clientId,
+      String clientSecret, String scopeParam) throws IOException, SQLException, JSONException {
+    if (clientId == null || clientId.isEmpty() || clientSecret == null || clientSecret.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          "client_id and client_secret are required");
+      return;
+    }
+
+    ClientRecord client = findClient(clientId);
+    if (client == null) {
+      log.warn("OAuth2 token request for unknown client_id: {}", clientId);
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, ERROR_INVALID_CLIENT,
+          "Client authentication failed");
+      return;
+    }
+
+    if (!OAuth2Utils.verifySecret(clientSecret, client.secretHash)) {
+      log.warn("OAuth2 token request with invalid secret for client_id: {}", clientId);
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, ERROR_INVALID_CLIENT,
+          "Client authentication failed");
+      return;
+    }
+
+    if (OAuth2ClientPolicy.hasUnsupportedScopes(scopeParam, VALID_SCOPES)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
+          MESSAGE_SCOPE_EXCEEDS_PERMISSIONS);
+      return;
+    }
+    Set<String> requestedScopes = OAuth2ClientPolicy.parseScopes(scopeParam, VALID_SCOPES);
+    Set<String> allowedScopes = OAuth2ClientPolicy.parseScopes(client.scopes, VALID_SCOPES);
+    if (!requestedScopes.isEmpty()
+        && !OAuth2ClientPolicy.isScopeAllowed(requestedScopes, allowedScopes, WILDCARD_SCOPE)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
+          MESSAGE_SCOPE_EXCEEDS_PERMISSIONS);
+      return;
+    }
+
+    Set<String> grantedScopes = requestedScopes.isEmpty() ? allowedScopes : requestedScopes;
+    String accessToken = OAuth2Utils.generateSecureToken();
+    String refreshToken = OAuth2Utils.generateSecureToken();
+    Timestamp expiresAt = new Timestamp(System.currentTimeMillis() + (TOKEN_EXPIRY_SECONDS * 1000L));
+    storeToken(client, OAuth2Utils.hashToken(accessToken), OAuth2Utils.hashToken(refreshToken),
+        String.join(" ", grantedScopes), expiresAt);
+
+    JSONObject result = new JSONObject();
+    result.put(FIELD_ACCESS_TOKEN, accessToken);
+    result.put(FIELD_TOKEN_TYPE, TOKEN_TYPE_BEARER);
+    result.put(FIELD_EXPIRES_IN, TOKEN_EXPIRY_SECONDS);
+    result.put(FIELD_REFRESH_TOKEN, refreshToken);
+    result.put(FIELD_SCOPE, String.join(" ", grantedScopes));
+
+    writeJsonResponse(response, HttpServletResponse.SC_OK, result);
+    log.info("OAuth2 token issued for client: {}", clientId);
+  }
+
 
   // --- Client CRUD (B3) ---
 
@@ -434,6 +438,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
           client.put(FIELD_AD_USER_ID, rs.getString(FIELD_DB_AD_USER_ID));
           client.put(FIELD_AD_ROLE_ID, rs.getString(FIELD_DB_AD_ROLE_ID));
           client.put(FIELD_SCOPES, rs.getString(FIELD_SCOPES));
+          client.put(FIELD_REDIRECT_URIS_JSON, StringUtils.defaultString(
+              rs.getString(FIELD_REDIRECT_URIS), "[]"));
           client.put(FIELD_IS_ACTIVE, "Y".equals(rs.getString("isactive")));
           clients.put(client);
         }
@@ -469,6 +475,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String adRoleId = body.optString(FIELD_AD_ROLE_ID, null);
       String scopes = body.optString(FIELD_SCOPES, SCOPE_NEO_READ);
       boolean isActive = body.optBoolean(FIELD_IS_ACTIVE, true);
+      String redirectUrisJson = body.optString(FIELD_REDIRECT_URIS_JSON, "[]");
 
       if (name == null || name.trim().isEmpty()) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
@@ -504,6 +511,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
         ps.setString(8, adUserId.trim());         // ad_user_id
         ps.setString(9, adRoleId.trim());         // ad_role_id
         ps.setString(10, scopes.trim());          // scopes
+        ps.setString(11, redirectUrisJson);       // redirect_uris
         ps.executeUpdate();
       }
 
@@ -515,6 +523,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       result.put(FIELD_AD_USER_ID, adUserId.trim());
       result.put(FIELD_AD_ROLE_ID, adRoleId.trim());
       result.put(FIELD_SCOPES, scopes.trim());
+      result.put(FIELD_REDIRECT_URIS_JSON, redirectUrisJson);
       result.put(FIELD_IS_ACTIVE, isActive);
 
       writeJsonResponse(response, HttpServletResponse.SC_CREATED, result);
@@ -550,10 +559,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
         return;
       }
 
-      String name = body.optString("name", existing.getString("name"));
-      String scopes = body.optString(FIELD_SCOPES, existing.getString(FIELD_SCOPES));
-      String adUserId = body.optString(FIELD_AD_USER_ID, existing.getString(FIELD_AD_USER_ID));
-      String adRoleId = body.optString(FIELD_AD_ROLE_ID, existing.getString(FIELD_AD_ROLE_ID));
+      String name = body.optString("name", existing.optString("name", ""));
+      String scopes = body.optString(FIELD_SCOPES, existing.optString(FIELD_SCOPES, ""));
+      String adUserId = body.optString(FIELD_AD_USER_ID, existing.optString(FIELD_AD_USER_ID, ""));
+      String adRoleId = body.optString(FIELD_AD_ROLE_ID, existing.optString(FIELD_AD_ROLE_ID, ""));
+      String redirectUrisJson = body.optString(
+          FIELD_REDIRECT_URIS_JSON, existing.optString(FIELD_REDIRECT_URIS_JSON, "[]"));
       boolean isActive = body.has(FIELD_IS_ACTIVE)
           ? body.getBoolean(FIELD_IS_ACTIVE)
           : existing.getBoolean(FIELD_IS_ACTIVE);
@@ -562,11 +573,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
       try (PreparedStatement ps = conn.prepareStatement(SQL_UPDATE_CLIENT)) {
         ps.setString(1, name.trim());
         ps.setString(2, scopes.trim());
-        ps.setString(3, adUserId.trim());
-        ps.setString(4, adRoleId.trim());
-        ps.setString(5, isActive ? "Y" : "N");
-        ps.setString(6, adminUserId);
-        ps.setString(7, id);
+        ps.setString(3, redirectUrisJson);
+        ps.setString(4, adUserId.trim());
+        ps.setString(5, adRoleId.trim());
+        ps.setString(6, isActive ? "Y" : "N");
+        ps.setString(7, adminUserId);
+        ps.setString(8, id);
         int rows = ps.executeUpdate();
         if (rows == 0) {
           writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND,
@@ -582,6 +594,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       result.put(FIELD_AD_USER_ID, adUserId.trim());
       result.put(FIELD_AD_ROLE_ID, adRoleId.trim());
       result.put(FIELD_SCOPES, scopes.trim());
+      result.put(FIELD_REDIRECT_URIS_JSON, redirectUrisJson);
       result.put(FIELD_IS_ACTIVE, isActive);
 
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
@@ -847,6 +860,17 @@ public class OAuth2Servlet extends HttpBaseServlet {
       return;
     }
 
+    try {
+      if (!validateAuthorizeClientRequest(response, clientId, redirectUri, scope)) {
+        return;
+      }
+    } catch (SQLException e) {
+      log.error("Error validating OAuth2 authorize request", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
+      return;
+    }
+
     // Redirect to the PWA authorize page, forwarding all OAuth params.
     // The PWA handles authentication (user is already logged in) and consent UI.
     String appBase = resolveAppUrl(request);
@@ -866,6 +890,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
     response.sendRedirect(appUrl.toString());
   }
 
+
+
   /**
    * POST /sws/oauth2/authorize — Process the login form submission.
    * Validates credentials via /sws/login, generates an authorization code, and redirects.
@@ -873,90 +899,44 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleAuthorizePost(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      String contentType = request.getContentType();
-      String jwtToken;
-      String clientId;
-      String redirectUri;
-      String codeChallenge;
-      String state;
-      String scope;
-
-      if (contentType != null && contentType.contains(APPLICATION_JSON)) {
-        JSONObject body = parseJsonBody(request);
-        jwtToken = body.optString(FIELD_TOKEN, null);
-        clientId = body.optString(FIELD_CLIENT_ID_REQUEST, null);
-        redirectUri = body.optString(FIELD_REDIRECT_URI, null);
-        codeChallenge = body.optString(FIELD_CODE_CHALLENGE, null);
-        state = body.optString(FIELD_STATE, null);
-        scope = body.optString(FIELD_SCOPE, null);
-      } else {
-        jwtToken = request.getParameter(FIELD_TOKEN);
-        clientId = request.getParameter(FIELD_CLIENT_ID_REQUEST);
-        redirectUri = request.getParameter(FIELD_REDIRECT_URI);
-        codeChallenge = request.getParameter(FIELD_CODE_CHALLENGE);
-        state = request.getParameter(FIELD_STATE);
-        scope = request.getParameter(FIELD_SCOPE);
-      }
-
-      if (jwtToken == null || jwtToken.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
-            "JWT token is required");
+      OAuth2AuthorizeSupport.AuthorizeRequestData authorizeRequest =
+          OAuth2AuthorizeSupport.parseAuthorizeRequest(
+              request, APPLICATION_JSON, this::parseJsonBody);
+      if (authorizeRequest == null || !validateAuthorizePostRequest(response, authorizeRequest)) {
         return;
       }
 
-      if (redirectUri == null || redirectUri.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
-            "redirect_uri is required");
-        return;
-      }
+      ClientRecord client = findClient(authorizeRequest.clientId);
+      Set<String> requestedScopes =
+          OAuth2ClientPolicy.parseScopes(authorizeRequest.scope, VALID_SCOPES);
+      Set<String> allowedScopes = OAuth2ClientPolicy.parseScopes(client.scopes, VALID_SCOPES);
+      DecodedJWT jwt = authenticateJwt(authorizeRequest.jwtToken);
 
-      if (codeChallenge == null || codeChallenge.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
-            "code_challenge is required");
-        return;
-      }
-
-      DecodedJWT jwt = authenticateJwt(jwtToken);
-
-      String userId = jwt.getClaim("user").asString();
-      String roleId = jwt.getClaim("role").asString();
-
-      // Generate authorization code and store it
       String authCode = OAuth2Utils.generateAuthCode();
       String codeHash = OAuth2Utils.hashToken(authCode);
-
       purgeExpiredAuthCodes();
 
-      AuthCodeData codeData = new AuthCodeData();
-      codeData.clientId = clientId;
-      codeData.userId = userId;
-      codeData.roleId = roleId;
-      codeData.redirectUri = redirectUri;
-      codeData.codeChallenge = codeChallenge;
-      codeData.scopes = scope != null ? scope : SCOPE_NEO_READ + " " + SCOPE_NEO_WRITE;
-      codeData.expiresAt = System.currentTimeMillis() + AUTH_CODE_EXPIRY_MS;
-      codeData.used = false;
-
+      AuthCodeData codeData = OAuth2AuthorizeSupport.buildAuthCodeData(
+          authorizeRequest,
+          jwt.getClaim("user").asString(),
+          jwt.getClaim("role").asString(),
+          requestedScopes,
+          allowedScopes,
+          AUTH_CODE_EXPIRY_MS);
       AUTH_CODE_STORE.put(codeHash, codeData);
 
-      // Build redirect URL
-      StringBuilder redirect = new StringBuilder(redirectUri);
-      redirect.append(redirectUri.contains("?") ? "&" : "?");
-      redirect.append("code=").append(authCode);
-      if (state != null && !state.isEmpty()) {
-        redirect.append("&state=").append(state);
-      }
-
-      log.info("Authorization code issued for user={}, client={}", userId, clientId);
-
-      // Return JSON with redirect URL (fetch() can't read Location header on opaque redirects)
-      JSONObject result = new JSONObject();
-      result.put("redirect_url", redirect.toString());
-      writeJsonResponse(response, HttpServletResponse.SC_OK, result);
+      log.info("Authorization code issued for user={}, client={}",
+          codeData.userId, authorizeRequest.clientId);
+      OAuth2AuthorizeSupport.writeAuthorizeSuccess(
+          response, authorizeRequest.redirectUri, authorizeRequest.state, authCode, this);
 
     } catch (AuthException e) {
       log.warn("Authorization code request with invalid JWT: {}", e.getMessage());
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (SQLException e) {
+      log.error("Error validating OAuth2 authorize request", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
     } catch (JSONException e) {
       log.error("Error processing authorize request", e);
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
@@ -1207,7 +1187,9 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       JSONObject body = parseJsonBody(request);
       String clientName = body.optString("client_name", "MCP Client");
-      String scopes = SCOPE_NEO_READ + " " + SCOPE_NEO_WRITE;
+      String scopes = SCOPE_NEO_READ;
+      String redirectUris = OAuth2ClientPolicy.normalizeRedirectUris(
+          body.optJSONArray(FIELD_REDIRECT_URIS));
 
       // Generate a unique client_identifier
       String clientIdentifier = OAuth2Utils.generateClientId();
@@ -1220,6 +1202,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
         ps.setString(2, clientName);         // name
         ps.setString(3, clientIdentifier);   // client_identifier
         ps.setString(4, scopes);             // scopes
+        ps.setString(5, redirectUris);       // redirect_uris
         ps.executeUpdate();
       }
 
@@ -1231,13 +1214,15 @@ public class OAuth2Servlet extends HttpBaseServlet {
           new JSONArray(Arrays.asList(GRANT_TYPE_AUTHORIZATION_CODE, GRANT_TYPE_REFRESH_TOKEN)));
       result.put("response_types", new JSONArray(Arrays.asList("code")));
       result.put("token_endpoint_auth_method", "none");
-      result.put("redirect_uris", body.optJSONArray("redirect_uris"));
+      result.put(FIELD_REDIRECT_URIS, new JSONArray(redirectUris));
       result.put("client_id_issued_at", System.currentTimeMillis() / 1000);
       result.put("client_secret_expires_at", 0);
 
       writeJsonResponse(response, HttpServletResponse.SC_CREATED, result);
       log.info("DCR client registered: {} ({})", clientName, clientIdentifier);
 
+    } catch (IllegalArgumentException | OBException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST, e.getMessage());
     } catch (JSONException e) {
       log.error("Error processing DCR request", e);
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
@@ -1383,6 +1368,69 @@ public class OAuth2Servlet extends HttpBaseServlet {
     return jwt;
   }
 
+  private boolean validateAuthorizePostRequest(HttpServletResponse response,
+      OAuth2AuthorizeSupport.AuthorizeRequestData authorizeRequest) throws IOException, SQLException {
+    if (authorizeRequest.jwtToken == null || authorizeRequest.jwtToken.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          "JWT token is required");
+      return false;
+    }
+    if (authorizeRequest.codeChallenge == null || authorizeRequest.codeChallenge.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          "code_challenge is required");
+      return false;
+    }
+    return validateAuthorizeClientRequest(
+        response, authorizeRequest.clientId, authorizeRequest.redirectUri, authorizeRequest.scope);
+  }
+
+
+
+  private boolean validateAuthorizeClientRequest(HttpServletResponse response, String clientId,
+      String redirectUri, String scope) throws IOException, SQLException {
+    if (clientId == null || clientId.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          "client_id is required");
+      return false;
+    }
+    if (redirectUri == null || redirectUri.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          "redirect_uri is required");
+      return false;
+    }
+    ClientRecord client = findClient(clientId);
+    if (client == null) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, ERROR_INVALID_CLIENT,
+          "Unknown or inactive client_id");
+      return false;
+    }
+    if (!OAuth2ClientPolicy.isRegisteredRedirectUri(
+        StringUtils.defaultString(client.redirectUrisJson, "[]"), redirectUri)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          "redirect_uri is not registered for this client_id");
+      return false;
+    }
+    if (!OAuth2ClientPolicy.isSafeRedirectUri(redirectUri)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          "redirect_uri must use https, http://localhost, or http://127.0.0.1");
+      return false;
+    }
+    if (OAuth2ClientPolicy.hasUnsupportedScopes(scope, VALID_SCOPES)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
+          MESSAGE_SCOPE_EXCEEDS_PERMISSIONS);
+      return false;
+    }
+    Set<String> requestedScopes = OAuth2ClientPolicy.parseScopes(scope, VALID_SCOPES);
+    Set<String> allowedScopes = OAuth2ClientPolicy.parseScopes(client.scopes, VALID_SCOPES);
+    if (!requestedScopes.isEmpty()
+        && !OAuth2ClientPolicy.isScopeAllowed(requestedScopes, allowedScopes, WILDCARD_SCOPE)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_SCOPE,
+          MESSAGE_SCOPE_EXCEEDS_PERMISSIONS);
+      return false;
+    }
+    return true;
+  }
+
   // --- Data access helpers ---
 
   /**
@@ -1403,6 +1451,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
         client.id = rs.getString(DB_OAUTH2_CLIENT_ID);
         client.secretHash = rs.getString("client_secret_hash");
         client.scopes = rs.getString(FIELD_SCOPES);
+        client.redirectUrisJson = rs.getString(FIELD_REDIRECT_URIS);
         client.adClientId = rs.getString("ad_client_id");
         client.adUserId = rs.getString(FIELD_DB_AD_USER_ID);
         client.adRoleId = rs.getString(FIELD_DB_AD_ROLE_ID);
@@ -1432,6 +1481,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
         client.put(FIELD_AD_USER_ID, rs.getString(FIELD_DB_AD_USER_ID));
         client.put(FIELD_AD_ROLE_ID, rs.getString(FIELD_DB_AD_ROLE_ID));
         client.put(FIELD_SCOPES, rs.getString(FIELD_SCOPES));
+        client.put(FIELD_REDIRECT_URIS_JSON, StringUtils.defaultString(
+            rs.getString(FIELD_REDIRECT_URIS), "[]"));
         client.put(FIELD_IS_ACTIVE, "Y".equals(rs.getString("isactive")));
         return client;
       }
@@ -1459,28 +1510,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   // --- Scope helpers ---
 
-  /**
-   * Parse a space-separated scope string into a set.
-   */
-  private Set<String> parseScopes(String scopeStr) {
-    if (scopeStr == null || scopeStr.trim().isEmpty()) {
-      return Collections.emptySet();
-    }
-    Set<String> scopes = new HashSet<>(Arrays.asList(scopeStr.trim().split("\\s+")));
-    scopes.retainAll(VALID_SCOPES);
-    return scopes;
-  }
-
-  /**
-   * Check that all requested scopes are allowed by the client's configured scopes.
-   * The wildcard scope "neo:*" grants access to all scopes.
-   */
-  private boolean isScopeAllowed(Set<String> requested, Set<String> allowed) {
-    if (allowed.contains(WILDCARD_SCOPE)) {
-      return true;
-    }
-    return allowed.containsAll(requested);
-  }
 
   // --- JSON/HTTP helpers ---
 
@@ -1501,7 +1530,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   /**
    * Write a JSON response with the given HTTP status code.
    */
-  private void writeJsonResponse(HttpServletResponse response, int status, JSONObject body)
+  void writeJsonResponse(HttpServletResponse response, int status, JSONObject body)
       throws IOException {
     response.setStatus(status);
     response.setContentType("application/json;charset=UTF-8");
@@ -1515,15 +1544,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
    */
   private void writeError(HttpServletResponse response, int status, String error,
       String description) throws IOException {
-    try {
-      JSONObject body = new JSONObject();
-      body.put("error", error);
-      body.put("error_description", description);
-      writeJsonResponse(response, status, body);
-    } catch (JSONException e) {
-      log.error("Failed to build error response", e);
-      response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
-    }
+    ProtocolErrorAdapters.writeOAuthError(response, status, error, description);
   }
 
   /**
@@ -1548,6 +1569,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     String id;
     String secretHash;
     String scopes;
+    String redirectUrisJson;
     String adClientId;
     String adUserId;
     String adRoleId;

@@ -43,6 +43,8 @@ import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
+import org.openbravo.model.financialmgmt.payment.PaymentTerm;
+import org.openbravo.model.financialmgmt.payment.PaymentTermLine;
 import org.openbravo.model.financialmgmt.tax.TaxCategory;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.pricing.pricelist.PriceList;
@@ -138,6 +140,8 @@ public class SeedReferenceDataStep implements OnboardingStep {
       // 11. Create payment methods
       FIN_PaymentMethod cashMethod = createPaymentMethod(client, org, "Cash", "DEP", "WIT");
       FIN_PaymentMethod bankMethod = createPaymentMethod(client, org, "Bank Transfer", null, null);
+      createPaymentTerm(client, org, "I", "Immediate", 0L);
+      createPaymentTerm(client, org, "30D", "30 Days", 30L);
 
       // 12. Link payment methods to financial accounts (4 combinations)
       createFinAccPaymentMethod(client, org, cashAccount, cashMethod, "DEP", "WIT");
@@ -338,6 +342,40 @@ public class SeedReferenceDataStep implements OnboardingStep {
     taxCategory.setDefault(false);
     OBDal.getInstance().save(taxCategory);
     return taxCategory;
+  }
+
+  private PaymentTerm createPaymentTerm(Client client, Organization org, String searchKey, String name,
+      long netDays) {
+    PaymentTerm paymentTerm = OBProvider.getInstance().get(PaymentTerm.class);
+    paymentTerm.setNewOBObject(true);
+    paymentTerm.setClient(client);
+    paymentTerm.setOrganization(org);
+    paymentTerm.setSearchKey(searchKey);
+    paymentTerm.setName(name);
+    paymentTerm.setFixedDueDate(false);
+    paymentTerm.setOverduePaymentDaysRule(netDays);
+    paymentTerm.setOffsetMonthDue(0L);
+    paymentTerm.setNextBusinessDay(false);
+    paymentTerm.setDefault(netDays == 0L);
+    paymentTerm.setValid(true);
+    paymentTerm.setMaturityDate3(0L);
+    OBDal.getInstance().save(paymentTerm);
+
+    PaymentTermLine paymentTermLine = OBProvider.getInstance().get(PaymentTermLine.class);
+    paymentTermLine.setNewOBObject(true);
+    paymentTermLine.setClient(client);
+    paymentTermLine.setOrganization(org);
+    paymentTermLine.setPaymentTerms(paymentTerm);
+    paymentTermLine.setLineNo(10L);
+    paymentTermLine.setPercentageDue(new BigDecimal("100"));
+    paymentTermLine.setRest(true);
+    paymentTermLine.setExcludeTax(false);
+    paymentTermLine.setFixedDueDate(false);
+    paymentTermLine.setOverduePaymentDaysRule(netDays);
+    paymentTermLine.setOffsetMonthDue(0L);
+    paymentTermLine.setNextBusinessDay(false);
+    OBDal.getInstance().save(paymentTermLine);
+    return paymentTerm;
   }
 
   private void createTaxRate(Client client, Organization org, TaxCategory taxCategory) {

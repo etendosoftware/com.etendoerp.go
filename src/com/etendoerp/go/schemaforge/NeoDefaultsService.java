@@ -133,7 +133,7 @@ public class NeoDefaultsService {
           }
           if (isSequenceField(adColumn)) {
             sequenceSFFields.add(sfField);  // defer to pass 2
-            continue;
+              continue;
           }
 
           String dbColumnName = adColumn.getDBColumnName();
@@ -294,6 +294,12 @@ public class NeoDefaultsService {
   private static Object resolveFieldDefault(Column adColumn, String parentId,
       VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx,
       String sfFieldDefault) {
+    return resolveFieldDefault(adColumn, parentId, vars, conn, windowId, ctx, sfFieldDefault, null);
+  }
+
+  private static Object resolveFieldDefault(Column adColumn, String parentId,
+      VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx,
+      String sfFieldDefault, Map<String, Object> parentValues) {
 
     String dbColumnName = adColumn.getDBColumnName();
 
@@ -332,7 +338,7 @@ public class NeoDefaultsService {
 
     // SQL expressions — resolve parameters and execute
     if (defaultExpr.startsWith("@SQL=")) {
-      return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn);
+      return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn, parentValues);
     }
 
     // Delegate to Utility.getDefault for all other cases:
@@ -530,6 +536,20 @@ public class NeoDefaultsService {
    */
   private static String resolveSQLDefault(String defaultExpr, VariablesSecureApp vars,
       DalConnectionProvider conn, String windowId, Column adColumn) {
+    return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn, null);
+  }
+
+  /**
+   * Resolve a @SQL= default expression, preferring parent record values over session context
+   * for non-session parameters. This ensures that columns like @M_Warehouse_ID@ and @AD_Client_ID@
+   * resolve to the parent record's values (e.g. the inventory's warehouse and client) rather than
+   * the session user's warehouse/client, which may differ when the user belongs to a different org.
+   *
+   * Session parameters (prefixed with #, e.g. @#Date@) always use session context.
+   */
+  private static String resolveSQLDefault(String defaultExpr, VariablesSecureApp vars,
+      DalConnectionProvider conn, String windowId, Column adColumn,
+      Map<String, Object> parentValues) {
     try {
       ArrayList<String> params = new ArrayList<>();
       String sql = parseSQLExpression(defaultExpr, params);
@@ -537,7 +557,18 @@ public class NeoDefaultsService {
       try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
         int paramIndex = 1;
         for (String parameter : params) {
-          String value = Utility.getContext(conn, vars, parameter, windowId);
+          String value = null;
+          // Non-session params: check parent record values first (e.g. @M_Warehouse_ID@, @AD_Client_ID@)
+          if (parentValues != null && !parentValues.isEmpty() && !parameter.startsWith("#")) {
+            Object pv = parentValues.get(parameter.toUpperCase());
+            if (pv != null) {
+              value = String.valueOf(pv);
+              log.debug("[resolveSQLDefault] param @{}@ from parentValues: {}", parameter, value);
+            }
+          }
+          if (value == null || value.isEmpty()) {
+            value = Utility.getContext(conn, vars, parameter, windowId);
+          }
           ps.setObject(paramIndex++, value);
         }
 
@@ -715,10 +746,30 @@ public class NeoDefaultsService {
    * @param ctx     the NeoContext with OBContext and spec/entity info
    */
   public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx) {
-    injectMandatoryDefaults(body, adTab, ctx, null);
+    injectMandatoryDefaults(body, adTab, ctx, null, true);
   }
 
   public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx, String parentId) {
+    injectMandatoryDefaults(body, adTab, ctx, parentId, true);
+  }
+
+  /**
+   * Injects missing mandatory default values into a create payload.
+   *
+   * <p>This overload lets callers decide whether the default injection pass should
+   * also execute the trailing callout cascade. Use {@code runCascade=false} when
+   * the caller runs the cascade immediately afterward.</p>
+   *
+   * @param body       the filtered request body — columns already present are skipped
+   * @param adTab      the AD_Tab for the entity being created
+   * @param ctx        the NeoContext with OBContext and spec/entity info
+   * @param parentId   optional parent record id used for child-tab defaults
+   * @param runCascade whether to run the trailing callout cascade after column iteration.
+   *                   Set to {@code false} when the caller will run the cascade explicitly
+   *                   right after, to avoid duplicating the (expensive) cascade pass.
+   */
+  public static void injectMandatoryDefaults(JSONObject body, Tab adTab, NeoContext ctx,
+      String parentId, boolean runCascade) {
     if (body == null || adTab == null || ctx == null) {
       return;
     }
@@ -760,7 +811,11 @@ public class NeoDefaultsService {
       // Fallback 3: run callout cascade with all fields in body.
       // Callouts configured in AD_Column derive dependent fields (e.g. BP → address,
       // price list, payment terms) without hardcoding any field relationships.
-      NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body);
+      // Skipped when the caller will run the cascade explicitly right after, to avoid
+      // duplicating the (expensive) cascade pass.
+      if (runCascade) {
+        NeoDefaultsCascadeHelper.executeCalloutCascadeForCreate(ctx, adTab, body);
+      }
 
     } catch (Exception e) {
       log.error("Error injecting mandatory defaults for tab {}: {}",
@@ -842,7 +897,7 @@ public class NeoDefaultsService {
       MandatoryDefaultContext mCtx) {
     try {
       Object resolved = resolveFieldDefault(col, mCtx.parentId, mCtx.vars, mCtx.conn,
-          mCtx.windowId, mCtx.neoCtx);
+          mCtx.windowId, mCtx.neoCtx, null, mCtx.parentValues);
       if (resolved != null) {
         applyResolvedDefault(body, col, propName, resolved, mCtx.neoCtx);
         tryInjectIdentifier(body,
@@ -1055,8 +1110,14 @@ public class NeoDefaultsService {
    * when no explicit default is configured.
    *
    * <p>Matches the classes {@code FKComboUIDefinition} (TableDir=19, Table=18) and
-   * {@code EnumUIDefinition} (List=17). Returns {@code false} for Search (30),
-   * OBUISEL_Selector, Tree, and ID references, which leave the field empty on NEW.</p>
+   * {@code EnumUIDefinition} (List=17). Returns {@code false} for Search (30), Tree, and ID
+   * references, which leave the field empty on NEW.</p>
+   *
+   * <p>Note: this is a pure check on the base reference id and does not detect columns whose
+   * {@code AD_Reference_ID} is Table/TableDir but which have an OBUISEL_Selector override on
+   * {@code AD_Reference_Value_ID}. Those render as {@code SearchUIDefinition} in Classic and
+   * must also skip preselection; {@link #resolveFirstComboOption} guards against that via
+   * {@link NeoSelectorService#hasObuiselSelector}.</p>
    */
   private static boolean isFICComboReference(String baseRefId) {
     return NeoSelectorService.REF_TABLEDIR.equals(baseRefId)
@@ -1085,7 +1146,18 @@ public class NeoDefaultsService {
       if (!isFICComboReference(baseRefId)) {
         return null;
       }
+      // Columns whose AD_Reference is Table/TableDir but carry an OBUISEL_Selector override
+      // render as SearchUIDefinition in Etendo Classic (not FKComboUIDefinition), so FIC does
+      // not preselect them on MODE=NEW. Mirrors the selector-override branch in UIDefinition.
+      if (NeoSelectorService.hasObuiselSelector(col)) {
+        return null;
+      }
       Map<String, String> contextParams = buildFICComboContextParams(ctx);
+      // FIC parity for unresolvable validation params (e.g. "C_BPartner_Location.C_BPartner_ID
+      // = @C_BPartner_ID@" on a new document) is handled at the query level:
+      // SelectorQueryBuilder.resolveValidationClause substitutes NULL for missing vars,
+      // mirroring Classic's ComboTableData, so the filter returns no rows instead of
+      // matching everything.
       NeoResponse selectorResp = NeoSelectorService.querySelectorByColumn(
           col, col.getDBColumnName(), null, 1, 0, contextParams);
       if (selectorResp == null || selectorResp.getHttpStatus() != 200) {
@@ -1318,90 +1390,5 @@ public class NeoDefaultsService {
       log.debug("Could not resolve first org for client {}: {}", clientId, e.getMessage());
     }
     return null;
-  }
-  /**
-   * For tax-inclusive invoice/order lines, when 'grossUnitPrice' is present but 'grossAmount'
-   * (LINE_GROSS_AMOUNT) is zero or missing, compute it as grossUnitPrice × invoicedQuantity.
-   *
-   * The callout (SL_Invoice_Product) fires at product selection time when qty is still 0,
-   * so it sets grossAmount = grossUnitPrice × 0 = 0. The c_invoiceline_before_trg trigger
-   * then uses LINE_GROSS_AMOUNT to compute PRICEACTUAL for tax-inclusive price lists — if it
-   * is 0, priceActual ends up as 0. This method corrects the stale callout value at save time.
-   */
-  public static void injectGrossAmountIfMissing(JSONObject body) {
-    if (body == null) {
-      return;
-    }
-    double grossUnitPrice;
-    try {
-      grossUnitPrice = body.optDouble("grossUnitPrice", 0);
-    } catch (Exception e) {
-      return;
-    }
-    if (grossUnitPrice <= 0) {
-      return;
-    }
-    double existingGrossAmount = body.optDouble("grossAmount", 0);
-    if (existingGrossAmount != 0) {
-      return;
-    }
-    double qty;
-    try {
-      qty = Double.parseDouble(body.optString("invoicedQuantity", "0"));
-    } catch (NumberFormatException e) {
-      return;
-    }
-    if (qty == 0) {
-      return;
-    }
-    try {
-      double computed = grossUnitPrice * qty;
-      body.put("grossAmount", computed);
-      log.debug("[NEO-DEFAULTS] Computed grossAmount={} from grossUnitPrice={} × qty={}",
-          computed, grossUnitPrice, qty);
-    } catch (Exception e) {
-      log.debug("Could not compute grossAmount: {}", e.getMessage());
-    }
-  }
-
-  /**
-   * For line entities (e.g. C_InvoiceLine, C_OrderLine), when 'product' is present in the body
-   * but 'uOM' (C_UOM_ID) is missing or empty, derive C_UOM_ID from M_Product.C_UOM_ID.
-   *
-   * This prevents DB trigger failures on INSERT caused by a product/transaction UOM mismatch:
-   * the c_invoiceline_trg trigger requires that C_UOM_ID matches the product's UOM, but
-   * callouts return uOM as empty (the classic UI auto-fills it via readOnly logic), so NEO
-   * must derive it here before persisting.
-   */
-  public static void injectProductDerivedUomIfMissing(JSONObject body) {
-    if (body == null) {
-      return;
-    }
-    String productId = body.optString("product", "");
-    if (productId.isEmpty()) {
-      return;
-    }
-    // Only inject if uOM is absent or empty
-    String existingUom = body.optString("uOM", "");
-    if (!existingUom.isEmpty()) {
-      return;
-    }
-    try {
-      String sql = "SELECT C_UOM_ID FROM M_PRODUCT WHERE M_PRODUCT_ID = ?";
-      try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
-        ps.setString(1, productId);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            String uomId = rs.getString(1);
-            if (uomId != null && !uomId.isEmpty()) {
-              body.put("uOM", uomId);
-              log.debug("[NEO-DEFAULTS] Injected product-derived uOM={} for product={}", uomId, productId);
-            }
-          }
-        }
-      }
-    } catch (Exception e) {
-      log.debug("Could not inject product-derived UOM for product {}: {}", productId, e.getMessage());
-    }
   }
 }

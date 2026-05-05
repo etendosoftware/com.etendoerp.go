@@ -28,3 +28,6 @@ Thumbs.db
 
 # Apps spike private key (ETP-3805)
 config/apps-spike/private-key.pem
+.env
+.scannerwork/
+sonar-reports/

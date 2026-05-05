@@ -194,9 +194,18 @@ public class NeoCrudHelper {
     String parentIdValue = resolveAndMapParentId(requestBody, adTab);
 
     JSONObject filteredBody = fieldFilter.filterCreateRequest(requestBody);
+    // Snapshot user-submitted keys before injectMandatoryDefaults adds backend defaults so
+    // the callout cascade cannot overwrite values the user explicitly set.
+    Set<String> userSubmittedFields = new HashSet<>();
+    if (filteredBody != null) {
+      Iterator<String> userKeyIter = filteredBody.keys();
+      while (userKeyIter.hasNext()) {
+        userSubmittedFields.add(userKeyIter.next());
+      }
+    }
     NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
 
-    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue);
+    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, userSubmittedFields);
 
     String wrappedBody = NeoTypeCoercionHelper.wrapForSmartclient(
         filteredBody, dalEntityName, null);
@@ -264,7 +273,7 @@ public class NeoCrudHelper {
    * The frontend callout (triggered on field change) handles price auto-fill for lines.
    */
   static void executePostCalloutCascade(JSONObject filteredBody, Tab adTab,
-      NeoContext context, String parentIdValue) {
+      NeoContext context, String parentIdValue, Set<String> protectedFields) {
     if (adTab == null || adTab.getTabLevel() == null || adTab.getTabLevel() != 0) {
       return;
     }
@@ -283,7 +292,11 @@ public class NeoCrudHelper {
         }
       }
     }
-    NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields);
+    Set<String> effectiveProtected = protectedFields != null
+        ? protectedFields
+        : java.util.Collections.emptySet();
+    NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields,
+        effectiveProtected);
     DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
     NeoDefaultsCascadeHelper.removeEmptyFkValues(filteredBody, adTab);
     NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);

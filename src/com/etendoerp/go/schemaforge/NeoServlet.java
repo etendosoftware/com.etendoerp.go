@@ -9,6 +9,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
+import javax.servlet.annotation.MultipartConfig;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -32,7 +33,6 @@ import org.openbravo.model.ad.ui.Window;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
-import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -49,6 +49,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * which point directly to AD_Window, AD_Tab, and AD_Column.
  * Hooks are discovered via CDI using the Java_Qualifier on ETGO_SF_Entity.
  */
+@MultipartConfig(maxFileSize = 10L * 1024 * 1024, maxRequestSize = 12L * 1024 * 1024, fileSizeThreshold = 1024 * 1024)
 public class NeoServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
@@ -64,6 +65,8 @@ public class NeoServlet extends HttpBaseServlet {
   private static final String KEY_COMBOS = "combos";
 
   private final NeoDiscoveryHandler discoveryHandler = new NeoDiscoveryHandler(this);
+  private final NeoBuiltInEndpointHandler builtInEndpointHandler =
+      new NeoBuiltInEndpointHandler(this, discoveryHandler);
   private final NeoButtonHandler buttonHandler = new NeoButtonHandler();
   private final NeoDisplayLogicHandler displayLogicHandler = new NeoDisplayLogicHandler();
   private final NeoCrudHandler crudHandler = new NeoCrudHandler(this);
@@ -104,90 +107,80 @@ public class NeoServlet extends HttpBaseServlet {
 
   private void processRequest(HttpServletRequest request, HttpServletResponse response,
       String method) throws IOException {
-    // 1. Authenticate via JWT
-    try {
-      authenticateJwt(request);
-    } catch (OBException e) {
-      // OBException messages are safe to expose (we control them)
-      log.warn("Unauthorized NEO request: {}", e.getMessage());
-      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
-      return;
-    } catch (Exception e) {
-      // Other exceptions (JWT decode failures, NPEs) — don't leak internals
-      log.warn("Unauthorized NEO request: {}", e.getMessage());
-      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
+    if (!authenticateRequest(request, response)) {
       return;
     }
 
-    // 2. Parse the path
-    NeoPathInfo pathInfo;
-    try {
-      pathInfo = NeoServletSupport.parsePath(request.getPathInfo());
-    } catch (IllegalArgumentException e) {
-      sendError(response, HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+    NeoPathInfo pathInfo = parseRequestPath(request, response);
+    if (pathInfo == null) {
       return;
     }
 
-    // 3. Resolve spec, entity, and tab
     try {
       OBContext.setAdminMode();
-
-      // Discovery mode: list all specs
-      if (pathInfo.specName == null) {
-        if (!"GET".equals(method)) {
-          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-              "Discovery endpoint only supports GET");
-          return;
-        }
-        discoveryHandler.handleDiscovery(response);
+      if (builtInEndpointHandler.handle(pathInfo, method, request, response)) {
         return;
       }
-
-      // Image endpoint: GET /sws/neo/image/{imageId}  or  POST /sws/neo/image
-      if ("image".equals(pathInfo.specName)) {
-        NeoImageHelper.handleImageRequest(pathInfo.entityName, method, request, response);
-        return;
-      }
-
-      // Session endpoint: GET /sws/neo/session — returns org-level defaults (currency, etc.)
-      if ("session".equals(pathInfo.specName)) {
-        if (!"GET".equals(method)) {
-          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-              "Session endpoint only supports GET");
-          return;
-        }
-        writeResponse(response, NeoSessionService.resolveSession());
-        return;
-      }
-
-      // Find the spec
-      SFSpec spec = NeoServletSupport.findSpec(pathInfo.specName);
-      if (spec == null) {
-        sendError(response, HttpServletResponse.SC_NOT_FOUND,
-            "Spec not found: " + pathInfo.specName);
-        return;
-      }
-
-      // Route by spec type
-      String specType = spec.getSpecType();
-      if ("P".equals(specType)) {
-        handleProcessSpecRequest(spec, method, request, response);
-        return;
-      }
-      if ("R".equals(specType)) {
-        handleReportSpecRequest(spec, pathInfo, method, request, response);
-        return;
-      }
-
-      // Window spec routing
-      handleWindowSpecRequest(spec, pathInfo, method, request, response);
-
+      handleSpecRequest(pathInfo, method, request, response);
     } catch (Exception e) {
       log.error("Error processing NEO request: {}", e.getMessage(), e);
       sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  private boolean authenticateRequest(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      authenticateJwt(request);
+      return true;
+    } catch (OBException e) {
+      // OBException messages are safe to expose (we control them)
+      log.warn("Unauthorized NEO request: {}", e.getMessage());
+      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
+      return false;
+    } catch (Exception e) {
+      // Other exceptions (JWT decode failures, NPEs) don't leak internals.
+      log.warn("Unauthorized NEO request: {}", e.getMessage());
+      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
+      return false;
+    }
+  }
+
+  private NeoPathInfo parseRequestPath(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      NeoPathInfo pathInfo = NeoServletSupport.parsePath(request.getPathInfo());
+      if (pathInfo != null) {
+        return pathInfo;
+      }
+      sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Unable to parse request path");
+    } catch (IllegalArgumentException e) {
+      sendError(response, HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+    }
+    return null;
+  }
+
+  private void handleSpecRequest(NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws Exception {
+    SFSpec spec = NeoServletSupport.findSpec(pathInfo.specName);
+    if (spec == null) {
+      sendError(response, HttpServletResponse.SC_NOT_FOUND,
+          "Spec not found: " + pathInfo.specName);
+      return;
+    }
+
+    String specType = spec.getSpecType();
+    if ("P".equals(specType)) {
+      handleProcessSpecRequest(spec, method, request, response);
+      return;
+    }
+    if ("R".equals(specType)) {
+      handleReportSpecRequest(spec, pathInfo, method, request, response);
+      return;
+    }
+    handleWindowSpecRequest(spec, pathInfo, method, request, response);
   }
 
   /**
@@ -885,6 +878,7 @@ public class NeoServlet extends HttpBaseServlet {
           .specName(pathInfo.specName)
           .entityName(pathInfo.entityName)
           .httpMethod("POST")
+          .endpointType(NeoEndpointType.CALLOUT)
           .requestBody(requestBody)
           .adTab(tab)
           .sfEntity(sfEntity)
@@ -908,6 +902,31 @@ public class NeoServlet extends HttpBaseServlet {
         if (cascade.hasResults()) {
           mergeCalloutResponse(calloutResult.getBody(), cascade.toJSON());
           log.debug("[NEO-CALLOUT] Cascade merged additional fields into response");
+        }
+      }
+
+      // Post-hook: give the entity's NeoHandler a chance to enrich the callout response
+      // (e.g. add a synthetic 'taxRate' update when the trigger is C_Tax_ID). Same dispatch
+      // shape as `handleWithHooks` — looked up by the entity's Java_Qualifier and merged
+      // without overwriting fields already set by the underlying callout.
+      if (calloutResult.getHttpStatus() == 200 && calloutResult.getBody() != null) {
+        String qualifier = sfEntity.getJavaQualifier();
+        if (StringUtils.isNotBlank(qualifier)) {
+          NeoHandler handler = lookupHandler(qualifier);
+          if (handler != null) {
+            try {
+              neoContext.setPreviousResult(calloutResult);
+              NeoResponse handlerResult = handler.afterCallout(neoContext);
+              if (handlerResult != null && handlerResult.getBody() != null) {
+                mergeCalloutResponse(calloutResult.getBody(), handlerResult.getBody());
+                log.debug("[NEO-CALLOUT] Handler '{}' merged additional fields via afterCallout",
+                    qualifier);
+              }
+            } catch (Exception e) {
+              log.warn("[NEO-CALLOUT] afterCallout for handler '{}' failed (non-fatal): {}",
+                  qualifier, e.getMessage());
+            }
+          }
         }
       }
 
@@ -954,7 +973,7 @@ public class NeoServlet extends HttpBaseServlet {
     }
   }
 
-  private static String readRequestBody(HttpServletRequest request) throws IOException {
+  static String readRequestBody(HttpServletRequest request) throws IOException {
     return new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
   }
 

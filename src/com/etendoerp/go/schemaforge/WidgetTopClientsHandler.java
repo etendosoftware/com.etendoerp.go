@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 
 import javax.inject.Named;
 
@@ -26,35 +27,18 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
 
 /**
- * NeoHandler that returns the top 10 clients by revenue for the last 12 months.
- * The 12-month window is anchored to the most recent invoice date (treating it
- * as "today"), so demo/test databases without current-date data still show results.
+ * NeoHandler that returns the top 10 clients by revenue for the requested date range.
+ * When no range is supplied it falls back to the last 12 months anchored to the most
+ * recent invoice date so demo/test databases with stale data still return results.
  */
 @Named("widgetTopClientsHandler")
 public class WidgetTopClientsHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(WidgetTopClientsHandler.class);
 
-  private static final String TOP_CLIENTS_QUERY =
-      "WITH max_date AS ( "
-    + "  SELECT MAX(dateinvoiced) AS last_date "
-    + "  FROM c_invoice "
-    + "  WHERE issotrx = 'Y' AND docstatus IN ('CO','CL') AND ad_client_id = :clientId "
-    + ") "
-    + "SELECT bp.name, SUM(i.grandtotal) AS total "
-    + "FROM c_invoice i "
-    + "JOIN c_bpartner bp ON bp.c_bpartner_id = i.c_bpartner_id "
-    + "WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') "
-    + "  AND i.ad_client_id = :clientId "
-    + "  AND i.dateinvoiced > (SELECT last_date - CAST('12 months' AS interval) FROM max_date) "
-    + "GROUP BY bp.c_bpartner_id, bp.name "
-    + "ORDER BY SUM(i.grandtotal) DESC "
-    + "LIMIT 10";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -62,18 +46,16 @@ public class WidgetTopClientsHandler implements NeoHandler {
       return NeoResponse.error(405, "Method not allowed");
     }
 
+    WidgetQueryPolicyRegistry.WidgetQueryPolicy policy =
+        WidgetQueryPolicyRegistry.topClients();
     try {
       OBContext.setAdminMode(true);
       try {
         String clientId = OBContext.getOBContext().getCurrentClient().getId();
-
-        @SuppressWarnings("unchecked")
-        NativeQuery<Object[]> query = OBDal.getInstance()
-            .getSession()
-            .createNativeQuery(TOP_CLIENTS_QUERY);
-        query.setParameter("clientId", clientId);
-
-        List<Object[]> rows = query.list();
+        Map<String, String> params = context.getQueryParams();
+        String range = params != null ? params.get("range") : null;
+        List<Object[]> rows = WidgetQueryHelper.resolveQuery(
+            policy.fallbackSql, policy.rangedSql, clientId, range);
 
         JSONArray data = new JSONArray();
         for (Object[] row : rows) {
@@ -83,14 +65,7 @@ public class WidgetTopClientsHandler implements NeoHandler {
           data.put(item);
         }
 
-        JSONObject responseData = new JSONObject();
-        responseData.put("data", data);
-        responseData.put("count", data.length());
-
-        JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
-
-        return NeoResponse.ok(wrapper);
+        return WidgetQueryHelper.buildDataResponse(data);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -99,4 +74,5 @@ public class WidgetTopClientsHandler implements NeoHandler {
       return NeoResponse.error(500, "Top clients handler failed: " + e.getMessage());
     }
   }
+
 }

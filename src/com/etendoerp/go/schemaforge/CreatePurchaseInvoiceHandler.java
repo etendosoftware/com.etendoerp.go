@@ -18,7 +18,6 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.util.Date;
 import java.util.List;
 
@@ -28,16 +27,18 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.weld.WeldUtils;
+import org.openbravo.common.actionhandler.createlinesfromprocess.CreateInvoiceLinesFromProcess;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
-import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.service.db.DalConnectionProvider;
@@ -76,7 +77,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       try {
         Invoice invoice = createFromOrder(recordId);
         OBDal.getInstance().flush();
-        // Refresh to pick up trigger-generated documentNo.
+        // Refresh to pick up trigger-generated documentNo and totals set by CreateInvoiceLinesFromProcess.
         OBDal.getInstance().getSession().refresh(invoice);
 
         JSONObject data = new JSONObject();
@@ -109,18 +110,61 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       throw new OBException("Purchase order not found: " + orderId);
     }
 
-    // Pre-validate: check pending lines exist before creating the invoice header
-    // to prevent zombie invoice headers if addOrderLinesToInvoice throws.
-    if (!hasPendingLines(order)) {
+    JSONArray selectedLines = buildSelectedLines(order);
+    if (selectedLines.length() == 0) {
       throw new OBException("No pending lines to invoice in this purchase order");
     }
 
+    DocumentType invoiceDocType = resolveAPInvoiceDocType(order);
+
+    Invoice invoice = NeoCommercialDocumentFactory.createInvoiceFromOrderHeader(
+        order,
+        invoiceDocType,
+        false);
+
+    OBDal.getInstance().save(invoice);
+    OBDal.getInstance().flush();
+
+    // Delegate line creation to native Etendo process — handles taxes, gross prices, IVA-included, etc.
+    CreateInvoiceLinesFromProcess proc =
+        WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class);
+    proc.createInvoiceLinesFromDocumentLines(selectedLines, invoice, OrderLine.class);
+
+    return invoice;
+  }
+
+  private JSONArray buildSelectedLines(Order order) {
+    JSONArray selectedLines = new JSONArray();
+    for (OrderLine ol : order.getOrderLineList()) {
+      BigDecimal pending = getPendingQuantity(ol);
+      if (pending == null) continue;
+      try {
+        JSONObject entry = new JSONObject();
+        entry.put("id", ol.getId());
+        entry.put("orderedQuantity", pending.toPlainString());
+        selectedLines.put(entry);
+      } catch (Exception e) {
+        log.warn("Failed to add line {}: {}", ol.getId(), e.getMessage());
+      }
+    }
+    return selectedLines;
+  }
+
+  private BigDecimal getPendingQuantity(OrderLine ol) {
+    if (!ol.isActive() || ol.getProduct() == null) return null;
+    BigDecimal ordered  = ol.getOrderedQuantity()  != null ? ol.getOrderedQuantity()  : BigDecimal.ZERO;
+    BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
+    BigDecimal pending  = ordered.subtract(invoiced);
+    return pending.compareTo(BigDecimal.ZERO) > 0 ? pending : null;
+  }
+
+  // Discard the placeholder doc type ('0' = "** New **", docBasetype="---")
+  // which is stored when no invoice doc type is linked to the PO doc type.
+  private DocumentType resolveAPInvoiceDocType(Order order) {
     DocumentType orderDocType = order.getTransactionDocument();
     DocumentType invoiceDocType = orderDocType != null
         ? orderDocType.getDocumentTypeForInvoice()
         : null;
-    // Discard the placeholder doc type ('0' = "** New **", docBasetype="---")
-    // which is stored when no invoice doc type is linked to the PO doc type.
     if (invoiceDocType != null && !"API".equals(invoiceDocType.getDocumentCategory())) {
       invoiceDocType = null;
     }
@@ -130,87 +174,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     if (invoiceDocType == null) {
       throw new OBException("No AP Invoice document type found");
     }
-
-    Invoice invoice = OBProvider.getInstance().get(Invoice.class);
-    invoice.setClient(order.getClient());
-    invoice.setOrganization(order.getOrganization());
-    invoice.setDocumentType(invoiceDocType);
-    invoice.setTransactionDocument(invoiceDocType);
-    invoice.setDocumentStatus("DR");
-    invoice.setDocumentAction("CO");
-    invoice.setSalesTransaction(false);
-    invoice.setInvoiceDate(new Date());
-    invoice.setAccountingDate(new Date());
-    invoice.setBusinessPartner(order.getBusinessPartner());
-    invoice.setPartnerAddress(order.getPartnerAddress());
-    invoice.setPriceList(order.getPriceList());
-    invoice.setCurrency(order.getCurrency());
-    invoice.setPaymentTerms(order.getPaymentTerms());
-    invoice.setPaymentMethod(order.getPaymentMethod());
-    invoice.setSummedLineAmount(BigDecimal.ZERO);
-    invoice.setGrandTotalAmount(BigDecimal.ZERO);
-    invoice.setWithholdingamount(BigDecimal.ZERO);
-    invoice.setSalesOrder(order);
-
-    String documentNo = Utility.getDocumentNo(
-        new DalConnectionProvider(false), order.getClient().getId(), "C_Invoice", true);
-    invoice.setDocumentNo(StringUtils.isNotBlank(documentNo) ? documentNo : "*");
-
-    OBDal.getInstance().save(invoice);
-    OBDal.getInstance().flush();
-
-    addOrderLinesToInvoice(invoice, order);
-
-    return invoice;
-  }
-
-  private boolean hasPendingLines(Order order) {
-    for (OrderLine ol : order.getOrderLineList()) {
-      if (!ol.isActive() || ol.getProduct() == null) {
-        continue;
-      }
-      BigDecimal ordered  = ol.getOrderedQuantity()  != null ? ol.getOrderedQuantity()  : BigDecimal.ZERO;
-      BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
-      if (ordered.subtract(invoiced).compareTo(BigDecimal.ZERO) > 0) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private void addOrderLinesToInvoice(Invoice invoice, Order order) {
-    long lineNo = 10;
-    int addedLines = 0;
-    for (OrderLine ol : order.getOrderLineList()) {
-      BigDecimal ordered  = ol.getOrderedQuantity()  != null ? ol.getOrderedQuantity()  : BigDecimal.ZERO;
-      BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
-      BigDecimal pending  = ordered.subtract(invoiced);
-      if (!ol.isActive() || ol.getProduct() == null || pending.compareTo(BigDecimal.ZERO) <= 0) {
-        continue;
-      }
-
-      InvoiceLine il = OBProvider.getInstance().get(InvoiceLine.class);
-      il.setOrganization(ol.getOrganization());
-      il.setInvoice(invoice);
-      il.setLineNo(lineNo);
-      il.setProduct(ol.getProduct());
-      il.setInvoicedQuantity(pending);
-      il.setUOM(ol.getUOM());
-      il.setUnitPrice(ol.getUnitPrice());
-      il.setListPrice(ol.getListPrice());
-      il.setPriceLimit(ol.getPriceLimit());
-      int precision = invoice.getCurrency().getStandardPrecision().intValue();
-      il.setLineNetAmount(
-          pending.multiply(ol.getUnitPrice()).setScale(precision, RoundingMode.HALF_UP));
-      il.setTax(ol.getTax());
-      il.setSalesOrderLine(ol);
-      OBDal.getInstance().save(il);
-      lineNo += 10;
-      addedLines++;
-    }
-    if (addedLines == 0) {
-      throw new OBException("No pending lines to invoice in this purchase order");
-    }
+    return invoiceDocType;
   }
 
   private DocumentType findAPInvoiceDocType(String clientId) {

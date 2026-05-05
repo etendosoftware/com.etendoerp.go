@@ -14,18 +14,28 @@
  * Contributor(s): Futit Services S.L.
  *************************************************************************
  */
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.selector.meta;
 
-/**
- * Metadata for a single field in a rich (OBUISEL) selector grid.
- */
-class RichFieldMeta {
-  final String propertyKey;  // last segment of property path
-  final String label;        // display name
-  final String property;     // full DAL property path
-  final long sortNo;
+/** Metadata for one visible column in a rich OBUISEL selector grid. */
+public class RichFieldMeta {
+  /** Last segment of the DAL property path, used as the JSON key. */
+  public final String propertyKey;
+  /** Human-readable label shown in selector metadata. */
+  public final String label;
+  /** Full DAL property path used to fetch the value from the selected entity. */
+  public final String property;
+  /** Sort position from selector metadata. */
+  public final long sortNo;
 
-  RichFieldMeta(String propertyKey, String label, String property, long sortNo) {
+  /**
+   * Create grid metadata for one selector field.
+   *
+   * @param propertyKey last segment of the property path
+   * @param label display label
+   * @param property full DAL property path
+   * @param sortNo selector sort order
+   */
+  public RichFieldMeta(String propertyKey, String label, String property, long sortNo) {
     this.propertyKey = propertyKey;
     this.label = label;
     this.property = property;

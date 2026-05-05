@@ -35,12 +35,14 @@ public class SalesInvoiceHeaderHandler implements NeoHandler {
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
 
+  @Inject
+  private RegisterPaymentHandler registerPaymentHandler;
+
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse result = cloneRecordHandler.handle(context);
-    if (result != null) {
-      return result;
-    }
-    return new RegisterPaymentHandler().handle(context);
+    return NeoHeaderActionRouter.dispatch(
+        context,
+        cloneRecordHandler,
+        registerPaymentHandler);
   }
 }

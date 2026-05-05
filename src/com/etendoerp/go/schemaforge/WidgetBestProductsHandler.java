@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 
 import javax.inject.Named;
 
@@ -26,29 +27,16 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
 
 /**
- * NeoHandler that returns the top 10 best-selling products by revenue
- * for the dashboard widget. Queries completed sales invoice lines grouped
- * by product, ordered by total line net amount descending.
+ * NeoHandler that returns the top 10 best-selling products by revenue for the requested
+ * date range. When no range is supplied it ranks by all-time revenue (original behaviour).
  */
 @Named("widgetBestProductsHandler")
 public class WidgetBestProductsHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(WidgetBestProductsHandler.class);
-
-  private static final String BEST_PRODUCTS_QUERY =
-      "SELECT p.name, SUM(il.qtyinvoiced) AS qty, SUM(il.linenetamt) AS amount "
-    + "FROM c_invoiceline il "
-    + "JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
-    + "JOIN m_product p ON p.m_product_id = il.m_product_id "
-    + "WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId "
-    + "GROUP BY p.m_product_id, p.name "
-    + "ORDER BY SUM(il.linenetamt) DESC "
-    + "LIMIT 10";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -56,36 +44,29 @@ public class WidgetBestProductsHandler implements NeoHandler {
       return NeoResponse.error(405, "Method not allowed");
     }
 
+    WidgetQueryPolicyRegistry.WidgetQueryPolicy policy =
+        WidgetQueryPolicyRegistry.bestProducts();
     try {
       OBContext.setAdminMode(true);
       try {
         String clientId = OBContext.getOBContext().getCurrentClient().getId();
-
-        @SuppressWarnings("unchecked")
-        NativeQuery<Object[]> query = OBDal.getInstance()
-            .getSession()
-            .createNativeQuery(BEST_PRODUCTS_QUERY);
-        query.setParameter("clientId", clientId);
-
-        List<Object[]> rows = query.list();
+        Map<String, String> params = context.getQueryParams();
+        String range = params != null ? params.get("range") : null;
+        List<Object[]> rows = WidgetQueryHelper.resolveQuery(
+            policy.fallbackSql, policy.rangedSql, clientId, range);
 
         JSONArray data = new JSONArray();
         for (Object[] row : rows) {
           JSONObject item = new JSONObject();
-          item.put("name", row[0]);
-          item.put("qty", ((BigDecimal) row[1]).longValue());
-          item.put("amount", ((BigDecimal) row[2]).doubleValue());
+          item.put("id",     row[0]);
+          item.put("name",   row[1]);
+          item.put("qty",    ((BigDecimal) row[2]).longValue());
+          item.put("amount", ((BigDecimal) row[3]).doubleValue());
+          if (row[4] != null) item.put("trendPct", ((BigDecimal) row[4]).intValue());
           data.put(item);
         }
 
-        JSONObject responseData = new JSONObject();
-        responseData.put("data", data);
-        responseData.put("count", data.length());
-
-        JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
-
-        return NeoResponse.ok(wrapper);
+        return WidgetQueryHelper.buildDataResponse(data);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -94,4 +75,5 @@ public class WidgetBestProductsHandler implements NeoHandler {
       return NeoResponse.error(500, "Best products handler failed: " + e.getMessage());
     }
   }
+
 }

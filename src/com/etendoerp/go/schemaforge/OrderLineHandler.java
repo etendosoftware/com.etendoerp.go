@@ -51,6 +51,33 @@ public class OrderLineHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (!NeoEndpointType.CRUD.equals(context.getEndpointType())) {
+      return null;
+    }
+    if (!"POST".equals(context.getHttpMethod())) {
+      return null;
+    }
+
+    JSONObject body = context.getRequestBody();
+    if (body.optDouble("grossUnitPrice", -1) <= 0) {
+      return null;
+    }
+
+    // parentId is injected by NeoCrudHandler from the request body before this hook runs.
+    String orderId = body.optString("parentId", null);
+    if (orderId == null || orderId.isEmpty()) {
+      return null;
+    }
+
+    Order order = OBDal.getInstance().get(Order.class, orderId);
+    if (order == null || order.getPriceList() == null) {
+      return null;
+    }
+
+    NeoCommercialLinePolicy.normalizeOrderLineSelectorPriceMapping(
+        body,
+        Boolean.TRUE.equals(order.getPriceList().isPriceIncludesTax()),
+        order.getPriceList().getIdentifier());
     return null;
   }
 
@@ -124,5 +151,15 @@ public class OrderLineHandler implements NeoHandler {
     OBDal.getInstance().flush();
 
     return null;
+  }
+
+  /**
+   * Callout post-hook: enrich the response with a synthetic {@code taxRate} update
+   * when the user changed the line tax. Logic shared with invoice lines lives in
+   * {@link LineCalloutTaxRateHelper}.
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    return LineCalloutTaxRateHelper.augmentTaxRate(context);
   }
 }

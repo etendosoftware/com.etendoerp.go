@@ -14,20 +14,29 @@
  * Contributor(s): Futit Services S.L.
  *************************************************************************
  */
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.selector.meta;
 
 import java.util.List;
 
 /**
- * Container for the three field lists produced by classifying OBUISEL selector fields:
- * grid display columns, searchable properties, and auxiliary output fields.
+ * Container for the three field lists produced while classifying OBUISEL selector fields.
  */
-class ObuiselFieldLists {
-  final List<RichFieldMeta> gridFields;
-  final List<String> searchableProps;
-  final List<AuxFieldMeta> auxFields;
+public class ObuiselFieldLists {
+  /** Fields rendered as visible grid columns in the selector popup. */
+  public final List<RichFieldMeta> gridFields;
+  /** Property paths that participate in suggestion-box search. */
+  public final List<String> searchableProps;
+  /** Auxiliary output fields appended under {@code _aux}. */
+  public final List<AuxFieldMeta> auxFields;
 
-  ObuiselFieldLists(List<RichFieldMeta> gridFields, List<String> searchableProps,
+  /**
+   * Create the grouped field lists for one selector.
+   *
+   * @param gridFields visible grid column metadata
+   * @param searchableProps searchable property paths
+   * @param auxFields auxiliary output metadata
+   */
+  public ObuiselFieldLists(List<RichFieldMeta> gridFields, List<String> searchableProps,
       List<AuxFieldMeta> auxFields) {
     this.gridFields = gridFields;
     this.searchableProps = searchableProps;
