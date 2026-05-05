@@ -146,10 +146,12 @@ public class NeoDefaultsService {
             String sfFieldDefault = sfField.getDefaultValue();
             Object resolvedValue = resolveFieldDefault(adColumn, parentId, vars, conn, windowId,
                 ctx, sfFieldDefault);
-            // FIC parity: when no explicit default resolves, combo-style references (TableDir,
-            // Table, List) preselect row [0] of their lookup — exactly what
-            // UIDefinition.getValueInComboReference does in Etendo Classic. Search/Selector/Tree
-            // references are intentionally left empty here (FIC leaves them empty too).
+            // For combo-style references (TableDir/Table/List) with no explicit default,
+            // mirror FIC parity and preselect the first available option. Search-type
+            // references (ref 30, OBUISEL) are excluded by resolveFirstComboOption, so
+            // Contact/BP fields remain empty. The genuinely dangerous fallback that picked
+            // the first record for ANY FK column (tryInjectFallbackFkDefault) was removed
+            // in ETP-3894 — only that one auto-picked Search-type fields silently.
             if (resolvedValue == null) {
               resolvedValue = resolveFirstComboOption(adColumn, ctx);
             }
@@ -212,11 +214,10 @@ public class NeoDefaultsService {
           DocTypeResolver.reapplyDocTypeFromTabFilter(defaults, adTab, ctx);
         }
 
-        // FK preselection is applied per-column inside pass 1 via resolveFirstComboOption,
-        // scoped to FIC combo references (TableDir, Table, List) — mirroring
-        // UIDefinition.getValueInComboReference. Search/Selector/Tree references are left empty
-        // so the form/UI (or the BP/DocType callout chain) can surface them for user input,
-        // matching Etendo Classic FIC behavior on MODE=NEW.
+        // ETP-3894: FK preselection is intentionally disabled. Mandatory FKs without an
+        // explicit AD_Column default / ETGO_SF_FIELD default / session value / parent value
+        // are left empty so the user is forced to make an explicit selection and Save fails
+        // with MISSING_REQUIRED_FIELDS instead of silently picking the first lookup row.
         // The CREATE path keeps its own broader fallback in injectMandatoryDefaults to avoid
         // NOT NULL violations when partial payloads reach persistence.
 
@@ -876,9 +877,12 @@ public class NeoDefaultsService {
       if (tryInjectFromParentValues(body, dalEntity, propName, col, mCtx.parentValues)) {
         return;
       }
-      if (tryInjectFallbackFkDefault(body, dalEntity, propName, col, mCtx.neoCtx)) {
-        return;
-      }
+      // ETP-3894: tryInjectFallbackFkDefault was removed here — it silently picked the
+      // first active record for ANY column ending in _ID (including Search-type FKs like
+      // C_BPartner_ID / Contact) without checking the reference type. That caused
+      // documents to be saved with the wrong business partner when the user clicked Save
+      // without choosing one. tryInjectFirstFromLookup is kept because it only fires for
+      // combo-style references (TableDir/Table/List), matching legitimate FIC parity.
       if (tryInjectFirstFromLookup(body, dalEntity, propName, col, mCtx.neoCtx)) {
         return;
       }
@@ -963,27 +967,6 @@ public class NeoDefaultsService {
     }
   }
 
-  private static boolean tryInjectFallbackFkDefault(JSONObject body, Entity dalEntity,
-      String propName, Column col, NeoContext ctx) {
-    try {
-      if (!col.getDBColumnName().toUpperCase().endsWith("_ID")) {
-        return false;
-      }
-      String fallbackId = resolveFallbackFkDefault(col, ctx);
-      if (fallbackId == null || fallbackId.isEmpty()) {
-        return false;
-      }
-      applyResolvedDefault(body, col, propName, fallbackId, ctx);
-      tryInjectIdentifier(body, dalEntity, propName, body.opt(propName));
-      log.debug("Injected FK fallback default: {} = {}", propName, body.opt(propName));
-      return true;
-    } catch (Exception e) {
-      log.debug("Could not inject fallback FK default for {}: {}",
-          col.getDBColumnName(), e.getMessage());
-      return false;
-    }
-  }
-
   private static void applyResolvedDefault(JSONObject body, Column col,
       String propName, Object resolved, NeoContext ctx) throws Exception {
     if (resolved == null) {
@@ -1022,78 +1005,8 @@ public class NeoDefaultsService {
       }
     }
     body.put(propName, valueToStore);
-    log.warn("[NEO-DEFAULTS] {} = {} ({})", propName, valueToStore,
+    log.debug("[NEO-DEFAULTS] {} = {} ({})", propName, valueToStore,
         valueToStore == null ? "null" : valueToStore.getClass().getSimpleName());
-  }
-
-  private static String resolveFallbackFkDefault(Column col, NeoContext ctx) {
-    try {
-      // Determine the referenced table from the column's reference
-      org.openbravo.model.ad.datamodel.Table refTable = null;
-
-      // For TableDir references, the table name is derived from the column name
-      // (e.g., C_PaymentTerm_ID → C_PaymentTerm)
-      String dbColName = col.getDBColumnName();
-      if (dbColName.toUpperCase().endsWith("_ID")) {
-        String tableName = dbColName.substring(0, dbColName.length() - 3);
-        OBCriteria<org.openbravo.model.ad.datamodel.Table> tblCrit =
-            OBDal.getInstance().createCriteria(org.openbravo.model.ad.datamodel.Table.class);
-        tblCrit.add(Restrictions.eq("dBTableName", tableName));
-        tblCrit.setMaxResults(1);
-        refTable = (org.openbravo.model.ad.datamodel.Table) tblCrit.uniqueResult();
-      }
-
-      if (refTable == null) {
-        return null;
-      }
-
-      OBContext obCtx = OBContext.getOBContext();
-      String clientId = obCtx.getCurrentClient().getId();
-      String keyColumn = refTable.getDBTableName() + "_ID";
-
-      // Check if the target table has IsDefault and Name columns
-      boolean hasIsDefault = false;
-      boolean hasName = false;
-      for (Column c : refTable.getADColumnList()) {
-        String cn = c.getDBColumnName();
-        if ("IsDefault".equalsIgnoreCase(cn)) hasIsDefault = true;
-        if ("Name".equalsIgnoreCase(cn)) hasName = true;
-      }
-
-      StringBuilder sql = new StringBuilder();
-      sql.append("SELECT t.").append(keyColumn);
-      sql.append(" FROM ").append(refTable.getDBTableName()).append(" t");
-      sql.append(" WHERE t.IsActive = 'Y'");
-      sql.append(" AND t.AD_Client_ID = ?");
-      if ("M_PriceList".equalsIgnoreCase(refTable.getDBTableName())
-          && ctx != null && ctx.getAdTab() != null) {
-        boolean isSO = Boolean.TRUE.equals(ctx.getAdTab().getWindow().isSalesTransaction());
-        sql.append(" AND t.issopricelist = '").append(isSO ? "Y" : "N").append("'");
-      }
-      sql.append(" ORDER BY ");
-      if (hasIsDefault) {
-        sql.append("t.IsDefault DESC, ");
-      }
-      sql.append(hasName ? "t.Name ASC" : "t." + keyColumn + " ASC");
-
-      try (PreparedStatement ps = OBDal.getInstance().getConnection(false)
-          .prepareStatement(sql.toString())) {
-        ps.setMaxRows(1);
-        ps.setString(1, clientId);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            String id = rs.getString(1);
-            log.warn("Fallback FK default for {}: {} (table={}) — no explicit default configured",
-                dbColName, id, refTable.getDBTableName());
-            return id;
-          }
-        }
-      }
-    } catch (Exception e) {
-      log.debug("Could not resolve fallback FK default for {}: {}",
-          col.getDBColumnName(), e.getMessage());
-    }
-    return null;
   }
 
   private static boolean isAuditColumn(Column col) {
@@ -1104,150 +1017,6 @@ public class NeoDefaultsService {
         || "UPDATEDBY".equals(colNameUpper);
   }
 
-  /**
-   * Returns {@code true} for AD_Reference IDs whose Etendo Classic UIDefinition invokes
-   * {@code getValueInComboReference} — i.e. combo-style rendering that preselects row [0]
-   * when no explicit default is configured.
-   *
-   * <p>Matches the classes {@code FKComboUIDefinition} (TableDir=19, Table=18) and
-   * {@code EnumUIDefinition} (List=17). Returns {@code false} for Search (30), Tree, and ID
-   * references, which leave the field empty on NEW.</p>
-   *
-   * <p>Note: this is a pure check on the base reference id and does not detect columns whose
-   * {@code AD_Reference_ID} is Table/TableDir but which have an OBUISEL_Selector override on
-   * {@code AD_Reference_Value_ID}. Those render as {@code SearchUIDefinition} in Classic and
-   * must also skip preselection; {@link #resolveFirstComboOption} guards against that via
-   * {@link NeoSelectorService#hasObuiselSelector}.</p>
-   */
-  private static boolean isFICComboReference(String baseRefId) {
-    return NeoSelectorService.REF_TABLEDIR.equals(baseRefId)
-        || NeoSelectorService.REF_TABLE.equals(baseRefId)
-        || NeoSelectorService.REF_LIST.equals(baseRefId);
-  }
-
-  /**
-   * FIC parity: return the first combo option ID (row [0]) for columns whose AD_Reference
-   * renders as a combo in Etendo Classic. Returns {@code null} when the column is not a
-   * combo reference, has no lookup rows available, or any error occurs.
-   *
-   * <p>Routes through {@link NeoSelectorService#querySelectorByColumn} so the same
-   * {@code AD_Val_Rule}, reference override, and readable-orgs filters that the selector
-   * applies are honored here — exactly like {@code UIDefinition.getValueInComboReference}
-   * delegates to {@code ComboTableData}. No entity-specific filters are hardcoded: all
-   * contextual behavior (e.g. {@code IsSOPriceList=@IsSOTrx@} for M_PriceList) comes from
-   * the column's validation rule.</p>
-   *
-   * <p>Mirrors {@code UIDefinition.getValueInComboReference} lines 712-718 (FK branch) and
-   * 729-750 (List branch).</p>
-   */
-  private static Object resolveFirstComboOption(Column col, NeoContext ctx) {
-    try {
-      String baseRefId = NeoSelectorService.getBaseReferenceId(col);
-      if (!isFICComboReference(baseRefId)) {
-        return null;
-      }
-      // Columns whose AD_Reference is Table/TableDir but carry an OBUISEL_Selector override
-      // render as SearchUIDefinition in Etendo Classic (not FKComboUIDefinition), so FIC does
-      // not preselect them on MODE=NEW. Mirrors the selector-override branch in UIDefinition.
-      if (NeoSelectorService.hasObuiselSelector(col)) {
-        return null;
-      }
-      Map<String, String> contextParams = buildFICComboContextParams(ctx);
-      // FIC parity for unresolvable validation params (e.g. "C_BPartner_Location.C_BPartner_ID
-      // = @C_BPartner_ID@" on a new document) is handled at the query level:
-      // SelectorQueryBuilder.resolveValidationClause substitutes NULL for missing vars,
-      // mirroring Classic's ComboTableData, so the filter returns no rows instead of
-      // matching everything.
-      NeoResponse selectorResp = NeoSelectorService.querySelectorByColumn(
-          col, col.getDBColumnName(), null, 1, 0, contextParams);
-      if (selectorResp == null || selectorResp.getHttpStatus() != 200) {
-        return null;
-      }
-      JSONObject body = selectorResp.getBody();
-      if (body == null) {
-        return null;
-      }
-      JSONArray items = body.optJSONArray("items");
-      if (items == null || items.length() == 0) {
-        return null;
-      }
-      JSONObject first = items.getJSONObject(0);
-      // For FK refs the id field is "id"; for List refs resolveListSelector also stores
-      // the searchKey under "id". Same key in both paths.
-      String id = first.optString("id", null);
-      if (id == null || id.isEmpty()) {
-        return null;
-      }
-      return id;
-    } catch (Exception e) {
-      log.debug("Could not resolve first combo option for {}: {}",
-          col.getDBColumnName(), e.getMessage());
-      return null;
-    }
-  }
-
-  /**
-   * Build the context-parameter map consumed by {@code SelectorQueryBuilder.resolveValidationSql}
-   * when the selector is invoked from the /defaults path. Provides {@code IsSOTrx} / {@code isSOTrx}
-   * from the window (both casings, mirroring {@code NeoCalloutService.buildVars}) so validation
-   * rules like {@code IsSOPriceList='@IsSOTrx@'} resolve correctly. {@code AD_Org_ID},
-   * {@code AD_Client_ID}, {@code AD_User_ID} and {@code AD_Role_ID} are injected automatically
-   * by {@code buildValidationParamMap} from the current {@link OBContext}.
-   */
-  private static Map<String, String> buildFICComboContextParams(NeoContext ctx) {
-    Map<String, String> params = new java.util.HashMap<>();
-    if (ctx != null && ctx.getAdTab() != null && ctx.getAdTab().getWindow() != null
-        && ctx.getAdTab().getWindow().isSalesTransaction() != null) {
-      String soTrx =
-          Boolean.TRUE.equals(ctx.getAdTab().getWindow().isSalesTransaction()) ? "Y" : "N";
-      params.put("IsSOTrx", soTrx);
-      params.put("isSOTrx", soTrx);
-    }
-    return params;
-  }
-
-  /**
-   * Auto-pick the first available combo option for mandatory FK columns that have no resolved
-   * default. Shares the FIC-parity logic with {@link #resolveFirstComboOption}: only columns
-   * whose {@code AD_Reference} renders as a combo in Classic (TableDir=19, Table=18, List=17)
-   * get preselected, and the lookup is routed through {@link NeoSelectorService#querySelectorByColumn}
-   * so {@code AD_Val_Rule} and readable-orgs filters are honored.
-   *
-   * <p>Search (30), OBUISEL_Selector, and Tree references are intentionally skipped — Classic
-   * leaves them empty on NEW as well.</p>
-   *
-   * @return true if a value was injected, false if the column is not a combo reference or the
-   *         selector returned no rows
-   */
-  private static boolean tryInjectFirstFromLookup(JSONObject body, Entity dalEntity,
-      String propName, Column col, NeoContext ctx) {
-    Object firstId = resolveFirstComboOption(col, ctx);
-    if (firstId == null) {
-      return false;
-    }
-    try {
-      body.put(propName, firstId);
-      tryInjectIdentifier(body, dalEntity, propName, firstId.toString());
-      log.debug("Auto-injected first combo option: {} = {}", propName, firstId);
-      return true;
-    } catch (Exception e) {
-      log.debug("Could not auto-pick first combo option for {}: {}",
-          col.getDBColumnName(), e.getMessage());
-      return false;
-    }
-  }
-
-  // ── FK cleanup ─────────────────────────────────────────────────────────
-
-  /**
-   * Remove empty-string values from the body for mandatory FK columns.
-   * Callouts may set FK fields to "" when they cannot resolve a value (e.g., BP without
-   * sales payment term). Removing these allows injectMandatoryDefaults to attempt
-   * a fallback resolution on the next pass.
-   *
-   * @param body  the JSON request body from which empty FK values will be removed
-   * @param adTab the AD_Tab containing the table with FK column definitions
-   */
   // ── Callout cascade ─────────────────────────────────────────────────
 
   /**
@@ -1390,5 +1159,165 @@ public class NeoDefaultsService {
       log.debug("Could not resolve first org for client {}: {}", clientId, e.getMessage());
     }
     return null;
+  }
+  // ---------------------------------------------------------------------------
+  // FIC combo preselection helpers (restored in ETP-3894 correction)
+  // These only fire for combo-style references (TableDir/Table/List) — they
+  // mirror Etendo Classic FIC parity and are safe because they exclude Search
+  // and OBUISEL references via isFICComboReference + hasObuiselSelector.
+  // ---------------------------------------------------------------------------
+
+  private static boolean isFICComboReference(String baseRefId) {
+    return NeoSelectorService.REF_TABLEDIR.equals(baseRefId)
+        || NeoSelectorService.REF_TABLE.equals(baseRefId)
+        || NeoSelectorService.REF_LIST.equals(baseRefId);
+  }
+
+  private static Map<String, String> buildFICComboContextParams(NeoContext ctx) {
+    Map<String, String> params = new java.util.HashMap<>();
+    if (ctx != null && ctx.getAdTab() != null && ctx.getAdTab().getWindow() != null
+        && ctx.getAdTab().getWindow().isSalesTransaction() != null) {
+      String soTrx =
+          Boolean.TRUE.equals(ctx.getAdTab().getWindow().isSalesTransaction()) ? "Y" : "N";
+      params.put("IsSOTrx", soTrx);
+      params.put("isSOTrx", soTrx);
+    }
+    return params;
+  }
+
+  private static Object resolveFirstComboOption(Column col, NeoContext ctx) {
+    try {
+      String baseRefId = NeoSelectorService.getBaseReferenceId(col);
+      if (!isFICComboReference(baseRefId)) {
+        return null;
+      }
+      if (NeoSelectorService.hasObuiselSelector(col)) {
+        return null;
+      }
+      Map<String, String> contextParams = buildFICComboContextParams(ctx);
+      NeoResponse selectorResp = NeoSelectorService.querySelectorByColumn(
+          col, col.getDBColumnName(), null, 1, 0, contextParams);
+      if (selectorResp == null || selectorResp.getHttpStatus() != 200) {
+        return null;
+      }
+      JSONObject body = selectorResp.getBody();
+      if (body == null) {
+        return null;
+      }
+      JSONArray items = body.optJSONArray("items");
+      if (items == null || items.length() == 0) {
+        return null;
+      }
+      JSONObject first = items.getJSONObject(0);
+      String id = first.optString("id", null);
+      if (id == null || id.isEmpty()) {
+        return null;
+      }
+      return id;
+    } catch (Exception e) {
+      log.debug("Could not resolve first combo option for {}: {}",
+          col.getDBColumnName(), e.getMessage());
+      return null;
+    }
+  }
+
+  private static boolean tryInjectFirstFromLookup(JSONObject body, Entity dalEntity,
+      String propName, Column col, NeoContext ctx) {
+    Object firstId = resolveFirstComboOption(col, ctx);
+    if (firstId == null) {
+      return false;
+    }
+    try {
+      body.put(propName, firstId);
+      tryInjectIdentifier(body, dalEntity, propName, firstId.toString());
+      log.debug("Auto-injected first combo option: {} = {}", propName, firstId);
+      return true;
+    } catch (Exception e) {
+      log.debug("Could not auto-pick first combo option for {}: {}",
+          col.getDBColumnName(), e.getMessage());
+      return false;
+    }
+  }
+
+  /**
+   * Identify mandatory FK / non-primitive columns of {@code adTab} that still have no value
+   * in {@code body} after the full default-resolution chain has run (explicit defaults,
+   * session, parent, callout cascade). The returned list contains DAL property names so the
+   * UI can map them back to the contract field keys.
+   *
+   * <p>Only columns whose DAL property name appears in {@code userSubmittedFields} are checked.
+   * System-managed columns not submitted by the user are excluded — if the backend could not
+   * auto-resolve them, the DB constraint will surface the error rather than this method
+   * misleadingly reporting it as a user-input problem.</p>
+   *
+   * @param body               the request payload after defaults injection and callout cascade
+   * @param adTab              the AD_Tab being saved
+   * @param userSubmittedFields DAL property names submitted by the user before injection;
+   *                           pass {@code null} to check all mandatory columns (legacy behaviour)
+   * @return DAL property names of mandatory columns left without a value; never null
+   */
+  public static List<String> findMissingMandatoryFields(JSONObject body, Tab adTab,
+      java.util.Set<String> userSubmittedFields) {
+    List<String> missing = new ArrayList<>();
+    if (body == null || adTab == null || adTab.getTable() == null) {
+      return missing;
+    }
+    try {
+      Entity dalEntity = ModelProvider.getInstance()
+          .getEntityByTableId(adTab.getTable().getId());
+      if (dalEntity == null) {
+        return missing;
+      }
+      for (Column col : adTab.getTable().getADColumnList()) {
+        if (!col.isActive() || !col.isMandatory()) {
+          continue;
+        }
+        if (Boolean.TRUE.equals(col.isKeyColumn())) {
+          continue;
+        }
+        Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
+        if (prop == null || prop.isAuditInfo()) {
+          continue;
+        }
+        // Numeric / boolean primitives are always covered by injectSafeTypeDefault
+        // (0 / false). Skip them to keep the list focused on user-input lookups.
+        String refId = col.getReference() != null ? col.getReference().getId() : null;
+        if ("22".equals(refId) || "29".equals(refId) || "12".equals(refId)
+            || "11".equals(refId) || "20".equals(refId)) {
+          continue;
+        }
+        String propName = prop.getName();
+        // When userSubmittedFields is provided, skip columns the user did not send.
+        // Those are system-managed fields; if the defaults chain could not resolve them
+        // the DB will surface the violation — not this validator.
+        if (userSubmittedFields != null && !userSubmittedFields.contains(propName)) {
+          continue;
+        }
+        if (!body.has(propName)) {
+          missing.add(propName);
+          continue;
+        }
+        Object value = body.opt(propName);
+        if (value == null || JSONObject.NULL.equals(value)
+            || (value instanceof String && ((String) value).trim().isEmpty())) {
+          missing.add(propName);
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Error checking missing mandatory fields for tab {}: {}",
+          adTab.getName(), e.getMessage());
+    }
+    return missing;
+  }
+
+  /**
+   * Backward-compatible overload — checks all mandatory columns without a user-submission filter.
+   *
+   * @param body  the request payload after defaults injection and callout cascade
+   * @param adTab the AD_Tab being saved
+   * @return DAL property names of mandatory columns left without a value; never null
+   */
+  public static List<String> findMissingMandatoryFields(JSONObject body, Tab adTab) {
+    return findMissingMandatoryFields(body, adTab, null);
   }
 }
