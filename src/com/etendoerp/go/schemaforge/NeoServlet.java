@@ -9,6 +9,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
+import javax.servlet.annotation.MultipartConfig;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -49,6 +50,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * which point directly to AD_Window, AD_Tab, and AD_Column.
  * Hooks are discovered via CDI using the Java_Qualifier on ETGO_SF_Entity.
  */
+@MultipartConfig(maxFileSize = 10L * 1024 * 1024, maxRequestSize = 12L * 1024 * 1024, fileSizeThreshold = 1024 * 1024)
 public class NeoServlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(NeoServlet.class);
@@ -127,6 +129,10 @@ public class NeoServlet extends HttpBaseServlet {
       sendError(response, HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
       return;
     }
+    if (pathInfo == null) {
+      sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Unable to parse request path");
+      return;
+    }
 
     // 3. Resolve spec, entity, and tab
     try {
@@ -157,6 +163,56 @@ public class NeoServlet extends HttpBaseServlet {
           return;
         }
         writeResponse(response, NeoSessionService.resolveSession());
+        return;
+      }
+
+      // Filters endpoint — per-user, per-window named filter presets
+      //   GET    /sws/neo/filters/{window}          → all presets for that window
+      //   PUT    /sws/neo/filters/{window}/{preset} → save/overwrite a named preset
+      //   DELETE /sws/neo/filters/{window}/{preset} → remove a named preset
+      if ("filters".equals(pathInfo.specName)) {
+        if (pathInfo.entityName == null) {
+          sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+              "Window name required: /sws/neo/filters/{window}");
+          return;
+        }
+        if ("GET".equals(method)) {
+          writeResponse(response, NeoFiltersService.getWindowPresets(pathInfo.entityName));
+          return;
+        }
+        if (pathInfo.recordId == null) {
+          sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+              "Preset name required: /sws/neo/filters/{window}/{preset}");
+          return;
+        }
+        if ("PUT".equals(method)) {
+          String body = readRequestBody(request);
+          NeoFiltersService.savePreset(pathInfo.entityName, pathInfo.recordId, body);
+          OBDal.getInstance().flush();
+          writeResponse(response, null);
+          return;
+        }
+        if (METHOD_DELETE.equals(method)) {
+          NeoFiltersService.deletePreset(pathInfo.entityName, pathInfo.recordId);
+          OBDal.getInstance().flush();
+          writeResponse(response, null);
+          return;
+        }
+        sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+            "Filters endpoint only supports GET, PUT and DELETE");
+        return;
+      }
+
+      // Certificate endpoint: GET (status) or POST (upload)
+      if ("certificate".equals(pathInfo.specName)) {
+        if ("GET".equals(method)) {
+          writeResponse(response, NeoCertificateHelper.handleCertificateGet(request));
+        } else if ("POST".equals(method)) {
+          writeResponse(response, NeoCertificateHelper.handleCertificateUpload(request));
+        } else {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Certificate endpoint supports GET and POST");
+        }
         return;
       }
 
@@ -885,6 +941,7 @@ public class NeoServlet extends HttpBaseServlet {
           .specName(pathInfo.specName)
           .entityName(pathInfo.entityName)
           .httpMethod("POST")
+          .endpointType(NeoEndpointType.CALLOUT)
           .requestBody(requestBody)
           .adTab(tab)
           .sfEntity(sfEntity)
@@ -908,6 +965,31 @@ public class NeoServlet extends HttpBaseServlet {
         if (cascade.hasResults()) {
           mergeCalloutResponse(calloutResult.getBody(), cascade.toJSON());
           log.debug("[NEO-CALLOUT] Cascade merged additional fields into response");
+        }
+      }
+
+      // Post-hook: give the entity's NeoHandler a chance to enrich the callout response
+      // (e.g. add a synthetic 'taxRate' update when the trigger is C_Tax_ID). Same dispatch
+      // shape as `handleWithHooks` — looked up by the entity's Java_Qualifier and merged
+      // without overwriting fields already set by the underlying callout.
+      if (calloutResult.getHttpStatus() == 200 && calloutResult.getBody() != null) {
+        String qualifier = sfEntity.getJavaQualifier();
+        if (StringUtils.isNotBlank(qualifier)) {
+          NeoHandler handler = lookupHandler(qualifier);
+          if (handler != null) {
+            try {
+              neoContext.setPreviousResult(calloutResult);
+              NeoResponse handlerResult = handler.afterCallout(neoContext);
+              if (handlerResult != null && handlerResult.getBody() != null) {
+                mergeCalloutResponse(calloutResult.getBody(), handlerResult.getBody());
+                log.debug("[NEO-CALLOUT] Handler '{}' merged additional fields via afterCallout",
+                    qualifier);
+              }
+            } catch (Exception e) {
+              log.warn("[NEO-CALLOUT] afterCallout for handler '{}' failed (non-fatal): {}",
+                  qualifier, e.getMessage());
+            }
+          }
         }
       }
 

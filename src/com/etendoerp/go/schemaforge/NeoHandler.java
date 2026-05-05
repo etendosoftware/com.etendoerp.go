@@ -51,4 +51,24 @@ public interface NeoHandler {
   default NeoResponse afterHandle(NeoContext context) {
     return null;
   }
+
+  /**
+   * Post-hook for callout requests: called AFTER {@code NeoCalloutService.executeCallout}
+   * produced the REST response. The context's {@code previousResult} carries that response
+   * and the {@code requestBody} carries the original callout payload (with {@code field},
+   * {@code value} and {@code formState}).
+   *
+   * <p>Return a {@link NeoResponse} whose body provides additional fields to merge into
+   * the existing {@code updates}/{@code combos} sections, or {@code null} to keep the
+   * response unchanged. Implementations should NOT overwrite fields already set by the
+   * underlying callout — the dispatcher merges only fields that are absent from the base
+   * response.
+   *
+   * @param context the NeoContext whose {@code previousResult} holds the callout response
+   *                and whose {@code requestBody} holds the original callout payload
+   * @return a {@link NeoResponse} carrying the additions to merge, or {@code null} to skip
+   */
+  default NeoResponse afterCallout(NeoContext context) {
+    return null;
+  }
 }

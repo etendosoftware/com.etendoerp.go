@@ -82,7 +82,6 @@ public class OnboardingDatasetNormalizerTest {
   }
 
 
-
   @Test
   public void testNormalizerBuildsEmptyDatasetWithoutUnsupportedJaxpFailures() throws Exception {
     Path emptySampleDataDir = Files.createTempDirectory("onboarding-empty-sampledata");
@@ -116,6 +115,13 @@ public class OnboardingDatasetNormalizerTest {
     assertFalse(OnboardingDatasetDefinition.getIncludedTables().contains("C_PAYMENTTERM_TRL"));
   }
 
+  /** Verifies that translation-only payment term tables are excluded from onboarding metadata. */
+  @Test
+  public void testDefinitionExcludesPaymentTermTranslations() {
+    assertFalse(OnboardingDatasetDefinition.getIncludedTables().contains("C_PAYMENTTERM_TRL"));
+  }
+
+
   /** Verifies that representative foundation business records remain in the normalized XML. */
   @Test
   public void testNormalizerKeepsFoundationBusinessContent() {
@@ -138,6 +144,15 @@ public class OnboardingDatasetNormalizerTest {
     assertFalse(xml.contains("<SALESREP_ID>"));
     assertFalse(xml.contains("<AD_LANGUAGE>"));
   }
+
+  /** Verifies that system-scoped language rows are stripped from the normalized XML. */
+  @Test
+  public void testNormalizerStripsSystemScopedLanguageRows() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertFalse(xml.contains("<AD_LANGUAGE>"));
+  }
+
 
   /** Verifies that sourcedata table and column tags do not leak into the final XML. */
   @Test
