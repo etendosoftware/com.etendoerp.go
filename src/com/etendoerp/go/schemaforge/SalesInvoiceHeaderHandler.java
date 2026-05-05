@@ -98,6 +98,12 @@ public class SalesInvoiceHeaderHandler implements NeoHandler {
     }
   }
 
+  /**
+   * Annotates every record in a list GET response with {@code bpEmail} using a single batch query.
+   * Records without a {@code businessPartner} field receive an empty string.
+   *
+   * @param dataArr the {@code response.data} array from the NEO response body
+   */
   private void annotateBatch(JSONArray dataArr) throws Exception {
     List<String> bPartnerIds = new ArrayList<>();
     for (int i = 0; i < dataArr.length(); i++) {
@@ -117,6 +123,12 @@ public class SalesInvoiceHeaderHandler implements NeoHandler {
     }
   }
 
+  /**
+   * Queries {@code C_BPartner.EM_Etgo_Email} for a single business partner.
+   *
+   * @param bPartnerId the {@code C_BPartner_ID} value; returns empty string if null or blank
+   * @return the email address, or an empty string if not found or on DB error
+   */
   private String fetchEmail(String bPartnerId) {
     if (bPartnerId == null || bPartnerId.isEmpty()) {
       return "";
@@ -137,7 +149,15 @@ public class SalesInvoiceHeaderHandler implements NeoHandler {
     return "";
   }
 
-  // placeholders contains only "?" literals — all values are bound via setString(); no injection risk.
+  /**
+   * Queries {@code C_BPartner.EM_Etgo_Email} for a list of business partners in a single IN query.
+   * Returns a map of {@code C_BPartner_ID → email}; partners with no email are absent from the map.
+   *
+   * <p>placeholders contains only "?" literals — all values are bound via setString(); no injection risk.
+   *
+   * @param bPartnerIds non-empty list of {@code C_BPartner_ID} values to look up
+   * @return map of bPartnerId to email address; empty map on DB error
+   */
   @SuppressWarnings("java:S2077")
   private Map<String, String> fetchEmailBatch(List<String> bPartnerIds) {
     Map<String, String> result = new HashMap<>();
