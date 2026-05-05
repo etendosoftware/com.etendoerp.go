@@ -49,6 +49,9 @@ import org.openbravo.dal.service.OBDal;
 @Named("bpEmailAnnotatorHandler")
 public class BpEmailAnnotatorHandler implements NeoHandler {
 
+  private static final String FIELD_BUSINESS_PARTNER = "businessPartner";
+  private static final String FIELD_BP_EMAIL = "bpEmail";
+
   private final Logger log = LogManager.getLogger(getClass());
 
   /**
@@ -89,9 +92,9 @@ public class BpEmailAnnotatorHandler implements NeoHandler {
         return null;
       }
       if (context.getRecordId() != null) {
-        JSONObject record = dataArr.getJSONObject(0);
-        String bPartnerId = record.optString("businessPartner", null);
-        record.put("bpEmail", fetchEmail(bPartnerId));
+        JSONObject rec = dataArr.getJSONObject(0);
+        String bPartnerId = rec.optString(FIELD_BUSINESS_PARTNER, null);
+        rec.put(FIELD_BP_EMAIL, fetchEmail(bPartnerId));
       } else {
         annotateBatch(dataArr);
       }
@@ -111,7 +114,7 @@ public class BpEmailAnnotatorHandler implements NeoHandler {
   private void annotateBatch(JSONArray dataArr) throws Exception {
     List<String> bPartnerIds = new ArrayList<>();
     for (int i = 0; i < dataArr.length(); i++) {
-      String id = dataArr.getJSONObject(i).optString("businessPartner", null);
+      String id = dataArr.getJSONObject(i).optString(FIELD_BUSINESS_PARTNER, null);
       if (id != null && !id.isEmpty()) {
         bPartnerIds.add(id);
       }
@@ -122,8 +125,8 @@ public class BpEmailAnnotatorHandler implements NeoHandler {
     Map<String, String> emailByBPartnerId = fetchEmailBatch(bPartnerIds);
     for (int i = 0; i < dataArr.length(); i++) {
       JSONObject rec = dataArr.getJSONObject(i);
-      String bpId = rec.optString("businessPartner", null);
-      rec.put("bpEmail", bpId != null ? emailByBPartnerId.getOrDefault(bpId, "") : "");
+      String bpId = rec.optString(FIELD_BUSINESS_PARTNER, null);
+      rec.put(FIELD_BP_EMAIL, bpId != null ? emailByBPartnerId.getOrDefault(bpId, "") : "");
     }
   }
 
