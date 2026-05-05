@@ -82,24 +82,37 @@ public class PriceListHeaderHandler implements NeoHandler {
   }
 
   private void annotateBatch(JSONArray dataArr) throws Exception {
-    List<String> priceListIds = new ArrayList<>();
-    for (int i = 0; i < dataArr.length(); i++) {
-      String id = dataArr.getJSONObject(i).optString("id", null);
-      if (id != null && !id.isEmpty()) {
-        priceListIds.add(id);
-      }
-    }
+    List<JSONObject> records = extractRecords(dataArr);
+    List<String> priceListIds = extractIds(records);
     if (priceListIds.isEmpty()) {
       return;
     }
     Map<String, String> versionByPriceListId = PriceListVersionResolver
         .findSingleVersionIds(priceListIds);
-    for (int i = 0; i < dataArr.length(); i++) {
-      JSONObject rec = dataArr.getJSONObject(i);
+    for (JSONObject rec : records) {
       String plId = rec.optString("id", null);
       rec.put(FIELD_PRICE_LIST_VERSION,
           plId != null ? versionByPriceListId.getOrDefault(plId, "") : "");
     }
+  }
+
+  private static List<JSONObject> extractRecords(JSONArray dataArr) throws Exception {
+    List<JSONObject> list = new ArrayList<>(dataArr.length());
+    for (int i = 0; i < dataArr.length(); i++) {
+      list.add(dataArr.getJSONObject(i));
+    }
+    return list;
+  }
+
+  private static List<String> extractIds(List<JSONObject> records) {
+    List<String> ids = new ArrayList<>();
+    for (JSONObject rec : records) {
+      String id = rec.optString("id", null);
+      if (id != null && !id.isEmpty()) {
+        ids.add(id);
+      }
+    }
+    return ids;
   }
 
   private String resolveVersionId(String priceListId) {
