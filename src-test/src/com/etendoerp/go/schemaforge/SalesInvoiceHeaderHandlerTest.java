@@ -54,6 +54,10 @@ public class SalesInvoiceHeaderHandlerTest {
 
   // ── helpers ───────────────────────────────────────────────────────────────
 
+  /**
+   * Builds a GET NeoContext for the sales-invoice header with the given record id.
+   * Pass {@code null} to simulate a list GET (no specific record).
+   */
   private static NeoContext getCtxWithId(String recordId) {
     return NeoContext.builder()
         .specName("sales-invoice")
@@ -64,11 +68,19 @@ public class SalesInvoiceHeaderHandlerTest {
         .build();
   }
 
+  /**
+   * Builds a list GET NeoContext (no recordId) for the sales-invoice header.
+   */
   private static NeoContext listCtx() {
     return getCtxWithId(null);
   }
 
-  /** Single invoice record with a businessPartner FK set. */
+  /**
+   * Wraps a single invoice record in the standard NEO response envelope.
+   *
+   * @param invoiceId  the invoice record id
+   * @param bPartnerId the businessPartner FK value to include in the record
+   */
   private static JSONObject singleRecordBody(String invoiceId, String bPartnerId) throws JSONException {
     JSONObject rec = new JSONObject()
         .put("id", invoiceId)
@@ -77,7 +89,11 @@ public class SalesInvoiceHeaderHandlerTest {
     return new JSONObject().put("response", new JSONObject().put("data", new JSONArray().put(rec)));
   }
 
-  /** List body where each entry has an id and businessPartner. */
+  /**
+   * Builds a list response body from a 2D array of {@code {invoiceId, bPartnerId}} pairs.
+   *
+   * @param entries array where each element is {@code {invoiceId, bPartnerId}}
+   */
   private static JSONObject listBody(String[][] entries) throws JSONException {
     JSONArray data = new JSONArray();
     for (String[] entry : entries) {
@@ -86,6 +102,13 @@ public class SalesInvoiceHeaderHandlerTest {
     return new JSONObject().put("response", new JSONObject().put("data", data));
   }
 
+  /**
+   * Creates a {@link SalesInvoiceHeaderHandler} with its {@code @Inject} fields replaced by the
+   * provided mocks via reflection, bypassing CDI in the unit-test context.
+   *
+   * @param mockClone   mock for {@link NeoCloneRecordHandler}
+   * @param mockPayment mock for {@link RegisterPaymentHandler}
+   */
   private static SalesInvoiceHeaderHandler handlerWithMocks(
       NeoCloneRecordHandler mockClone, RegisterPaymentHandler mockPayment) throws Exception {
     SalesInvoiceHeaderHandler handler = new SalesInvoiceHeaderHandler();
