@@ -24,6 +24,7 @@ import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.order.Order;
@@ -41,6 +42,9 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
  * the correct {@code grossUnitPrice} and flush it so the trigger recalculates
  * correctly within the same transaction.
  *
+ * <p>On GET: filters discount lines (dummy product {@code ETGO_DTO}) from the response so the
+ * UI never displays the internal discount line as a regular product line.
+ *
  * <p>Registered via {@code javaQualifier = "orderLineHandler"} on the lines
  * entity of sales-order, purchase-order and sales-quotation specs.
  */
@@ -54,30 +58,25 @@ public class OrderLineHandler implements NeoHandler {
     if (!NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return null;
     }
-    if (!"POST".equals(context.getHttpMethod())) {
-      return null;
+
+    // For POST: apply gross-unit-price normalisation on tax-inclusive price lists.
+    if ("POST".equals(context.getHttpMethod())) {
+      JSONObject body = context.getRequestBody();
+      if (body != null && body.optDouble("grossUnitPrice", -1) > 0) {
+        // parentId is injected by NeoCrudHandler from the request body before this hook runs.
+        String orderId = body.optString("parentId", null);
+        if (orderId != null && !orderId.isEmpty()) {
+          Order order = OBDal.getInstance().get(Order.class, orderId);
+          if (order != null && order.getPriceList() != null) {
+            NeoCommercialLinePolicy.normalizeOrderLineSelectorPriceMapping(
+                body,
+                Boolean.TRUE.equals(order.getPriceList().isPriceIncludesTax()),
+                order.getPriceList().getIdentifier());
+          }
+        }
+      }
     }
 
-    JSONObject body = context.getRequestBody();
-    if (body.optDouble("grossUnitPrice", -1) <= 0) {
-      return null;
-    }
-
-    // parentId is injected by NeoCrudHandler from the request body before this hook runs.
-    String orderId = body.optString("parentId", null);
-    if (orderId == null || orderId.isEmpty()) {
-      return null;
-    }
-
-    Order order = OBDal.getInstance().get(Order.class, orderId);
-    if (order == null || order.getPriceList() == null) {
-      return null;
-    }
-
-    NeoCommercialLinePolicy.normalizeOrderLineSelectorPriceMapping(
-        body,
-        Boolean.TRUE.equals(order.getPriceList().isPriceIncludesTax()),
-        order.getPriceList().getIdentifier());
     return null;
   }
 
@@ -86,12 +85,89 @@ public class OrderLineHandler implements NeoHandler {
     if (!NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return null;
     }
-    if (!"PATCH".equals(context.getHttpMethod())) {
-      return null;
+
+    String method = context.getHttpMethod();
+
+    // Filter discount lines from GET responses so the UI never sees them.
+    if ("GET".equals(method)) {
+      return filterDiscountLinesFromResponse(context);
     }
 
+    // Existing PATCH logic: fix grossUnitPrice on tax-inclusive price lists.
+    if ("PATCH".equals(method)) {
+      return fixGrossPriceAfterPatch(context);
+    }
+
+    return null;
+  }
+
+  /**
+   * Callout post-hook: enrich the response with a synthetic {@code taxRate} update
+   * when the user changed the line tax. Logic shared with invoice lines lives in
+   * {@link LineCalloutTaxRateHelper}.
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    return LineCalloutTaxRateHelper.augmentTaxRate(context);
+  }
+
+  // -------------------------------------------------------------------------
+  // Private helpers
+  // -------------------------------------------------------------------------
+
+  /**
+   * Removes discount lines (dummy product {@value TotalDiscountService#DISCOUNT_PRODUCT_ID})
+   * from the GET response data array. Returns a new NeoResponse if any lines were removed,
+   * or {@code null} to keep the original.
+   */
+  private NeoResponse filterDiscountLinesFromResponse(NeoContext context) {
+    NeoResponse prev = context.getPreviousResult();
+    if (prev == null || prev.getBody() == null) {
+      return null;
+    }
+    try {
+      JSONObject body = prev.getBody();
+      JSONObject responseWrapper = body.optJSONObject("response");
+      if (responseWrapper == null) {
+        return null;
+      }
+      JSONArray dataArr = responseWrapper.optJSONArray("data");
+      if (dataArr == null || dataArr.length() == 0) {
+        return null;
+      }
+      JSONArray filtered = new JSONArray();
+      boolean removed = false;
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject row = dataArr.optJSONObject(i);
+        if (row == null) {
+          continue;
+        }
+        String productId = row.optString("product", "");
+        if (TotalDiscountService.DISCOUNT_PRODUCT_ID.equals(productId)) {
+          removed = true;
+        } else {
+          filtered.put(row);
+        }
+      }
+      if (!removed) {
+        return null;
+      }
+      responseWrapper.put("data", filtered);
+      return NeoResponse.ok(body);
+    } catch (Exception e) {
+      log.warn("[OrderLineHandler] Could not filter discount lines from GET response: {}",
+          e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Post-PATCH fix: corrects {@code grossUnitPrice} on tax-inclusive price lists when the DB
+   * trigger derived the wrong net price.
+   */
+  private NeoResponse fixGrossPriceAfterPatch(NeoContext context) {
     JSONObject body = context.getRequestBody();
-    if (!body.has("unitPrice")) {
+    if (body == null || !body.has("unitPrice")) {
       return null;
     }
 
@@ -151,15 +227,5 @@ public class OrderLineHandler implements NeoHandler {
     OBDal.getInstance().flush();
 
     return null;
-  }
-
-  /**
-   * Callout post-hook: enrich the response with a synthetic {@code taxRate} update
-   * when the user changed the line tax. Logic shared with invoice lines lives in
-   * {@link LineCalloutTaxRateHelper}.
-   */
-  @Override
-  public NeoResponse afterCallout(NeoContext context) {
-    return LineCalloutTaxRateHelper.augmentTaxRate(context);
   }
 }

@@ -35,14 +35,94 @@ import org.openbravo.dal.service.OBDal;
 /**
  * Shared base for order-type header handlers (Sales Order, Purchase Order).
  *
- * The {@code afterHandle} post-hook appends {@code hasLinkedDocuments} to every
+ * <p>The {@code afterHandle} post-hook appends {@code hasLinkedDocuments} to every
  * record in GET responses. Single-record GETs use a LIMIT 1 query; list GETs
  * use a single batch IN query to avoid N+1. Subclasses only need to implement
  * {@code handle()} with their window-specific action dispatching.
+ *
+ * <p>The static helper {@link #applyTotalDiscountBeforeComplete(NeoContext, TotalDiscountService, boolean)}
+ * is called from the pre-hook ({@code handle()}) of each header subclass. It creates the discount
+ * line just before the Complete action (documentAction=CO) is processed by the CRUD layer, so the
+ * discount line reflects the final set of product lines and is included in the completed document.
  */
 public abstract class AbstractOrderHeaderHandler implements NeoHandler {
 
   private final Logger log = LogManager.getLogger(getClass());
+
+  /**
+   * Creates (or re-creates) the total discount line immediately before the Complete action
+   * (documentAction=CO) is processed by the default handler.
+   *
+   * <p>Must be called at the top of {@code handle()} in every header subclass that supports
+   * total discount. It intercepts two paths:
+   * <ul>
+   *   <li><b>CRUD PATCH/PUT</b> — body contains {@code { documentAction: "CO" }}</li>
+   *   <li><b>ACTION POST</b> — frontend confirm button sends
+   *       POST to {@code /action/documentAction} with body
+   *       {@code { fieldValues: { documentAction: "CO" } }}</li>
+   * </ul>
+   *
+   * @param context   the current NeoContext
+   * @param service   the TotalDiscountService CDI bean injected by the subclass
+   * @param isInvoice {@code true} for invoice documents, {@code false} for order documents
+   */
+  static void applyTotalDiscountBeforeComplete(NeoContext context, TotalDiscountService service,
+      boolean isInvoice) {
+    if (service == null) {
+      return;
+    }
+    String recordId = context.getRecordId();
+    if (recordId == null || recordId.isEmpty()) {
+      return;
+    }
+
+    boolean isComplete = false;
+
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
+      // CRUD: PATCH/PUT with { documentAction: "CO" } in the body.
+      String method = context.getHttpMethod();
+      if ("PATCH".equals(method) || "PUT".equals(method)) {
+        JSONObject body = context.getRequestBody();
+        if (body != null && "CO".equals(body.optString("documentAction", ""))) {
+          isComplete = true;
+        }
+      }
+    } else if (NeoEndpointType.ACTION.equals(context.getEndpointType())) {
+      // ACTION: POST to /action/documentAction.
+      // Body format varies by caller:
+      //   useDocumentAction hook  → { docAction: "CO" }
+      //   handleSaveAndProcess    → { fieldValues: { documentAction: "CO" } }
+      if ("documentAction".equals(context.getFieldName())) {
+        JSONObject body = context.getRequestBody();
+        if (body != null) {
+          JSONObject fieldValues = body.optJSONObject("fieldValues");
+          String docAction;
+          if (fieldValues != null) {
+            docAction = fieldValues.optString("documentAction", "");
+          } else {
+            docAction = body.optString("docAction", body.optString("documentAction", ""));
+          }
+          if ("CO".equals(docAction)) {
+            isComplete = true;
+          }
+        }
+      }
+    }
+
+    if (!isComplete) {
+      return;
+    }
+    try {
+      LogManager.getLogger(AbstractOrderHeaderHandler.class)
+          .info("Recalculating total discount before complete for {} id={}",
+              isInvoice ? "invoice" : "order", recordId);
+      service.recalculate(recordId, isInvoice);
+    } catch (Exception e) {
+      LogManager.getLogger(AbstractOrderHeaderHandler.class)
+          .error("Error recalculating total discount before complete for {} id={}",
+              isInvoice ? "invoice" : "order", recordId, e);
+    }
+  }
 
   @Override
   public NeoResponse afterHandle(NeoContext context) {

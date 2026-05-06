@@ -30,6 +30,10 @@ import javax.inject.Named;
  *   <li>{@code rejectQuotation} → {@link RejectQuotationHandler}</li>
  *   <li>{@code createRejectReason} → {@link CreateRejectReasonHandler}</li>
  * </ul>
+ *
+ * <p>Before the Complete action (documentAction=CO), creates the total discount line so it is
+ * included in the confirmed quotation. Delegates to {@link TotalDiscountService} via the shared
+ * helper in {@link AbstractOrderHeaderHandler}.
  */
 @Named("salesQuotationHeaderHandler")
 public class SalesQuotationHeaderHandler implements NeoHandler {
@@ -37,8 +41,12 @@ public class SalesQuotationHeaderHandler implements NeoHandler {
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
 
+  @Inject
+  private TotalDiscountService totalDiscountService;
+
   @Override
   public NeoResponse handle(NeoContext context) {
+    AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
     NeoResponse result = cloneRecordHandler.handle(context);
     if (result != null) {
       return result;
