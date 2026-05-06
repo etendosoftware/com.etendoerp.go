@@ -80,6 +80,7 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 import org.openbravo.model.pricing.pricelist.PriceList;
+import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * Unit tests for {@link CreateDraftInvoiceHandler}.
@@ -1855,7 +1856,8 @@ public class CreateDraftInvoiceHandlerTest {
   public void testCreateFromOrderPersistsHeaderAndDelegatesLines() throws JSONException {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
-        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class);
+        MockedStatic<Utility> utilityMock = Mockito.mockStatic(Utility.class)) {
       OBDal dal = mock(OBDal.class);
       Session session = mock(Session.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
@@ -1867,6 +1869,8 @@ public class CreateDraftInvoiceHandlerTest {
       Invoice invoice = mock(Invoice.class);
       obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
       when(provider.get(Invoice.class)).thenReturn(invoice);
+      utilityMock.when(() -> Utility.getDocumentNo(any(DalConnectionProvider.class),
+          Mockito.nullable(String.class), eq("C_Invoice"), eq(true))).thenReturn("INV-200");
 
       CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
       weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
@@ -1886,6 +1890,7 @@ public class CreateDraftInvoiceHandlerTest {
       assertSame(invoice, handler.ensuredGrossInvoice);
       verify(invoice).setDocumentType(handler.resolvedDocType);
       verify(invoice).setTransactionDocument(handler.resolvedDocType);
+      verify(invoice).setDocumentNo("INV-200");
       verify(invoice).setSalesTransaction(true);
       verify(dal).save(invoice);
       verify(process).createInvoiceLinesFromDocumentLines(eq(handler.selectedLines), eq(invoice), eq(OrderLine.class));

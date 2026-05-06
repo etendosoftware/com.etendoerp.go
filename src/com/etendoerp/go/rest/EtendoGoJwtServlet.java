@@ -38,7 +38,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -50,8 +49,11 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
-import com.etendoerp.go.common.CorsUtils;
+import com.etendoerp.go.common.EtendoGoCorsServlet;
+import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
+import com.etendoerp.go.onboarding.OnboardingDefaultCustomerService;
+import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -73,7 +75,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *
  * Database access uses OBDal/OBQuery, including the generated DAL entity for ETGO_Account.
  */
-public class EtendoGoJwtServlet extends HttpBaseServlet {
+public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private static final Logger log = LogManager.getLogger(EtendoGoJwtServlet.class);
 
@@ -100,25 +102,15 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
   private static final String PROGRESS_ERROR = "error";
   private static final String PROGRESS_ORGANIZATION = "organization";
   private static final String PROGRESS_DATASET = "dataset";
+  private static final String PROGRESS_SEQUENCES = "sequences";
+  private static final String PROGRESS_CUSTOMER = "customer";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
 
-  // --- CORS ---
-
-  private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
-    CorsUtils.apply(request, response, "GET, POST, OPTIONS",
-        "Content-Type, Authorization, Accept", null, false);
-  }
-
-  @Override
-  public void service(HttpServletRequest request, HttpServletResponse response)
-      throws javax.servlet.ServletException, IOException {
-    setCorsHeaders(request, response);
-    if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
-      response.setStatus(HttpServletResponse.SC_NO_CONTENT);
-      return;
-    }
-    super.service(request, response);
-  }
+  OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
+  OnboardingSequenceGeneratorService onboardingSequenceGeneratorService =
+      new OnboardingSequenceGeneratorService();
+  OnboardingDefaultCustomerService onboardingDefaultCustomerService =
+      new OnboardingDefaultCustomerService();
 
   // --- HTTP method dispatchers ---
 
@@ -211,7 +203,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
       writeResponse(response, HttpServletResponse.SC_CREATED, result);
     } catch (RuntimeException e) {
-      rollbackDalChanges("account registration", e);
+      EtendoGoDalHelper.rollbackDalChanges("account registration", e, log);
       log.error("Database error during account registration", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Registration failed due to a server error");
@@ -274,7 +266,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
-      rollbackDalChanges("login", e);
+      EtendoGoDalHelper.rollbackDalChanges("login", e, log);
       log.error("Database error during login", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Login failed due to a server error");
@@ -513,9 +505,12 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
         return;
       }
 
-      if (!ensureOnboardingDataset(writer, clientId, orgId, organizationCreated)) {
+      if (!ensureOnboardingDataset(writer, clientId, orgId, organizationCreated,
+          adminContext.adminUserId, adminContext.adminRoleId)) {
         return;
       }
+
+      EtendoGoDalHelper.commitDalChanges("onboarding", log);
 
       sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
       sendProgress(writer, "finalize", "done", "Environment ready");
@@ -523,7 +518,7 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
 
     } catch (Exception e) {
       log.error("Onboarding failed", e);
-      rollbackDalChanges("onboarding", e);
+      EtendoGoDalHelper.rollbackDalChanges("onboarding", e, log);
       sendProgress(writer, PROGRESS_ERROR, PROGRESS_ERROR,
           "Onboarding failed: " + e.getMessage());
       sendFinalResult(writer, false, "Onboarding failed: " + e.getMessage());
@@ -722,23 +717,29 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
   }
 
   boolean ensureOnboardingDataset(PrintWriter writer, String clientId, String orgId,
-      boolean importRequired) {
+      boolean importRequired, String adminUserId, String adminRoleId) {
+    if (importRequired && !importOnboardingDataset(writer, clientId, orgId)) {
+      return false;
+    }
     if (!importRequired) {
       sendProgress(writer, PROGRESS_DATASET, "done",
           "Existing organization detected, skipping onboarding dataset import");
-      return true;
     }
-    return importOnboardingDataset(writer, clientId, orgId);
+    if (!generateOnboardingSequences(writer, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
+    }
+    return ensureDefaultCustomer(writer, clientId, orgId, adminUserId, adminRoleId);
   }
 
   boolean importOnboardingDataset(PrintWriter writer, String clientId, String orgId) {
     sendProgress(writer, PROGRESS_DATASET, PROGRESS_IN_PROGRESS,
         "Importing onboarding dataset...");
     try {
-      createOnboardingDatasetImportService().importDataset(clientId, orgId);
+      onboardingDatasetImportService.importDataset(clientId, orgId);
       sendProgress(writer, PROGRESS_DATASET, "done", "Onboarding dataset imported");
       return true;
     } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding dataset import", e, log);
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Onboarding dataset import failed";
       sendProgress(writer, PROGRESS_DATASET, PROGRESS_ERROR, errorMessage);
@@ -747,9 +748,43 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     }
   }
 
-  OnboardingDatasetImportService createOnboardingDatasetImportService() {
-    return new OnboardingDatasetImportService();
+  boolean generateOnboardingSequences(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, PROGRESS_SEQUENCES, PROGRESS_IN_PROGRESS,
+        "Generating organization sequences...");
+    try {
+      int count = onboardingSequenceGeneratorService.generateSequences(clientId, orgId, adminUserId,
+          adminRoleId);
+      sendProgress(writer, PROGRESS_SEQUENCES, "done",
+          "Organization sequences generated: " + count);
+      return true;
+    } catch (Exception e) {
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Organization sequence generation failed";
+      sendProgress(writer, PROGRESS_SEQUENCES, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
   }
+
+  boolean ensureDefaultCustomer(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, PROGRESS_CUSTOMER, PROGRESS_IN_PROGRESS,
+        "Creating default customer...");
+    try {
+      onboardingDefaultCustomerService.ensureDefaultCustomer(clientId, orgId, adminUserId,
+          adminRoleId);
+      sendProgress(writer, PROGRESS_CUSTOMER, "done", "Default customer ready");
+      return true;
+    } catch (Exception e) {
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Default customer creation failed";
+      sendProgress(writer, PROGRESS_CUSTOMER, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
 
 
   /**
@@ -787,14 +822,6 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
     }
   }
 
-  private void rollbackDalChanges(String operation, Exception failure) {
-    try {
-      OBDal.getInstance().rollbackAndClose();
-    } catch (Exception rollbackEx) {
-      log.error("Rollback failed after {}", operation, rollbackEx);
-      log.debug("Original failure while handling {}", operation, failure);
-    }
-  }
 
   // --- Password utilities ---
 
@@ -912,24 +939,13 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
    */
   private void writeError(HttpServletResponse response, int status, String message)
       throws IOException {
-    response.setStatus(status);
-    response.setContentType("application/json");
-    response.setCharacterEncoding(UTF_8);
-    try (PrintWriter writer = response.getWriter()) {
-      try {
-        JSONObject error = new JSONObject();
-        error.put(FIELD_MESSAGE, message);
-        error.put(FIELD_STATUS, status);
-
-        JSONObject wrapper = new JSONObject();
-        wrapper.put(PROGRESS_ERROR, error);
-
-        writer.write(wrapper.toString());
-      } catch (JSONException e) {
-        // Fallback to plain text if JSON construction fails
-        writer.write("{\"error\":{\"message\":\"" + message + "\",\"status\":" + status + "}}");
-      }
-    }
+    ProtocolErrorAdapters.writeRestError(
+        response,
+        status,
+        message,
+        FIELD_MESSAGE,
+        FIELD_STATUS,
+        PROGRESS_ERROR);
   }
 
   private static class OnboardingRequestData {

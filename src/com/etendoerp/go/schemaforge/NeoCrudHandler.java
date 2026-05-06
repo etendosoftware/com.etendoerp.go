@@ -225,9 +225,44 @@ class NeoCrudHandler {
 
       return executeJsonServiceAndBuildResponse(
           context, adTab, dalEntityName, fieldFilter, jsonService, params);
+    } catch (MissingRequiredFieldsException e) {
+      // ETP-3894: structured 400 lists the missing fields so the UI can highlight them.
+      return buildMissingRequiredFieldsResponse(e);
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    }
+  }
+
+  /**
+   * ETP-3894: build the structured 400 response returned when a create/update is rejected
+   * because mandatory user-input fields are missing. Body shape:
+   * <pre>{
+   *   "error": {
+   *     "code": "MISSING_REQUIRED_FIELDS",
+   *     "message": "...",
+   *     "fields": ["bpartner", "priceList", ...]
+   *   }
+   * }</pre>
+   */
+  private NeoResponse buildMissingRequiredFieldsResponse(MissingRequiredFieldsException e) {
+    try {
+      JSONArray fieldsArr = new JSONArray();
+      for (String f : e.getFields()) {
+        fieldsArr.put(f);
+      }
+      JSONObject errorObj = new JSONObject();
+      errorObj.put("code", MissingRequiredFieldsException.ERROR_CODE);
+      errorObj.put("status", HttpServletResponse.SC_BAD_REQUEST);
+      errorObj.put("message", "Missing required fields");
+      errorObj.put("fields", fieldsArr);
+      JSONObject body = new JSONObject();
+      body.put("error", errorObj);
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
+    } catch (Exception fallback) {
+      log.warn("Could not build MISSING_REQUIRED_FIELDS body: {}", fallback.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          MissingRequiredFieldsException.ERROR_CODE);
     }
   }
 
@@ -435,9 +470,10 @@ class NeoCrudHandler {
     long perfInjectDefaults = System.nanoTime();
     executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, userSubmittedFields);
     long perfCalloutCascade = System.nanoTime();
-    NeoDefaultsService.injectProductDerivedUomIfMissing(filteredBody);
-    NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
-    // TODO move this compatibility rule into the shared create-defaults helper once the merge settles.
+    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(filteredBody);
     stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
     // Coerce String primitives injected by injectMandatoryDefaults to their correct Java types.
     // Utility.getDefault() always returns String; JsonToDataConverter has no String→BigDecimal/
@@ -448,6 +484,14 @@ class NeoCrudHandler {
     // to UPDATE an existing record instead of INSERT a new one.
     if (filteredBody != null) {
       filteredBody.remove("id");
+    }
+    // ETP-3894: validate that all mandatory user-input fields have values after the full
+    // resolution chain (defaults + session + parent + callout cascade). Throw a structured
+    // exception so the UI can highlight the missing fields instead of letting Hibernate fail
+    // with a generic not-null violation.
+    List<String> missing = NeoDefaultsService.findMissingMandatoryFields(filteredBody, adTab, userSubmittedFields);
+    if (!missing.isEmpty()) {
+      throw new MissingRequiredFieldsException(missing);
     }
     long perfPreSave = System.nanoTime();
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
@@ -543,6 +587,7 @@ class NeoCrudHandler {
     }
   }
 
+
   /**
    * Executes the PUT/PATCH (update) JSON service operation and returns the raw result string.
    */
@@ -554,7 +599,9 @@ class NeoCrudHandler {
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
     // available here to compute the correct net amount even for products where SL_Invoice_Amt
     // throws on the sales invoice context (e.g. tax-exclusive price lists).
-    NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
   }
