@@ -24,7 +24,6 @@ import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.order.Order;
@@ -90,7 +89,7 @@ public class OrderLineHandler implements NeoHandler {
 
     // Filter discount lines from GET responses so the UI never sees them.
     if ("GET".equals(method)) {
-      return filterDiscountLinesFromResponse(context);
+      return DiscountLineFilter.filterFromResponse(context);
     }
 
     // Existing PATCH logic: fix grossUnitPrice on tax-inclusive price lists.
@@ -109,56 +108,6 @@ public class OrderLineHandler implements NeoHandler {
   @Override
   public NeoResponse afterCallout(NeoContext context) {
     return LineCalloutTaxRateHelper.augmentTaxRate(context);
-  }
-
-  // -------------------------------------------------------------------------
-  // Private helpers
-  // -------------------------------------------------------------------------
-
-  /**
-   * Removes discount lines (dummy product {@value TotalDiscountService#DISCOUNT_PRODUCT_ID})
-   * from the GET response data array. Returns a new NeoResponse if any lines were removed,
-   * or {@code null} to keep the original.
-   */
-  private NeoResponse filterDiscountLinesFromResponse(NeoContext context) {
-    NeoResponse prev = context.getPreviousResult();
-    if (prev == null || prev.getBody() == null) {
-      return null;
-    }
-    try {
-      JSONObject body = prev.getBody();
-      JSONObject responseWrapper = body.optJSONObject("response");
-      if (responseWrapper == null) {
-        return null;
-      }
-      JSONArray dataArr = responseWrapper.optJSONArray("data");
-      if (dataArr == null || dataArr.length() == 0) {
-        return null;
-      }
-      JSONArray filtered = new JSONArray();
-      boolean removed = false;
-      for (int i = 0; i < dataArr.length(); i++) {
-        JSONObject row = dataArr.optJSONObject(i);
-        if (row == null) {
-          continue;
-        }
-        String productId = row.optString("product", "");
-        if (TotalDiscountService.DISCOUNT_PRODUCT_ID.equals(productId)) {
-          removed = true;
-        } else {
-          filtered.put(row);
-        }
-      }
-      if (!removed) {
-        return null;
-      }
-      responseWrapper.put("data", filtered);
-      return NeoResponse.ok(body);
-    } catch (Exception e) {
-      log.warn("[OrderLineHandler] Could not filter discount lines from GET response: {}",
-          e.getMessage());
-      return null;
-    }
   }
 
   /**
