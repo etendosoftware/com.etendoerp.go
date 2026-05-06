@@ -53,6 +53,7 @@ import org.openbravo.model.materialmgmt.transaction.InventoryCountLine;
 public class InventoryLineHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(InventoryLineHandler.class);
+  private static final String BOOK_QTY_FIELD = "bookQuantity";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -106,7 +107,7 @@ public class InventoryLineHandler implements NeoHandler {
     if (updates == null) {
       return null;
     }
-    if (!updates.has("bookQuantity") && !updates.has("quantityCount")) {
+    if (!updates.has(BOOK_QTY_FIELD) && !updates.has("quantityCount")) {
       return null;
     }
     try {
@@ -130,7 +131,7 @@ public class InventoryLineHandler implements NeoHandler {
         return null;
       }
       double qty = queryProductStock(locInfo.warehouseId, productId);
-      overrideCalloutValue(updates, "bookQuantity", qty);
+      overrideCalloutValue(updates, BOOK_QTY_FIELD, qty);
       overrideCalloutValue(updates, "quantityCount", qty);
       log.debug("[InventoryLineHandler] callout: overrode book/count={} for product={} warehouse={}",
           qty, productId, locInfo.warehouseId);
@@ -170,7 +171,7 @@ public class InventoryLineHandler implements NeoHandler {
     String productId = resolveProductId(body);
     if (productId != null) {
       double qty = queryProductStock(locInfo.warehouseId, productId);
-      body.put("bookQuantity", qty);
+      body.put(BOOK_QTY_FIELD, qty);
       log.debug("[InventoryLineHandler] POST: storageBin={} bookQuantity={} product={} warehouse={}",
           locInfo.locatorId, qty, productId, locInfo.warehouseId);
     } else {
@@ -225,10 +226,15 @@ public class InventoryLineHandler implements NeoHandler {
 
   // ── helpers ──────────────────────────────────────────────────────────
 
+  /** Resolved locator and warehouse data for a physical inventory header. */
   public static class LocatorInfo {
+    /** AD primary key of the M_Locator record. */
     public final String locatorId;
+    /** Search key (value) of the locator. */
     public final String locatorValue;
+    /** Display name of the warehouse. */
     public final String warehouseName;
+    /** AD primary key of the M_Warehouse record. */
     public final String warehouseId;
 
     LocatorInfo(String locatorId, String locatorValue, String warehouseName, String warehouseId) {
@@ -255,6 +261,9 @@ public class InventoryLineHandler implements NeoHandler {
 
   /**
    * Returns the default active locator for the warehouse of the given inventory record.
+   *
+   * @param inventoryId AD primary key of the {@code M_Inventory} record
+   * @return resolved {@link LocatorInfo}, or {@code null} if none found
    */
   public static LocatorInfo resolveDefaultLocatorInfo(String inventoryId) {
     try {
