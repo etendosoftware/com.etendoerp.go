@@ -37,9 +37,9 @@ import org.openbravo.model.materialmgmt.transaction.InventoryCount;
  * The SL_Inventory_Product callout sets storageBin to the product's global stock location,
  * which may belong to a different warehouse; this hook corrects it.
  *
- * <p>Product stock data (product_LOC, product_QTY, product_quantityOnHand, etc.) is now
- * returned warehouse-scoped by the custom
- * {@link InventoryProductSelectorServlet} rather than by a post-hook here.
+ * <p>Product stock data (product_LOC, product_QTY, product_quantityOnHand, etc.) is
+ * returned warehouse-scoped by {@link com.etendoerp.go.schemaforge.selector.policy.InventoryProductSelectorPolicy}
+ * via the {@code SelectorEnrichmentPolicy} SPI.
  *
  * <p>Registered via {@code JAVA_QUALIFIER = 'inventoryLine'} on the
  * ETGO_SF_ENTITY record for the inventoryLine entity in the physical-inventory spec.
@@ -84,11 +84,11 @@ public class InventoryLineHandler implements NeoHandler {
 
   // ── helpers ──────────────────────────────────────────────────────────
 
-  static class LocatorInfo {
-    final String locatorId;
-    final String locatorValue;
-    final String warehouseName;
-    final String warehouseId;
+  public static class LocatorInfo {
+    public final String locatorId;
+    public final String locatorValue;
+    public final String warehouseName;
+    public final String warehouseId;
 
     LocatorInfo(String locatorId, String locatorValue, String warehouseName, String warehouseId) {
       this.locatorId = locatorId;
@@ -101,7 +101,7 @@ public class InventoryLineHandler implements NeoHandler {
   /**
    * Returns the default active locator for the warehouse of the given inventory record.
    */
-  static LocatorInfo resolveDefaultLocatorInfo(String inventoryId) {
+  public static LocatorInfo resolveDefaultLocatorInfo(String inventoryId) {
     try {
       InventoryCount inventory = OBDal.getInstance().get(InventoryCount.class, inventoryId);
       if (inventory == null || inventory.getWarehouse() == null) {
