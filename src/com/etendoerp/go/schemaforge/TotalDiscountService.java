@@ -257,8 +257,6 @@ public class TotalDiscountService {
       int deleted = ps.executeUpdate();
       if (deleted > 0) {
         log.debug("Deleted {} discount line(s) from {} id={}", deleted, lineTable, headerId);
-        // Evict stale entities from the L1 cache so subsequent OBDal reads see the deletion.
-        OBDal.getInstance().getSession().clear();
       }
     } catch (Exception e) {
       log.error("Could not delete discount line from {} id={}: {}", lineTable, headerId,
