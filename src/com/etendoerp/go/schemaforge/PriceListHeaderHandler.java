@@ -29,7 +29,9 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.model.pricing.pricelist.PriceListSchema;
@@ -59,7 +61,7 @@ public class PriceListHeaderHandler implements NeoHandler {
 
   private static final String FIELD_PRICE_LIST_VERSION = "priceListVersion";
   private static final int MAX_SCHEMA_NAME_LENGTH = 60;
-  private static final String SCHEMA_NAME_SUFFIX = " Schema";
+  private static final String DEFAULT_SCHEMA_NAME = "Esquema de Lista de Precios";
 
   private final Logger log = LogManager.getLogger(getClass());
 
@@ -174,12 +176,7 @@ public class PriceListHeaderHandler implements NeoHandler {
   }
 
   private void createDefaultVersion(PriceList priceList) {
-    PriceListSchema schema = OBProvider.getInstance().get(PriceListSchema.class);
-    schema.setNewOBObject(true);
-    schema.setClient(priceList.getClient());
-    schema.setOrganization(priceList.getOrganization());
-    schema.setName(buildSchemaName(priceList.getName()));
-    OBDal.getInstance().save(schema);
+    PriceListSchema schema = findOrCreateSchema(priceList);
 
     PriceListVersion version = OBProvider.getInstance().get(PriceListVersion.class);
     version.setNewOBObject(true);
@@ -190,17 +187,39 @@ public class PriceListHeaderHandler implements NeoHandler {
     version.setPriceListSchema(schema);
     version.setValidFromDate(java.sql.Date.valueOf(LocalDate.of(Year.now().getValue(), 1, 1)));
     OBDal.getInstance().save(version);
+    // Flush so the criteria query in the subsequent annotateRecords step sees the new version.
+    OBDal.getInstance().flush();
 
     log.debug("Auto-created price list version '{}' for price list '{}'",
         version.getName(), priceList.getName());
   }
 
-  private static String buildSchemaName(String priceListName) {
-    String schemaName = priceListName + SCHEMA_NAME_SUFFIX;
-    if (schemaName.length() > MAX_SCHEMA_NAME_LENGTH) {
-      schemaName = schemaName.substring(0, MAX_SCHEMA_NAME_LENGTH - 3) + "...";
+  /**
+   * Reuses an existing active {@link PriceListSchema} for the same client, falling back to
+   * the standard "Esquema de Lista de Precios" if none exists yet (first-run bootstrap).
+   * This avoids creating a new schema per price list, which clutters the AD window.
+   */
+  private PriceListSchema findOrCreateSchema(PriceList priceList) {
+    OBCriteria<PriceListSchema> crit = OBDal.getInstance()
+        .createCriteria(PriceListSchema.class);
+    crit.add(Restrictions.eq(PriceListSchema.PROPERTY_CLIENT, priceList.getClient()));
+    crit.add(Restrictions.eq(PriceListSchema.PROPERTY_ACTIVE, true));
+    crit.setMaxResults(1);
+    List<PriceListSchema> existing = crit.list();
+    if (!existing.isEmpty()) {
+      return existing.get(0);
     }
-    return schemaName;
+    PriceListSchema schema = OBProvider.getInstance().get(PriceListSchema.class);
+    schema.setNewOBObject(true);
+    schema.setClient(priceList.getClient());
+    schema.setOrganization(priceList.getOrganization());
+    schema.setName(truncate(DEFAULT_SCHEMA_NAME, MAX_SCHEMA_NAME_LENGTH));
+    OBDal.getInstance().save(schema);
+    return schema;
+  }
+
+  private static String truncate(String value, int maxLength) {
+    return value.length() <= maxLength ? value : value.substring(0, maxLength - 3) + "...";
   }
 
   private void syncVersionNameForFirstRecord(JSONArray dataArr) throws Exception {

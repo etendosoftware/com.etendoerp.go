@@ -126,6 +126,15 @@ public class PriceListHeaderHandlerTest {
     return crit;
   }
 
+  @SuppressWarnings("unchecked")
+  private static OBCriteria<PriceListSchema> stubSchemaCriteria(OBDal dal,
+      java.util.List<PriceListSchema> schemas) {
+    OBCriteria<PriceListSchema> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(PriceListSchema.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(schemas);
+    return crit;
+  }
+
   // ── handle() ──────────────────────────────────────────────────────────────
 
   /**
@@ -364,11 +373,14 @@ public class PriceListHeaderHandlerTest {
   }
 
   /**
-   * Verifies that on POST, when the price list has no version, the handler creates a new
-   * {@link PriceListSchema} and a new {@link PriceListVersion} via OBProvider and saves both.
+   * Verifies that on POST, when the price list has no version and an existing
+   * {@link PriceListSchema} is available for the client, the handler reuses that schema
+   * (does not create a new one) and saves the new {@link PriceListVersion}.
+   * Also verifies that {@code flush()} is called so the subsequent annotation step sees
+   * the just-saved version.
    */
   @Test
-  public void testAfterHandlePostCreatesVersionWhenMissing() throws Exception {
+  public void testAfterHandlePostCreatesVersionReusingExistingSchema() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
       OBDal dal = mock(OBDal.class);
@@ -381,10 +393,11 @@ public class PriceListHeaderHandlerTest {
       when(dal.get(PriceList.class, "pl-new")).thenReturn(pl);
       stubVersionCriteria(dal, Collections.emptyList());
 
+      PriceListSchema existingSchema = mock(PriceListSchema.class);
+      stubSchemaCriteria(dal, Collections.singletonList(existingSchema));
+
       OBProvider provider = mock(OBProvider.class);
       obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
-      PriceListSchema schema = mock(PriceListSchema.class);
-      when(provider.get(PriceListSchema.class)).thenReturn(schema);
       PriceListVersion newVersion = mock(PriceListVersion.class);
       when(provider.get(PriceListVersion.class)).thenReturn(newVersion);
 
@@ -394,11 +407,56 @@ public class PriceListHeaderHandlerTest {
       NeoResponse result = new PriceListHeaderHandler().afterHandle(ctx);
 
       assertNotNull(result);
-      verify(dal, times(1)).save(schema);
+      // Existing schema reused: OBProvider was never asked for a new PriceListSchema
+      verify(provider, never()).get(PriceListSchema.class);
+      verify(dal, never()).save(any(PriceListSchema.class));
+      // Version was created and saved with the reused schema
       verify(dal, times(1)).save(newVersion);
       verify(newVersion).setName("My PL");
       verify(newVersion).setPriceList(pl);
-      verify(newVersion).setPriceListSchema(schema);
+      verify(newVersion).setPriceListSchema(existingSchema);
+      // Flush ensures the just-saved version is visible to the subsequent criteria query
+      verify(dal, times(1)).flush();
+    }
+  }
+
+  /**
+   * Verifies that on POST, when no {@link PriceListSchema} exists yet for the client
+   * (first-run bootstrap), the handler creates a default one with the standard name and
+   * uses it for the new version.
+   */
+  @Test
+  public void testAfterHandlePostCreatesSchemaWhenNoneExists() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      PriceList pl = mock(PriceList.class);
+      when(pl.getName()).thenReturn("My PL");
+      when(pl.getClient()).thenReturn(mock(Client.class));
+      when(pl.getOrganization()).thenReturn(mock(Organization.class));
+      when(dal.get(PriceList.class, "pl-new")).thenReturn(pl);
+      stubVersionCriteria(dal, Collections.emptyList());
+      stubSchemaCriteria(dal, Collections.emptyList());
+
+      OBProvider provider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      PriceListSchema newSchema = mock(PriceListSchema.class);
+      when(provider.get(PriceListSchema.class)).thenReturn(newSchema);
+      PriceListVersion newVersion = mock(PriceListVersion.class);
+      when(provider.get(PriceListVersion.class)).thenReturn(newVersion);
+
+      JSONObject body = singleRecordBody("pl-new");
+      NeoContext ctx = postCtxWithBody("pl-new", body);
+
+      NeoResponse result = new PriceListHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      verify(newSchema).setName("Esquema de Lista de Precios");
+      verify(dal, times(1)).save(newSchema);
+      verify(dal, times(1)).save(newVersion);
+      verify(newVersion).setPriceListSchema(newSchema);
     }
   }
 
