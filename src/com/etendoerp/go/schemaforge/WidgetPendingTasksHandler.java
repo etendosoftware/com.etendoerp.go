@@ -217,7 +217,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
    * Pending receptions: confirmed purchase orders where delivery status < 100%.
    */
   private void addPendingReceptions(JSONArray data, String clientId) throws Exception {
-    addPendingOrdersTask(data, clientId, "N", "qtyreserved", "purchase order",
+    addPendingOrdersTask(data, clientId, "N", "qtydelivered", "purchase order",
         "pending reception", "purchase-order", "/purchase-order?filter=" + FILTER_PENDING_DELIVERY,
         "pendingReceptions");
   }
@@ -230,7 +230,6 @@ public class WidgetPendingTasksHandler implements NeoHandler {
         + " WHERE o.issotrx = :isSalesTransaction"
         + "   AND o.docstatus = 'CO'"
         + "   AND o.iscancelled = 'N'"
-        + "   AND o.cancelledorder_id IS NULL"
         + "   AND o.ad_client_id = :clientId"
         + "   AND COALESCE(("
         + "     SELECT CASE"
