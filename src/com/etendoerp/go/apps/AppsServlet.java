@@ -25,6 +25,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -75,7 +76,7 @@ public class AppsServlet extends HttpBaseServlet {
       Collections.unmodifiableList(Arrays.asList("read:products", "read:users"));
 
   /** Lazily-loaded singleton - keys live on disk so we only read them once. */
-  private static volatile JwtIssuerService issuer;
+  private static final AtomicReference<JwtIssuerService> issuer = new AtomicReference<>();
 
   // --- CORS ---
 
@@ -211,13 +212,13 @@ public class AppsServlet extends HttpBaseServlet {
   // --- Issuer lifecycle ---
 
   private static JwtIssuerService getIssuer() throws Exception {
-    JwtIssuerService local = issuer;
+    JwtIssuerService local = issuer.get();
     if (local == null) {
       synchronized (AppsServlet.class) {
-        local = issuer;
+        local = issuer.get();
         if (local == null) {
           local = loadIssuer();
-          issuer = local;
+          issuer.set(local);
         }
       }
     }
