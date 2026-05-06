@@ -54,12 +54,15 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
    * (documentAction=CO) is processed by the default handler.
    *
    * <p>Must be called at the top of {@code handle()} in every header subclass that supports
-   * total discount. It intercepts two paths:
+   * total discount. It intercepts three paths:
    * <ul>
    *   <li><b>CRUD PATCH/PUT</b> — body contains {@code { documentAction: "CO" }}</li>
-   *   <li><b>ACTION POST</b> — frontend confirm button sends
+   *   <li><b>ACTION POST /documentAction</b> — frontend confirm button sends
    *       POST to {@code /action/documentAction} with body
    *       {@code { fieldValues: { documentAction: "CO" } }}</li>
+   *   <li><b>ACTION POST /DocAction</b> — quotation {@code SendToEvaluationModal} sends
+   *       POST to {@code /action/DocAction} with {@code { fieldValues: {} }}.
+   *       This always syncs the discount line regardless of the stored action value.</li>
    * </ul>
    *
    * @param context   the current NeoContext
@@ -106,6 +109,12 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
             isComplete = true;
           }
         }
+      } else if ("DocAction".equals(context.getFieldName())) {
+        // DocAction process-button path (used by quotations: SendToEvaluationModal sends
+        // POST /action/DocAction { fieldValues: {} } with no explicit docAction value).
+        // Always sync: recalculate() reads the stored pct and creates the discount line when
+        // pct > 0 (CO path), or deletes any stale line when reopened (RE path).
+        isComplete = true;
       }
     }
 
