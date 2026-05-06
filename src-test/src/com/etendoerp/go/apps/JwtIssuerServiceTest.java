@@ -9,7 +9,7 @@
  * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
  * implied. See the License for the specific language governing rights
  * and limitations under the License.
- * All portions are Copyright © 2021-2026 FUTIT SERVICES, S.L
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
  * All Rights Reserved.
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
@@ -40,7 +40,7 @@ import com.auth0.jwt.interfaces.DecodedJWT;
 /**
  * Unit tests for {@link JwtIssuerService}.
  *
- * <p>Uses an in-memory RSA keypair generated per test — no dependency on
+ * <p>Uses an in-memory RSA keypair generated per test - no dependency on
  * {@code config/apps-spike/*.pem} being present, which keeps tests portable.
  */
 public class JwtIssuerServiceTest {

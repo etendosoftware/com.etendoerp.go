@@ -9,7 +9,7 @@
  * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
  * implied. See the License for the specific language governing rights
  * and limitations under the License.
- * All portions are Copyright © 2021-2026 FUTIT SERVICES, S.L
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
  * All Rights Reserved.
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
@@ -32,6 +32,7 @@ import java.time.Instant;
 import java.util.Base64;
 import java.util.Date;
 import java.util.List;
+import java.util.Objects;
 
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.algorithms.Algorithm;
@@ -47,7 +48,7 @@ import com.auth0.jwt.algorithms.Algorithm;
  *   <li>Header: {@code alg=RS256}, {@code kid=<configured kid>}</li>
  *   <li>Issuer: {@code etendo-go}</li>
  *   <li>Subject: Etendo user id</li>
- *   <li>Audience: {@code [etendo-go, <appId>]} — both the backend and the target app
+ *   <li>Audience: {@code [etendo-go, <appId>]} - both the backend and the target app
  *       must accept the token</li>
  *   <li>Claims: {@code tenant}, {@code org}, {@code app}, {@code scopes}</li>
  *   <li>TTL: 5 minutes (short-lived, per design)</li>
@@ -61,13 +62,21 @@ public class JwtIssuerService {
   static final String ISSUER = "etendo-go";
   static final long TTL_SECONDS = 300;
 
-  private final RSAPrivateKey privateKey;
   private final RSAPublicKey publicKey;
   private final String kid;
   private final Algorithm algorithm;
 
+  /**
+   * Creates an issuer backed by the provided RSA keypair.
+   *
+   * @param privateKey private RSA key used to sign tokens
+   * @param publicKey public RSA key exposed through JWKS
+   * @param kid key identifier included in the JWT header
+   */
   public JwtIssuerService(RSAPrivateKey privateKey, RSAPublicKey publicKey, String kid) {
-    this.privateKey = privateKey;
+    Objects.requireNonNull(privateKey, "privateKey cannot be null");
+    Objects.requireNonNull(publicKey, "publicKey cannot be null");
+    Objects.requireNonNull(kid, "kid cannot be null");
     this.publicKey = publicKey;
     this.kid = kid;
     this.algorithm = Algorithm.RSA256(publicKey, privateKey);
@@ -79,6 +88,10 @@ public class JwtIssuerService {
    * @param privateKeyPath PKCS#8 encoded PEM file
    * @param publicKeyPath  X.509 encoded PEM file
    * @param kid            key identifier, surfaced in the JWT header and JWKS
+   * @return issuer service initialized with the PEM keypair
+   * @throws IOException if a PEM file cannot be read
+   * @throws NoSuchAlgorithmException if RSA is unavailable in the runtime
+   * @throws InvalidKeySpecException if a PEM block cannot be parsed as an RSA key
    */
   public static JwtIssuerService fromPemFiles(Path privateKeyPath, Path publicKeyPath, String kid)
       throws IOException, NoSuchAlgorithmException, InvalidKeySpecException {
@@ -90,7 +103,12 @@ public class JwtIssuerService {
   /**
    * Mints a JWT for a given user/tenant/app triple.
    *
+   * @param userId Etendo user identifier
+   * @param tenantId Etendo client identifier
+   * @param orgId Etendo organization identifier
+   * @param appId target app identifier
    * @param scopes may be empty; {@code null} is treated as empty
+   * @return signed RS256 JWT
    */
   public String issue(String userId, String tenantId, String orgId, String appId,
       List<String> scopes) {
@@ -137,8 +155,8 @@ public class JwtIssuerService {
     String end = "-----END " + type + "-----";
     int beginIdx = pem.indexOf(begin);
     int endIdx = pem.indexOf(end);
-    if (beginIdx < 0 || endIdx < 0) {
-      throw new IllegalArgumentException("PEM does not contain " + type + " block");
+    if (beginIdx < 0 || endIdx < 0 || endIdx < beginIdx + begin.length()) {
+      throw new IllegalArgumentException("PEM does not contain a valid " + type + " block");
     }
     String body = pem.substring(beginIdx + begin.length(), endIdx).replaceAll("\\s", "");
     return Base64.getDecoder().decode(body);

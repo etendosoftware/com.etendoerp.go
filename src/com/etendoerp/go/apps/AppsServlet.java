@@ -9,7 +9,7 @@
  * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
  * implied. See the License for the specific language governing rights
  * and limitations under the License.
- * All portions are Copyright © 2021-2026 FUTIT SERVICES, S.L
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
  * All Rights Reserved.
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
@@ -41,15 +41,15 @@ import com.etendoerp.go.common.CorsUtils;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
- * Etendo Go Apps — F1 spike servlet (ETP-3805).
+ * Etendo Go Apps - F1 spike servlet (ETP-3805).
  *
  * <p>Mapped to {@code /sws/apps/*} via {@code AD_MODEL_OBJECT} / {@code AD_MODEL_OBJECT_MAPPING}.
  *
  * <p>Endpoints:
  * <ul>
- *   <li>{@code GET  /sws/apps/.well-known/jwks.json} — publishes the RS256 public key
+ *   <li>{@code GET  /sws/apps/.well-known/jwks.json} - publishes the RS256 public key
  *       (public, no auth). External apps fetch this to verify JWTs.</li>
- *   <li>{@code POST /sws/apps/token?appId=<id>} — mints a short-lived RS256 JWT for the
+ *   <li>{@code POST /sws/apps/token?appId=<id>} - mints a short-lived RS256 JWT for the
  *       given app. Requires an Etendo session JWT in the {@code Authorization: Bearer ...}
  *       header (same HS256 JWT the shell already uses for {@code /sws/neo/*}).</li>
  * </ul>
@@ -74,7 +74,7 @@ public class AppsServlet extends HttpBaseServlet {
   private static final List<String> SPIKE_SCOPES =
       Collections.unmodifiableList(Arrays.asList("read:products", "read:users"));
 
-  /** Lazily-loaded singleton — keys live on disk so we only read them once. */
+  /** Lazily-loaded singleton - keys live on disk so we only read them once. */
   private static volatile JwtIssuerService issuer;
 
   // --- CORS ---
@@ -129,7 +129,7 @@ public class AppsServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("JWKS endpoint failed", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "JWKS unavailable: " + e.getMessage());
+          "JWKS unavailable");
     }
   }
 
@@ -161,9 +161,10 @@ public class AppsServlet extends HttpBaseServlet {
     String userId = decoded.getClaim("user").asString();
     String clientId = decoded.getClaim("client").asString();
     String orgId = decoded.getClaim("organization").asString();
-    if (userId == null || userId.isBlank() || clientId == null || clientId.isBlank()) {
+    if (userId == null || userId.isBlank() || clientId == null || clientId.isBlank()
+        || orgId == null || orgId.isBlank()) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
-          "Etendo token missing required claims (user, client)");
+          "Etendo token missing required claims (user, client, organization)");
       return;
     }
 
@@ -177,7 +178,7 @@ public class AppsServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Failed to mint app token for appId={} user={}", appId, userId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Failed to mint token: " + e.getMessage());
+          "Failed to mint token");
     }
   }
 
@@ -198,8 +199,7 @@ public class AppsServlet extends HttpBaseServlet {
   /** Encode a BigInteger as unsigned big-endian base64url (JWK convention). */
   static String base64UrlUnsigned(BigInteger value) {
     byte[] bytes = value.toByteArray();
-    // BigInteger.toByteArray() produces a signed two's-complement representation;
-    // strip the leading 0x00 padding that appears when the high bit would otherwise be set.
+    // JWK modulus/exponent values must omit the sign padding byte.
     if (bytes.length > 1 && bytes[0] == 0) {
       byte[] stripped = new byte[bytes.length - 1];
       System.arraycopy(bytes, 1, stripped, 0, stripped.length);
