@@ -54,16 +54,17 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
    * (documentAction=CO) is processed by the default handler.
    *
    * <p>Must be called at the top of {@code handle()} in every header subclass that supports
-   * total discount. It intercepts three paths:
+   * total discount. It intercepts two paths:
    * <ul>
    *   <li><b>CRUD PATCH/PUT</b> — body contains {@code { documentAction: "CO" }}</li>
    *   <li><b>ACTION POST /documentAction</b> — frontend confirm button sends
    *       POST to {@code /action/documentAction} with body
    *       {@code { fieldValues: { documentAction: "CO" } }}</li>
-   *   <li><b>ACTION POST /DocAction</b> — quotation {@code SendToEvaluationModal} sends
-   *       POST to {@code /action/DocAction} with {@code { fieldValues: {} }}.
-   *       This always syncs the discount line regardless of the stored action value.</li>
    * </ul>
+   *
+   * <p>Document types that use a different action endpoint (e.g. quotations via
+   * {@code DocAction}) must call {@link #syncTotalDiscountOnDocAction} explicitly
+   * in their own {@code handle()} implementation.
    *
    * @param context   the current NeoContext
    * @param service   the TotalDiscountService CDI bean injected by the subclass
@@ -109,12 +110,6 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
             isComplete = true;
           }
         }
-      } else if ("DocAction".equals(context.getFieldName())) {
-        // DocAction process-button path (used by quotations: SendToEvaluationModal sends
-        // POST /action/DocAction { fieldValues: {} } with no explicit docAction value).
-        // Always sync: recalculate() reads the stored pct and creates the discount line when
-        // pct > 0 (CO path), or deletes any stale line when reopened (RE path).
-        isComplete = true;
       }
     }
 
@@ -129,6 +124,50 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     } catch (Exception e) {
       LogManager.getLogger(AbstractOrderHeaderHandler.class)
           .error("Error recalculating total discount before complete for {} id={}",
+              isInvoice ? "invoice" : "order", recordId, e);
+    }
+  }
+
+  /**
+   * Syncs the total discount line when a {@code DocAction} process-button request is received.
+   *
+   * <p>The quotation {@code SendToEvaluationModal} sends
+   * {@code POST /action/DocAction { fieldValues: {} }} without an explicit {@code docAction}
+   * value. This helper delegates to {@link TotalDiscountService#recalculate} unconditionally:
+   * when {@code pct > 0} (CO path) it creates the discount line; when the document is
+   * reopened (RE path) it cleans up any stale line.
+   *
+   * <p>Call this from {@code handle()} only in handlers whose window uses the {@code DocAction}
+   * button path to complete/evaluate the document — currently only
+   * {@link SalesQuotationHeaderHandler}.
+   *
+   * @param context   the current NeoContext
+   * @param service   the TotalDiscountService CDI bean injected by the subclass
+   * @param isInvoice {@code true} for invoice documents, {@code false} for order documents
+   */
+  static void syncTotalDiscountOnDocAction(NeoContext context, TotalDiscountService service,
+      boolean isInvoice) {
+    if (service == null) {
+      return;
+    }
+    if (!NeoEndpointType.ACTION.equals(context.getEndpointType())) {
+      return;
+    }
+    if (!"DocAction".equals(context.getFieldName())) {
+      return;
+    }
+    String recordId = context.getRecordId();
+    if (recordId == null || recordId.isEmpty()) {
+      return;
+    }
+    try {
+      LogManager.getLogger(AbstractOrderHeaderHandler.class)
+          .info("Syncing total discount on DocAction for {} id={}",
+              isInvoice ? "invoice" : "order", recordId);
+      service.recalculate(recordId, isInvoice);
+    } catch (Exception e) {
+      LogManager.getLogger(AbstractOrderHeaderHandler.class)
+          .error("Error syncing total discount on DocAction for {} id={}",
               isInvoice ? "invoice" : "order", recordId, e);
     }
   }
