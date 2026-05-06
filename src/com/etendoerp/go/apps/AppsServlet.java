@@ -18,7 +18,6 @@
 package com.etendoerp.go.apps;
 
 import java.io.IOException;
-import java.io.PrintWriter;
 import java.math.BigInteger;
 import java.nio.file.Path;
 import java.util.Arrays;
@@ -35,10 +34,10 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.base.HttpBaseServlet;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
-import com.etendoerp.go.common.CorsUtils;
+import com.etendoerp.go.common.EtendoGoCorsServlet;
+import com.etendoerp.go.common.ServletResponseUtils;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -59,7 +58,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * Override with system property {@code etendo.apps.keysDir} or env var
  * {@code ETENDO_APPS_KEYS_DIR}. Production must load from a secrets manager.
  */
-public class AppsServlet extends HttpBaseServlet {
+public class AppsServlet extends EtendoGoCorsServlet {
 
   private static final Logger log = LogManager.getLogger(AppsServlet.class);
 
@@ -68,7 +67,6 @@ public class AppsServlet extends HttpBaseServlet {
   private static final String PATH_JWKS = "/.well-known/jwks.json";
   private static final String HEADER_AUTHORIZATION = "Authorization";
   private static final String BEARER_PREFIX = "Bearer ";
-  private static final String CONTENT_TYPE_JSON = "application/json";
   private static final String DEFAULT_KEYS_DIR = "modules/com.etendoerp.go/config/apps-spike";
 
   // Hardcoded scopes for the F1 spike. F1 proper will read these from the app descriptor.
@@ -78,24 +76,6 @@ public class AppsServlet extends HttpBaseServlet {
   /** Lazily-loaded singleton - keys live on disk so we only read them once. */
   private static final AtomicReference<JwtIssuerService> issuer = new AtomicReference<>();
 
-  // --- CORS ---
-
-  private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
-    CorsUtils.apply(request, response, "GET, POST, OPTIONS",
-        "Content-Type, Authorization, Accept", null, false);
-  }
-
-  @Override
-  public void service(HttpServletRequest request, HttpServletResponse response)
-      throws javax.servlet.ServletException, IOException {
-    setCorsHeaders(request, response);
-    if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
-      response.setStatus(HttpServletResponse.SC_NO_CONTENT);
-      return;
-    }
-    super.service(request, response);
-  }
-
   // --- Dispatchers ---
 
   @Override
@@ -104,7 +84,8 @@ public class AppsServlet extends HttpBaseServlet {
     if (PATH_JWKS.equals(path)) {
       handleJwks(response);
     } else {
-      writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
+      ServletResponseUtils.sendError(response, HttpServletResponse.SC_NOT_FOUND,
+          "Unknown endpoint: " + path);
     }
   }
 
@@ -114,7 +95,8 @@ public class AppsServlet extends HttpBaseServlet {
     if (PATH_TOKEN.equals(path) || (PATH_TOKEN + "/").equals(path)) {
       handleToken(request, response);
     } else {
-      writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
+      ServletResponseUtils.sendError(response, HttpServletResponse.SC_NOT_FOUND,
+          "Unknown endpoint: " + path);
     }
   }
 
@@ -126,10 +108,10 @@ public class AppsServlet extends HttpBaseServlet {
       JSONObject jwk = buildJwk(svc);
       JSONObject payload = new JSONObject();
       payload.put("keys", new JSONArray().put(jwk));
-      writeJson(response, HttpServletResponse.SC_OK, payload);
+      ServletResponseUtils.writeJson(response, HttpServletResponse.SC_OK, payload);
     } catch (Exception e) {
       log.error("JWKS endpoint failed", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+      ServletResponseUtils.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "JWKS unavailable");
     }
   }
@@ -138,13 +120,14 @@ public class AppsServlet extends HttpBaseServlet {
       throws IOException {
     String appId = request.getParameter("appId");
     if (appId == null || appId.isBlank()) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing 'appId' parameter");
+      ServletResponseUtils.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Missing 'appId' parameter");
       return;
     }
 
     String authHeader = request.getHeader(HEADER_AUTHORIZATION);
     if (authHeader == null || !authHeader.startsWith(BEARER_PREFIX)) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
+      ServletResponseUtils.sendError(response, HttpServletResponse.SC_UNAUTHORIZED,
           "Missing or invalid Authorization header");
       return;
     }
@@ -155,7 +138,8 @@ public class AppsServlet extends HttpBaseServlet {
       decoded = SecureWebServicesUtils.decodeToken(etendoToken);
     } catch (Exception e) {
       log.warn("Rejected invalid Etendo JWT on /sws/apps/token: {}", e.getMessage());
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid Etendo session token");
+      ServletResponseUtils.sendError(response, HttpServletResponse.SC_UNAUTHORIZED,
+          "Invalid Etendo session token");
       return;
     }
 
@@ -164,7 +148,7 @@ public class AppsServlet extends HttpBaseServlet {
     String orgId = decoded.getClaim("organization").asString();
     if (userId == null || userId.isBlank() || clientId == null || clientId.isBlank()
         || orgId == null || orgId.isBlank()) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
+      ServletResponseUtils.sendError(response, HttpServletResponse.SC_UNAUTHORIZED,
           "Etendo token missing required claims (user, client, organization)");
       return;
     }
@@ -175,10 +159,10 @@ public class AppsServlet extends HttpBaseServlet {
       JSONObject payload = new JSONObject();
       payload.put("token", appToken);
       payload.put("expiresInSeconds", JwtIssuerService.TTL_SECONDS);
-      writeJson(response, HttpServletResponse.SC_OK, payload);
+      ServletResponseUtils.writeJson(response, HttpServletResponse.SC_OK, payload);
     } catch (Exception e) {
       log.error("Failed to mint app token for appId={} user={}", appId, userId, e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+      ServletResponseUtils.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Failed to mint token");
     }
   }
@@ -241,26 +225,4 @@ public class AppsServlet extends HttpBaseServlet {
         KID);
   }
 
-  // --- Response helpers ---
-
-  private static void writeJson(HttpServletResponse response, int status, JSONObject body)
-      throws IOException {
-    response.setStatus(status);
-    response.setContentType(CONTENT_TYPE_JSON);
-    response.setCharacterEncoding("UTF-8");
-    try (PrintWriter out = response.getWriter()) {
-      out.write(body.toString());
-    }
-  }
-
-  private static void writeError(HttpServletResponse response, int status, String message)
-      throws IOException {
-    try {
-      JSONObject body = new JSONObject();
-      body.put("error", message);
-      writeJson(response, status, body);
-    } catch (JSONException e) {
-      response.sendError(status, message);
-    }
-  }
 }

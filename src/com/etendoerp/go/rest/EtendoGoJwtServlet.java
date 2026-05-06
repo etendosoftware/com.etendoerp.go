@@ -38,7 +38,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -50,7 +49,7 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
-import com.etendoerp.go.common.CorsUtils;
+import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingDefaultCustomerService;
@@ -76,7 +75,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *
  * Database access uses OBDal/OBQuery, including the generated DAL entity for ETGO_Account.
  */
-public class EtendoGoJwtServlet extends HttpBaseServlet {
+public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private static final Logger log = LogManager.getLogger(EtendoGoJwtServlet.class);
 
@@ -112,24 +111,6 @@ public class EtendoGoJwtServlet extends HttpBaseServlet {
       new OnboardingSequenceGeneratorService();
   OnboardingDefaultCustomerService onboardingDefaultCustomerService =
       new OnboardingDefaultCustomerService();
-
-  // --- CORS ---
-
-  private void setCorsHeaders(HttpServletRequest request, HttpServletResponse response) {
-    CorsUtils.apply(request, response, "GET, POST, OPTIONS",
-        "Content-Type, Authorization, Accept", null, false);
-  }
-
-  @Override
-  public void service(HttpServletRequest request, HttpServletResponse response)
-      throws javax.servlet.ServletException, IOException {
-    setCorsHeaders(request, response);
-    if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
-      response.setStatus(HttpServletResponse.SC_NO_CONTENT);
-      return;
-    }
-    super.service(request, response);
-  }
 
   // --- HTTP method dispatchers ---
 
