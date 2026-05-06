@@ -69,16 +69,24 @@ class SelectorQueryBuilder {
 
   // Matches "(SELECT expr FROM DUAL)" — Oracle-ism for inline expressions.
   // HQL doesn't support FROM DUAL; the fix is to unwrap the subquery into just "(expr)".
-  // The expr body must not contain parens, otherwise a non-greedy match crosses
-  // nested DUAL subqueries and strips the outer SELECT — producing invalid HQL like
-  // "EXISTS (1 FROM ...)" when the original was "EXISTS (SELECT 1 FROM <table> ...
-  // (SELECT ... FROM DUAL) ...)".
+  // Uses a tempered greedy token so the pattern does NOT cross inner "(SELECT" subquery boundaries,
+  // which prevents accidentally consuming an outer EXISTS(SELECT 1 FROM ...) when it contains
+  // multiple nested (SELECT ... FROM DUAL) clauses. The lookahead allows whitespace between
+  // "(" and "SELECT" so subqueries formatted as "(\n  SELECT ..." are also detected.
   private static final Pattern SELECT_FROM_DUAL = Pattern.compile(
-      "\\(\\s*SELECT\\s+([^()]+?)\\s+FROM\\s+DUAL\\s*\\)", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+      "\\(\\s*SELECT\\s+((?:(?!\\(\\s*SELECT).)+?)\\s+FROM\\s+DUAL\\s*\\)",
+      Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
   // Matches "FROM <name> <alias>" in subqueries to detect SQL table names that need HQL translation
   private static final Pattern FROM_WITH_ALIAS = Pattern.compile(
       "\\bFROM\\s+(\\w+)\\s+(\\w+)", Pattern.CASE_INSENSITIVE);
+
+  // Matches: LHS_EXPR = (CASE WHEN 'LIT1' = 'LIT2' THEN 'THEN_LIT' ELSE ELSE_EXPR END)
+  // Used to simplify constant CASE expressions that arise from FROM DUAL unwrapping.
+  private static final Pattern LITERAL_CASE_WHEN = Pattern.compile(
+      "(\\w++(?:\\.\\w++)*+)\\s*+=\\s*+" +
+      "\\(CASE\\s++WHEN\\s++'([^']*+)'\\s*+=\\s*+'([^']*+)'\\s++THEN\\s++'([^']*+)'\\s++ELSE\\s++(\\w++(?:\\.\\w++)*+)\\s++END\\)",
+      Pattern.CASE_INSENSITIVE);
 
   private SelectorQueryBuilder() {
   }
@@ -492,7 +500,7 @@ class SelectorQueryBuilder {
     }
     m.appendTail(sb);
     // Unwrap "(SELECT expr FROM DUAL)" → "(expr)" — Oracle-ism not supported by HQL
-    String afterDual = SELECT_FROM_DUAL.matcher(sb.toString()).replaceAll("($1)");
+    String afterDual = unwrapSelectFromDual(sb.toString());
 
     // Strip top-level AND clauses that contain SQL-only functions (AD_ISORGINCLUDED, etc.)
     // which have no HQL equivalent and would cause a Hibernate parse error.
@@ -533,7 +541,65 @@ class SelectorQueryBuilder {
       return null;
     }
     // Convert SQL TABLE.COLUMN references to HQL e.property paths
-    return convertSqlToHql(resolvedSql, targetEntityName);
+    String hql = convertSqlToHql(resolvedSql, targetEntityName);
+    // Simplify constant CASE WHEN expressions left by FROM DUAL unwrapping after param substitution.
+    // Hibernate HQL cannot evaluate string-literal CASE predicates reliably — simplify them away.
+    return simplifyConstantCaseExpressions(hql);
+  }
+
+  /**
+   * Replaces every {@code (SELECT expr FROM DUAL)} occurrence with {@code (expr)}.
+   *
+   * <p>This is an Oracle-ism: HQL scalar subqueries work without a {@code FROM} clause.
+   * Uses a tempered-greedy token to avoid consuming outer {@code EXISTS (SELECT …)}
+   * clauses when multiple FROM DUAL subqueries appear inside the same EXISTS block.
+   */
+  static String unwrapSelectFromDual(String sql) {
+    if (sql == null) return null;
+    return SELECT_FROM_DUAL.matcher(sql).replaceAll("($1)");
+  }
+
+  /**
+   * Simplifies constant {@code CASE WHEN} expressions that arise from unwrapping
+   * {@code (SELECT expr FROM DUAL)} subqueries after parameter substitution.
+   *
+   * <p>Pattern: {@code LHS = (CASE WHEN 'LIT1' = 'LIT2' THEN 'Y' ELSE LHS END)}
+   * <ul>
+   *   <li>If {@code LIT1 == LIT2} (always-true): replaces with {@code LHS = 'Y'}</li>
+   *   <li>If {@code LIT1 != LIT2} (always-false, ELSE = LHS = tautology): replaces with
+   *       {@code 1=1} and then strips the redundant {@code AND 1=1} condition</li>
+   * </ul>
+   */
+  static String simplifyConstantCaseExpressions(String hql) {
+    if (hql == null || !hql.toUpperCase().contains("CASE WHEN")) {
+      return hql;
+    }
+    Matcher m = LITERAL_CASE_WHEN.matcher(hql);
+    StringBuffer sb = new StringBuffer();
+    while (m.find()) {
+      String lhs      = m.group(1);
+      String lit1     = m.group(2);
+      String lit2     = m.group(3);
+      String thenVal  = m.group(4);
+      String elseExpr = m.group(5);
+      String replacement;
+      if (lit1.equalsIgnoreCase(lit2)) {
+        // Always-true: CASE evaluates to THEN literal → collapse to direct equality.
+        replacement = lhs + " = '" + thenVal + "'";
+        log.debug("Simplified always-true CASE for {}: {} = '{}'", lhs, lhs, thenVal);
+      } else if (lhs.equalsIgnoreCase(elseExpr)) {
+        // Always-false and ELSE is the same property → tautology (x = x) → drop clause.
+        replacement = "1=1";
+        log.debug("Simplified always-false CASE for {} (LHS=ELSE tautology → 1=1)", lhs);
+      } else {
+        // Always-false and ELSE is a different property → emit the real comparison.
+        replacement = lhs + " = " + elseExpr;
+        log.debug("Simplified always-false CASE for {}: real comparison {} = {}", lhs, lhs, elseExpr);
+      }
+      m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
+    }
+    m.appendTail(sb);
+    return sb.toString().replaceAll("(?i)\\s*+AND\\s++1=1\\b", "");
   }
 
   /**
@@ -742,7 +808,7 @@ class SelectorQueryBuilder {
    * {@code FROM DUAL} is removed — HQL scalar subqueries work without a FROM clause.
    */
   private static String translateSqlToHql(String clause) {
-    clause = SELECT_FROM_DUAL.matcher(clause).replaceAll("($1)");
+    clause = unwrapSelectFromDual(clause);
     Map<String, Entity> aliasEntityMap = new HashMap<>();
     String translatedFrom = translateFromAliases(clause, aliasEntityMap);
     return translateColumnReferences(translatedFrom, aliasEntityMap);

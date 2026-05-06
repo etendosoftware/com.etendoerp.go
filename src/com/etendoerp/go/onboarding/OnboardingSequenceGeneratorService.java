@@ -66,7 +66,10 @@ public class OnboardingSequenceGeneratorService {
       enterAdminMode();
       try {
         SequencesGenerator generator = createSequencesGenerator();
-        return generateSequenceCombination(generator, client, organizations, parameters);
+        int generatedSequences = generateSequenceCombination(generator, client, organizations,
+            parameters);
+        flushChanges();
+        return generatedSequences;
       } finally {
         exitAdminMode();
       }
