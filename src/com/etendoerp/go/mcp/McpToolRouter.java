@@ -45,6 +45,7 @@ import org.openbravo.model.ad.ui.Window;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
@@ -118,6 +119,8 @@ public class McpToolRouter {
             return handleDefaults(specName, arguments);
           case "neo_schema":
             return handleSchema(specName, arguments);
+          case "neo_batch":
+            return handleBatch(arguments);
           default:
             // Check if it's a report tool (generate_*)
             if (toolName.startsWith(McpConstants.GENERATE_PREFIX)) {
@@ -573,6 +576,31 @@ public class McpToolRouter {
 
   static String mapSelectorTypeStatic(String refId) {
     return McpToolRouterSupport.mapSelectorType(refId);
+  }
+
+  // ── neo_batch ─────────────────────────────────────────────────────────
+
+  /**
+   * Execute a transactional batch of create operations across specs.
+   * Delegates to {@link BatchService#executeBatch(JSONArray)} which owns the
+   * OBDal transaction lifecycle and returns a JSONObject describing success
+   * (committed) or failure (rolled back).
+   */
+  private JSONObject handleBatch(JSONObject args) {
+    if (args == null) {
+      return wrapAsErrorContent("operations must be a non-empty array");
+    }
+    JSONArray operations = args.optJSONArray("operations");
+    if (operations == null || operations.length() == 0) {
+      return wrapAsErrorContent("operations must be a non-empty array");
+    }
+    try {
+      JSONObject result = new BatchService().executeBatch(operations);
+      return wrapAsTextContent(result.toString(2));
+    } catch (Exception e) {
+      log.error("Error executing neo_batch: {}", e.getMessage(), e);
+      return wrapAsErrorContent("Error executing neo_batch: " + e.getMessage());
+    }
   }
 
   // ── Process execution ─────────────────────────────────────────────────

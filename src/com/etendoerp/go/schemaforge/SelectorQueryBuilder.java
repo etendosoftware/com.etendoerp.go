@@ -73,8 +73,12 @@ class SelectorQueryBuilder {
 
   // Matches "(SELECT expr FROM DUAL)" — Oracle-ism for inline expressions.
   // HQL doesn't support FROM DUAL; the fix is to unwrap the subquery into just "(expr)".
+  // The expr body must not contain parens, otherwise a non-greedy match crosses
+  // nested DUAL subqueries and strips the outer SELECT — producing invalid HQL like
+  // "EXISTS (1 FROM ...)" when the original was "EXISTS (SELECT 1 FROM <table> ...
+  // (SELECT ... FROM DUAL) ...)".
   private static final Pattern SELECT_FROM_DUAL = Pattern.compile(
-      "\\(\\s*SELECT\\s+(.+?)\\s+FROM\\s+DUAL\\s*\\)", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+      "\\(\\s*SELECT\\s+([^()]+?)\\s+FROM\\s+DUAL\\s*\\)", Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
   // Matches "FROM <name> <alias>" in subqueries to detect SQL table names that need HQL translation
   private static final Pattern FROM_WITH_ALIAS = Pattern.compile(

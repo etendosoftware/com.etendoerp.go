@@ -153,6 +153,7 @@ public class ToolRegistry {
       tools.add(buildCreateTool(accessibleWindowSpecs));
       tools.add(buildUpdateTool(accessibleWindowSpecs));
       tools.add(buildDeleteTool(accessibleWindowSpecs));
+      tools.add(buildBatchTool());
     }
   }
 
@@ -201,6 +202,7 @@ public class ToolRegistry {
       case "neo_selectors":
       case "neo_defaults":
       case "neo_schema":
+      case "neo_batch":
         return true;
       default:
         return false;
@@ -317,6 +319,79 @@ public class ToolRegistry {
         "Get default field values for creating a new record. "
             + "Optional — neo_create auto-fills defaults, so only call this if you need to inspect default values before creating.",
         buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
+  }
+
+  // ── Batch tool (cross-spec, atomic) ───────────────────────────────────
+
+  /**
+   * Build the {@code neo_batch} tool definition. Unlike the per-spec CRUD tools,
+   * each operation in the batch carries its own {@code spec}, so this tool is
+   * registered once with no top-level enum.
+   */
+  private McpToolDefinition buildBatchTool() {
+    Map<String, Object> opProps = new LinkedHashMap<>();
+    Map<String, Object> idProp = new LinkedHashMap<>();
+    idProp.put("type", McpConstants.TYPE_STRING);
+    idProp.put(McpConstants.KEY_DESCRIPTION,
+        "Local op identifier, unique within this batch. Used as the target of $ref:<id> "
+            + "and parentRef.");
+    opProps.put("id", idProp);
+
+    Map<String, Object> specProp = new LinkedHashMap<>();
+    specProp.put("type", McpConstants.TYPE_STRING);
+    specProp.put(McpConstants.KEY_DESCRIPTION,
+        "Spec name (e.g. 'sales-order'). Each op may target a different spec.");
+    opProps.put("spec", specProp);
+
+    Map<String, Object> entityProp = new LinkedHashMap<>();
+    entityProp.put("type", McpConstants.TYPE_STRING);
+    entityProp.put(McpConstants.KEY_DESCRIPTION,
+        "Entity name within the spec (e.g. 'Header', 'Lines').");
+    opProps.put("entity", entityProp);
+
+    Map<String, Object> parentRefProp = new LinkedHashMap<>();
+    parentRefProp.put("type", McpConstants.TYPE_STRING);
+    parentRefProp.put(McpConstants.KEY_DESCRIPTION,
+        "Optional id of an earlier op whose recordId becomes this op's parent FK.");
+    opProps.put("parentRef", parentRefProp);
+
+    Map<String, Object> bodyProp = new LinkedHashMap<>();
+    bodyProp.put("type", McpConstants.TYPE_OBJECT);
+    bodyProp.put(McpConstants.KEY_DESCRIPTION,
+        "Field values for the new record. String values of the form '$ref:<opId>' are "
+            + "replaced with the resolved recordId of an earlier op.");
+    opProps.put("body", bodyProp);
+
+    Map<String, Object> opItem = new LinkedHashMap<>();
+    opItem.put("type", McpConstants.TYPE_OBJECT);
+    opItem.put(McpConstants.KEY_PROPERTIES, opProps);
+    opItem.put("required", List.of("id", "spec", "entity"));
+
+    Map<String, Object> operationsProp = new LinkedHashMap<>();
+    operationsProp.put("type", "array");
+    operationsProp.put(McpConstants.KEY_DESCRIPTION,
+        "Ordered list of create operations to run as a single transaction.");
+    operationsProp.put("items", opItem);
+
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("operations", operationsProp);
+
+    return new McpToolDefinition(
+        "neo_batch",
+        "Run a sequence of cross-spec create operations atomically. All operations "
+            + "share one OBDal transaction: success commits everything, any failure "
+            + "rolls back everything (no partial writes). Each op carries its own "
+            + "'spec' and 'entity', so a single batch can mix windows (e.g. create a "
+            + "Business Partner, a Location, then a Purchase Invoice referencing both). "
+            + "Use 'parentRef':<earlierOpId> to set the parent FK on a child-tab op, "
+            + "and string values of the form '$ref:<earlierOpId>' anywhere in 'body' "
+            + "to substitute the resolved recordId of an earlier op. Typically call "
+            + "neo_list / neo_selectors first to look up existing records and only "
+            + "include create ops for what is genuinely new. "
+            + "Returns {committed:true, operations:[{id,ok:true,recordId}]} on success "
+            + "or {committed:false, failedAt:{id,index}, error:{status,message,detail?}} "
+            + "on failure.",
+        buildObjectSchema(props, List.of("operations")));
   }
 
   // ── Schema tool ────────────────────────────────────────────────────────

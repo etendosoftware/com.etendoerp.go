@@ -66,7 +66,11 @@ public class NeoServlet extends HttpBaseServlet {
   private final NeoDiscoveryHandler discoveryHandler = new NeoDiscoveryHandler(this);
   private final NeoButtonHandler buttonHandler = new NeoButtonHandler();
   private final NeoDisplayLogicHandler displayLogicHandler = new NeoDisplayLogicHandler();
-  private final NeoCrudHandler crudHandler = new NeoCrudHandler(this);
+  // Package-private so sibling collaborators (BatchService) can dispatch through
+  // the same default CRUD pipeline without going via HTTP. The class itself is
+  // already package-private; widening the field follows the same scope.
+  final NeoCrudHandler crudHandler = new NeoCrudHandler(this);
+  private final BatchService batchService = new BatchService(this);
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -194,6 +198,21 @@ public class NeoServlet extends HttpBaseServlet {
         }
         sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
             "Filters endpoint only supports GET, PUT and DELETE");
+        return;
+      }
+
+      // Generic transactional batch endpoint: POST /sws/neo/batch
+      //   Runs an ordered list of CRUD ops in one OBDal transaction with
+      //   $ref:<opId> substitution between ops. Same primitive is consumed by
+      //   the React UI (composite-document ingest) and external agents (MCP).
+      //   Find-or-create logic stays with the caller — no per-window server code.
+      if ("batch".equals(pathInfo.specName)) {
+        if (!"POST".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Batch endpoint only supports POST");
+          return;
+        }
+        batchService.handle(request, response);
         return;
       }
 
@@ -1017,7 +1036,7 @@ public class NeoServlet extends HttpBaseServlet {
     }
   }
 
-  private static String readRequestBody(HttpServletRequest request) throws IOException {
+  static String readRequestBody(HttpServletRequest request) throws IOException {
     return new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
   }
 
