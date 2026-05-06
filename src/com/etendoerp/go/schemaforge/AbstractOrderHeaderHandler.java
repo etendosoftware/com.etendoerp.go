@@ -47,7 +47,10 @@ import org.openbravo.dal.service.OBDal;
  */
 public abstract class AbstractOrderHeaderHandler implements NeoHandler {
 
-  private final Logger log = LogManager.getLogger(getClass());
+  private static final Logger log = LogManager.getLogger(AbstractOrderHeaderHandler.class);
+  private static final String FIELD_DOCUMENT_ACTION = "documentAction";
+  private static final String DOC_TYPE_ORDER = "order";
+  private static final String DOC_TYPE_INVOICE = "invoice";
 
   /**
    * Creates (or re-creates) the total discount line immediately before the Complete action
@@ -79,53 +82,50 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     if (recordId == null || recordId.isEmpty()) {
       return;
     }
-
-    boolean isComplete = false;
-
-    if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
-      // CRUD: PATCH/PUT with { documentAction: "CO" } in the body.
-      String method = context.getHttpMethod();
-      if ("PATCH".equals(method) || "PUT".equals(method)) {
-        JSONObject body = context.getRequestBody();
-        if (body != null && "CO".equals(body.optString("documentAction", ""))) {
-          isComplete = true;
-        }
-      }
-    } else if (NeoEndpointType.ACTION.equals(context.getEndpointType())) {
-      // ACTION: POST to /action/documentAction.
-      // Body format varies by caller:
-      //   useDocumentAction hook  → { docAction: "CO" }
-      //   handleSaveAndProcess    → { fieldValues: { documentAction: "CO" } }
-      if ("documentAction".equals(context.getFieldName())) {
-        JSONObject body = context.getRequestBody();
-        if (body != null) {
-          JSONObject fieldValues = body.optJSONObject("fieldValues");
-          String docAction;
-          if (fieldValues != null) {
-            docAction = fieldValues.optString("documentAction", "");
-          } else {
-            docAction = body.optString("docAction", body.optString("documentAction", ""));
-          }
-          if ("CO".equals(docAction)) {
-            isComplete = true;
-          }
-        }
-      }
-    }
-
-    if (!isComplete) {
+    if (!isCompleteAction(context)) {
       return;
     }
+    String docType = isInvoice ? DOC_TYPE_INVOICE : DOC_TYPE_ORDER;
     try {
-      LogManager.getLogger(AbstractOrderHeaderHandler.class)
-          .info("Recalculating total discount before complete for {} id={}",
-              isInvoice ? "invoice" : "order", recordId);
+      log.info("Recalculating total discount before complete for {} id={}", docType, recordId);
       service.recalculate(recordId, isInvoice);
     } catch (Exception e) {
-      LogManager.getLogger(AbstractOrderHeaderHandler.class)
-          .error("Error recalculating total discount before complete for {} id={}",
-              isInvoice ? "invoice" : "order", recordId, e);
+      log.error("Error recalculating total discount before complete for {} id={}", docType, recordId, e);
     }
+  }
+
+  private static boolean isCompleteAction(NeoContext context) {
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
+      return isCrudComplete(context);
+    }
+    return NeoEndpointType.ACTION.equals(context.getEndpointType())
+        && isActionDocumentActionComplete(context);
+  }
+
+  private static boolean isCrudComplete(NeoContext context) {
+    String method = context.getHttpMethod();
+    if (!"PATCH".equals(method) && !"PUT".equals(method)) {
+      return false;
+    }
+    JSONObject body = context.getRequestBody();
+    return body != null && "CO".equals(body.optString(FIELD_DOCUMENT_ACTION, ""));
+  }
+
+  private static boolean isActionDocumentActionComplete(NeoContext context) {
+    if (!FIELD_DOCUMENT_ACTION.equals(context.getFieldName())) {
+      return false;
+    }
+    JSONObject body = context.getRequestBody();
+    if (body == null) {
+      return false;
+    }
+    // Two body formats: root-level docAction (useDocumentAction hook)
+    // or nested fieldValues.documentAction (handleSaveAndProcess path).
+    JSONObject fieldValues = body.optJSONObject("fieldValues");
+    String docAction = fieldValues != null
+        ? fieldValues.optString(FIELD_DOCUMENT_ACTION, "")
+        : body.optString("docAction", body.optString(FIELD_DOCUMENT_ACTION, ""));
+    return "CO".equals(docAction);
   }
 
   /**
@@ -160,15 +160,12 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     if (recordId == null || recordId.isEmpty()) {
       return;
     }
+    String docType = isInvoice ? DOC_TYPE_INVOICE : DOC_TYPE_ORDER;
     try {
-      LogManager.getLogger(AbstractOrderHeaderHandler.class)
-          .info("Syncing total discount on DocAction for {} id={}",
-              isInvoice ? "invoice" : "order", recordId);
+      log.info("Syncing total discount on DocAction for {} id={}", docType, recordId);
       service.recalculate(recordId, isInvoice);
     } catch (Exception e) {
-      LogManager.getLogger(AbstractOrderHeaderHandler.class)
-          .error("Error syncing total discount on DocAction for {} id={}",
-              isInvoice ? "invoice" : "order", recordId, e);
+      log.error("Error syncing total discount on DocAction for {} id={}", docType, recordId, e);
     }
   }
 

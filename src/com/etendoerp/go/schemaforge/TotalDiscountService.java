@@ -67,6 +67,11 @@ public class TotalDiscountService {
 
   private static final int PRICE_SCALE = 2;
   private static final RoundingMode ROUNDING = RoundingMode.HALF_UP;
+  private static final String COL_ORDER_ID = "c_order_id";
+  private static final String COL_INVOICE_ID = "c_invoice_id";
+  private static final String TABLE_ORDER_LINE = "c_orderline";
+  private static final String TABLE_INVOICE_LINE = "c_invoiceline";
+  private static final String SQL_WHERE = " WHERE ";
 
   // -------------------------------------------------------------------------
   // Public API
@@ -131,15 +136,14 @@ public class TotalDiscountService {
   @SuppressWarnings("java:S2077")
   private BigDecimal readDiscountPct(String headerId, boolean isInvoice) {
     String table = isInvoice ? "c_invoice" : "c_order";
-    String idCol = isInvoice ? "c_invoice_id" : "c_order_id";
-    String sql = "SELECT em_etgo_total_discount FROM " + table + " WHERE " + idCol + " = ?";
+    String idCol = isInvoice ? COL_INVOICE_ID : COL_ORDER_ID;
+    String sql = "SELECT em_etgo_total_discount FROM " + table + SQL_WHERE + idCol + " = ?";
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, headerId);
       try (ResultSet rs = ps.executeQuery()) {
         if (rs.next()) {
-          BigDecimal val = rs.getBigDecimal(1);
-          return val;
+          return rs.getBigDecimal(1);
         }
       }
     } catch (Exception e) {
@@ -156,10 +160,10 @@ public class TotalDiscountService {
    */
   @SuppressWarnings("java:S2077")
   private Map<String, BigDecimal> readNetSubtotalByTax(String headerId, boolean isInvoice) {
-    String lineTable = isInvoice ? "c_invoiceline" : "c_orderline";
-    String parentCol = isInvoice ? "c_invoice_id" : "c_order_id";
+    String lineTable = isInvoice ? TABLE_INVOICE_LINE : TABLE_ORDER_LINE;
+    String parentCol = isInvoice ? COL_INVOICE_ID : COL_ORDER_ID;
     String sql = "SELECT c_tax_id, COALESCE(SUM(linenetamt), 0) FROM " + lineTable
-        + " WHERE " + parentCol + " = ?"
+        + SQL_WHERE + parentCol + " = ?"
         + "   AND m_product_id != ?"
         + "   AND isactive = 'Y'"
         + " GROUP BY c_tax_id"
@@ -190,10 +194,10 @@ public class TotalDiscountService {
    */
   @SuppressWarnings("java:S2077")
   private String readFirstLineUomId(String headerId, boolean isInvoice) {
-    String lineTable = isInvoice ? "c_invoiceline" : "c_orderline";
-    String parentCol = isInvoice ? "c_invoice_id" : "c_order_id";
+    String lineTable = isInvoice ? TABLE_INVOICE_LINE : TABLE_ORDER_LINE;
+    String parentCol = isInvoice ? COL_INVOICE_ID : COL_ORDER_ID;
     String sql = "SELECT c_uom_id FROM " + lineTable
-        + " WHERE " + parentCol + " = ?"
+        + SQL_WHERE + parentCol + " = ?"
         + "   AND m_product_id != ?"
         + "   AND isactive = 'Y'"
         + " ORDER BY line LIMIT 1";
@@ -217,10 +221,10 @@ public class TotalDiscountService {
    */
   @SuppressWarnings("java:S2077")
   private long readNextLineNo(String headerId, boolean isInvoice) {
-    String lineTable = isInvoice ? "c_invoiceline" : "c_orderline";
-    String parentCol = isInvoice ? "c_invoice_id" : "c_order_id";
+    String lineTable = isInvoice ? TABLE_INVOICE_LINE : TABLE_ORDER_LINE;
+    String parentCol = isInvoice ? COL_INVOICE_ID : COL_ORDER_ID;
     String sql = "SELECT COALESCE(MAX(line), 0) FROM " + lineTable
-        + " WHERE " + parentCol + " = ?";
+        + SQL_WHERE + parentCol + " = ?";
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, headerId);
@@ -245,10 +249,10 @@ public class TotalDiscountService {
    */
   @SuppressWarnings("java:S2077")
   private void deleteExistingDiscountLine(String headerId, boolean isInvoice) {
-    String lineTable = isInvoice ? "c_invoiceline" : "c_orderline";
-    String parentCol = isInvoice ? "c_invoice_id" : "c_order_id";
+    String lineTable = isInvoice ? TABLE_INVOICE_LINE : TABLE_ORDER_LINE;
+    String parentCol = isInvoice ? COL_INVOICE_ID : COL_ORDER_ID;
     String sql = "DELETE FROM " + lineTable
-        + " WHERE " + parentCol + " = ?"
+        + SQL_WHERE + parentCol + " = ?"
         + "   AND m_product_id = ?";
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
