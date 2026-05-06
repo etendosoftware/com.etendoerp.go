@@ -576,17 +576,24 @@ class SelectorQueryBuilder {
     Matcher m = LITERAL_CASE_WHEN.matcher(hql);
     StringBuffer sb = new StringBuffer();
     while (m.find()) {
-      String lhs = m.group(1);
-      String lit1 = m.group(2);
-      String lit2 = m.group(3);
-      String thenVal = m.group(4);
+      String lhs      = m.group(1);
+      String lit1     = m.group(2);
+      String lit2     = m.group(3);
+      String thenVal  = m.group(4);
+      String elseExpr = m.group(5);
       String replacement;
       if (lit1.equalsIgnoreCase(lit2)) {
+        // Always-true: CASE evaluates to THEN literal → collapse to direct equality.
         replacement = lhs + " = '" + thenVal + "'";
         log.debug("Simplified always-true CASE for {}: {} = '{}'", lhs, lhs, thenVal);
-      } else {
+      } else if (lhs.equalsIgnoreCase(elseExpr)) {
+        // Always-false and ELSE is the same property → tautology (x = x) → drop clause.
         replacement = "1=1";
-        log.debug("Simplified always-false CASE for {} (tautology → 1=1)", lhs);
+        log.debug("Simplified always-false CASE for {} (LHS=ELSE tautology → 1=1)", lhs);
+      } else {
+        // Always-false and ELSE is a different property → emit the real comparison.
+        replacement = lhs + " = " + elseExpr;
+        log.debug("Simplified always-false CASE for {}: real comparison {} = {}", lhs, lhs, elseExpr);
       }
       m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
     }

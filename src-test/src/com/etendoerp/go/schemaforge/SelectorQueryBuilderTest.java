@@ -182,12 +182,12 @@ class SelectorQueryBuilderTest {
   }
 
   /**
-   * When literals differ ('N'='Y'), the CASE expression is always false — the
-   * term should be dropped via the 1=1 cleanup.
+   * When literals differ ('N'='Y') and LHS == ELSE_EXPR, the CASE is a tautology
+   * (x = x is always true) — the AND clause should be dropped entirely.
    */
   @Test
-  @DisplayName("simplifyConstantCaseExpressions drops always-false CASE (AND 1=1 cleanup)")
-  void testSimplifyAlwaysFalseCase() {
+  @DisplayName("simplifyConstantCaseExpressions drops always-false CASE when LHS=ELSE (tautology)")
+  void testSimplifyAlwaysFalseCaseTautology() {
     String input = "EXISTS (SELECT 1 FROM FinancialMgmtFinAccPaymentMethod fapm "
         + "WHERE e.id=fapm.paymentMethod.id AND fapm.active='Y' "
         + "AND fapm.payinAllow = (CASE WHEN 'N'='Y' THEN 'Y' ELSE fapm.payinAllow END))";
@@ -198,6 +198,25 @@ class SelectorQueryBuilderTest {
         "No CASE WHEN should remain: " + result);
     assertFalse(result.contains("AND 1=1"),
         "AND 1=1 tautology should be stripped: " + result);
+  }
+
+  /**
+   * When literals differ ('A'='B') and LHS != ELSE_EXPR, the CASE evaluates to ELSE.
+   * The replacement must be a real comparison 'LHS = ELSE_EXPR', not a dropped tautology.
+   */
+  @Test
+  @DisplayName("simplifyConstantCaseExpressions emits real comparison when always-false CASE has different LHS and ELSE")
+  void testSimplifyAlwaysFalseCaseDifferentElse() {
+    String input = "WHERE e.org = (CASE WHEN 'A'='B' THEN 'Y' ELSE e.client END)";
+
+    String result = SelectorQueryBuilder.simplifyConstantCaseExpressions(input);
+
+    assertFalse(result.contains("CASE WHEN"),
+        "No CASE WHEN should remain: " + result);
+    assertTrue(result.contains("e.org = e.client"),
+        "Real comparison must be emitted when LHS != ELSE_EXPR: " + result);
+    assertFalse(result.contains("1=1"),
+        "Must not collapse to tautology when LHS and ELSE differ: " + result);
   }
 
   /**
