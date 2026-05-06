@@ -57,15 +57,21 @@ public class BusinessPartnerTransactionalSequenceIntegrationTest extends OBBaseT
     new OnboardingSequenceGeneratorService().generateSequences(TEST_CLIENT_ID, TEST_ORG_ID,
         TEST_USER_ID, TEST_ROLE_ID);
 
+    OBContext.setAdminMode(true);
+    try {
+      assertNotNull("Onboarding sequence generation must create the Business Partner identifier "
+          + "sequence combination", findBusinessPartnerIdentifierSequence());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+
     String customerId = new UniqueDefaultCustomerService().ensureDefaultCustomer(TEST_CLIENT_ID,
         TEST_ORG_ID, TEST_USER_ID, TEST_ROLE_ID);
 
     OBContext.setAdminMode(true);
     try {
-      assertNotNull("Onboarding sequence generation must create the Business Partner identifier "
-          + "sequence combination", findBusinessPartnerIdentifierSequence());
-
       BusinessPartner businessPartner = OBDal.getInstance().get(BusinessPartner.class, customerId);
+      assertNotNull("Onboarding default customer must exist after creation", businessPartner);
       String identifier = businessPartner.getEtgoIdentifier();
       assertNotNull("Onboarding default customer must receive EM_Etgo_Identifier", identifier);
       assertTrue("Onboarding default customer must use the transactional sequence mask",
