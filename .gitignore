@@ -1,6 +1,7 @@
 # Build
 build/
 out/
+web/
 *.class
 
 # IDE
@@ -21,3 +22,6 @@ Thumbs.db
 
 # Claude
 .claude/
+
+# Git worktrees
+.worktrees/

@@ -1,0 +1,35 @@
+# ─────────────────────────────────────────────
+# Runtime — solo Tomcat + WAR pre-compilado
+#
+# El WAR es generado por Jenkins (Stage 9: compile.complete + antWar)
+# contra clone_after, donde el agente Jenkins sí tiene acceso a RDS.
+# Docker solo empaqueta el artefacto resultante — sin compilación,
+# sin acceso a DB.
+# ─────────────────────────────────────────────
+FROM tomcat:9.0-jdk17
+
+RUN apt-get update && apt-get install -y postgresql-client curl && rm -rf /var/lib/apt/lists/*
+
+# Limpiar webapps por defecto
+RUN rm -rf "$CATALINA_HOME/webapps"/*
+
+# Copiar el WAR pre-compilado en Jenkins y expandirlo
+COPY lib/etendo.war /tmp/etendo.war
+RUN mkdir -p "$CATALINA_HOME/webapps/etendo" \
+ && cd "$CATALINA_HOME/webapps/etendo" \
+ && jar xf /tmp/etendo.war \
+ && rm /tmp/etendo.war
+
+# Directorio de adjuntos requerido por Etendo
+RUN mkdir -p /opt/openbravo/attachments
+
+# Entrypoint: inyecta openbravo.properties desde env vars y arranca Tomcat
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
+    CMD curl -sf http://localhost:8080/etendo/security/Login || exit 1
+
+ENTRYPOINT ["/docker-entrypoint.sh"]

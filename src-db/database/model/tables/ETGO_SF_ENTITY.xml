@@ -1,0 +1,116 @@
+<?xml version="1.0"?>
+  <database name="TABLE ETGO_SF_ENTITY">
+    <table name="ETGO_SF_ENTITY" primaryKey="ETGO_SF_ENTITY_KEY">
+      <column name="ETGO_SF_ENTITY_ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_ORG_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ISACTIVE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="NAME" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ETGO_SF_SPEC_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_TAB_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_MODULE_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ISINCLUDED" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="ISGET" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="ISGETBYID" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="ISPOST" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="ISPUT" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="ISPATCH" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="ISDELETE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="JAVA_QUALIFIER" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SEQNO" primaryKey="false" required="false" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[10]]></default>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_SF_ENT_CLI_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_MODULE" name="ETGO_SF_ENT_MOD_FK">
+        <reference local="AD_MODULE_ID" foreign="AD_MODULE_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_SF_ENT_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="ETGO_SF_SPEC" name="ETGO_SF_ENT_SPEC_FK">
+        <reference local="ETGO_SF_SPEC_ID" foreign="ETGO_SF_SPEC_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_TAB" name="ETGO_SF_ENT_TAB_FK">
+        <reference local="AD_TAB_ID" foreign="AD_TAB_ID"/>
+      </foreign-key>
+      <unique name="ETGO_SF_ENTITY_SPEC_NAME_UQ">
+        <unique-column name="ETGO_SF_SPEC_ID"/>
+        <unique-column name="NAME"/>
+      </unique>
+      <check name="ETGO_SF_ENT_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="ETGO_SF_ENT_ISDEL"><![CDATA[ISDELETE IN ('Y', 'N')]]></check>
+      <check name="ETGO_SF_ENT_ISGET"><![CDATA[ISGET IN ('Y', 'N')]]></check>
+      <check name="ETGO_SF_ENT_ISGETBI"><![CDATA[ISGETBYID IN ('Y', 'N')]]></check>
+      <check name="ETGO_SF_ENT_ISINCL"><![CDATA[ISINCLUDED IN ('Y', 'N')]]></check>
+      <check name="ETGO_SF_ENT_ISPATCH"><![CDATA[ISPATCH IN ('Y', 'N')]]></check>
+      <check name="ETGO_SF_ENT_ISPOST"><![CDATA[ISPOST IN ('Y', 'N')]]></check>
+      <check name="ETGO_SF_ENT_ISPUT"><![CDATA[ISPUT IN ('Y', 'N')]]></check>
+    </table>
+  </database>

@@ -1,0 +1,91 @@
+<?xml version="1.0"?>
+  <database name="TABLE ETGO_SF_FIELD">
+    <table name="ETGO_SF_FIELD" primaryKey="ETGO_SF_FIELD_KEY">
+      <column name="ETGO_SF_FIELD_ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_ORG_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ISACTIVE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ETGO_SF_ENTITY_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_COLUMN_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_MODULE_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ISINCLUDED" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="ISREADONLY" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="DEFAULTVALUE" primaryKey="false" required="false" type="VARCHAR" size="2000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="JAVA_QUALIFIER" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SEQNO" primaryKey="false" required="false" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[10]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="VISIBILITY" primaryKey="false" required="false" type="VARCHAR" size="20" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_SF_FLD_CLI_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_COLUMN" name="ETGO_SF_FLD_COL_FK">
+        <reference local="AD_COLUMN_ID" foreign="AD_COLUMN_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="ETGO_SF_ENTITY" name="ETGO_SF_FLD_ENT_FK">
+        <reference local="ETGO_SF_ENTITY_ID" foreign="ETGO_SF_ENTITY_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_MODULE" name="ETGO_SF_FLD_MOD_FK">
+        <reference local="AD_MODULE_ID" foreign="AD_MODULE_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_SF_FLD_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
+      <check name="ETGO_SF_FLD_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="ETGO_SF_FLD_ISINCL"><![CDATA[ISINCLUDED IN ('Y', 'N')]]></check>
+      <check name="ETGO_SF_FLD_ISRO"><![CDATA[ISREADONLY IN ('Y', 'N')]]></check>
+    </table>
+  </database>

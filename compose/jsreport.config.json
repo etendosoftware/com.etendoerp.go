@@ -1,0 +1,36 @@
+{
+  "httpPort": 5488,
+  "store": {
+    "provider": "fs"
+  },
+  "extensions": {
+    "authentication": {
+      "enabled": false
+    },
+    "chrome-pdf": {
+      "launchOptions": {
+        "executablePath": "/usr/bin/chromium-browser",
+        "args": ["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"]
+      },
+      "timeout": 60000
+    },
+    "handlebars": {
+      "enabled": true
+    },
+    "assets": {
+      "searchRecursive": true,
+      "allowedFiles": "**/*.*"
+    }
+  },
+  "trustUserCode": true,
+  "templatingEngines": {
+    "timeout": 60000,
+    "strategy": "in-process"
+  },
+  "logger": {
+    "console": {
+      "transport": "console",
+      "level": "info"
+    }
+  }
+}
