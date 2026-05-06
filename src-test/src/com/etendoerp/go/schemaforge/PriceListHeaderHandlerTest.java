@@ -105,7 +105,7 @@ public class PriceListHeaderHandlerTest {
     return ctx;
   }
 
-  private static NeoContext postCtxWithBody(String createdId, JSONObject body) {
+  private static NeoContext postCtxWithBody(JSONObject body) {
     NeoContext ctx = getCtxWithId(null, "POST");
     ctx.setPreviousResult(NeoResponse.ok(body));
     return ctx;
@@ -359,7 +359,7 @@ public class PriceListHeaderHandlerTest {
       stubVersionCriteria(dal, Collections.singletonList(existing));
 
       JSONObject body = singleRecordBody("pl-new");
-      NeoContext ctx = postCtxWithBody("pl-new", body);
+      NeoContext ctx = postCtxWithBody(body);
 
       NeoResponse result = new PriceListHeaderHandler().afterHandle(ctx);
 
@@ -402,7 +402,7 @@ public class PriceListHeaderHandlerTest {
       when(provider.get(PriceListVersion.class)).thenReturn(newVersion);
 
       JSONObject body = singleRecordBody("pl-new");
-      NeoContext ctx = postCtxWithBody("pl-new", body);
+      NeoContext ctx = postCtxWithBody(body);
 
       NeoResponse result = new PriceListHeaderHandler().afterHandle(ctx);
 
@@ -448,7 +448,7 @@ public class PriceListHeaderHandlerTest {
       when(provider.get(PriceListVersion.class)).thenReturn(newVersion);
 
       JSONObject body = singleRecordBody("pl-new");
-      NeoContext ctx = postCtxWithBody("pl-new", body);
+      NeoContext ctx = postCtxWithBody(body);
 
       NeoResponse result = new PriceListHeaderHandler().afterHandle(ctx);
 
