@@ -16,21 +16,25 @@
  */
 package com.etendoerp.go.schemaforge;
 
-/**
- * Metadata for an auxiliary output field in an OBUISEL selector.
- * Auxiliary fields are defined with isOutField=Y and a SUFFIX (e.g., "_LOC").
- * They provide extra data (like a default location ID) alongside the selected value.
- */
-class AuxFieldMeta {
-  final String suffix;              // e.g., "_LOC", "_CON"
-  final String hqlAlias;            // e.g., "locationid" (from displayColumnAlias)
-  final String name;                // display name of the field
-  final String property;            // DAL property path (if available)
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-  AuxFieldMeta(String suffix, String hqlAlias, String name, String property) {
-    this.suffix = suffix;
-    this.hqlAlias = hqlAlias;
-    this.name = name;
-    this.property = property;
+import org.junit.jupiter.api.Test;
+
+class WidgetQueryPolicyRegistryTest {
+
+  @Test
+  void bestProductsTrendUsesZeroWhenCurrentPeriodHasNoSales() {
+    WidgetQueryPolicyRegistry.WidgetQueryPolicy policy = WidgetQueryPolicyRegistry.bestProducts();
+
+    assertTrue(policy.fallbackSql.contains("COALESCE(curr_period.amount, 0)"));
+    assertTrue(policy.rangedSql.contains("COALESCE(curr_period.amount, 0)"));
+  }
+
+  @Test
+  void bestSellersTrendUsesZeroWhenCurrentPeriodHasNoSales() {
+    WidgetQueryPolicyRegistry.WidgetQueryPolicy policy = WidgetQueryPolicyRegistry.bestSellers();
+
+    assertTrue(policy.fallbackSql.contains("COALESCE(curr_period.qty, 0)"));
+    assertTrue(policy.rangedSql.contains("COALESCE(curr_period.qty, 0)"));
   }
 }
