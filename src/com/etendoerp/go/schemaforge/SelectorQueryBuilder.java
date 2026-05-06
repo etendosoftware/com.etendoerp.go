@@ -30,6 +30,9 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import com.etendoerp.go.schemaforge.selector.meta.AuxFieldMeta;
+import com.etendoerp.go.schemaforge.selector.meta.RichFieldMeta;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
@@ -53,13 +56,6 @@ class SelectorQueryBuilder {
   static final String SQL_AND = " AND ";
   static final String SQL_WHERE = " WHERE ";
 
-  private static final String FIELD_LABEL = "label";
-  private static final String FIELD_ITEMS = "items";
-  private static final String FIELD_COLUMNS = "columns";
-  private static final String FIELD_TOTAL_COUNT = "totalCount";
-  private static final String FIELD_LIMIT = "limit";
-  private static final String FIELD_OFFSET = "offset";
-  private static final String FIELD_HAS_MORE = "hasMore";
 
   /** Pattern matching @param@ and @#param@ (session-level) placeholders in OBUISEL clauses. */
   static final Pattern PARAM_PATTERN = Pattern.compile("@#?([A-Za-z_]+)@");
@@ -113,20 +109,6 @@ class SelectorQueryBuilder {
     }
   }
 
-  /**
-   * Build the standard paginated selector response JSON.
-   */
-  static NeoResponse buildSelectorResponse(JSONArray items, JSONArray columns,
-      int totalCount, int limit, int offset) throws Exception {
-    JSONObject result = new JSONObject();
-    result.put(FIELD_ITEMS, items);
-    result.put(FIELD_COLUMNS, columns);
-    result.put(FIELD_TOTAL_COUNT, totalCount);
-    result.put(FIELD_LIMIT, limit);
-    result.put(FIELD_OFFSET, offset);
-    result.put(FIELD_HAS_MORE, (offset + limit) < totalCount);
-    return NeoResponse.ok(result);
-  }
 
   /**
    * Build the OBQuery where-string for a standard rich (OBUISEL) query.
@@ -149,21 +131,6 @@ class SelectorQueryBuilder {
     return new HqlWithParams(whereClause, queryParams);
   }
 
-  /**
-   * Build the column-metadata JSONArray from a list of grid field descriptors.
-   */
-  static JSONArray buildGridColumnMetadata(List<RichFieldMeta> gridFields)
-      throws Exception {
-    JSONArray columns = new JSONArray();
-    for (RichFieldMeta fieldMeta : gridFields) {
-      JSONObject col = new JSONObject();
-      col.put("name", fieldMeta.propertyKey);
-      col.put(FIELD_LABEL, fieldMeta.label);
-      col.put("sortNo", fieldMeta.sortNo);
-      columns.put(col);
-    }
-    return columns;
-  }
 
   /**
    * Build the FROM-onwards HQL fragment for a custom-HQL selector query.
@@ -325,8 +292,15 @@ class SelectorQueryBuilder {
 
   /**
    * Append a full-text search predicate across all searchable properties.
-   * Emits an OR clause: {@code (lower(COALESCE(cast(alias.prop as string), '')) LIKE :search)}.
+   *
+   * <p>Emits an OR clause: {@code (lower(COALESCE(cast(<expr> as string), '')) LIKE :search)}.
    * No-op when {@code search} is blank or {@code searchableProps} is empty.
+   *
+   * <p>Each fragment is resolved via {@link #resolveSearchableExpression(String, String)}:
+   * bare property names are prefixed with the alias (standard selectors with
+   * {@code SelectorField.property}), while dotted fragments are used as-is
+   * (custom-HQL selectors whose {@code clause_left_part} already contains the alias,
+   * e.g. {@code bp.name}).
    */
   static void appendCustomSearchFilter(StringBuilder hql,
       List<String> searchableProps, String alias, String search, boolean hasWhere) {
@@ -338,10 +312,27 @@ class SelectorQueryBuilder {
       if (i > 0) {
         hql.append(" OR ");
       }
-      hql.append("lower(COALESCE(cast(").append(alias).append(".")
-          .append(searchableProps.get(i)).append(" as string), '')) LIKE :search");
+      String expr = resolveSearchableExpression(alias, searchableProps.get(i));
+      hql.append("lower(COALESCE(cast(").append(expr).append(" as string), '')) LIKE :search");
     }
     hql.append(")");
+  }
+
+  /**
+   * Resolve a searchable fragment into a fully-qualified HQL expression.
+   *
+   * <p>If the fragment already contains a dot (e.g. {@code bp.name}), it is returned
+   * as-is — OBUISEL custom selectors store the full HQL path including the alias in
+   * {@code clause_left_part}. Otherwise the fragment is a bare property name
+   * (standard {@code SelectorField.property}) and is prefixed with {@code alias.}.
+   *
+   * <p>Package-private for unit testing.
+   */
+  static String resolveSearchableExpression(String alias, String fragment) {
+    if (StringUtils.isBlank(fragment)) {
+      return fragment;
+    }
+    return fragment.contains(".") ? fragment : alias + "." + fragment;
   }
 
   /**
@@ -407,23 +398,9 @@ class SelectorQueryBuilder {
    * used as a fallback row identifier. Prefer resolving via valueProperty when available.
    */
   static String normalizeEntityId(String rawId) {
-    if (rawId != null && rawId.length() == 64 && rawId.matches("[0-9A-Fa-f]{64}")) {
-      return rawId.substring(32);
-    }
-    return rawId;
+    return SelectorResponseSupport.normalizeEntityId(rawId);
   }
 
-  /**
-   * Extract and normalize the record ID from an HQL Object[] row.
-   * Handles BaseOBObject, composite 64-char UUIDs, and plain string values.
-   */
-  static String extractRecordId(Object[] row, Integer idColIdx) {
-    Object idVal = (idColIdx != null && idColIdx < row.length) ? row[idColIdx] : row[0];
-    String recordId = idVal instanceof BaseOBObject
-        ? ((BaseOBObject) idVal).getId().toString()
-        : String.valueOf(idVal);
-    return normalizeEntityId(recordId);
-  }
 
   /**
    * Extract the display label from an HQL Object[] row.
@@ -585,14 +562,41 @@ class SelectorQueryBuilder {
 
   /**
    * Build combined param map from OBContext session variables and caller-provided params.
+   *
+   * <p>Mirrors the session variables Etendo Classic exposes to validation rules so that
+   * filters like {@code @#User_Client@}, {@code @Default_AD_Org_ID@} or
+   * {@code @Parent_AD_Org@} resolve the same way in FIC and in {@code /defaults}.</p>
    */
   private static Map<String, String> buildValidationParamMap(Map<String, String> contextParams) {
     Map<String, String> allParams = new java.util.HashMap<>();
     OBContext ctx = OBContext.getOBContext();
-    allParams.put("AD_Org_ID", ctx.getCurrentOrganization().getId());
-    allParams.put("AD_Client_ID", ctx.getCurrentClient().getId());
+    String currentOrgId = ctx.getCurrentOrganization().getId();
+    String currentClientId = ctx.getCurrentClient().getId();
+    allParams.put("AD_Org_ID", currentOrgId);
+    allParams.put("AD_Client_ID", currentClientId);
     allParams.put("AD_User_ID", ctx.getUser().getId());
     allParams.put("AD_Role_ID", ctx.getRole().getId());
+    allParams.put("Default_AD_Org_ID", currentOrgId);
+    allParams.put("Default_AD_Client_ID", currentClientId);
+    allParams.put("Default_AD_Role_ID", ctx.getRole().getId());
+    allParams.put("Default_AD_User_ID", ctx.getUser().getId());
+    allParams.put("Product_Org", currentOrgId);
+    String readableClients = quotedCsv(ctx.getReadableClients());
+    if (readableClients != null) {
+      allParams.put("#User_Client", readableClients);
+    }
+    String readableOrgs = quotedCsv(ctx.getReadableOrganizations());
+    if (readableOrgs != null) {
+      allParams.put("#User_Org", readableOrgs);
+    }
+    try {
+      String parentOrg = ctx.getOrganizationStructureProvider().getParentOrg(currentOrgId);
+      if (StringUtils.isNotBlank(parentOrg)) {
+        allParams.put("Parent_AD_Org", parentOrg);
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve Parent_AD_Org for {}: {}", currentOrgId, e.getMessage());
+    }
     if (contextParams != null) {
       allParams.putAll(contextParams);
     }
@@ -628,33 +632,82 @@ class SelectorQueryBuilder {
     // HQL requires entity/property names. Translate SQL names → HQL names when possible.
     trimmed = translateSqlToHql(trimmed);
 
-    // Check if all @Param@ in this clause can be resolved
-    Matcher paramMatcher = VALIDATION_PARAM.matcher(trimmed);
-    while (paramMatcher.find()) {
-      if (lookupParamValue(allParams, paramMatcher.group(1)) == null) {
-        log.debug("Skipping validation clause with unresolvable params: {}", trimmed);
-        return null;
-      }
-    }
+    // Substitute @Param@ / @#Param@ with their value, or with literal NULL when the
+    // variable can't be resolved from the current context. This mirrors Etendo Classic's
+    // ComboTableData, which injects NULL for missing session vars: filters relying on a
+    // missing variable naturally return no rows instead of being silently dropped (which
+    // would relax the filter and surface arbitrary records).
+    return substituteValidationParams(trimmed, allParams);
+  }
 
-    // Replace @Param@ and @#Param@ with sanitized values
-    StringBuffer resolved = new StringBuffer();
-    paramMatcher = VALIDATION_PARAM.matcher(trimmed);
-    while (paramMatcher.find()) {
-      String rawValue = lookupParamValue(allParams, paramMatcher.group(1));
-      if (rawValue == null) {
-        return null;
-      }
-      String value = rawValue.replace("'", "''");
-      int matchStart = paramMatcher.start();
-      int matchEnd = paramMatcher.end();
-      boolean alreadyQuoted = matchStart > 0 && trimmed.charAt(matchStart - 1) == '\''
-          && matchEnd < trimmed.length() && trimmed.charAt(matchEnd) == '\'';
-      String replacement = alreadyQuoted ? value : "'" + value + "'";
-      paramMatcher.appendReplacement(resolved, Matcher.quoteReplacement(replacement));
+  /**
+   * Replace every {@code @Param@} / {@code @#Param@} placeholder in {@code clause} by its
+   * value from {@code allParams}. Unresolved placeholders become the SQL literal
+   * {@code NULL}.
+   *
+   * <p>Placeholders wrapped in single quotes (e.g. {@code ='@Foo@'}) get special handling:
+   * the surrounding quotes are stripped when substituting {@code NULL}, so the output is
+   * {@code =NULL} instead of the string {@code ='NULL'}. Resolved values in that position
+   * keep the surrounding quotes and only have inner quotes escaped.</p>
+   */
+  private static String substituteValidationParams(String clause, Map<String, String> allParams) {
+    // First pass: placeholders wrapped in single quotes (e.g. ='@Foo@') — for unresolved
+    // vars strip the quotes so the output is =NULL rather than ='NULL'.
+    Pattern quotedParam = Pattern.compile("'@([^@]+)@'");
+    Matcher m = quotedParam.matcher(clause);
+    StringBuffer sb = new StringBuffer();
+    while (m.find()) {
+      String value = lookupParamValue(allParams, m.group(1));
+      String rep = value == null ? "NULL" : "'" + value.replace("'", "''") + "'";
+      m.appendReplacement(sb, Matcher.quoteReplacement(rep));
     }
-    paramMatcher.appendTail(resolved);
-    return resolved.toString();
+    m.appendTail(sb);
+
+    // Second pass: bare placeholders.
+    // Pre-formatted CSV session vars like #User_Client ("'0','1'") already contain quotes
+    // — those are emitted raw to preserve the SQL list syntax. Simple scalar values are
+    // wrapped in quotes and have their inner quotes escaped.
+    String intermediate = sb.toString();
+    Matcher bare = VALIDATION_PARAM.matcher(intermediate);
+    StringBuffer out = new StringBuffer();
+    while (bare.find()) {
+      String value = lookupParamValue(allParams, bare.group(1));
+      String rep;
+      if (value == null) {
+        log.debug("Validation param @{}@ not resolvable, substituting NULL in clause: {}",
+            bare.group(1), clause);
+        rep = "NULL";
+      } else if (value.indexOf('\'') >= 0) {
+        rep = value;
+      } else {
+        rep = "'" + value + "'";
+      }
+      bare.appendReplacement(out, Matcher.quoteReplacement(rep));
+    }
+    bare.appendTail(out);
+    return out.toString();
+  }
+
+  /**
+   * Build a comma-separated list of SQL-quoted ids (e.g. {@code '0','1'}).
+   * Returns {@code null} when the array is empty or fully blank, so callers
+   * can skip injecting the session variable when there are no readable ids.
+   */
+  private static String quotedCsv(String[] ids) {
+    if (ids == null || ids.length == 0) {
+      return null;
+    }
+    StringBuilder sb = new StringBuilder();
+    for (String id : ids) {
+      if (StringUtils.isBlank(id)) {
+        continue;
+      }
+      if (sb.length() > 0) {
+        sb.append(',');
+      }
+      sb.append('\'').append(id.replace("'", "''")).append('\'');
+    }
+    return sb.length() == 0 ? null : sb.toString();
   }
 
   private static String lookupParamValue(Map<String, String> allParams, String key) {
@@ -685,63 +738,67 @@ class SelectorQueryBuilder {
    * {@code FROM DUAL} is removed — HQL scalar subqueries work without a FROM clause.
    */
   private static String translateSqlToHql(String clause) {
-    // Unwrap "(SELECT expr FROM DUAL)" → "(expr)" before table-name translation
     clause = SELECT_FROM_DUAL.matcher(clause).replaceAll("($1)");
-    // Step 1: Find "FROM <tableName> <alias>" patterns and build alias→Entity map
     Map<String, Entity> aliasEntityMap = new HashMap<>();
+    String translatedFrom = translateFromAliases(clause, aliasEntityMap);
+    return translateColumnReferences(translatedFrom, aliasEntityMap);
+  }
+
+  private static String translateFromAliases(String clause, Map<String, Entity> aliasEntityMap) {
     Matcher fromMatcher = FROM_WITH_ALIAS.matcher(clause);
-    StringBuffer step1 = new StringBuffer();
+    StringBuffer translated = new StringBuffer();
     while (fromMatcher.find()) {
-      String tableName = fromMatcher.group(1);
+      Entity entity = resolveFromEntity(fromMatcher.group(1));
       String alias = fromMatcher.group(2);
-      // Try by HQL entity name first, then by SQL table name.
-      // ModelProvider.getEntity() throws if not found, so we catch and fall through.
-      Entity entity = null;
-      try {
-        entity = ModelProvider.getInstance().getEntity(tableName);
-      } catch (Exception e) {
-        // Not a valid HQL entity name — try as SQL table name below
-      }
       if (entity != null) {
         aliasEntityMap.put(alias, entity);
-        continue; // already a valid HQL entity name, no replacement needed
       }
-      entity = ModelProvider.getInstance().getEntityByTableName(tableName);
-      if (entity != null) {
-        aliasEntityMap.put(alias, entity);
-        log.debug("Translating SQL table name [{}] → HQL entity [{}]", tableName, entity.getName());
-        fromMatcher.appendReplacement(step1,
+      if (entity != null && !entity.getName().equals(fromMatcher.group(1))) {
+        log.debug("Translating SQL table name [{}] → HQL entity [{}]", fromMatcher.group(1), entity.getName());
+        fromMatcher.appendReplacement(translated,
             Matcher.quoteReplacement("FROM " + entity.getName() + " " + alias));
       }
     }
-    fromMatcher.appendTail(step1);
-    String result = step1.toString();
+    fromMatcher.appendTail(translated);
+    return translated.toString();
+  }
 
-    // Step 2: Translate alias.columnName → alias.propertyName for each known alias
-    for (Map.Entry<String, Entity> entry : aliasEntityMap.entrySet()) {
-      String alias = entry.getKey();
-      Entity entity = entry.getValue();
-      Pattern colRef = Pattern.compile("\\b" + Pattern.quote(alias) + "\\.(\\w+)");
-      Matcher colMatcher = colRef.matcher(result);
-      StringBuffer step2 = new StringBuffer();
-      while (colMatcher.find()) {
-        String columnName = colMatcher.group(1);
-        Property prop = entity.getPropertyByColumnName(columnName, false);
-        if (prop != null) {
-          // FK columns (associations) need .id appended for HQL comparison
-          String hqlRef = prop.isPrimitive()
-              ? alias + "." + prop.getName()
-              : alias + "." + prop.getName() + ".id";
-          log.debug("Translating column [{}] → HQL property [{}]", columnName, hqlRef);
-          colMatcher.appendReplacement(step2, Matcher.quoteReplacement(hqlRef));
-        }
-        // If property not found, leave original (might be a valid HQL reference already)
+  private static Entity resolveFromEntity(String tableName) {
+    try {
+      Entity hqlEntity = ModelProvider.getInstance().getEntity(tableName);
+      if (hqlEntity != null) {
+        return hqlEntity;
       }
-      colMatcher.appendTail(step2);
-      result = step2.toString();
+    } catch (Exception e) {
+      // Not a valid HQL entity name — fall through to SQL table lookup.
     }
+    return ModelProvider.getInstance().getEntityByTableName(tableName);
+  }
 
+  private static String translateColumnReferences(String clause, Map<String, Entity> aliasEntityMap) {
+    String result = clause;
+    for (Map.Entry<String, Entity> entry : aliasEntityMap.entrySet()) {
+      result = translateAliasColumns(result, entry.getKey(), entry.getValue());
+    }
     return result;
+  }
+
+  private static String translateAliasColumns(String clause, String alias, Entity entity) {
+    Pattern colRef = Pattern.compile("\\b" + Pattern.quote(alias) + "\\.(\\w+)");
+    Matcher colMatcher = colRef.matcher(clause);
+    StringBuffer translated = new StringBuffer();
+    while (colMatcher.find()) {
+      Property prop = entity.getPropertyByColumnName(colMatcher.group(1), false);
+      if (prop != null) {
+        String hqlRef = prop.isPrimitive()
+            ? alias + "." + prop.getName()
+            : alias + "." + prop.getName() + ".id";
+        log.debug("Translating column [{}] → HQL property [{}]", colMatcher.group(1), hqlRef);
+        colMatcher.appendReplacement(translated, Matcher.quoteReplacement(hqlRef));
+      }
+    }
+    colMatcher.appendTail(translated);
+    return translated.toString();
   }
 
   /**

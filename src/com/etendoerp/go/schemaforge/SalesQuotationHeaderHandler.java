@@ -27,6 +27,8 @@ import javax.inject.Named;
  * <ul>
  *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler}</li>
  *   <li>{@code createDraftInvoice} / {@code checkDraftInvoice} / {@code listInvoices} → {@link CreateDraftInvoiceHandler}</li>
+ *   <li>{@code rejectQuotation} → {@link RejectQuotationHandler}</li>
+ *   <li>{@code createRejectReason} → {@link CreateRejectReasonHandler}</li>
  * </ul>
  */
 @Named("salesQuotationHeaderHandler")
@@ -38,6 +40,14 @@ public class SalesQuotationHeaderHandler implements NeoHandler {
   @Override
   public NeoResponse handle(NeoContext context) {
     NeoResponse result = cloneRecordHandler.handle(context);
+    if (result != null) {
+      return result;
+    }
+    result = new RejectQuotationHandler().handle(context);
+    if (result != null) {
+      return result;
+    }
+    result = new CreateRejectReasonHandler().handle(context);
     if (result != null) {
       return result;
     }

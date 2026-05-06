@@ -82,21 +82,22 @@ NeoServlet (/sws/neo/*)
 
 ### Componentes Clave
 
-| Clase | Responsabilidad |
+| Clase / package | Responsabilidad |
 |-------|----------------|
 | `NeoServlet` | Entry point principal. Auth JWT, parsing de path, routing, filtro parent-child. |
 | `NeoHandler` | Interface CDI para hooks custom. Retorna `NeoResponse` o `null` para fall-through. |
 | `NeoContext` | Objeto contexto inmutable (builder pattern). Transporta spec, entity, method, body, tab, OBContext. |
 | `NeoResponse` | Wrapper de response con builders estaticos: `ok()`, `created()`, `noContent()`, `error()`. |
-| `NeoSelectorService` | Resolucion de FK dropdowns (TableDir, Table, Search, OBUISEL). Soporta HQL custom. |
+| `NeoSelectorService` | Facade de selectors. Delega metadata y politicas a `schemaforge.selector.meta` y `schemaforge.selector.policy`. |
+| `schemaforge.selector.meta` | Metadata normalizada para Table/TableDir/Search/OBUISEL selectors. |
+| `schemaforge.selector.policy` | SPI/registry para filtros por contexto, overrides, columnas virtuales y enriquecimiento post-query. |
 | `NeoCalloutService` | Ejecucion de AD_Callouts via REST. Construye request sintetico. |
 | `NeoDefaultsService` | Resolucion de valores por defecto (literals, context vars, SQL, sequences). |
-| `NeoProcessService` | Ejecucion de procesos (OBUIAPP, Classic). Validacion de parametros. |
+| `NeoProcessService` | Ejecucion de procesos (OBUIAPP, Classic, scheduling, DB procedure). Validacion de parametros. |
 | `NeoReportService` | Generacion de reportes Jasper (PDF, XLS, XLSX, HTML, CSV). |
 | `NeoFieldFilter` | Filtra JSON basado en config ETGO_SF_FIELD (IsIncluded, IsReadOnly). |
 | `NeoOpenAPIEndpoint` | Generacion automatica de documentacion OpenAPI 3.0. |
 | `PopulateSpecHelper` | Auto-popula entities y fields desde metadata AD. |
-
 ---
 
 ## 3. Pipeline de Request
@@ -564,6 +565,17 @@ GET /sws/neo/sales-order/OrderLine/selectors/M_Product_ID?q=laptop&M_Product_Cat
 ```
 
 ---
+### Internal selector package split
+
+| Layer | Package / classes | Notes |
+|---|---|---|
+| Request facade | `NeoSelectorService` | Handles selector endpoints and delegates implementation details. |
+| Metadata | `com.etendoerp.go.schemaforge.selector.meta` | Resolves AD/OBUISEL metadata into normalized selector descriptors. |
+| Policies | `com.etendoerp.go.schemaforge.selector.policy` | Hosts `SelectorContextPolicy`, `SelectorEnrichmentPolicy`, and `SelectorPolicyRegistry`. |
+| Execution | `SelectorQueryExecutor`, `SelectorQueryBuilder`, `ComboReferenceSelectorExecutor`, `ListReferenceSelectorExecutor`, `SelectorResponseSupport` | Performs HQL/reference execution and response shaping. These classes remain in `schemaforge` to avoid widening package-private APIs. |
+
+New selector special cases should be registered as policies where possible instead of adding entity-specific branches to `NeoSelectorService`.
+
 
 ## 10. Pipeline de Callouts
 
@@ -1108,34 +1120,34 @@ Tests unitarios en `src-test/src/com/etendoerp/go/schemaforge/`:
 ## Estructura de Archivos
 
 ```
-src/com/etendoerp/go/schemaforge/
-  NeoServlet.java              # Entry point, routing, auth
-  NeoHandler.java              # Interface para hooks custom
-  NeoContext.java              # Contexto de request (builder)
-  NeoResponse.java             # Wrapper de response
-  NeoSelectorService.java      # FK dropdowns
-  NeoCalloutService.java       # AD Callout execution
-  NeoDefaultsService.java      # Default value resolution
-  NeoProcessService.java       # Process execution
-  NeoReportService.java        # Jasper report generation
-  NeoFieldFilter.java          # Field-level filtering
-  NeoOpenAPIEndpoint.java      # OpenAPI documentation
-  PopulateSpecHelper.java      # Auto-populate from AD metadata
-  PopulateSpecProcess.java     # AD_Process wrapper for populate
-  SyntheticHttpServletRequest.java  # Mock request for callouts
-  data/
-    SFSpec.java                # ORM entity (auto-generated)
-    SFEntity.java              # ORM entity (auto-generated)
-    SFField.java               # ORM entity (auto-generated)
-  webhooks/
-    SFUpsertSpec.java          # Webhook: create/update spec
-    SFUpsertEntity.java        # Webhook: create/update entity
-    SFUpsertField.java         # Webhook: create/update field
-    SFPopulateSpec.java        # Webhook: auto-populate
-    SFListWindows.java         # Webhook: list windows
-    SFListProcesses.java       # Webhook: list processes
-    SFListMenu.java            # Webhook: list menu items
-
+src/com/etendoerp/go/
+  common/                       # Shared servlet/auth/protocol helpers
+  mcp/                          # MCP servlet, tool registry, authorization, routing
+  oauth2/                       # OAuth2 endpoints plus extracted support/policy helpers
+  onboarding/                   # Onboarding dataset import/runtime support
+  rest/                         # REST/JWT compatibility endpoints
+  schemaforge/
+    NeoServlet.java             # Entry point, routing, auth
+    NeoHandler.java             # Interface para hooks custom
+    NeoContext.java             # Contexto de request (builder)
+    NeoResponse.java            # Wrapper de response
+    NeoSelectorService.java     # Selector facade
+    SelectorQueryExecutor.java  # Selector query execution
+    SelectorResponseSupport.java # Selector response shaping
+    NeoCalloutService.java      # AD Callout execution
+    NeoDefaultsService.java     # Default value resolution
+    NeoProcessService.java      # Process execution
+    NeoReportService.java       # Jasper report generation
+    NeoFieldFilter.java         # Field-level filtering
+    selector/
+      meta/                     # Selector metadata and descriptor resolution
+      policy/                   # Selector policy SPI, registry, overrides, enrichments
+    data/
+      SFSpec.java               # ORM entity (auto-generated)
+      SFEntity.java             # ORM entity (auto-generated)
+      SFField.java              # ORM entity (auto-generated)
+    util/                       # Generic NEO helper classes
+    webhooks/                   # Schema Forge metadata management webhooks
 src-db/database/
   model/tables/
     ETGO_SF_SPEC.xml           # Table definition

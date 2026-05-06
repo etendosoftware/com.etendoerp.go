@@ -58,6 +58,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   private static final String FIELD_INVOICE_TO_ADDRESS = "invoiceToAddress";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_REGION = "region";
+  private static final String FIELD_RESPONSE = "response";
+  private static final String FIELD_DATA = "data";
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
@@ -81,14 +83,18 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   @Override
   public NeoResponse afterHandle(NeoContext ctx) {
-    // Enrich GET-by-ID response with C_Location fields so the modal can pre-populate the form
-    if (!"GET".equals(ctx.getHttpMethod()) || ctx.getRecordId() == null) {
+    if (!"GET".equals(ctx.getHttpMethod())) {
       return null;
     }
     try {
-      return enrichWithLocationData(ctx);
+      if (ctx.getRecordId() != null) {
+        // Enrich GET-by-ID response with C_Location fields so the modal can pre-populate the form
+        return enrichWithLocationData(ctx);
+      }
+      // Enrich GET list: replace stale "Location" names with a computed display name
+      return enrichListDisplayNames(ctx);
     } catch (Exception e) {
-      log.error("ContactsLocationAddressHandler error enriching GET by ID response", e);
+      log.error("ContactsLocationAddressHandler afterHandle error", e);
       return null;
     }
   }
@@ -186,17 +192,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   // ------------------------------------------------------------------ enrich GET
 
   private NeoResponse enrichWithLocationData(NeoContext ctx) throws Exception {
-    NeoResponse previous = ctx.getPreviousResult();
-    if (previous == null || previous.getBody() == null) {
-      return null;
-    }
-    JSONObject body = previous.getBody();
-    JSONObject responseWrapper = body.optJSONObject("response");
-    if (responseWrapper == null) {
-      return null;
-    }
-    JSONArray dataArr = responseWrapper.optJSONArray("data");
-    if (dataArr == null || dataArr.length() == 0) {
+    JSONArray dataArr = extractDataArray(ctx);
+    if (dataArr == null) {
       return null;
     }
     JSONObject locationJson = dataArr.getJSONObject(0);
@@ -213,13 +210,74 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         return null;
       }
       putGeoLocFields(locationJson, geoLoc);
-      return NeoResponse.ok(body);
+      return NeoResponse.ok(ctx.getPreviousResult().getBody());
     } finally {
       OBContext.restorePreviousMode();
     }
   }
 
+  // ------------------------------------------------------------------ enrich GET list
+
+  private NeoResponse enrichListDisplayNames(NeoContext ctx) throws Exception {
+    JSONArray dataArr = extractDataArray(ctx);
+    if (dataArr == null) {
+      return null;
+    }
+
+    OBContext.setAdminMode(true);
+    try {
+      boolean modified = false;
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject rec = dataArr.getJSONObject(i);
+        String name = rec.optString("name", "");
+        if (!"Location".equals(name) && !name.isEmpty()) {
+          continue;
+        }
+        String bplId = nullIfEmpty(rec.optString("id", null));
+        if (bplId == null) {
+          continue;
+        }
+        org.openbravo.model.common.businesspartner.Location bpLoc =
+            OBDal.getInstance().get(org.openbravo.model.common.businesspartner.Location.class, bplId);
+        if (bpLoc == null || bpLoc.getLocationAddress() == null) {
+          continue;
+        }
+        String computed = buildDisplayName(bpLoc.getLocationAddress());
+        if (computed != null && !computed.equals(name)) {
+          rec.put("name", computed);
+          modified = true;
+        }
+      }
+      return modified ? NeoResponse.ok(ctx.getPreviousResult().getBody()) : null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private static String buildDisplayName(org.openbravo.model.common.geography.Location geoLoc) {
+    String result = joinNonNull(nullIfEmpty(geoLoc.getCityName()), nullIfEmpty(geoLoc.getAddressLine1()));
+    if (result != null) {
+      return result;
+    }
+    String region = geoLoc.getRegion() != null ? nullIfEmpty(geoLoc.getRegion().getName()) : null;
+    String country = geoLoc.getCountry() != null ? nullIfEmpty(geoLoc.getCountry().getName()) : null;
+    return joinNonNull(region, country);
+  }
+
   // ------------------------------------------------------------------ shared helpers
+
+  private static JSONArray extractDataArray(NeoContext ctx) {
+    NeoResponse previous = ctx.getPreviousResult();
+    if (previous == null || previous.getBody() == null) {
+      return null;
+    }
+    JSONObject responseWrapper = previous.getBody().optJSONObject(FIELD_RESPONSE);
+    if (responseWrapper == null) {
+      return null;
+    }
+    JSONArray dataArr = responseWrapper.optJSONArray(FIELD_DATA);
+    return (dataArr == null || dataArr.length() == 0) ? null : dataArr;
+  }
 
   private static void applyGeoLocFields(JSONObject body,
       org.openbravo.model.common.geography.Location geoLoc) throws Exception {
@@ -255,30 +313,29 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     locationJson.put("postalCode",   geoLoc.getPostalCode()   != null ? geoLoc.getPostalCode()   : JSONObject.NULL);
 
     if (geoLoc.getCountry() != null) {
-      locationJson.put(FIELD_COUNTRY,             geoLoc.getCountry().getId());
-      locationJson.put("country$_identifier", geoLoc.getCountry().getName());
+      locationJson.put(FIELD_COUNTRY,          geoLoc.getCountry().getId());
+      locationJson.put("country$_identifier",  geoLoc.getCountry().getName());
     } else {
-      locationJson.put(FIELD_COUNTRY,             JSONObject.NULL);
-      locationJson.put("country$_identifier", JSONObject.NULL);
+      locationJson.put(FIELD_COUNTRY,          JSONObject.NULL);
+      locationJson.put("country$_identifier",  JSONObject.NULL);
     }
     if (geoLoc.getRegion() != null) {
-      locationJson.put(FIELD_REGION,             geoLoc.getRegion().getId());
-      locationJson.put("region$_identifier", geoLoc.getRegion().getName());
+      locationJson.put(FIELD_REGION,           geoLoc.getRegion().getId());
+      locationJson.put("region$_identifier",   geoLoc.getRegion().getName());
     } else {
-      locationJson.put(FIELD_REGION,             JSONObject.NULL);
-      locationJson.put("region$_identifier", JSONObject.NULL);
+      locationJson.put(FIELD_REGION,           JSONObject.NULL);
+      locationJson.put("region$_identifier",   JSONObject.NULL);
     }
   }
 
   private static JSONObject buildRecord(org.openbravo.model.common.businesspartner.Location bpLoc,
       org.openbravo.model.common.geography.Location geoLoc) throws Exception {
     JSONObject locationJson = new JSONObject();
-    locationJson.put("id",             bpLoc.getId());
+    locationJson.put("id",              bpLoc.getId());
     locationJson.put("locationAddress", geoLoc.getId());
-    locationJson.put("name",           bpLoc.getName() != null ? bpLoc.getName() : JSONObject.NULL);
-    locationJson.put(FIELD_SHIP_TO_ADDRESS,  Boolean.TRUE.equals(bpLoc.isShipToAddress()) ? "Y" : "N");
-    locationJson.put(FIELD_INVOICE_TO_ADDRESS,
-        Boolean.TRUE.equals(bpLoc.isInvoiceToAddress()) ? "Y" : "N");
+    locationJson.put("name",            bpLoc.getName() != null ? bpLoc.getName() : JSONObject.NULL);
+    locationJson.put(FIELD_SHIP_TO_ADDRESS,    Boolean.TRUE.equals(bpLoc.isShipToAddress()) ? "Y" : "N");
+    locationJson.put(FIELD_INVOICE_TO_ADDRESS, Boolean.TRUE.equals(bpLoc.isInvoiceToAddress()) ? "Y" : "N");
     putGeoLocFields(locationJson, geoLoc);
     return locationJson;
   }
@@ -288,10 +345,23 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     dataArr.put(locationJson);
     JSONObject responseData = new JSONObject();
     responseData.put("status", 0);
-    responseData.put("data", dataArr);
+    responseData.put(FIELD_DATA, dataArr);
     JSONObject wrapper = new JSONObject();
-    wrapper.put("response", responseData);
+    wrapper.put(FIELD_RESPONSE, responseData);
     return new NeoResponse(httpStatus, wrapper);
+  }
+
+  private static String joinNonNull(String... parts) {
+    StringBuilder sb = new StringBuilder();
+    for (String part : parts) {
+      if (part != null) {
+        if (sb.length() > 0) {
+          sb.append(", ");
+        }
+        sb.append(part);
+      }
+    }
+    return sb.length() > 0 ? sb.toString() : null;
   }
 
   private static String nullIfEmpty(String s) {

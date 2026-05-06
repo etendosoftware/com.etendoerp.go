@@ -19,10 +19,12 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -32,11 +34,15 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
@@ -63,6 +69,8 @@ class NeoCrudHandler {
   private static final String METHOD_DELETE = "DELETE";
   private static final String METHOD_PATCH = "PATCH";
   private static final String PARAM_PARENT_ID = "parentId";
+  private static final String HQL_AND_OPERATOR = " and ";
+  private static final String JSON_IDENTIFIER = "_identifier";
   private static final Set<String> CONTACTS_PRECREATE_BILLING_FIELDS = new HashSet<>(
       Arrays.asList(
           "priceList",
@@ -102,6 +110,19 @@ class NeoCrudHandler {
     }
     Tab adTab = entity.getADTab();
     Map<String, String> queryParams = servlet.extractQueryParams(request);
+
+    // Short-circuit for `?_distinct=<field>` on a list GET: returns the
+    // paginated set of distinct values for the given scalar field, so UI
+    // filter selectors can show all possible options without loading the
+    // entire dataset or inventing them client-side. Runs through the same
+    // tab-where + parent-filter + readable-client/org filtering as the
+    // standard list fetch, just with a different projection.
+    if ("GET".equals(method) && queryParams != null
+        && StringUtils.isNotBlank(queryParams.get(JsonConstants.DISTINCT_PARAMETER))) {
+      servlet.writeResponse(response, handleDistinctFetch(adTab, queryParams));
+      return;
+    }
+
     NeoContext neoContext = NeoContext.builder()
         .specName(pathInfo.specName)
         .entityName(pathInfo.entityName)
@@ -204,9 +225,44 @@ class NeoCrudHandler {
 
       return executeJsonServiceAndBuildResponse(
           context, adTab, dalEntityName, fieldFilter, jsonService, params);
+    } catch (MissingRequiredFieldsException e) {
+      // ETP-3894: structured 400 lists the missing fields so the UI can highlight them.
+      return buildMissingRequiredFieldsResponse(e);
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    }
+  }
+
+  /**
+   * ETP-3894: build the structured 400 response returned when a create/update is rejected
+   * because mandatory user-input fields are missing. Body shape:
+   * <pre>{
+   *   "error": {
+   *     "code": "MISSING_REQUIRED_FIELDS",
+   *     "message": "...",
+   *     "fields": ["bpartner", "priceList", ...]
+   *   }
+   * }</pre>
+   */
+  private NeoResponse buildMissingRequiredFieldsResponse(MissingRequiredFieldsException e) {
+    try {
+      JSONArray fieldsArr = new JSONArray();
+      for (String f : e.getFields()) {
+        fieldsArr.put(f);
+      }
+      JSONObject errorObj = new JSONObject();
+      errorObj.put("code", MissingRequiredFieldsException.ERROR_CODE);
+      errorObj.put("status", HttpServletResponse.SC_BAD_REQUEST);
+      errorObj.put("message", "Missing required fields");
+      errorObj.put("fields", fieldsArr);
+      JSONObject body = new JSONObject();
+      body.put("error", errorObj);
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
+    } catch (Exception fallback) {
+      log.warn("Could not build MISSING_REQUIRED_FIELDS body: {}", fallback.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          MissingRequiredFieldsException.ERROR_CODE);
     }
   }
 
@@ -253,7 +309,7 @@ class NeoCrudHandler {
       String parentFilter = resolveParentFilter(adTab, parentId);
       if (StringUtils.isNotBlank(parentFilter)) {
         if (where.length() > 0) {
-          where.append(" and ");
+          where.append(HQL_AND_OPERATOR);
         }
         where.append("(").append(parentFilter).append(")");
       }
@@ -261,14 +317,14 @@ class NeoCrudHandler {
     String neoWhere = params.remove(NeoCrudHelper.NEO_WHERE_PARAM);
     if (StringUtils.isNotBlank(neoWhere)) {
       if (where.length() > 0) {
-        where.append(" and ");
+        where.append(HQL_AND_OPERATOR);
       }
       where.append("(").append(neoWhere).append(")");
     }
     if (where.length() > 0) {
       params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, where.toString());
-      params.put(JsonConstants.USE_ALIAS, "true");
     }
+    params.put(JsonConstants.USE_ALIAS, "true");
   }
 
   /**
@@ -395,13 +451,29 @@ class NeoCrudHandler {
     // on create because they often carry values set by callouts or defaults (e.g., taxCategory
     // populated from productCategory). filterWriteRequest is for PATCH/PUT only.
     JSONObject filteredBody = fieldFilter.filterCreateRequest(requestBody);
-    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
-    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue);
-    NeoDefaultsService.injectProductDerivedUomIfMissing(filteredBody);
-    NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
-    NeoDefaultsService.injectLineGrossAmountIfMissing(filteredBody);
-    NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
-    // TODO move this compatibility rule into the shared create-defaults helper once the merge settles.
+    // Snapshot the keys submitted by the user BEFORE injectMandatoryDefaults adds backend
+    // defaults. The callout cascade is allowed to refine missing/derived fields, but it must
+    // not overwrite values the user explicitly chose (e.g. paymentTerms manually changed in
+    // the form after a businessPartner callout already ran).
+    Set<String> userSubmittedFields = new HashSet<>();
+    if (filteredBody != null) {
+      Iterator<String> userKeyIter = filteredBody.keys();
+      while (userKeyIter.hasNext()) {
+        userSubmittedFields.add(userKeyIter.next());
+      }
+    }
+    long perfTotalStart = System.nanoTime();
+    long perfStart = perfTotalStart;
+    // runCascade=false: the cascade is run explicitly right after by executePostCalloutCascade,
+    // so we skip the duplicated pass embedded in injectMandatoryDefaults.
+    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue, false);
+    long perfInjectDefaults = System.nanoTime();
+    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, userSubmittedFields);
+    long perfCalloutCascade = System.nanoTime();
+    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(filteredBody);
     stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
     // Coerce String primitives injected by injectMandatoryDefaults to their correct Java types.
     // Utility.getDefault() always returns String; JsonToDataConverter has no String→BigDecimal/
@@ -413,12 +485,31 @@ class NeoCrudHandler {
     if (filteredBody != null) {
       filteredBody.remove("id");
     }
+    // ETP-3894: validate that all mandatory user-input fields have values after the full
+    // resolution chain (defaults + session + parent + callout cascade). Throw a structured
+    // exception so the UI can highlight the missing fields instead of letting Hibernate fail
+    // with a generic not-null violation.
+    List<String> missing = NeoDefaultsService.findMissingMandatoryFields(filteredBody, adTab, userSubmittedFields);
+    if (!missing.isEmpty()) {
+      throw new MissingRequiredFieldsException(missing);
+    }
+    long perfPreSave = System.nanoTime();
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
-    return jsonService.add(params, wrappedBody);
+    String result = jsonService.add(params, wrappedBody);
+    long perfEnd = System.nanoTime();
+    log.info(
+        "[NEO-PERF] executePostCreate entity={} injectDefaults={}ms calloutCascade={}ms otherDefaults+coerce={}ms jsonService.add={}ms total={}ms",
+        dalEntityName,
+        (perfInjectDefaults - perfStart) / 1_000_000L,
+        (perfCalloutCascade - perfInjectDefaults) / 1_000_000L,
+        (perfPreSave - perfCalloutCascade) / 1_000_000L,
+        (perfEnd - perfPreSave) / 1_000_000L,
+        (perfEnd - perfTotalStart) / 1_000_000L);
+    return result;
   }
 
   private void executePostCalloutCascade(JSONObject filteredBody, Tab adTab,
-      NeoContext context, String parentIdValue) {
+      NeoContext context, String parentIdValue, Set<String> protectedFields) {
     if (adTab == null || adTab.getTabLevel() == null || adTab.getTabLevel() != 0) {
       return;
     }
@@ -436,10 +527,20 @@ class NeoCrudHandler {
       }
     }
 
-    NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields);
+    Set<String> effectiveProtected = protectedFields != null
+        ? protectedFields
+        : java.util.Collections.emptySet();
+    long t0 = System.nanoTime();
+    NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields,
+        effectiveProtected);
+    long t1 = System.nanoTime();
     DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
     NeoDefaultsCascadeHelper.removeEmptyFkValues(filteredBody, adTab);
-    NeoDefaultsService.injectMandatoryDefaults(filteredBody, adTab, context, parentIdValue);
+    long t2 = System.nanoTime();
+    log.info(
+        "[NEO-PERF]   executePostCalloutCascade calloutCascade={}ms docTypeReapply+removeEmpty={}ms",
+        (t1 - t0) / 1_000_000L,
+        (t2 - t1) / 1_000_000L);
   }
 
   /**
@@ -486,6 +587,7 @@ class NeoCrudHandler {
     }
   }
 
+
   /**
    * Executes the PUT/PATCH (update) JSON service operation and returns the raw result string.
    */
@@ -497,9 +599,9 @@ class NeoCrudHandler {
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
     // available here to compute the correct net amount even for products where SL_Invoice_Amt
     // throws on the sales invoice context (e.g. tax-exclusive price lists).
-    NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
-    NeoDefaultsService.injectGrossAmountIfMissing(filteredBody);
-    NeoDefaultsService.injectLineGrossAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
   }
@@ -535,5 +637,191 @@ class NeoCrudHandler {
       log.error("Error resolving parent filter for tab '{}': {}", childTab.getName(), e.getMessage(), e);
       return null;
     }
+  }
+
+  /**
+   * Parses an integer from a raw query-string value, falling back to
+   * {@code fallback} when the value is blank or malformed.
+   */
+  private static int parseIntOrDefault(String raw, int fallback) {
+    if (StringUtils.isBlank(raw)) {
+      return fallback;
+    }
+    try {
+      return Integer.parseInt(raw.trim());
+    } catch (NumberFormatException e) {
+      return fallback;
+    }
+  }
+
+  private static final int DISTINCT_DEFAULT_PAGE_SIZE = 50;
+  private static final int DISTINCT_MAX_PAGE_SIZE = 200;
+
+  /**
+   * Handles a {@code ?_distinct=<field>} list GET: returns the paginated set of
+   * distinct values of a single scalar property, reusing the same tab where
+   * clause and parent filter as the standard list fetch. {@link OBQuery}
+   * automatically applies readable-client/organization/active filters from the
+   * current {@link OBContext}.
+   */
+  private NeoResponse handleDistinctFetch(Tab adTab, Map<String, String> queryParams) {
+    if (adTab == null || adTab.getTable() == null) {
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Distinct query requires a tab with a linked table");
+    }
+    String fieldName = queryParams.get(JsonConstants.DISTINCT_PARAMETER);
+    if (StringUtils.isBlank(fieldName)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "_distinct requires a field name");
+    }
+
+    String dalEntityName = adTab.getTable().getName();
+    Entity entityDef;
+    try {
+      entityDef = ModelProvider.getInstance().getEntity(dalEntityName);
+    } catch (Exception e) {
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Unknown DAL entity: " + dalEntityName);
+    }
+    Property prop = resolveDistinctProperty(entityDef, fieldName);
+    if (prop == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Unknown field '" + fieldName + "' on entity " + dalEntityName);
+    }
+    String resolvedProperty = prop.getName();
+
+    int startRow = Math.max(0,
+        parseIntOrDefault(queryParams.get(JsonConstants.STARTROW_PARAMETER), 0));
+    int endRow = parseIntOrDefault(queryParams.get(JsonConstants.ENDROW_PARAMETER),
+        startRow + DISTINCT_DEFAULT_PAGE_SIZE - 1);
+    int requestedSize = (endRow >= startRow) ? (endRow - startRow + 1) : DISTINCT_DEFAULT_PAGE_SIZE;
+    int pageSize = Math.max(1, Math.min(requestedSize, DISTINCT_MAX_PAGE_SIZE));
+
+    String parentId = queryParams.get(PARAM_PARENT_ID);
+    String search = queryParams.get("_distinctSearch");
+
+    // Build the same where clause used by the list GET (tab HQL where with
+    // @token@ substitution + parent filter for child tabs). Prefixed with
+    // "as e" so OBQuery picks up the alias for its own client/org filters.
+    List<String> predicates = new ArrayList<>();
+    predicates.add("e." + resolvedProperty + " IS NOT NULL");
+
+    String tabWhere = adTab.getHqlwhereclause();
+    if (StringUtils.isNotBlank(tabWhere)) {
+      if (parentId != null && tabWhere.contains("@")) {
+        tabWhere = tabWhere.replaceAll("@[A-Za-z_.]+@", "'" + parentId.replace("'", "''") + "'");
+      }
+      if (!tabWhere.contains("@")) {
+        // Skip when unresolved @session_tokens@ remain — OBQuery can't bind
+        // them and the list fetch relies on DefaultJsonDataService to resolve.
+        predicates.add("(" + tabWhere + ")");
+      }
+    }
+    if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
+      String parentFilter = resolveParentFilter(adTab, parentId);
+      if (StringUtils.isNotBlank(parentFilter)) {
+        predicates.add("(" + parentFilter + ")");
+      }
+    }
+    if (StringUtils.isNotBlank(search)) {
+      predicates.add("LOWER(CAST(e." + resolvedProperty + " AS string)) LIKE :search");
+    }
+
+    StringBuilder where = new StringBuilder(" as e where ")
+        .append(String.join(HQL_AND_OPERATOR, predicates))
+        .append(" order by e.").append(resolvedProperty).append(" asc");
+
+    try {
+      OBQuery<BaseOBObject> obQuery = OBDal.getInstance()
+          .createQuery(dalEntityName, where.toString());
+      obQuery.setSelectClause("DISTINCT e." + resolvedProperty);
+      if (StringUtils.isNotBlank(search)) {
+        obQuery.setNamedParameter("search", "%" + search.toLowerCase() + "%");
+      }
+      obQuery.setFirstResult(startRow);
+      obQuery.setMaxResult(pageSize + 1); // fetch one extra to detect hasMore
+
+      List<Object> results = obQuery.createQuery(Object.class).list();
+      boolean hasMore = results.size() > pageSize;
+      List<Object> page = hasMore ? new ArrayList<>(results.subList(0, pageSize)) : results;
+
+      JSONArray data = new JSONArray();
+      for (Object value : page) {
+        data.put(toDistinctEntry(value));
+      }
+
+      JSONObject payload = new JSONObject();
+      payload.put("data", data);
+      payload.put("startRow", startRow);
+      payload.put("endRow", startRow + page.size() - 1);
+      payload.put("hasMore", hasMore);
+      JSONObject envelope = new JSONObject();
+      envelope.put("response", payload);
+      return NeoResponse.ok(envelope);
+    } catch (Exception e) {
+      log.error("Distinct fetch failed for {} / {}: {}",
+          dalEntityName, resolvedProperty, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Failed to compute distinct values");
+    }
+  }
+
+  /**
+   * Resolves a distinct field name against the DAL entity, trying the raw name
+   * first and falling back to case-insensitive matches against property names
+   * and AD column names.
+   */
+  private static Property resolveDistinctProperty(Entity entityDef, String fieldName) {
+    if (entityDef == null) {
+      return null;
+    }
+    Property direct = entityDef.getProperty(fieldName, false);
+    if (direct != null) {
+      return direct;
+    }
+    for (Property p : entityDef.getProperties()) {
+      if (p.getName().equalsIgnoreCase(fieldName)) {
+        return p;
+      }
+      if (p.getColumnName() != null && p.getColumnName().equalsIgnoreCase(fieldName)) {
+        return p;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Builds a {@code {"id": ..., "_identifier": ...}} entry for a single distinct
+   * value. Scalar values (String enum codes, numbers, dates) use the stringified
+   * value for both fields so the frontend can render a label without a second
+   * lookup. FK references expose the target entity's id and its DAL identifier.
+   */
+  private static JSONObject toDistinctEntry(Object value) {
+    JSONObject entry = new JSONObject();
+    try {
+      if (value == null) {
+        entry.put("id", "");
+        entry.put(JSON_IDENTIFIER, "");
+      } else if (value instanceof BaseOBObject) {
+        BaseOBObject bob = (BaseOBObject) value;
+        Object id = bob.getId();
+        String idStr = id == null ? "" : id.toString();
+        String identifier;
+        try {
+          identifier = bob.getIdentifier();
+        } catch (Exception e) {
+          identifier = idStr;
+        }
+        entry.put("id", idStr);
+        entry.put(JSON_IDENTIFIER, StringUtils.isBlank(identifier) ? idStr : identifier);
+      } else {
+        String str = value.toString();
+        entry.put("id", str);
+        entry.put(JSON_IDENTIFIER, str);
+      }
+    } catch (Exception e) {
+      log.error("Failed to serialize distinct entry: {}", e.getMessage(), e);
+    }
+    return entry;
   }
 }

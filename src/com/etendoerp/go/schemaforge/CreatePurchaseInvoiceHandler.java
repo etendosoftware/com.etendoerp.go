@@ -117,30 +117,10 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
     DocumentType invoiceDocType = resolveAPInvoiceDocType(order);
 
-    Invoice invoice = OBProvider.getInstance().get(Invoice.class);
-    invoice.setClient(order.getClient());
-    invoice.setOrganization(order.getOrganization());
-    invoice.setDocumentType(invoiceDocType);
-    invoice.setTransactionDocument(invoiceDocType);
-    invoice.setDocumentStatus("DR");
-    invoice.setDocumentAction("CO");
-    invoice.setSalesTransaction(false);
-    invoice.setInvoiceDate(new Date());
-    invoice.setAccountingDate(new Date());
-    invoice.setBusinessPartner(order.getBusinessPartner());
-    invoice.setPartnerAddress(order.getPartnerAddress());
-    invoice.setPriceList(order.getPriceList());
-    invoice.setCurrency(order.getCurrency());
-    invoice.setPaymentTerms(order.getPaymentTerms());
-    invoice.setPaymentMethod(order.getPaymentMethod());
-    invoice.setSummedLineAmount(BigDecimal.ZERO);
-    invoice.setGrandTotalAmount(BigDecimal.ZERO);
-    invoice.setWithholdingamount(BigDecimal.ZERO);
-    invoice.setSalesOrder(order);
-
-    String documentNo = Utility.getDocumentNo(
-        new DalConnectionProvider(false), order.getClient().getId(), "C_Invoice", true);
-    invoice.setDocumentNo(StringUtils.isNotBlank(documentNo) ? documentNo : "*");
+    Invoice invoice = NeoCommercialDocumentFactory.createInvoiceFromOrderHeader(
+        order,
+        invoiceDocType,
+        false);
 
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();

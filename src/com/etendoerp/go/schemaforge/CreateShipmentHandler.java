@@ -119,24 +119,11 @@ public class CreateShipmentHandler implements NeoHandler {
       throw new OBException("No Goods Shipment document type found (docBaseType=MMS, isSOTrx=true)");
     }
 
-    ShipmentInOut shipment = OBProvider.getInstance().get(ShipmentInOut.class);
-    shipment.setClient(order.getClient());
-    shipment.setOrganization(order.getOrganization());
-    shipment.setBusinessPartner(order.getBusinessPartner());
-    shipment.setPartnerAddress(order.getPartnerAddress());
-    shipment.setWarehouse(order.getWarehouse());
-    shipment.setMovementDate(new Date());
-    shipment.setAccountingDate(new Date());
-    shipment.setDocumentType(docType);
-    String documentNo = Utility.getDocumentNo(
-        new DalConnectionProvider(false), order.getClient().getId(), "M_InOut", true);
-    shipment.setDocumentNo(StringUtils.isNotBlank(documentNo) ? documentNo : "*");
-    shipment.setSalesTransaction(true);
-    shipment.setSalesOrder(order);
-    shipment.setProcessed(false);
-    shipment.setDocumentStatus("DR");
-    shipment.setMovementType("C-");
-    return shipment;
+    return NeoCommercialDocumentFactory.createShipmentReceiptHeader(
+        order,
+        docType,
+        true,
+        "C-");
   }
 
   private void createShipmentLines(ShipmentInOut shipment, Order order) {
