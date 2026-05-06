@@ -144,6 +144,7 @@ public class NeoCertificateHelper {
       resp.put("deleted", deleted);
       return NeoResponse.ok(resp);
     } catch (Exception e) {
+      OBDal.getInstance().rollbackAndClose();
       log.error("Certificate DELETE failed", e);
       return NeoResponse.error(500, "Internal error deleting certificates");
     }
