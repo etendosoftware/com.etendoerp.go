@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_GET_DUE_DATE">
+    <function name="ETGO_GET_DUE_DATE" type="TIMESTAMP" volatility="STABLE">
+      <parameter name="p_c_invoice_id" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <body><![CDATA[v_duedate DATE;
+BEGIN
+  SELECT MIN(duedate) INTO v_duedate
+  FROM fin_payment_schedule
+  WHERE c_invoice_id = p_c_invoice_id
+    AND isactive = 'Y'
+    AND COALESCE(outstandingamt, 0) > 0;
+
+  IF v_duedate IS NOT NULL THEN
+    RETURN v_duedate;
+  END IF;
+
+  SELECT MAX(duedate) INTO v_duedate
+  FROM fin_payment_schedule
+  WHERE c_invoice_id = p_c_invoice_id
+    AND isactive = 'Y';
+
+  RETURN v_duedate;
+END ETGO_GET_DUE_DATE
+]]></body>
+    </function>
+  </database>
