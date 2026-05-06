@@ -39,10 +39,14 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.client.application.process.BaseProcessActionHandler;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.enterprise.OrganizationInformation;
 
+import com.etendoerp.sif.general.data.DigitalCertificate;
 import com.etendoerp.sif.general.process.AddCertificateToOrg;
+import com.etendoerp.sif.general.utility.SifGeneralUtils;
 
 /**
  * Handles POST /sws/neo/certificate — uploads a PKCS#12 certificate for an organization.
@@ -115,6 +119,33 @@ public class NeoCertificateHelper {
     } catch (Exception e) {
       log.error("Certificate GET failed", e);
       return NeoResponse.error(500, "Internal error retrieving certificate status");
+    }
+  }
+
+  /**
+   * Handles DELETE /sws/neo/certificate?orgId=... — removes certificate records for an organization.
+   *
+   * Deletes the certificate attachments first, then removes the certificate rows themselves.
+   *
+   * @param request HTTP request; must include {@code orgId} query parameter
+   * @return NeoResponse with deleted count
+   */
+  public static NeoResponse handleCertificateDelete(HttpServletRequest request) {
+    try {
+      String orgId = request.getParameter(PARAM_ORG_ID);
+      if (orgId == null || orgId.isBlank()) {
+        return NeoResponse.error(400, "Required parameter: orgId");
+      }
+
+      int deleted = deleteCertificatesForOrg(orgId);
+      OBDal.getInstance().flush();
+
+      JSONObject resp = new JSONObject();
+      resp.put("deleted", deleted);
+      return NeoResponse.ok(resp);
+    } catch (Exception e) {
+      log.error("Certificate DELETE failed", e);
+      return NeoResponse.error(500, "Internal error deleting certificates");
     }
   }
 
@@ -268,6 +299,27 @@ public class NeoCertificateHelper {
     } catch (Exception e) {
       log.warn("Could not retrieve org NIF for orgId {}: {}", orgId, e.getMessage());
       return null;
+    }
+  }
+
+  private static int deleteCertificatesForOrg(String orgId) {
+    OBCriteria<DigitalCertificate> criteria = OBDal.getInstance().createCriteria(DigitalCertificate.class);
+    criteria.add(org.hibernate.criterion.Restrictions.eq(DigitalCertificate.PROPERTY_ORGANIZATION + ".id", orgId));
+
+    int deleted = 0;
+    for (DigitalCertificate certificate : criteria.list()) {
+      deleteCertificateAttachment(certificate.getId());
+      OBDal.getInstance().remove(certificate);
+      deleted++;
+    }
+    return deleted;
+  }
+
+  private static void deleteCertificateAttachment(String certificateId) {
+    OBCriteria<Attachment> attachCrit = OBDal.getInstance().createCriteria(Attachment.class);
+    attachCrit.add(org.hibernate.criterion.Restrictions.eq(Attachment.PROPERTY_RECORD, certificateId));
+    for (Attachment attachment : attachCrit.list()) {
+      SifGeneralUtils.attachManager.delete(attachment);
     }
   }
 
