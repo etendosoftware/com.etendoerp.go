@@ -22,6 +22,8 @@ import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import javax.enterprise.context.ApplicationScoped;
 
@@ -48,8 +50,8 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
  * <ol>
  *   <li>Reads the stored {@code EM_Etgo_Total_Discount} percentage from the header table.</li>
  *   <li>Deletes any existing discount line (identified by the dummy product {@code ETGO_DTO}).</li>
- *   <li>If the percentage is greater than zero, creates a new negative-amount discount line
- *       derived from the sum of all non-discount product lines.</li>
+ *   <li>If the percentage is greater than zero, creates one negative-amount discount line per
+ *       tax group, each proportional to that group's net subtotal (mirrors Classic behavior).</li>
  * </ol>
  *
  * <p>The dummy product ID is {@code E4BC94E71D664E73A066DAF78BF39DB3} (search key
@@ -71,10 +73,10 @@ public class TotalDiscountService {
   // -------------------------------------------------------------------------
 
   /**
-   * Recalculates (delete + recreate if needed) the total discount line for the given document.
+   * Recalculates (delete + recreate if needed) the total discount lines for the given document.
    *
-   * <p>Called by header handlers when {@code emEtgoTotalDiscount} is present in the request body,
-   * and by line handlers after a product line is created or deleted.
+   * <p>Mirrors Classic {@code C_ORDER_POST1} / {@code C_INVOICE_POST}: one negative discount line
+   * is created per tax group so that each tax bucket carries the proportional discount amount.
    *
    * @param headerId  the ID of the C_Invoice or C_Order record
    * @param isInvoice {@code true} for invoice documents, {@code false} for order documents
@@ -87,19 +89,26 @@ public class TotalDiscountService {
       if (pct == null || pct.compareTo(BigDecimal.ZERO) <= 0) {
         return;
       }
-      BigDecimal netSubtotal = readNetSubtotal(headerId, isInvoice);
-      if (netSubtotal == null || netSubtotal.compareTo(BigDecimal.ZERO) == 0) {
+      Map<String, BigDecimal> netByTax = readNetSubtotalByTax(headerId, isInvoice);
+      if (netByTax.isEmpty()) {
         return;
       }
-      BigDecimal discountAmt = netSubtotal
-          .multiply(pct)
-          .divide(new BigDecimal("100"), PRICE_SCALE, ROUNDING)
-          .negate();
-
-      if (isInvoice) {
-        createInvoiceDiscountLine(headerId, discountAmt);
-      } else {
-        createOrderDiscountLine(headerId, discountAmt);
+      long lineNo = readNextLineNo(headerId, isInvoice);
+      for (Map.Entry<String, BigDecimal> entry : netByTax.entrySet()) {
+        BigDecimal net = entry.getValue();
+        if (net == null || net.compareTo(BigDecimal.ZERO) == 0) {
+          continue;
+        }
+        BigDecimal discountAmt = net
+            .multiply(pct)
+            .divide(new BigDecimal("100"), PRICE_SCALE, ROUNDING)
+            .negate();
+        if (isInvoice) {
+          createInvoiceDiscountLine(headerId, discountAmt, entry.getKey(), lineNo);
+        } else {
+          createOrderDiscountLine(headerId, discountAmt, entry.getKey(), lineNo);
+        }
+        lineNo += 10;
       }
       OBDal.getInstance().flush();
     } catch (Exception e) {
@@ -141,57 +150,39 @@ public class TotalDiscountService {
   }
 
   /**
-   * Computes the sum of linenetamt for all non-discount, active product lines on the document.
+   * Returns the sum of linenetamt grouped by tax, for all non-discount active lines.
+   * Mirrors Classic {@code C_ORDER_POST1} / {@code C_INVOICE_POST}: one entry per tax group
+   * so that the resulting discount lines preserve the correct tax distribution.
    */
   @SuppressWarnings("java:S2077")
-  private BigDecimal readNetSubtotal(String headerId, boolean isInvoice) {
+  private Map<String, BigDecimal> readNetSubtotalByTax(String headerId, boolean isInvoice) {
     String lineTable = isInvoice ? "c_invoiceline" : "c_orderline";
     String parentCol = isInvoice ? "c_invoice_id" : "c_order_id";
-    String sql = "SELECT COALESCE(SUM(linenetamt), 0) FROM " + lineTable
-        + " WHERE " + parentCol + " = ?"
-        + "   AND m_product_id != ?"
-        + "   AND isactive = 'Y'";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, headerId);
-      ps.setString(2, DISCOUNT_PRODUCT_ID);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          return rs.getBigDecimal(1);
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Could not compute net subtotal for {} id={}: {}",
-          lineTable, headerId, e.getMessage());
-    }
-    return BigDecimal.ZERO;
-  }
-
-  /**
-   * Returns the C_Tax_ID from the first non-discount active line on the document, or {@code null}.
-   */
-  @SuppressWarnings("java:S2077")
-  private String readFirstLineTaxId(String headerId, boolean isInvoice) {
-    String lineTable = isInvoice ? "c_invoiceline" : "c_orderline";
-    String parentCol = isInvoice ? "c_invoice_id" : "c_order_id";
-    String sql = "SELECT c_tax_id FROM " + lineTable
+    String sql = "SELECT c_tax_id, COALESCE(SUM(linenetamt), 0) FROM " + lineTable
         + " WHERE " + parentCol + " = ?"
         + "   AND m_product_id != ?"
         + "   AND isactive = 'Y'"
-        + " ORDER BY line LIMIT 1";
+        + " GROUP BY c_tax_id"
+        + " ORDER BY MIN(line)";
+    Map<String, BigDecimal> result = new LinkedHashMap<>();
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, headerId);
       ps.setString(2, DISCOUNT_PRODUCT_ID);
       try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          return rs.getString(1);
+        while (rs.next()) {
+          String taxId = rs.getString(1);
+          BigDecimal net = rs.getBigDecimal(2);
+          if (taxId != null && net != null) {
+            result.put(taxId, net);
+          }
         }
       }
     } catch (Exception e) {
-      log.warn("Could not fetch tax id for {} id={}: {}", lineTable, headerId, e.getMessage());
+      log.warn("Could not compute net subtotal by tax for {} id={}: {}", lineTable, headerId,
+          e.getMessage());
     }
-    return null;
+    return result;
   }
 
   /**
@@ -279,7 +270,8 @@ public class TotalDiscountService {
   // Create discount line — Invoice
   // -------------------------------------------------------------------------
 
-  private void createInvoiceDiscountLine(String headerId, BigDecimal discountAmt) {
+  private void createInvoiceDiscountLine(String headerId, BigDecimal discountAmt, String taxId,
+      long lineNo) {
     Invoice invoice = OBDal.getInstance().get(Invoice.class, headerId);
     if (invoice == null) {
       log.warn("Invoice not found: {}", headerId);
@@ -291,9 +283,7 @@ public class TotalDiscountService {
       return;
     }
 
-    String taxId = readFirstLineTaxId(headerId, true);
     String uomId = readFirstLineUomId(headerId, true);
-    long lineNo = readNextLineNo(headerId, true);
 
     InvoiceLine line = OBProvider.getInstance().get(InvoiceLine.class);
     line.setClient(invoice.getClient());
@@ -309,11 +299,9 @@ public class TotalDiscountService {
         line.setUOM(uom);
       }
     }
-    if (taxId != null) {
-      TaxRate tax = OBDal.getInstance().get(TaxRate.class, taxId);
-      if (tax != null) {
-        line.setTax(tax);
-      }
+    TaxRate tax = OBDal.getInstance().get(TaxRate.class, taxId);
+    if (tax != null) {
+      line.setTax(tax);
     }
 
     line.setInvoicedQuantity(BigDecimal.ONE);
@@ -328,14 +316,16 @@ public class TotalDiscountService {
     line.setGrossAmount(BigDecimal.ZERO);
 
     OBDal.getInstance().save(line);
-    log.debug("Created invoice discount line: invoice={}, amt={}", headerId, discountAmt);
+    log.debug("Created invoice discount line: invoice={}, taxId={}, amt={}", headerId, taxId,
+        discountAmt);
   }
 
   // -------------------------------------------------------------------------
   // Create discount line — Order
   // -------------------------------------------------------------------------
 
-  private void createOrderDiscountLine(String headerId, BigDecimal discountAmt) {
+  private void createOrderDiscountLine(String headerId, BigDecimal discountAmt, String taxId,
+      long lineNo) {
     Order order = OBDal.getInstance().get(Order.class, headerId);
     if (order == null) {
       log.warn("Order not found: {}", headerId);
@@ -347,9 +337,7 @@ public class TotalDiscountService {
       return;
     }
 
-    String taxId = readFirstLineTaxId(headerId, false);
     String uomId = readFirstLineUomId(headerId, false);
-    long lineNo = readNextLineNo(headerId, false);
 
     OrderLine line = OBProvider.getInstance().get(OrderLine.class);
     line.setClient(order.getClient());
@@ -370,11 +358,9 @@ public class TotalDiscountService {
         line.setUOM(uom);
       }
     }
-    if (taxId != null) {
-      TaxRate tax = OBDal.getInstance().get(TaxRate.class, taxId);
-      if (tax != null) {
-        line.setTax(tax);
-      }
+    TaxRate tax = OBDal.getInstance().get(TaxRate.class, taxId);
+    if (tax != null) {
+      line.setTax(tax);
     }
 
     line.setOrderedQuantity(BigDecimal.ONE);
@@ -393,6 +379,7 @@ public class TotalDiscountService {
     line.setDirectShipment(false);
 
     OBDal.getInstance().save(line);
-    log.debug("Created order discount line: order={}, amt={}", headerId, discountAmt);
+    log.debug("Created order discount line: order={}, taxId={}, amt={}", headerId, taxId,
+        discountAmt);
   }
 }
