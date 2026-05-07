@@ -348,6 +348,8 @@ class WidgetPendingTasksHandlerTest {
       JSONObject task = data.getJSONObject(i);
       if (task.optString("taskKey", "").startsWith("collectionsDueToday")) {
         found = true;
+        assertTrue(task.optString("link", "").contains("collectionsDueToday"),
+            "Link must use collectionsDueToday filter, not overdue");
       }
     }
     assertTrue(found, "Expected a collectionsDueToday task in the response");
@@ -371,6 +373,8 @@ class WidgetPendingTasksHandlerTest {
       JSONObject task = data.getJSONObject(i);
       if (task.optString("taskKey", "").startsWith("paymentsDueToday")) {
         found = true;
+        assertTrue(task.optString("link", "").contains("paymentsDueToday"),
+            "Link must use paymentsDueToday filter, not overdue");
       }
     }
     assertTrue(found, "Expected a paymentsDueToday task in the response");

@@ -52,6 +52,8 @@ public class WidgetPendingTasksHandler implements NeoHandler {
   private static final String JSON_NAVIGATION = "navigation";
   private static final String NAVIGATION_TYPE_LIST = "list";
   private static final String FILTER_OVERDUE = "overdue";
+  private static final String FILTER_COLLECTIONS_DUE_TODAY = "collectionsDueToday";
+  private static final String FILTER_PAYMENTS_DUE_TODAY = "paymentsDueToday";
   private static final String FILTER_PENDING_DELIVERY = "pendingDelivery";
 
   @Override
@@ -128,7 +130,8 @@ public class WidgetPendingTasksHandler implements NeoHandler {
    */
   private void addCollectionsDueToday(JSONArray data, String clientId) throws Exception {
     addDueTodayInvoicesTask(data, clientId, "Y", "collection", "sales-invoice",
-        "/sales-invoice?filter=" + FILTER_OVERDUE, "collectionsDueToday");
+        FILTER_COLLECTIONS_DUE_TODAY,
+        "/sales-invoice?filter=" + FILTER_COLLECTIONS_DUE_TODAY, "collectionsDueToday");
   }
 
   /**
@@ -136,11 +139,12 @@ public class WidgetPendingTasksHandler implements NeoHandler {
    */
   private void addPaymentsDueToday(JSONArray data, String clientId) throws Exception {
     addDueTodayInvoicesTask(data, clientId, "N", "payment", "purchase-invoice",
-        "/purchase-invoice?filter=" + FILTER_OVERDUE, "paymentsDueToday");
+        FILTER_PAYMENTS_DUE_TODAY,
+        "/purchase-invoice?filter=" + FILTER_PAYMENTS_DUE_TODAY, "paymentsDueToday");
   }
 
   private void addDueTodayInvoicesTask(JSONArray data, String clientId, String isSalesTransaction,
-      String entityLabel, String window, String link, String taskKeyBase) throws Exception {
+      String entityLabel, String window, String filter, String link, String taskKeyBase) throws Exception {
     String sql = "SELECT COUNT(*)"
         + " FROM c_invoice ci"
         + " WHERE ci.issotrx = :isSalesTransaction"
@@ -164,7 +168,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
     data.put(buildTask(TYPE_WARNING,
         count + " " + entityLabel + (count != 1 ? "s" : "") + " due today",
         window,
-        FILTER_OVERDUE,
+        filter,
         link,
         count,
         count > 1 ? taskKeyBase + "_plural" : taskKeyBase));
