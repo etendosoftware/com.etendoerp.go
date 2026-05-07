@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.util.Date;
 import java.util.List;
 
 import javax.inject.Named;
@@ -29,7 +28,6 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
@@ -38,7 +36,6 @@ import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
-import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 import org.openbravo.service.db.DalConnectionProvider;
 
 /**
@@ -161,50 +158,38 @@ public class CreateGoodsReceiptHandler implements NeoHandler {
   }
 
   protected void createReceiptLines(ShipmentInOut receipt, Order order) {
-    Locator defaultLocator = findDefaultLocator(order);
-    if (defaultLocator == null) {
-      String warehouseName = order.getWarehouse() != null
-          ? order.getWarehouse().getName() : "unknown";
-      throw new OBException("No storage locator found for warehouse: " + warehouseName);
-    }
+    Locator defaultLocator = resolveDefaultLocatorOrFail(order);
 
     long lineNo = 10;
     int addedLines = 0;
     for (OrderLine orderLine : order.getOrderLineList()) {
-      java.math.BigDecimal orderedQty = orderLine.getOrderedQuantity();
-      java.math.BigDecimal deliveredQty = orderLine.getDeliveredQuantity() != null
-          ? orderLine.getDeliveredQuantity() : java.math.BigDecimal.ZERO;
-      java.math.BigDecimal pendingQty = orderedQty != null
-          ? orderedQty.subtract(deliveredQty) : java.math.BigDecimal.ZERO;
-      if (!orderLine.isActive() || orderLine.getProduct() == null
-          || orderLine.getUOM() == null
-          || pendingQty.compareTo(java.math.BigDecimal.ZERO) <= 0) {
+      java.math.BigDecimal pendingQty = InOutLineFromOrderFactory.pendingQuantityFor(orderLine);
+      if (pendingQty == null) {
         continue;
       }
-
-      ShipmentInOutLine line = OBProvider.getInstance().get(ShipmentInOutLine.class);
-      line.setClient(orderLine.getClient());
-      line.setOrganization(orderLine.getOrganization());
-      line.setShipmentReceipt(receipt);
-      line.setLineNo(lineNo);
-      line.setProduct(orderLine.getProduct());
-      line.setUOM(orderLine.getUOM());
-      line.setStorageBin(defaultLocator);
-      line.setMovementQuantity(pendingQty);
-      line.setSalesOrderLine(orderLine);
-      line.setDescription(orderLine.getDescription());
-
-      OBDal.getInstance().save(line);
-      // Flush so the new shipment line gets a persisted id available to the
-      // link helper.
-      OBDal.getInstance().flush();
-      InvoiceLineLinker.linkPendingInvoiceLinesToInout(line, orderLine.getId());
+      InOutLineFromOrderFactory.createAndLinkLine(receipt, orderLine, defaultLocator, lineNo, pendingQty);
       lineNo += 10;
       addedLines++;
     }
     if (addedLines == 0) {
       throw new OBException("No pending lines to receive in this purchase order");
     }
+  }
+
+  /**
+   * Returns the locator for the order's warehouse, or throws when none is
+   * configured. Kept here (rather than in the shared factory) because the
+   * underlying {@link #findDefaultLocator(Order)} is a per-handler hook that
+   * tests override to bypass the criteria query.
+   */
+  private Locator resolveDefaultLocatorOrFail(Order order) {
+    Locator defaultLocator = findDefaultLocator(order);
+    if (defaultLocator == null) {
+      String warehouseName = order.getWarehouse() != null
+          ? order.getWarehouse().getName() : "unknown";
+      throw new OBException("No storage locator found for warehouse: " + warehouseName);
+    }
+    return defaultLocator;
   }
 
   private DocumentType findReceiptDocType(Order order) {
