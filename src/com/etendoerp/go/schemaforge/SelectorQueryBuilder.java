@@ -71,9 +71,10 @@ class SelectorQueryBuilder {
   // HQL doesn't support FROM DUAL; the fix is to unwrap the subquery into just "(expr)".
   // Uses a tempered greedy token so the pattern does NOT cross inner "(SELECT" subquery boundaries,
   // which prevents accidentally consuming an outer EXISTS(SELECT 1 FROM ...) when it contains
-  // multiple nested (SELECT ... FROM DUAL) clauses.
+  // multiple nested (SELECT ... FROM DUAL) clauses. The lookahead allows whitespace between
+  // "(" and "SELECT" so subqueries formatted as "(\n  SELECT ..." are also detected.
   private static final Pattern SELECT_FROM_DUAL = Pattern.compile(
-      "\\(\\s*SELECT\\s+((?:(?!\\(SELECT).)+?)\\s+FROM\\s+DUAL\\s*\\)",
+      "\\(\\s*SELECT\\s+((?:(?!\\(\\s*SELECT).)+?)\\s+FROM\\s+DUAL\\s*\\)",
       Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
 
   // Matches "FROM <name> <alias>" in subqueries to detect SQL table names that need HQL translation

@@ -84,6 +84,10 @@
       <foreign-key foreignTable="AD_ORG" name="ETGO_SF_FLD_ORG_FK">
         <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
       </foreign-key>
+      <unique name="ETGO_SF_FIELD_ENT_COL_UQ">
+        <unique-column name="ETGO_SF_ENTITY_ID"/>
+        <unique-column name="AD_COLUMN_ID"/>
+      </unique>
       <check name="ETGO_SF_FLD_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_SF_FLD_ISINCL"><![CDATA[ISINCLUDED IN ('Y', 'N')]]></check>
       <check name="ETGO_SF_FLD_ISRO"><![CDATA[ISREADONLY IN ('Y', 'N')]]></check>

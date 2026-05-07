@@ -96,6 +96,54 @@ jobs:
               print("ETGO_SF_ENTITY: no unique constraint violations found.")
           PYEOF
 
+  check-xml-field-uniqueness:
+    name: Validate ETGO_SF_FIELD uniqueness (ENTITY_ID, AD_COLUMN_ID)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check ETGO_SF_FIELD unique constraint (ETGO_SF_ENTITY_ID, AD_COLUMN_ID)
+        run: |
+          python3 - <<'PYEOF'
+          import xml.etree.ElementTree as ET
+          import sys
+
+          xml_file = "src-db/database/sourcedata/ETGO_SF_FIELD.xml"
+          tree = ET.parse(xml_file)
+          root = tree.getroot()
+
+          seen = {}
+          errors = []
+
+          for field in root.findall("ETGO_SF_FIELD"):
+              fid    = (field.findtext("ETGO_SF_FIELD_ID")  or "").strip()
+              entity = (field.findtext("ETGO_SF_ENTITY_ID") or "").strip()
+              col    = (field.findtext("AD_COLUMN_ID")      or "").strip()
+              # Skip rows without a column (process params for some spec types)
+              if not col:
+                  continue
+              key = (entity, col)
+
+              if key in seen:
+                  errors.append(
+                      f"Duplicate (ETGO_SF_ENTITY_ID={entity}, AD_COLUMN_ID={col}): "
+                      f"IDs {seen[key]} and {fid}"
+                  )
+              else:
+                  seen[key] = fid
+
+          if errors:
+              print(f"::error file={xml_file}::Unique constraint violation in ETGO_SF_FIELD")
+              print("Each (entity, column) pair must map to a single field row.")
+              print("Duplicates make push-to-neo non-deterministic (Y/N flip across runs).")
+              for e in errors:
+                  print(f"  {e}")
+              sys.exit(1)
+          else:
+              print("ETGO_SF_FIELD: no unique constraint violations found.")
+          PYEOF
+
   check-xml-orphans:
     name: Validate XML referential integrity
     runs-on: ubuntu-latest

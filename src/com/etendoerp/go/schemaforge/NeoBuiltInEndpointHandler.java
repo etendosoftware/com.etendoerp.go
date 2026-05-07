@@ -114,11 +114,15 @@ class NeoBuiltInEndpointHandler {
       servlet.writeResponse(response, NeoCertificateHelper.handleCertificateGet(request));
       return;
     }
+    if (METHOD_DELETE.equals(method)) {
+      servlet.writeResponse(response, NeoCertificateHelper.handleCertificateDelete(request));
+      return;
+    }
     if ("POST".equals(method)) {
       servlet.writeResponse(response, NeoCertificateHelper.handleCertificateUpload(request));
       return;
     }
     servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-        "Certificate endpoint supports GET and POST");
+        "Certificate endpoint supports GET, POST and DELETE");
   }
 }
