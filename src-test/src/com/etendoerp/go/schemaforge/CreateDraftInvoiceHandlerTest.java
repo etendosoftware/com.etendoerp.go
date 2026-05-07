@@ -46,7 +46,9 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
+import org.hibernate.query.NativeQuery;
 import org.hibernate.query.Query;
+import org.mockito.ArgumentCaptor;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -1855,6 +1857,7 @@ public class CreateDraftInvoiceHandlerTest {
   public void testCreateFromOrderPersistsHeaderAndDelegatesLines() throws JSONException {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
         MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
       OBDal dal = mock(OBDal.class);
       Session session = mock(Session.class);
@@ -1865,8 +1868,23 @@ public class CreateDraftInvoiceHandlerTest {
 
       OBProvider provider = mock(OBProvider.class);
       Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-10");
       obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
       when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      // The post-flush UPDATE that links new invoice lines to existing
+      // shipment/receipt lines uses the current OBContext user id.
+      OBContext obCtx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-1");
+      when(obCtx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      // Stub the NativeQuery chain so the UPDATE doesn't NPE.
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(0);
 
       CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
       weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
@@ -1894,6 +1912,76 @@ public class CreateDraftInvoiceHandlerTest {
       verify(process).createInvoiceLinesFromDocumentLines(eq(handler.selectedLines), eq(invoice), eq(OrderLine.class));
       verify(session).refresh(invoice);
       verify(dal, Mockito.atLeastOnce()).flush();
+    }
+  }
+
+  /**
+   * Verifies that after the line-creation process, createFromOrder runs the
+   * native UPDATE that links each new invoice line to an existing shipment/
+   * receipt line of the same order line. This is what populates
+   * c_invoiceline.M_InOutLine_ID so that m_inout_post can later create
+   * m_matchsi/m_matchinv when the inout is completed. Without this step,
+   * invoices created after a shipment (e.g. when the order-confirm modal
+   * asks for both at once and creates the shipment first) stay unlinked
+   * and the matching tables never populate.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testCreateFromOrderLinksInvoiceLinesToExistingInoutLines() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+      when(dal.get(eq(Order.class), eq("order-X"))).thenReturn(mockOrderWithHeaderData());
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-X");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      OBContext obCtx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-Y");
+      when(obCtx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(1);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      CreateFromOrderHandler handler = new CreateFromOrderHandler();
+      handler.resolvedDocType = mock(DocumentType.class);
+      handler.selectedLines = new JSONArray().put(new JSONObject()
+          .put("id", "ol-X")
+          .put("orderedQuantity", "1"));
+
+      handler.createFromOrder("order-X", Collections.emptyMap());
+
+      // Capture the SQL and assert it has the right shape.
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      verify(session).createNativeQuery(sqlCaptor.capture());
+      String sql = sqlCaptor.getValue();
+      assertTrue("SQL should target C_InvoiceLine", sql.contains("UPDATE C_InvoiceLine"));
+      assertTrue("SQL should set M_InOutLine_ID", sql.contains("SET M_InOutLine_ID"));
+      assertTrue("SQL should subquery MAX over M_InOutLine", sql.contains("MAX(iol.M_InOutLine_ID)"));
+      assertTrue("SQL should join via C_OrderLine_ID", sql.contains("iol.C_OrderLine_ID = il.C_OrderLine_ID"));
+      assertTrue("SQL should scope to the new invoice", sql.contains(":invoiceId"));
+      assertTrue("SQL should only touch unlinked lines", sql.contains("M_InOutLine_ID IS NULL"));
+      assertTrue("SQL should skip orderline-less rows", sql.contains("C_OrderLine_ID IS NOT NULL"));
+
+      verify(linkQuery).setParameter(eq("userId"), eq("user-Y"));
+      verify(linkQuery).setParameter(eq("invoiceId"), eq("invoice-X"));
+      verify(linkQuery).executeUpdate();
     }
   }
 
