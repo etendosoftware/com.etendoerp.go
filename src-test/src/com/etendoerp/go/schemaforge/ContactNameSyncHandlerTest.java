@@ -242,6 +242,21 @@ class ContactNameSyncHandlerTest {
     verify(event, never()).setCurrentState(any(Property.class), any());
   }
 
+  // ── Missing-property guard ────────────────────────────────────────────────────
+
+  /**
+   * When a required column property is absent from the entity (dictionary not fully synced),
+   * the handler must skip processing rather than throwing a NullPointerException.
+   */
+  @Test
+  void testOnUpdateMissingPropertyDoesNotProcess() {
+    when(bpEntity.getPropertyByColumnName("EM_ETGO_ISPERSON")).thenReturn(null);
+
+    EntityUpdateEvent event = buildEvent(Boolean.TRUE, "Juan", "Pedro", "García", "García");
+    handler.onUpdate(event);
+    verify(event, never()).setCurrentState(any(Property.class), any());
+  }
+
   // ── getObservedEntities ───────────────────────────────────────────────────────
 
   /**

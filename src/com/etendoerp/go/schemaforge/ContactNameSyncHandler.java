@@ -50,14 +50,18 @@ public class ContactNameSyncHandler extends EntityPersistenceEventObserver {
 
   private static Entity[] entities;
 
-  @Override
-  protected Entity[] getObservedEntities() {
+  private static Entity[] resolveEntities() {
     if (entities == null) {
       entities = new Entity[]{
           ModelProvider.getInstance().getEntity(BusinessPartner.ENTITY_NAME)
       };
     }
     return entities;
+  }
+
+  @Override
+  protected Entity[] getObservedEntities() {
+    return resolveEntities();
   }
 
   public void onUpdate(@Observes EntityUpdateEvent event) {
@@ -70,6 +74,10 @@ public class ContactNameSyncHandler extends EntityPersistenceEventObserver {
     Property firstnameProp = bpEntity.getPropertyByColumnName("EM_ETGO_FIRSTNAME");
     Property lastnameProp  = bpEntity.getPropertyByColumnName("EM_ETGO_LASTNAME");
     Property nameProp      = bpEntity.getPropertyByColumnName("NAME");
+
+    if (isPersonProp == null || firstnameProp == null || lastnameProp == null || nameProp == null) {
+      return;
+    }
 
     Object isPerson = event.getCurrentState(isPersonProp);
     if (!Boolean.TRUE.equals(isPerson)) {
