@@ -101,6 +101,14 @@ public class BatchService {
   private static final Logger log = LogManager.getLogger(BatchService.class);
 
   private static final String REF_PREFIX = "$ref:";
+  private static final String FIELD_COMMITTED = "committed";
+  private static final String FIELD_PARENT_ID = "parentId";
+  private static final String FIELD_ID = "id";
+  private static final String FIELD_ENTITY = "entity";
+  private static final String FIELD_SPEC = "spec";
+  private static final String FIELD_BODY = "body";
+  private static final String FIELD_PARENT_REF = "parentRef";
+  private static final String OPS_PREFIX = "operations[";
 
   private final NeoServlet servlet;
   private final NeoCrudHandler crudHandler;
@@ -169,7 +177,7 @@ public class BatchService {
     }
 
     int status = HttpServletResponse.SC_OK;
-    if (!result.optBoolean("committed", false)) {
+    if (!result.optBoolean(FIELD_COMMITTED, false)) {
       JSONObject error = result.optJSONObject("error");
       if (error != null) {
         status = error.optInt("status", HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
@@ -197,116 +205,125 @@ public class BatchService {
    * @throws JSONException only on truly unexpected JSON serialization failures
    */
   public JSONObject executeBatch(JSONArray operations) throws JSONException {
+    if (operations == null) {
+      return failureBody(-1, null, HttpServletResponse.SC_BAD_REQUEST,
+          "Missing 'operations' array", null);
+    }
     log.info("[BATCH] received {} operation(s)", operations.length());
 
-    boolean transactionClosed = false;
     Map<String, String> resolvedIds = new HashMap<>();
     JSONArray opResults = new JSONArray();
+    boolean committed = false;
     try {
       for (int i = 0; i < operations.length(); i++) {
-        JSONObject op = operations.optJSONObject(i);
-        if (op == null) {
-          OBDal.getInstance().rollbackAndClose();
-          transactionClosed = true;
-          return failureBody(i, null, HttpServletResponse.SC_BAD_REQUEST,
-              "operations[" + i + "] must be an object", null);
+        JSONObject failure = processOperation(i, operations.optJSONObject(i), resolvedIds, opResults);
+        if (failure != null) {
+          rollbackQuietly();
+          return failure;
         }
-        String opId = op.optString("id", null);
-        String specName = op.optString("spec", null);
-        String entityName = op.optString("entity", null);
-        if (StringUtils.isBlank(opId) || StringUtils.isBlank(specName) || StringUtils.isBlank(entityName)) {
-          OBDal.getInstance().rollbackAndClose();
-          transactionClosed = true;
-          return failureBody(i, opId, HttpServletResponse.SC_BAD_REQUEST,
-              "operations[" + i + "] requires 'id', 'spec', 'entity'", null);
-        }
-
-        // Reject duplicate ids — refs would be ambiguous.
-        if (resolvedIds.containsKey(opId)) {
-          OBDal.getInstance().rollbackAndClose();
-          transactionClosed = true;
-          return failureBody(i, opId, HttpServletResponse.SC_BAD_REQUEST,
-              "operations[" + i + "].id duplicates an earlier op", null);
-        }
-
-        SFSpec spec = NeoServletSupport.findSpec(specName);
-        if (spec == null) {
-          OBDal.getInstance().rollbackAndClose();
-          transactionClosed = true;
-          return failureBody(i, opId, HttpServletResponse.SC_NOT_FOUND,
-              "Spec not found: " + specName, null);
-        }
-
-        JSONObject opBody = op.optJSONObject("body");
-        if (opBody == null) {
-          opBody = new JSONObject();
-        }
-
-        try {
-          substituteRefs(opBody, resolvedIds);
-        } catch (JSONException e) {
-          OBDal.getInstance().rollbackAndClose();
-          transactionClosed = true;
-          return failureBody(i, opId, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-              "Failed to substitute refs: " + e.getMessage(), null);
-        }
-
-        String parentId = resolveParentId(op, resolvedIds, opBody);
-        if (parentId != null && !resolvedIds.containsValue(parentId)) {
-          // parentRef pointed at an unknown op — surface explicitly.
-          String parentRef = op.optString("parentRef", null);
-          if (parentRef != null && !resolvedIds.containsKey(parentRef)) {
-            OBDal.getInstance().rollbackAndClose();
-            transactionClosed = true;
-            return failureBody(i, opId, HttpServletResponse.SC_BAD_REQUEST,
-                "operations[" + i + "].parentRef '" + parentRef + "' does not match any earlier op id",
-                null);
-          }
-        }
-
-        NeoResponse rowResp = createRecord(spec, entityName, opBody, parentId);
-        if (!isSuccess(rowResp)) {
-          log.warn("[BATCH] op '{}' (index {}) failed with status {}", opId, i, rowResp.getHttpStatus());
-          OBDal.getInstance().rollbackAndClose();
-          transactionClosed = true;
-          return failureBody(i, opId, rowResp.getHttpStatus(),
-              "Operation '" + opId + "' rejected by server",
-              rowResp.getBody());
-        }
-        String recordId = extractRecordId(rowResp.getBody());
-        if (StringUtils.isBlank(recordId)) {
-          OBDal.getInstance().rollbackAndClose();
-          transactionClosed = true;
-          return failureBody(i, opId, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-              "Operation '" + opId + "' created but id missing in response", null);
-        }
-        resolvedIds.put(opId, recordId);
-        JSONObject perOp = new JSONObject();
-        perOp.put("id", opId);
-        perOp.put("ok", true);
-        perOp.put("recordId", recordId);
-        opResults.put(perOp);
       }
-
       OBDal.getInstance().commitAndClose();
-      transactionClosed = true;
-
-      JSONObject ok = new JSONObject();
-      ok.put("committed", true);
-      ok.put("operations", opResults);
+      committed = true;
       log.info("[BATCH] committed {} operation(s)", opResults.length());
+      JSONObject ok = new JSONObject();
+      ok.put(FIELD_COMMITTED, true);
+      ok.put("operations", opResults);
       return ok;
     } catch (Exception e) {
       log.error("[BATCH] unexpected failure", e);
-      if (!transactionClosed) {
-        try {
-          OBDal.getInstance().rollbackAndClose();
-        } catch (Exception rollbackErr) {
-          log.error("[BATCH] rollback failed after primary error", rollbackErr);
-        }
+      if (!committed) {
+        rollbackQuietly();
       }
       return failureBody(-1, null, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Batch failed: " + e.getMessage(), null);
+    }
+  }
+
+  /**
+   * Process one batch operation. Returns {@code null} on success (the op was
+   * dispatched and its recordId stored in {@code resolvedIds} / {@code opResults}),
+   * or a failure body that the caller should return after rolling back.
+   */
+  private JSONObject processOperation(int i, JSONObject op, Map<String, String> resolvedIds,
+      JSONArray opResults) throws JSONException {
+    if (op == null) {
+      return failureBody(i, null, HttpServletResponse.SC_BAD_REQUEST,
+          OPS_PREFIX + i + "] must be an object", null);
+    }
+    String opId = op.optString(FIELD_ID, null);
+    String specName = op.optString(FIELD_SPEC, null);
+    String entityName = op.optString(FIELD_ENTITY, null);
+    if (StringUtils.isBlank(opId) || StringUtils.isBlank(specName) || StringUtils.isBlank(entityName)) {
+      return failureBody(i, opId, HttpServletResponse.SC_BAD_REQUEST,
+          OPS_PREFIX + i + "] requires 'id', 'spec', 'entity'", null);
+    }
+    if (resolvedIds.containsKey(opId)) {
+      return failureBody(i, opId, HttpServletResponse.SC_BAD_REQUEST,
+          OPS_PREFIX + i + "].id duplicates an earlier op", null);
+    }
+    SFSpec spec = NeoServletSupport.findSpec(specName);
+    if (spec == null) {
+      return failureBody(i, opId, HttpServletResponse.SC_NOT_FOUND,
+          "Spec not found: " + specName, null);
+    }
+
+    JSONObject opBody = op.optJSONObject(FIELD_BODY);
+    if (opBody == null) {
+      opBody = new JSONObject();
+    }
+    JSONObject substitutionFailure = trySubstituteRefs(i, opId, opBody, resolvedIds);
+    if (substitutionFailure != null) {
+      return substitutionFailure;
+    }
+
+    String parentRef = op.optString(FIELD_PARENT_REF, null);
+    if (StringUtils.isNotBlank(parentRef) && !resolvedIds.containsKey(parentRef)) {
+      return failureBody(i, opId, HttpServletResponse.SC_BAD_REQUEST,
+          OPS_PREFIX + i + "].parentRef '" + parentRef + "' does not match any earlier op id",
+          null);
+    }
+    String parentId = resolveParentId(op, resolvedIds, opBody);
+
+    NeoResponse rowResp = createRecord(spec, entityName, opBody, parentId);
+    if (!isSuccess(rowResp)) {
+      log.warn("[BATCH] op '{}' (index {}) failed with status {}", opId, i, rowResp.getHttpStatus());
+      return failureBody(i, opId, rowResp.getHttpStatus(),
+          "Operation '" + opId + "' rejected by server", rowResp.getBody());
+    }
+    String recordId = extractRecordId(rowResp.getBody());
+    if (StringUtils.isBlank(recordId)) {
+      return failureBody(i, opId, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Operation '" + opId + "' created but id missing in response", null);
+    }
+    resolvedIds.put(opId, recordId);
+    JSONObject perOp = new JSONObject();
+    perOp.put(FIELD_ID, opId);
+    perOp.put("ok", true);
+    perOp.put("recordId", recordId);
+    opResults.put(perOp);
+    return null;
+  }
+
+  /**
+   * Run {@link #substituteRefs} and convert any {@link JSONException} into a
+   * batch failure body. Keeps the per-op flow free of nested try/catch.
+   */
+  private JSONObject trySubstituteRefs(int i, String opId, JSONObject opBody,
+      Map<String, String> resolvedIds) throws JSONException {
+    try {
+      substituteRefs(opBody, resolvedIds);
+      return null;
+    } catch (JSONException e) {
+      return failureBody(i, opId, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Failed to substitute refs: " + e.getMessage(), null);
+    }
+  }
+
+  private void rollbackQuietly() {
+    try {
+      OBDal.getInstance().rollbackAndClose();
+    } catch (Exception rollbackErr) {
+      log.error("[BATCH] rollback failed", rollbackErr);
     }
   }
 
@@ -318,11 +335,11 @@ public class BatchService {
   private JSONObject failureBody(int index, String opId, int status, String message,
       JSONObject detail) throws JSONException {
     JSONObject body = new JSONObject();
-    body.put("committed", false);
+    body.put(FIELD_COMMITTED, false);
     JSONObject failedAt = new JSONObject();
     failedAt.put("index", index);
     if (opId != null) {
-      failedAt.put("id", opId);
+      failedAt.put(FIELD_ID, opId);
     }
     body.put("failedAt", failedAt);
     JSONObject error = new JSONObject();
@@ -345,13 +362,13 @@ public class BatchService {
    * wins (the caller may already have resolved it themselves).</p>
    */
   private String resolveParentId(JSONObject op, Map<String, String> resolvedIds, JSONObject opBody) {
-    if (opBody.has("parentId")) {
-      String explicit = opBody.optString("parentId", null);
+    if (opBody.has(FIELD_PARENT_ID)) {
+      String explicit = opBody.optString(FIELD_PARENT_ID, null);
       if (StringUtils.isNotBlank(explicit)) {
         return explicit;
       }
     }
-    String parentRef = op.optString("parentRef", null);
+    String parentRef = op.optString(FIELD_PARENT_REF, null);
     if (StringUtils.isBlank(parentRef)) {
       return null;
     }
@@ -433,7 +450,7 @@ public class BatchService {
 
     if (parentId != null) {
       try {
-        body.put("parentId", parentId);
+        body.put(FIELD_PARENT_ID, parentId);
       } catch (JSONException e) {
         return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
             "Failed to set parentId: " + e.getMessage());
@@ -464,7 +481,7 @@ public class BatchService {
     OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
     criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
     criteria.add(Restrictions.ilike(SFEntity.PROPERTY_NAME, entityName, MatchMode.EXACT));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
     criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
     criteria.setMaxResults(1);
     List<SFEntity> results = criteria.list();
@@ -491,11 +508,11 @@ public class BatchService {
     if (data == null || data.length() == 0) {
       return null;
     }
-    JSONObject record = data.optJSONObject(0);
-    if (record == null) {
+    JSONObject row = data.optJSONObject(0);
+    if (row == null) {
       return null;
     }
-    String id = record.optString("id", null);
+    String id = row.optString(FIELD_ID, null);
     return StringUtils.isBlank(id) ? null : id;
   }
 }

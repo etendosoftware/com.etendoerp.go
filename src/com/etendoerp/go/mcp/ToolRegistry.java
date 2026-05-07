@@ -347,7 +347,7 @@ public class ToolRegistry {
     entityProp.put("type", McpConstants.TYPE_STRING);
     entityProp.put(McpConstants.KEY_DESCRIPTION,
         "Entity name within the spec (e.g. 'Header', 'Lines').");
-    opProps.put("entity", entityProp);
+    opProps.put(McpConstants.PARAM_ENTITY, entityProp);
 
     Map<String, Object> parentRefProp = new LinkedHashMap<>();
     parentRefProp.put("type", McpConstants.TYPE_STRING);
@@ -365,7 +365,7 @@ public class ToolRegistry {
     Map<String, Object> opItem = new LinkedHashMap<>();
     opItem.put("type", McpConstants.TYPE_OBJECT);
     opItem.put(McpConstants.KEY_PROPERTIES, opProps);
-    opItem.put("required", List.of("id", "spec", "entity"));
+    opItem.put("required", List.of("id", "spec", McpConstants.PARAM_ENTITY));
 
     Map<String, Object> operationsProp = new LinkedHashMap<>();
     operationsProp.put("type", "array");
