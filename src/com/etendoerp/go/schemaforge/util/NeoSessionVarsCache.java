@@ -106,6 +106,14 @@ public final class NeoSessionVarsCache {
    * <p>Callers should NOT mutate the returned map. To produce a
    * {@link VariablesSecureApp} for downstream use, replay the entries into a
    * fresh instance via {@link #replayInto(VariablesSecureApp, Map)}.</p>
+   *
+   * @param userId      the AD user id
+   * @param roleId      the AD role id
+   * @param clientId    the AD client id
+   * @param orgId       the AD organization id
+   * @param warehouseId the AD warehouse id
+   * @param lang        the language code (e.g. {@code en_US})
+   * @return an unmodifiable snapshot of session variables for the given identity
    */
   public static Map<String, String> getOrLoad(String userId, String roleId,
       String clientId, String orgId, String warehouseId, String lang) {
@@ -123,6 +131,9 @@ public final class NeoSessionVarsCache {
   /**
    * Replay every entry of {@code snapshot} into {@code vars} via
    * {@link VariablesSecureApp#setSessionValue}. The VSA is mutated in-place.
+   *
+   * @param vars     the target {@link VariablesSecureApp}; ignored if {@code null}
+   * @param snapshot the entries to replay; ignored if {@code null}
    */
   public static void replayInto(VariablesSecureApp vars, Map<String, String> snapshot) {
     if (vars == null || snapshot == null) {
@@ -142,7 +153,11 @@ public final class NeoSessionVarsCache {
     CACHE.invalidateAll();
   }
 
-  /** Visible for testing. */
+  /**
+   * Visible for testing.
+   *
+   * @return the number of entries currently cached
+   */
   public static long size() {
     return CACHE.size();
   }

@@ -43,6 +43,7 @@ public final class SelectorDescriptorResolver {
   private static final Logger log = LogManager.getLogger(SelectorDescriptorResolver.class);
   private static final java.util.regex.Pattern SAFE_HQL_PATH =
       java.util.regex.Pattern.compile("^[a-zA-Z_][a-zA-Z0-9_.]*$");
+  private static final String PROP_SEARCH_KEY = "searchKey";
 
   private SelectorDescriptorResolver() {
   }
@@ -120,8 +121,8 @@ public final class SelectorDescriptorResolver {
     if (entity.hasProperty("name")) {
       return "name";
     }
-    if (entity.hasProperty("searchKey")) {
-      return "searchKey";
+    if (entity.hasProperty(PROP_SEARCH_KEY)) {
+      return PROP_SEARCH_KEY;
     }
     return "id";
   }
@@ -293,8 +294,8 @@ public final class SelectorDescriptorResolver {
       if (StringUtils.isNotBlank(valueProp) && !"id".equals(valueProp)) {
         addIfPropertyExists(searchableProps, targetEntity, valueProp);
       }
-      if (targetEntity.hasProperty("searchKey")) {
-        addIfAbsent(searchableProps, "searchKey");
+      if (targetEntity.hasProperty(PROP_SEARCH_KEY)) {
+        addIfAbsent(searchableProps, PROP_SEARCH_KEY);
       }
     }
   }
