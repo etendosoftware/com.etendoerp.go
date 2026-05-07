@@ -166,27 +166,9 @@ public class CreateShipmentHandler implements NeoHandler {
 
       OBDal.getInstance().save(line);
       // Flush so the new shipment line gets a persisted id available to the
-      // UPDATE below.
+      // link helper.
       OBDal.getInstance().flush();
-      // Link any existing draft invoice line that points to the same order
-      // line. m_inout_post (which runs when the shipment is completed) only
-      // creates m_matchsi when c_invoiceline.M_InOutLine_ID is already set,
-      // and the canonical m_inout_create stored procedure does this UPDATE
-      // when classic generates a shipment from an order. Replicate it here
-      // so the matching tables get populated regardless of which UI created
-      // the invoice.
-      OBDal.getInstance().getSession()
-          .createNativeQuery(
-              "UPDATE C_InvoiceLine "
-              + "SET M_InOutLine_ID = :inoutLineId, "
-              + "    Updated = now(), "
-              + "    UpdatedBy = :userId "
-              + "WHERE C_OrderLine_ID = :orderLineId "
-              + "  AND M_InOutLine_ID IS NULL")
-          .setParameter("inoutLineId", line.getId())
-          .setParameter("userId", OBContext.getOBContext().getUser().getId())
-          .setParameter("orderLineId", orderLine.getId())
-          .executeUpdate();
+      InvoiceLineLinker.linkPendingInvoiceLinesToInout(line, orderLine.getId());
       lineNo += 10;
       addedLines++;
     }

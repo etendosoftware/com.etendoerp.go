@@ -170,32 +170,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
     OBDal.getInstance().flush();
 
-    // Link each new invoice line to an existing receipt line of the same
-    // order line, when one exists. Mirrors the lookup performed by the
-    // canonical c_invoice_create stored procedure so that m_inout_post can
-    // later create m_matchinv when the receipt is completed. Without this,
-    // invoices created AFTER an existing receipt (e.g. when the order-
-    // confirm modal asks for both and creates the receipt first) would not
-    // get linked, and the matching table stays empty regardless of how many
-    // receipts are completed afterwards.
-    OBDal.getInstance().getSession()
-        .createNativeQuery(
-            "UPDATE C_InvoiceLine il "
-            + "SET M_InOutLine_ID = ("
-            + "    SELECT MAX(iol.M_InOutLine_ID) "
-            + "    FROM M_InOutLine iol "
-            + "    WHERE iol.C_OrderLine_ID = il.C_OrderLine_ID), "
-            + "    Updated = now(), "
-            + "    UpdatedBy = :userId "
-            + "WHERE il.C_Invoice_ID = :invoiceId "
-            + "  AND il.M_InOutLine_ID IS NULL "
-            + "  AND il.C_OrderLine_ID IS NOT NULL "
-            + "  AND EXISTS ("
-            + "    SELECT 1 FROM M_InOutLine iol "
-            + "    WHERE iol.C_OrderLine_ID = il.C_OrderLine_ID)")
-        .setParameter("userId", OBContext.getOBContext().getUser().getId())
-        .setParameter("invoiceId", invoice.getId())
-        .executeUpdate();
+    InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
 
     return invoice;
   }
