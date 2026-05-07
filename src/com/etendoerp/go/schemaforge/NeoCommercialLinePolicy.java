@@ -73,6 +73,14 @@ final class NeoCommercialLinePolicy {
     if (body == null) {
       return;
     }
+    // Client-side computation is the source of truth: if the frontend already sent a non-zero
+    // lineGrossAmount, trust it and skip the server-side fallback entirely.
+    double clientValue = body.optDouble("lineGrossAmount", 0);
+    if (clientValue != 0) {
+      log.debug("[NEO-LINE-POLICY] lineGrossAmount={} supplied by client, skipping server injection",
+          clientValue);
+      return;
+    }
     double qty;
     try {
       qty = Double.parseDouble(body.optString("orderedQuantity", "0"));
@@ -83,9 +91,9 @@ final class NeoCommercialLinePolicy {
       return;
     }
     double unitPrice = body.optDouble("unitPrice", 0);
-    double discount = body.optDouble("discount", 0);
-    double discountFactor = 1.0 - discount / 100.0;
-    double baseNetAmt = unitPrice > 0 ? unitPrice * qty * discountFactor : 0;
+    // unitPrice (PriceActual) = PriceList × (1 − discount/100): already post-discount.
+    // Do NOT apply discountFactor again — that would double the discount.
+    double baseNetAmt = unitPrice > 0 ? unitPrice * qty : 0;
     String taxId = body.optString("tax", "");
     double computed = resolveGrossAmount(body.optDouble(FIELD_GROSS_UNIT_PRICE, 0), qty, baseNetAmt, taxId);
     if (Double.isNaN(computed)) {

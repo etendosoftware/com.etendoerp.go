@@ -285,6 +285,34 @@ class SelectorQueryBuilderTest {
   }
 
   /**
+   * Same nested EXISTS scenario but the inner subqueries are formatted with whitespace
+   * between "(" and "SELECT" (e.g. "(\n  SELECT … FROM DUAL )"). The negative lookahead
+   * must tolerate that whitespace; otherwise the tempered token crosses the inner
+   * boundary and consumes the outer EXISTS, producing invalid HQL like
+   * "EXISTS (1 FROM …".
+   */
+  @Test
+  @DisplayName("unwrapSelectFromDual tolerates whitespace between '(' and 'SELECT' in nested subqueries")
+  void testSelectFromDualNestedInExistsWithWhitespace() {
+    String sql = "EXISTS (SELECT 1 FROM FIN_FinAcc_PaymentMethod fapm "
+        + "WHERE FIN_PaymentMethod.FIN_PaymentMethod_ID=fapm.FIN_PaymentMethod_ID "
+        + "AND fapm.isActive='Y' "
+        + "AND fapm.Payin_Allow = (\n  SELECT CASE WHEN '@FIN_ISRECEIPT@'='Y' THEN 'Y' ELSE fapm.Payin_Allow END FROM DUAL\n) "
+        + "AND fapm.Payout_Allow = ( SELECT CASE WHEN '@FIN_ISRECEIPT@'='N' THEN 'Y' ELSE fapm.Payout_Allow END FROM DUAL ))";
+
+    String result = SelectorQueryBuilder.unwrapSelectFromDual(sql);
+
+    assertTrue(result.contains("EXISTS (SELECT 1"),
+        "Outer EXISTS SELECT must be preserved when inner subqueries have whitespace after '(': " + result);
+    assertFalse(result.contains("FROM DUAL"),
+        "All FROM DUAL clauses must be unwrapped: " + result);
+    assertTrue(result.contains("CASE WHEN '@FIN_ISRECEIPT@'='Y' THEN 'Y' ELSE fapm.Payin_Allow END"),
+        "Inner CASE expression (with leading whitespace before SELECT) must be preserved: " + result);
+    assertTrue(result.contains("CASE WHEN '@FIN_ISRECEIPT@'='N' THEN 'Y' ELSE fapm.Payout_Allow END"),
+        "Second inner CASE expression must be preserved: " + result);
+  }
+
+  /**
    * A simple (SELECT expr FROM DUAL) is unwrapped to (expr).
    */
   @Test

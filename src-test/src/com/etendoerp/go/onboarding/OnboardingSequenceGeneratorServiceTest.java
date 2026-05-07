@@ -89,6 +89,7 @@ public class OnboardingSequenceGeneratorServiceTest {
     assertTrue(service.generatorCreated);
     assertTrue(service.adminModeEntered);
     assertTrue(service.adminModeExited);
+    assertEquals(2, service.flushCount);
   }
 
   private static final class TestableService extends OnboardingSequenceGeneratorService {
@@ -99,6 +100,7 @@ public class OnboardingSequenceGeneratorServiceTest {
     private JSONObject capturedParameters;
     private boolean generatorCreated;
     private boolean throwOnGenerate;
+    private int flushCount;
 
     private TestableService() {
       when(client.getId()).thenReturn("CLIENT-1");
@@ -129,7 +131,7 @@ public class OnboardingSequenceGeneratorServiceTest {
 
     @Override
     protected void flushChanges() {
-      // Avoid DAL access in unit tests.
+      flushCount++;
     }
 
     @Override
