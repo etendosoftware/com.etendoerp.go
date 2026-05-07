@@ -30,6 +30,15 @@ import javax.inject.Named;
  *   <li>{@code rejectQuotation} → {@link RejectQuotationHandler}</li>
  *   <li>{@code createRejectReason} → {@link CreateRejectReasonHandler}</li>
  * </ul>
+ *
+ * <p>Total discount is synced on two paths:
+ * <ul>
+ *   <li>{@code documentAction=CO} via CRUD or ACTION — handled by
+ *       {@link AbstractOrderHeaderHandler#applyTotalDiscountBeforeComplete}</li>
+ *   <li>{@code DocAction} process button — handled by
+ *       {@link AbstractOrderHeaderHandler#syncTotalDiscountOnDocAction},
+ *       used by {@code SendToEvaluationModal} when confirming a draft quotation (DR→UE)</li>
+ * </ul>
  */
 @Named("salesQuotationHeaderHandler")
 public class SalesQuotationHeaderHandler implements NeoHandler {
@@ -37,8 +46,13 @@ public class SalesQuotationHeaderHandler implements NeoHandler {
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
 
+  @Inject
+  private TotalDiscountService totalDiscountService;
+
   @Override
   public NeoResponse handle(NeoContext context) {
+    AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
+    AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction(context, totalDiscountService, false);
     NeoResponse result = cloneRecordHandler.handle(context);
     if (result != null) {
       return result;
