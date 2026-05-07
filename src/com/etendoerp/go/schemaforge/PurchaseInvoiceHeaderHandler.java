@@ -28,6 +28,10 @@ import javax.inject.Named;
  *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler} (uses {@code CloneInvoiceHook})</li>
  *   <li>{@code registerPayment} / {@code invoicePayments} / {@code invoiceAccounts} → {@link RegisterPaymentOutHandler}</li>
  * </ul>
+ *
+ * <p>Before the Complete action (documentAction=CO), creates the total discount line so it is
+ * included in the completed invoice. Delegates to {@link TotalDiscountService} via the shared
+ * helper in {@link AbstractOrderHeaderHandler}.
  */
 @Named("purchaseInvoiceHeaderHandler")
 public class PurchaseInvoiceHeaderHandler implements NeoHandler {
@@ -38,8 +42,12 @@ public class PurchaseInvoiceHeaderHandler implements NeoHandler {
   @Inject
   private RegisterPaymentOutHandler registerPaymentOutHandler;
 
+  @Inject
+  private TotalDiscountService totalDiscountService;
+
   @Override
   public NeoResponse handle(NeoContext context) {
+    AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
     return NeoHeaderActionRouter.dispatch(
         context,
         cloneRecordHandler,
