@@ -11,7 +11,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -35,8 +34,6 @@ import org.openbravo.service.db.DalConnectionProvider;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.sequences.SequenceUtils;
-import com.google.common.cache.Cache;
-import com.google.common.cache.CacheBuilder;
 
 /**
  * Service for resolving default values when creating a new record via NEO Headless.
@@ -63,15 +60,6 @@ public class NeoDefaultsService {
   private static final String DATE_FORMAT = "yyyy-MM-dd";
   private static final String KEY_UPDATES = "updates";
   private static final String KEY_COMBOS = "combos";
-
-  // Cache VariablesSecureApp per user+role+org+warehouse combination to avoid calling
-  // LoginUtils.fillSessionArguments (multiple DB queries) on every request.
-  // In the future, if session variables need to reflect real-time preference changes,
-  // this TTL can be shortened or the cache can be invalidated on preference updates.
-  private static final Cache<String, VariablesSecureApp> varsCache = CacheBuilder.newBuilder()
-      .maximumSize(100)
-      .expireAfterWrite(5, TimeUnit.MINUTES)
-      .build();
 
   private NeoDefaultsService() {
   }
@@ -674,43 +662,13 @@ public class NeoDefaultsService {
    * @return a cached or newly built VariablesSecureApp instance with session variables populated
    */
   public static VariablesSecureApp buildVariablesSecureApp(OBContext obContext, Tab adTab) {
-    String userId = obContext.getUser().getId();
-    String clientId = obContext.getCurrentClient().getId();
-    String roleId = obContext.getRole().getId();
-    String orgId = obContext.getCurrentOrganization().getId();
-    String warehouseId = obContext.getWarehouse() != null
-        ? obContext.getWarehouse().getId() : "";
-
-    // When the session org is "*" (id=0), mandatory defaults like AD_Org_ID would resolve
-    // to "0" which OBDal rejects for business documents (C_Order, M_InOut, etc.).
-    // A role with "*" access has implicit access to all orgs, so we safely pick the
-    // first real org of the client to produce valid defaults.
-    if ("0".equals(orgId)) {
-      String realOrgId = resolveFirstOrgForClient(clientId);
-      if (realOrgId != null) {
-        orgId = realOrgId;
-        log.debug("Context org is '*' (0); resolved first real org {} for defaults", realOrgId);
-      }
-    }
-
-    String soTrx = "";
-    if (adTab != null && adTab.getWindow() != null
-        && adTab.getWindow().isSalesTransaction() != null) {
-      soTrx = Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
-    }
-
-    String cacheKey = userId + "|" + roleId + "|" + orgId + "|" + warehouseId + "|" + soTrx;
-    VariablesSecureApp cached = varsCache.getIfPresent(cacheKey);
-    if (cached != null) {
-      return cached;
-    }
-
-    // Shared builder handles OBContext session vars + IsSOTrx (both casings) when adTab is set.
+    // The shared builder pulls identity + number-format vars from
+    // NeoSessionVarsCache and applies per-tab IsSOTrx on a fresh
+    // VariablesSecureApp, so there is no need for a per-call cache here. #Date
+    // changes daily and is intentionally NOT cached: we set it per request.
     VariablesSecureApp vars = NeoCalloutService.buildVars(obContext, adTab);
     vars.setSessionValue("#Date",
         new SimpleDateFormat(DATE_FORMAT).format(new Date()));
-
-    varsCache.put(cacheKey, vars);
     return vars;
   }
 

@@ -162,12 +162,22 @@ public class NeoDefaultsCascadeHelper {
       log.debug("[NEO-CALLOUT] Interactive cascade: {} field(s) queued after '{}': {}",
           pendingFields.size(), triggerField, pendingFields);
 
+      long cascadeStart = System.nanoTime();
       int depth = 0;
+      int totalProcessed = 0;
       while (!pendingFields.isEmpty() && depth < MAX_CALLOUT_CHAIN_DEPTH) {
         depth++;
+        long iterStart = System.nanoTime();
+        int iterSize = pendingFields.size();
+        totalProcessed += iterSize;
         pendingFields = executeCascadeIteration(
             pendingFields, ctx, adTab, cascadeFormState, cascadeFormState, skipFields, result);
+        log.debug("[NEO-PERF]   cascadeInteractive iter={} fields={} duration={}ms trigger={}",
+            depth, iterSize, (System.nanoTime() - iterStart) / 1_000_000L, triggerField);
       }
+      log.debug("[NEO-PERF] cascadeInteractive trigger={} totalIterations={} totalCalloutsRun={} duration={}ms",
+          triggerField, depth, totalProcessed,
+          (System.nanoTime() - cascadeStart) / 1_000_000L);
     } catch (Exception e) {
       log.warn("[NEO-CALLOUT] Interactive cascade failed for trigger '{}': {}",
           triggerField, e.getMessage(), e);
