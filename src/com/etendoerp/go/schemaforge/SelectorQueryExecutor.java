@@ -41,7 +41,7 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 final class SelectorQueryExecutor {
 
   private static final Logger log = LogManager.getLogger(SelectorQueryExecutor.class);
-  private static final String PARAM_SEARCH = "_selectorSearch";
+  private static final String PARAM_SEARCH = "search";
   private static final String FIELD_LABEL = "label";
 
   private SelectorQueryExecutor() {

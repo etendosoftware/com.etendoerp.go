@@ -186,6 +186,7 @@ public final class SelectorDescriptorResolver {
       String whereClause = StringUtils.trimToNull(selector.getHQLWhereClause());
       ObuiselFieldLists fieldLists = classifySelectorFields(selector.getOBUISELSelectorFieldList());
       fieldLists.gridFields.sort((a, b) -> Long.compare(a.sortNo, b.sortNo));
+      ensureSearchableFallback(fieldLists.searchableProps, targetEntity, displayProp, valueProp);
 
       return new SelectorMeta.Builder(targetEntity.getName(), displayProp)
           .whereClause(whereClause)
@@ -261,6 +262,55 @@ public final class SelectorDescriptorResolver {
         && StringUtils.isNotBlank(searchFragment)
         && !searchFragment.endsWith("_identifier")) {
       searchableProps.add(searchFragment);
+    }
+  }
+
+  /**
+   * Mirror classic Etendo's selector search behavior: always include
+   * {@code displayProperty} in the search predicate, in addition to fields
+   * flagged with {@code IsSearchInSuggestionBox = Y}.
+   *
+   * <p>Why: classic SelectorComponent#getExtraSearchFields explicitly skips the
+   * display field and ob-selector-item.js always adds it back as a final
+   * criterion (see clause builder at ~line 1387). If we only honored
+   * {@code searchInSuggestionBox} we would silently break selectors whose
+   * display field is not flagged — for example the standard Product selector,
+   * whose suggestion box otherwise ignores the user's typed text.
+   */
+  static void ensureSearchableFallback(List<String> searchableProps,
+      Entity targetEntity, String displayProp, String valueProp) {
+    if (targetEntity == null) {
+      return;
+    }
+    addIfPropertyExists(searchableProps, targetEntity, displayProp);
+    // When displayProp resolves to an identifier alias (e.g. "_identifier")
+    // it is not a real DAL property, so fall back to name/searchKey which the
+    // identifier clause typically combines.
+    if (searchableProps.isEmpty()) {
+      if (targetEntity.hasProperty("name")) {
+        addIfAbsent(searchableProps, "name");
+      }
+      if (StringUtils.isNotBlank(valueProp) && !"id".equals(valueProp)) {
+        addIfPropertyExists(searchableProps, targetEntity, valueProp);
+      }
+      if (targetEntity.hasProperty("searchKey")) {
+        addIfAbsent(searchableProps, "searchKey");
+      }
+    }
+  }
+
+  private static void addIfPropertyExists(List<String> props, Entity entity, String property) {
+    if (StringUtils.isBlank(property) || property.contains(".") || "id".equals(property)) {
+      return;
+    }
+    if (entity.hasProperty(property)) {
+      addIfAbsent(props, property);
+    }
+  }
+
+  private static void addIfAbsent(List<String> props, String value) {
+    if (StringUtils.isNotBlank(value) && !props.contains(value)) {
+      props.add(value);
     }
   }
 
