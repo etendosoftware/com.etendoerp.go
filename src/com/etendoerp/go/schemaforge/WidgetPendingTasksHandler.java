@@ -131,7 +131,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
   private void addCollectionsDueToday(JSONArray data, String clientId) throws Exception {
     addDueTodayInvoicesTask(data, clientId, "Y", "collection", "sales-invoice",
         FILTER_COLLECTIONS_DUE_TODAY,
-        "/sales-invoice?filter=" + FILTER_COLLECTIONS_DUE_TODAY, "collectionsDueToday");
+        "/sales-invoice?filter=" + FILTER_COLLECTIONS_DUE_TODAY, FILTER_COLLECTIONS_DUE_TODAY);
   }
 
   /**
@@ -140,7 +140,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
   private void addPaymentsDueToday(JSONArray data, String clientId) throws Exception {
     addDueTodayInvoicesTask(data, clientId, "N", "payment", "purchase-invoice",
         FILTER_PAYMENTS_DUE_TODAY,
-        "/purchase-invoice?filter=" + FILTER_PAYMENTS_DUE_TODAY, "paymentsDueToday");
+        "/purchase-invoice?filter=" + FILTER_PAYMENTS_DUE_TODAY, FILTER_PAYMENTS_DUE_TODAY);
   }
 
   private void addDueTodayInvoicesTask(JSONArray data, String clientId, String isSalesTransaction,
