@@ -111,6 +111,9 @@ public final class SqlToHqlTranslator {
    *   (e.g. {@code paymentMethod.id})
    *
    * {@code FROM DUAL} is removed — HQL scalar subqueries work without a FROM clause.
+   *
+   * @param clause the SQL validation clause to translate
+   * @return the clause rewritten with HQL entity names and property paths
    */
   public static String translateSqlToHql(String clause) {
     clause = unwrapSelectFromDual(clause);
