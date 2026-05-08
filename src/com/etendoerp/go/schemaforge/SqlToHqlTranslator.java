@@ -42,6 +42,10 @@ import org.openbravo.base.model.Property;
 public final class SqlToHqlTranslator {
   private static final Logger log = LogManager.getLogger(SqlToHqlTranslator.class);
 
+  @SuppressWarnings("java:S5852")
+  private static final Pattern REDUNDANT_AND_ONE_EQUALS_ONE =
+      Pattern.compile("(?i)\\s*+AND\\s++1=1\\b");
+
   private SqlToHqlTranslator() {
   }
 
@@ -97,7 +101,7 @@ public final class SqlToHqlTranslator {
       m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
     }
     m.appendTail(sb);
-    return sb.toString().replaceAll("(?i)\\s*+AND\\s++1=1\\b", "");
+    return REDUNDANT_AND_ONE_EQUALS_ONE.matcher(sb.toString()).replaceAll("");
   }
 
   /**
