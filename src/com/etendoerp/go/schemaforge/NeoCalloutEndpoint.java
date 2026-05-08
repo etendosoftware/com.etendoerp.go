@@ -80,13 +80,11 @@ class NeoCalloutEndpoint {
             "Request body is required for callout execution");
       }
 
-      JSONObject requestBody;
-      try {
-        requestBody = NeoRequestBodyParser.parseJsonObject(bodyStr);
-      } catch (Exception e) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-            "Invalid JSON body: " + e.getMessage());
+      Object parsed = parseRequestBody(bodyStr);
+      if (parsed instanceof NeoResponse neoResponse) {
+        return neoResponse;
       }
+      JSONObject requestBody = (JSONObject) parsed;
 
       if (!requestBody.has("field")) {
         return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
@@ -105,51 +103,11 @@ class NeoCalloutEndpoint {
           .obContext(OBContext.getOBContext())
           .build();
 
-      // Execute the callout
       NeoResponse calloutResult = NeoCalloutService.executeCallout(neoContext, requestBody);
-
-      // Cascade: if the callout set fields that have further callouts (e.g., SL_Order_Product
-      // sets tax+grossUnitPrice for gross-price lists → SL_Order_Amt derives unitPrice),
-      // chain those callouts and merge the results back into the response.
-      // This is done here (not in NeoCalloutService) to avoid recursion when
-      // executeSingleCallout calls NeoCalloutService.executeCallout internally.
       if (calloutResult.getHttpStatus() == 200 && calloutResult.getBody() != null) {
-        String fieldName = requestBody.optString("field", "");
-        JSONObject formState = requestBody.optJSONObject("formState");
-        NeoDefaultsService.CalloutCascadeResult cascade =
-            NeoDefaultsCascadeHelper.cascadeInteractiveCallout(
-                neoContext, tab, fieldName, formState, calloutResult.getBody());
-        if (cascade.hasResults()) {
-          mergeCalloutResponse(calloutResult.getBody(), cascade.toJSON());
-          log.debug("[NEO-CALLOUT] Cascade merged additional fields into response");
-        }
+        applyCascade(neoContext, tab, requestBody, calloutResult);
+        applyAfterCalloutHook(neoContext, sfEntity, calloutResult);
       }
-
-      // Post-hook: give the entity's NeoHandler a chance to enrich the callout response
-      // (e.g. add a synthetic 'taxRate' update when the trigger is C_Tax_ID). Same dispatch
-      // shape as `handleWithHooks` — looked up by the entity's Java_Qualifier and merged
-      // without overwriting fields already set by the underlying callout.
-      if (calloutResult.getHttpStatus() == 200 && calloutResult.getBody() != null) {
-        String qualifier = sfEntity.getJavaQualifier();
-        if (StringUtils.isNotBlank(qualifier)) {
-          NeoHandler handler = servlet.lookupHandler(qualifier);
-          if (handler != null) {
-            try {
-              neoContext.setPreviousResult(calloutResult);
-              NeoResponse handlerResult = handler.afterCallout(neoContext);
-              if (handlerResult != null && handlerResult.getBody() != null) {
-                mergeCalloutResponse(calloutResult.getBody(), handlerResult.getBody());
-                log.debug("[NEO-CALLOUT] Handler '{}' merged additional fields via afterCallout",
-                    qualifier);
-              }
-            } catch (Exception e) {
-              log.warn("[NEO-CALLOUT] afterCallout for handler '{}' failed (non-fatal): {}",
-                  qualifier, e.getMessage());
-            }
-          }
-        }
-      }
-
       return calloutResult;
     } catch (Exception e) {
       log.error("Error handling callout for {}/{}: {}",
@@ -159,10 +117,60 @@ class NeoCalloutEndpoint {
     }
   }
 
+  private void applyCascade(NeoContext neoContext, Tab tab, JSONObject requestBody,
+      NeoResponse calloutResult) {
+    String fieldName = requestBody.optString("field", "");
+    JSONObject formState = requestBody.optJSONObject("formState");
+    NeoDefaultsService.CalloutCascadeResult cascade =
+        NeoDefaultsCascadeHelper.cascadeInteractiveCallout(
+            neoContext, tab, fieldName, formState, calloutResult.getBody());
+    if (cascade.hasResults()) {
+      mergeCalloutResponse(calloutResult.getBody(), cascade.toJSON());
+      log.debug("[NEO-CALLOUT] Cascade merged additional fields into response");
+    }
+  }
+
+  private void applyAfterCalloutHook(NeoContext neoContext, SFEntity sfEntity,
+      NeoResponse calloutResult) {
+    String qualifier = sfEntity.getJavaQualifier();
+    if (StringUtils.isBlank(qualifier)) {
+      return;
+    }
+    NeoHandler handler = servlet.lookupHandler(qualifier);
+    if (handler != null) {
+      runAfterCalloutHook(neoContext, calloutResult, handler, qualifier);
+    }
+  }
+
+  private void runAfterCalloutHook(NeoContext neoContext, NeoResponse calloutResult,
+      NeoHandler handler, String qualifier) {
+    try {
+      neoContext.setPreviousResult(calloutResult);
+      NeoResponse handlerResult = handler.afterCallout(neoContext);
+      if (handlerResult != null && handlerResult.getBody() != null) {
+        mergeCalloutResponse(calloutResult.getBody(), handlerResult.getBody());
+        log.debug("[NEO-CALLOUT] Handler '{}' merged additional fields via afterCallout",
+            qualifier);
+      }
+    } catch (Exception e) {
+      log.warn("[NEO-CALLOUT] afterCallout for handler '{}' failed (non-fatal): {}",
+          qualifier, e.getMessage());
+    }
+  }
+
   /**
    * Merge cascade results into an existing REST callout response.
    * Does not overwrite fields already set by the initial callout.
    */
+  private static Object parseRequestBody(String bodyStr) {
+    try {
+      return NeoRequestBodyParser.parseJsonObject(bodyStr);
+    } catch (Exception e) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Invalid JSON body: " + e.getMessage());
+    }
+  }
+
   private void mergeCalloutResponse(JSONObject base, JSONObject addition) {
     try {
       mergeJsonSection(base, addition, KEY_UPDATES);
