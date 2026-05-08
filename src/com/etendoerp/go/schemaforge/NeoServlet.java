@@ -233,7 +233,7 @@ public class NeoServlet extends HttpBaseServlet {
       log.warn("Error checking report handler qualifier for spec '{}': {}", spec.getName(), e.getMessage());
     }
     if (reportHandlerQualifier != null) {
-      JSONObject requestBody = parseOptionalJsonObject(readRequestBody(request));
+      JSONObject requestBody = NeoRequestBodyParser.parseOptionalJsonObject(NeoRequestBodyParser.readRequestBody(request));
       NeoContext handlerContext = NeoContext.builder()
           .specName(pathInfo.specName)
           .entityName(pathInfo.specName)
@@ -413,9 +413,9 @@ public class NeoServlet extends HttpBaseServlet {
       return actionParams;
     }
     try {
-      String bodyStr = readRequestBody(request);
+      String bodyStr = NeoRequestBodyParser.readRequestBody(request);
       request.setAttribute(ACTION_REQUEST_BODY_ATTR, bodyStr);
-      return new ActionDispatchParams(pathInfo.recordId, parseOptionalJsonObject(bodyStr));
+      return new ActionDispatchParams(pathInfo.recordId, NeoRequestBodyParser.parseOptionalJsonObject(bodyStr));
     } catch (Exception e) {
       sendError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Invalid JSON body: " + e.getMessage());
@@ -701,7 +701,7 @@ public class NeoServlet extends HttpBaseServlet {
       }
 
       // Read request body
-      JSONObject requestBody = parseOptionalJsonObject(readRequestBody(request));
+      JSONObject requestBody = NeoRequestBodyParser.parseOptionalJsonObject(NeoRequestBodyParser.readRequestBody(request));
 
       // Delegate to NeoProcessService
       NeoResponse result = NeoProcessService.executeProcess(adProcess, requestBody);
@@ -728,7 +728,7 @@ public class NeoServlet extends HttpBaseServlet {
       }
 
       // Read request body
-      JSONObject body = parseJsonObjectOrEmpty(readRequestBody(request));
+      JSONObject body = NeoRequestBodyParser.parseJsonObjectOrEmpty(NeoRequestBodyParser.readRequestBody(request));
       String exportType = body.optString("exportType", "PDF");
       JSONObject params = body.optJSONObject("params");
       if (params == null) {
@@ -854,7 +854,7 @@ public class NeoServlet extends HttpBaseServlet {
       }
 
       // Parse request body
-      String bodyStr = readRequestBody(request);
+      String bodyStr = NeoRequestBodyParser.readRequestBody(request);
       if (StringUtils.isBlank(bodyStr)) {
         return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
             "Request body is required for callout execution");
@@ -862,7 +862,7 @@ public class NeoServlet extends HttpBaseServlet {
 
       JSONObject requestBody;
       try {
-        requestBody = parseJsonObject(bodyStr);
+        requestBody = NeoRequestBodyParser.parseJsonObject(bodyStr);
       } catch (Exception e) {
         return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
             "Invalid JSON body: " + e.getMessage());
@@ -971,26 +971,6 @@ public class NeoServlet extends HttpBaseServlet {
         baseSection.put(key, addSection.get(key));
       }
     }
-  }
-
-  static String readRequestBody(HttpServletRequest request) throws IOException {
-    return new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-  }
-
-  private static JSONObject parseOptionalJsonObject(String bodyStr) throws Exception {
-    if (StringUtils.isBlank(bodyStr)) {
-      return null;
-    }
-    return parseJsonObject(bodyStr);
-  }
-
-  private static JSONObject parseJsonObjectOrEmpty(String bodyStr) throws Exception {
-    JSONObject parsed = parseOptionalJsonObject(bodyStr);
-    return parsed != null ? parsed : new JSONObject();
-  }
-
-  private static JSONObject parseJsonObject(String bodyStr) throws Exception {
-    return new JSONObject(bodyStr);
   }
 
   /**

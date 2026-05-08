@@ -60,6 +60,7 @@ public class NeoDefaultsService {
   private static final String DATE_FORMAT = "yyyy-MM-dd";
   private static final String KEY_UPDATES = "updates";
   private static final String KEY_COMBOS = "combos";
+  private static final String LOG_SEQUENCE_PREVIEW_FAILURE = "Could not generate sequence preview for {}: {}";
 
   private NeoDefaultsService() {
   }
@@ -177,7 +178,7 @@ public class NeoDefaultsService {
               sequenceFields.put(propertyName);
             }
           } catch (Exception e) {
-            log.debug("Could not generate sequence preview for {}: {}",
+            log.debug(LOG_SEQUENCE_PREVIEW_FAILURE,
                 dbColumnName, e.getMessage());
             unresolvedFields.put(propertyName);
           }
@@ -456,7 +457,7 @@ public class NeoDefaultsService {
       }
       return null;
     } catch (Exception e) {
-      log.debug("Could not generate sequence preview for {}: {}",
+      log.debug(LOG_SEQUENCE_PREVIEW_FAILURE,
           adColumn.getDBColumnName(), e.getMessage());
       return null;
     }
@@ -512,7 +513,7 @@ public class NeoDefaultsService {
       }
       return "<auto>";
     } catch (Exception e) {
-      log.debug("Could not generate sequence preview for {}: {}",
+      log.debug(LOG_SEQUENCE_PREVIEW_FAILURE,
           adColumn.getDBColumnName(), e.getMessage());
       return "<auto>";
     }

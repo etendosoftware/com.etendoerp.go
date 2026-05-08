@@ -5,9 +5,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.regex.Matcher;
-import java.util.stream.Collectors;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -16,14 +14,11 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
-import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.structure.BaseOBObject;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
-import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -214,7 +209,7 @@ public class NeoSelectorService {
             "Could not resolve target for: " + columnName);
       }
 
-      String validationFilter = SelectorQueryBuilder.resolveValidationFilter(
+      String validationFilter = SelectorValidationResolver.resolveValidationFilter(
           column, meta.entityName, contextParams);
       String contextOrganizationId = SelectorContextResolver.resolveContextOrganizationId(sourceEntity, contextParams);
       String filterAlias = resolveFilterAlias(meta);

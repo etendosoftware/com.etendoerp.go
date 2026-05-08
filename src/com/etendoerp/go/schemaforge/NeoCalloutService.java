@@ -64,6 +64,9 @@ public class NeoCalloutService {
   private static final String VALUE_KEY = "value";
   private static final String IDENTIFIER_KEY = "_identifier";
   private static final String FIELD_ENTRIES = "entries";
+  private static final String KEY_UPDATES = "updates";
+  private static final String KEY_COMBOS = "combos";
+  private static final String KEY_MESSAGES = "messages";
 
   // Per-JVM cache of scalar AD_Column/callout metadata by tableId. Do not cache DAL
   // entities here: Hibernate proxies are session-bound and will fail on later requests.
@@ -121,9 +124,9 @@ public class NeoCalloutService {
           log.info("[NEO-CALLOUT] No callout found for field '{}' on tab '{}'",
               fieldName, adTab.getName());
           JSONObject emptyResponse = new JSONObject();
-          emptyResponse.put("updates", new JSONObject());
-          emptyResponse.put("combos", new JSONObject());
-          emptyResponse.put("messages", new JSONArray());
+          emptyResponse.put(KEY_UPDATES, new JSONObject());
+          emptyResponse.put(KEY_COMBOS, new JSONObject());
+          emptyResponse.put(KEY_MESSAGES, new JSONArray());
           return NeoResponse.ok(emptyResponse);
         }
         log.info("[NEO-CALLOUT] Found callout '{}' for field '{}' (inp: {}, column: {})",
@@ -721,9 +724,9 @@ public class NeoCalloutService {
       Map<String, String> rDisplayNames = new java.util.HashMap<>();
 
       if (calloutResult == null) {
-        response.put("updates", updates);
-        response.put("combos", combos);
-        response.put("messages", messages);
+        response.put(KEY_UPDATES, updates);
+        response.put(KEY_COMBOS, combos);
+        response.put(KEY_MESSAGES, messages);
         return response;
       }
 
@@ -739,9 +742,9 @@ public class NeoCalloutService {
       // can compute grossAmount in real-time without an extra round-trip.
       NeoCommercialLinePolicy.injectTaxRateIfPresent(updates);
 
-      response.put("updates", updates);
-      response.put("combos", combos);
-      response.put("messages", messages);
+      response.put(KEY_UPDATES, updates);
+      response.put(KEY_COMBOS, combos);
+      response.put(KEY_MESSAGES, messages);
 
     } catch (Exception e) {
       log.error("Error transforming callout response: {}", e.getMessage(), e);
