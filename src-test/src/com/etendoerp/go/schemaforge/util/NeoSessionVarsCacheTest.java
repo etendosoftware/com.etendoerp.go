@@ -166,6 +166,91 @@ public class NeoSessionVarsCacheTest {
   }
 
   /**
+   * Regression for the AED-instead-of-EUR currency bug.
+   *
+   * <p>{@code LoginUtils.fillSessionArguments} populates {@code $C_Currency_ID}
+   * (and a handful of related accounting vars) on the VSA. The cache snapshot
+   * MUST capture them so that subsequent VSA replays preserve those values —
+   * otherwise {@code @C_Currency_ID@} resolves to empty in
+   * {@code Utility.getDefault} and {@code resolveFirstComboOption} falls back
+   * to the alphabetically-first currency (AED), masking the org's real
+   * functional currency (e.g. EUR) until a downstream callout corrects it.</p>
+   */
+  @Test
+  public void testSnapshotCarriesAccountingSessionVars() {
+    try (MockedStatic<LoginUtils> loginMock = mockStatic(LoginUtils.class)) {
+      loginMock.when(() -> LoginUtils.fillSessionArguments(
+          any(ConnectionProvider.class), any(VariablesSecureApp.class),
+          anyString(), anyString(), anyString(),
+          anyString(), anyString(), anyString(), anyString()))
+          .thenAnswer(inv -> {
+            VariablesSecureApp vars = inv.getArgument(1);
+            vars.setSessionValue("#AD_User_ID", inv.getArgument(2));
+            vars.setSessionValue("#AD_Client_ID", inv.getArgument(6));
+            vars.setSessionValue("#AD_Org_ID", inv.getArgument(7));
+            // Accounting-schema vars set by the real fillSessionArguments
+            // when an acct schema exists for the org/client.
+            vars.setSessionValue("$C_Currency_ID", "102");
+            vars.setSessionValue("$C_AcctSchema_ID", "ACCT-1");
+            vars.setSessionValue("$HasAlias", "N");
+            vars.setSessionValue("#StdPrecision", "2");
+            vars.setSessionValue("#Approval_C_Currency_ID", "102");
+            vars.setSessionValue("#Approval_Amt", "1000");
+            vars.setSessionValue("#Client_Value", "GoClient");
+            vars.setSessionValue("#User_Level", " CO");
+            return Boolean.TRUE;
+          });
+      loginMock.when(() -> LoginUtils.readNumberFormat(any(VariablesSecureApp.class), anyString()))
+          .thenAnswer(inv -> null);
+
+      Map<String, String> snapshot = NeoSessionVarsCache.getOrLoad(
+          "u", "r", "c", "o", "w", "es_ES");
+
+      assertEquals("$C_Currency_ID must survive into the snapshot — losing it makes "
+          + "@C_Currency_ID@ defaults fall back to the first combo option (AED)",
+          "102", snapshot.get("$C_Currency_ID"));
+      assertEquals("ACCT-1", snapshot.get("$C_AcctSchema_ID"));
+      assertEquals("N", snapshot.get("$HasAlias"));
+      assertEquals("2", snapshot.get("#StdPrecision"));
+      assertEquals("102", snapshot.get("#Approval_C_Currency_ID"));
+      assertEquals("1000", snapshot.get("#Approval_Amt"));
+      assertEquals("GoClient", snapshot.get("#Client_Value"));
+      assertEquals(" CO", snapshot.get("#User_Level"));
+    }
+  }
+
+  /**
+   * Verifies the snapshot can be replayed onto a fresh VSA so the accounting
+   * vars are visible to {@code Utility.getContext} when it resolves
+   * {@code @C_Currency_ID@}.
+   */
+  @Test
+  public void testReplayRestoresCurrencyVar() {
+    try (MockedStatic<LoginUtils> loginMock = mockStatic(LoginUtils.class)) {
+      loginMock.when(() -> LoginUtils.fillSessionArguments(
+          any(ConnectionProvider.class), any(VariablesSecureApp.class),
+          anyString(), anyString(), anyString(),
+          anyString(), anyString(), anyString(), anyString()))
+          .thenAnswer(inv -> {
+            VariablesSecureApp vars = inv.getArgument(1);
+            vars.setSessionValue("$C_Currency_ID", "102");
+            return Boolean.TRUE;
+          });
+      loginMock.when(() -> LoginUtils.readNumberFormat(any(VariablesSecureApp.class), anyString()))
+          .thenAnswer(inv -> null);
+
+      Map<String, String> snapshot = NeoSessionVarsCache.getOrLoad(
+          "u", "r", "c", "o", "w", "es_ES");
+      VariablesSecureApp fresh = new VariablesSecureApp("u", "c", "o", "r", "es_ES");
+      NeoSessionVarsCache.replayInto(fresh, snapshot);
+
+      assertEquals("Replayed VSA must carry $C_Currency_ID so Utility.getContext "
+          + "can resolve @C_Currency_ID@ to the org's functional currency",
+          "102", fresh.getSessionValue("$C_Currency_ID"));
+    }
+  }
+
+  /**
    * The cache key is intentionally identity-only — IsSOTrx is applied
    * per-tab on the materialized VSA in {@code NeoCalloutService.buildVars}.
    * This test guards the snapshot itself does not carry any IsSOTrx value
