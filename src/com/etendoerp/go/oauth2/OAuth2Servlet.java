@@ -50,6 +50,7 @@ import org.openbravo.erpCommon.utility.SequenceIdData;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
+import com.etendoerp.go.common.PublicUrlResolver;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -1242,14 +1243,19 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleMetadata(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      String baseUrl = buildBaseUrl(request);
-
       JSONObject metadata = new JSONObject();
-      String appUrl = resolveAppUrl(request);
-      metadata.put("issuer", baseUrl + "/oauth2");
-      metadata.put("authorization_endpoint", appUrl + PATH_AUTHORIZE);
-      metadata.put("token_endpoint", baseUrl + "/oauth2/token");
-      metadata.put("registration_endpoint", baseUrl + "/oauth2/register");
+      String authorizationServerUrl = PublicUrlResolver.resolveOAuth2Url(request);
+      if (StringUtils.isBlank(authorizationServerUrl)) {
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+            "Unable to resolve public OAuth2 URL");
+        return;
+      }
+      metadata.put("issuer", authorizationServerUrl);
+      metadata.put("authorization_endpoint",
+          PublicUrlResolver.appendPath(authorizationServerUrl, PATH_AUTHORIZE));
+      metadata.put("token_endpoint", PublicUrlResolver.appendPath(authorizationServerUrl, FIELD_TOKEN));
+      metadata.put("registration_endpoint",
+          PublicUrlResolver.appendPath(authorizationServerUrl, "register"));
       metadata.put("scopes_supported",
             new JSONArray(Arrays.asList(SCOPE_NEO_READ, SCOPE_NEO_WRITE, SCOPE_NEO_PROCESS,
               SCOPE_NEO_REPORT, WILDCARD_SCOPE)));
