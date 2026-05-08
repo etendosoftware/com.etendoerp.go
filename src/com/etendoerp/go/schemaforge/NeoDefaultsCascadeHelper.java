@@ -343,38 +343,53 @@ public class NeoDefaultsCascadeHelper {
       }
       Object newValue = updateObj.get(FIELD_VALUE);
       Object oldValue = formState.opt(updatedField);
-      // Legacy callouts (e.g., SL_TaxCategory_Org) sometimes return empty strings as a
-      // "don't know / clear this" signal. In the defaults/create flow we don't want to
-      // overwrite a valid existing value with "" — that destroys defaults we already
-      // resolved and causes NOT-NULL violations on save for mandatory FKs.
-      boolean newIsEmpty = newValue == null
-          || JSONObject.NULL.equals(newValue)
-          || "".equals(String.valueOf(newValue));
-      boolean oldIsPresent = oldValue != null
-          && !JSONObject.NULL.equals(oldValue)
-          && !"".equals(String.valueOf(oldValue));
-      if (newIsEmpty && oldIsPresent) {
+      if (wouldClearExistingValue(newValue, oldValue)) {
         log.debug("[NEO-DEFAULTS] Skipping callout update that would clear '{}' "
             + "(old='{}', new='')", updatedField, oldValue);
         continue;
       }
       formState.put(updatedField, newValue);
       defaults.put(updatedField, newValue);
-      // When the callout returned a fresh _identifier alongside the value, propagate it so the
-      // {field}$_identifier companion stays consistent with the new value. Without this, a prior
-      // identifier resolved from the original (now-overwritten) value lingers in the response.
-      if (updateObj.has(FIELD_IDENTIFIER)) {
-        Object newIdentifier = updateObj.opt(FIELD_IDENTIFIER);
-        if (newIdentifier != null && !JSONObject.NULL.equals(newIdentifier)) {
-          defaults.put(updatedField + IDENTIFIER_SUFFIX, newIdentifier);
-        }
-      }
-      if (valueChanged(oldValue, newValue)
-          && !seqFields.contains(updatedField)
-          && NeoCalloutService.resolveCallout(adTab, updatedField) != null) {
+      propagateIdentifier(updateObj, defaults, updatedField);
+      if (shouldQueueForCascade(oldValue, newValue, updatedField, seqFields, adTab)) {
         nextPending.add(updatedField);
       }
     }
+  }
+
+  // Legacy callouts (e.g., SL_TaxCategory_Org) sometimes return empty strings as a
+  // "don't know / clear this" signal. In the defaults/create flow we don't want to
+  // overwrite a valid existing value with "" — that destroys defaults we already
+  // resolved and causes NOT-NULL violations on save for mandatory FKs.
+  private static boolean wouldClearExistingValue(Object newValue, Object oldValue) {
+    boolean newIsEmpty = newValue == null
+        || JSONObject.NULL.equals(newValue)
+        || "".equals(String.valueOf(newValue));
+    boolean oldIsPresent = oldValue != null
+        && !JSONObject.NULL.equals(oldValue)
+        && !"".equals(String.valueOf(oldValue));
+    return newIsEmpty && oldIsPresent;
+  }
+
+  // When the callout returned a fresh _identifier alongside the value, propagate it so the
+  // {field}$_identifier companion stays consistent with the new value. Without this, a prior
+  // identifier resolved from the original (now-overwritten) value lingers in the response.
+  private static void propagateIdentifier(JSONObject updateObj, JSONObject defaults,
+      String updatedField) throws JSONException {
+    if (!updateObj.has(FIELD_IDENTIFIER)) {
+      return;
+    }
+    Object newIdentifier = updateObj.opt(FIELD_IDENTIFIER);
+    if (newIdentifier != null && !JSONObject.NULL.equals(newIdentifier)) {
+      defaults.put(updatedField + IDENTIFIER_SUFFIX, newIdentifier);
+    }
+  }
+
+  private static boolean shouldQueueForCascade(Object oldValue, Object newValue,
+      String updatedField, Set<String> seqFields, Tab adTab) {
+    return valueChanged(oldValue, newValue)
+        && !seqFields.contains(updatedField)
+        && NeoCalloutService.resolveCallout(adTab, updatedField) != null;
   }
 
   private static void mergeCalloutCombos(JSONObject calloutBody, JSONObject formState,
