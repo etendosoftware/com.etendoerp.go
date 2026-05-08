@@ -894,6 +894,13 @@ public class NeoProcessService {
       result.put(STATUS, SUCCESS);
     }
 
+    JSONObject actionError = extractProcessViewError(handlerResult);
+    if (actionError != null) {
+      result.put(STATUS, ERROR);
+      result.put(MESSAGE, actionError.optString("msgText", "Process failed"));
+      return new NeoResponse(400, result);
+    }
+
     // Pass through any additional response data
     Iterator<String> keys = handlerResult.keys();
     while (keys.hasNext()) {
@@ -904,6 +911,35 @@ public class NeoProcessService {
     }
 
     return NeoResponse.ok(result);
+  }
+
+  private static JSONObject extractProcessViewError(JSONObject handlerResult) throws JSONException {
+    if (!handlerResult.has("responseActions")) {
+      return null;
+    }
+
+    JSONArray actions = handlerResult.optJSONArray("responseActions");
+    if (actions == null) {
+      return null;
+    }
+
+    for (int i = 0; i < actions.length(); i++) {
+      JSONObject action = actions.optJSONObject(i);
+      if (action == null || !action.has("showMsgInProcessView")) {
+        continue;
+      }
+
+      JSONObject message = action.optJSONObject("showMsgInProcessView");
+      if (message == null) {
+        continue;
+      }
+
+      if (ERROR.equalsIgnoreCase(message.optString("msgType"))) {
+        return message;
+      }
+    }
+
+    return null;
   }
 
   /**
