@@ -76,8 +76,21 @@ public final class NeoSessionVarsCache {
       "#AD_Language",
       "#AD_Session_ID",
       "#User_Client",
+      "#User_Org",
+      "#User_Level",
       "#AD_JavaDateFormat",
       "#AD_JavaDateTimeFormat",
+      // Accounting-schema vars set by LoginUtils.fillSessionArguments. Without these,
+      // @C_Currency_ID@ defaults fall through Utility.getContext to nothing and the
+      // first-combo fallback picks AED (alphabetically before EUR) instead of the
+      // org's functional currency.
+      "$C_Currency_ID",
+      "$C_AcctSchema_ID",
+      "$HasAlias",
+      "#StdPrecision",
+      "#Approval_C_Currency_ID",
+      "#Approval_Amt",
+      "#Client_Value",
   };
 
   /**

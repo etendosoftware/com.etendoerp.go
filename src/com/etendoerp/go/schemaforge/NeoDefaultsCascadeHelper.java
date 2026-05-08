@@ -30,6 +30,8 @@ public class NeoDefaultsCascadeHelper {
   private static final Logger log = LogManager.getLogger(NeoDefaultsCascadeHelper.class);
   private static final int MAX_CALLOUT_CHAIN_DEPTH = 5;
   private static final String FIELD_VALUE = "value";
+  private static final String FIELD_IDENTIFIER = "_identifier";
+  private static final String IDENTIFIER_SUFFIX = "$_identifier";
   private static final String KEY_UPDATES = "updates";
   private static final String KEY_COMBOS = "combos";
   private static final String KEY_SELECTED = "selected";
@@ -358,6 +360,15 @@ public class NeoDefaultsCascadeHelper {
       }
       formState.put(updatedField, newValue);
       defaults.put(updatedField, newValue);
+      // When the callout returned a fresh _identifier alongside the value, propagate it so the
+      // {field}$_identifier companion stays consistent with the new value. Without this, a prior
+      // identifier resolved from the original (now-overwritten) value lingers in the response.
+      if (updateObj.has(FIELD_IDENTIFIER)) {
+        Object newIdentifier = updateObj.opt(FIELD_IDENTIFIER);
+        if (newIdentifier != null && !JSONObject.NULL.equals(newIdentifier)) {
+          defaults.put(updatedField + IDENTIFIER_SUFFIX, newIdentifier);
+        }
+      }
       if (valueChanged(oldValue, newValue)
           && !seqFields.contains(updatedField)
           && NeoCalloutService.resolveCallout(adTab, updatedField) != null) {
