@@ -33,6 +33,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.client.application.process.BaseProcessActionHandler;
+import org.openbravo.client.kernel.BaseActionHandler;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -502,6 +503,32 @@ public class NeoProcessService {
   }
 
   /**
+   * Execute an OBUIAPP action handler by Java class name.
+   *
+   * <p>Used when an AD-level OBUIAPP definition points to a client-side hook
+   * string (for example {@code OB.AEATSII.send}) but the runtime integration
+   * needs to call the underlying server-side action handler class directly.
+   */
+  public static NeoResponse executeObuiappClass(String className, String processId,
+      JSONObject params) {
+    if (params == null) {
+      params = new JSONObject();
+    }
+    try {
+      OBContext.setAdminMode();
+      try {
+        return executeObuiappHandler(className, processId, params);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("Error executing OBUIAPP action handler {}", className, e);
+      return NeoResponse.error(500,
+          "Process execution failed: " + e.getMessage());
+    }
+  }
+
+  /**
    * Pushes a VariablesSecureApp into RequestContext and restores the previous one on close.
    */
   private static RequestContextScope pushRequestContextVars() {
@@ -534,9 +561,9 @@ public class NeoProcessService {
     Object handlerInstance =
         WeldUtils.getInstanceFromStaticBeanManager(handlerClass);
 
-    if (!(handlerInstance instanceof BaseProcessActionHandler)) {
+    if (!(handlerInstance instanceof BaseActionHandler)) {
       return NeoResponse.error(500,
-          "Process handler is not a BaseProcessActionHandler: "
+          "Process handler is not a BaseActionHandler: "
               + className);
     }
 
@@ -599,18 +626,25 @@ public class NeoProcessService {
         handlerParams.put(key, params.get(key));
       }
 
-      // Invoke the protected doExecute via reflection.
-      // doExecute(Map<String, Object>, String) is the method that concrete
-      // handlers override with their business logic.
-      Method doExecuteMethod = BaseProcessActionHandler.class
-          .getDeclaredMethod("doExecute", Map.class, String.class);
-      doExecuteMethod.setAccessible(true);
-
-      JSONObject handlerResult = (JSONObject) doExecuteMethod.invoke(
+      JSONObject handlerResult = invokeObuiappHandler(
           handlerInstance, handlerParams, content.toString());
 
       return translateObuiappResult(handlerResult);
     }
+  }
+
+  private static JSONObject invokeObuiappHandler(Object handlerInstance,
+      Map<String, Object> handlerParams, String content) throws Exception {
+    Class<?> baseClass = handlerInstance instanceof BaseProcessActionHandler
+        ? BaseProcessActionHandler.class
+        : BaseActionHandler.class;
+    Method executeMethod = baseClass.getDeclaredMethod("execute", Map.class, String.class);
+    executeMethod.setAccessible(true);
+    String handlerContent = content;
+    if (!(handlerInstance instanceof BaseProcessActionHandler)) {
+      handlerContent = new JSONObject(handlerParams).toString();
+    }
+    return (JSONObject) executeMethod.invoke(handlerInstance, handlerParams, handlerContent);
   }
 
   /**
