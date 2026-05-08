@@ -88,10 +88,6 @@ class NeoAuthenticator {
     }
 
     OBContext context = SecureWebServicesUtils.createContext(userId, roleId, orgId, warehouseId, clientId);
-    // The JWT warehouse may have been set to an inaccessible warehouse by the token generator
-    // (SecureWebServicesUtils.getWarehouse() falls back to warehouseList.get(0) when the user
-    // has no default, without filtering by client). Validate it against the user's readable orgs;
-    // if inaccessible, find the first warehouse the user can actually access.
     if (context.getWarehouse() != null) {
       String whOrgId = context.getWarehouse().getOrganization().getId();
       boolean accessible = false;
