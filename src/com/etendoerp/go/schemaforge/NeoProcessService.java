@@ -86,6 +86,7 @@ public class NeoProcessService {
   public static final String ERROR = "error";
   public static final String SUCCESS = "success";
   public static final String PROCESS_ID = "processId";
+  private static final String PROCESS_EXECUTION_FAILED_PREFIX = "Process execution failed: ";
   private static final String ACCESS_DENIED_FOR_CURRENT_ROLE =
       "Access denied to process for current role";
 
@@ -121,7 +122,7 @@ public class NeoProcessService {
     } catch (Exception e) {
       log.error("Error executing process {}", process.getName(), e);
       return NeoResponse.error(500,
-          "Process execution failed: " + e.getMessage());
+          PROCESS_EXECUTION_FAILED_PREFIX + e.getMessage());
     }
   }
 
@@ -498,7 +499,7 @@ public class NeoProcessService {
     } catch (Exception e) {
       log.error("Error executing OBUIAPP process {}", obuiappProcess.getName(), e);
       return NeoResponse.error(500,
-          "Process execution failed: " + e.getMessage());
+          PROCESS_EXECUTION_FAILED_PREFIX + e.getMessage());
     }
   }
 
@@ -508,6 +509,11 @@ public class NeoProcessService {
    * <p>Used when an AD-level OBUIAPP definition points to a client-side hook
    * string (for example {@code OB.AEATSII.send}) but the runtime integration
    * needs to call the underlying server-side action handler class directly.
+   *
+   * @param className fully qualified Java class name of the OBUIAPP handler
+   * @param processId AD/OBUIAPP process identifier forwarded as {@code _action}
+   * @param params request parameters passed to the handler; may be null
+   * @return NeoResponse containing the translated handler execution result
    */
   public static NeoResponse executeObuiappClass(String className, String processId,
       JSONObject params) {
@@ -524,7 +530,7 @@ public class NeoProcessService {
     } catch (Exception e) {
       log.error("Error executing OBUIAPP action handler {}", className, e);
       return NeoResponse.error(500,
-          "Process execution failed: " + e.getMessage());
+          PROCESS_EXECUTION_FAILED_PREFIX + e.getMessage());
     }
   }
 
@@ -925,16 +931,8 @@ public class NeoProcessService {
 
     for (int i = 0; i < actions.length(); i++) {
       JSONObject action = actions.optJSONObject(i);
-      if (action == null || !action.has("showMsgInProcessView")) {
-        continue;
-      }
-
-      JSONObject message = action.optJSONObject("showMsgInProcessView");
-      if (message == null) {
-        continue;
-      }
-
-      if (ERROR.equalsIgnoreCase(message.optString("msgType"))) {
+      JSONObject message = action == null ? null : action.optJSONObject("showMsgInProcessView");
+      if (message != null && ERROR.equalsIgnoreCase(message.optString("msgType"))) {
         return message;
       }
     }
