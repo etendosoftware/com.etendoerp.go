@@ -18,12 +18,9 @@
 package com.etendoerp.go.schemaforge;
 
 import javax.inject.Named;
-import javax.servlet.http.HttpServletResponse;
 
-import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 /**
@@ -36,7 +33,7 @@ import org.openbravo.dal.service.OBDal;
  * server-side action handler with the same payload shape used by the classic UI.
  */
 @Named("sii-send")
-public class SiiSendHandler implements NeoHandler {
+public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
 
   static final String ACTION_NAME = "EM_Aeatsii_Send";
   static final String ACTION_NAME_LEGACY = "Em_aeatsii_send";
@@ -45,47 +42,28 @@ public class SiiSendHandler implements NeoHandler {
   private static final String PROCESS_CLASS = "org.openbravo.module.sii.process.MultiEnvioFactura";
 
   @Override
-  public NeoResponse handle(NeoContext context) {
-    if (!NeoEndpointType.ACTION.equals(context.getEndpointType())) {
-      return null;
-    }
-    if (!"POST".equals(context.getHttpMethod())) {
-      return null;
-    }
-    if (!matchesActionName(context.getFieldName())) {
-      return null;
-    }
+  protected NeoResponse executeAction(String recordId) throws Exception {
+    JSONObject params = new JSONObject();
+    params.put("recordId", recordId);
+    params.put("inpRecordId", recordId);
+    params.put("orgid", resolveOrganizationId(recordId));
+    JSONArray ids = new JSONArray();
+    ids.put(recordId);
+    params.put("ids", ids);
 
-    String recordId = context.getRecordId();
-    if (StringUtils.isBlank(recordId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Record ID is required");
-    }
-
-    try {
-      OBContext.setAdminMode(true);
-      try {
-        JSONObject params = new JSONObject();
-        params.put("recordId", recordId);
-        params.put("inpRecordId", recordId);
-        params.put("orgid", resolveOrganizationId(recordId));
-        JSONArray ids = new JSONArray();
-        ids.put(recordId);
-        params.put("ids", ids);
-
-        return NeoProcessService.executeObuiappClass(PROCESS_CLASS, PROCESS_ID, params);
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "SII send failed: " + e.getMessage());
-    }
+    return NeoProcessService.executeObuiappClass(PROCESS_CLASS, PROCESS_ID, params);
   }
 
-  private boolean matchesActionName(String fieldName) {
+  @Override
+  protected boolean matchesActionName(String fieldName) {
     return ACTION_NAME.equals(fieldName)
         || ACTION_NAME_LEGACY.equals(fieldName)
         || ACTION_NAME_QUALIFIER.equals(fieldName);
+  }
+
+  @Override
+  protected String buildExecutionErrorMessage(Exception e) {
+    return "SII send failed: " + e.getMessage();
   }
 
   private String resolveOrganizationId(String invoiceId) {

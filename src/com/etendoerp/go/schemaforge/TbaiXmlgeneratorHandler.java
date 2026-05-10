@@ -18,13 +18,10 @@
 package com.etendoerp.go.schemaforge;
 
 import javax.inject.Named;
-import javax.servlet.http.HttpServletResponse;
 
-import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.client.application.Process;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 /**
@@ -37,7 +34,7 @@ import org.openbravo.dal.service.OBDal;
  * OBUIAPP execution path.
  */
 @Named("tbai-xmlgenerator")
-public class TbaiXmlgeneratorHandler implements NeoHandler {
+public class TbaiXmlgeneratorHandler extends AbstractLegacyInvoiceActionHandler {
 
   static final String ACTION_NAME = "EM_Tbai_Xmlgenerator";
   static final String ACTION_NAME_LEGACY = "Em_Tbai_Xmlgenerator";
@@ -45,51 +42,31 @@ public class TbaiXmlgeneratorHandler implements NeoHandler {
   private static final String PROCESS_ID = "BE2486102F2C41779B760609FD69A225";
 
   @Override
-  public NeoResponse handle(NeoContext context) {
-    if (!NeoEndpointType.ACTION.equals(context.getEndpointType())) {
-      return null;
-    }
-    if (!"POST".equals(context.getHttpMethod())) {
-      return null;
-    }
-    if (!matchesActionName(context.getFieldName())) {
-      return null;
+  protected NeoResponse executeAction(String recordId) throws Exception {
+    Process process = OBDal.getInstance().get(Process.class, PROCESS_ID);
+    if (process == null) {
+      return NeoResponse.error(500, "TicketBAI process not found: " + PROCESS_ID);
     }
 
-    String recordId = context.getRecordId();
-    if (StringUtils.isBlank(recordId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Record ID is required");
-    }
+    JSONObject params = new JSONObject();
+    params.put("recordId", recordId);
+    params.put("inpRecordId", recordId);
+    JSONArray recordIds = new JSONArray();
+    recordIds.put(recordId);
+    params.put("recordIds", recordIds);
 
-    try {
-      OBContext.setAdminMode(true);
-      try {
-        Process process = OBDal.getInstance().get(Process.class, PROCESS_ID);
-        if (process == null) {
-          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-              "TicketBAI process not found: " + PROCESS_ID);
-        }
-
-        JSONObject params = new JSONObject();
-        params.put("recordId", recordId);
-        params.put("inpRecordId", recordId);
-        JSONArray recordIds = new JSONArray();
-        recordIds.put(recordId);
-        params.put("recordIds", recordIds);
-
-        return NeoProcessService.executeObuiappProcess(process, params);
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "TicketBAI XML generation failed: " + e.getMessage());
-    }
+    return NeoProcessService.executeObuiappProcess(process, params);
   }
 
-  private boolean matchesActionName(String fieldName) {
+  @Override
+  protected boolean matchesActionName(String fieldName) {
     return ACTION_NAME.equals(fieldName)
         || ACTION_NAME_LEGACY.equals(fieldName)
         || ACTION_NAME_QUALIFIER.equals(fieldName);
+  }
+
+  @Override
+  protected String buildExecutionErrorMessage(Exception e) {
+    return "TicketBAI XML generation failed: " + e.getMessage();
   }
 }
