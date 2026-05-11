@@ -21,8 +21,6 @@ import javax.inject.Named;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.client.application.Process;
-import org.openbravo.dal.service.OBDal;
 
 /**
  * NeoHandler delegate for the legacy TicketBAI XML generation button on Sales Invoice.
@@ -40,14 +38,10 @@ public class TbaiXmlgeneratorHandler extends AbstractLegacyInvoiceActionHandler 
   static final String ACTION_NAME_LEGACY = "Em_Tbai_Xmlgenerator";
   static final String ACTION_NAME_QUALIFIER = "tbaiXmlgenerator";
   private static final String PROCESS_ID = "BE2486102F2C41779B760609FD69A225";
+  private static final String PROCESS_CLASS = "com.smf.ticketbai.process.XMLConvertionFromInvoice";
 
   @Override
   protected NeoResponse executeAction(String recordId) throws Exception {
-    Process process = OBDal.getInstance().get(Process.class, PROCESS_ID);
-    if (process == null) {
-      return NeoResponse.error(500, "TicketBAI process not found: " + PROCESS_ID);
-    }
-
     JSONObject params = new JSONObject();
     params.put("recordId", recordId);
     params.put("inpRecordId", recordId);
@@ -55,7 +49,7 @@ public class TbaiXmlgeneratorHandler extends AbstractLegacyInvoiceActionHandler 
     recordIds.put(recordId);
     params.put("recordIds", recordIds);
 
-    return NeoProcessService.executeObuiappProcess(process, params);
+    return NeoProcessService.executeObuiappClass(PROCESS_CLASS, PROCESS_ID, params);
   }
 
   @Override
