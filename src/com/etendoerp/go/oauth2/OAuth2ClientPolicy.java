@@ -61,6 +61,16 @@ final class OAuth2ClientPolicy {
     return allowed.contains(wildcardScope) || allowed.containsAll(requested);
   }
 
+  static String normalizeClientScopes(String scopeStr, String defaultScopes, Set<String> validScopes) {
+    String scopes = scopeStr == null || scopeStr.trim().isEmpty()
+        ? defaultScopes
+        : scopeStr.trim();
+    if (hasUnsupportedScopes(scopes, validScopes)) {
+      throw new OBException("scope contains unsupported values");
+    }
+    return scopes;
+  }
+
   static String normalizeRedirectUris(JSONArray redirectUris) throws JSONException {
     if (redirectUris == null || redirectUris.length() == 0) {
       throw new OBException("redirect_uris is required");

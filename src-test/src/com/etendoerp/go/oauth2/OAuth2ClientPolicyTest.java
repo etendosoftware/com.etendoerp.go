@@ -17,6 +17,7 @@
 package com.etendoerp.go.oauth2;
 
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import java.util.Arrays;
@@ -54,6 +55,26 @@ public class OAuth2ClientPolicyTest {
   @Test
   public void hasUnsupportedScopesAcceptsValidScopeRequest() {
     assertFalse(OAuth2ClientPolicy.hasUnsupportedScopes("neo:read neo:write", VALID_SCOPES));
+  }
+
+  /** Dynamic registration defaults to the configured default scope when the request omits scope. */
+  @Test
+  public void normalizeClientScopesUsesDefaultWhenBlank() {
+    assertEquals("neo:*",
+        OAuth2ClientPolicy.normalizeClientScopes("  ", "neo:*", VALID_SCOPES));
+  }
+
+  /** Dynamic registration preserves an explicit valid scope request. */
+  @Test
+  public void normalizeClientScopesKeepsValidRequestedScopes() {
+    assertEquals("neo:read neo:write",
+        OAuth2ClientPolicy.normalizeClientScopes(" neo:read neo:write ", "neo:*", VALID_SCOPES));
+  }
+
+  /** Dynamic registration rejects unsupported scope values before persisting the client. */
+  @Test(expected = OBException.class)
+  public void normalizeClientScopesRejectsUnsupportedScopes() {
+    OAuth2ClientPolicy.normalizeClientScopes("neo:read unknown:scope", "neo:*", VALID_SCOPES);
   }
 
   /** Dynamic client registration requires at least one redirect URI. */
