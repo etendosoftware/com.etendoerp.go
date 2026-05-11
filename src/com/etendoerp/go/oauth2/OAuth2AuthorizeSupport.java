@@ -17,7 +17,7 @@
 package com.etendoerp.go.oauth2;
 
 import java.net.URLEncoder;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Set;
 
 import java.io.IOException;
@@ -108,7 +108,7 @@ final class OAuth2AuthorizeSupport {
   }
   static OAuth2Servlet.AuthCodeData buildAuthCodeData(AuthorizeRequestData authorizeRequest,
       String userId, String roleId, Set<String> requestedScopes,
-      Set<String> allowedScopes, long authCodeExpiryMs) {
+      Set<String> allowedScopes, String wildcardScope, long authCodeExpiryMs) {
     if (authorizeRequest == null || requestedScopes == null || allowedScopes == null) {
       throw new IllegalArgumentException("Authorize data and scopes cannot be null");
     }
@@ -118,9 +118,13 @@ final class OAuth2AuthorizeSupport {
     codeData.roleId = roleId;
     codeData.redirectUri = authorizeRequest.redirectUri;
     codeData.codeChallenge = authorizeRequest.codeChallenge;
-    Set<String> grantedScopes = new HashSet<>(allowedScopes);
+    Set<String> grantedScopes = new LinkedHashSet<>(allowedScopes);
     if (!requestedScopes.isEmpty()) {
-      grantedScopes.retainAll(requestedScopes);
+      if (allowedScopes.contains(wildcardScope)) {
+        grantedScopes = new LinkedHashSet<>(requestedScopes);
+      } else {
+        grantedScopes.retainAll(requestedScopes);
+      }
     }
     codeData.scopes = String.join(" ", grantedScopes);
     codeData.expiresAt = System.currentTimeMillis() + authCodeExpiryMs;

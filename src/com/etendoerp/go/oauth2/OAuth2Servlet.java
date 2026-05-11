@@ -923,6 +923,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
           jwt.getClaim("role").asString(),
           requestedScopes,
           allowedScopes,
+          WILDCARD_SCOPE,
           AUTH_CODE_EXPIRY_MS);
       AUTH_CODE_STORE.put(codeHash, codeData);
 
@@ -1188,7 +1189,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       JSONObject body = parseJsonBody(request);
       String clientName = body.optString("client_name", "MCP Client");
-      String scopes = SCOPE_NEO_READ;
+      String scopes = OAuth2ClientPolicy.normalizeClientScopes(
+          body.optString(FIELD_SCOPE, null), WILDCARD_SCOPE, VALID_SCOPES);
       String redirectUris = OAuth2ClientPolicy.normalizeRedirectUris(
           body.optJSONArray(FIELD_REDIRECT_URIS));
 
@@ -1216,12 +1218,16 @@ public class OAuth2Servlet extends HttpBaseServlet {
       result.put("response_types", new JSONArray(Arrays.asList("code")));
       result.put("token_endpoint_auth_method", "none");
       result.put(FIELD_REDIRECT_URIS, new JSONArray(redirectUris));
+      result.put(FIELD_SCOPE, scopes);
       result.put("client_id_issued_at", System.currentTimeMillis() / 1000);
       result.put("client_secret_expires_at", 0);
 
       writeJsonResponse(response, HttpServletResponse.SC_CREATED, result);
       log.info("DCR client registered: {} ({})", clientName, clientIdentifier);
 
+    } catch (OAuth2ClientPolicy.InvalidScopeException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_client_metadata",
+          e.getMessage());
     } catch (IllegalArgumentException | OBException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST, e.getMessage());
     } catch (JSONException e) {
