@@ -112,8 +112,8 @@ public class CreatePurchaseInvoiceHandlerTest {
       Session session = mock(Session.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.getSession()).thenReturn(session);
-      Order orderMock = mockOrderWithHeaderData();
-      when(dal.get(eq(Order.class), eq("po-1"))).thenReturn(orderMock);
+      Order orderHeader = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("po-1"))).thenReturn(orderHeader);
 
       NativeQuery linkQuery = mock(NativeQuery.class);
       when(session.createNativeQuery(anyString())).thenReturn(linkQuery);

@@ -1936,8 +1936,8 @@ public class CreateDraftInvoiceHandlerTest {
       Session session = mock(Session.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.getSession()).thenReturn(session);
-      Order orderMock = mockOrderWithHeaderData();
-      when(dal.get(eq(Order.class), eq("order-X"))).thenReturn(orderMock);
+      Order orderHeader = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("order-X"))).thenReturn(orderHeader);
 
       OBProvider provider = mock(OBProvider.class);
       Invoice invoice = mock(Invoice.class);

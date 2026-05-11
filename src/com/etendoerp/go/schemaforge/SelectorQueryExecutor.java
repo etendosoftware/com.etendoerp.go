@@ -99,7 +99,7 @@ final class SelectorQueryExecutor {
     JSONArray items = new JSONArray();
     for (BaseOBObject bob : dataQuery.list()) {
       JSONObject item = new JSONObject();
-      item.put("id", SelectorQueryBuilder.normalizeEntityId(bob.getId().toString()));
+      item.put("id", SelectorRowMapper.normalizeEntityId(bob.getId().toString()));
       if (meta.displayProperty != null && meta.displayProperty.contains(".")) {
         Object labelValue = resolvePropertyValue(bob, meta.displayProperty);
         item.put(FIELD_LABEL, labelValue != null ? labelValue : bob.getIdentifier());
@@ -188,7 +188,7 @@ final class SelectorQueryExecutor {
 
     String selectPart = rawHql.substring(0, fromIdx).trim();
     String[] selectExprs = selectPart.replaceFirst("(?i)^select\\s+", "").split(",");
-    Map<String, Integer> colIndexMap = SelectorQueryBuilder.buildSelectColumnIndexMap(selectExprs);
+    Map<String, Integer> colIndexMap = SelectorRowMapper.buildSelectColumnIndexMap(selectExprs);
 
     Map<String, Object> fromParams = new HashMap<>(fromClause.getParams());
     if (extraFilterParams != null) {
@@ -215,7 +215,7 @@ final class SelectorQueryExecutor {
     dataQuery.setMaxResults(limit);
     dataQuery.setFirstResult(offset);
 
-    Integer idColIdx = SelectorQueryBuilder.resolveIdColumnIndex(meta, alias, colIndexMap, selectExprs);
+    Integer idColIdx = SelectorRowMapper.resolveIdColumnIndex(meta, alias, colIndexMap, selectExprs);
     JSONArray columns = SelectorResponseSupport.buildGridColumnMetadata(meta.gridFields);
     Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
     JSONArray items = new JSONArray();
@@ -228,9 +228,9 @@ final class SelectorQueryExecutor {
       item.put("id", recordId);
       entityIds.add(recordId);
       item.put(FIELD_LABEL,
-          SelectorQueryBuilder.extractDisplayLabel(row, colIndexMap, meta.displayProperty,
+          SelectorRowMapper.extractDisplayLabel(row, colIndexMap, meta.displayProperty,
               entityDef, recordId));
-      SelectorQueryBuilder.mapGridFieldsToItem(item, row, colIndexMap, meta.gridFields);
+      SelectorRowMapper.mapGridFieldsToItem(item, row, colIndexMap, meta.gridFields);
       items.put(item);
     }
 
@@ -250,7 +250,7 @@ final class SelectorQueryExecutor {
         return val.toString();
       }
     }
-    return SelectorQueryBuilder.normalizeEntityId(bob.getId().toString());
+    return SelectorRowMapper.normalizeEntityId(bob.getId().toString());
   }
 
   private static Object resolvePropertyValue(BaseOBObject bob, String propertyPath) {
