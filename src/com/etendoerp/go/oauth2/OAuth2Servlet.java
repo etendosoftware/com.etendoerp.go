@@ -923,6 +923,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
           jwt.getClaim("role").asString(),
           requestedScopes,
           allowedScopes,
+          WILDCARD_SCOPE,
           AUTH_CODE_EXPIRY_MS);
       AUTH_CODE_STORE.put(codeHash, codeData);
 
@@ -1224,6 +1225,9 @@ public class OAuth2Servlet extends HttpBaseServlet {
       writeJsonResponse(response, HttpServletResponse.SC_CREATED, result);
       log.info("DCR client registered: {} ({})", clientName, clientIdentifier);
 
+    } catch (OAuth2ClientPolicy.InvalidScopeException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "invalid_client_metadata",
+          e.getMessage());
     } catch (IllegalArgumentException | OBException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST, e.getMessage());
     } catch (JSONException e) {

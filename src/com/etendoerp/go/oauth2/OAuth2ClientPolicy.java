@@ -19,6 +19,7 @@ package com.etendoerp.go.oauth2;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
@@ -38,7 +39,7 @@ final class OAuth2ClientPolicy {
     if (scopeStr == null || scopeStr.trim().isEmpty() || validScopes == null) {
       return Collections.emptySet();
     }
-    Set<String> scopes = new HashSet<>(Arrays.asList(scopeStr.trim().split("\\s+")));
+    Set<String> scopes = new LinkedHashSet<>(Arrays.asList(scopeStr.trim().split("\\s+")));
     scopes.retainAll(validScopes);
     return scopes;
   }
@@ -62,13 +63,26 @@ final class OAuth2ClientPolicy {
   }
 
   static String normalizeClientScopes(String scopeStr, String defaultScopes, Set<String> validScopes) {
-    String scopes = scopeStr == null || scopeStr.trim().isEmpty()
+    String scopes = normalizeScopeString(scopeStr == null || scopeStr.trim().isEmpty()
         ? defaultScopes
-        : scopeStr.trim();
+        : scopeStr);
     if (hasUnsupportedScopes(scopes, validScopes)) {
-      throw new OBException("scope contains unsupported values");
+      throw new InvalidScopeException("scope contains unsupported values");
     }
     return scopes;
+  }
+
+  static String normalizeScopeString(String scopeStr) {
+    if (scopeStr == null || scopeStr.trim().isEmpty()) {
+      return "";
+    }
+    return String.join(" ", scopeStr.trim().split("\\s+"));
+  }
+
+  static final class InvalidScopeException extends OBException {
+    InvalidScopeException(String message) {
+      super(message);
+    }
   }
 
   static String normalizeRedirectUris(JSONArray redirectUris) throws JSONException {

@@ -21,6 +21,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -71,10 +72,36 @@ public class OAuth2ClientPolicyTest {
         OAuth2ClientPolicy.normalizeClientScopes(" neo:read neo:write ", "neo:*", VALID_SCOPES));
   }
 
+  /** Dynamic registration canonicalizes OAuth scope whitespace before storage and response. */
+  @Test
+  public void normalizeClientScopesCanonicalizesWhitespace() {
+    assertEquals("neo:read neo:write",
+        OAuth2ClientPolicy.normalizeClientScopes("neo:read\tneo:write\n", "neo:*", VALID_SCOPES));
+  }
+
   /** Dynamic registration rejects unsupported scope values before persisting the client. */
-  @Test(expected = OBException.class)
+  @Test(expected = OAuth2ClientPolicy.InvalidScopeException.class)
   public void normalizeClientScopesRejectsUnsupportedScopes() {
     OAuth2ClientPolicy.normalizeClientScopes("neo:read unknown:scope", "neo:*", VALID_SCOPES);
+  }
+
+  /** Wildcard client grants the concrete requested scopes for authorization-code tokens. */
+  @Test
+  public void buildAuthCodeDataGrantsRequestedScopesWhenClientHasWildcard() {
+    OAuth2AuthorizeSupport.AuthorizeRequestData request =
+        new OAuth2AuthorizeSupport.AuthorizeRequestData(
+            "token", "client", "http://127.0.0.1/callback", "challenge", "state",
+            "neo:read");
+    OAuth2Servlet.AuthCodeData codeData = OAuth2AuthorizeSupport.buildAuthCodeData(
+        request,
+        "user",
+        "role",
+        Collections.singleton("neo:read"),
+        Collections.singleton("neo:*"),
+        "neo:*",
+        300000);
+
+    assertEquals("neo:read", codeData.scopes);
   }
 
   /** Dynamic client registration requires at least one redirect URI. */
