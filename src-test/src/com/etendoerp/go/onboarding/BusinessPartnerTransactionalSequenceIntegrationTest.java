@@ -44,6 +44,10 @@ public class BusinessPartnerTransactionalSequenceIntegrationTest extends OBBaseT
 
   @After
   public void rollbackChanges() {
+    while (OBContext.getOBContext() != null
+        && OBContext.getOBContext().isInAdministratorMode()) {
+      OBContext.restorePreviousMode();
+    }
     OBDal.getInstance().rollbackAndClose();
   }
 
