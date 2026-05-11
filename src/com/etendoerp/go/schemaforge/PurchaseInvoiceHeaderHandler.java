@@ -27,6 +27,8 @@ import javax.inject.Named;
  * <ul>
  *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler} (uses {@code CloneInvoiceHook})</li>
  *   <li>{@code registerPayment} / {@code invoicePayments} / {@code invoiceAccounts} → {@link RegisterPaymentOutHandler}</li>
+ *   <li>{@code Em_Aeatsii_Send} → {@link SiiSendHandler}</li>
+ *   <li>{@code Em_Tbai_Xmlgenerator} → {@link TbaiXmlgeneratorHandler}</li>
  * </ul>
  *
  * <p>Before the Complete action (documentAction=CO), creates the total discount line so it is
@@ -43,6 +45,12 @@ public class PurchaseInvoiceHeaderHandler implements NeoHandler {
   private RegisterPaymentOutHandler registerPaymentOutHandler;
 
   @Inject
+  private SiiSendHandler siiSendHandler;
+
+  @Inject
+  private TbaiXmlgeneratorHandler tbaiXmlgeneratorHandler;
+
+  @Inject
   private TotalDiscountService totalDiscountService;
 
   @Override
@@ -51,6 +59,8 @@ public class PurchaseInvoiceHeaderHandler implements NeoHandler {
     return NeoHeaderActionRouter.dispatch(
         context,
         cloneRecordHandler,
-        registerPaymentOutHandler);
+        registerPaymentOutHandler,
+        siiSendHandler,
+        tbaiXmlgeneratorHandler);
   }
 }
