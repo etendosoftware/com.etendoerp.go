@@ -104,7 +104,7 @@ class NeoBuiltInEndpointHandler {
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     if ("PUT".equals(method)) {
       NeoFiltersService.savePreset(pathInfo.entityName, pathInfo.recordId,
-          NeoServlet.readRequestBody(request));
+          NeoRequestBodyParser.readRequestBody(request));
       OBDal.getInstance().flush();
       servlet.writeResponse(response, null);
       return;
