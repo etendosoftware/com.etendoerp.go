@@ -94,6 +94,9 @@ public final class NeoAttachmentsHelper {
   private static final String ZIP_CONTENT_TYPE = "application/zip";
   private static final String UI_PATTERN_STD = "STD";
   private static final String ERR_ATTACHMENT_NOT_FOUND = "Attachment not found";
+  private static final String TABLENAME_RECORDID_REQUIRED = "tableName and recordId are required";
+  private static final String ATTACHMENTID_REQUIRED = "attachmentId is required";
+  private static final String CONTENT_DISPOSITION = "Content-Disposition";
 
   private NeoAttachmentsHelper() {
   }
@@ -109,7 +112,7 @@ public final class NeoAttachmentsHelper {
    */
   public static NeoResponse handleList(String tableName, String recordId) {
     if (StringUtils.isBlank(tableName) || StringUtils.isBlank(recordId)) {
-      return NeoResponse.error(400, "tableName and recordId are required");
+      return NeoResponse.error(400, TABLENAME_RECORDID_REQUIRED);
     }
     try {
       String tableId = resolveTableId(tableName);
@@ -154,7 +157,7 @@ public final class NeoAttachmentsHelper {
   public static NeoResponse handleUpload(String tableName, String recordId,
       HttpServletRequest request) {
     if (StringUtils.isBlank(tableName) || StringUtils.isBlank(recordId)) {
-      return NeoResponse.error(400, "tableName and recordId are required");
+      return NeoResponse.error(400, TABLENAME_RECORDID_REQUIRED);
     }
     String contentType = request.getContentType();
     if (contentType == null || !contentType.startsWith("multipart/")) {
@@ -215,7 +218,7 @@ public final class NeoAttachmentsHelper {
   public static void handleDownload(String attachmentId, HttpServletResponse response)
       throws IOException {
     if (StringUtils.isBlank(attachmentId)) {
-      writeError(response, 400, "attachmentId is required");
+      writeError(response, 400, ATTACHMENTID_REQUIRED);
       return;
     }
     Attachment attachment = OBDal.getInstance().get(Attachment.class, attachmentId);
@@ -230,7 +233,7 @@ public final class NeoAttachmentsHelper {
 
       response.setStatus(HttpServletResponse.SC_OK);
       response.setContentType(resolveContentType(attachment.getDataType()));
-      response.setHeader("Content-Disposition", buildContentDisposition(attachment.getName()));
+      response.setHeader(CONTENT_DISPOSITION, buildContentDisposition(attachment.getName()));
       byte[] bytes = buffer.toByteArray();
       response.setContentLength(bytes.length);
       try (OutputStream out = response.getOutputStream()) {
@@ -263,7 +266,7 @@ public final class NeoAttachmentsHelper {
   public static void handleDownloadAll(String tableName, String recordId,
       HttpServletResponse response) throws IOException {
     if (StringUtils.isBlank(tableName) || StringUtils.isBlank(recordId)) {
-      writeError(response, 400, "tableName and recordId are required");
+      writeError(response, 400, TABLENAME_RECORDID_REQUIRED);
       return;
     }
     try {
@@ -281,7 +284,7 @@ public final class NeoAttachmentsHelper {
 
       response.setStatus(HttpServletResponse.SC_OK);
       response.setContentType(ZIP_CONTENT_TYPE);
-      response.setHeader("Content-Disposition",
+      response.setHeader(CONTENT_DISPOSITION,
           buildContentDisposition("attachments_" + recordId + ".zip"));
       byte[] bytes = buffer.toByteArray();
       response.setContentLength(bytes.length);
@@ -313,7 +316,7 @@ public final class NeoAttachmentsHelper {
    */
   public static NeoResponse handleDelete(String attachmentId) {
     if (StringUtils.isBlank(attachmentId)) {
-      return NeoResponse.error(400, "attachmentId is required");
+      return NeoResponse.error(400, ATTACHMENTID_REQUIRED);
     }
     try {
       Attachment attachment = OBDal.getInstance().get(Attachment.class, attachmentId);
@@ -345,7 +348,7 @@ public final class NeoAttachmentsHelper {
    */
   public static NeoResponse handleUpdateDescription(String attachmentId, String description) {
     if (StringUtils.isBlank(attachmentId)) {
-      return NeoResponse.error(400, "attachmentId is required");
+      return NeoResponse.error(400, ATTACHMENTID_REQUIRED);
     }
     try {
       Attachment attachment = OBDal.getInstance().get(Attachment.class, attachmentId);
@@ -523,7 +526,7 @@ public final class NeoAttachmentsHelper {
     if (StringUtils.isNotBlank(submittedName)) {
       return sanitizeFileName(submittedName);
     }
-    String disposition = part.getHeader("Content-Disposition");
+    String disposition = part.getHeader(CONTENT_DISPOSITION);
     if (disposition != null) {
       for (String segment : disposition.split(";")) {
         segment = segment.trim();
