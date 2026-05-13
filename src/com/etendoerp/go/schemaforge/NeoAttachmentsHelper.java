@@ -25,13 +25,14 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.text.SimpleDateFormat;
+import java.nio.file.Files;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.TimeZone;
 import java.util.concurrent.ConcurrentHashMap;
 
 import javax.servlet.http.HttpServletRequest;
@@ -83,11 +84,9 @@ public final class NeoAttachmentsHelper {
   private static final ConcurrentHashMap<String, String> TABLE_ID_CACHE = new ConcurrentHashMap<>();
 
   /** UTC ISO-8601 formatter shared across responses for predictable client parsing. */
-  private static final ThreadLocal<SimpleDateFormat> ISO_FORMATTER = ThreadLocal.withInitial(() -> {
-    SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.ROOT);
-    sdf.setTimeZone(TimeZone.getTimeZone("UTC"));
-    return sdf;
-  });
+  private static final DateTimeFormatter ISO_FORMATTER =
+      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.ROOT)
+          .withZone(ZoneOffset.UTC);
 
   private static final String MULTIPART_FILE_PART = "file";
   private static final String DEFAULT_CONTENT_TYPE = "application/octet-stream";
@@ -469,7 +468,7 @@ public final class NeoAttachmentsHelper {
     if (date == null) {
       return JSONObject.NULL;
     }
-    return ISO_FORMATTER.get().format(date);
+    return ISO_FORMATTER.format(date.toInstant());
   }
 
   /**
@@ -512,8 +511,13 @@ public final class NeoAttachmentsHelper {
   }
 
   private static void cleanupTempFile(File tempFile) {
-    if (tempFile != null && tempFile.exists() && !tempFile.delete()) {
-      log.warn("Could not delete temporary upload file: {}", tempFile.getAbsolutePath());
+    if (tempFile == null) {
+      return;
+    }
+    try {
+      Files.deleteIfExists(tempFile.toPath());
+    } catch (IOException e) {
+      log.warn("Could not delete temporary upload file: {}", tempFile.getAbsolutePath(), e);
     }
   }
 

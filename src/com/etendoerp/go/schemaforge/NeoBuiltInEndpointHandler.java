@@ -23,6 +23,7 @@ class NeoBuiltInEndpointHandler {
   private static final String METHOD_PATCH = "PATCH";
   private static final String ATTACHMENTS_SEGMENT_FILE = "file";
   private static final String ATTACHMENTS_SEGMENT_ZIP = "zip";
+  private static final String DESCRIPTION_FIELD = "description";
 
   private final NeoServlet servlet;
   private final NeoDiscoveryHandler discoveryHandler;
@@ -53,7 +54,7 @@ class NeoBuiltInEndpointHandler {
       return true;
     }
     if ("attachments".equals(pathInfo.specName)) {
-      handleAttachmentsEndpoint(pathInfo, method, request, response);
+      handleAttachmentsEndpoint(method, request, response);
       return true;
     }
     return false;
@@ -149,7 +150,7 @@ class NeoBuiltInEndpointHandler {
    *   <li>{@code PATCH  /attachments/file/{attachmentId}}           — update description</li>
    * </ul>
    */
-  private void handleAttachmentsEndpoint(NeoServlet.NeoPathInfo pathInfo, String method,
+  private void handleAttachmentsEndpoint(String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     String[] segments = parseAttachmentsSegments(request.getPathInfo());
     if (segments.length < 2) {
@@ -273,10 +274,10 @@ class NeoBuiltInEndpointHandler {
     }
     try {
       JSONObject json = new JSONObject(body);
-      if (!json.has("description") || json.isNull("description")) {
+      if (!json.has(DESCRIPTION_FIELD) || json.isNull(DESCRIPTION_FIELD)) {
         return null;
       }
-      return json.getString("description");
+      return json.getString(DESCRIPTION_FIELD);
     } catch (JSONException e) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Invalid JSON body: " + e.getMessage());
