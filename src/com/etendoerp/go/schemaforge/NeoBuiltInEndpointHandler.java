@@ -2,7 +2,6 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.BufferedReader;
 import java.io.IOException;
-import java.util.stream.Collectors;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -141,8 +140,8 @@ class NeoBuiltInEndpointHandler {
       return;
     }
     if (METHOD_POST.equals(method)) {
-      String body = request.getReader().lines().collect(Collectors.joining());
-      servlet.writeResponse(response, NeoPreviewFileService.savePreviewFile(body));
+      servlet.writeResponse(response,
+          NeoPreviewFileService.savePreviewFile(NeoRequestBodyParser.readRequestBody(request)));
       return;
     }
     if (METHOD_DELETE.equals(method)) {
