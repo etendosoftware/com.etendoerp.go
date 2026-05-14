@@ -62,10 +62,10 @@ class BusinessPartnerHandlerTest {
    * Builds a minimal NEO POST response body with {@code response.data[0].id = recordId}.
    */
   private static JSONObject buildResponseBody() throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("id", "REC_ID");
+    JSONObject recordEntry = new JSONObject();
+    recordEntry.put("id", "REC_ID");
     JSONArray data = new JSONArray();
-    data.put(record);
+    data.put(recordEntry);
     JSONObject response = new JSONObject();
     response.put("data", data);
     JSONObject body = new JSONObject();
