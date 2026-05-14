@@ -217,6 +217,32 @@ public class NeoDefaultsService {
         // The CREATE path keeps its own broader fallback in injectMandatoryDefaults to avoid
         // NOT NULL violations when partial payloads reach persistence.
 
+        // Pass 3: resolve defaults for mandatory columns NOT in ETGO_SF_FIELD.
+        // These are "hidden required" fields (e.g. transactionDocument, priceList) that
+        // the agent needs to see in the /defaults response even though they are not
+        // exposed in the UI. Without this, the agent may omit them on create and hit
+        // NOT NULL or MISSING_REQUIRED_FIELDS errors.
+        Set<String> sfFieldColumns = new HashSet<>();
+        if (fields != null) {
+          for (SFField sfField : fields) {
+            Column adColumn = sfField.getADColumn();
+            String dbColumnName = adColumn != null ? adColumn.getDBColumnName() : null;
+            if (dbColumnName != null) {
+              sfFieldColumns.add(dbColumnName.toUpperCase());
+            }
+          }
+        }
+        NeoHiddenMandatoryDefaultsResolver.resolve(
+            new NeoHiddenMandatoryDefaultsResolver.Request(defaults, dalEntity, adTab)
+                .withParentValues(NeoParentValuesLoader.load(adTab, parentId))
+                .withDefaultResolver((column, parentValues) -> {
+                  Object resolved = resolveFieldDefault(new FieldDefaultRequest(column, parentId,
+                      vars, conn, windowId, ctx).withParentValues(parentValues));
+                  return resolved != null ? resolved : resolveFirstComboOption(column, ctx);
+                })
+                .withIdentifierInjector(NeoDefaultsService::tryInjectIdentifier)
+                .withSfFieldColumns(sfFieldColumns));
+
         // Build response
         JSONObject response = new JSONObject();
         response.put("defaults", defaults);
@@ -276,7 +302,8 @@ public class NeoDefaultsService {
    */
   private static Object resolveFieldDefault(Column adColumn, String parentId,
       VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx) {
-    return resolveFieldDefault(adColumn, parentId, vars, conn, windowId, ctx, null);
+    return resolveFieldDefault(new FieldDefaultRequest(adColumn, parentId, vars, conn, windowId,
+        ctx));
   }
 
   /**
@@ -291,13 +318,43 @@ public class NeoDefaultsService {
   private static Object resolveFieldDefault(Column adColumn, String parentId,
       VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx,
       String sfFieldDefault) {
-    return resolveFieldDefault(adColumn, parentId, vars, conn, windowId, ctx, sfFieldDefault, null);
+    return resolveFieldDefault(new FieldDefaultRequest(adColumn, parentId, vars, conn, windowId,
+        ctx).withSfFieldDefault(sfFieldDefault));
   }
 
-  private static Object resolveFieldDefault(Column adColumn, String parentId,
-      VariablesSecureApp vars, DalConnectionProvider conn, String windowId, NeoContext ctx,
-      String sfFieldDefault, Map<String, Object> parentValues) {
+  private static final class FieldDefaultRequest {
+    private final Column adColumn;
+    private final String parentId;
+    private final VariablesSecureApp vars;
+    private final DalConnectionProvider conn;
+    private final String windowId;
+    private final NeoContext ctx;
+    private String sfFieldDefault;
+    private Map<String, Object> parentValues;
 
+    private FieldDefaultRequest(Column adColumn, String parentId, VariablesSecureApp vars,
+        DalConnectionProvider conn, String windowId, NeoContext ctx) {
+      this.adColumn = adColumn;
+      this.parentId = parentId;
+      this.vars = vars;
+      this.conn = conn;
+      this.windowId = windowId;
+      this.ctx = ctx;
+    }
+
+    private FieldDefaultRequest withSfFieldDefault(String sfFieldDefault) {
+      this.sfFieldDefault = sfFieldDefault;
+      return this;
+    }
+
+    private FieldDefaultRequest withParentValues(Map<String, Object> parentValues) {
+      this.parentValues = parentValues;
+      return this;
+    }
+  }
+
+  private static Object resolveFieldDefault(FieldDefaultRequest request) {
+    Column adColumn = request.adColumn;
     String dbColumnName = adColumn.getDBColumnName();
 
     // NEO-specific: IsActive always defaults to true
@@ -306,24 +363,28 @@ public class NeoDefaultsService {
     }
 
     // NEO-specific: Link-to-parent columns use the parentId from query params
-    if (adColumn.isLinkToParentColumn() && parentId != null && !parentId.isEmpty()) {
-      return parentId;
+    if (adColumn.isLinkToParentColumn()
+        && request.parentId != null && !request.parentId.isEmpty()) {
+      return request.parentId;
     }
 
     // Sequence/DocumentNo fields — use Utility.getDocumentNo for real preview
     if (isSequenceField(adColumn)) {
-      String preview = resolveSequencePreview(adColumn, vars, conn, windowId, ctx);
+      String preview = resolveSequencePreview(adColumn, request.vars, request.conn,
+          request.windowId, request.ctx);
       if (preview != null) {
         return preview;
       }
     }
 
     // ETGO_SF_FIELD.defaultvalue overrides AD_Column.defaultvalue when set
-    String defaultExpr = (sfFieldDefault != null && !sfFieldDefault.trim().isEmpty())
-        ? sfFieldDefault.trim()
+    String defaultExpr = (request.sfFieldDefault != null
+        && !request.sfFieldDefault.trim().isEmpty())
+        ? request.sfFieldDefault.trim()
         : adColumn.getDefaultValue();
     if (defaultExpr == null || defaultExpr.trim().isEmpty()) {
-      return resolveFromPrefsOrDocType(adColumn, vars, conn, windowId, dbColumnName, ctx);
+      return resolveFromPrefsOrDocType(adColumn, request.vars, request.conn, request.windowId,
+          dbColumnName, request.ctx);
     }
 
     defaultExpr = defaultExpr.trim();
@@ -335,7 +396,8 @@ public class NeoDefaultsService {
 
     // SQL expressions — resolve parameters and execute
     if (defaultExpr.startsWith("@SQL=")) {
-      return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn, parentValues);
+      return resolveSQLDefault(defaultExpr, request.vars, request.conn, request.windowId, adColumn,
+          request.parentValues);
     }
 
     // Delegate to Utility.getDefault for all other cases:
@@ -343,7 +405,8 @@ public class NeoDefaultsService {
     // - Context variables (@#AD_Org_ID@, @#Date@, etc.)
     // - Preferences (checked first by Utility.getDefault)
     // - Comma-separated alternatives (@#Var1@,@#Var2@,literal)
-    String resolved = Utility.getDefault(conn, vars, dbColumnName, defaultExpr, windowId, "");
+    String resolved = Utility.getDefault(request.conn, request.vars, dbColumnName, defaultExpr,
+        request.windowId, "");
 
     if (resolved != null && !resolved.isEmpty()) {
       return resolved;
@@ -774,7 +837,7 @@ public class NeoDefaultsService {
       VariablesSecureApp vars = buildVariablesSecureApp(ctx.getObContext(), adTab);
       DalConnectionProvider conn = new DalConnectionProvider(false);
       String windowId = ctx.getSfEntity() != null ? resolveWindowId(ctx.getSfEntity()) : "";
-      Map<String, Object> parentValues = loadParentValues(adTab, parentId);
+      Map<String, Object> parentValues = NeoParentValuesLoader.load(adTab, parentId);
       MandatoryDefaultContext mCtx = new MandatoryDefaultContext(parentId, vars, conn,
           windowId, ctx, parentValues);
 
@@ -889,8 +952,8 @@ public class NeoDefaultsService {
   private static boolean tryResolveFieldDefault(JSONObject body, String propName, Column col,
       MandatoryDefaultContext mCtx) {
     try {
-      Object resolved = resolveFieldDefault(col, mCtx.parentId, mCtx.vars, mCtx.conn,
-          mCtx.windowId, mCtx.neoCtx, null, mCtx.parentValues);
+      Object resolved = resolveFieldDefault(new FieldDefaultRequest(col, mCtx.parentId, mCtx.vars,
+          mCtx.conn, mCtx.windowId, mCtx.neoCtx).withParentValues(mCtx.parentValues));
       if (resolved != null) {
         applyResolvedDefault(body, col, propName, resolved, mCtx.neoCtx);
         tryInjectIdentifier(body,
@@ -1083,42 +1146,6 @@ public class NeoDefaultsService {
     }
   }
 
-  private static Map<String, Object> loadParentValues(Tab adTab, String parentId) {
-    Map<String, Object> parentValues = new java.util.HashMap<>();
-    if (parentId != null && !parentId.isEmpty() && adTab.getTabLevel() > 0) {
-      try {
-        Tab parentTab = adTab.getWindow().getADTabList().stream()
-            .filter(t -> t.getTabLevel() == adTab.getTabLevel() - 1 && t.isActive())
-            .findFirst().orElse(null);
-        if (parentTab != null) {
-          Entity parentEntity = ModelProvider.getInstance()
-              .getEntityByTableId(parentTab.getTable().getId());
-          if (parentEntity != null) {
-            BaseOBObject parentRecord = OBDal.getInstance().get(parentEntity.getName(), parentId);
-            if (parentRecord != null) {
-              for (Property p : parentEntity.getProperties()) {
-                Object val = parentRecord.get(p.getName());
-                if (val != null) {
-                  // Store by DB column name (uppercase) for matching @ColumnName@ expressions
-                  String colName = p.getColumnName();
-                  if (colName != null) {
-                    parentValues.put(colName.toUpperCase(), val instanceof BaseOBObject
-                        ? ((BaseOBObject) val).getId().toString() : val);
-                  }
-                }
-              }
-              log.debug("Loaded {} parent values from {} for child defaults",
-                  parentValues.size(), parentEntity.getName());
-            }
-          }
-        }
-      } catch (Exception e) {
-        log.debug("Could not load parent record for defaults: {}", e.getMessage());
-      }
-    }
-    return parentValues;
-  }
-
   /**
    * Returns the ID of the first active non-system organization for the given client.
    * Used when the session context org is "0" (the "*" all-orgs pseudo-org) so that
@@ -1228,85 +1255,4 @@ public class NeoDefaultsService {
     }
   }
 
-  /**
-   * Identify mandatory FK / non-primitive columns of {@code adTab} that still have no value
-   * in {@code body} after the full default-resolution chain has run (explicit defaults,
-   * session, parent, callout cascade). The returned list contains DAL property names so the
-   * UI can map them back to the contract field keys.
-   *
-   * <p>Only columns whose DAL property name appears in {@code userSubmittedFields} are checked.
-   * System-managed columns not submitted by the user are excluded — if the backend could not
-   * auto-resolve them, the DB constraint will surface the error rather than this method
-   * misleadingly reporting it as a user-input problem.</p>
-   *
-   * @param body               the request payload after defaults injection and callout cascade
-   * @param adTab              the AD_Tab being saved
-   * @param userSubmittedFields DAL property names submitted by the user before injection;
-   *                           pass {@code null} to check all mandatory columns (legacy behaviour)
-   * @return DAL property names of mandatory columns left without a value; never null
-   */
-  public static List<String> findMissingMandatoryFields(JSONObject body, Tab adTab,
-      java.util.Set<String> userSubmittedFields) {
-    List<String> missing = new ArrayList<>();
-    if (body == null || adTab == null || adTab.getTable() == null) {
-      return missing;
-    }
-    try {
-      Entity dalEntity = ModelProvider.getInstance()
-          .getEntityByTableId(adTab.getTable().getId());
-      if (dalEntity == null) {
-        return missing;
-      }
-      for (Column col : adTab.getTable().getADColumnList()) {
-        if (!col.isActive() || !col.isMandatory()) {
-          continue;
-        }
-        if (Boolean.TRUE.equals(col.isKeyColumn())) {
-          continue;
-        }
-        Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-        if (prop == null || prop.isAuditInfo()) {
-          continue;
-        }
-        // Numeric / boolean primitives are always covered by injectSafeTypeDefault
-        // (0 / false). Skip them to keep the list focused on user-input lookups.
-        String refId = col.getReference() != null ? col.getReference().getId() : null;
-        if ("22".equals(refId) || "29".equals(refId) || "12".equals(refId)
-            || "11".equals(refId) || "20".equals(refId)) {
-          continue;
-        }
-        String propName = prop.getName();
-        // When userSubmittedFields is provided, skip columns the user did not send.
-        // Those are system-managed fields; if the defaults chain could not resolve them
-        // the DB will surface the violation — not this validator.
-        if (userSubmittedFields != null && !userSubmittedFields.contains(propName)) {
-          continue;
-        }
-        if (!body.has(propName)) {
-          missing.add(propName);
-          continue;
-        }
-        Object value = body.opt(propName);
-        if (value == null || JSONObject.NULL.equals(value)
-            || (value instanceof String && ((String) value).trim().isEmpty())) {
-          missing.add(propName);
-        }
-      }
-    } catch (Exception e) {
-      log.debug("Error checking missing mandatory fields for tab {}: {}",
-          adTab.getName(), e.getMessage());
-    }
-    return missing;
-  }
-
-  /**
-   * Backward-compatible overload — checks all mandatory columns without a user-submission filter.
-   *
-   * @param body  the request payload after defaults injection and callout cascade
-   * @param adTab the AD_Tab being saved
-   * @return DAL property names of mandatory columns left without a value; never null
-   */
-  public static List<String> findMissingMandatoryFields(JSONObject body, Tab adTab) {
-    return findMissingMandatoryFields(body, adTab, null);
-  }
 }
