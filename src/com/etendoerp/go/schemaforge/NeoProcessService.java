@@ -33,6 +33,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.client.application.process.BaseProcessActionHandler;
+import org.openbravo.client.kernel.BaseActionHandler;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -85,6 +86,7 @@ public class NeoProcessService {
   public static final String ERROR = "error";
   public static final String SUCCESS = "success";
   public static final String PROCESS_ID = "processId";
+  private static final String PROCESS_EXECUTION_FAILED_PREFIX = "Process execution failed: ";
   private static final String ACCESS_DENIED_FOR_CURRENT_ROLE =
       "Access denied to process for current role";
 
@@ -120,7 +122,7 @@ public class NeoProcessService {
     } catch (Exception e) {
       log.error("Error executing process {}", process.getName(), e);
       return NeoResponse.error(500,
-          "Process execution failed: " + e.getMessage());
+          PROCESS_EXECUTION_FAILED_PREFIX + e.getMessage());
     }
   }
 
@@ -497,7 +499,38 @@ public class NeoProcessService {
     } catch (Exception e) {
       log.error("Error executing OBUIAPP process {}", obuiappProcess.getName(), e);
       return NeoResponse.error(500,
-          "Process execution failed: " + e.getMessage());
+          PROCESS_EXECUTION_FAILED_PREFIX + e.getMessage());
+    }
+  }
+
+  /**
+   * Execute an OBUIAPP action handler by Java class name.
+   *
+   * <p>Used when an AD-level OBUIAPP definition points to a client-side hook
+   * string (for example {@code OB.AEATSII.send}) but the runtime integration
+   * needs to call the underlying server-side action handler class directly.
+   *
+   * @param className fully qualified Java class name of the OBUIAPP handler
+   * @param processId AD/OBUIAPP process identifier forwarded as {@code _action}
+   * @param params request parameters passed to the handler; may be null
+   * @return NeoResponse containing the translated handler execution result
+   */
+  public static NeoResponse executeObuiappClass(String className, String processId,
+      JSONObject params) {
+    if (params == null) {
+      params = new JSONObject();
+    }
+    try {
+      OBContext.setAdminMode();
+      try {
+        return executeObuiappHandler(className, processId, params);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("Error executing OBUIAPP action handler {}", className, e);
+      return NeoResponse.error(500,
+          PROCESS_EXECUTION_FAILED_PREFIX + e.getMessage());
     }
   }
 
@@ -534,9 +567,9 @@ public class NeoProcessService {
     Object handlerInstance =
         WeldUtils.getInstanceFromStaticBeanManager(handlerClass);
 
-    if (!(handlerInstance instanceof BaseProcessActionHandler)) {
+    if (!(handlerInstance instanceof BaseActionHandler)) {
       return NeoResponse.error(500,
-          "Process handler is not a BaseProcessActionHandler: "
+          "Process handler is not a BaseActionHandler: "
               + className);
     }
 
@@ -599,18 +632,25 @@ public class NeoProcessService {
         handlerParams.put(key, params.get(key));
       }
 
-      // Invoke the protected doExecute via reflection.
-      // doExecute(Map<String, Object>, String) is the method that concrete
-      // handlers override with their business logic.
-      Method doExecuteMethod = BaseProcessActionHandler.class
-          .getDeclaredMethod("doExecute", Map.class, String.class);
-      doExecuteMethod.setAccessible(true);
-
-      JSONObject handlerResult = (JSONObject) doExecuteMethod.invoke(
+      JSONObject handlerResult = invokeObuiappHandler(
           handlerInstance, handlerParams, content.toString());
 
       return translateObuiappResult(handlerResult);
     }
+  }
+
+  private static JSONObject invokeObuiappHandler(Object handlerInstance,
+      Map<String, Object> handlerParams, String content) throws Exception {
+    Class<?> baseClass = handlerInstance instanceof BaseProcessActionHandler
+        ? BaseProcessActionHandler.class
+        : BaseActionHandler.class;
+    Method executeMethod = baseClass.getDeclaredMethod("execute", Map.class, String.class);
+    executeMethod.setAccessible(true);
+    String handlerContent = content;
+    if (!(handlerInstance instanceof BaseProcessActionHandler)) {
+      handlerContent = new JSONObject(handlerParams).toString();
+    }
+    return (JSONObject) executeMethod.invoke(handlerInstance, handlerParams, handlerContent);
   }
 
   /**
@@ -860,6 +900,13 @@ public class NeoProcessService {
       result.put(STATUS, SUCCESS);
     }
 
+    JSONObject actionError = extractProcessViewError(handlerResult);
+    if (actionError != null) {
+      result.put(STATUS, ERROR);
+      result.put(MESSAGE, actionError.optString("msgText", "Process failed"));
+      return new NeoResponse(400, result);
+    }
+
     // Pass through any additional response data
     Iterator<String> keys = handlerResult.keys();
     while (keys.hasNext()) {
@@ -870,6 +917,27 @@ public class NeoProcessService {
     }
 
     return NeoResponse.ok(result);
+  }
+
+  private static JSONObject extractProcessViewError(JSONObject handlerResult) throws JSONException {
+    if (!handlerResult.has("responseActions")) {
+      return null;
+    }
+
+    JSONArray actions = handlerResult.optJSONArray("responseActions");
+    if (actions == null) {
+      return null;
+    }
+
+    for (int i = 0; i < actions.length(); i++) {
+      JSONObject action = actions.optJSONObject(i);
+      JSONObject message = action == null ? null : action.optJSONObject("showMsgInProcessView");
+      if (message != null && ERROR.equalsIgnoreCase(message.optString("msgType"))) {
+        return message;
+      }
+    }
+
+    return null;
   }
 
   /**

@@ -23,7 +23,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.List;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -48,7 +47,7 @@ class SelectorQueryBuilderTest {
   @DisplayName("resolveSearchableExpression prefixes alias for bare property")
   void testResolveExprBareProperty() {
     assertEquals("e.name",
-        SelectorQueryBuilder.resolveSearchableExpression("e", "name"));
+        SelectorOrgFilter.resolveSearchableExpression("e", "name"));
   }
 
   /** Dotted fragment from clause_left_part: used as-is (already aliased). */
@@ -56,18 +55,18 @@ class SelectorQueryBuilderTest {
   @DisplayName("resolveSearchableExpression leaves dotted fragment untouched")
   void testResolveExprDottedFragment() {
     assertEquals("bp.name",
-        SelectorQueryBuilder.resolveSearchableExpression("e", "bp.name"));
+        SelectorOrgFilter.resolveSearchableExpression("e", "bp.name"));
     assertEquals("bp.searchKey",
-        SelectorQueryBuilder.resolveSearchableExpression("bp", "bp.searchKey"));
+        SelectorOrgFilter.resolveSearchableExpression("bp", "bp.searchKey"));
     assertEquals("contact.businessPartner.name",
-        SelectorQueryBuilder.resolveSearchableExpression("e", "contact.businessPartner.name"));
+        SelectorOrgFilter.resolveSearchableExpression("e", "contact.businessPartner.name"));
   }
 
   /** Blank fragment is returned as-is (caller is responsible for filtering). */
   @Test
   @DisplayName("resolveSearchableExpression passes blank fragment through")
   void testResolveExprBlank() {
-    assertEquals("", SelectorQueryBuilder.resolveSearchableExpression("e", ""));
+    assertEquals("", SelectorOrgFilter.resolveSearchableExpression("e", ""));
   }
 
   // --------------------------------------------------------------------
@@ -79,7 +78,7 @@ class SelectorQueryBuilderTest {
   @DisplayName("appendCustomSearchFilter prefixes alias for bare properties")
   void testAppendFilterBareProperty() {
     StringBuilder hql = new StringBuilder();
-    SelectorQueryBuilder.appendCustomSearchFilter(
+    SelectorOrgFilter.appendCustomSearchFilter(
         hql, Collections.singletonList("name"), "e", "mi", false);
     String result = hql.toString();
     assertTrue(result.contains("cast(e.name as string)"),
@@ -93,7 +92,7 @@ class SelectorQueryBuilderTest {
   @DisplayName("appendCustomSearchFilter does not double-prefix dotted fragments")
   void testAppendFilterDottedFragment() {
     StringBuilder hql = new StringBuilder();
-    SelectorQueryBuilder.appendCustomSearchFilter(
+    SelectorOrgFilter.appendCustomSearchFilter(
         hql, Arrays.asList("bp.name", "bp.searchKey"), ALIAS, "mi", false);
     String result = hql.toString();
 
@@ -117,7 +116,7 @@ class SelectorQueryBuilderTest {
   @DisplayName("appendCustomSearchFilter handles mixed bare + dotted fragments")
   void testAppendFilterMixedFragments() {
     StringBuilder hql = new StringBuilder();
-    SelectorQueryBuilder.appendCustomSearchFilter(
+    SelectorOrgFilter.appendCustomSearchFilter(
         hql, Arrays.asList("name", "bp.searchKey"), "e", "mi", false);
     String result = hql.toString();
     assertTrue(result.contains("cast(e.name as string)"), "bare prop missing alias: " + result);
@@ -130,7 +129,7 @@ class SelectorQueryBuilderTest {
   @DisplayName("appendCustomSearchFilter no-op when search is blank")
   void testAppendFilterBlankSearch() {
     StringBuilder hql = new StringBuilder();
-    SelectorQueryBuilder.appendCustomSearchFilter(
+    SelectorOrgFilter.appendCustomSearchFilter(
         hql, Arrays.asList("bp.name"), ALIAS, "", false);
     assertEquals("", hql.toString());
   }
@@ -140,7 +139,7 @@ class SelectorQueryBuilderTest {
   @DisplayName("appendCustomSearchFilter no-op when searchable list is empty")
   void testAppendFilterEmptyList() {
     StringBuilder hql = new StringBuilder();
-    SelectorQueryBuilder.appendCustomSearchFilter(
+    SelectorOrgFilter.appendCustomSearchFilter(
         hql, Collections.emptyList(), ALIAS, "mi", false);
     assertEquals("", hql.toString());
   }
@@ -150,7 +149,7 @@ class SelectorQueryBuilderTest {
   @DisplayName("appendCustomSearchFilter uses AND when hasWhere=true")
   void testAppendFilterAndPrefix() {
     StringBuilder hql = new StringBuilder("FROM Foo f WHERE 1=1");
-    SelectorQueryBuilder.appendCustomSearchFilter(
+    SelectorOrgFilter.appendCustomSearchFilter(
         hql, Collections.singletonList("bp.name"), ALIAS, "mi", true);
     String result = hql.toString();
     assertTrue(result.contains(" AND ("), "should append with AND: " + result);
@@ -173,7 +172,7 @@ class SelectorQueryBuilderTest {
         + "WHERE e.id=fapm.paymentMethod.id AND fapm.active='Y' "
         + "AND fapm.payoutAllow = (CASE WHEN 'N'='N' THEN 'Y' ELSE fapm.payoutAllow END))";
 
-    String result = SelectorQueryBuilder.simplifyConstantCaseExpressions(input);
+    String result = SqlToHqlTranslator.simplifyConstantCaseExpressions(input);
 
     assertTrue(result.contains("fapm.payoutAllow = 'Y'"),
         "Always-true CASE should collapse to direct equality: " + result);
@@ -192,7 +191,7 @@ class SelectorQueryBuilderTest {
         + "WHERE e.id=fapm.paymentMethod.id AND fapm.active='Y' "
         + "AND fapm.payinAllow = (CASE WHEN 'N'='Y' THEN 'Y' ELSE fapm.payinAllow END))";
 
-    String result = SelectorQueryBuilder.simplifyConstantCaseExpressions(input);
+    String result = SqlToHqlTranslator.simplifyConstantCaseExpressions(input);
 
     assertFalse(result.contains("CASE WHEN"),
         "No CASE WHEN should remain: " + result);
@@ -209,7 +208,7 @@ class SelectorQueryBuilderTest {
   void testSimplifyAlwaysFalseCaseDifferentElse() {
     String input = "WHERE e.org = (CASE WHEN 'A'='B' THEN 'Y' ELSE e.client END)";
 
-    String result = SelectorQueryBuilder.simplifyConstantCaseExpressions(input);
+    String result = SqlToHqlTranslator.simplifyConstantCaseExpressions(input);
 
     assertFalse(result.contains("CASE WHEN"),
         "No CASE WHEN should remain: " + result);
@@ -229,7 +228,7 @@ class SelectorQueryBuilderTest {
         + "WHERE e.id=fapm.paymentMethod.id AND fapm.active='Y' "
         + "AND fapm.payinAllow = (CASE WHEN 'Y'='Y' THEN 'Y' ELSE fapm.payinAllow END))";
 
-    String result = SelectorQueryBuilder.simplifyConstantCaseExpressions(input);
+    String result = SqlToHqlTranslator.simplifyConstantCaseExpressions(input);
 
     assertTrue(result.contains("fapm.payinAllow = 'Y'"),
         "Customer always-true CASE should collapse to direct equality: " + result);
@@ -243,7 +242,7 @@ class SelectorQueryBuilderTest {
     String input = "EXISTS (SELECT 1 FROM FinancialMgmtFinAccPaymentMethod fapm "
         + "WHERE e.id=fapm.paymentMethod.id AND fapm.active='Y')";
 
-    String result = SelectorQueryBuilder.simplifyConstantCaseExpressions(input);
+    String result = SqlToHqlTranslator.simplifyConstantCaseExpressions(input);
 
     assertEquals(input, result, "HQL without CASE WHEN should be returned unchanged");
   }
@@ -252,7 +251,7 @@ class SelectorQueryBuilderTest {
   @Test
   @DisplayName("simplifyConstantCaseExpressions handles null input gracefully")
   void testSimplifyNull() {
-    assertEquals(null, SelectorQueryBuilder.simplifyConstantCaseExpressions(null));
+    assertEquals(null, SqlToHqlTranslator.simplifyConstantCaseExpressions(null));
   }
 
   // --------------------------------------------------------------------
@@ -274,7 +273,7 @@ class SelectorQueryBuilderTest {
         + "AND fapm.Payin_Allow = (SELECT CASE WHEN '@FIN_ISRECEIPT@'='Y' THEN 'Y' ELSE fapm.Payin_Allow END FROM DUAL) "
         + "AND fapm.Payout_Allow = (SELECT CASE WHEN '@FIN_ISRECEIPT@'='N' THEN 'Y' ELSE fapm.Payout_Allow END FROM DUAL))";
 
-    String result = SelectorQueryBuilder.unwrapSelectFromDual(sql);
+    String result = SqlToHqlTranslator.unwrapSelectFromDual(sql);
 
     assertTrue(result.contains("EXISTS (SELECT 1"),
         "Outer EXISTS SELECT must be preserved: " + result);
@@ -300,7 +299,7 @@ class SelectorQueryBuilderTest {
         + "AND fapm.Payin_Allow = (\n  SELECT CASE WHEN '@FIN_ISRECEIPT@'='Y' THEN 'Y' ELSE fapm.Payin_Allow END FROM DUAL\n) "
         + "AND fapm.Payout_Allow = ( SELECT CASE WHEN '@FIN_ISRECEIPT@'='N' THEN 'Y' ELSE fapm.Payout_Allow END FROM DUAL ))";
 
-    String result = SelectorQueryBuilder.unwrapSelectFromDual(sql);
+    String result = SqlToHqlTranslator.unwrapSelectFromDual(sql);
 
     assertTrue(result.contains("EXISTS (SELECT 1"),
         "Outer EXISTS SELECT must be preserved when inner subqueries have whitespace after '(': " + result);
@@ -318,7 +317,7 @@ class SelectorQueryBuilderTest {
   @Test
   @DisplayName("unwrapSelectFromDual unwraps simple top-level SELECT FROM DUAL")
   void testSelectFromDualSimple() {
-    String result = SelectorQueryBuilder.unwrapSelectFromDual("(SELECT 'Y' FROM DUAL)");
+    String result = SqlToHqlTranslator.unwrapSelectFromDual("(SELECT 'Y' FROM DUAL)");
 
     assertFalse(result.contains("FROM DUAL"), "FROM DUAL must be removed: " + result);
     assertTrue(result.contains("'Y'"), "Expression must be preserved: " + result);
@@ -328,7 +327,7 @@ class SelectorQueryBuilderTest {
   @Test
   @DisplayName("unwrapSelectFromDual handles null input gracefully")
   void testSelectFromDualNull() {
-    assertEquals(null, SelectorQueryBuilder.unwrapSelectFromDual(null));
+    assertEquals(null, SqlToHqlTranslator.unwrapSelectFromDual(null));
   }
 
   /** SQL without FROM DUAL is returned unchanged. */
@@ -336,6 +335,6 @@ class SelectorQueryBuilderTest {
   @DisplayName("unwrapSelectFromDual returns SQL unchanged when no FROM DUAL present")
   void testSelectFromDualNoOp() {
     String sql = "EXISTS (SELECT 1 FROM FIN_FinAcc_PaymentMethod fapm WHERE fapm.active='Y')";
-    assertEquals(sql, SelectorQueryBuilder.unwrapSelectFromDual(sql));
+    assertEquals(sql, SqlToHqlTranslator.unwrapSelectFromDual(sql));
   }
 }

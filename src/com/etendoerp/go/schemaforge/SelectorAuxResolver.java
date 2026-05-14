@@ -165,7 +165,7 @@ class SelectorAuxResolver {
 
       // Build and execute the aux query filtered by the already-fetched IDs
       SelectorQueryBuilder.HqlWithParams auxQueryFragment =
-          SelectorQueryBuilder.resolveObuiselParams(
+          SelectorValidationResolver.resolveObuiselParams(
               buildAuxIdListQuery(selectClause + fromOnwards, entityAlias));
 
       org.hibernate.query.Query<Object[]> auxQuery = OBDal.getInstance()
