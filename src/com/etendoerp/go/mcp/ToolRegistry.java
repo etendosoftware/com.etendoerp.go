@@ -298,11 +298,23 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_COLUMN,
       stringProp("Field name (e.g. 'businessPartner') or DB column name (e.g. 'C_BPartner_ID') to get selector values for"));
     props.put("query", stringProp("Search query to filter selector values"));
+    props.put(McpConstants.PARAM_RECORD_CONTEXT, objectProp(
+        "Optional context from the current record to resolve dependent selectors. "
+            + "For example: {\"businessPartner\": \"<id>\"} for partnerAddress, "
+            + "or {\"invoiceDate\": \"2026-05-12\"} for line tax selectors."));
+    props.put(McpConstants.PARAM_PARENT_CONTEXT, objectProp(
+        "Optional parent/header record context for child selectors. "
+            + "For example: {\"businessPartner\": \"<id>\", \"orderDate\": \"2026-05-12\", "
+            + "\"priceList\": \"<id>\"} when resolving line selectors."));
 
     return new McpToolDefinition(
         "neo_selectors",
         "Get foreign-key selector values for a column. "
-            + "Use this to discover valid values for FK reference fields.",
+            + "Use this to discover valid values for FK reference fields. "
+            + "Pass recordContext when the selector depends on other field values "
+            + "(e.g. partnerAddress requires businessPartner). "
+            + "Pass parentContext for line selectors that depend on header values "
+            + "(e.g. tax requires orderDate/invoiceDate and priceList).",
         buildObjectSchema(props,
           List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN)));
   }
@@ -310,7 +322,9 @@ public class ToolRegistry {
   private McpToolDefinition buildDefaultsTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
-    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME_WITH_EXAMPLE));
+    props.put(McpConstants.PARAM_PARENT_ID, stringProp(
+        "Optional parent record ID for child entities (e.g. order ID when getting line defaults)"));
 
     return new McpToolDefinition(
         "neo_defaults",

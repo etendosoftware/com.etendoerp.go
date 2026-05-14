@@ -217,6 +217,24 @@ public class NeoDefaultsService {
         // The CREATE path keeps its own broader fallback in injectMandatoryDefaults to avoid
         // NOT NULL violations when partial payloads reach persistence.
 
+        // Pass 3: resolve defaults for mandatory columns NOT in ETGO_SF_FIELD.
+        // These are "hidden required" fields (e.g. transactionDocument, priceList) that
+        // the agent needs to see in the /defaults response even though they are not
+        // exposed in the UI. Without this, the agent may omit them on create and hit
+        // NOT NULL or MISSING_REQUIRED_FIELDS errors.
+        Set<String> sfFieldColumns = new HashSet<>();
+        if (fields != null) {
+          for (SFField sfField : fields) {
+            Column adColumn = sfField.getADColumn();
+            String dbColumnName = adColumn != null ? adColumn.getDBColumnName() : null;
+            if (dbColumnName != null) {
+              sfFieldColumns.add(dbColumnName.toUpperCase());
+            }
+          }
+        }
+        resolveHiddenMandatoryDefaults(defaults, dalEntity, adTab, parentId, vars, conn,
+            windowId, ctx, sfFieldColumns);
+
         // Build response
         JSONObject response = new JSONObject();
         response.put("defaults", defaults);
@@ -425,6 +443,70 @@ public class NeoDefaultsService {
           tableName, columnName, e.getMessage());
     }
     return null;
+  }
+
+  /**
+   * Resolve defaults for mandatory columns that are NOT in ETGO_SF_FIELD.
+   * These are "hidden required" fields that the agent needs to see in the
+   * /defaults response even though they are not exposed in the UI.
+   *
+   * @param defaults the defaults map to populate
+   * @param dalEntity the DAL entity for property name lookup
+   * @param adTab the AD_Tab for column list
+   * @param parentId optional parent record ID
+   * @param vars the VariablesSecureApp for context resolution
+   * @param conn the connection provider
+   * @param windowId the window ID for Utility.getDefault
+   * @param ctx the NeoContext
+   * @param sfFieldColumns set of DB column names already covered by SFField records
+   */
+  static void resolveHiddenMandatoryDefaults(JSONObject defaults, Entity dalEntity,
+      Tab adTab, String parentId, VariablesSecureApp vars, DalConnectionProvider conn,
+      String windowId, NeoContext ctx, Set<String> sfFieldColumns) {
+    if (adTab == null || adTab.getTable() == null) {
+      return;
+    }
+    Map<String, Object> parentValues = loadParentValues(adTab, parentId);
+    for (Column col : adTab.getTable().getADColumnList()) {
+      if (!col.isActive() || !col.isMandatory()) {
+        continue;
+      }
+      String dbColName = col.getDBColumnName();
+      // Skip columns already covered by SFField records
+      if (sfFieldColumns.contains(dbColName.toUpperCase())) {
+        continue;
+      }
+      // Skip primary key columns — DAL auto-generates UUID PKs
+      if (Boolean.TRUE.equals(col.isKeyColumn())) {
+        continue;
+      }
+      // Skip audit columns — Hibernate manages these automatically
+      Property prop = dalEntity != null ? dalEntity.getPropertyByColumnName(dbColName) : null;
+      if (prop != null && prop.isAuditInfo()) {
+        continue;
+      }
+      try {
+        String propertyName = prop != null ? prop.getName() : dbColName;
+        // Skip if already resolved (e.g. by cascade or docType reapplication)
+        if (defaults.has(propertyName)) {
+          continue;
+        }
+        Object resolved = resolveFieldDefault(col, parentId, vars, conn, windowId, ctx, null,
+            parentValues);
+        if (resolved == null) {
+          resolved = resolveFirstComboOption(col, ctx);
+        }
+        if (resolved != null) {
+          defaults.put(propertyName, resolved);
+          if (dalEntity != null) {
+            tryInjectIdentifier(defaults, dalEntity, propertyName, resolved);
+          }
+          log.debug("Resolved hidden mandatory default: {} = {}", propertyName, resolved);
+        }
+      } catch (Exception e) {
+        log.warn("Could not resolve hidden mandatory default for {}", dbColName, e);
+      }
+    }
   }
 
   /**

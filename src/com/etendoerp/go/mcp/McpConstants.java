@@ -23,6 +23,10 @@ final class McpConstants {
   static final String PARAM_FIELDS = "fields";
   static final String PARAM_COLUMN = "column";
   static final String PARAM_PARENT_ID = "parentId";
+  /** Current record context used to resolve dependent MCP selectors. */
+  static final String PARAM_RECORD_CONTEXT = "recordContext";
+  /** Parent/header record context used to resolve child MCP selectors. */
+  static final String PARAM_PARENT_CONTEXT = "parentContext";
   static final String TYPE_STRING = "string";
   static final String TYPE_OBJECT = "object";
   static final String KEY_PROPERTIES = "properties";

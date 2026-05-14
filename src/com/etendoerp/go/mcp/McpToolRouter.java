@@ -18,6 +18,9 @@
 package com.etendoerp.go.mcp;
 
 import java.io.ByteArrayOutputStream;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -81,6 +84,7 @@ public class McpToolRouter {
 
   private static final Logger log = LogManager.getLogger(McpToolRouter.class);
   private static final String ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX = "' for current role";
+  private static final DateTimeFormatter CLASSIC_DATE_FORMATTER = DateTimeFormatter.ofPattern("dd-MM-yyyy");
 
   /**
    * Route a tool call to its handler.
@@ -447,6 +451,12 @@ public class McpToolRouter {
    * Query FK selector values for a column.
    * Resolves the AD_Column from the dictionary (AD_Tab → AD_Table → AD_Column),
    * bypassing ETGO_SF_FIELD so all FK columns are queryable — not just included ones.
+   *
+   * Supports optional recordContext for dependent selectors:
+   * - partnerAddress: { "businessPartner": "..." }
+   * - priceList: { "isSOTrx": "Y" } (auto-derived from window category if omitted)
+   * - tax: { "invoiceDate": "2026-05-12", "priceList": "..." }
+   * Also supports parentContext for child selectors that depend on header values.
    */
   private JSONObject handleSelectors(String specName, JSONObject args) throws Exception {
     validateArgs(args, McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN);
@@ -468,21 +478,238 @@ public class McpToolRouter {
       throw new IllegalArgumentException("Column not found in table: " + columnName);
     }
 
-    NeoResponse neoResponse = NeoSelectorService.querySelectorByColumn(
-        adColumn, columnName, query, 50, 0, new HashMap<>());
+    // Build contextParams from recordContext and window category
+    Map<String, String> contextParams = buildSelectorContextParams(args, adTab);
 
-    return neoResponseToMcpResult(neoResponse);
+    NeoResponse neoResponse = NeoSelectorService.querySelectorByColumn(
+        adColumn, columnName, query, 50, 0, contextParams);
+
+    // Enrich response with context diagnostics when result is empty
+    return neoResponseToMcpResultWithDiagnostics(neoResponse, columnName, contextParams);
+  }
+
+  /**
+   * Build context params for selector queries from MCP arguments.
+   * Extracts recordContext/parentContext fields and maps them to selector param names.
+   */
+  // Package-private for focused unit coverage without reflection.
+  Map<String, String> buildSelectorContextParams(JSONObject args, Tab adTab) {
+    Map<String, String> contextParams = new HashMap<>();
+
+    // Parent/header values are applied first; current record values can override them.
+    copySelectorContext(args.optJSONObject(McpConstants.PARAM_PARENT_CONTEXT), contextParams);
+    copySelectorContext(args.optJSONObject(McpConstants.PARAM_RECORD_CONTEXT), contextParams);
+
+    // Derive isSOTrx from window category if not explicitly provided
+    if (!contextParams.containsKey("IsSOTrx") && !contextParams.containsKey("isSOTrx")) {
+      String isSOTrx = resolveIsSOTrxFromTab(adTab);
+      if (isSOTrx != null) {
+        contextParams.put("IsSOTrx", isSOTrx);
+        contextParams.put("isSOTrx", isSOTrx);
+      }
+    }
+
+    addBusinessPartnerRoleContext(adTab, contextParams);
+
+    // Pass parentId if provided
+    String parentId = args.optString(McpConstants.PARAM_PARENT_ID, null);
+    if (StringUtils.isNotBlank(parentId)) {
+      contextParams.put("parentId", parentId);
+    }
+
+    return contextParams;
+  }
+
+  /**
+   * Copy known selector context fields from an MCP context object into the
+   * request parameter names used by Classic validation rules and selector policies.
+   */
+  private void copySelectorContext(JSONObject context, Map<String, String> contextParams) {
+    if (context == null) {
+      return;
+    }
+
+    copyContextIfPresent(context, "businessPartner", contextParams, "C_BPartner_ID");
+    copyContextIfPresent(context, "C_BPartner_ID", contextParams, "C_BPartner_ID");
+    copyContextIfPresent(context, "partnerAddress", contextParams, "C_BPartner_Location_ID");
+    copyContextIfPresent(context, "invoiceAddress", contextParams, "C_BPartner_Location_ID");
+    copyContextIfPresent(context, "C_BPartner_Location_ID", contextParams, "C_BPartner_Location_ID");
+
+    String priceList = firstNonBlank(context, "priceList", "PriceList", "M_PriceList_ID");
+    if (StringUtils.isNotBlank(priceList)) {
+      contextParams.put("priceList", priceList);
+      contextParams.put("PriceList", priceList);
+      contextParams.put("M_PriceList_ID", priceList);
+    }
+
+    String isSOTrx = firstNonBlank(context, "isSOTrx", "IsSOTrx");
+    if (StringUtils.isNotBlank(isSOTrx)) {
+      contextParams.put("isSOTrx", isSOTrx);
+      contextParams.put("IsSOTrx", isSOTrx);
+    }
+    copyContextIfPresent(context, "isCustomer", contextParams, "isCustomer");
+    copyContextIfPresent(context, "isVendor", contextParams, "isVendor");
+
+    String invoiceDate = firstNonBlank(context, "invoiceDate", "DateInvoiced", "dateInvoiced");
+    if (StringUtils.isNotBlank(invoiceDate)) {
+      String classicDate = formatClassicDate(invoiceDate);
+      contextParams.put("DateInvoiced", classicDate);
+      contextParams.put("dateInvoiced", classicDate);
+    }
+
+    String orderDate = firstNonBlank(context, "orderDate", "DateOrdered", "dateOrdered");
+    if (StringUtils.isNotBlank(orderDate)) {
+      String classicDate = formatClassicDate(orderDate);
+      contextParams.put("DateOrdered", classicDate);
+      contextParams.put("dateOrdered", classicDate);
+    }
+  }
+
+  private String firstNonBlank(JSONObject context, String... keys) {
+    for (String key : keys) {
+      String value = context.optString(key, null);
+      if (StringUtils.isNotBlank(value)) {
+        return value;
+      }
+    }
+    return null;
+  }
+
+  private String formatClassicDate(String value) {
+    String trimmed = StringUtils.trimToNull(value);
+    if (trimmed == null) {
+      return value;
+    }
+    if (trimmed.matches("\\d{2}-\\d{2}-\\d{4}")) {
+      return trimmed;
+    }
+    String isoDate = trimmed.length() >= 10 ? trimmed.substring(0, 10) : trimmed;
+    try {
+      return LocalDate.parse(isoDate).format(CLASSIC_DATE_FORMATTER);
+    } catch (DateTimeParseException ignored) {
+      return trimmed;
+    }
+  }
+
+  /**
+   * Copy a value from recordContext to contextParams if the source key exists.
+   */
+  void copyContextIfPresent(JSONObject recordContext, String sourceKey,
+      Map<String, String> contextParams, String targetKey) {
+    String value = recordContext.optString(sourceKey, null);
+    if (StringUtils.isNotBlank(value)) {
+      contextParams.put(targetKey, value);
+    }
+  }
+
+  /**
+   * Resolve IsSOTrx from the AD_Window's sales transaction flag.
+   */
+  private String resolveIsSOTrxFromTab(Tab adTab) {
+    if (adTab == null) {
+      return null;
+    }
+    Window window = adTab.getWindow();
+    if (window == null) {
+      return null;
+    }
+    Boolean isSalesTransaction = window.isSalesTransaction();
+    if (isSalesTransaction == null) {
+      return null;
+    }
+    return isSalesTransaction ? "Y" : "N";
+  }
+
+  private void addBusinessPartnerRoleContext(Tab adTab, Map<String, String> contextParams) {
+    String isSOTrx = contextParams.get("isSOTrx");
+    if (StringUtils.isBlank(isSOTrx)) {
+      isSOTrx = contextParams.get("IsSOTrx");
+    }
+    if ("Y".equalsIgnoreCase(isSOTrx)) {
+      contextParams.putIfAbsent("isCustomer", "Y");
+    } else if ("N".equalsIgnoreCase(isSOTrx)) {
+      contextParams.putIfAbsent("isVendor", "Y");
+    } else {
+      String resolved = resolveIsSOTrxFromTab(adTab);
+      if ("Y".equalsIgnoreCase(resolved)) {
+        contextParams.putIfAbsent("isCustomer", "Y");
+      } else if ("N".equalsIgnoreCase(resolved)) {
+        contextParams.putIfAbsent("isVendor", "Y");
+      }
+    }
+  }
+
+  /**
+   * Convert NeoResponse to MCP result, adding missing-context diagnostics
+   * when the selector returns empty results.
+   */
+  JSONObject neoResponseToMcpResultWithDiagnostics(NeoResponse neoResponse,
+      String columnName, Map<String, String> contextParams) throws JSONException {
+    if (neoResponse.getHttpStatus() >= 400) {
+      return neoResponseToMcpResult(neoResponse);
+    }
+
+    JSONObject body = neoResponse.getBody();
+    if (body == null) {
+      return neoResponseToMcpResult(neoResponse);
+    }
+
+    // Check if result is empty and add diagnostics
+    JSONArray items = body.optJSONArray("items");
+    long totalCount = body.optLong("totalCount", 0);
+    if ((items == null || items.length() == 0) && totalCount == 0) {
+      JSONObject diagnostics = new JSONObject();
+      diagnostics.put("column", columnName);
+      diagnostics.put("message", "No selector results found. This may be due to missing context parameters.");
+
+      // Suggest missing context based on common patterns
+      JSONArray missingContext = new JSONArray();
+      if (!contextParams.containsKey("C_BPartner_ID")
+          && (columnName.contains("BPartner_Location") || columnName.contains("BillTo")
+          || "partnerAddress".equalsIgnoreCase(columnName)
+          || "invoiceAddress".equalsIgnoreCase(columnName))) {
+        JSONObject missing = new JSONObject();
+        missing.put("param", "C_BPartner_ID");
+        missing.put("field", "businessPartner");
+        missing.put("message", "Provide businessPartner in recordContext to resolve " + columnName);
+        missingContext.put(missing);
+      }
+      if (!contextParams.containsKey("IsSOTrx") && !contextParams.containsKey("isSOTrx")) {
+        JSONObject missing = new JSONObject();
+        missing.put("param", "IsSOTrx");
+        missing.put("source", "windowCategory");
+        missing.put("message", "isSOTrx not resolved from window context. Verify the window is flagged as sales or purchase.");
+        missingContext.put(missing);
+      }
+      if ((columnName.equals("C_Tax_ID") || columnName.contains("Tax"))
+          && !contextParams.containsKey("DateInvoiced") && !contextParams.containsKey("DateOrdered")) {
+        JSONObject missing = new JSONObject();
+        missing.put("param", "DateInvoiced");
+        missing.put("field", "invoiceDate or orderDate");
+        missing.put("message", "Provide invoiceDate or orderDate in recordContext to resolve tax selector");
+        missingContext.put(missing);
+      }
+
+      if (missingContext.length() > 0) {
+        diagnostics.put("missingContext", missingContext);
+        body.put("diagnostics", diagnostics);
+      }
+    }
+
+    return neoResponseToMcpResult(NeoResponse.ok(body));
   }
 
   // ── neo_defaults ──────────────────────────────────────────────────────
 
   /**
    * Get default field values for creating a new record.
+   * Supports optional parentId for child entity defaults.
    */
   private JSONObject handleDefaults(String specName, JSONObject args) throws Exception {
     validateArgs(args, McpConstants.PARAM_ENTITY);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
+    String parentId = args.optString(McpConstants.PARAM_PARENT_ID, null);
 
     SFSpec spec = findSpecOrThrow(specName);
     SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
@@ -497,7 +724,7 @@ public class McpToolRouter {
         .obContext(OBContext.getOBContext())
         .build();
 
-    NeoResponse neoResponse = NeoDefaultsService.resolveDefaults(ctx, null);
+    NeoResponse neoResponse = NeoDefaultsService.resolveDefaults(ctx, parentId);
     return neoResponseToMcpResult(neoResponse);
   }
 
