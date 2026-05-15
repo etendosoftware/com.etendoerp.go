@@ -1367,6 +1367,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   private static void purgeExpiredDcrRegistrationRateLimits(long nowMillis, long windowMillis) {
     long cutoff = nowMillis - windowMillis;
+    Set<String> expiredClientAddresses = new HashSet<>();
     for (Map.Entry<String, DcrRegistrationRateLimitState> entry
         : DCR_REGISTRATION_RATE_LIMITS.entrySet()) {
       DcrRegistrationRateLimitState rateLimitState = entry.getValue();
@@ -1376,7 +1377,19 @@ public class OAuth2Servlet extends HttpBaseServlet {
           rateLimitState.requestTimes.removeFirst();
         }
         if (rateLimitState.requestTimes.isEmpty() && rateLimitState.lastSeenAt <= cutoff) {
-          DCR_REGISTRATION_RATE_LIMITS.remove(entry.getKey(), rateLimitState);
+          expiredClientAddresses.add(entry.getKey());
+        }
+      }
+    }
+
+    for (String clientAddress : expiredClientAddresses) {
+      DcrRegistrationRateLimitState rateLimitState = DCR_REGISTRATION_RATE_LIMITS.get(clientAddress);
+      if (rateLimitState == null) {
+        continue;
+      }
+      synchronized (rateLimitState) {
+        if (rateLimitState.requestTimes.isEmpty() && rateLimitState.lastSeenAt <= cutoff) {
+          DCR_REGISTRATION_RATE_LIMITS.remove(clientAddress, rateLimitState);
         }
       }
     }
