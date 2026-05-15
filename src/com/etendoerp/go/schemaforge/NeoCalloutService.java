@@ -17,12 +17,10 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.commons.lang3.StringUtils;
@@ -40,15 +38,15 @@ import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.base.secureApp.LoginUtils;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.erpCommon.ad_callouts.SimpleCallout;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.domain.Callout;
 import org.openbravo.model.ad.domain.ModelImplementation;
 import org.openbravo.model.ad.ui.Tab;
-import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.JsonConstants;
+
+import com.etendoerp.go.schemaforge.util.NeoSessionVarsCache;
 
 /**
  * Service for executing AD Callouts via the NEO Headless API.
@@ -66,18 +64,31 @@ public class NeoCalloutService {
   private static final String VALUE_KEY = "value";
   private static final String IDENTIFIER_KEY = "_identifier";
   private static final String FIELD_ENTRIES = "entries";
+  private static final String KEY_UPDATES = "updates";
+  private static final String KEY_COMBOS = "combos";
+  private static final String KEY_MESSAGES = "messages";
 
   // Per-JVM cache of scalar AD_Column/callout metadata by tableId. Do not cache DAL
   // entities here: Hibernate proxies are session-bound and will fail on later requests.
   private static final Map<String, List<ColumnCalloutMetadata>> CALLOUT_METADATA_BY_TABLE =
       new ConcurrentHashMap<>();
 
+  // Per-JVM cache of inpName ↔ DAL property name maps by tableId, derived from the
+  // column metadata above plus ModelProvider. Avoids one OBCriteria<Column> per field
+  // of every callout response (and the cascade chain that calls them recursively).
+  private static final Map<String, TableNameMappings> NAME_MAPPINGS_BY_TABLE =
+      new ConcurrentHashMap<>();
+
   /**
-   * Invalidate the metadata caches. Call after any operation that mutates AD_Column
-   * or AD_ModelImplementation (e.g., module install/upgrade, manual AD edits).
+   * Invalidate the metadata caches. Call after any operation that mutates AD_Column,
+   * AD_ModelImplementation or AD_Tab structure (e.g., module install/upgrade, manual
+   * AD edits). Also clears caches owned by collaborator classes.
    */
   public static void clearMetadataCache() {
     CALLOUT_METADATA_BY_TABLE.clear();
+    NAME_MAPPINGS_BY_TABLE.clear();
+    CalloutRequestBuilder.clearParentTabCache();
+    NeoSessionVarsCache.clear();
   }
 
   private NeoCalloutService() {
@@ -91,6 +102,7 @@ public class NeoCalloutService {
    * @return NeoResponse with updates, combos, and messages
    */
   public static NeoResponse executeCallout(NeoContext ctx, JSONObject requestBody) {
+    long perfStart = System.nanoTime();
     try {
       OBContext.setAdminMode();
       try {
@@ -104,38 +116,41 @@ public class NeoCalloutService {
 
         Tab adTab = ctx.getAdTab();
 
-        // Resolve the column and callout class for the changed field
+        long perfResolveStart = System.nanoTime();
         CalloutInfo calloutInfo = resolveCallout(adTab, fieldName);
+        long perfResolveEnd = System.nanoTime();
         if (calloutInfo == null) {
           // No callout for this field — return empty response (not an error)
           log.info("[NEO-CALLOUT] No callout found for field '{}' on tab '{}'",
               fieldName, adTab.getName());
           JSONObject emptyResponse = new JSONObject();
-          emptyResponse.put("updates", new JSONObject());
-          emptyResponse.put("combos", new JSONObject());
-          emptyResponse.put("messages", new JSONArray());
+          emptyResponse.put(KEY_UPDATES, new JSONObject());
+          emptyResponse.put(KEY_COMBOS, new JSONObject());
+          emptyResponse.put(KEY_MESSAGES, new JSONArray());
           return NeoResponse.ok(emptyResponse);
         }
         log.info("[NEO-CALLOUT] Found callout '{}' for field '{}' (inp: {}, column: {})",
             calloutInfo.className, fieldName, calloutInfo.inpFieldName, calloutInfo.columnName);
 
-        // Build synthetic request parameters
+        long perfParamsStart = System.nanoTime();
         Map<String, String[]> params = CalloutRequestBuilder.buildRequestParams(
             adTab, value, formState, calloutInfo.inpFieldName,
             auxValues);
+        long perfParamsEnd = System.nanoTime();
 
         // Build session attributes from a fully populated VariablesSecureApp
         // (includes #GROUPSEPARATOR|qtyEdition, #DECIMALSEPARATOR|qtyEdition, etc.)
+        long perfSessionStart = System.nanoTime();
         Map<String, Object> sessionAttrs = buildSessionAttributes(ctx.getObContext(), adTab);
+        long perfSessionEnd = System.nanoTime();
 
-        // Create synthetic request and set up RequestContext
         SyntheticHttpServletRequest syntheticRequest =
             new SyntheticHttpServletRequest(params, sessionAttrs);
 
         RequestContext requestContext = RequestContext.get();
         requestContext.setRequest(syntheticRequest);
 
-        // Instantiate and execute the callout
+        long perfInitStart = System.nanoTime();
         Class<?> calloutClass = Class.forName(calloutInfo.className);
         Object calloutObject = calloutClass.getDeclaredConstructor().newInstance();
 
@@ -156,12 +171,26 @@ public class NeoCalloutService {
               e.getMessage());
         }
 
+        long perfInitEnd = System.nanoTime();
         JSONObject calloutResult = calloutInstance.executeSimpleCallout(requestContext);
+        long perfExecEnd = System.nanoTime();
         log.info("[NEO-CALLOUT] Raw callout result: {}", calloutResult != null ? calloutResult.toString().substring(0, Math.min(500, calloutResult.toString().length())) : "null");
 
-        // Transform the callout result to REST format
         JSONObject restResponse = transformResponse(calloutResult, adTab);
+        long perfTransformEnd = System.nanoTime();
         log.info("[NEO-CALLOUT] Transformed response: {}", restResponse.toString().substring(0, Math.min(500, restResponse.toString().length())));
+
+        log.debug(
+            "[NEO-PERF] executeCallout field={} class={} resolve={}ms buildParams={}ms sessionAttrs={}ms instantiate={}ms simpleCalloutRun={}ms transform={}ms total={}ms",
+            fieldName,
+            calloutInfo.className,
+            (perfResolveEnd - perfResolveStart) / 1_000_000L,
+            (perfParamsEnd - perfParamsStart) / 1_000_000L,
+            (perfSessionEnd - perfSessionStart) / 1_000_000L,
+            (perfInitEnd - perfInitStart) / 1_000_000L,
+            (perfExecEnd - perfInitEnd) / 1_000_000L,
+            (perfTransformEnd - perfExecEnd) / 1_000_000L,
+            (perfTransformEnd - perfStart) / 1_000_000L);
 
         return NeoResponse.ok(restResponse);
 
@@ -211,6 +240,64 @@ public class NeoCalloutService {
       this.calloutName = calloutName;
       this.className = className;
     }
+  }
+
+  /**
+   * Pre-computed name mappings for a table, derived once from the column metadata
+   * cache and the DAL Entity. All maps are unmodifiable.
+   */
+  static class TableNameMappings {
+    final Map<String, String> inpToProperty;    // "inpcBpartnerId" → "businessPartner"
+    final Map<String, String> propertyToColumn; // "businessPartner" → "C_BPartner_ID"
+
+    TableNameMappings(Map<String, String> inpToProperty,
+        Map<String, String> propertyToColumn) {
+      this.inpToProperty = inpToProperty;
+      this.propertyToColumn = propertyToColumn;
+    }
+  }
+
+  /**
+   * Build (or fetch) the cached name mappings for an AD_Table.
+   *
+   * <p>Mappings are derived from {@link #loadColumnCalloutMetadata} (already cached)
+   * combined with the DAL {@link Entity} for that table. The result lets
+   * {@link #inpToCleanName} and {@link #fromCleanFieldName} skip the
+   * per-field {@code OBCriteria<Column>} query they used to run.</p>
+   */
+  static TableNameMappings getNameMappings(String tableId) {
+    return NAME_MAPPINGS_BY_TABLE.computeIfAbsent(tableId,
+        NeoCalloutService::loadNameMappings);
+  }
+
+  private static TableNameMappings loadNameMappings(String tableId) {
+    Map<String, String> inpToProperty = new HashMap<>();
+    Map<String, String> propertyToColumn = new HashMap<>();
+    try {
+      List<ColumnCalloutMetadata> cols = CALLOUT_METADATA_BY_TABLE.computeIfAbsent(
+          tableId, NeoCalloutService::loadColumnCalloutMetadata);
+      Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(tableId);
+      for (ColumnCalloutMetadata col : cols) {
+        String inp = toInpName(col.dbColumnName);
+        String propertyName = null;
+        if (dalEntity != null) {
+          Property prop = dalEntity.getPropertyByColumnName(col.dbColumnName);
+          if (prop != null) {
+            propertyName = prop.getName();
+          }
+        }
+        if (StringUtils.isBlank(propertyName)) {
+          propertyName = toCleanFieldName(col.dbColumnName);
+        }
+        inpToProperty.put(inp, propertyName);
+        propertyToColumn.put(propertyName, col.dbColumnName);
+      }
+    } catch (Exception e) {
+      log.debug("Failed to build name mappings for table {}: {}", tableId, e.getMessage());
+    }
+    return new TableNameMappings(
+        java.util.Collections.unmodifiableMap(inpToProperty),
+        java.util.Collections.unmodifiableMap(propertyToColumn));
   }
 
   /**
@@ -416,21 +503,23 @@ public class NeoCalloutService {
 
   /**
    * Try to reverse-map a clean REST field name back to a DB column name.
-   * This is a best-effort heuristic; the SFField mapping would be more reliable.
+   * Uses the cached {@link TableNameMappings} to avoid hitting the database.
    */
   static String fromCleanFieldName(String cleanName, Tab adTab) {
-    if (adTab == null || adTab.getTable() == null) {
+    if (adTab == null || adTab.getTable() == null || cleanName == null) {
       return cleanName;
     }
-    // Try to find the column whose clean name matches
-    OBCriteria<Column> colCriteria = OBDal.getInstance().createCriteria(Column.class);
-    colCriteria.add(Restrictions.eq(Column.PROPERTY_TABLE + ".id", adTab.getTable().getId()));
-    colCriteria.add(Restrictions.eq(Column.PROPERTY_ACTIVE, true));
-    List<Column> columns = colCriteria.list();
-
-    for (Column col : columns) {
-      if (toCleanFieldName(col.getDBColumnName()).equalsIgnoreCase(cleanName)) {
-        return col.getDBColumnName();
+    TableNameMappings mappings = getNameMappings(adTab.getTable().getId());
+    String dbColumn = mappings.propertyToColumn.get(cleanName);
+    if (dbColumn != null) {
+      return dbColumn;
+    }
+    // Fallback: case-insensitive match against the derived clean name (covers DB
+    // column names whose property mapping was not available at load time).
+    for (Map.Entry<String, String> entry : mappings.propertyToColumn.entrySet()) {
+      if (entry.getKey().equalsIgnoreCase(cleanName)
+          || toCleanFieldName(entry.getValue()).equalsIgnoreCase(cleanName)) {
+        return entry.getValue();
       }
     }
     return cleanName;
@@ -476,22 +565,15 @@ public class NeoCalloutService {
       }
     }
 
-    VariablesSecureApp vars = new VariablesSecureApp(userId, clientId, orgId, roleId, lang);
-    DalConnectionProvider conn = new DalConnectionProvider(false);
+    // Pull the slow path (fillSessionArguments + readNumberFormat) from a
+    // process-wide cache. IsSOTrx is intentionally NOT in the cache key —
+    // we apply it per-tab below so a sales-window callout never sees a
+    // purchase-window value or vice versa.
+    Map<String, String> snapshot = NeoSessionVarsCache.getOrLoad(
+        userId, roleId, clientId, orgId, warehouseId, lang);
 
-    try {
-      LoginUtils.fillSessionArguments(conn, vars, userId, lang, "N",
-          roleId, clientId, orgId, warehouseId);
-    } catch (Exception e) {
-      log.debug("LoginUtils.fillSessionArguments failed: {}", e.getMessage());
-      vars.setSessionValue("#AD_User_ID", userId);
-      vars.setSessionValue("#AD_Client_ID", clientId);
-      vars.setSessionValue("#AD_Org_ID", orgId);
-      vars.setSessionValue("#AD_Role_ID", roleId);
-      vars.setSessionValue("#AD_Language", lang);
-      vars.setSessionValue("#M_Warehouse_ID", warehouseId);
-      vars.setSessionValue("#User_Client", "'" + clientId + "','0'");
-    }
+    VariablesSecureApp vars = new VariablesSecureApp(userId, clientId, orgId, roleId, lang);
+    NeoSessionVarsCache.replayInto(vars, snapshot);
 
     if (adTab != null && adTab.getWindow() != null
         && adTab.getWindow().isSalesTransaction() != null) {
@@ -505,9 +587,11 @@ public class NeoCalloutService {
 
   /**
    * Build session attributes for the synthetic request.
-   * Replicates the same two-step process as the classic login:
-   *   1. fillSessionArguments → identity, preferences, context variables
-   *   2. readNumberFormat    → #GROUPSEPARATOR|qtyEdition, #DECIMALSEPARATOR|qtyEdition, etc.
+   * Identity, preferences and number-format entries come from
+   * {@link NeoSessionVarsCache} via {@link CalloutRequestBuilder#buildCalloutVars}
+   * — both {@link org.openbravo.base.secureApp.LoginUtils#fillSessionArguments}
+   * and {@link org.openbravo.base.secureApp.LoginUtils#readNumberFormat} run only
+   * once per identity, not per callout.
    * VariablesBase.getSessionValue reads these as UPPERCASE keys from the session.
    */
   private static Map<String, Object> buildSessionAttributes(OBContext obContext, Tab adTab) {
@@ -516,17 +600,7 @@ public class NeoCalloutService {
       return attrs;
     }
 
-    // Step 1: Build VariablesSecureApp with fillSessionArguments (same as classic login)
     VariablesSecureApp vars = CalloutRequestBuilder.buildCalloutVars(obContext, adTab);
-
-    // Step 2: Read number formats from Format.xml (same as classic login)
-    try {
-      org.openbravo.base.ConfigParameters config =
-          org.openbravo.base.ConfigParameters.retrieveFrom(RequestContext.getServletContext());
-      LoginUtils.readNumberFormat(vars, config.getFormatPath());
-    } catch (Exception e) {
-      log.debug("[NEO-CALLOUT] Could not read Format.xml: {}", e.getMessage());
-    }
 
     // Copy all session values from vars to the attrs map.
     // VariablesSecureApp without a real HttpSession stores values in an internal
@@ -558,44 +632,6 @@ public class NeoCalloutService {
     return attrs;
   }
 
-  /**
-   * Returns true if the column's AD Reference type is numeric (Amount=12, Number=22,
-   * Quantity=29, Integer=11). Used to substitute "0" for empty defaults so that
-   * VariablesBase.NumberFilter accepts the parameter instead of rejecting it with an NPE.
-   */
-  private static boolean isNumericReference(Column col) {
-    if (col.getReference() == null) {
-      return false;
-    }
-    String refId = col.getReference().getId();
-    return "11".equals(refId) || "12".equals(refId) || "22".equals(refId) || "29".equals(refId);
-  }
-
-  /**
-   * Find the parent tab of a child tab by walking the window's tab list in sequence order.
-   * Returns the nearest tab with a lower tab level that precedes the child tab.
-   */
-  private static Tab findParentTab(Tab childTab) {
-    if (childTab.getWindow() == null) {
-      return null;
-    }
-    int childLevel = childTab.getTabLevel() != null ? childTab.getTabLevel().intValue() : 0;
-    List<Tab> tabs = childTab.getWindow().getADTabList();
-    tabs.sort(Comparator.comparingLong(Tab::getSequenceNumber));
-    Tab parent = null;
-    for (Tab t : tabs) {
-      if (t.getId().equals(childTab.getId())) {
-        break;
-      }
-      int level = t.getTabLevel() != null ? t.getTabLevel().intValue() : 0;
-      if (level < childLevel) {
-        parent = t;
-      }
-    }
-    return parent;
-  }
-
-  // ── Response transformation ────────────────────────────────────────
   // ── Response transformation ────────────────────────────────────────
 
   /**
@@ -688,9 +724,9 @@ public class NeoCalloutService {
       Map<String, String> rDisplayNames = new java.util.HashMap<>();
 
       if (calloutResult == null) {
-        response.put("updates", updates);
-        response.put("combos", combos);
-        response.put("messages", messages);
+        response.put(KEY_UPDATES, updates);
+        response.put(KEY_COMBOS, combos);
+        response.put(KEY_MESSAGES, messages);
         return response;
       }
 
@@ -706,9 +742,9 @@ public class NeoCalloutService {
       // can compute grossAmount in real-time without an extra round-trip.
       NeoCommercialLinePolicy.injectTaxRateIfPresent(updates);
 
-      response.put("updates", updates);
-      response.put("combos", combos);
-      response.put("messages", messages);
+      response.put(KEY_UPDATES, updates);
+      response.put(KEY_COMBOS, combos);
+      response.put(KEY_MESSAGES, messages);
 
     } catch (Exception e) {
       log.error("Error transforming callout response: {}", e.getMessage(), e);
@@ -852,36 +888,20 @@ public class NeoCalloutService {
   }
 
   /**
-   * Convert an inp* name back to a clean REST field name.
-   * Strips the "inp" prefix and tries to find the matching column.
+   * Convert an inp* name back to a clean REST field name. Uses the cached
+   * {@link TableNameMappings} so callout response transformation stays
+   * O(1) per field instead of issuing one OBCriteria per field.
    */
   private static String inpToCleanName(String inpName, Tab adTab) {
     if (inpName == null || !inpName.startsWith("inp")) {
       return inpName;
     }
 
-    // Try to find the column whose inp name matches, then resolve its OBDal property name
     if (adTab != null && adTab.getTable() != null) {
       try {
-        String tableId = adTab.getTable().getId();
-        Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(tableId);
-
-        OBCriteria<Column> colCriteria = OBDal.getInstance().createCriteria(Column.class);
-        colCriteria.add(Restrictions.eq(Column.PROPERTY_TABLE + ".id", tableId));
-        colCriteria.add(Restrictions.eq(Column.PROPERTY_ACTIVE, true));
-        List<Column> columns = colCriteria.list();
-
-        for (Column col : columns) {
-          if (toInpName(col.getDBColumnName()).equals(inpName)) {
-            // Use OBDal property name (matches GET response keys and frontend field keys)
-            if (dalEntity != null) {
-              Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-              if (prop != null) {
-                return prop.getName();
-              }
-            }
-            return toCleanFieldName(col.getDBColumnName());
-          }
+        String mapped = getNameMappings(adTab.getTable().getId()).inpToProperty.get(inpName);
+        if (mapped != null) {
+          return mapped;
         }
       } catch (Exception e) {
         log.debug("Error looking up column for inp name '{}': {}", inpName, e.getMessage());

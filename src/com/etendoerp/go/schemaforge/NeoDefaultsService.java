@@ -11,7 +11,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -30,13 +29,13 @@ import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
+import org.openbravo.model.ad.utility.Sequence;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.sequences.SequenceUtils;
-import com.google.common.cache.Cache;
-import com.google.common.cache.CacheBuilder;
 
 /**
  * Service for resolving default values when creating a new record via NEO Headless.
@@ -63,15 +62,7 @@ public class NeoDefaultsService {
   private static final String DATE_FORMAT = "yyyy-MM-dd";
   private static final String KEY_UPDATES = "updates";
   private static final String KEY_COMBOS = "combos";
-
-  // Cache VariablesSecureApp per user+role+org+warehouse combination to avoid calling
-  // LoginUtils.fillSessionArguments (multiple DB queries) on every request.
-  // In the future, if session variables need to reflect real-time preference changes,
-  // this TTL can be shortened or the cache can be invalidated on preference updates.
-  private static final Cache<String, VariablesSecureApp> varsCache = CacheBuilder.newBuilder()
-      .maximumSize(100)
-      .expireAfterWrite(5, TimeUnit.MINUTES)
-      .build();
+  private static final String LOG_SEQUENCE_PREVIEW_FAILURE = "Could not generate sequence preview for {}: {}";
 
   private NeoDefaultsService() {
   }
@@ -182,14 +173,19 @@ public class NeoDefaultsService {
           String propertyName = NeoDefaultsCascadeHelper.resolvePropertyName(dalEntity, dbColumnName);
 
           try {
-            String preview = resolveSequencePreviewWithDocType(
-                adColumn, vars, conn, windowId, docTypeTargetId, docTypeId);
+            String preview;
+            if (Boolean.TRUE.equals(SequenceUtils.isSequence(adColumn))) {
+              preview = resolveTransactionalSequencePreview(adColumn);
+            } else {
+              preview = resolveSequencePreviewWithDocType(
+                  adColumn, vars, conn, windowId, docTypeTargetId, docTypeId);
+            }
             if (preview != null) {
               defaults.put(propertyName, preview);
               sequenceFields.put(propertyName);
             }
           } catch (Exception e) {
-            log.debug("Could not generate sequence preview for {}: {}",
+            log.debug(LOG_SEQUENCE_PREVIEW_FAILURE,
                 dbColumnName, e.getMessage());
             unresolvedFields.put(propertyName);
           }
@@ -449,6 +445,29 @@ public class NeoDefaultsService {
   }
 
   /**
+   * Preview for transactional sequences (new AD_Sequence mechanism, detected via
+   * SequenceUtils.isSequence). Looks up the sequence by column + current organization and
+   * returns the current nextAssignedNumber without consuming it.
+   */
+  static String resolveTransactionalSequencePreview(Column adColumn) {
+    try {
+      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+      OBCriteria<Sequence> crit = OBDal.getInstance().createCriteria(Sequence.class);
+      crit.add(Restrictions.eq(Sequence.PROPERTY_COLUMN, adColumn));
+      crit.add(Restrictions.eq(Sequence.PROPERTY_ORGANIZATION,
+          OBDal.getInstance().get(Organization.class, orgId)));
+      crit.setMaxResults(1);
+      Sequence seq = (Sequence) crit.uniqueResult();
+      if (seq != null) {
+        return "<" + seq.getNextAssignedNumber() + ">";
+      }
+    } catch (Exception e) {
+      log.debug(LOG_SEQUENCE_PREVIEW_FAILURE, adColumn.getDBColumnName(), e.getMessage());
+    }
+    return null;
+  }
+
+  /**
    * Generate a sequence preview using the doctype IDs already resolved in pass 1.
    *
    * <p>Mirrors UIDefinition.getFieldProperties line 210 exactly:
@@ -468,7 +487,7 @@ public class NeoDefaultsService {
       }
       return null;
     } catch (Exception e) {
-      log.debug("Could not generate sequence preview for {}: {}",
+      log.debug(LOG_SEQUENCE_PREVIEW_FAILURE,
           adColumn.getDBColumnName(), e.getMessage());
       return null;
     }
@@ -524,7 +543,7 @@ public class NeoDefaultsService {
       }
       return "<auto>";
     } catch (Exception e) {
-      log.debug("Could not generate sequence preview for {}: {}",
+      log.debug(LOG_SEQUENCE_PREVIEW_FAILURE,
           adColumn.getDBColumnName(), e.getMessage());
       return "<auto>";
     }
@@ -674,43 +693,13 @@ public class NeoDefaultsService {
    * @return a cached or newly built VariablesSecureApp instance with session variables populated
    */
   public static VariablesSecureApp buildVariablesSecureApp(OBContext obContext, Tab adTab) {
-    String userId = obContext.getUser().getId();
-    String clientId = obContext.getCurrentClient().getId();
-    String roleId = obContext.getRole().getId();
-    String orgId = obContext.getCurrentOrganization().getId();
-    String warehouseId = obContext.getWarehouse() != null
-        ? obContext.getWarehouse().getId() : "";
-
-    // When the session org is "*" (id=0), mandatory defaults like AD_Org_ID would resolve
-    // to "0" which OBDal rejects for business documents (C_Order, M_InOut, etc.).
-    // A role with "*" access has implicit access to all orgs, so we safely pick the
-    // first real org of the client to produce valid defaults.
-    if ("0".equals(orgId)) {
-      String realOrgId = resolveFirstOrgForClient(clientId);
-      if (realOrgId != null) {
-        orgId = realOrgId;
-        log.debug("Context org is '*' (0); resolved first real org {} for defaults", realOrgId);
-      }
-    }
-
-    String soTrx = "";
-    if (adTab != null && adTab.getWindow() != null
-        && adTab.getWindow().isSalesTransaction() != null) {
-      soTrx = Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
-    }
-
-    String cacheKey = userId + "|" + roleId + "|" + orgId + "|" + warehouseId + "|" + soTrx;
-    VariablesSecureApp cached = varsCache.getIfPresent(cacheKey);
-    if (cached != null) {
-      return cached;
-    }
-
-    // Shared builder handles OBContext session vars + IsSOTrx (both casings) when adTab is set.
+    // The shared builder pulls identity + number-format vars from
+    // NeoSessionVarsCache and applies per-tab IsSOTrx on a fresh
+    // VariablesSecureApp, so there is no need for a per-call cache here. #Date
+    // changes daily and is intentionally NOT cached: we set it per request.
     VariablesSecureApp vars = NeoCalloutService.buildVars(obContext, adTab);
     vars.setSessionValue("#Date",
         new SimpleDateFormat(DATE_FORMAT).format(new Date()));
-
-    varsCache.put(cacheKey, vars);
     return vars;
   }
 

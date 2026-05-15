@@ -19,14 +19,11 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.util.Date;
 
-import org.apache.commons.lang3.StringUtils;
 import org.openbravo.base.provider.OBProvider;
-import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
-import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * Shared commercial document projection helpers for order-driven documents.
@@ -47,9 +44,7 @@ final class NeoCommercialDocumentFactory {
     shipment.setMovementDate(new Date());
     shipment.setAccountingDate(new Date());
     shipment.setDocumentType(docType);
-    String documentNo = Utility.getDocumentNo(
-        new DalConnectionProvider(false), order.getClient().getId(), "M_InOut", true);
-    shipment.setDocumentNo(StringUtils.isNotBlank(documentNo) ? documentNo : "*");
+    shipment.setDocumentNo("<*>");
     shipment.setSalesTransaction(salesTransaction);
     shipment.setSalesOrder(order);
     shipment.setProcessed(false);
@@ -80,9 +75,7 @@ final class NeoCommercialDocumentFactory {
     invoice.setGrandTotalAmount(BigDecimal.ZERO);
     invoice.setWithholdingamount(BigDecimal.ZERO);
     invoice.setSalesOrder(order);
-    String documentNo = Utility.getDocumentNo(
-        new DalConnectionProvider(false), order.getClient().getId(), "C_Invoice", true);
-    invoice.setDocumentNo(StringUtils.isNotBlank(documentNo) ? documentNo : "*");
+    invoice.setDocumentNo("<*>");
     return invoice;
   }
 }

@@ -24,6 +24,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -335,28 +336,62 @@ class CalloutRequestBuilder {
     }
   }
 
+  // Per-JVM cache of child tab id → parent tab id. Tab structure only mutates with
+  // module install/upgrade, so the same lifetime as NeoCalloutService.CALLOUT_METADATA_BY_TABLE
+  // applies — invalidated via NeoCalloutService.clearMetadataCache().
+  // Empty string is the sentinel for "no parent" (top-level tab) since
+  // ConcurrentHashMap rejects null values.
+  private static final ConcurrentHashMap<String, String> PARENT_TAB_BY_CHILD =
+      new ConcurrentHashMap<>();
+  private static final String NO_PARENT = "";
+
+  /**
+   * Invalidate the parent-tab cache. Called by
+   * {@link NeoCalloutService#clearMetadataCache()}.
+   */
+  static void clearParentTabCache() {
+    PARENT_TAB_BY_CHILD.clear();
+  }
+
   /**
    * Find the parent tab of a child tab by walking the window's tab list in sequence order.
    * Returns the nearest tab with a lower tab level that precedes the child tab.
+   *
+   * <p>Result is cached by child tab id. Only the parent id is stored; the actual
+   * {@link Tab} entity is fetched via {@link OBDal} on each call (Hibernate's L1/L2
+   * cache makes that cheap). This avoids re-sorting {@code window.getADTabList()}
+   * on every callout — including every iteration of the cascade chain.</p>
    */
-  private static Tab findParentTab(Tab childTab) {
-    if (childTab.getWindow() == null) {
+  static Tab findParentTab(Tab childTab) {
+    if (childTab == null || childTab.getId() == null) {
       return null;
+    }
+    String parentId = PARENT_TAB_BY_CHILD.computeIfAbsent(
+        childTab.getId(), id -> resolveParentTabId(childTab));
+    if (parentId == null || parentId.isEmpty()) {
+      return null;
+    }
+    return OBDal.getInstance().get(Tab.class, parentId);
+  }
+
+  private static String resolveParentTabId(Tab childTab) {
+    if (childTab.getWindow() == null) {
+      return NO_PARENT;
     }
     int childLevel = childTab.getTabLevel() != null ? childTab.getTabLevel().intValue() : 0;
     List<Tab> tabs = childTab.getWindow().getADTabList();
     tabs.sort(Comparator.comparingLong(Tab::getSequenceNumber));
-    Tab parent = null;
+    String parentId = NO_PARENT;
     for (Tab t : tabs) {
       if (t.getId().equals(childTab.getId())) {
         break;
       }
       int level = t.getTabLevel() != null ? t.getTabLevel().intValue() : 0;
       if (level < childLevel) {
-        parent = t;
+        parentId = t.getId();
       }
     }
-    return parent;
+    return parentId;
   }
 
   /**

@@ -147,7 +147,7 @@ public class BatchService {
     }
     JSONObject body;
     try {
-      String raw = NeoServlet.readRequestBody(request);
+      String raw = NeoRequestBodyParser.readRequestBody(request);
       if (StringUtils.isBlank(raw)) {
         servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Empty request body");
         return;

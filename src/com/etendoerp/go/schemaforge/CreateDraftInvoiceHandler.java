@@ -493,6 +493,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     proc.createInvoiceLinesFromDocumentLines(selectedLines, invoice, OrderLine.class);
 
     OBDal.getInstance().flush();
+
+    InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
+
     OBDal.getInstance().getSession().refresh(invoice);
     ensureLineGrossAmounts(invoice);
 

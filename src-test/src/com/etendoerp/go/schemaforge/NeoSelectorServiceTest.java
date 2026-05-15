@@ -18,10 +18,24 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mockStatic;
 
-import org.junit.jupiter.api.Test;
+import java.lang.reflect.Method;
+import java.util.HashMap;
+import java.util.Map;
+
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+
+import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
+import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 
 /**
  * Unit tests for {@link NeoSelectorService} utility methods.
@@ -130,5 +144,95 @@ class NeoSelectorServiceTest {
     assertNull(NeoSelectorService.resolveSearchableFragment(null, null));
     assertNull(NeoSelectorService.resolveSearchableFragment("", ""));
     assertNull(NeoSelectorService.resolveSearchableFragment("  ", "  "));
+  }
+
+  // --------------------------------------------------------------------
+  // executeSelectorQuery — language propagation to SelectorQueryExecutor
+  // --------------------------------------------------------------------
+
+  /** A non-blank language in contextParams is forwarded to SelectorQueryExecutor extraFilterParams. */
+  @Test
+  @DisplayName("language in contextParams is forwarded to SelectorQueryExecutor extraFilterParams")
+  @SuppressWarnings("unchecked")
+  void testLanguagePropagatedToExecutor() throws Exception {
+    SelectorMeta meta = new SelectorMeta("Country", "name", null);
+    Map<String, String> ctx = new HashMap<>();
+    ctx.put("language", "es_ES");
+    Map<String, Object>[] captured = new Map[1];
+
+    try (MockedStatic<NeoSelectorPolicy> pMock = mockStatic(
+        NeoSelectorPolicy.class); MockedStatic<SelectorQueryExecutor> eMock = mockStatic(SelectorQueryExecutor.class)) {
+      pMock.when(() -> NeoSelectorPolicy.resolveContextParamFilter(anyString(), any(), anyString())).thenReturn(null);
+      eMock.when(() -> SelectorQueryExecutor.execute(any(), anyString(), anyInt(), anyInt(), any(), anyString(),
+          any())).thenAnswer(inv -> {
+        captured[0] = inv.getArgument(6);
+        return null;
+      });
+
+      invokeExecuteSelectorQuery(meta, ctx);
+    }
+
+    assertNotNull(captured[0]);
+    assertEquals("es_ES", captured[0].get("language"));
+  }
+
+  /** A blank language value in contextParams is not added to extraFilterParams. */
+  @Test
+  @DisplayName("blank language in contextParams is not forwarded to SelectorQueryExecutor")
+  @SuppressWarnings("unchecked")
+  void testBlankLanguageNotPropagated() throws Exception {
+    SelectorMeta meta = new SelectorMeta("Country", "name", null);
+    Map<String, String> ctx = new HashMap<>();
+    ctx.put("language", "  ");
+    Map<String, Object>[] captured = new Map[1];
+
+    try (MockedStatic<NeoSelectorPolicy> pMock = mockStatic(
+        NeoSelectorPolicy.class); MockedStatic<SelectorQueryExecutor> eMock = mockStatic(SelectorQueryExecutor.class)) {
+      pMock.when(() -> NeoSelectorPolicy.resolveContextParamFilter(anyString(), any(), anyString())).thenReturn(null);
+      eMock.when(() -> SelectorQueryExecutor.execute(any(), anyString(), anyInt(), anyInt(), any(), anyString(),
+          any())).thenAnswer(inv -> {
+        captured[0] = inv.getArgument(6);
+        return null;
+      });
+
+      invokeExecuteSelectorQuery(meta, ctx);
+    }
+
+    assertNotNull(captured[0]);
+    assertFalse(captured[0].containsKey("language"));
+  }
+
+  /** Null contextParams does not produce a language key in extraFilterParams. */
+  @Test
+  @DisplayName("null contextParams does not add language to SelectorQueryExecutor params")
+  @SuppressWarnings("unchecked")
+  void testNullContextParamsNoLanguage() throws Exception {
+    SelectorMeta meta = new SelectorMeta("Country", "name", null);
+    Map<String, Object>[] captured = new Map[1];
+
+    try (MockedStatic<NeoSelectorPolicy> pMock = mockStatic(
+        NeoSelectorPolicy.class); MockedStatic<SelectorQueryExecutor> eMock = mockStatic(SelectorQueryExecutor.class)) {
+      pMock.when(() -> NeoSelectorPolicy.resolveContextParamFilter(anyString(), any(), anyString())).thenReturn(null);
+      eMock.when(() -> SelectorQueryExecutor.execute(any(), anyString(), anyInt(), anyInt(), any(), anyString(),
+          any())).thenAnswer(inv -> {
+        captured[0] = inv.getArgument(6);
+        return null;
+      });
+
+      invokeExecuteSelectorQuery(meta, null);
+    }
+
+    assertNotNull(captured[0]);
+    assertFalse(captured[0].containsKey("language"));
+  }
+
+  @SuppressWarnings("unchecked")
+  private static void invokeExecuteSelectorQuery(SelectorMeta meta, Map<String, String> contextParams)
+      throws Exception {
+    Method m = NeoSelectorService.class.getDeclaredMethod("executeSelectorQuery",
+        SelectorMeta.class, String.class, int.class, int.class,
+        String.class, String.class, Map.class);
+    m.setAccessible(true);
+    m.invoke(null, meta, "", 20, 0, "org-1", null, contextParams);
   }
 }

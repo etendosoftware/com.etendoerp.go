@@ -117,6 +117,26 @@ Represents a column (for window specs) or a process parameter (for process specs
 | `SEQNO` | NUMERIC | Display/processing order. |
 | `AD_MODULE_ID` | VARCHAR (FK) | Module that owns this field. |
 
+### ETGO_PREVIEW_FILE
+
+Stores one preview file per `(AD_CLIENT_ID, SPEC_NAME, RECORD_ID)` tuple. Used by `GET/POST/DELETE /sws/neo/preview-file`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `ETGO_PREVIEW_FILE_ID` | VARCHAR(32) | PK — 32-char uppercase UUID |
+| `AD_CLIENT_ID` | VARCHAR(32) | FK → AD_Client |
+| `AD_ORG_ID` | VARCHAR(32) | FK → AD_Org |
+| `ISACTIVE` | CHAR(1) | Always `'Y'` |
+| `CREATED` / `UPDATED` | TIMESTAMP | Audit timestamps |
+| `CREATEDBY` / `UPDATEDBY` | VARCHAR(32) | Audit user FKs |
+| `RECORD_ID` | VARCHAR(32) | PK of the source document |
+| `SPEC_NAME` | VARCHAR(100) | Spec identifier (e.g. `purchase-invoice`) |
+| `FILE_NAME` | VARCHAR(255) | Original filename |
+| `MIME_TYPE` | VARCHAR(100) | e.g. `application/pdf`, `image/png` |
+| `FILE_DATA` | CLOB | Base64-encoded file content |
+
+Access level: `3` (Client + Org). One row per tuple — `POST` uses upsert semantics.
+
 ---
 
 ## 4. API Reference
@@ -400,6 +420,74 @@ Classic processes return OBError results, translated to:
 
 Errors from either type return HTTP 400 with `"status": "error"`.
 
+### 4.7 Preview File Endpoint
+
+A built-in endpoint for persisting document preview files. Files are stored per `(clientId, specName, recordId)` tuple in `ETGO_PREVIEW_FILE`.
+
+**Base path:** `/sws/neo/preview-file`
+
+#### GET — Fetch stored file
+
+```
+GET /sws/neo/preview-file?specName={spec}&recordId={id}
+Authorization: Bearer {token}
+```
+
+Returns `200` with a JSON body on both hit and miss:
+
+```json
+// Hit — file found
+{ "fileName": "receipt.pdf", "mimeType": "application/pdf", "fileData": "<base64>" }
+
+// Miss — no file stored yet
+{}
+```
+
+Required query parameters: `specName`, `recordId`. Returns `400` if either is missing.
+
+#### POST — Store or replace file
+
+```
+POST /sws/neo/preview-file
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{
+  "specName": "purchase-invoice",
+  "recordId": "ABC123",
+  "fileName": "receipt.pdf",
+  "mimeType": "application/pdf",
+  "fileData": "<base64>"
+}
+```
+
+Upsert semantics: inserts a new row if no file exists for the tuple; otherwise updates `FILE_NAME`, `MIME_TYPE`, and `FILE_DATA` in place. Returns `200` with `{ "id": "<saved-record-id>" }`.
+
+All five body fields are required. Returns `400` if any is blank or missing, or if the body is not valid JSON.
+
+#### DELETE — Remove stored file
+
+```
+DELETE /sws/neo/preview-file?specName={spec}&recordId={id}
+Authorization: Bearer {token}
+```
+
+Returns `200 {}` when the row is removed. Returns `404` when no file exists for the tuple. Returns `400` if `specName` or `recordId` is missing.
+
+#### Frontend integration
+
+The React hook `usePreviewAttachment` (`tools/app-shell/src/windows/custom/shared/usePreviewAttachment.js`) wraps all three methods. It is activated only when `storeCondition=true`; when false the hook is a no-op and nothing is fetched or stored.
+
+`GenericPreviewModal` consumes `usePreviewAttachment` internally via its `attachmentConfig` prop and manages the left-panel state machine:
+
+| State | Left panel shown |
+|-------|-----------------|
+| `storeCondition=false` | Caller's `leftPanel` prop unchanged |
+| Checking / storing | Spinner |
+| No file cached, `autoFetch=false` | Drop zone (upload via drag-and-drop or file picker) |
+| No file cached, `autoFetch=true` | Caller's `leftPanel` (live viewer) while background caching runs |
+| File cached | PDF/image viewer + delete button |
+
 ---
 
 ## 5. Configuration
@@ -583,6 +671,7 @@ The module includes unit tests that run without a backend:
 | `NeoContextTest` | 148 | Builder pattern, all fields, HTTP method values, mutable `previousResult`. |
 | `NeoResponseTest` | -- | Static builders (`ok`, `created`, `noContent`, `error`), custom headers. |
 | `NeoServletTabFilterTest` | -- | Parent-child HQL where clause generation. |
+| `NeoPreviewFileServiceTest` | ~250 | Validation (invalid JSON, blank fields), GET miss/hit, POST INSERT/UPDATE paths, DELETE miss/hit. All without a live DB via `MockedStatic<OBDal>` + `MockedStatic<OBContext>`. |
 
 Tests are located in `src-test/src/com/etendoerp/go/schemaforge/`.
 
