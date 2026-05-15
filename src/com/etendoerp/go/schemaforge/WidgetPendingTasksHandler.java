@@ -209,12 +209,32 @@ public class WidgetPendingTasksHandler implements NeoHandler {
   }
 
   /**
-   * Pending sales deliveries: confirmed sales orders where delivery status < 100%.
+   * Pending sales deliveries: goods shipments (M_InOut) in Draft status awaiting processing.
    */
   private void addPendingSalesDeliveries(JSONArray data, String clientId) throws Exception {
-    addPendingOrdersTask(data, clientId, "Y", "qtydelivered", "sales order",
-        "pending delivery", "sales-order", "/sales-order?filter=" + FILTER_PENDING_DELIVERY,
-        "pendingSalesDeliveries");
+    String sql = "SELECT COUNT(*) FROM m_inout"
+        + " WHERE issotrx = 'Y'"
+        + "   AND docstatus = 'DR'"
+        + "   AND isactive = 'Y'"
+        + "   AND ad_client_id = :clientId";
+
+    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
+    long count = ((Number) query.uniqueResult()).longValue();
+
+    if (count == 0) {
+      return;
+    }
+
+    JSONObject params = new JSONObject();
+    params.put("DocStatus", "DR");
+    data.put(buildTaskWithParams(TYPE_INFO,
+        count + " goods shipment" + (count != 1 ? "s" : "") + " pending",
+        "goods-shipment",
+        params,
+        "/goods-shipment?DocStatus=DR",
+        count,
+        count > 1 ? "pendingSalesDeliveries_plural" : "pendingSalesDeliveries"));
   }
 
   /**
