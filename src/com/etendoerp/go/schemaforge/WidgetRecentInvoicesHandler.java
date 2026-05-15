@@ -30,9 +30,10 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 
 /**
- * NeoHandler that returns the 10 most recent completed sales invoices for the requested date range.
- * When no range is supplied it falls back to the last 30 days anchored to the most
- * recent invoice date so demo/test databases with stale data still return results.
+ * NeoHandler that returns the 5 most recent completed sales invoices for the requested date range.
+ * The limit matches the five rows rendered by {@code RecentSalesList} to avoid fetching
+ * unnecessary records. When no range is supplied it falls back to the last 30 days anchored
+ * to the most recent invoice date so demo/test databases with stale data still return results.
  */
 @Named("widgetRecentInvoicesHandler")
 public class WidgetRecentInvoicesHandler implements NeoHandler {

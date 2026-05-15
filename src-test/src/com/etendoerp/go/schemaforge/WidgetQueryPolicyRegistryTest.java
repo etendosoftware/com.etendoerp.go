@@ -104,25 +104,25 @@ class WidgetQueryPolicyRegistryTest {
   }
 
   /**
-   * Verifies that rangedSql includes {@code LIMIT 10} to cap the result set and
-   * prevent unbounded queries from overloading the dashboard.
+   * Verifies that rangedSql includes {@code LIMIT 5} to match the five rows rendered
+   * by {@code RecentSalesList} and avoid fetching unnecessary records.
    */
   @Test
-  void recentInvoicesRangedSqlLimitsResultsTo10() {
+  void recentInvoicesRangedSqlLimitsResultsTo5() {
     WidgetQueryPolicyRegistry.WidgetQueryPolicy policy = WidgetQueryPolicyRegistry.recentInvoices();
 
-    assertTrue(policy.rangedSql.contains("LIMIT 10"), "rangedSql must include LIMIT 10 to cap results");
+    assertTrue(policy.rangedSql.contains("LIMIT 5"), "rangedSql must include LIMIT 5 to match the UI row count");
   }
 
   /**
-   * Verifies that fallbackSql also includes {@code LIMIT 10} so even the no-range path
+   * Verifies that fallbackSql also includes {@code LIMIT 5} so the no-range path
    * caps its result set consistently with the ranged variant.
    */
   @Test
-  void recentInvoicesFallbackSqlLimitsResultsTo10() {
+  void recentInvoicesFallbackSqlLimitsResultsTo5() {
     WidgetQueryPolicyRegistry.WidgetQueryPolicy policy = WidgetQueryPolicyRegistry.recentInvoices();
 
-    assertTrue(policy.fallbackSql.contains("LIMIT 10"), "fallbackSql must include LIMIT 10 to cap results");
+    assertTrue(policy.fallbackSql.contains("LIMIT 5"), "fallbackSql must include LIMIT 5 to match the UI row count");
   }
 
   /**
