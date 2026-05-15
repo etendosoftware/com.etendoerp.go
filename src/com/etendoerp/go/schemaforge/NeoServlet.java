@@ -104,6 +104,12 @@ public class NeoServlet extends HttpBaseServlet {
 
   private void processRequest(HttpServletRequest request, HttpServletResponse response,
       String method) throws IOException {
+    // Readiness probe: no auth required, used by ALB health check
+    if ("GET".equals(method) && "/health/ready".equals(request.getPathInfo())) {
+      handleReadinessCheck(response);
+      return;
+    }
+
     if (!authenticator.authenticateRequest(request, response)) {
       return;
     }
@@ -241,6 +247,33 @@ public class NeoServlet extends HttpBaseServlet {
       response.getWriter().write(neoResponse.getBody().toString());
     }
   }
+
+
+  private void handleReadinessCheck(HttpServletResponse response) throws IOException {
+    try {
+      OBContext.setAdminMode();
+      OBDal.getInstance().getSession()
+          .createNativeQuery("SELECT 1").getSingleResult();
+      OBContext.restorePreviousMode();
+      writeReadinessJson(response, HttpServletResponse.SC_OK, "ready");
+    } catch (Exception e) {
+      log.warn("Readiness check failed: {}", e.getMessage());
+      try {
+        OBContext.restorePreviousMode();
+      } catch (Exception ignored) {
+      }
+      writeReadinessJson(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, "not-ready");
+    }
+  }
+
+  private static void writeReadinessJson(HttpServletResponse response, int status, String statusValue)
+      throws IOException {
+    response.setStatus(status);
+    response.setContentType("application/json");
+    response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+    response.getWriter().write("{\"status\":\"" + statusValue + "\"}");
+  }
+
 
   void sendError(HttpServletResponse response, int status, String message)
       throws IOException {
