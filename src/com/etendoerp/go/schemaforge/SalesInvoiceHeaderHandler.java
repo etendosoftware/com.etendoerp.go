@@ -125,25 +125,25 @@ public class SalesInvoiceHeaderHandler implements NeoHandler {
    * in the given record. Skips confirmed invoices ({@code processed=true}) and records with no
    * positive discount.
    *
-   * @param record
+   * @param invoice
    *     a single invoice record from the response data array; modified in-place
    * @throws Exception
    *     if a JSON read or write operation fails
    */
-  private void applyTotalDiscountToRecord(JSONObject record) throws Exception {
-    if (record.optBoolean("processed", false)) {
+  private void applyTotalDiscountToRecord(JSONObject invoice) throws Exception {
+    if (invoice.optBoolean("processed", false)) {
       return;
     }
-    double discountPct = record.optDouble("etgoTotalDiscount", 0.0);
+    double discountPct = invoice.optDouble("etgoTotalDiscount", 0.0);
     if (discountPct <= 0.0) {
       return;
     }
     double factor = 1.0 - discountPct / 100.0;
 
-    double grandTotal = record.optDouble("grandTotalAmount", 0.0);
-    record.put("grandTotalAmount", roundHalfUp(grandTotal * factor));
+    double grandTotal = invoice.optDouble("grandTotalAmount", 0.0);
+    invoice.put("grandTotalAmount", roundHalfUp(grandTotal * factor));
 
-    double outstanding = record.optDouble("outstandingAmount", 0.0);
-    record.put("outstandingAmount", roundHalfUp(outstanding * factor));
+    double outstanding = invoice.optDouble("outstandingAmount", 0.0);
+    invoice.put("outstandingAmount", roundHalfUp(outstanding * factor));
   }
 }

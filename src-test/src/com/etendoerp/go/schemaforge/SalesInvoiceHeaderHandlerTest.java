@@ -95,9 +95,9 @@ public class SalesInvoiceHeaderHandlerTest {
    */
   private static JSONObject invoiceBody(boolean processed, double discount, double grandTotal,
       double outstanding) throws JSONException {
-    JSONObject record = new JSONObject().put("processed", processed).put("etgoTotalDiscount", discount).put(
+    JSONObject invoice = new JSONObject().put("processed", processed).put("etgoTotalDiscount", discount).put(
         "grandTotalAmount", grandTotal).put("outstandingAmount", outstanding);
-    JSONArray data = new JSONArray().put(record);
+    JSONArray data = new JSONArray().put(invoice);
     return new JSONObject().put("response", new JSONObject().put("data", data));
   }
 
