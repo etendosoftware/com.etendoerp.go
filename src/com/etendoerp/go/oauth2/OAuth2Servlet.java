@@ -25,8 +25,10 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
@@ -79,6 +81,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     private static final String ERROR_ACCESS_DENIED = "access_denied";
     private static final String ERROR_NOT_FOUND = "not_found";
     private static final String ERROR_INVALID_GRANT = "invalid_grant";
+    private static final String ERROR_RATE_LIMITED = "rate_limited";
     private static final String MESSAGE_INTERNAL_SERVER_ERROR = "Internal server error";
     private static final String MESSAGE_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
     private static final String MESSAGE_CLIENT_NOT_FOUND = "Client not found: ";
@@ -112,11 +115,21 @@ public class OAuth2Servlet extends HttpBaseServlet {
     private static final String FIELD_CODE_CHALLENGE = "code_challenge";
     private static final String FIELD_STATE = "state";
     private static final String DB_OAUTH2_CLIENT_ID = "etgo_oauth2_client_id";
+  static final String DCR_RATE_LIMIT_MAX_REQUESTS_PROPERTY =
+      "etgo.oauth2.dcr.rateLimit.maxRequests";
+  static final String DCR_RATE_LIMIT_WINDOW_SECONDS_PROPERTY =
+      "etgo.oauth2.dcr.rateLimit.windowSeconds";
+  private static final int DEFAULT_DCR_RATE_LIMIT_MAX_REQUESTS = 10;
+  private static final int DEFAULT_DCR_RATE_LIMIT_WINDOW_SECONDS = 3600;
+  private static final int MAX_DCR_CLIENT_NAME_LENGTH = 255;
+  private static final String DEFAULT_DCR_CLIENT_NAME = "MCP Client";
 
   private static final String WILDCARD_SCOPE = "neo:*";
 
   /** In-memory store for authorization codes (short-lived, single-use). */
   private static final Map<String, AuthCodeData> AUTH_CODE_STORE = new ConcurrentHashMap<>();
+  private static final Map<String, DcrRegistrationRateLimitState> DCR_REGISTRATION_RATE_LIMITS =
+      new ConcurrentHashMap<>();
 
   private static final Set<String> VALID_SCOPES = Collections.unmodifiableSet(
       new HashSet<>(Arrays.asList(SCOPE_NEO_READ, SCOPE_NEO_WRITE, SCOPE_NEO_PROCESS,
@@ -1205,8 +1218,20 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleRegister(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
+      String clientAddress = normalizeDcrClientAddress(request.getRemoteAddr());
+      if (!tryConsumeDcrRegistrationSlot(clientAddress, System.currentTimeMillis())) {
+        int rateLimitWindowSeconds = getDcrRateLimitWindowSeconds();
+        response.setHeader("Retry-After", String.valueOf(rateLimitWindowSeconds));
+        log.warn("DCR rate limit exceeded for ip={} limit={} windowSeconds={}", clientAddress,
+            getDcrRateLimitMaxRequests(), rateLimitWindowSeconds);
+        writeError(response, HttpServletResponse.SC_TOO_MANY_REQUESTS, ERROR_RATE_LIMITED,
+            "Dynamic client registration rate limit exceeded");
+        return;
+      }
+
       JSONObject body = parseJsonBody(request);
-      String clientName = body.optString("client_name", "MCP Client");
+      String clientName = normalizeDcrClientName(
+          body.optString("client_name", DEFAULT_DCR_CLIENT_NAME));
       String scopes = SCOPE_NEO_READ + " " + SCOPE_NEO_WRITE;
 
       // Generate a unique client_identifier
@@ -1242,11 +1267,139 @@ public class OAuth2Servlet extends HttpBaseServlet {
       log.error("Error processing DCR request", e);
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
           "Malformed request body");
+    } catch (IllegalArgumentException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
+          e.getMessage());
     } catch (SQLException e) {
       log.error("Database error during DCR", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
           MESSAGE_INTERNAL_SERVER_ERROR);
     }
+  }
+
+  static String normalizeDcrClientName(String requestedClientName) {
+    String clientName = requestedClientName == null ? DEFAULT_DCR_CLIENT_NAME
+        : requestedClientName.trim();
+
+    if (clientName.isEmpty()) {
+      clientName = DEFAULT_DCR_CLIENT_NAME;
+    }
+
+    if (clientName.length() > MAX_DCR_CLIENT_NAME_LENGTH) {
+      throw new IllegalArgumentException(
+          "client_name must be at most " + MAX_DCR_CLIENT_NAME_LENGTH + " characters");
+    }
+
+    for (int i = 0; i < clientName.length(); i++) {
+      if (Character.isISOControl(clientName.charAt(i))) {
+        throw new IllegalArgumentException("client_name contains invalid control characters");
+      }
+    }
+
+    return clientName;
+  }
+
+  static boolean tryConsumeDcrRegistrationSlot(String clientAddress, long nowMillis) {
+    int maxRequests = getDcrRateLimitMaxRequests();
+    if (maxRequests <= 0) {
+      return true;
+    }
+
+    long windowMillis = getDcrRateLimitWindowMillis();
+    String normalizedClientAddress = normalizeDcrClientAddress(clientAddress);
+    purgeExpiredDcrRegistrationRateLimits(nowMillis, windowMillis);
+
+    DcrRegistrationRateLimitState rateLimitState = DCR_REGISTRATION_RATE_LIMITS.computeIfAbsent(
+        normalizedClientAddress, ignored -> new DcrRegistrationRateLimitState());
+
+    synchronized (rateLimitState) {
+      long cutoff = nowMillis - windowMillis;
+      while (!rateLimitState.requestTimes.isEmpty()
+          && rateLimitState.requestTimes.peekFirst() <= cutoff) {
+        rateLimitState.requestTimes.removeFirst();
+      }
+      rateLimitState.lastSeenAt = nowMillis;
+      if (rateLimitState.requestTimes.size() >= maxRequests) {
+        return false;
+      }
+      rateLimitState.requestTimes.addLast(nowMillis);
+      return true;
+    }
+  }
+
+  static int getDcrRateLimitMaxRequests() {
+    return getIntSystemProperty(DCR_RATE_LIMIT_MAX_REQUESTS_PROPERTY,
+        DEFAULT_DCR_RATE_LIMIT_MAX_REQUESTS, 0);
+  }
+
+  static int getDcrRateLimitWindowSeconds() {
+    return getIntSystemProperty(DCR_RATE_LIMIT_WINDOW_SECONDS_PROPERTY,
+        DEFAULT_DCR_RATE_LIMIT_WINDOW_SECONDS, 1);
+  }
+
+  static void resetDcrRegistrationRateLimiter() {
+    DCR_REGISTRATION_RATE_LIMITS.clear();
+  }
+
+  private static long getDcrRateLimitWindowMillis() {
+    return getDcrRateLimitWindowSeconds() * 1000L;
+  }
+
+  private static int getIntSystemProperty(String propertyName, int defaultValue,
+      int minimumValue) {
+    String rawValue = System.getProperty(propertyName);
+    if (rawValue == null || rawValue.trim().isEmpty()) {
+      return defaultValue;
+    }
+
+    try {
+      int parsedValue = Integer.parseInt(rawValue.trim());
+      if (parsedValue < minimumValue) {
+        log.warn("Ignoring invalid value {} for system property {} (minimum {})", rawValue,
+            propertyName, minimumValue);
+        return defaultValue;
+      }
+      return parsedValue;
+    } catch (NumberFormatException e) {
+      log.warn("Ignoring invalid numeric value {} for system property {}", rawValue, propertyName);
+      return defaultValue;
+    }
+  }
+
+  private static void purgeExpiredDcrRegistrationRateLimits(long nowMillis, long windowMillis) {
+    long cutoff = nowMillis - windowMillis;
+    Set<String> expiredClientAddresses = new HashSet<>();
+    for (Map.Entry<String, DcrRegistrationRateLimitState> entry
+        : DCR_REGISTRATION_RATE_LIMITS.entrySet()) {
+      DcrRegistrationRateLimitState rateLimitState = entry.getValue();
+      synchronized (rateLimitState) {
+        while (!rateLimitState.requestTimes.isEmpty()
+            && rateLimitState.requestTimes.peekFirst() <= cutoff) {
+          rateLimitState.requestTimes.removeFirst();
+        }
+        if (rateLimitState.requestTimes.isEmpty() && rateLimitState.lastSeenAt <= cutoff) {
+          expiredClientAddresses.add(entry.getKey());
+        }
+      }
+    }
+
+    for (String clientAddress : expiredClientAddresses) {
+      DCR_REGISTRATION_RATE_LIMITS.computeIfPresent(clientAddress, (ignored, rateLimitState) -> {
+        synchronized (rateLimitState) {
+          if (rateLimitState.requestTimes.isEmpty() && rateLimitState.lastSeenAt <= cutoff) {
+            return null;
+          }
+          return rateLimitState;
+        }
+      });
+    }
+  }
+
+  private static String normalizeDcrClientAddress(String clientAddress) {
+    if (clientAddress == null || clientAddress.trim().isEmpty()) {
+      return "unknown";
+    }
+    return clientAddress.trim();
   }
 
   // --- Authorization Server Metadata ---
@@ -1540,6 +1693,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
   }
 
   // --- Inner classes ---
+
+  private static final class DcrRegistrationRateLimitState {
+    private final Deque<Long> requestTimes = new ArrayDeque<>();
+    private long lastSeenAt;
+  }
 
   /**
    * Internal holder for client data loaded from ETGO_OAUTH2_CLIENT via JDBC.
