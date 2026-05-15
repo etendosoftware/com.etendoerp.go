@@ -722,7 +722,7 @@ public class McpToolRouter {
       return null;
     }
 
-    return buildCriteriaFromFilters(filters, dalEntity);
+    return buildCriteriaPayload(filters, dalEntity);
   }
 
   /**
@@ -733,7 +733,7 @@ public class McpToolRouter {
    * @return a JSON array string containing exact-match criteria, or {@code null} if none apply
    * @throws JSONException if the filter payload cannot be read or the criteria cannot be built
    */
-  String buildCriteriaFromFilters(JSONObject filters, Entity dalEntity) throws JSONException {
+  private String buildCriteriaPayload(JSONObject filters, Entity dalEntity) throws JSONException {
     JSONArray criteria = new JSONArray();
     Iterator<String> keys = filters.keys();
     while (keys.hasNext()) {
@@ -760,7 +760,7 @@ public class McpToolRouter {
    * @param value the user-provided filter value to bind into the criteria payload
    * @throws JSONException if the criteria object cannot be appended
    */
-  void appendFilterCondition(JSONArray criteria, Entity dalEntity, String key, Object value)
+  private void appendFilterCondition(JSONArray criteria, Entity dalEntity, String key, Object value)
       throws JSONException {
     Property prop = null;
     try {

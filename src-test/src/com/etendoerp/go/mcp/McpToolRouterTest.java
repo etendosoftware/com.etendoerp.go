@@ -26,6 +26,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Method;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -44,6 +46,14 @@ public class McpToolRouterTest {
   private static final String SPEC_SALES_ORDER = "sales-order";
   private static final String TOOL_NEO_LIST = "neo_list";
   private static final String TOOL_COMPLETE_ORDER = "complete_order";
+
+  private void invokeAppendFilterCondition(McpToolRouter router, JSONArray criteria, Entity entity,
+      String key, Object value) throws Exception {
+    Method method = McpToolRouter.class.getDeclaredMethod("appendFilterCondition",
+        JSONArray.class, Entity.class, String.class, Object.class);
+    method.setAccessible(true);
+    method.invoke(router, criteria, entity, key, value);
+  }
 
   // ── wrapAsTextContent ──────────────────────────────────────────────────
 
@@ -188,7 +198,7 @@ public class McpToolRouterTest {
     when(property.isPrimitive()).thenReturn(true);
     when(property.getName()).thenReturn("name");
 
-    router.appendFilterCondition(criteria, entity, "name", value);
+    invokeAppendFilterCondition(router, criteria, entity, "name", value);
 
     assertEquals(1, criteria.length());
     JSONObject criterion = criteria.getJSONObject(0);
@@ -209,7 +219,7 @@ public class McpToolRouterTest {
     when(property.isPrimitive()).thenReturn(false);
     when(property.getName()).thenReturn("businessPartner");
 
-    router.appendFilterCondition(criteria, entity, "C_BPartner_ID", "12345");
+    invokeAppendFilterCondition(router, criteria, entity, "C_BPartner_ID", "12345");
 
     assertEquals(1, criteria.length());
     JSONObject criterion = criteria.getJSONObject(0);
@@ -231,7 +241,7 @@ public class McpToolRouterTest {
     when(property.isPrimitive()).thenReturn(true);
     when(property.getName()).thenReturn("documentNo");
 
-    router.appendFilterCondition(criteria, entity, "documentNo", "SO/123");
+    invokeAppendFilterCondition(router, criteria, entity, "documentNo", "SO/123");
 
     assertEquals(1, criteria.length());
     assertEquals("documentNo", criteria.getJSONObject(0).getString("fieldName"));
@@ -250,7 +260,7 @@ public class McpToolRouterTest {
     doThrow(new IllegalArgumentException("missing property"))
         .when(entity).getProperty("unknown");
 
-    router.appendFilterCondition(criteria, entity, "unknown", "value");
+    invokeAppendFilterCondition(router, criteria, entity, "unknown", "value");
 
     assertEquals(0, criteria.length());
   }
