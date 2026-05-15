@@ -725,6 +725,14 @@ public class McpToolRouter {
     return buildCriteriaFromFilters(filters, dalEntity);
   }
 
+  /**
+   * Build structured JSON criteria from MCP filter key-value pairs using a resolved DAL entity.
+   *
+   * @param filters the user-provided MCP filters
+   * @param dalEntity the DAL entity used to resolve column/property names
+   * @return a JSON array string containing exact-match criteria, or {@code null} if none apply
+   * @throws JSONException if the filter payload cannot be read or the criteria cannot be built
+   */
   String buildCriteriaFromFilters(JSONObject filters, Entity dalEntity) throws JSONException {
     JSONArray criteria = new JSONArray();
     Iterator<String> keys = filters.keys();
@@ -740,7 +748,17 @@ public class McpToolRouter {
   }
 
   /**
-   * Resolve a single filter key to a DAL property and append a criteria condition.
+   * Resolve a single filter key to a DAL property and append an exact-match criteria condition.
+   *
+   * <p>The lookup first tries the DB column name and then falls back to the DAL property name.
+   * Primitive properties use their DAL property name directly, while reference properties target
+   * the referenced {@code .id} field so values are matched by identifier.</p>
+   *
+   * @param criteria the criteria array being built
+   * @param dalEntity the DAL entity used to resolve the filter key
+   * @param key the user-provided filter key, as a column or DAL property name
+   * @param value the user-provided filter value to bind into the criteria payload
+   * @throws JSONException if the criteria object cannot be appended
    */
   void appendFilterCondition(JSONArray criteria, Entity dalEntity, String key, Object value)
       throws JSONException {
