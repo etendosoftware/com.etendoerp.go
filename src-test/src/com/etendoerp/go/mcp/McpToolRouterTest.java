@@ -21,10 +21,16 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.Property;
 
 /**
  * Unit tests for {@link McpToolRouter} static helpers and MCP content formatting.
@@ -165,5 +171,87 @@ public class McpToolRouterTest {
     assertEquals("complete-order", ToolRegistry.snakeToKebab(TOOL_COMPLETE_ORDER));
     assertEquals("sales-order-lines", ToolRegistry.snakeToKebab("sales_order_lines"));
     assertEquals("invoices", ToolRegistry.snakeToKebab("invoices"));
+  }
+
+  // ── MCP filter criteria ────────────────────────────────────────────────
+
+  /** Tests that primitive MCP filters are translated to criteria without escaping the value. */
+  @Test
+  public void testAppendFilterConditionBuildsPrimitiveCriteria() throws Exception {
+    McpToolRouter router = new McpToolRouter();
+    Entity entity = mock(Entity.class);
+    Property property = mock(Property.class);
+    JSONArray criteria = new JSONArray();
+    String value = "O'Reilly\\\\special/%_value";
+
+    when(entity.getPropertyByColumnName("name")).thenReturn(property);
+    when(property.isPrimitive()).thenReturn(true);
+    when(property.getName()).thenReturn("name");
+
+    router.appendFilterCondition(criteria, entity, "name", value);
+
+    assertEquals(1, criteria.length());
+    JSONObject criterion = criteria.getJSONObject(0);
+    assertEquals("name", criterion.getString("fieldName"));
+    assertEquals("equals", criterion.getString("operator"));
+    assertEquals(value, criterion.getString("value"));
+  }
+
+  /** Tests that reference MCP filters target the referenced id field. */
+  @Test
+  public void testAppendFilterConditionBuildsReferenceCriteriaOnId() throws Exception {
+    McpToolRouter router = new McpToolRouter();
+    Entity entity = mock(Entity.class);
+    Property property = mock(Property.class);
+    JSONArray criteria = new JSONArray();
+
+    when(entity.getPropertyByColumnName("C_BPartner_ID")).thenReturn(property);
+    when(property.isPrimitive()).thenReturn(false);
+    when(property.getName()).thenReturn("businessPartner");
+
+    router.appendFilterCondition(criteria, entity, "C_BPartner_ID", "12345");
+
+    assertEquals(1, criteria.length());
+    JSONObject criterion = criteria.getJSONObject(0);
+    assertEquals("businessPartner.id", criterion.getString("fieldName"));
+    assertEquals("12345", criterion.getString("value"));
+  }
+
+  /** Tests that DAL property lookup falls back from DB column names to property names. */
+  @Test
+  public void testAppendFilterConditionFallsBackToDalPropertyName() throws Exception {
+    McpToolRouter router = new McpToolRouter();
+    Entity entity = mock(Entity.class);
+    Property property = mock(Property.class);
+    JSONArray criteria = new JSONArray();
+
+    doThrow(new IllegalArgumentException("missing column"))
+        .when(entity).getPropertyByColumnName("documentNo");
+    when(entity.getProperty("documentNo")).thenReturn(property);
+    when(property.isPrimitive()).thenReturn(true);
+    when(property.getName()).thenReturn("documentNo");
+
+    router.appendFilterCondition(criteria, entity, "documentNo", "SO/123");
+
+    assertEquals(1, criteria.length());
+    assertEquals("documentNo", criteria.getJSONObject(0).getString("fieldName"));
+    verify(entity).getProperty("documentNo");
+  }
+
+  /** Tests that unresolved MCP filters are ignored instead of producing malformed criteria. */
+  @Test
+  public void testAppendFilterConditionIgnoresUnknownFilter() throws Exception {
+    McpToolRouter router = new McpToolRouter();
+    Entity entity = mock(Entity.class);
+    JSONArray criteria = new JSONArray();
+
+    doThrow(new IllegalArgumentException("missing column"))
+        .when(entity).getPropertyByColumnName("unknown");
+    doThrow(new IllegalArgumentException("missing property"))
+        .when(entity).getProperty("unknown");
+
+    router.appendFilterCondition(criteria, entity, "unknown", "value");
+
+    assertEquals(0, criteria.length());
   }
 }

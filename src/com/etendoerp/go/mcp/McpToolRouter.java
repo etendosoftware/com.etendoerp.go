@@ -192,12 +192,11 @@ public class McpToolRouter {
       params.put(JsonConstants.SORTBY_PARAMETER, orderBy);
     }
 
-    // Apply filters as where clause
+    // Apply filters as structured criteria
     if (filters != null && filters.length() > 0) {
-      String whereClause = buildWhereFromFilters(filters, adTab);
-      if (StringUtils.isNotBlank(whereClause)) {
-        params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause);
-        params.put(JsonConstants.USE_ALIAS, "true");
+      String criteria = buildCriteriaFromFilters(filters, adTab);
+      if (StringUtils.isNotBlank(criteria)) {
+        params.put("criteria", criteria);
       }
     }
 
@@ -713,31 +712,38 @@ public class McpToolRouter {
   }
 
   /**
-   * Build an HQL where clause fragment from MCP filter key-value pairs.
+   * Build structured JSON criteria from MCP filter key-value pairs.
    * Filters are applied as exact-match conditions using the DAL property name.
    */
-  private String buildWhereFromFilters(JSONObject filters, Tab adTab) throws JSONException {
+  private String buildCriteriaFromFilters(JSONObject filters, Tab adTab) throws JSONException {
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
     if (dalEntity == null) {
       return null;
     }
 
-    StringBuilder where = new StringBuilder();
+    return buildCriteriaFromFilters(filters, dalEntity);
+  }
+
+  String buildCriteriaFromFilters(JSONObject filters, Entity dalEntity) throws JSONException {
+    JSONArray criteria = new JSONArray();
     Iterator<String> keys = filters.keys();
     while (keys.hasNext()) {
       String key = keys.next();
-      String value = filters.getString(key);
-      appendFilterCondition(where, dalEntity, key, value);
+      Object value = filters.get(key);
+      if (JSONObject.NULL.equals(value)) {
+        continue;
+      }
+      appendFilterCondition(criteria, dalEntity, key, value);
     }
-    return where.length() > 0 ? where.toString() : null;
+    return criteria.length() > 0 ? criteria.toString() : null;
   }
 
   /**
-   * Resolve a single filter key to a DAL property and append an HQL condition.
+   * Resolve a single filter key to a DAL property and append a criteria condition.
    */
-  private void appendFilterCondition(StringBuilder where, Entity dalEntity,
-      String key, String value) {
+  void appendFilterCondition(JSONArray criteria, Entity dalEntity, String key, Object value)
+      throws JSONException {
     Property prop = null;
     try {
       prop = dalEntity.getPropertyByColumnName(key);
@@ -754,15 +760,11 @@ public class McpToolRouter {
       return;
     }
 
-    if (where.length() > 0) {
-      where.append(" and ");
-    }
-    String escaped = value.replace("'", "''");
-    if (!prop.isPrimitive()) {
-      where.append("e.").append(prop.getName()).append(".id='").append(escaped).append("'");
-    } else {
-      where.append("e.").append(prop.getName()).append("='").append(escaped).append("'");
-    }
+    JSONObject criterion = new JSONObject();
+    criterion.put("fieldName", !prop.isPrimitive() ? prop.getName() + ".id" : prop.getName());
+    criterion.put("operator", "equals");
+    criterion.put("value", value);
+    criteria.put(criterion);
   }
 
   /**
