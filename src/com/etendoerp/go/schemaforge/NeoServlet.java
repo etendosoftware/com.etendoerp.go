@@ -250,20 +250,19 @@ public class NeoServlet extends HttpBaseServlet {
 
 
   private void handleReadinessCheck(HttpServletResponse response) throws IOException {
+    boolean ready = false;
     try {
       OBContext.setAdminMode();
       OBDal.getInstance().getSession()
           .createNativeQuery("SELECT 1").getSingleResult();
-      OBContext.restorePreviousMode();
-      writeReadinessJson(response, HttpServletResponse.SC_OK, "ready");
+      ready = true;
     } catch (Exception e) {
       log.warn("Readiness check failed: {}", e.getMessage());
-      try {
-        OBContext.restorePreviousMode();
-      } catch (Exception ignored) {
-      }
-      writeReadinessJson(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, "not-ready");
+    } finally {
+      OBContext.restorePreviousMode();
     }
+    int status = ready ? HttpServletResponse.SC_OK : HttpServletResponse.SC_SERVICE_UNAVAILABLE;
+    writeReadinessJson(response, status, ready ? "ready" : "not-ready");
   }
 
   private static void writeReadinessJson(HttpServletResponse response, int status, String statusValue)
