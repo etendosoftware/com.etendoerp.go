@@ -19,10 +19,23 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.utility.Sequence;
+import org.openbravo.model.common.enterprise.Organization;
 
 /**
  * Unit tests for {@link NeoCommercialLinePolicy#injectLineNetAmountIfMissing}.
@@ -121,6 +134,95 @@ public class NeoDefaultsServiceTest {
 
     assertTrue("lineNetAmount should be injected", body.has("lineNetAmount"));
     assertAmountEquals(50.00, body.getDouble("lineNetAmount")); // 10 × 5
+  }
+
+  // ── resolveTransactionalSequencePreview ──────────────────────────────────────
+
+  /**
+   * When the transactional sequence is found for the given column and organization,
+   * the preview must be wrapped in angle brackets (e.g. {@code <1000067>}).
+   */
+  @Test
+  public void testTransactionalPreviewSequenceFoundReturnsFormattedValue() {
+    Column column = mock(Column.class);
+    OBContext obContextMock = mock(OBContext.class);
+    Organization orgMock = mock(Organization.class);
+    OBDal obDalMock = mock(OBDal.class);
+    OBCriteria<Sequence> criteriaMock = mock(OBCriteria.class);
+    Sequence sequenceMock = mock(Sequence.class);
+
+    when(obContextMock.getCurrentOrganization()).thenReturn(orgMock);
+    when(orgMock.getId()).thenReturn("TEST_ORG");
+    when(obDalMock.get(eq(Organization.class), eq("TEST_ORG"))).thenReturn(orgMock);
+    when(obDalMock.createCriteria(Sequence.class)).thenReturn(criteriaMock);
+    when(criteriaMock.uniqueResult()).thenReturn(sequenceMock);
+    when(sequenceMock.getNextAssignedNumber()).thenReturn(1000067L);
+
+    try (MockedStatic<OBContext> mockedCtx = mockStatic(OBContext.class); MockedStatic<OBDal> mockedDal = mockStatic(
+        OBDal.class)) {
+      mockedCtx.when(OBContext::getOBContext).thenReturn(obContextMock);
+      mockedDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      String result = NeoDefaultsService.resolveTransactionalSequencePreview(column);
+
+      assertEquals("<1000067>", result);
+    }
+  }
+
+  /**
+   * When no sequence record exists for the column and organization combination,
+   * the method must return {@code null} so the field is omitted from defaults.
+   */
+  @Test
+  public void testTransactionalPreviewSequenceNotFoundReturnsNull() {
+    Column column = mock(Column.class);
+    OBContext obContextMock = mock(OBContext.class);
+    Organization orgMock = mock(Organization.class);
+    OBDal obDalMock = mock(OBDal.class);
+    OBCriteria<Sequence> criteriaMock = mock(OBCriteria.class);
+
+    when(obContextMock.getCurrentOrganization()).thenReturn(orgMock);
+    when(orgMock.getId()).thenReturn("TEST_ORG");
+    when(obDalMock.get(eq(Organization.class), eq("TEST_ORG"))).thenReturn(orgMock);
+    when(obDalMock.createCriteria(Sequence.class)).thenReturn(criteriaMock);
+    when(criteriaMock.uniqueResult()).thenReturn(null);
+
+    try (MockedStatic<OBContext> mockedCtx = mockStatic(OBContext.class); MockedStatic<OBDal> mockedDal = mockStatic(
+        OBDal.class)) {
+      mockedCtx.when(OBContext::getOBContext).thenReturn(obContextMock);
+      mockedDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      String result = NeoDefaultsService.resolveTransactionalSequencePreview(column);
+
+      assertNull("Should return null when no sequence is found", result);
+    }
+  }
+
+  /**
+   * When the DAL layer throws an unexpected exception, the method must swallow it
+   * and return {@code null} rather than propagating the error to the defaults response.
+   */
+  @Test
+  public void testTransactionalPreviewDalThrowsReturnsNull() {
+    Column column = mock(Column.class);
+    OBContext obContextMock = mock(OBContext.class);
+    Organization orgMock = mock(Organization.class);
+    OBDal obDalMock = mock(OBDal.class);
+
+    when(obContextMock.getCurrentOrganization()).thenReturn(orgMock);
+    when(orgMock.getId()).thenReturn("TEST_ORG");
+    when(obDalMock.get(eq(Organization.class), eq("TEST_ORG"))).thenReturn(orgMock);
+    when(obDalMock.createCriteria(any(Class.class))).thenThrow(new RuntimeException("DAL unavailable"));
+
+    try (MockedStatic<OBContext> mockedCtx = mockStatic(OBContext.class); MockedStatic<OBDal> mockedDal = mockStatic(
+        OBDal.class)) {
+      mockedCtx.when(OBContext::getOBContext).thenReturn(obContextMock);
+      mockedDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      String result = NeoDefaultsService.resolveTransactionalSequencePreview(column);
+
+      assertNull("Exception should be swallowed and null returned", result);
+    }
   }
 
   // ── injectLineNetAmountIfMissing — always recomputes (no early-return) ─────

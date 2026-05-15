@@ -29,6 +29,8 @@ import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
+import org.openbravo.model.ad.utility.Sequence;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -60,6 +62,7 @@ public class NeoDefaultsService {
   private static final String DATE_FORMAT = "yyyy-MM-dd";
   private static final String KEY_UPDATES = "updates";
   private static final String KEY_COMBOS = "combos";
+  private static final String LOG_SEQUENCE_PREVIEW_FAILURE = "Could not generate sequence preview for {}: {}";
 
   private NeoDefaultsService() {
   }
@@ -170,14 +173,19 @@ public class NeoDefaultsService {
           String propertyName = NeoDefaultsCascadeHelper.resolvePropertyName(dalEntity, dbColumnName);
 
           try {
-            String preview = resolveSequencePreviewWithDocType(
-                adColumn, vars, conn, windowId, docTypeTargetId, docTypeId);
+            String preview;
+            if (Boolean.TRUE.equals(SequenceUtils.isSequence(adColumn))) {
+              preview = resolveTransactionalSequencePreview(adColumn);
+            } else {
+              preview = resolveSequencePreviewWithDocType(
+                  adColumn, vars, conn, windowId, docTypeTargetId, docTypeId);
+            }
             if (preview != null) {
               defaults.put(propertyName, preview);
               sequenceFields.put(propertyName);
             }
           } catch (Exception e) {
-            log.debug("Could not generate sequence preview for {}: {}",
+            log.debug(LOG_SEQUENCE_PREVIEW_FAILURE,
                 dbColumnName, e.getMessage());
             unresolvedFields.put(propertyName);
           }
@@ -437,6 +445,29 @@ public class NeoDefaultsService {
   }
 
   /**
+   * Preview for transactional sequences (new AD_Sequence mechanism, detected via
+   * SequenceUtils.isSequence). Looks up the sequence by column + current organization and
+   * returns the current nextAssignedNumber without consuming it.
+   */
+  static String resolveTransactionalSequencePreview(Column adColumn) {
+    try {
+      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+      OBCriteria<Sequence> crit = OBDal.getInstance().createCriteria(Sequence.class);
+      crit.add(Restrictions.eq(Sequence.PROPERTY_COLUMN, adColumn));
+      crit.add(Restrictions.eq(Sequence.PROPERTY_ORGANIZATION,
+          OBDal.getInstance().get(Organization.class, orgId)));
+      crit.setMaxResults(1);
+      Sequence seq = (Sequence) crit.uniqueResult();
+      if (seq != null) {
+        return "<" + seq.getNextAssignedNumber() + ">";
+      }
+    } catch (Exception e) {
+      log.debug(LOG_SEQUENCE_PREVIEW_FAILURE, adColumn.getDBColumnName(), e.getMessage());
+    }
+    return null;
+  }
+
+  /**
    * Generate a sequence preview using the doctype IDs already resolved in pass 1.
    *
    * <p>Mirrors UIDefinition.getFieldProperties line 210 exactly:
@@ -456,7 +487,7 @@ public class NeoDefaultsService {
       }
       return null;
     } catch (Exception e) {
-      log.debug("Could not generate sequence preview for {}: {}",
+      log.debug(LOG_SEQUENCE_PREVIEW_FAILURE,
           adColumn.getDBColumnName(), e.getMessage());
       return null;
     }
@@ -512,7 +543,7 @@ public class NeoDefaultsService {
       }
       return "<auto>";
     } catch (Exception e) {
-      log.debug("Could not generate sequence preview for {}: {}",
+      log.debug(LOG_SEQUENCE_PREVIEW_FAILURE,
           adColumn.getDBColumnName(), e.getMessage());
       return "<auto>";
     }

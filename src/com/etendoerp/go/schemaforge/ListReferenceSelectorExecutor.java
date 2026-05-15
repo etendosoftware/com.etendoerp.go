@@ -43,7 +43,7 @@ final class ListReferenceSelectorExecutor {
       listRef = column.getReference();
     }
 
-    String valRuleSql = SelectorQueryBuilder.resolveValidationSql(column, contextParams);
+    String valRuleSql = SelectorValidationResolver.resolveValidationSql(column, contextParams);
     OBCriteria<org.openbravo.model.ad.domain.List> countCrit = buildCriteria(listRef.getId(),
         valRuleSql, search);
     int totalCount = countCrit.count();

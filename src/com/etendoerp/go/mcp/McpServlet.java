@@ -37,8 +37,9 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.common.CorsUtils;
-import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
+import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.oauth2.OAuth2Filter;
 
 /**
  * MCP (Model Context Protocol) servlet implementing Streamable HTTP transport.
@@ -187,30 +188,25 @@ public class McpServlet extends HttpServlet {
    */
   private void handleResourceMetadata(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    String baseUrl = buildBaseUrl(request);
+    String mcpResourceUrl = PublicUrlResolver.resolveMcpResourceUrl(request);
+    String oauth2Url = PublicUrlResolver.resolveOAuth2Url(request);
     response.setStatus(HttpServletResponse.SC_OK);
+    if (mcpResourceUrl == null || oauth2Url == null) {
+      ProtocolErrorAdapters.writeSimpleJsonError(response,
+          HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Unable to resolve public MCP/OAuth2 URL");
+      return;
+    }
     try {
       JSONObject meta = new JSONObject();
-      meta.put("resource", baseUrl + "/sws/mcp");
-      meta.put("authorization_servers", new JSONArray()
-          .put(baseUrl + "/oauth2"));
+      meta.put("resource", mcpResourceUrl);
+      meta.put("authorization_servers", new JSONArray().put(oauth2Url));
       meta.put("scopes_supported", new JSONArray()
-          .put("neo:read").put("neo:write").put("neo:process").put("neo:report").put("neo:*"));
+          .put(LEGACY_JWT_FALLBACK_SCOPES).put("neo:write").put("neo:process").put("neo:report").put("neo:*"));
       meta.put("bearer_methods_supported", new JSONArray().put("header"));
       response.getWriter().write(meta.toString());
     } catch (JSONException e) {
-      response.getWriter().write("{\"resource\":\"" + baseUrl + "/sws/mcp\"}");
+      response.getWriter().write("{\"resource\":\"" + mcpResourceUrl + "\"}");
     }
-  }
-
-  private String buildBaseUrl(HttpServletRequest request) {
-    String scheme = request.getScheme();
-    String host = request.getServerName();
-    int port = request.getServerPort();
-    String contextPath = request.getContextPath();
-    boolean defaultPort = ("http".equals(scheme) && port == 80)
-        || ("https".equals(scheme) && port == 443);
-    return scheme + "://" + host + (defaultPort ? "" : ":" + port) + contextPath;
   }
 
   // ── Authentication ─────────────────────────────────────────────────────
@@ -452,9 +448,13 @@ public class McpServlet extends HttpServlet {
   private void sendJsonError(HttpServletRequest request, HttpServletResponse response,
       int status, String message) throws IOException {
     if (status == HttpServletResponse.SC_UNAUTHORIZED) {
-      String metaUrl = buildBaseUrl(request) + "/sws/mcp/.well-known/oauth-protected-resource";
-      response.setHeader("WWW-Authenticate",
-          "Bearer resource_metadata=\"" + metaUrl + "\"");
+      String metaUrl = PublicUrlResolver.appendPath(
+          PublicUrlResolver.resolveMcpResourceUrl(request),
+          ".well-known/oauth-protected-resource");
+      if (metaUrl != null) {
+        response.setHeader("WWW-Authenticate",
+            "Bearer resource_metadata=\"" + metaUrl + "\"");
+      }
     }
     ProtocolErrorAdapters.writeSimpleJsonError(response, status, message);
   }

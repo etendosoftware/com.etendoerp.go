@@ -43,6 +43,7 @@ final class SelectorQueryExecutor {
   private static final Logger log = LogManager.getLogger(SelectorQueryExecutor.class);
   private static final String PARAM_SEARCH = "search";
   private static final String FIELD_LABEL = "label";
+  private static final String PARAM_LANGUAGE = "language";
 
   private SelectorQueryExecutor() {
   }
@@ -67,6 +68,15 @@ final class SelectorQueryExecutor {
       String search, int limit, int offset, String validationFilter,
       String contextOrganizationId, Map<String, Object> extraFilterParams) throws Exception {
 
+    // Extract language before binding — it is not an HQL parameter
+    String language = null;
+    Map<String, Object> safeExtraParams = extraFilterParams;
+    if (extraFilterParams != null && extraFilterParams.containsKey(PARAM_LANGUAGE)) {
+      language = (String) extraFilterParams.get(PARAM_LANGUAGE);
+      safeExtraParams = new HashMap<>(extraFilterParams);
+      safeExtraParams.remove(PARAM_LANGUAGE);
+    }
+
     StringBuilder hql = new StringBuilder();
     Map<String, Object> queryParams = new HashMap<>();
     NeoSelectorExecutionHelper.appendResolvedWhereClause(hql, queryParams, meta.whereClause);
@@ -74,8 +84,8 @@ final class SelectorQueryExecutor {
     NeoSelectorExecutionHelper.appendSelectorOrganizationFilter(hql, queryParams, meta,
         contextOrganizationId);
     NeoSelectorExecutionHelper.appendSimpleSearchFilter(hql, meta.displayProperty, search);
-    if (extraFilterParams != null) {
-      queryParams.putAll(extraFilterParams);
+    if (safeExtraParams != null) {
+      queryParams.putAll(safeExtraParams);
     }
 
     String whereStr = NeoSelectorExecutionHelper.buildSimpleWhereClause(hql);
@@ -99,7 +109,7 @@ final class SelectorQueryExecutor {
     JSONArray items = new JSONArray();
     for (BaseOBObject bob : dataQuery.list()) {
       JSONObject item = new JSONObject();
-      item.put("id", SelectorQueryBuilder.normalizeEntityId(bob.getId().toString()));
+      item.put("id", SelectorRowMapper.normalizeEntityId(bob.getId().toString()));
       if (meta.displayProperty != null && meta.displayProperty.contains(".")) {
         Object labelValue = resolvePropertyValue(bob, meta.displayProperty);
         item.put(FIELD_LABEL, labelValue != null ? labelValue : bob.getIdentifier());
@@ -107,6 +117,10 @@ final class SelectorQueryExecutor {
         item.put(FIELD_LABEL, bob.getIdentifier());
       }
       items.put(item);
+    }
+
+    if (language != null && !"en_US".equals(language)) {
+      enrichCountryTranslations(items, meta.entityName, language);
     }
 
     return SelectorResponseSupport.buildSelectorResponse(items, new JSONArray(), totalCount, limit, offset);
@@ -188,7 +202,7 @@ final class SelectorQueryExecutor {
 
     String selectPart = rawHql.substring(0, fromIdx).trim();
     String[] selectExprs = selectPart.replaceFirst("(?i)^select\\s+", "").split(",");
-    Map<String, Integer> colIndexMap = SelectorQueryBuilder.buildSelectColumnIndexMap(selectExprs);
+    Map<String, Integer> colIndexMap = SelectorRowMapper.buildSelectColumnIndexMap(selectExprs);
 
     Map<String, Object> fromParams = new HashMap<>(fromClause.getParams());
     if (extraFilterParams != null) {
@@ -215,7 +229,7 @@ final class SelectorQueryExecutor {
     dataQuery.setMaxResults(limit);
     dataQuery.setFirstResult(offset);
 
-    Integer idColIdx = SelectorQueryBuilder.resolveIdColumnIndex(meta, alias, colIndexMap, selectExprs);
+    Integer idColIdx = SelectorRowMapper.resolveIdColumnIndex(meta, alias, colIndexMap, selectExprs);
     JSONArray columns = SelectorResponseSupport.buildGridColumnMetadata(meta.gridFields);
     Entity entityDef = ModelProvider.getInstance().getEntity(meta.entityName);
     JSONArray items = new JSONArray();
@@ -228,9 +242,9 @@ final class SelectorQueryExecutor {
       item.put("id", recordId);
       entityIds.add(recordId);
       item.put(FIELD_LABEL,
-          SelectorQueryBuilder.extractDisplayLabel(row, colIndexMap, meta.displayProperty,
+          SelectorRowMapper.extractDisplayLabel(row, colIndexMap, meta.displayProperty,
               entityDef, recordId));
-      SelectorQueryBuilder.mapGridFieldsToItem(item, row, colIndexMap, meta.gridFields);
+      SelectorRowMapper.mapGridFieldsToItem(item, row, colIndexMap, meta.gridFields);
       items.put(item);
     }
 
@@ -250,7 +264,7 @@ final class SelectorQueryExecutor {
         return val.toString();
       }
     }
-    return SelectorQueryBuilder.normalizeEntityId(bob.getId().toString());
+    return SelectorRowMapper.normalizeEntityId(bob.getId().toString());
   }
 
   private static Object resolvePropertyValue(BaseOBObject bob, String propertyPath) {
@@ -275,6 +289,50 @@ final class SelectorQueryExecutor {
       log.debug("Could not resolve property {} on {}: {}",
           propertyPath, bob.getId(), e.getMessage());
       return null;
+    }
+  }
+
+  /**
+   * Post-processes a selector result to replace English country names with translated names
+   * from the {@code CountryTrl} entity for the requested language.
+   * Falls back silently to the original name when no translation is found.
+   */
+  private static void enrichCountryTranslations(JSONArray items, String entityName, String language) {
+    if (!"Country".equals(entityName)) {
+      return;
+    }
+    try {
+      List<String> ids = new ArrayList<>();
+      for (int i = 0; i < items.length(); i++) {
+        ids.add(items.getJSONObject(i).getString("id"));
+      }
+      if (ids.isEmpty()) {
+        return;
+      }
+      OBQuery<BaseOBObject> trlQuery = OBDal.getInstance().createQuery("CountryTrl",
+          "as t where t.language.language = :lang and t.country.id in :ids");
+      trlQuery.setNamedParameter("lang", language);
+      trlQuery.setNamedParameter("ids", ids);
+
+      Map<String, String> translations = new HashMap<>();
+      for (BaseOBObject trl : trlQuery.list()) {
+        BaseOBObject country = (BaseOBObject) trl.get("country");
+        String name = (String) trl.get("name");
+        if (country != null && StringUtils.isNotBlank(name)) {
+          translations.put(country.getId().toString(), name);
+        }
+      }
+
+      for (int i = 0; i < items.length(); i++) {
+        JSONObject item = items.getJSONObject(i);
+        String id = item.getString("id");
+        String translated = translations.get(id);
+        if (translated != null) {
+          item.put(FIELD_LABEL, translated);
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Country translation enrichment failed for language {}: {}", language, e.getMessage());
     }
   }
 }
