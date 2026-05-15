@@ -52,12 +52,17 @@ import org.openbravo.model.ad.system.Client;
 
 /**
  * Unit tests for {@link WidgetPendingTasksHandler}.
- * <p>
- * Key regression covered: the pending-orders SQL must NOT filter by
- * {@code cancelledorder_id IS NULL}, which incorrectly excluded replacement
- * orders created by Etendo's reactivation flow. Those orders have
- * {@code cancelledorder_id IS NOT NULL} but {@code iscancelled = 'N'} and
- * are legitimate pending receipts that must be counted.
+ *
+ * <p>Covers: method guard (405), SQL correctness for the pending-receptions query
+ * (queries {@code m_inout} with {@code docstatus='DR'}, not {@code c_order}),
+ * navigation shape (window="goods-receipt", params.DocStatus="DR"), zero-count
+ * suppression, taskKey singular/plural logic, link value, overdue invoices,
+ * collections/payments due today, low-stock alerts, and the exception path.
+ *
+ * <p>Key regression covered: pending-receptions must query {@code m_inout} in Draft
+ * status, not {@code c_order}. The old pending-orders SQL must not filter by
+ * {@code cancelledorder_id IS NULL}, which incorrectly excluded replacement orders
+ * created by Etendo's reactivation flow.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -83,6 +88,9 @@ class WidgetPendingTasksHandlerTest {
   @Mock
   @SuppressWarnings("rawtypes")
   private NativeQuery orderQuery;
+  @Mock
+  @SuppressWarnings("rawtypes")
+  private NativeQuery mInoutQuery;
   @Mock
   @SuppressWarnings("rawtypes")
   private NativeQuery stockQuery;
@@ -124,6 +132,10 @@ class WidgetPendingTasksHandlerTest {
     when(scheduleQuery.setParameter(anyString(), any())).thenReturn(scheduleQuery);
     when(scheduleQuery.uniqueResult()).thenReturn(0L);
 
+    when(session.createNativeQuery(contains("m_inout"))).thenReturn(mInoutQuery);
+    when(mInoutQuery.setParameter(anyString(), any())).thenReturn(mInoutQuery);
+    when(mInoutQuery.uniqueResult()).thenReturn(0L);
+
     when(session.createNativeQuery(contains("c_order"))).thenReturn(orderQuery);
     when(orderQuery.setParameter(anyString(), any())).thenReturn(orderQuery);
     when(orderQuery.uniqueResult()).thenReturn(0L);
@@ -139,7 +151,7 @@ class WidgetPendingTasksHandlerTest {
    * Verifies that the handler rejects POST requests with HTTP 405.
    */
   @Test
-  void testHandleRejectsPost() {
+  void testNonGetMethodReturns405() {
     NeoContext ctx = NeoContext.builder().specName("dashboard").entityName("pending-tasks").httpMethod(
         "POST").endpointType(NeoEndpointType.CRUD).build();
     assertEquals(405, handler.handle(ctx).getHttpStatus());
@@ -190,52 +202,141 @@ class WidgetPendingTasksHandlerTest {
     assertEquals(0, data.length());
   }
 
-  // ── Pending receptions task appears when count > 0 ───────────────────────
+  // ── addPendingReceptions: SQL targets m_inout, not c_order ───────────────
 
   /**
-   * Verifies that a pendingReceptions task with the correct count appears in the response
-   * when the purchase-order query returns a non-zero value.
+   * Source-reading test: verifies that the {@code addPendingReceptions} SQL block in
+   * the handler source queries {@code m_inout} with {@code docstatus = 'DR'} and does
+   * NOT reference {@code c_order}.
+   *
+   * <p>This guards against the previous incorrect implementation that queried
+   * purchase orders instead of goods receipts in draft status.
    */
   @Test
   @SuppressWarnings("unchecked")
-  void testHandlePendingReceptionsAppearsInResponseWhenNonZero() throws Exception {
-    when(session.createNativeQuery(contains("SUM(outstandingamt)"))).thenReturn(overdueQuery);
-    when(overdueQuery.setParameter(anyString(), any())).thenReturn(overdueQuery);
-    when(overdueQuery.uniqueResult()).thenReturn(new Object[]{ 0L, BigDecimal.ZERO });
+  void addPendingReceptionsQueriesMInoutNotCOrder() throws Exception {
+    mockAllQueriesEmpty();
 
-    when(session.createNativeQuery(contains("fin_payment_schedule"))).thenReturn(scheduleQuery);
-    when(scheduleQuery.setParameter(anyString(), any())).thenReturn(scheduleQuery);
-    when(scheduleQuery.uniqueResult()).thenReturn(0L);
+    handler.handle(getContext());
 
-    when(session.createNativeQuery(contains("m_storage_detail"))).thenReturn(stockQuery);
-    when(stockQuery.setParameter(anyString(), any())).thenReturn(stockQuery);
-    when(stockQuery.list()).thenReturn(Collections.emptyList());
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    verify(session, atLeastOnce()).createNativeQuery(sqlCaptor.capture());
 
-    when(session.createNativeQuery(contains("c_order"))).thenReturn(orderQuery);
-    when(orderQuery.setParameter(anyString(), any())).thenReturn(orderQuery);
-    when(orderQuery.uniqueResult()).thenReturn(10L);
+    List<String> allSqls = sqlCaptor.getAllValues();
 
-    NeoResponse response = handler.handle(getContext());
-    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    // There must be at least one query against m_inout.
+    boolean foundMInout = allSqls.stream().anyMatch(sql -> sql.contains("m_inout"));
+    assertTrue(foundMInout, "addPendingReceptions must execute a query against m_inout");
 
-    boolean found = false;
-    for (int i = 0; i < data.length(); i++) {
-      JSONObject task = data.getJSONObject(i);
-      String key = task.optString("taskKey", "");
-      if (key.startsWith("pendingReceptions")) {
-        assertEquals(10, task.getInt("count"));
-        found = true;
-      }
-    }
-    assertTrue(found, "Expected a pendingReceptions task in the response");
+    // The m_inout query must filter by docstatus = 'DR'.
+    boolean foundDrFilter = allSqls.stream().filter(sql -> sql.contains("m_inout")).anyMatch(
+        sql -> sql.contains("docstatus = 'DR'") || sql.contains("docstatus='DR'"));
+    assertTrue(foundDrFilter, "The m_inout query must include a docstatus = 'DR' filter");
+
+    // The m_inout query must NOT reference c_order within the same SQL string.
+    boolean mInoutQueryAlsoHasCOrder = allSqls.stream().filter(sql -> sql.contains("m_inout")).anyMatch(
+        sql -> sql.contains("c_order"));
+    assertFalse(mInoutQueryAlsoHasCOrder,
+        "The m_inout query must not reference c_order — " + "pending receptions query must be separate from the purchase-orders query");
   }
 
-  // ── SQL regression: cancelledorder_id must not appear ────────────────────
+  // ── addPendingReceptions: navigation goes to goods-receipt ───────────────
 
   /**
-   * Regression: the pending-orders SQL must not include a {@code cancelledorder_id IS NULL}
-   * condition, which would incorrectly exclude replacement orders created during
-   * the Etendo order reactivation flow.
+   * Verifies that when the m_inout count is 2 the response contains a task whose
+   * navigation points to window="goods-receipt" with params.DocStatus="DR".
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void addPendingReceptionsNavigatesToGoodsReceipt() throws Exception {
+    mockAllQueriesEmpty();
+    when(mInoutQuery.uniqueResult()).thenReturn(2L);
+
+    NeoResponse response = handler.handle(getContext());
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+
+    JSONObject receptionTask = findTaskByKeyPrefix(data, "pendingReceptions");
+    JSONObject navigation = receptionTask.getJSONObject("navigation");
+
+    assertEquals("goods-receipt", navigation.getString("window"), "navigation.window must be 'goods-receipt'");
+    assertEquals("DR", navigation.getJSONObject("params").getString("DocStatus"),
+        "navigation.params.DocStatus must be 'DR'");
+  }
+
+  // ── addPendingReceptions: zero count produces no task ────────────────────
+
+  /**
+   * Verifies that when the m_inout count is 0 no pending-receptions task is
+   * emitted in the response data array.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void addPendingReceptionsZeroCountProducesEmptyData() throws Exception {
+    mockAllQueriesEmpty();
+    // mInoutQuery already returns 0L by default.
+
+    NeoResponse response = handler.handle(getContext());
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    assertEquals(0, data.length(), "No tasks should be emitted when all counts are 0");
+  }
+
+  // ── buildTaskWithParams: link + navigation.type + taskKey singular ───────
+
+  /**
+   * Verifies that for count=1 the task emitted by {@code buildTaskWithParams} has:
+   * navigation.type="list", link="/goods-receipt?DocStatus=DR", and
+   * taskKey="pendingReceptions" (singular).
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void buildTaskWithParamsUsesNavigationParams() throws Exception {
+    mockAllQueriesEmpty();
+    when(mInoutQuery.uniqueResult()).thenReturn(1L);
+
+    NeoResponse response = handler.handle(getContext());
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    JSONObject task = findTaskByKey(data, "pendingReceptions");
+
+    assertEquals("list", task.getJSONObject("navigation").getString("type"), "navigation.type must be 'list'");
+    assertEquals("/goods-receipt?DocStatus=DR", task.getString("link"), "link must be '/goods-receipt?DocStatus=DR'");
+    assertEquals("pendingReceptions", task.getString("taskKey"),
+        "taskKey must be 'pendingReceptions' (singular) when count=1");
+  }
+
+  // ── buildTaskWithParams: taskKey plural ──────────────────────────────────
+
+  /**
+   * Verifies that for count=3 the taskKey uses the plural form
+   * "pendingReceptions_plural".
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void buildTaskWithParamsUsesNavigationParamsPlural() throws Exception {
+    mockAllQueriesEmpty();
+    when(mInoutQuery.uniqueResult()).thenReturn(3L);
+
+    NeoResponse response = handler.handle(getContext());
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    JSONObject task = findTaskByKey(data, "pendingReceptions_plural");
+
+    assertEquals("pendingReceptions_plural", task.getString("taskKey"),
+        "taskKey must be 'pendingReceptions_plural' (plural) when count=3");
+  }
+
+  // ── SQL regression: cancelledorder_id must not appear in c_order query ───
+
+  /**
+   * Regression: the pending-orders SQL must not include {@code cancelledorder_id IS NULL},
+   * which would incorrectly exclude replacement orders created during the Etendo
+   * order reactivation flow.
    */
   @Test
   @SuppressWarnings("unchecked")
@@ -462,32 +563,6 @@ class WidgetPendingTasksHandlerTest {
     assertTrue(found, "Expected a pendingSalesDeliveries task in the response");
   }
 
-  // ── Singular key for pending receptions ──────────────────────────────────
-
-  /**
-   * Verifies that the singular taskKey {@code "pendingReceptions"} is used
-   * when exactly one purchase order has a pending reception.
-   */
-  @Test
-  @SuppressWarnings("unchecked")
-  void testPendingReceptionsSingularKeyWhenCountIsOne() throws Exception {
-    mockAllQueriesEmpty();
-    when(orderQuery.uniqueResult()).thenReturn(1L);
-
-    NeoResponse response = handler.handle(getContext());
-    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
-
-    boolean found = false;
-    for (int i = 0; i < data.length(); i++) {
-      JSONObject task = data.getJSONObject(i);
-      if ("pendingReceptions".equals(task.optString("taskKey", ""))) {
-        assertEquals(1, task.getInt("count"));
-        found = true;
-      }
-    }
-    assertTrue(found, "Expected pendingReceptions (singular) task in the response");
-  }
-
   // ── Exception / error path ────────────────────────────────────────────────
 
   /**
@@ -498,5 +573,36 @@ class WidgetPendingTasksHandlerTest {
   void testHandleExceptionInContextReturns500() {
     obContextMock.when(OBContext::getOBContext).thenThrow(new RuntimeException("DB unavailable"));
     assertEquals(500, handler.handle(getContext()).getHttpStatus());
+  }
+
+  // ── Private helpers ───────────────────────────────────────────────────────
+
+  /**
+   * Finds a task in the data array by its exact taskKey.
+   * Throws {@link AssertionError} if not found.
+   */
+  private JSONObject findTaskByKey(JSONArray data, String taskKey) throws Exception {
+    for (int i = 0; i < data.length(); i++) {
+      JSONObject task = data.getJSONObject(i);
+      if (taskKey.equals(task.optString("taskKey"))) {
+        return task;
+      }
+    }
+    throw new AssertionError("Task with taskKey='" + taskKey + "' not found in data (length=" + data.length() + ")");
+  }
+
+  /**
+   * Finds a task in the data array whose taskKey starts with the given prefix.
+   * Throws {@link AssertionError} if not found.
+   */
+  private JSONObject findTaskByKeyPrefix(JSONArray data, String prefix) throws Exception {
+    for (int i = 0; i < data.length(); i++) {
+      JSONObject task = data.getJSONObject(i);
+      if (task.optString("taskKey", "").startsWith(prefix)) {
+        return task;
+      }
+    }
+    throw new AssertionError(
+        "Task with taskKey prefix='" + prefix + "' not found in data (length=" + data.length() + ")");
   }
 }
