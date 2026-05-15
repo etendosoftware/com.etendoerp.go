@@ -218,12 +218,44 @@ public class WidgetPendingTasksHandler implements NeoHandler {
   }
 
   /**
-   * Pending receptions: confirmed purchase orders where delivery status < 100%.
+   * Pending receptions: goods receipts (M_InOut) in Draft status awaiting processing.
    */
   private void addPendingReceptions(JSONArray data, String clientId) throws Exception {
-    addPendingOrdersTask(data, clientId, "N", "qtydelivered", "purchase order",
-        "pending reception", "purchase-order", "/purchase-order?filter=" + FILTER_PENDING_DELIVERY,
-        "pendingReceptions");
+    String sql = "SELECT COUNT(*) FROM m_inout"
+        + " WHERE issotrx = 'N'"
+        + "   AND docstatus = 'DR'"
+        + "   AND isactive = 'Y'"
+        + "   AND ad_client_id = :clientId";
+
+    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
+    long count = ((Number) query.uniqueResult()).longValue();
+
+    if (count == 0) {
+      return;
+    }
+
+    JSONObject params = new JSONObject();
+    params.put("DocStatus", "DR");
+    data.put(buildTaskWithParams(TYPE_INFO,
+        count + " goods receipt" + (count != 1 ? "s" : "") + " pending",
+        "goods-receipt",
+        params,
+        "/goods-receipt?DocStatus=DR",
+        count,
+        count > 1 ? "pendingReceptions_plural" : "pendingReceptions"));
+  }
+
+  private JSONObject buildTaskWithParams(String type, String text, String window,
+      JSONObject params, String link, long count, String taskKey) throws Exception {
+    JSONObject task = new JSONObject();
+    task.put(JSON_TYPE, type);
+    task.put(JSON_TEXT, text);
+    task.put(JSON_NAVIGATION, navigationParams(window, params));
+    task.put(JSON_LINK, link);
+    task.put(JSON_COUNT, count);
+    task.put(JSON_TASK_KEY, taskKey);
+    return task;
   }
 
   private void addPendingOrdersTask(JSONArray data, String clientId, String isSalesTransaction,
