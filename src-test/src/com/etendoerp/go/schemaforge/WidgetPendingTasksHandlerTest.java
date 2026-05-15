@@ -542,13 +542,13 @@ class WidgetPendingTasksHandlerTest {
 
   /**
    * Verifies that a pendingSalesDeliveries task appears in the response
-   * when the sales-order query returns a non-zero count.
+   * when the m_inout query for sales shipments returns a non-zero count.
    */
   @Test
   @SuppressWarnings("unchecked")
   void testPendingSalesDeliveriesAppearsInResponseWhenNonZero() throws Exception {
     mockAllQueriesEmpty();
-    when(orderQuery.uniqueResult()).thenReturn(7L);
+    when(mInoutQuery.uniqueResult()).thenReturn(7L);
 
     NeoResponse response = handler.handle(getContext());
     JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
