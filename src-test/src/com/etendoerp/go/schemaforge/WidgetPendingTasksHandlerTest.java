@@ -563,6 +563,148 @@ class WidgetPendingTasksHandlerTest {
     assertTrue(found, "Expected a pendingSalesDeliveries task in the response");
   }
 
+  // ── addPendingSalesDeliveries: SQL targets m_inout with issotrx='Y' ──────
+
+  /**
+   * Source-reading test: verifies that the {@code addPendingSalesDeliveries} SQL block
+   * queries {@code m_inout} with {@code issotrx = 'Y'} (sales transactions) and does
+   * NOT use {@code c_order}.
+   *
+   * <p>This guards against a regression where sales deliveries might be queried from
+   * the orders table (c_order) instead of the shipments table (m_inout in Draft status).
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void addPendingSalesDeliveriesQueriesMInoutIssotrxY() throws Exception {
+    mockAllQueriesEmpty();
+
+    handler.handle(getContext());
+
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    verify(session, atLeastOnce()).createNativeQuery(sqlCaptor.capture());
+
+    List<String> allSqls = sqlCaptor.getAllValues();
+
+    // There must be at least one query against m_inout with issotrx = 'Y'.
+    boolean foundSalesInout = allSqls.stream()
+        .filter(sql -> sql.contains("m_inout"))
+        .anyMatch(sql -> sql.contains("issotrx = 'Y'") || sql.contains("issotrx='Y'"));
+    assertTrue(foundSalesInout,
+        "addPendingSalesDeliveries must execute a query against m_inout with issotrx = 'Y'");
+
+    // The m_inout query for sales must also filter by docstatus = 'DR'.
+    boolean foundDrFilter = allSqls.stream()
+        .filter(sql -> sql.contains("m_inout"))
+        .filter(sql -> sql.contains("issotrx = 'Y'") || sql.contains("issotrx='Y'"))
+        .anyMatch(sql -> sql.contains("docstatus = 'DR'") || sql.contains("docstatus='DR'"));
+    assertTrue(foundDrFilter,
+        "The m_inout (issotrx='Y') query must include a docstatus = 'DR' filter");
+  }
+
+  // ── addPendingSalesDeliveries: navigation goes to goods-shipment ──────────
+
+  /**
+   * Verifies that when the m_inout (issotrx='Y') count is 2 the response contains a
+   * task whose navigation points to window="goods-shipment" with params.DocStatus="DR".
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void addPendingSalesDeliveriesNavigatesToGoodsShipment() throws Exception {
+    mockAllQueriesEmpty();
+    // mInoutQuery covers both purchase and sales m_inout queries; returning 2 from
+    // uniqueResult triggers both addPendingReceptions and addPendingSalesDeliveries.
+    // We isolate the deliveries task by its taskKey prefix.
+    when(mInoutQuery.uniqueResult()).thenReturn(2L);
+
+    NeoResponse response = handler.handle(getContext());
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+
+    JSONObject deliveriesTask = findTaskByKeyPrefix(data, "pendingSalesDeliveries");
+    JSONObject navigation = deliveriesTask.getJSONObject("navigation");
+
+    assertEquals("goods-shipment", navigation.getString("window"),
+        "navigation.window must be 'goods-shipment'");
+    assertEquals("DR", navigation.getJSONObject("params").getString("DocStatus"),
+        "navigation.params.DocStatus must be 'DR'");
+  }
+
+  // ── addPendingSalesDeliveries: zero count produces no task ────────────────
+
+  /**
+   * Verifies that when the m_inout (issotrx='Y') count is 0 no
+   * pendingSalesDeliveries task is emitted in the response data array.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void addPendingSalesDeliveriesZeroCountProducesEmptyData() throws Exception {
+    mockAllQueriesEmpty();
+    // mInoutQuery returns 0L by default — no task should be emitted.
+
+    NeoResponse response = handler.handle(getContext());
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+
+    boolean found = false;
+    for (int i = 0; i < data.length(); i++) {
+      if (data.getJSONObject(i).optString("taskKey", "").startsWith("pendingSalesDeliveries")) {
+        found = true;
+        break;
+      }
+    }
+    assertFalse(found, "No pendingSalesDeliveries task should be emitted when count is 0");
+  }
+
+  // ── addPendingSalesDeliveries: singular taskKey ───────────────────────────
+
+  /**
+   * Verifies that for count=1 the task emitted by {@code addPendingSalesDeliveries}
+   * has taskKey="pendingSalesDeliveries" (singular) and link="/goods-shipment?DocStatus=DR".
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void addPendingSalesDeliveriesSingularTaskKey() throws Exception {
+    mockAllQueriesEmpty();
+    when(mInoutQuery.uniqueResult()).thenReturn(1L);
+
+    NeoResponse response = handler.handle(getContext());
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    JSONObject task = findTaskByKey(data, "pendingSalesDeliveries");
+
+    assertEquals("pendingSalesDeliveries", task.getString("taskKey"),
+        "taskKey must be 'pendingSalesDeliveries' (singular) when count=1");
+    assertEquals("/goods-shipment?DocStatus=DR", task.getString("link"),
+        "link must be '/goods-shipment?DocStatus=DR'");
+    assertEquals("list", task.getJSONObject("navigation").getString("type"),
+        "navigation.type must be 'list'");
+  }
+
+  // ── addPendingSalesDeliveries: plural taskKey ─────────────────────────────
+
+  /**
+   * Verifies that for count=3 the task emitted by {@code addPendingSalesDeliveries}
+   * has taskKey="pendingSalesDeliveries_plural".
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void addPendingSalesDeliveriesPluralTaskKey() throws Exception {
+    mockAllQueriesEmpty();
+    when(mInoutQuery.uniqueResult()).thenReturn(3L);
+
+    NeoResponse response = handler.handle(getContext());
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    JSONObject task = findTaskByKey(data, "pendingSalesDeliveries_plural");
+
+    assertEquals("pendingSalesDeliveries_plural", task.getString("taskKey"),
+        "taskKey must be 'pendingSalesDeliveries_plural' (plural) when count=3");
+  }
+
   // ── Exception / error path ────────────────────────────────────────────────
 
   /**
