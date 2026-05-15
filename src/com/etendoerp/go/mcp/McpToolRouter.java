@@ -192,12 +192,11 @@ public class McpToolRouter {
       params.put(JsonConstants.SORTBY_PARAMETER, orderBy);
     }
 
-    // Apply filters as where clause
+    // Apply filters as structured criteria
     if (filters != null && filters.length() > 0) {
-      String whereClause = buildWhereFromFilters(filters, adTab);
-      if (StringUtils.isNotBlank(whereClause)) {
-        params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause);
-        params.put(JsonConstants.USE_ALIAS, "true");
+      String criteria = buildCriteriaFromFilters(filters, adTab);
+      if (StringUtils.isNotBlank(criteria)) {
+        params.put("criteria", criteria);
       }
     }
 
@@ -713,31 +712,56 @@ public class McpToolRouter {
   }
 
   /**
-   * Build an HQL where clause fragment from MCP filter key-value pairs.
+   * Build structured JSON criteria from MCP filter key-value pairs.
    * Filters are applied as exact-match conditions using the DAL property name.
    */
-  private String buildWhereFromFilters(JSONObject filters, Tab adTab) throws JSONException {
+  private String buildCriteriaFromFilters(JSONObject filters, Tab adTab) throws JSONException {
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
     if (dalEntity == null) {
       return null;
     }
 
-    StringBuilder where = new StringBuilder();
-    Iterator<String> keys = filters.keys();
-    while (keys.hasNext()) {
-      String key = keys.next();
-      String value = filters.getString(key);
-      appendFilterCondition(where, dalEntity, key, value);
-    }
-    return where.length() > 0 ? where.toString() : null;
+    return buildCriteriaPayload(filters, dalEntity);
   }
 
   /**
-   * Resolve a single filter key to a DAL property and append an HQL condition.
+   * Build structured JSON criteria from MCP filter key-value pairs using a resolved DAL entity.
+   *
+   * @param filters the user-provided MCP filters
+   * @param dalEntity the DAL entity used to resolve column/property names
+   * @return a JSON array string containing exact-match criteria, or {@code null} if none apply
+   * @throws JSONException if the filter payload cannot be read or the criteria cannot be built
    */
-  private void appendFilterCondition(StringBuilder where, Entity dalEntity,
-      String key, String value) {
+  private String buildCriteriaPayload(JSONObject filters, Entity dalEntity) throws JSONException {
+    JSONArray criteria = new JSONArray();
+    Iterator<String> keys = filters.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      Object value = filters.get(key);
+      if (JSONObject.NULL.equals(value)) {
+        continue;
+      }
+      appendFilterCondition(criteria, dalEntity, key, value);
+    }
+    return criteria.length() > 0 ? criteria.toString() : null;
+  }
+
+  /**
+   * Resolve a single filter key to a DAL property and append an exact-match criteria condition.
+   *
+   * <p>The lookup first tries the DB column name and then falls back to the DAL property name.
+   * Primitive properties use their DAL property name directly, while reference properties target
+   * the referenced {@code .id} field so values are matched by identifier.</p>
+   *
+   * @param criteria the criteria array being built
+   * @param dalEntity the DAL entity used to resolve the filter key
+   * @param key the user-provided filter key, as a column or DAL property name
+   * @param value the user-provided filter value to bind into the criteria payload
+   * @throws JSONException if the criteria object cannot be appended
+   */
+  private void appendFilterCondition(JSONArray criteria, Entity dalEntity, String key, Object value)
+      throws JSONException {
     Property prop = null;
     try {
       prop = dalEntity.getPropertyByColumnName(key);
@@ -754,15 +778,11 @@ public class McpToolRouter {
       return;
     }
 
-    if (where.length() > 0) {
-      where.append(" and ");
-    }
-    String escaped = value.replace("'", "''");
-    if (!prop.isPrimitive()) {
-      where.append("e.").append(prop.getName()).append(".id='").append(escaped).append("'");
-    } else {
-      where.append("e.").append(prop.getName()).append("='").append(escaped).append("'");
-    }
+    JSONObject criterion = new JSONObject();
+    criterion.put("fieldName", !prop.isPrimitive() ? prop.getName() + ".id" : prop.getName());
+    criterion.put("operator", "equals");
+    criterion.put("value", value);
+    criteria.put(criterion);
   }
 
   /**
