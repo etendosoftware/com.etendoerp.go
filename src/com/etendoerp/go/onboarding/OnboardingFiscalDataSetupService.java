@@ -16,8 +16,6 @@
  */
 package com.etendoerp.go.onboarding;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
@@ -32,8 +30,6 @@ import org.openbravo.module.sii.data.AEATSIIDescription;
  * Seeds SII descriptions for a newly created client.
  */
 public class OnboardingFiscalDataSetupService {
-
-  private static final Logger log = LogManager.getLogger(OnboardingFiscalDataSetupService.class);
 
   private static final String SII_VENTAS = "Ventas";
   private static final String SII_COMPRAS = "Compras";
@@ -102,7 +98,7 @@ public class OnboardingFiscalDataSetupService {
     criteria.setFilterOnReadableOrganization(false);
     criteria.add(Restrictions.eq(AEATSIIDescription.PROPERTY_CLIENT, client));
     String typeProperty = isSales
-        ? AEATSIIDescription.PROPERTY_SALES : AEATSIIDescription.PROPERTY_PURCHASE;
+        ? AEATSIIDescription.PROPERTY_ISSALES : AEATSIIDescription.PROPERTY_ISPURCHASE;
     criteria.add(Restrictions.eq(typeProperty, true));
     criteria.setMaxResults(1);
     return criteria.uniqueResult() != null;
