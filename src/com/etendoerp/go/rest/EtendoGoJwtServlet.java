@@ -53,6 +53,8 @@ import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingDefaultCustomerService;
+import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
+import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -103,12 +105,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_ORGANIZATION = "organization";
   private static final String PROGRESS_DATASET = "dataset";
   private static final String PROGRESS_SEQUENCES = "sequences";
+  private static final String PROGRESS_FISCAL = "fiscal";
+  private static final String PROGRESS_ORG_READY = "orgReady";
   private static final String PROGRESS_CUSTOMER = "customer";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
   OnboardingSequenceGeneratorService onboardingSequenceGeneratorService =
       new OnboardingSequenceGeneratorService();
+  OnboardingMarkOrgReadyService onboardingMarkOrgReadyService =
+      new OnboardingMarkOrgReadyService();
+  OnboardingFiscalDataSetupService onboardingFiscalDataSetupService =
+      new OnboardingFiscalDataSetupService();
   OnboardingDefaultCustomerService onboardingDefaultCustomerService =
       new OnboardingDefaultCustomerService();
 
@@ -728,6 +736,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!generateOnboardingSequences(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
+    if (!markOrgReady(writer, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
+    }
+    if (!setupFiscalData(writer, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
+    }
     return ensureDefaultCustomer(writer, clientId, orgId, adminUserId, adminRoleId);
   }
 
@@ -762,6 +776,40 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Organization sequence generation failed";
       sendProgress(writer, PROGRESS_SEQUENCES, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  boolean markOrgReady(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, PROGRESS_ORG_READY, PROGRESS_IN_PROGRESS,
+        "Marking organization as ready...");
+    try {
+      onboardingMarkOrgReadyService.markOrgReady(clientId, orgId, adminUserId, adminRoleId);
+      sendProgress(writer, PROGRESS_ORG_READY, "done", "Organization is ready");
+      return true;
+    } catch (Exception e) {
+      log.error("Error marking organization as ready", e);
+      String errorMessage = e.getMessage() != null ? e.getMessage() : "Mark org ready failed";
+      sendProgress(writer, PROGRESS_ORG_READY, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  boolean setupFiscalData(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, PROGRESS_FISCAL, PROGRESS_IN_PROGRESS,
+        "Setting up fiscal data...");
+    try {
+      onboardingFiscalDataSetupService.setup(clientId, orgId, adminUserId, adminRoleId);
+      sendProgress(writer, PROGRESS_FISCAL, "done", "Fiscal data ready");
+      return true;
+    } catch (Exception e) {
+      log.error("Error during fiscal data setup", e);
+      String errorMessage = e.getMessage() != null ? e.getMessage() : "Fiscal data setup failed";
+      sendProgress(writer, PROGRESS_FISCAL, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);
       return false;
     }
