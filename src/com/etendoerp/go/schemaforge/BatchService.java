@@ -131,6 +131,9 @@ public class BatchService {
    * {@link #handle(HttpServletRequest, HttpServletResponse)} (which would NPE)
    * and so future changes that need the servlet in the default path fail at
    * construction rather than at runtime.
+   *
+   * @return a {@link BatchService} wired without a servlet reference, usable
+   *         only via {@link #executeBatch(JSONArray)}
    */
   public static BatchService forBatchOnly() {
     return new BatchService((NeoServlet) null);
