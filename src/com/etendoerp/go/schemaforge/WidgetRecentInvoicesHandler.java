@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.Map;
 
 import javax.inject.Named;
 
@@ -26,33 +27,18 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
 
 /**
- * NeoHandler that returns recent completed sales invoices for the dashboard widget.
- * Queries sales invoices (c_invoice) joined with business partner, filtered to
- * completed statuses (CO, CL) within the last 7 days, ordered by invoice date
- * descending, limited to the latest 10 records.
+ * NeoHandler that returns the 5 most recent completed sales invoices for the requested date range.
+ * The limit matches the five rows rendered by {@code RecentSalesList} to avoid fetching
+ * unnecessary records. When no range is supplied it falls back to the last 30 days anchored
+ * to the most recent invoice date so demo/test databases with stale data still return results.
  */
 @Named("widgetRecentInvoicesHandler")
 public class WidgetRecentInvoicesHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(WidgetRecentInvoicesHandler.class);
-
-  private static final String RECENT_INVOICES_QUERY =
-      "SELECT i.c_invoice_id, bp.name AS client, "
-    + "to_char(i.dateinvoiced, 'DD-MM-YYYY') AS date, "
-    + "i.grandtotal AS amount, i.docstatus AS status, "
-    + "i.documentno AS documentno "
-    + "FROM c_invoice i "
-    + "JOIN c_bpartner bp ON bp.c_bpartner_id = i.c_bpartner_id "
-    + "WHERE i.issotrx = 'Y' AND i.ad_client_id = :clientId "
-    + "  AND i.docstatus IN ('CO','CL') "
-    + "  AND i.dateinvoiced >= CURRENT_DATE - CAST('7 days' AS interval) "
-    + "ORDER BY i.dateinvoiced DESC, i.created DESC "
-    + "LIMIT 10";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -60,40 +46,36 @@ public class WidgetRecentInvoicesHandler implements NeoHandler {
       return NeoResponse.error(405, "Method not allowed");
     }
 
+    WidgetQueryPolicyRegistry.WidgetQueryPolicy policy = WidgetQueryPolicyRegistry.recentInvoices();
     try {
       OBContext.setAdminMode(true);
       try {
         String clientId = OBContext.getOBContext().getCurrentClient().getId();
+        Map<String, String> params = context.getQueryParams();
+        String range = params != null ? params.get("range") : null;
+        List<Object[]> rows = WidgetQueryHelper.resolveQuery(policy.fallbackSql, policy.rangedSql, clientId, range);
 
-        @SuppressWarnings("unchecked")
-        NativeQuery<Object[]> query = OBDal.getInstance()
-            .getSession()
-            .createNativeQuery(RECENT_INVOICES_QUERY);
-        query.setParameter("clientId", clientId);
-
-        List<Object[]> rows = query.list();
-
+        // Columns: [0]=c_invoice_id, [1]=documentno, [2]=client, [3]=date, [4]=amount, [5]=status
         JSONArray data = new JSONArray();
-
         for (Object[] row : rows) {
+          String id = String.valueOf(row[0]);
+          JSONObject navigation = new JSONObject();
+          navigation.put("type", "record");
+          navigation.put("window", "sales-invoice");
+          navigation.put("recordId", id);
+
           JSONObject item = new JSONObject();
-          item.put("id", String.valueOf(row[0]));
-          item.put("client", String.valueOf(row[1]));
-          item.put("date", String.valueOf(row[2]));
-          item.put("amount", ((BigDecimal) row[3]).doubleValue());
-          item.put("status", String.valueOf(row[4]));
-          item.put("documentNo", String.valueOf(row[5] != null ? row[5] : ""));
+          item.put("id", id);
+          item.put("documentNo", row[1] != null ? String.valueOf(row[1]) : "");
+          item.put("client", row[2] != null ? String.valueOf(row[2]) : "");
+          item.put("date", row[3] != null ? String.valueOf(row[3]) : "");
+          item.put("amount", row[4] != null ? ((BigDecimal) row[4]).doubleValue() : 0);
+          item.put("status", row[5] != null ? String.valueOf(row[5]) : "");
+          item.put("navigation", navigation);
           data.put(item);
         }
 
-        JSONObject responseData = new JSONObject();
-        responseData.put("data", data);
-        responseData.put("count", data.length());
-
-        JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
-
-        return NeoResponse.ok(wrapper);
+        return WidgetQueryHelper.buildDataResponse(data);
       } finally {
         OBContext.restorePreviousMode();
       }
