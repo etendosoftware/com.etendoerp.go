@@ -98,6 +98,17 @@ public class OnboardingFiscalDataSetupServiceTest {
   }
 
   @Test
+  public void testSetupSkipsTbaiWhenTableNotInstalled() {
+    TestableService service = new TestableService();
+    service.tbaiTablePresent = false;
+
+    service.setup("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
+
+    assertEquals(2, service.siiSaveCount);
+    assertEquals(0, service.tbaiInsertCount);
+  }
+
+  @Test
   public void testSetupSkipsTbaiWhenAlreadyExists() {
     TestableService service = new TestableService();
     service.tbaiExists = true;
@@ -131,6 +142,7 @@ public class OnboardingFiscalDataSetupServiceTest {
 
     boolean siiExists;
     boolean tbaiExists;
+    boolean tbaiTablePresent = true;
     boolean failOnSii;
     boolean flushed;
     int siiSaveCount;
@@ -202,6 +214,11 @@ public class OnboardingFiscalDataSetupServiceTest {
         throw new OBException("sii-boom");
       }
       siiSaveCount++;
+    }
+
+    @Override
+    protected boolean tbaiTableExists() {
+      return tbaiTablePresent;
     }
 
     @Override

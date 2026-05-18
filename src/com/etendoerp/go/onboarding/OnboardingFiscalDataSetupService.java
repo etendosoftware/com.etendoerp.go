@@ -195,6 +195,10 @@ public class OnboardingFiscalDataSetupService {
   }
 
   protected void createTbaiDestinyConfigsIfAbsent(String clientId) {
+    if (!tbaiTableExists()) {
+      log.debug("TBAI_DESTINY_CONFIG table not found, skipping (module not installed)");
+      return;
+    }
     if (tbaiDestinyConfigsExist(clientId)) {
       log.debug("TBAI destiny configs already exist for client {}, skipping", clientId);
       return;
@@ -277,6 +281,19 @@ public class OnboardingFiscalDataSetupService {
     criteria.add(Restrictions.eq(AEATSIIDescription.PROPERTY_CLIENT, client));
     criteria.setMaxResults(1);
     return criteria.uniqueResult() != null;
+  }
+
+  protected boolean tbaiTableExists() {
+    String sql = "SELECT COUNT(*) FROM information_schema.tables WHERE LOWER(table_name) = LOWER(?)";
+    try (PreparedStatement ps = getConnection().prepareStatement(sql)) {
+      ps.setString(1, TBAI_TABLE);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() && rs.getLong(1) > 0;
+      }
+    } catch (Exception e) {
+      log.warn("Could not check TBAI_DESTINY_CONFIG table existence: {}", e.getMessage());
+      return false;
+    }
   }
 
   protected boolean tbaiDestinyConfigsExist(String clientId) {
