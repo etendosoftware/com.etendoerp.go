@@ -160,6 +160,53 @@ public class McpToolRouterTest {
     assertFalse(ToolRegistry.isCrudTool(""));
   }
 
+  /** Tests that neo_batch is treated as a CRUD tool so spec resolution is skipped. */
+  @Test
+  public void testNeoBatchIsCrudTool() {
+    assertTrue(ToolRegistry.isCrudTool("neo_batch"));
+  }
+
+  /**
+   * Tests that resolveSpecName returns null for neo_batch even with arguments —
+   * each operation carries its own spec, there is no top-level spec.
+   */
+  @Test
+  public void testResolveSpecNameForBatchTool() throws Exception {
+    JSONObject args = new JSONObject();
+    JSONArray ops = new JSONArray();
+    JSONObject op = new JSONObject();
+    op.put("id", "h");
+    op.put("spec", SPEC_SALES_ORDER);
+    op.put("entity", "Header");
+    ops.put(op);
+    args.put("operations", ops);
+
+    assertNull(ToolRegistry.resolveSpecName("neo_batch", args));
+  }
+
+  /**
+   * Tests that the router rejects neo_batch with missing/empty operations as an MCP
+   * error content block, without dispatching to BatchService (no DAL touched).
+   */
+  @Test
+  public void testHandleBatchEmptyOperationsReturnsError() throws Exception {
+    McpToolRouter router = new McpToolRouter();
+
+    JSONObject result1 = router.handleBatch(null);
+    assertTrue(result1.optBoolean("isError", false));
+    assertTrue(result1.getJSONArray(FIELD_CONTENT).getJSONObject(0)
+        .getString("text").toLowerCase().contains("operations"));
+
+    JSONObject empty = new JSONObject();
+    empty.put("operations", new JSONArray());
+    JSONObject result2 = router.handleBatch(empty);
+    assertTrue(result2.optBoolean("isError", false));
+
+    JSONObject missing = new JSONObject();
+    JSONObject result3 = router.handleBatch(missing);
+    assertTrue(result3.optBoolean("isError", false));
+  }
+
   // ── ToolRegistry.snakeToKebab ─────────────────────────────────────────
 
   /** Tests that snakeToKebab correctly converts underscores to hyphens. */

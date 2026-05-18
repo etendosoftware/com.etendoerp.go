@@ -21,6 +21,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 
 import org.junit.Test;
@@ -104,5 +105,45 @@ public class ToolRegistryTest {
     String str = tool.toString();
     assertTrue(str.contains("neo_get"));
     assertTrue(str.contains("Get record"));
+  }
+
+  /** Tests that neo_batch is recognised as a CRUD tool (so spec resolution is skipped). */
+  @Test
+  public void testNeoBatchIsCrudTool() {
+    assertTrue(ToolRegistry.isCrudTool("neo_batch"));
+  }
+
+  /**
+   * Tests the schema produced by buildBatchTool: required top-level 'operations' array,
+   * with each item requiring id/spec/entity and supporting optional parentRef/body.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBuildBatchToolSchema() {
+    McpToolDefinition tool = new ToolRegistry().buildBatchTool();
+
+    assertEquals("neo_batch", tool.getName());
+    assertNotNull(tool.getDescription());
+    assertTrue("Description must mention atomic transaction",
+        tool.getDescription().toLowerCase().contains("atomic"));
+
+    Map<String, Object> schema = tool.getInputSchema();
+    assertEquals("object", schema.get("type"));
+    assertEquals(List.of("operations"), schema.get("required"));
+
+    Map<String, Object> props = (Map<String, Object>) schema.get("properties");
+    Map<String, Object> opsSchema = (Map<String, Object>) props.get("operations");
+    assertEquals("array", opsSchema.get("type"));
+
+    Map<String, Object> item = (Map<String, Object>) opsSchema.get("items");
+    assertEquals("object", item.get("type"));
+    assertEquals(List.of("id", "spec", "entity"), item.get("required"));
+
+    Map<String, Object> itemProps = (Map<String, Object>) item.get("properties");
+    assertNotNull(itemProps.get("id"));
+    assertNotNull(itemProps.get("spec"));
+    assertNotNull(itemProps.get("entity"));
+    assertNotNull(itemProps.get("parentRef"));
+    assertNotNull(itemProps.get("body"));
   }
 }

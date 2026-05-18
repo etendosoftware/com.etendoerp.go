@@ -58,6 +58,8 @@ public class NeoServlet extends HttpBaseServlet {
       new NeoBuiltInEndpointHandler(this, discoveryHandler);
   final NeoButtonHandler buttonHandler = new NeoButtonHandler();
   final NeoDisplayLogicHandler displayLogicHandler = new NeoDisplayLogicHandler();
+  // Package-private so sibling collaborators (BatchService) can dispatch through
+  // the same default CRUD pipeline without going via HTTP.
   final NeoCrudHandler crudHandler = new NeoCrudHandler(this);
   final NeoAuthenticator authenticator = new NeoAuthenticator(this);
   private final NeoRequestRouter requestRouter = new NeoRequestRouter(this);
@@ -67,6 +69,7 @@ public class NeoServlet extends HttpBaseServlet {
   final NeoCalloutEndpoint calloutEndpoint = new NeoCalloutEndpoint(this);
   final NeoDefaultsEndpoint defaultsEndpoint = new NeoDefaultsEndpoint(this);
   final NeoProcessReportEndpoint processReportEndpoint = new NeoProcessReportEndpoint(this);
+  private final BatchService batchService = new BatchService(this);
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -122,6 +125,21 @@ public class NeoServlet extends HttpBaseServlet {
     try {
       OBContext.setAdminMode();
       if (builtInEndpointHandler.handle(pathInfo, method, request, response)) {
+        return;
+      }
+
+      // Generic transactional batch endpoint: POST /sws/neo/batch
+      //   Runs an ordered list of CRUD ops in one OBDal transaction with
+      //   $ref:<opId> substitution between ops. Same primitive is consumed by
+      //   the React UI (composite-document ingest) and external agents (MCP).
+      //   Find-or-create logic stays with the caller — no per-window server code.
+      if ("batch".equals(pathInfo.specName)) {
+        if (!"POST".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Batch endpoint only supports POST");
+          return;
+        }
+        batchService.handle(request, response);
         return;
       }
       requestRouter.handleSpecRequest(pathInfo, method, request, response);
