@@ -81,8 +81,10 @@ public class OnboardingMarkOrgReadyService {
           "AD_Org_Ready process not found — ensure Etendo core reference data is loaded");
     }
     try {
-      String roleId = OBContext.getOBContext().getRole().getId();
-      String language = OBContext.getOBContext().getLanguage().getLanguage();
+      String roleId = adminRoleId;
+      OBContext ctx = OBContext.getOBContext();
+      String language = (ctx != null && ctx.getLanguage() != null)
+          ? ctx.getLanguage().getLanguage() : "en_US";
       DalConnectionProvider conn = new DalConnectionProvider(false);
       VariablesSecureApp vars = new VariablesSecureApp(adminUserId, clientId, orgId, roleId,
           language);

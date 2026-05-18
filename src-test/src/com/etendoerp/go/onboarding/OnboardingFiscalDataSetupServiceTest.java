@@ -127,7 +127,7 @@ public class OnboardingFiscalDataSetupServiceTest {
     }
 
     @Override
-    protected Object captureCurrentContext() {
+    protected OBContext captureCurrentContext() {
       return OBContext.getOBContext();
     }
 
@@ -138,8 +138,8 @@ public class OnboardingFiscalDataSetupServiceTest {
     }
 
     @Override
-    protected void restoreExecutionContext(Object previousContext) {
-      OBContext.setOBContext((OBContext) previousContext);
+    protected void restoreExecutionContext(OBContext previousContext) {
+      OBContext.setOBContext(previousContext);
     }
 
     @Override
@@ -168,7 +168,7 @@ public class OnboardingFiscalDataSetupServiceTest {
     }
 
     @Override
-    protected boolean siiDescriptionsExist(Client client) {
+    protected boolean siiDescriptionExists(Client client, boolean isSales) {
       return siiExists;
     }
 

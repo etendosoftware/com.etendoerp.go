@@ -790,6 +790,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendProgress(writer, PROGRESS_ORG_READY, "done", "Organization is ready");
       return true;
     } catch (Exception e) {
+      log.error("Error marking organization as ready", e);
       String errorMessage = e.getMessage() != null ? e.getMessage() : "Mark org ready failed";
       sendProgress(writer, PROGRESS_ORG_READY, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);
@@ -806,6 +807,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendProgress(writer, PROGRESS_FISCAL, "done", "Fiscal data ready");
       return true;
     } catch (Exception e) {
+      log.error("Error during fiscal data setup", e);
       String errorMessage = e.getMessage() != null ? e.getMessage() : "Fiscal data setup failed";
       sendProgress(writer, PROGRESS_FISCAL, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);

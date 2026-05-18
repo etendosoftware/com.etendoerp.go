@@ -48,7 +48,7 @@ public class OnboardingFiscalDataSetupService {
    */
   public void setup(String clientId, String orgId, String adminUserId, String adminRoleId) {
     validateContext(clientId, orgId, adminUserId, adminRoleId);
-    Object previousContext = captureCurrentContext();
+    OBContext previousContext = captureCurrentContext();
     applyExecutionContext(adminUserId, adminRoleId, clientId, orgId);
     try {
       enterAdminMode();
@@ -72,12 +72,12 @@ public class OnboardingFiscalDataSetupService {
   }
 
   protected void createSiiDescriptionsIfAbsent(Client client, Organization org) {
-    if (siiDescriptionsExist(client)) {
-      log.debug("SII descriptions already exist for client {}, skipping", client.getId());
-      return;
+    if (!siiDescriptionExists(client, true)) {
+      saveSiiDescription(buildSiiDescription(client, org, SII_VENTAS, true, false));
     }
-    saveSiiDescription(buildSiiDescription(client, org, SII_VENTAS, true, false));
-    saveSiiDescription(buildSiiDescription(client, org, SII_COMPRAS, false, true));
+    if (!siiDescriptionExists(client, false)) {
+      saveSiiDescription(buildSiiDescription(client, org, SII_COMPRAS, false, true));
+    }
   }
 
   protected AEATSIIDescription buildSiiDescription(Client client, Organization org,
@@ -95,12 +95,15 @@ public class OnboardingFiscalDataSetupService {
     return desc;
   }
 
-  protected boolean siiDescriptionsExist(Client client) {
+  protected boolean siiDescriptionExists(Client client, boolean isSales) {
     OBCriteria<AEATSIIDescription> criteria = OBDal.getInstance()
         .createCriteria(AEATSIIDescription.class);
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
     criteria.add(Restrictions.eq(AEATSIIDescription.PROPERTY_CLIENT, client));
+    String typeProperty = isSales
+        ? AEATSIIDescription.PROPERTY_SALES : AEATSIIDescription.PROPERTY_PURCHASE;
+    criteria.add(Restrictions.eq(typeProperty, true));
     criteria.setMaxResults(1);
     return criteria.uniqueResult() != null;
   }
@@ -121,7 +124,7 @@ public class OnboardingFiscalDataSetupService {
     OBDal.getInstance().flush();
   }
 
-  protected Object captureCurrentContext() {
+  protected OBContext captureCurrentContext() {
     return OBContext.getOBContext();
   }
 
@@ -130,8 +133,8 @@ public class OnboardingFiscalDataSetupService {
     OBContext.setOBContext(adminUserId, adminRoleId, clientId, orgId);
   }
 
-  protected void restoreExecutionContext(Object previousContext) {
-    OBContext.setOBContext((OBContext) previousContext);
+  protected void restoreExecutionContext(OBContext previousContext) {
+    OBContext.setOBContext(previousContext);
   }
 
   protected void enterAdminMode() {
