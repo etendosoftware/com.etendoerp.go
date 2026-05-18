@@ -137,7 +137,7 @@ public class McpToolRouter {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
-      log.error("Error routing MCP tool '{}': {}", toolName, e.getMessage(), e);
+      log.error("Error routing MCP tool '{}'", toolName, e);
       return wrapAsErrorContent("Error executing " + toolName + ": " + e.getMessage());
     }
   }
@@ -589,8 +589,16 @@ public class McpToolRouter {
    * Delegates to {@link BatchService#executeBatch(JSONArray)} which owns the
    * OBDal transaction lifecycle and returns a JSONObject describing success
    * (committed) or failure (rolled back).
+   *
+   * <p>Package-private to keep the unit test free of reflection.</p>
+   *
+   * <p>OBDal session ownership: {@code BatchService} calls
+   * {@code commitAndClose()} / {@code rollbackAndClose()} on the shared session.
+   * That is safe here because {@link #route} performs no further DAL work after
+   * this method returns — the only remaining step is
+   * {@code OBContext.restorePreviousMode()} in the {@code finally} block.</p>
    */
-  private JSONObject handleBatch(JSONObject args) {
+  JSONObject handleBatch(JSONObject args) {
     if (args == null) {
       return wrapAsErrorContent("operations must be a non-empty array");
     }
@@ -599,10 +607,28 @@ public class McpToolRouter {
       return wrapAsErrorContent("operations must be a non-empty array");
     }
     try {
-      JSONObject result = new BatchService().executeBatch(operations);
+      // Per-spec access check: a single batch can mix specs from different
+      // windows, and the top-level authorizeSpecAccess(null) on neo_batch is a
+      // no-op. Authorise each distinct spec before any DAL work happens so an
+      // LLM agent cannot smuggle writes into a spec it lacks CRUD access to.
+      java.util.Set<String> seen = new java.util.HashSet<>();
+      for (int i = 0; i < operations.length(); i++) {
+        JSONObject op = operations.optJSONObject(i);
+        if (op == null) {
+          continue;
+        }
+        String specName = op.optString("spec", null);
+        if (StringUtils.isNotBlank(specName) && seen.add(specName)) {
+          authorizeSpecAccess(specName);
+        }
+      }
+      JSONObject result = BatchService.forBatchOnly().executeBatch(operations);
       return wrapAsTextContent(result.toString(2));
+    } catch (SecurityException e) {
+      log.warn("neo_batch access denied", e);
+      return wrapAsErrorContent(e.getMessage());
     } catch (Exception e) {
-      log.error("Error executing neo_batch: {}", e.getMessage(), e);
+      log.error("Error executing neo_batch", e);
       return wrapAsErrorContent("Error executing neo_batch: " + e.getMessage());
     }
   }
@@ -673,7 +699,7 @@ public class McpToolRouter {
 
       return wrapAsTextContent(reportResult.toString());
     } catch (Exception e) {
-      log.error("Error generating report '{}': {}", specName, e.getMessage(), e);
+      log.error("Error generating report '{}'", specName, e);
       // Fall back to describe
       NeoResponse describeResponse = NeoReportService.describeReport(adProcess);
       JSONObject fallback = new JSONObject();

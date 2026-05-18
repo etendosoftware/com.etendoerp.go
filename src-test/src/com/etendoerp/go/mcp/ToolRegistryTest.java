@@ -20,7 +20,6 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
-import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -117,14 +116,11 @@ public class ToolRegistryTest {
   /**
    * Tests the schema produced by buildBatchTool: required top-level 'operations' array,
    * with each item requiring id/spec/entity and supporting optional parentRef/body.
-   * Reflection is used because buildBatchTool is private (no DAL needed).
    */
   @Test
   @SuppressWarnings("unchecked")
-  public void testBuildBatchToolSchema() throws Exception {
-    Method m = ToolRegistry.class.getDeclaredMethod("buildBatchTool");
-    m.setAccessible(true);
-    McpToolDefinition tool = (McpToolDefinition) m.invoke(new ToolRegistry());
+  public void testBuildBatchToolSchema() {
+    McpToolDefinition tool = new ToolRegistry().buildBatchTool();
 
     assertEquals("neo_batch", tool.getName());
     assertNotNull(tool.getDescription());

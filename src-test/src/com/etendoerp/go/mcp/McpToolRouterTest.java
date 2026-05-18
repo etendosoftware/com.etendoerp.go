@@ -192,26 +192,19 @@ public class McpToolRouterTest {
   public void testHandleBatchEmptyOperationsReturnsError() throws Exception {
     McpToolRouter router = new McpToolRouter();
 
-    JSONObject result1 = invokeHandleBatch(router, null);
+    JSONObject result1 = router.handleBatch(null);
     assertTrue(result1.optBoolean("isError", false));
     assertTrue(result1.getJSONArray(FIELD_CONTENT).getJSONObject(0)
         .getString("text").toLowerCase().contains("operations"));
 
     JSONObject empty = new JSONObject();
     empty.put("operations", new JSONArray());
-    JSONObject result2 = invokeHandleBatch(router, empty);
+    JSONObject result2 = router.handleBatch(empty);
     assertTrue(result2.optBoolean("isError", false));
 
     JSONObject missing = new JSONObject();
-    JSONObject result3 = invokeHandleBatch(router, missing);
+    JSONObject result3 = router.handleBatch(missing);
     assertTrue(result3.optBoolean("isError", false));
-  }
-
-  private JSONObject invokeHandleBatch(McpToolRouter router, JSONObject args) throws Exception {
-    java.lang.reflect.Method m = McpToolRouter.class.getDeclaredMethod("handleBatch",
-        JSONObject.class);
-    m.setAccessible(true);
-    return (JSONObject) m.invoke(router, args);
   }
 
   // ── ToolRegistry.snakeToKebab ─────────────────────────────────────────

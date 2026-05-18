@@ -120,19 +120,20 @@ public class BatchService {
    */
   BatchService(NeoServlet servlet) {
     this.servlet = servlet;
-    this.crudHandler = servlet.crudHandler;
+    this.crudHandler = servlet != null ? servlet.crudHandler : new NeoCrudHandler(null);
   }
 
   /**
-   * No-arg constructor for non-HTTP callers (the MCP layer). The default-CRUD
-   * pipeline ({@link NeoCrudHandler#handleDefault(NeoContext)}) does not use
-   * its servlet reference, so passing {@code null} is safe — only the hooked
-   * dispatch path ({@code handleWithHooks}) requires the servlet, and the
-   * batch endpoint deliberately bypasses hooks.
+   * Factory for non-HTTP callers (the MCP layer). The batch endpoint dispatches
+   * exclusively through {@link NeoCrudHandler#handleDefault(NeoContext)}, which
+   * does not touch the owning servlet — only {@code handleWithHooks} does. This
+   * factory makes that contract explicit so callers cannot accidentally invoke
+   * {@link #handle(HttpServletRequest, HttpServletResponse)} (which would NPE)
+   * and so future changes that need the servlet in the default path fail at
+   * construction rather than at runtime.
    */
-  public BatchService() {
-    this.servlet = null;
-    this.crudHandler = new NeoCrudHandler(null);
+  public static BatchService forBatchOnly() {
+    return new BatchService((NeoServlet) null);
   }
 
   /**
@@ -213,7 +214,7 @@ public class BatchService {
 
     Map<String, String> resolvedIds = new HashMap<>();
     JSONArray opResults = new JSONArray();
-    boolean committed = false;
+    boolean commitAttempted = false;
     try {
       for (int i = 0; i < operations.length(); i++) {
         JSONObject failure = processOperation(i, operations.optJSONObject(i), resolvedIds, opResults);
@@ -222,8 +223,10 @@ public class BatchService {
           return failure;
         }
       }
+      // Mark before the call: commitAndClose closes the session even on failure,
+      // so a subsequent rollbackQuietly would log a misleading "no session" error.
+      commitAttempted = true;
       OBDal.getInstance().commitAndClose();
-      committed = true;
       log.info("[BATCH] committed {} operation(s)", opResults.length());
       JSONObject ok = new JSONObject();
       ok.put(FIELD_COMMITTED, true);
@@ -231,7 +234,7 @@ public class BatchService {
       return ok;
     } catch (Exception e) {
       log.error("[BATCH] unexpected failure", e);
-      if (!committed) {
+      if (!commitAttempted) {
         rollbackQuietly();
       }
       return failureBody(-1, null, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -448,7 +451,10 @@ public class BatchService {
           "No AD_Tab linked to entity: " + entityName);
     }
 
-    if (parentId != null) {
+    // Only inject when the body does not already carry an explicit parentId.
+    // resolveParentId already honours that explicit value, so this guard keeps
+    // body precedence even if the resolver semantics change later.
+    if (parentId != null && !body.has(FIELD_PARENT_ID)) {
       try {
         body.put(FIELD_PARENT_ID, parentId);
       } catch (JSONException e) {

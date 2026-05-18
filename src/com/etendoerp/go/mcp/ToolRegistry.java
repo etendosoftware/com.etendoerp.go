@@ -328,7 +328,7 @@ public class ToolRegistry {
    * each operation in the batch carries its own {@code spec}, so this tool is
    * registered once with no top-level enum.
    */
-  private McpToolDefinition buildBatchTool() {
+  McpToolDefinition buildBatchTool() {
     Map<String, Object> opProps = new LinkedHashMap<>();
     Map<String, Object> idProp = new LinkedHashMap<>();
     idProp.put("type", McpConstants.TYPE_STRING);
