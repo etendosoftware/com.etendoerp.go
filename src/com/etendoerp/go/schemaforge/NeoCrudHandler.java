@@ -538,7 +538,7 @@ class NeoCrudHandler {
     NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields,
         effectiveProtected);
     long t1 = System.nanoTime();
-    DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
+    DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context, effectiveProtected);
     NeoDefaultsCascadeHelper.removeEmptyFkValues(filteredBody, adTab);
     long t2 = System.nanoTime();
     log.info(

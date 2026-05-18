@@ -2,6 +2,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -35,11 +36,18 @@ public class DocTypeResolver {
    * (e.g., a wrong default coming from session). This method queries the canonical
    * default doctype for the tab and forces it back into the body.
    *
-   * @param body  the JSON request body (modified in place)
-   * @param adTab the AD_Tab containing doctype column info
-   * @param ctx   the NeoContext with spec/entity info for doctype resolution
+   * <p>If {@code clientSubmittedFields} contains the DAL property name for
+   * {@code C_DocTypeTarget_ID}, the reapplication is skipped — the user explicitly chose a
+   * document type and their selection must be preserved (callouts are already blocked from
+   * overriding it via the same set).
+   *
+   * @param body                 the JSON request body (modified in place)
+   * @param adTab                the AD_Tab containing doctype column info
+   * @param ctx                  the NeoContext with spec/entity info for doctype resolution
+   * @param clientSubmittedFields DAL property names the client explicitly sent; null = no skip
    */
-  public static void reapplyDocTypeFromTabFilter(JSONObject body, Tab adTab, NeoContext ctx) {
+  public static void reapplyDocTypeFromTabFilter(JSONObject body, Tab adTab, NeoContext ctx,
+      Set<String> clientSubmittedFields) {
     if (body == null || adTab == null || ctx == null) {
       return;
     }
@@ -48,6 +56,18 @@ public class DocTypeResolver {
       if (docTypeTargetCol == null) {
         return;
       }
+      if (clientSubmittedFields != null && !clientSubmittedFields.isEmpty()) {
+        Entity dalEntity = ModelProvider.getInstance()
+            .getEntityByTableId(adTab.getTable().getId());
+        if (dalEntity != null) {
+          Property targetProp = dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID");
+          if (targetProp != null && clientSubmittedFields.contains(targetProp.getName())) {
+            log.debug("Skipping doctype reapply — client explicitly submitted {}={}",
+                targetProp.getName(), body.optString(targetProp.getName()));
+            return;
+          }
+        }
+      }
       String correctId = resolveDefaultDocTypeId(docTypeTargetCol, ctx);
       if (correctId != null) {
         applyDocTypeToBody(body, adTab, correctId);
@@ -55,6 +75,11 @@ public class DocTypeResolver {
     } catch (Exception e) {
       log.debug("Error reapplying doctype: {}", e.getMessage());
     }
+  }
+
+  /** Overload for callers without client-fields context — existing behavior preserved. */
+  public static void reapplyDocTypeFromTabFilter(JSONObject body, Tab adTab, NeoContext ctx) {
+    reapplyDocTypeFromTabFilter(body, adTab, ctx, null);
   }
 
   /**
