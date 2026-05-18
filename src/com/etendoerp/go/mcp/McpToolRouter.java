@@ -41,7 +41,6 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
-import org.openbravo.model.ad.ui.Window;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
@@ -447,6 +446,12 @@ public class McpToolRouter {
    * Query FK selector values for a column.
    * Resolves the AD_Column from the dictionary (AD_Tab → AD_Table → AD_Column),
    * bypassing ETGO_SF_FIELD so all FK columns are queryable — not just included ones.
+   *
+   * Supports optional recordContext for dependent selectors:
+   * - partnerAddress: { "businessPartner": "..." }
+   * - priceList: { "isSOTrx": "Y" } (auto-derived from window category if omitted)
+   * - tax: { "invoiceDate": "2026-05-12", "priceList": "..." }
+   * Also supports parentContext for child selectors that depend on header values.
    */
   private JSONObject handleSelectors(String specName, JSONObject args) throws Exception {
     validateArgs(args, McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN);
@@ -468,21 +473,29 @@ public class McpToolRouter {
       throw new IllegalArgumentException("Column not found in table: " + columnName);
     }
 
-    NeoResponse neoResponse = NeoSelectorService.querySelectorByColumn(
-        adColumn, columnName, query, 50, 0, new HashMap<>());
+    // Build contextParams from recordContext and window category
+    Map<String, String> contextParams = McpSelectorContextHelper.buildSelectorContextParams(
+        args, adTab);
 
-    return neoResponseToMcpResult(neoResponse);
+    NeoResponse neoResponse = NeoSelectorService.querySelectorByColumn(
+        adColumn, columnName, query, 50, 0, contextParams);
+
+    NeoResponse response = McpSelectorContextHelper.withDiagnostics(
+        neoResponse, columnName, contextParams);
+    return neoResponseToMcpResult(response);
   }
 
   // ── neo_defaults ──────────────────────────────────────────────────────
 
   /**
    * Get default field values for creating a new record.
+   * Supports optional parentId for child entity defaults.
    */
   private JSONObject handleDefaults(String specName, JSONObject args) throws Exception {
     validateArgs(args, McpConstants.PARAM_ENTITY);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
+    String parentId = args.optString(McpConstants.PARAM_PARENT_ID, null);
 
     SFSpec spec = findSpecOrThrow(specName);
     SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
@@ -497,7 +510,7 @@ public class McpToolRouter {
         .obContext(OBContext.getOBContext())
         .build();
 
-    NeoResponse neoResponse = NeoDefaultsService.resolveDefaults(ctx, null);
+    NeoResponse neoResponse = NeoDefaultsService.resolveDefaults(ctx, parentId);
     return neoResponseToMcpResult(neoResponse);
   }
 

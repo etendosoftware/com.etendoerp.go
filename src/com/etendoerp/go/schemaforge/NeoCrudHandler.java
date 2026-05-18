@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -493,7 +494,8 @@ class NeoCrudHandler {
     // resolution chain (defaults + session + parent + callout cascade). Throw a structured
     // exception so the UI can highlight the missing fields instead of letting Hibernate fail
     // with a generic not-null violation.
-    List<String> missing = NeoDefaultsService.findMissingMandatoryFields(filteredBody, adTab, userSubmittedFields);
+    List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(filteredBody,
+        adTab, userSubmittedFields);
     if (!missing.isEmpty()) {
       throw new MissingRequiredFieldsException(missing);
     }
@@ -694,54 +696,60 @@ class NeoCrudHandler {
     if (parentRecord == null) {
       return parentId;
     }
-    String tokenLower = token.toLowerCase();
+    String tokenLower = token.toLowerCase(Locale.ROOT);
 
-    // Organization ID
     if ("ad_org_id".equals(tokenLower) || "org_id".equals(tokenLower)) {
-      try {
-        Object org = parentRecord.get("organization");
-        if (org instanceof BaseOBObject) {
-          return ((BaseOBObject) org).getId().toString();
-        }
-      } catch (Exception ignored) {}
-      return parentId;
+      return resolveRelatedObjectId(parentRecord, "organization", parentId);
     }
 
-    // Client ID
     if ("ad_client_id".equals(tokenLower) || "client_id".equals(tokenLower)) {
-      try {
-        Object client = parentRecord.get("client");
-        if (client instanceof BaseOBObject) {
-          return ((BaseOBObject) client).getId().toString();
-        }
-      } catch (Exception ignored) {}
-      return parentId;
+      return resolveRelatedObjectId(parentRecord, "client", parentId);
     }
 
-    // Primary key: <tableName>_id → parentId itself
     if (parentTableName != null && tokenLower.equals(parentTableName + "_id")) {
       return parentId;
     }
 
-    // Generic: find a property whose column name matches the token
     if (parentEntity != null) {
-      try {
-        for (Property prop : parentEntity.getProperties()) {
-          if (prop.getColumnName() != null && prop.getColumnName().equalsIgnoreCase(token)) {
-            Object val = parentRecord.get(prop.getName());
-            if (val instanceof BaseOBObject) {
-              return ((BaseOBObject) val).getId().toString();
-            }
-            if (val != null) {
-              return val.toString();
-            }
-            return "";
-          }
-        }
-      } catch (Exception ignored) {}
+      String entityValue = resolveTokenFromEntityProperty(token, parentRecord, parentEntity);
+      return entityValue != null ? entityValue : parentId;
     }
 
     return parentId;
+  }
+
+  private String resolveRelatedObjectId(BaseOBObject parentRecord, String propertyName,
+      String fallbackValue) {
+    try {
+      Object relatedObject = parentRecord.get(propertyName);
+      if (relatedObject instanceof BaseOBObject) {
+        return ((BaseOBObject) relatedObject).getId().toString();
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve parent {} token", propertyName, e);
+    }
+    return fallbackValue;
+  }
+
+  private String resolveTokenFromEntityProperty(String token, BaseOBObject parentRecord,
+      Entity parentEntity) {
+    try {
+      for (Property prop : parentEntity.getProperties()) {
+        if (prop.getColumnName() != null && prop.getColumnName().equalsIgnoreCase(token)) {
+          return stringifyParentValue(parentRecord.get(prop.getName()));
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve parent token {}", token, e);
+    }
+    return null;
+  }
+
+  private String stringifyParentValue(Object value) {
+    if (value instanceof BaseOBObject) {
+      return ((BaseOBObject) value).getId().toString();
+    }
+    return value != null ? value.toString() : "";
   }
 
   /**
