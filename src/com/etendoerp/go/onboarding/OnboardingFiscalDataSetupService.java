@@ -21,11 +21,11 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
-import java.util.UUID;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.erpCommon.utility.SequenceIdData;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
@@ -225,7 +225,7 @@ public class OnboardingFiscalDataSetupService {
   }
 
   private void insertTbaiDestinyConfigRow(Connection conn, String clientId, Territory t) {
-    String id = UUID.randomUUID().toString().replace("-", "").toUpperCase();
+    String id = SequenceIdData.getUUID();
     Timestamp now = Timestamp.from(Instant.now());
     String sql = "INSERT INTO TBAI_DESTINY_CONFIG ("
         + "TBAI_DESTINY_CONFIG_ID, AD_CLIENT_ID, AD_ORG_ID, ISACTIVE, CREATED, CREATEDBY, UPDATED, UPDATEDBY, "
