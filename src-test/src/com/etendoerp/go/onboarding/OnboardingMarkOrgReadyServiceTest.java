@@ -20,6 +20,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.junit.Test;
@@ -83,7 +84,7 @@ public class OnboardingMarkOrgReadyServiceTest {
     service.markOrgReady("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
 
     assertEquals(1, service.saveCount);
-    assertTrue("Org must be set ready defensively", service.savedOrg.isReady());
+    verify(service.savedOrg).setReady(true);
     assertTrue("Must flush after defensive set", service.flushCount >= 2);
   }
 
