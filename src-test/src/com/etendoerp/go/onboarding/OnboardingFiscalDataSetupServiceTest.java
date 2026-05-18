@@ -76,13 +76,12 @@ public class OnboardingFiscalDataSetupServiceTest {
   }
 
   @Test
-  public void testSetupCreatesBothSiiAndTbaiWhenAbsent() {
+  public void testSetupCreatesSiiDescriptionsWhenAbsent() {
     TestableService service = new TestableService();
 
     service.setup("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
 
     assertEquals(2, service.siiSaveCount);
-    assertEquals(1, service.tbaiInsertCount);
     assertTrue(service.flushed);
   }
 
@@ -94,29 +93,6 @@ public class OnboardingFiscalDataSetupServiceTest {
     service.setup("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
 
     assertEquals(0, service.siiSaveCount);
-    assertEquals(1, service.tbaiInsertCount);
-  }
-
-  @Test
-  public void testSetupSkipsTbaiWhenTableNotInstalled() {
-    TestableService service = new TestableService();
-    service.tbaiTablePresent = false;
-
-    service.setup("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
-
-    assertEquals(2, service.siiSaveCount);
-    assertEquals(0, service.tbaiInsertCount);
-  }
-
-  @Test
-  public void testSetupSkipsTbaiWhenAlreadyExists() {
-    TestableService service = new TestableService();
-    service.tbaiExists = true;
-
-    service.setup("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
-
-    assertEquals(2, service.siiSaveCount);
-    assertEquals(0, service.tbaiInsertCount);
   }
 
   @Test
@@ -141,12 +117,9 @@ public class OnboardingFiscalDataSetupServiceTest {
     private final Organization organization = mock(Organization.class);
 
     boolean siiExists;
-    boolean tbaiExists;
-    boolean tbaiTablePresent = true;
     boolean failOnSii;
     boolean flushed;
     int siiSaveCount;
-    int tbaiInsertCount;
 
     private TestableService() {
       when(client.getId()).thenReturn("CLIENT-1");
@@ -214,21 +187,6 @@ public class OnboardingFiscalDataSetupServiceTest {
         throw new OBException("sii-boom");
       }
       siiSaveCount++;
-    }
-
-    @Override
-    protected boolean tbaiTableExists() {
-      return tbaiTablePresent;
-    }
-
-    @Override
-    protected boolean tbaiDestinyConfigsExist(String clientId) {
-      return tbaiExists;
-    }
-
-    @Override
-    protected void insertTbaiDestinyConfigs(String clientId) {
-      tbaiInsertCount++;
     }
   }
 }
