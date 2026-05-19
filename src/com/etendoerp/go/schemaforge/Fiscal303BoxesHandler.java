@@ -121,6 +121,17 @@ class Fiscal303BoxesHandler {
     b.put(45, round(deductible));
     b.put(46, round(accrued.subtract(deductible)));
 
+    // resultado_final — standard company (100 % Estado, no pending credits, no complementary)
+    BigDecimal r46 = b.getOrDefault(46, BigDecimal.ZERO);
+    b.put(66, r46);   // amount attributable to Estado (box 65 % × box 46)
+    b.put(69, r46);   // result before final adjustments (assumes boxes 64/76/77/78/68/108 = 0)
+    b.put(71, r46);   // final declaration result (assumes boxes 70/109 = 0)
+    // volume of operations — intracom and export mirrors
+    BigDecimal r59 = b.getOrDefault(59, BigDecimal.ZERO);
+    BigDecimal r60 = b.getOrDefault(60, BigDecimal.ZERO);
+    if (r59.compareTo(BigDecimal.ZERO) > 0) b.put(93, r59);
+    if (r60.compareTo(BigDecimal.ZERO) > 0) b.put(94, r60);
+
     List<Map<String, Object>> sources = collectSources(org, periods, dao303, rateToBoxes);
 
     return new ComputeResult(b, sources);
