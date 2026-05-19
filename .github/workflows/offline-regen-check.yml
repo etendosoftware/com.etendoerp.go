@@ -47,8 +47,9 @@ jobs:
           echo "GIT_BRANCH=$GIT_BRANCH" >> "$GITHUB_OUTPUT"
 
           case "$GIT_BRANCH" in
-            hotfix/*) FALLBACK="$MAIN_BRANCH" ;;
-            *)        FALLBACK="$DEVELOP_BRANCH" ;;
+            hotfix/*)  FALLBACK="$MAIN_BRANCH" ;;
+            feature/*) FALLBACK="epic/ETP-3504" ;;
+            *)         FALLBACK="$DEVELOP_BRANCH" ;;
           esac
           echo "FALLBACK=$FALLBACK" >> "$GITHUB_OUTPUT"
           echo "Resolved GIT_BRANCH=$GIT_BRANCH fallback=$FALLBACK"
