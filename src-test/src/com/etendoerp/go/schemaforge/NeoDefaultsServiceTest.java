@@ -307,6 +307,14 @@ public class NeoDefaultsServiceTest {
       assertEquals(200, response.getHttpStatus());
       assertFalse(response.getBody().getJSONObject("defaults").has("rejectReason"));
       selectorMock.verify(() -> NeoSelectorService.getBaseReferenceId(adColumn), never());
+      selectorMock.verify(() -> NeoSelectorService.hasObuiselSelector(adColumn), never());
+      selectorMock.verify(() -> NeoSelectorService.querySelectorByColumn(
+          adColumn,
+          "C_Reject_Reason_ID",
+          null,
+          1,
+          0,
+          Collections.emptyMap()), never());
       verify(vars).setSessionValue(eq("#Date"), any(String.class));
       verify(dal, never()).get(eq(Organization.class), any(String.class));
     }
