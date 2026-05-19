@@ -535,19 +535,39 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   protected void copyLineDiscountsFromOrder(Invoice invoice) {
     boolean dirty = false;
     for (InvoiceLine il : invoice.getInvoiceLineList()) {
-      OrderLine ol = il.getSalesOrderLine();
-      if (ol == null) continue;
-      BigDecimal srcDiscount = ol.getDiscount();
-      if (srcDiscount == null || srcDiscount.compareTo(BigDecimal.ZERO) == 0) continue;
-      BigDecimal current = il.getEtgoDiscount();
-      if (current != null && current.compareTo(BigDecimal.ZERO) != 0) continue;
-      il.setEtgoDiscount(srcDiscount);
-      OBDal.getInstance().save(il);
-      dirty = true;
+      BigDecimal srcDiscount = resolveCopyableSourceDiscount(il);
+      if (srcDiscount != null) {
+        il.setEtgoDiscount(srcDiscount);
+        OBDal.getInstance().save(il);
+        dirty = true;
+      }
     }
     if (dirty) {
       OBDal.getInstance().flush();
     }
+  }
+
+  /**
+   * Returns the source {@link OrderLine#getDiscount()} value that should be copied
+   * into the given invoice line's {@code EM_Etgo_Discount} field, or {@code null}
+   * when the copy should be skipped. The copy is skipped when there is no source
+   * order line, the source carries no discount, or the invoice line already has a
+   * non-zero discount value (set explicitly elsewhere).
+   */
+  private BigDecimal resolveCopyableSourceDiscount(InvoiceLine il) {
+    OrderLine ol = il.getSalesOrderLine();
+    if (ol == null) {
+      return null;
+    }
+    BigDecimal srcDiscount = ol.getDiscount();
+    if (srcDiscount == null || srcDiscount.compareTo(BigDecimal.ZERO) == 0) {
+      return null;
+    }
+    BigDecimal current = il.getEtgoDiscount();
+    if (current != null && current.compareTo(BigDecimal.ZERO) != 0) {
+      return null;
+    }
+    return srcDiscount;
   }
 
   /**
@@ -633,31 +653,47 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     // InvoiceTax row produced by CreateInvoiceLinesFromProcess (rare).
     long nextLineNo = (long) (invoice.getInvoiceTaxList().size() + 1) * 10L;
     for (Map.Entry<String, BigDecimal> entry : netByTax.entrySet()) {
-      if (handledTaxIds.contains(entry.getKey())) continue;
-      TaxRate tax = OBDal.getInstance().get(TaxRate.class, entry.getKey());
-      if (tax == null || Boolean.TRUE.equals(tax.isSummaryLevel())) continue;
-      BigDecimal taxBase = entry.getValue().setScale(precision, RoundingMode.HALF_UP);
-      BigDecimal rate = tax.getRate() != null ? tax.getRate() : BigDecimal.ZERO;
-      BigDecimal taxAmt = taxBase.multiply(rate)
-          .divide(new BigDecimal("100"), precision, RoundingMode.HALF_UP);
-      InvoiceTax it = OBProvider.getInstance().get(InvoiceTax.class);
-      it.setClient(invoice.getClient());
-      it.setOrganization(invoice.getOrganization());
-      it.setInvoice(invoice);
-      it.setTax(tax);
-      it.setLineNo(nextLineNo);
-      it.setTaxableAmount(taxBase);
-      it.setTaxAmount(taxAmt);
-      it.setRecalculate(false);
-      OBDal.getInstance().save(it);
-      totalTax = totalTax.add(taxAmt);
-      nextLineNo += 10;
+      TaxRate tax = resolveMissingInvoiceTax(entry.getKey(), handledTaxIds);
+      if (tax != null) {
+        BigDecimal taxBase = entry.getValue().setScale(precision, RoundingMode.HALF_UP);
+        BigDecimal rate = tax.getRate() != null ? tax.getRate() : BigDecimal.ZERO;
+        BigDecimal taxAmt = taxBase.multiply(rate)
+            .divide(new BigDecimal("100"), precision, RoundingMode.HALF_UP);
+        InvoiceTax it = OBProvider.getInstance().get(InvoiceTax.class);
+        it.setClient(invoice.getClient());
+        it.setOrganization(invoice.getOrganization());
+        it.setInvoice(invoice);
+        it.setTax(tax);
+        it.setLineNo(nextLineNo);
+        it.setTaxableAmount(taxBase);
+        it.setTaxAmount(taxAmt);
+        it.setRecalculate(false);
+        OBDal.getInstance().save(it);
+        totalTax = totalTax.add(taxAmt);
+        nextLineNo += 10;
+      }
     }
 
     invoice.setSummedLineAmount(totalNet.setScale(precision, RoundingMode.HALF_UP));
     invoice.setGrandTotalAmount(totalNet.add(totalTax).setScale(precision, RoundingMode.HALF_UP));
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
+  }
+
+  /**
+   * Returns the {@link TaxRate} for which a new {@link InvoiceTax} row should be
+   * created, or {@code null} when the tax group is already covered by an existing
+   * row or does not represent a real (non-summary) tax.
+   */
+  private TaxRate resolveMissingInvoiceTax(String taxId, Set<String> handledTaxIds) {
+    if (handledTaxIds.contains(taxId)) {
+      return null;
+    }
+    TaxRate tax = OBDal.getInstance().get(TaxRate.class, taxId);
+    if (tax == null || Boolean.TRUE.equals(tax.isSummaryLevel())) {
+      return null;
+    }
+    return tax;
   }
 
   /**
