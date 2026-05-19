@@ -47,8 +47,9 @@ import org.openbravo.dal.service.OBDal;
 public class GoodsShipmentLineHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(GoodsShipmentLineHandler.class);
-  private static final String FIELD_ORDER_LINE_QTY = "orderLineQty";
-  private static final String FIELD_PRODUCT_CODE   = "productCode";
+  private static final String FIELD_ORDER_LINE_QTY  = "orderLineQty";
+  private static final String FIELD_ORDER_QUANTITY  = "orderQuantity";
+  private static final String FIELD_PRODUCT_CODE    = "productCode";
 
   private static final class LineData {
     final BigDecimal orderedQty;
@@ -102,6 +103,7 @@ public class GoodsShipmentLineHandler implements NeoHandler {
         }
         if (ld.orderedQty != null) {
           line.put(FIELD_ORDER_LINE_QTY, ld.orderedQty);
+          line.put(FIELD_ORDER_QUANTITY, ld.orderedQty);
         }
         if (ld.productCode != null && !ld.productCode.isEmpty()) {
           line.put(FIELD_PRODUCT_CODE, ld.productCode);
