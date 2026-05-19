@@ -340,13 +340,15 @@ class Fiscal303BoxesHandler {
 
   private void fillAdditionalInfoBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
       AEAT303Report2014Dao dao303, TaxReport taxReport, Map<String, List<Integer>> rateToBoxes) {
-    // Box 59: intra-community deliveries exempt (Información adicional)
+    // "Additional_Information" group only exists in monthly reports; quarterly reports use "Difference".
+    // "Difference" is present in all reports and carries the same tax rates, so use it universally.
+    // Box 59: intra-community deliveries (entregas intracomunitarias exentas)
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "Additional_Information", "303SALES_EU_EXEMPT",
+        "Difference", "IntracommunitySales",
         "All", "All", "All", 59, 0, rateToBoxes);
     // Box 60: exports and other exempt operations with deduction right
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "Additional_Information", "303EXPORTS_OTHEREXEMPT",
+        "Difference", "ExportsAndOperations",
         "All", "All", "All", 60, 0, rateToBoxes);
   }
 
