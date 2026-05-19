@@ -27,6 +27,8 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
+import com.smf.securewebservices.SWSConfig;
 
 /**
  * NEO Headless 2.0 servlet.
@@ -97,13 +99,19 @@ public class NeoServlet extends HttpBaseServlet {
         super.service(request, response);
       } catch (Exception e) {
         log.error("Error in NeoServlet.service", e);
-        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
       }
     }
   }
 
   private void processRequest(HttpServletRequest request, HttpServletResponse response,
       String method) throws IOException {
+    // Readiness probe: no auth required, used by ALB health check
+    if ("GET".equals(method) && "/health/ready".equals(request.getPathInfo())) {
+      handleReadinessCheck(response);
+      return;
+    }
+
     if (!authenticator.authenticateRequest(request, response)) {
       return;
     }
@@ -121,7 +129,7 @@ public class NeoServlet extends HttpBaseServlet {
       requestRouter.handleSpecRequest(pathInfo, method, request, response);
     } catch (Exception e) {
       log.error("Error processing NEO request: {}", e.getMessage(), e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -241,6 +249,32 @@ public class NeoServlet extends HttpBaseServlet {
       response.getWriter().write(neoResponse.getBody().toString());
     }
   }
+
+
+  private void handleReadinessCheck(HttpServletResponse response) throws IOException {
+    boolean ready = false;
+    try {
+      OBContext.setAdminMode();
+      OBDal.getInstance().getSession()
+          .createNativeQuery("SELECT 1").getSingleResult();
+      ready = SWSConfig.getInstance().getPrivateKey() != null;
+    } catch (Exception e) {
+      log.warn("Readiness check failed: {}", e.getMessage());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    int status = ready ? HttpServletResponse.SC_OK : HttpServletResponse.SC_SERVICE_UNAVAILABLE;
+    writeReadinessJson(response, status, ready ? "ready" : "not-ready");
+  }
+
+  private static void writeReadinessJson(HttpServletResponse response, int status, String statusValue)
+      throws IOException {
+    response.setStatus(status);
+    response.setContentType("application/json");
+    response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+    response.getWriter().write("{\"status\":\"" + statusValue + "\"}");
+  }
+
 
   void sendError(HttpServletResponse response, int status, String message)
       throws IOException {

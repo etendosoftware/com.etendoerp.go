@@ -18,22 +18,18 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
-import java.util.Arrays;
 import java.util.Collections;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.Session;
-import org.hibernate.query.NativeQuery;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -42,11 +38,13 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 
 /**
  * Unit tests for {@link WidgetRecentInvoicesHandler}.
+ * Covers all branches: method guard, range parameter routing, row mapping (happy path and nulls),
+ * empty result, and exception handling. Static dependencies (OBContext, WidgetQueryHelper)
+ * are isolated with Mockito {@code MockedStatic} so no DB or CDI container is required.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -54,105 +52,177 @@ class WidgetRecentInvoicesHandlerTest {
 
   private WidgetRecentInvoicesHandler handler;
 
-  @Mock private OBContext obContext;
-  @Mock private Client client;
-  @Mock private OBDal obDal;
-  @Mock private Session session;
-  @Mock private NativeQuery<Object[]> nativeQuery;
+  @Mock
+  private OBContext obContext;
+  @Mock
+  private Client client;
 
   private MockedStatic<OBContext> obContextMock;
-  private MockedStatic<OBDal> obDalMock;
+  private MockedStatic<WidgetQueryHelper> queryHelperMock;
 
   @BeforeEach
   void setUp() {
     handler = new WidgetRecentInvoicesHandler();
     obContextMock = mockStatic(OBContext.class);
-    obDalMock = mockStatic(OBDal.class);
+    queryHelperMock = mockStatic(WidgetQueryHelper.class);
 
     obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
     when(obContext.getCurrentClient()).thenReturn(client);
     when(client.getId()).thenReturn("test-client-id");
-    obDalMock.when(OBDal::getInstance).thenReturn(obDal);
-    when(obDal.getSession()).thenReturn(session);
-    when(session.createNativeQuery(anyString())).thenReturn(nativeQuery);
-    when(nativeQuery.setParameter(anyString(), any())).thenReturn(nativeQuery);
   }
 
   @AfterEach
   void tearDown() {
     obContextMock.close();
-    obDalMock.close();
+    queryHelperMock.close();
   }
 
-  private NeoContext buildContext(String method) {
-    return NeoContext.builder()
-        .specName("dashboard").entityName("recent-invoices")
-        .httpMethod(method).endpointType(NeoEndpointType.CRUD)
-        .build();
+  // ---------------------------------------------------------------------------
+  // Helper to build a GET context with optional query params
+  // ---------------------------------------------------------------------------
+
+  private NeoContext buildGetContext(Map<String, String> params) {
+    return NeoContext.builder().httpMethod("GET").specName("dashboard").entityName("recent-invoices").queryParams(
+        params).build();
   }
 
-  @Nested
-  @DisplayName("Method guard")
-  class MethodGuard {
-    @Test
-    void rejectsPost() {
-      assertEquals(405, handler.handle(buildContext("POST")).getHttpStatus());
-    }
+  // ---------------------------------------------------------------------------
+  // Tests
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Verifies that any non-GET HTTP method is rejected immediately with HTTP 405
+   * and that {@code WidgetQueryHelper.resolveQuery} is never invoked.
+   */
+  @Test
+  void nonGetMethodReturns405() {
+    NeoContext ctx = NeoContext.builder().httpMethod("POST").specName("dashboard").entityName(
+        "recent-invoices").build();
+
+    NeoResponse response = handler.handle(ctx);
+
+    assertEquals(405, response.getHttpStatus());
+    queryHelperMock.verify(() -> WidgetQueryHelper.resolveQuery(any(), any(), any(), any()), never());
   }
 
-  @Nested
-  @DisplayName("GET responses")
-  class GetResponses {
-    @Test
-    void emptyResultReturns200() throws Exception {
-      when(nativeQuery.list()).thenReturn(Collections.emptyList());
+  /**
+   * Verifies that a GET request with {@code range=last30d} passes that value as the last
+   * argument to {@code WidgetQueryHelper.resolveQuery} so the ranged SQL path is taken.
+   */
+  @Test
+  void getWithRangeParamPassesRangeToQuery() throws Exception {
+    queryHelperMock.when(() -> WidgetQueryHelper.resolveQuery(any(), any(), any(), any())).thenReturn(
+        Collections.emptyList());
+    queryHelperMock.when(() -> WidgetQueryHelper.buildDataResponse(any())).thenCallRealMethod();
 
-      NeoResponse response = handler.handle(buildContext("GET"));
-      assertEquals(200, response.getHttpStatus());
+    NeoContext ctx = buildGetContext(Map.of("range", "last30d"));
+    handler.handle(ctx);
 
-      JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
-      assertEquals(0, data.length());
-    }
+    queryHelperMock.verify(
+        () -> WidgetQueryHelper.resolveQuery(any(), any(), any(), org.mockito.ArgumentMatchers.eq("last30d")));
+  }
 
-    @Test
-    void singleRowMapsFieldsCorrectly() throws Exception {
-      Object[] row = { "inv-id-1", "Acme Corp", "15-01-2026",
-          new BigDecimal("2500.00"), "CO", "INV-001" };
-      when(nativeQuery.list()).thenReturn(Collections.singletonList(row));
+  /**
+   * Verifies that when {@code context.getQueryParams()} returns null the handler passes null
+   * as the range argument to {@code resolveQuery}, triggering the fallback SQL path.
+   */
+  @Test
+  void getWithNullQueryParamsPassesNullRange() throws Exception {
+    queryHelperMock.when(() -> WidgetQueryHelper.resolveQuery(any(), any(), any(), any())).thenReturn(
+        Collections.emptyList());
+    queryHelperMock.when(() -> WidgetQueryHelper.buildDataResponse(any())).thenCallRealMethod();
 
-      NeoResponse response = handler.handle(buildContext("GET"));
-      assertEquals(200, response.getHttpStatus());
+    NeoContext ctx = buildGetContext(null);
+    handler.handle(ctx);
 
-      JSONObject item = response.getBody()
-          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
-      assertEquals("inv-id-1", item.getString("id"));
-      assertEquals("Acme Corp", item.getString("client"));
-      assertEquals("15-01-2026", item.getString("date"));
-      assertEquals(2500.00, item.getDouble("amount"), 0.01);
-      assertEquals("CO", item.getString("status"));
-      assertEquals("INV-001", item.getString("documentNo"));
-    }
+    queryHelperMock.verify(
+        () -> WidgetQueryHelper.resolveQuery(any(), any(), any(), org.mockito.ArgumentMatchers.isNull()));
+  }
 
-    @Test
-    void multipleRowsReturnCorrectCount() throws Exception {
-      Object[] row1 = { "id1", "C1", "01-01-2026", new BigDecimal("100"), "CO", "INV-1" };
-      Object[] row2 = { "id2", "C2", "02-01-2026", new BigDecimal("200"), "CL", "INV-2" };
-      when(nativeQuery.list()).thenReturn(Arrays.asList(row1, row2));
+  /**
+   * Verifies that when the query returns an empty list the response has HTTP 200
+   * and {@code response.count == 0}.
+   */
+  @Test
+  void getWithEmptyRowsReturnsEmptyDataArray() throws Exception {
+    queryHelperMock.when(() -> WidgetQueryHelper.resolveQuery(any(), any(), any(), any())).thenReturn(
+        Collections.emptyList());
+    queryHelperMock.when(() -> WidgetQueryHelper.buildDataResponse(any())).thenCallRealMethod();
 
-      NeoResponse response = handler.handle(buildContext("GET"));
-      JSONObject respData = response.getBody().getJSONObject("response");
-      assertEquals(2, respData.getInt("count"));
-    }
+    NeoResponse response = handler.handle(buildGetContext(null));
 
-    @Test
-    void nullDocumentNoReturnEmptyString() throws Exception {
-      Object[] row = { "id1", "Client", "01-01-2026", new BigDecimal("100"), "CO", null };
-      when(nativeQuery.list()).thenReturn(Collections.singletonList(row));
+    assertEquals(200, response.getHttpStatus());
+    JSONObject responseBody = response.getBody().getJSONObject("response");
+    assertEquals(0, responseBody.getInt("count"));
+    assertEquals(0, responseBody.getJSONArray("data").length());
+  }
 
-      NeoResponse response = handler.handle(buildContext("GET"));
-      JSONObject item = response.getBody()
-          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
-      assertEquals("", item.getString("documentNo"));
-    }
+  /**
+   * Verifies that a row with all non-null values is mapped correctly to the JSON item,
+   * including the navigation sub-object pointing to the sales-invoice window.
+   */
+  @Test
+  void getWithRowsMapsAllFieldsCorrectly() throws Exception {
+    Object[] row = { "INV-001", "DOC-001", "Acme Corp", "01-05-2026", BigDecimal.valueOf(1500.00), "CO" };
+
+    queryHelperMock.when(() -> WidgetQueryHelper.resolveQuery(any(), any(), any(), any())).thenReturn(
+        Collections.singletonList(row));
+    queryHelperMock.when(() -> WidgetQueryHelper.buildDataResponse(any())).thenCallRealMethod();
+
+    NeoResponse response = handler.handle(buildGetContext(null));
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    assertEquals(1, data.length());
+
+    JSONObject item = data.getJSONObject(0);
+    assertEquals("INV-001", item.getString("id"));
+    assertEquals("DOC-001", item.getString("documentNo"));
+    assertEquals("Acme Corp", item.getString("client"));
+    assertEquals("01-05-2026", item.getString("date"));
+    assertEquals(1500.0, item.getDouble("amount"), 0.001);
+    assertEquals("CO", item.getString("status"));
+
+    JSONObject navigation = item.getJSONObject("navigation");
+    assertEquals("sales-invoice", navigation.getString("window"));
+    assertEquals("INV-001", navigation.getString("recordId"));
+    assertEquals("record", navigation.getString("type"));
+  }
+
+  /**
+   * Verifies that null values in row positions [1..5] default to empty string for text fields
+   * and to 0 for the amount field, so the frontend never receives JSON null values.
+   */
+  @Test
+  void getWithNullFieldsInRowDefaultsToEmptyStringAndZero() throws Exception {
+    Object[] row = { "INV-NULL", null, null, null, null, null };
+
+    queryHelperMock.when(() -> WidgetQueryHelper.resolveQuery(any(), any(), any(), any())).thenReturn(
+        Collections.singletonList(row));
+    queryHelperMock.when(() -> WidgetQueryHelper.buildDataResponse(any())).thenCallRealMethod();
+
+    NeoResponse response = handler.handle(buildGetContext(null));
+
+    JSONObject item = response.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+
+    assertEquals("", item.getString("documentNo"));
+    assertEquals("", item.getString("client"));
+    assertEquals("", item.getString("date"));
+    assertEquals(0, item.getInt("amount"));
+    assertEquals("", item.getString("status"));
+  }
+
+  /**
+   * Verifies that an exception thrown by {@code resolveQuery} (e.g. a DB failure) is caught
+   * and results in an HTTP 500 response without propagating the exception to the caller.
+   */
+  @Test
+  void exceptionFromQueryReturns500() {
+    queryHelperMock.when(() -> WidgetQueryHelper.resolveQuery(any(), any(), any(), any())).thenThrow(
+        new RuntimeException("DB error"));
+
+    NeoResponse response = handler.handle(buildGetContext(null));
+
+    assertEquals(500, response.getHttpStatus());
   }
 }
