@@ -111,6 +111,7 @@ class Fiscal303BoxesHandler {
 
     fillSalesBoxes(b, helper, dao303, taxReport, rateToBoxes);
     fillPurchaseBoxes(b, helper, dao303, taxReport, rateToBoxes);
+    fillAdditionalInfoBoxes(b, helper, dao303, taxReport, rateToBoxes);
 
     int[] accruedBoxes   = { 3, 6, 9, 11, 13, 15, 18, 21, 24, 152, 158, 167 };
     int[] deductibleBoxes = { 29, 31, 33, 35, 37, 39, 41, 42, 43, 44 };
@@ -306,6 +307,7 @@ class Fiscal303BoxesHandler {
         "VAT_PURCHASE", "Intracommunity_Investments",  "Purchase", "No", "Yes", 38, 39, rateToBoxes);
   }
 
+  // taxBox == 0 means base-only (no corresponding tax amount box, e.g. 0% exempt rows)
   private void fillGroupBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
       AEAT303Report2014Dao dao303, TaxReport taxReport,
       String groupKey, String paramKey,
@@ -318,9 +320,23 @@ class Fiscal303BoxesHandler {
     if (rates.isEmpty()) return;
     Map<String, BigDecimal> result = helper.calculateAmountsMap(rates, InvoiceType.ALL);
     addToBox(b, baseBox, result.get("TaxBaseAmount"));
-    addToBox(b, taxBox,  result.get("TaxAmount"));
-    List<Integer> boxes = java.util.Arrays.asList(baseBox, taxBox);
+    if (taxBox > 0) addToBox(b, taxBox, result.get("TaxAmount"));
+    List<Integer> boxes = taxBox > 0
+        ? java.util.Arrays.asList(baseBox, taxBox)
+        : java.util.Arrays.asList(baseBox);
     for (TaxRate tr : rates) rateToBoxes.put(tr.getId(), boxes);
+  }
+
+  private void fillAdditionalInfoBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
+      AEAT303Report2014Dao dao303, TaxReport taxReport, Map<String, List<Integer>> rateToBoxes) {
+    // Box 59: intra-community deliveries exempt (Información adicional)
+    fillGroupBoxes(b, helper, dao303, taxReport,
+        "Additional_Information", "303SALES_EU_EXEMPT",
+        "All", "All", "All", 59, 0, rateToBoxes);
+    // Box 60: exports and other exempt operations with deduction right
+    fillGroupBoxes(b, helper, dao303, taxReport,
+        "Additional_Information", "303EXPORTS_OTHEREXEMPT",
+        "All", "All", "All", 60, 0, rateToBoxes);
   }
 
   // ── Resolution helpers ───────────────────────────────────────────
