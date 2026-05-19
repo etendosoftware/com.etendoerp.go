@@ -26,9 +26,13 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Projections;
+import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
 /**
  * NeoHandler that returns pending tasks and alerts for the dashboard widget.
@@ -54,8 +58,6 @@ public class WidgetPendingTasksHandler implements NeoHandler {
   private static final String FILTER_OVERDUE = "overdue";
   private static final String FILTER_COLLECTIONS_DUE_TODAY = "collectionsDueToday";
   private static final String FILTER_PAYMENTS_DUE_TODAY = "paymentsDueToday";
-  private static final String FILTER_PENDING_DELIVERY = "pendingDelivery";
-
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!"GET".equals(context.getHttpMethod())) {
@@ -71,8 +73,8 @@ public class WidgetPendingTasksHandler implements NeoHandler {
         addOverdueInvoices(data, clientId);
         addCollectionsDueToday(data, clientId);
         addPaymentsDueToday(data, clientId);
-        addPendingReceptions(data, clientId);
-        addPendingSalesDeliveries(data, clientId);
+        addPendingReceptions(data);
+        addPendingSalesDeliveries(data);
         addLowStockAlerts(data, clientId);
 
         JSONObject responseData = new JSONObject();
@@ -209,59 +211,65 @@ public class WidgetPendingTasksHandler implements NeoHandler {
   }
 
   /**
-   * Pending sales deliveries: confirmed sales orders where delivery status < 100%.
+   * Pending sales deliveries: goods shipments (M_InOut) in Draft status awaiting processing.
+   * Uses OBDal criteria so organization and client security filters are applied automatically.
    */
-  private void addPendingSalesDeliveries(JSONArray data, String clientId) throws Exception {
-    addPendingOrdersTask(data, clientId, "Y", "qtydelivered", "sales order",
-        "pending delivery", "sales-order", "/sales-order?filter=" + FILTER_PENDING_DELIVERY,
-        "pendingSalesDeliveries");
-  }
-
-  /**
-   * Pending receptions: confirmed purchase orders where delivery status < 100%.
-   */
-  private void addPendingReceptions(JSONArray data, String clientId) throws Exception {
-    addPendingOrdersTask(data, clientId, "N", "qtydelivered", "purchase order",
-        "pending reception", "purchase-order", "/purchase-order?filter=" + FILTER_PENDING_DELIVERY,
-        "pendingReceptions");
-  }
-
-  private void addPendingOrdersTask(JSONArray data, String clientId, String isSalesTransaction,
-      String progressColumn, String entityLabel, String statusLabel, String window, String link,
-      String taskKeyBase) throws Exception {
-    String sql = "SELECT COUNT(*)"
-        + " FROM c_order o"
-        + " WHERE o.issotrx = :isSalesTransaction"
-        + "   AND o.docstatus = 'CO'"
-        + "   AND o.iscancelled = 'N'"
-        + "   AND o.ad_client_id = :clientId"
-        + "   AND COALESCE(("
-        + "     SELECT CASE"
-        + "       WHEN SUM(ABS(ol.qtyordered)) = 0 THEN 0"
-        + "       ELSE ROUND(COALESCE(SUM(ABS(ol." + progressColumn + ")), 0)"
-        + "            / SUM(ABS(ol.qtyordered)) * 100, 0)"
-        + "     END"
-        + "     FROM c_orderline ol"
-        + "     WHERE ol.c_order_id = o.c_order_id"
-        + "       AND ol.c_order_discount_id IS NULL"
-        + "   ), 0) < 100";
-
-    NativeQuery<Object> query = OBDal.getInstance().getSession().createNativeQuery(sql);
-    query.setParameter(PARAM_CLIENT_ID, clientId);
-    query.setParameter("isSalesTransaction", isSalesTransaction);
-    long count = ((Number) query.uniqueResult()).longValue();
+  private void addPendingSalesDeliveries(JSONArray data) throws Exception {
+    OBCriteria<ShipmentInOut> crit = OBDal.getInstance().createCriteria(ShipmentInOut.class);
+    crit.add(Restrictions.eq(ShipmentInOut.PROPERTY_SALESTRANSACTION, true));
+    crit.add(Restrictions.eq(ShipmentInOut.PROPERTY_DOCUMENTSTATUS, "DR"));
+    long count = ((Number) crit.setProjection(Projections.rowCount()).uniqueResult()).longValue();
 
     if (count == 0) {
       return;
     }
 
-    data.put(buildTask(TYPE_INFO,
-        count + " " + entityLabel + (count != 1 ? "s" : "") + " " + statusLabel,
-        window,
-        FILTER_PENDING_DELIVERY,
-        link,
+    JSONObject params = new JSONObject();
+    params.put("DocStatus", "DR");
+    data.put(buildTaskWithParams(TYPE_INFO,
+        count + " goods shipment" + (count != 1 ? "s" : "") + " pending",
+        "goods-shipment",
+        params,
+        "/goods-shipment?DocStatus=DR",
         count,
-        count > 1 ? taskKeyBase + "_plural" : taskKeyBase));
+        count > 1 ? "pendingSalesDeliveries_plural" : "pendingSalesDeliveries"));
+  }
+
+  /**
+   * Pending receptions: goods receipts (M_InOut) in Draft status awaiting processing.
+   * Uses OBDal criteria so organization and client security filters are applied automatically.
+   */
+  private void addPendingReceptions(JSONArray data) throws Exception {
+    OBCriteria<ShipmentInOut> crit = OBDal.getInstance().createCriteria(ShipmentInOut.class);
+    crit.add(Restrictions.eq(ShipmentInOut.PROPERTY_SALESTRANSACTION, false));
+    crit.add(Restrictions.eq(ShipmentInOut.PROPERTY_DOCUMENTSTATUS, "DR"));
+    long count = ((Number) crit.setProjection(Projections.rowCount()).uniqueResult()).longValue();
+
+    if (count == 0) {
+      return;
+    }
+
+    JSONObject params = new JSONObject();
+    params.put("DocStatus", "DR");
+    data.put(buildTaskWithParams(TYPE_INFO,
+        count + " goods receipt" + (count != 1 ? "s" : "") + " pending",
+        "goods-receipt",
+        params,
+        "/goods-receipt?DocStatus=DR",
+        count,
+        count > 1 ? "pendingReceptions_plural" : "pendingReceptions"));
+  }
+
+  private JSONObject buildTaskWithParams(String type, String text, String window,
+      JSONObject params, String link, long count, String taskKey) throws Exception {
+    JSONObject task = new JSONObject();
+    task.put(JSON_TYPE, type);
+    task.put(JSON_TEXT, text);
+    task.put(JSON_NAVIGATION, navigationParams(window, params));
+    task.put(JSON_LINK, link);
+    task.put(JSON_COUNT, count);
+    task.put(JSON_TASK_KEY, taskKey);
+    return task;
   }
 
   private JSONObject buildTask(String type, String text, String window, String filter, String link,
