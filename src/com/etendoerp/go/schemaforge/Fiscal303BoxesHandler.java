@@ -116,7 +116,7 @@ class Fiscal303BoxesHandler {
           dao303.get303Taxes(taxReport.getId(), "All", "All", "All", paramGeneral);
       for (Map.Entry<BigDecimal, List<TaxRate>> e : splitByPercentage(salesGeneral).entrySet()) {
         BigDecimal pct = e.getKey();
-        Map<String, BigDecimal> r = helper.calculateAmountsMap(e.getValue(), InvoiceType.SALES);
+        Map<String, BigDecimal> r = helper.calculateAmountsMap(e.getValue(), InvoiceType.ALL);
         BigDecimal base = r.get("TaxBaseAmount");
         BigDecimal tax  = r.get("TaxAmount");
         if (pct.compareTo(new BigDecimal("21")) == 0) {
@@ -137,13 +137,13 @@ class Fiscal303BoxesHandler {
       }
     }
 
-    // VAT_SALES_EU → boxes 10, 11 (adq. intracomunitarias — buyer self-assesses AP)
+    // VAT_SALES_EU → boxes 10, 11 (adq. intracomunitarias — buyer self-assesses)
     fillGroupBoxes(b, helper, dao303, taxReport, "VAT_SALES", "VAT_SALES_EU",
-        "Purchase", "No", "Yes", 10, 11, InvoiceType.PURCHASE);
+        "Purchase", "No", "Yes", 10, 11);
 
-    // VAT_SALES_ISP → boxes 12, 13 (inversión sujeto pasivo — AP)
+    // VAT_SALES_ISP → boxes 12, 13 (inversión sujeto pasivo)
     fillGroupBoxes(b, helper, dao303, taxReport, "VAT_SALES", "VAT_SALES_ISP",
-        "Purchase", "No", "No", 12, 13, InvoiceType.PURCHASE);
+        "Purchase", "No", "No", 12, 13);
 
     // VAT_SALES_EC (recargo equivalencia) — split by %
     TaxReportParameter paramEC =
@@ -153,7 +153,7 @@ class Fiscal303BoxesHandler {
           dao303.get303Taxes(taxReport.getId(), "All", "All", "All", paramEC);
       for (Map.Entry<BigDecimal, List<TaxRate>> e : splitByPercentage(ecTaxes).entrySet()) {
         BigDecimal pct = e.getKey();
-        Map<String, BigDecimal> r = helper.calculateAmountsMap(e.getValue(), InvoiceType.SALES);
+        Map<String, BigDecimal> r = helper.calculateAmountsMap(e.getValue(), InvoiceType.ALL);
         BigDecimal base = r.get("TaxBaseAmount");
         BigDecimal tax  = r.get("TaxAmount");
         if (pct.compareTo(new BigDecimal("1.40")) == 0) {
@@ -172,30 +172,30 @@ class Fiscal303BoxesHandler {
   private void fillPurchaseBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
       AEAT303Report2014Dao dao303, TaxReport taxReport) {
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "VAT_PURCHASE", "Normal_Operations",          "Purchase", "No", "No",  28, 29, InvoiceType.PURCHASE);
+        "VAT_PURCHASE", "Normal_Operations",          "Purchase", "No", "No",  28, 29);
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "VAT_PURCHASE", "Investment_Goods",            "Purchase", "No", "No",  30, 31, InvoiceType.PURCHASE);
+        "VAT_PURCHASE", "Investment_Goods",            "Purchase", "No", "No",  30, 31);
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "VAT_PURCHASE", "Import_Goods",                "Purchase", "No", "No",  32, 33, InvoiceType.PURCHASE);
+        "VAT_PURCHASE", "Import_Goods",                "Purchase", "No", "No",  32, 33);
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "VAT_PURCHASE", "Import_Investment_Goods",     "Purchase", "No", "No",  34, 35, InvoiceType.PURCHASE);
+        "VAT_PURCHASE", "Import_Investment_Goods",     "Purchase", "No", "No",  34, 35);
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "VAT_PURCHASE", "Intracommunity_Goods",        "Purchase", "No", "Yes", 36, 37, InvoiceType.PURCHASE);
+        "VAT_PURCHASE", "Intracommunity_Goods",        "Purchase", "No", "Yes", 36, 37);
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "VAT_PURCHASE", "Intracommunity_Investments",  "Purchase", "No", "Yes", 38, 39, InvoiceType.PURCHASE);
+        "VAT_PURCHASE", "Intracommunity_Investments",  "Purchase", "No", "Yes", 38, 39);
   }
 
   private void fillGroupBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
       AEAT303Report2014Dao dao303, TaxReport taxReport,
       String groupKey, String paramKey,
       String taxType, String equivCharge, String intracom,
-      int baseBox, int taxBox, InvoiceType invoiceType) {
+      int baseBox, int taxBox) {
     TaxReportParameter param = dao303.getTaxReportParameter(taxReport, groupKey, paramKey);
     if (param == null) return;
     List<TaxRate> rates =
         dao303.get303Taxes(taxReport.getId(), taxType, equivCharge, intracom, param);
     if (rates.isEmpty()) return;
-    Map<String, BigDecimal> result = helper.calculateAmountsMap(rates, invoiceType);
+    Map<String, BigDecimal> result = helper.calculateAmountsMap(rates, InvoiceType.ALL);
     addToBox(b, baseBox, result.get("TaxBaseAmount"));
     addToBox(b, taxBox,  result.get("TaxAmount"));
   }
