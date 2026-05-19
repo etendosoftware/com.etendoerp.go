@@ -624,7 +624,13 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    */
   private void updateInvoiceTaxAggregates(Invoice invoice) {
     String invoiceId = invoice.getId();
-    int precision = invoice.getCurrency().getStandardPrecision().intValue();
+    // Defensive null guards: in a fully-populated invoice Currency and its standard
+    // precision are always present, but downstream callers expect this helper to
+    // never throw an NPE in edge cases (e.g. half-built test invoices).
+    int precision = (invoice.getCurrency() != null
+        && invoice.getCurrency().getStandardPrecision() != null)
+        ? invoice.getCurrency().getStandardPrecision().intValue()
+        : 2;
 
     Map<String, BigDecimal> netByTax = readNetByTaxFromInvoiceLines(invoiceId);
     BigDecimal totalNet = BigDecimal.ZERO;
@@ -635,18 +641,21 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     BigDecimal totalTax = BigDecimal.ZERO;
     Set<String> handledTaxIds = new HashSet<>();
     for (InvoiceTax it : new ArrayList<>(invoice.getInvoiceTaxList())) {
-      String taxId = it.getTax().getId();
-      BigDecimal newBase = netByTax.getOrDefault(taxId, BigDecimal.ZERO)
-          .setScale(precision, RoundingMode.HALF_UP);
-      BigDecimal rate = it.getTax().getRate() != null ? it.getTax().getRate() : BigDecimal.ZERO;
-      BigDecimal newTaxAmt = newBase.multiply(rate)
-          .divide(new BigDecimal("100"), precision, RoundingMode.HALF_UP);
-      it.setTaxableAmount(newBase);
-      it.setTaxAmount(newTaxAmt);
-      it.setRecalculate(false);
-      OBDal.getInstance().save(it);
-      totalTax = totalTax.add(newTaxAmt);
-      handledTaxIds.add(taxId);
+      TaxRate currentTax = it.getTax();
+      if (currentTax != null) {
+        String taxId = currentTax.getId();
+        BigDecimal newBase = netByTax.getOrDefault(taxId, BigDecimal.ZERO)
+            .setScale(precision, RoundingMode.HALF_UP);
+        BigDecimal rate = currentTax.getRate() != null ? currentTax.getRate() : BigDecimal.ZERO;
+        BigDecimal newTaxAmt = newBase.multiply(rate)
+            .divide(new BigDecimal("100"), precision, RoundingMode.HALF_UP);
+        it.setTaxableAmount(newBase);
+        it.setTaxAmount(newTaxAmt);
+        it.setRecalculate(false);
+        OBDal.getInstance().save(it);
+        totalTax = totalTax.add(newTaxAmt);
+        handledTaxIds.add(taxId);
+      }
     }
 
     // Defensive: cover tax groups that show up in lines but did not have an
@@ -722,6 +731,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     } catch (Exception e) {
       log.error("Could not read aggregated net by tax for invoice {}: {}",
           invoiceId, e.getMessage(), e);
+      // Propagate so callers do NOT silently fall back to an empty map, which
+      // would zero out every tax aggregate and corrupt the invoice totals.
+      throw new OBException(e);
     }
     return result;
   }
