@@ -7,10 +7,13 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 
 /**
@@ -18,6 +21,8 @@ import com.etendoerp.go.schemaforge.util.NeoImageHelper;
  * an SF spec.
  */
 class NeoBuiltInEndpointHandler {
+
+  private static final Logger log = LogManager.getLogger(NeoBuiltInEndpointHandler.class);
 
   private static final String METHOD_GET    = "GET";
   private static final String METHOD_POST   = "POST";
@@ -29,10 +34,17 @@ class NeoBuiltInEndpointHandler {
 
   private final NeoServlet servlet;
   private final NeoDiscoveryHandler discoveryHandler;
+  private final TransactionalEmailService transactionalEmailService;
 
   NeoBuiltInEndpointHandler(NeoServlet servlet, NeoDiscoveryHandler discoveryHandler) {
+    this(servlet, discoveryHandler, new TransactionalEmailService());
+  }
+
+  NeoBuiltInEndpointHandler(NeoServlet servlet, NeoDiscoveryHandler discoveryHandler,
+      TransactionalEmailService transactionalEmailService) {
     this.servlet = servlet;
     this.discoveryHandler = discoveryHandler;
+    this.transactionalEmailService = transactionalEmailService;
   }
 
   boolean handle(NeoServlet.NeoPathInfo pathInfo, String method,
@@ -61,6 +73,10 @@ class NeoBuiltInEndpointHandler {
     }
     if ("preview-file".equals(pathInfo.specName)) {
       handlePreviewFileEndpoint(method, request, response);
+      return true;
+    }
+    if ("email-contracts".equals(pathInfo.specName)) {
+      handleEmailContractsEndpoint(pathInfo, method, request, response);
       return true;
     }
     return false;
@@ -158,6 +174,35 @@ class NeoBuiltInEndpointHandler {
     }
     servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
         "Preview file endpoint supports GET, POST and DELETE");
+  }
+
+  private void handleEmailContractsEndpoint(NeoServlet.NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!METHOD_POST.equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Email contract endpoint only supports POST");
+      return;
+    }
+    if (StringUtils.isBlank(pathInfo.entityName) || !"send".equals(pathInfo.recordId)) {
+      servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
+          "Unknown email contract endpoint");
+      return;
+    }
+    try {
+      JSONObject body = NeoRequestBodyParser.parseJsonObject(
+          NeoRequestBodyParser.readRequestBody(request));
+      servlet.writeResponse(response, transactionalEmailService.send(pathInfo.entityName, body));
+    } catch (JSONException e) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Invalid JSON body");
+    } catch (IOException e) {
+      log.error("Error reading email contract request body: {}", e.getMessage(), e);
+      throw e;
+    } catch (Exception e) {
+      log.error("Unexpected error handling email contract [{}]: {}", pathInfo.entityName,
+          e.getMessage(), e);
+      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Email contract request failed");
+    }
   }
 
   private void handleCertificateEndpoint(String method, HttpServletRequest request,

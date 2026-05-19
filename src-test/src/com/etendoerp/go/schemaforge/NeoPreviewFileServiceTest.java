@@ -23,7 +23,6 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -36,12 +35,9 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
-
-import com.etendoerp.go.schemaforge.data.PreviewFile;
 
 /**
  * Unit tests for {@link NeoPreviewFileService}.
@@ -150,10 +146,14 @@ public class NeoPreviewFileServiceTest {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+
       @SuppressWarnings("unchecked")
-      OBQuery<PreviewFile> query = mock(OBQuery.class);
-      when(dal.createQuery(eq(PreviewFile.class), anyString())).thenReturn(query);
-      when(query.uniqueResult()).thenReturn(null);
+      NativeQuery<Object> nq = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(nq);
+      when(nq.setParameter(anyString(), any())).thenReturn(nq);
+      when(nq.uniqueResult()).thenReturn(null);
 
       NeoResponse r = NeoPreviewFileService.getPreviewFile(SPEC_NAME, RECORD_ID);
 
@@ -179,15 +179,16 @@ public class NeoPreviewFileServiceTest {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      PreviewFile pf = mock(PreviewFile.class);
-      when(pf.getFileName()).thenReturn("receipt.pdf");
-      when(pf.getMIMEType()).thenReturn(MIME_PDF);
-      when(pf.getFileData()).thenReturn("base64encodedpdfdata");
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
 
       @SuppressWarnings("unchecked")
-      OBQuery<PreviewFile> query = mock(OBQuery.class);
-      when(dal.createQuery(eq(PreviewFile.class), anyString())).thenReturn(query);
-      when(query.uniqueResult()).thenReturn(pf);
+      NativeQuery<Object> nq = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(nq);
+      when(nq.setParameter(anyString(), any())).thenReturn(nq);
+      when(nq.uniqueResult()).thenReturn(new Object[] {
+          "PREVIEWID001", "receipt.pdf", MIME_PDF, "base64encodedpdfdata"
+      });
 
       NeoResponse r = NeoPreviewFileService.getPreviewFile(SPEC_NAME, RECORD_ID);
 
@@ -216,11 +217,6 @@ public class NeoPreviewFileServiceTest {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      @SuppressWarnings("unchecked")
-      OBQuery<PreviewFile> query = mock(OBQuery.class);
-      when(dal.createQuery(eq(PreviewFile.class), anyString())).thenReturn(query);
-      when(query.uniqueResult()).thenReturn(null);
-
       Session session = mock(Session.class);
       when(dal.getSession()).thenReturn(session);
 
@@ -228,6 +224,7 @@ public class NeoPreviewFileServiceTest {
       NativeQuery<Object> nq = mock(NativeQuery.class);
       when(session.createNativeQuery(anyString())).thenReturn(nq);
       when(nq.setParameter(anyString(), any())).thenReturn(nq);
+      when(nq.uniqueResult()).thenReturn(null);
       when(nq.executeUpdate()).thenReturn(1);
 
       String body = new JSONObject()
@@ -262,14 +259,6 @@ public class NeoPreviewFileServiceTest {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      PreviewFile existing = mock(PreviewFile.class);
-      when(existing.getId()).thenReturn("EXISTINGID001");
-
-      @SuppressWarnings("unchecked")
-      OBQuery<PreviewFile> query = mock(OBQuery.class);
-      when(dal.createQuery(eq(PreviewFile.class), anyString())).thenReturn(query);
-      when(query.uniqueResult()).thenReturn(existing);
-
       Session session = mock(Session.class);
       when(dal.getSession()).thenReturn(session);
 
@@ -277,6 +266,9 @@ public class NeoPreviewFileServiceTest {
       NativeQuery<Object> nq = mock(NativeQuery.class);
       when(session.createNativeQuery(anyString())).thenReturn(nq);
       when(nq.setParameter(anyString(), any())).thenReturn(nq);
+      when(nq.uniqueResult()).thenReturn(new Object[] {
+          "EXISTINGID001", "invoice.pdf", MIME_PDF, "base64encodeddata"
+      });
       when(nq.executeUpdate()).thenReturn(1);
 
       String body = new JSONObject()

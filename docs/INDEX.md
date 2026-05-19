@@ -8,3 +8,4 @@ This directory stores module-specific technical documentation for `com.etendoerp
 - `neo-headless-guide.md` — detailed Neo Headless development guide.
 - `onboarding-sampledata-packaging.md` — how onboarding sampledata is staged into `WebContent/WEB-INF/classes` for WAR packaging.
 - `package-architecture.md` — current Java package boundaries, selector policy split, OAuth2 support split, and PR-scoped Sonar workflow.
+- `transactional-email-contracts.md` — runtime endpoint, executor/provider boundary, and server-side provider configuration for transactional email contracts.
