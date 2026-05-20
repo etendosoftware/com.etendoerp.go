@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Inject;
 import javax.inject.Named;
 
@@ -29,7 +28,6 @@ import javax.inject.Named;
  *   <li>{@code createPurchaseInvoice} → {@link CreatePurchaseInvoiceHandler}</li>
  * </ul>
  */
-@ApplicationScoped
 @Named("goodsReceiptHeaderHandler")
 public class GoodsReceiptHeaderHandler implements NeoHandler {
 
