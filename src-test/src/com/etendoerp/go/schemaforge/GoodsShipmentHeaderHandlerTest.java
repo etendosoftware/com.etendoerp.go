@@ -73,15 +73,6 @@ public class GoodsShipmentHeaderHandlerTest {
         .build();
   }
 
-  /**
-   * Builds a minimal response body wrapping a single shipment record.
-   */
-  private static JSONObject shipmentBody(String id) throws Exception {
-    JSONObject shipment = new JSONObject().put("id", id).put("documentNo", "GS-001");
-    JSONArray data = new JSONArray().put(shipment);
-    return new JSONObject().put("response", new JSONObject().put("data", data));
-  }
-
   // ── handle() dispatch ──────────────────────────────────────────────────────
 
   /**
