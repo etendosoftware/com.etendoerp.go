@@ -53,9 +53,12 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   @Inject
   private CreateDraftInvoiceHandler createDraftInvoiceHandler;
 
+  @Inject
+  private NeoCloneRecordHandler neoCloneRecordHandler;
+
   @Override
   public NeoResponse handle(NeoContext context) {
-    return NeoHeaderActionRouter.dispatch(context, createDraftInvoiceHandler);
+    return NeoHeaderActionRouter.dispatch(context, createDraftInvoiceHandler, neoCloneRecordHandler);
   }
 
   @Override
@@ -132,23 +135,12 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   }
 
   // placeholders contains only "?" literals — all values bound via setString(). No injection risk.
+  // Uses GREATEST(m_matchsi qty, direct FK qty) per line to cover both Etendo-classic matching
+  // and NEO-created invoices without double-counting.
   @SuppressWarnings("java:S2077")
   private Map<String, Integer> computeBatch(List<String> ids) {
     String placeholders = ids.stream().map(id -> "?").collect(Collectors.joining(","));
-    String sql =
-        "SELECT iol.m_inout_id, " +
-        "  CASE WHEN SUM(ABS(iol.movementqty)) = 0 THEN 0 " +
-        "       ELSE LEAST(100, ROUND( " +
-        "         COALESCE(SUM(CASE WHEN inv.docstatus = 'CO' THEN ABS(invl.qtyinvoiced) ELSE 0 END), 0) " +
-        "         / SUM(ABS(iol.movementqty)) * 100 " +
-        "       )) " +
-        "  END " +
-        "FROM m_inoutline iol " +
-        "LEFT JOIN c_invoiceline invl ON invl.m_inoutline_id = iol.m_inoutline_id " +
-        "LEFT JOIN c_invoice inv ON inv.c_invoice_id = invl.c_invoice_id " +
-        "  AND inv.isactive = 'Y' AND inv.docstatus = 'CO' " +
-        "WHERE iol.isactive = 'Y' AND iol.m_inout_id IN (" + placeholders + ") " +
-        "GROUP BY iol.m_inout_id";
+    String sql = buildInvoiceStatusSql("iol.m_inout_id IN (" + placeholders + ")");
     Map<String, Integer> result = new HashMap<>();
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -167,27 +159,47 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   }
 
   private int computeSingle(String shipmentId) {
-    String sql =
-        "SELECT CASE WHEN SUM(ABS(iol.movementqty)) = 0 THEN 0 " +
-        "            ELSE LEAST(100, ROUND( " +
-        "              COALESCE(SUM(CASE WHEN inv.docstatus = 'CO' THEN ABS(invl.qtyinvoiced) ELSE 0 END), 0) " +
-        "              / SUM(ABS(iol.movementqty)) * 100 " +
-        "            )) " +
-        "       END " +
-        "FROM m_inoutline iol " +
-        "LEFT JOIN c_invoiceline invl ON invl.m_inoutline_id = iol.m_inoutline_id " +
-        "LEFT JOIN c_invoice inv ON inv.c_invoice_id = invl.c_invoice_id " +
-        "  AND inv.isactive = 'Y' AND inv.docstatus = 'CO' " +
-        "WHERE iol.isactive = 'Y' AND iol.m_inout_id = ?";
+    String sql = buildInvoiceStatusSql("iol.m_inout_id = ?");
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, shipmentId);
       try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() ? rs.getInt(1) : 0;
+        return rs.next() ? rs.getInt(2) : 0;
       }
     } catch (Exception e) {
       log.error("DB error computing invoice status for shipment {}", shipmentId, e);
       return 0;
     }
+  }
+
+  private static String buildInvoiceStatusSql(String whereClause) {
+    return
+      "SELECT iol.m_inout_id, " +
+      "  CASE WHEN SUM(ABS(iol.movementqty)) = 0 THEN 0 " +
+      "       ELSE LEAST(100, ROUND( " +
+      "         COALESCE(SUM(GREATEST( " +
+      "           COALESCE(msi_qty.qtymatched, 0), " +
+      "           COALESCE(direct_qty.qtyinvoiced, 0) " +
+      "         )), 0) / SUM(ABS(iol.movementqty)) * 100 " +
+      "       )) " +
+      "  END " +
+      "FROM m_inoutline iol " +
+      "LEFT JOIN ( " +
+      "  SELECT msi.m_inoutline_id, SUM(ABS(msi.qty)) AS qtymatched " +
+      "  FROM m_matchsi msi " +
+      "  JOIN c_invoiceline il ON il.c_invoiceline_id = msi.c_invoiceline_id " +
+      "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id " +
+      "  WHERE i.docstatus NOT IN ('VO','CL','DR') AND i.isactive = 'Y' " +
+      "  GROUP BY msi.m_inoutline_id " +
+      ") msi_qty ON msi_qty.m_inoutline_id = iol.m_inoutline_id " +
+      "LEFT JOIN ( " +
+      "  SELECT il2.m_inoutline_id, SUM(ABS(il2.qtyinvoiced)) AS qtyinvoiced " +
+      "  FROM c_invoiceline il2 " +
+      "  JOIN c_invoice i2 ON i2.c_invoice_id = il2.c_invoice_id " +
+      "  WHERE i2.docstatus NOT IN ('VO','CL','DR') AND i2.isactive = 'Y' " +
+      "  GROUP BY il2.m_inoutline_id " +
+      ") direct_qty ON direct_qty.m_inoutline_id = iol.m_inoutline_id " +
+      "WHERE iol.isactive = 'Y' AND " + whereClause + " " +
+      "GROUP BY iol.m_inout_id";
   }
 }
