@@ -253,7 +253,7 @@ class Fiscal303BoxesHandler {
     }
   }
 
-  private void finalizeInvoiceRow(Map<String, Object> row) {
+  void finalizeInvoiceRow(Map<String, Object> row) {
     @SuppressWarnings("unchecked")
     java.util.LinkedHashSet<Integer> bSet = (java.util.LinkedHashSet<Integer>) row.get(BOXES);
     List<Integer> sorted = new ArrayList<>(bSet);
@@ -302,7 +302,7 @@ class Fiscal303BoxesHandler {
     }
   }
 
-  private List<Integer> vatGeneralBoxes(BigDecimal pct) {
+  List<Integer> vatGeneralBoxes(BigDecimal pct) {
     if (pct.compareTo(new BigDecimal("21")) == 0) return java.util.Arrays.asList(7, 9);
     if (pct.compareTo(new BigDecimal("10")) == 0
         || pct.compareTo(new BigDecimal("7")) == 0
@@ -314,7 +314,7 @@ class Fiscal303BoxesHandler {
     return Collections.emptyList();
   }
 
-  private List<Integer> vatEcBoxes(BigDecimal pct) {
+  List<Integer> vatEcBoxes(BigDecimal pct) {
     if (pct.compareTo(new BigDecimal("1.40")) == 0) return java.util.Arrays.asList(19, 21);
     if (pct.compareTo(new BigDecimal("5.20")) == 0) return java.util.Arrays.asList(22, 24);
     if (pct.compareTo(new BigDecimal("0.50")) == 0) return java.util.Arrays.asList(16, 18);
