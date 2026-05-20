@@ -41,12 +41,15 @@ import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 import org.openbravo.service.db.DalConnectionProvider;
 
 /**
- * NeoHandler that creates a draft Purchase Invoice from a Purchase Order.
+ * NeoHandler that creates a draft Purchase Invoice from a Purchase Order or Goods Receipt.
  * Invoked as an ACTION endpoint via:
  *   POST /sws/neo/purchase-order/header/{recordId}/action/createPurchaseInvoice
+ *   POST /sws/neo/goods-receipt/{entity}/{recordId}/action/createPurchaseInvoice
  */
 @Named("createPurchaseInvoiceHandler")
 public class CreatePurchaseInvoiceHandler implements NeoHandler {
@@ -54,6 +57,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(CreatePurchaseInvoiceHandler.class);
   private static final String ACTION_NAME = "createPurchaseInvoice";
   private static final String SPEC_PURCHASE_ORDER = "purchase-order";
+  private static final String SPEC_GOODS_RECEIPT = "goods-receipt";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -63,7 +67,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     if (!ACTION_NAME.equals(context.getFieldName()) || !"POST".equals(context.getHttpMethod())) {
       return null;
     }
-    if (!SPEC_PURCHASE_ORDER.equals(context.getSpecName())) {
+    String specName = context.getSpecName();
+    if (!SPEC_PURCHASE_ORDER.equals(specName) && !SPEC_GOODS_RECEIPT.equals(specName)) {
       return null;
     }
 
@@ -75,7 +80,9 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     try {
       OBContext.setAdminMode(true);
       try {
-        Invoice invoice = createFromOrder(recordId);
+        Invoice invoice = SPEC_GOODS_RECEIPT.equals(specName)
+            ? createFromReceipt(recordId)
+            : createFromOrder(recordId);
         OBDal.getInstance().flush();
         // Refresh to pick up trigger-generated documentNo and totals set by CreateInvoiceLinesFromProcess.
         OBDal.getInstance().getSession().refresh(invoice);
@@ -231,5 +238,87 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         .setMaxResults(1)
         .list();
     return results.isEmpty() ? null : results.get(0);
+  }
+
+  /**
+   * Creates a draft AP Invoice from a Goods Receipt. Quantities come from the
+   * receipt's movement quantities; prices and taxes are resolved via the linked
+   * purchase order lines. Only lines that have a linked {@code C_OrderLine} are
+   * included; lines without a PO link are skipped.
+   *
+   * @param receiptId
+   *     primary key of the source {@code M_InOut} record (issotrx=false)
+   * @return the newly persisted draft {@link Invoice}
+   * @throws OBException
+   *     if the receipt is not found, has no linked PO, or no invoiceable lines
+   */
+  protected Invoice createFromReceipt(String receiptId) {
+    ShipmentInOut receipt = OBDal.getInstance().get(ShipmentInOut.class, receiptId);
+    if (receipt == null) {
+      throw new OBException("Goods receipt not found: " + receiptId);
+    }
+
+    Order linkedOrder = receipt.getSalesOrder();
+    if (linkedOrder == null) {
+      throw new OBException(
+          "This goods receipt has no linked purchase order. Create the invoice from the purchase order instead.");
+    }
+
+    JSONArray selectedLines = buildSelectedLinesFromReceipt(receipt);
+    if (selectedLines.length() == 0) {
+      throw new OBException("No lines with a linked purchase order to invoice in this goods receipt");
+    }
+
+    DocumentType invoiceDocType = resolveAPInvoiceDocType(linkedOrder);
+
+    Invoice invoice = NeoCommercialDocumentFactory.createInvoiceFromOrderHeader(
+        linkedOrder, invoiceDocType, false);
+
+    OBDal.getInstance().save(invoice);
+    OBDal.getInstance().flush();
+
+    CreateInvoiceLinesFromProcess proc =
+        WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class);
+    proc.createInvoiceLinesFromDocumentLines(selectedLines, invoice, OrderLine.class);
+
+    OBDal.getInstance().flush();
+
+    InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
+
+    OBDal.getInstance().getSession().refresh(invoice);
+    ensureDocumentNo(invoice);
+
+    return invoice;
+  }
+
+  /**
+   * Builds the selectedLines JSON array for a goods receipt: one entry per active
+   * receipt line that has a linked purchase order line, using the movement quantity
+   * as the quantity to invoice.
+   */
+  protected JSONArray buildSelectedLinesFromReceipt(ShipmentInOut receipt) {
+    JSONArray selectedLines = new JSONArray();
+    for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
+      if (!rl.isActive() || rl.getProduct() == null) {
+        continue;
+      }
+      OrderLine ol = rl.getSalesOrderLine();
+      if (ol == null) {
+        continue;
+      }
+      BigDecimal qty = rl.getMovementQuantity();
+      if (qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) {
+        continue;
+      }
+      try {
+        JSONObject entry = new JSONObject();
+        entry.put("id", ol.getId());
+        entry.put("orderedQuantity", qty.toPlainString());
+        selectedLines.put(entry);
+      } catch (Exception e) {
+        log.warn("Failed to add receipt line {} to selectedLines: {}", rl.getId(), e.getMessage());
+      }
+    }
+    return selectedLines;
   }
 }
