@@ -79,8 +79,7 @@ public class InvoiceFromOrderSupport {
       return invoice;
     }
     String invoiceId = invoice.getId();
-    invoice.setEtgoTotalDiscount(pct);
-    OBDal.getInstance().save(invoice);
+    writeInvoiceDiscountPct(invoiceId, pct);
     OBDal.getInstance().flush();
     if (discountService != null) {
       // Materialise the ETGO_DTO line and let the DB trigger chain
@@ -162,6 +161,19 @@ public class InvoiceFromOrderSupport {
       log.warn("Could not read em_etgo_total_discount for order {}: {}", orderId, e.getMessage());
     }
     return null;
+  }
+
+  private void writeInvoiceDiscountPct(String invoiceId, BigDecimal pct) {
+    String sql = "UPDATE c_invoice SET em_etgo_total_discount = ? WHERE c_invoice_id = ?";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setBigDecimal(1, pct);
+      ps.setString(2, invoiceId);
+      ps.executeUpdate();
+    } catch (Exception e) {
+      log.warn("Could not write em_etgo_total_discount for invoice {}: {}", invoiceId,
+          e.getMessage());
+    }
   }
 
 }

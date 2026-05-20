@@ -45,6 +45,7 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 
 /**
@@ -222,6 +223,92 @@ public class NeoBuiltInEndpointHandlerTest {
     assertTrue(handled);
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Session endpoint only supports GET"));
+  }
+
+  /**
+   * Verifies successful routing for contract-driven email commands.
+   */
+  @Test
+  public void handleEmailContractsPostWritesServiceResponse() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse serviceResponse = NeoResponse.ok(new JSONObject());
+    TransactionalEmailService emailService = mock(TransactionalEmailService.class);
+    NeoDiscoveryHandler discoveryHandler = mock(NeoDiscoveryHandler.class);
+    handler = new NeoBuiltInEndpointHandler(servlet, discoveryHandler, emailService);
+
+    when(request.getReader()).thenReturn(new BufferedReader(
+        new StringReader("{\"recordId\":\"1\"}")));
+    when(emailService.send(eq("reset-password"), any(JSONObject.class))).thenReturn(serviceResponse);
+
+    boolean handled = handler.handle(new NeoServlet.NeoPathInfo("email-contracts", "reset-password",
+        "send"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(emailService).send(eq("reset-password"), any(JSONObject.class));
+    verify(servlet).writeResponse(response, serviceResponse);
+  }
+
+  /**
+   * Verifies method restriction for email contract endpoint.
+   */
+  @Test
+  public void handleEmailContractsRejectsNonPostMethod() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    boolean handled = handler.handle(new NeoServlet.NeoPathInfo("email-contracts", "reset-password",
+        "send"), "GET", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Email contract endpoint only supports POST"));
+  }
+
+  /**
+   * Verifies only /email-contracts/{contract}/send is accepted.
+   */
+  @Test
+  public void handleEmailContractsRejectsUnknownShape() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    boolean handled = handler.handle(new NeoServlet.NeoPathInfo("email-contracts", "reset-password",
+        "preview"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_NOT_FOUND),
+        eq("Unknown email contract endpoint"));
+  }
+
+  /**
+   * Verifies DAL rollback when email contract handling catches an unexpected error.
+   */
+  @Test
+  public void handleEmailContractsRollsBackOnUnexpectedError() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    TransactionalEmailService emailService = mock(TransactionalEmailService.class);
+    NeoDiscoveryHandler discoveryHandler = mock(NeoDiscoveryHandler.class);
+    OBDal dal = mock(OBDal.class);
+    handler = new NeoBuiltInEndpointHandler(servlet, discoveryHandler, emailService);
+
+    when(request.getReader()).thenReturn(new BufferedReader(
+        new StringReader("{\"recordId\":\"1\"}")));
+    when(emailService.send(eq("reset-password"), any(JSONObject.class)))
+        .thenThrow(new RuntimeException("boom"));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      boolean handled = handler.handle(new NeoServlet.NeoPathInfo("email-contracts",
+          "reset-password", "send"), "POST", request, response);
+
+      assertTrue(handled);
+      verify(dal).rollbackAndClose();
+      verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR),
+          eq("Email contract request failed"));
+    }
   }
 
   /**
