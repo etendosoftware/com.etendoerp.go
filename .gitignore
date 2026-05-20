@@ -31,3 +31,4 @@ config/apps-spike/private-key.pem
 .env
 .scannerwork/
 sonar-reports/
+sonar-results.md
