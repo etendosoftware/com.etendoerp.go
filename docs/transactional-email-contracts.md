@@ -39,6 +39,7 @@ Rejected provider passthrough shape:
 |-----------|----------------|
 | `TransactionalEmailService` | Executes a named contract, enforces executor-level safety gates, and maps provider outcomes to NEO responses |
 | `EmailContractRegistry` | Finds the server-side contract by name |
+| `DefaultEmailContractRegistry` | Registers the built-in v1 transactional contracts |
 | `EmailContract` | Authorizes the command, resolves the recipient, and builds template variables from trusted server context |
 | `EmailAuthorizationResult` | Carries contract-specific authorization approval or rejection |
 | `EmailRecipientResolution` | Carries the recipient derived from server state or from an explicit support/admin contract |
@@ -49,7 +50,7 @@ Rejected provider passthrough shape:
 | `ApiGatewayEmailProviderAdapter` | HTTP adapter for API Gateway-style providers |
 | `EmailProviderConfig` | Reads provider configuration from server-side properties or environment variables |
 
-Initial contract registration is intentionally separate from the executor. A missing contract returns `VALIDATION_FAILED` with HTTP 404 until a concrete contract is registered.
+The default executor registers the built-in v1 contracts. A missing contract still returns `VALIDATION_FAILED` with HTTP 404.
 
 ## Authorization and Recipient Resolution
 
@@ -121,6 +122,23 @@ Idempotency lookups are scoped by contract and tenant/client in the default stor
 
 The default `InMemoryEmailSafetyStore` is process-local and suitable for executor wiring and tests. Production deployments that require cluster-wide enforcement must replace it with a persistent implementation without changing contract code.
 
+## Built-In v1 Contracts
+
+| Contract | Provider template | Recipient source | Required command fields |
+|----------|-------------------|------------------|-------------------------|
+| `reset-password` | `reset-password` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link` |
+| `new-account` | `new-account` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link` |
+| `login-alert` | `login-alert` | `AD_User.email` resolved by `userId` | `version`, `userId`; optional `loginEventId`, `ip`, `date` |
+| `sales-invoice-send` | `invoice` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the invoice business partner | `version`, `recordId` |
+
+`custom` and `support-custom-email` are not registered by default. A custom HTML email can only be added later as an explicit support/admin contract with role checks, reason capture, sanitizer, throttle, and audit.
+
+The account-link contracts accept only absolute `http://` or `https://` links. The sales invoice contract generates `download_link` from server configuration:
+
+| Property | Environment Variable | Purpose |
+|----------|----------------------|---------|
+| `etendo.go.email.documentDownloadBaseUrl` | `ETGO_EMAIL_DOCUMENT_DOWNLOAD_BASE_URL` | Base URL used to build document download links as `{base}/sales-invoice/{recordId}` |
+
 ## Provider Configuration
 
 No provider endpoint or API key is hardcoded in the module.
@@ -150,4 +168,4 @@ The provider is considered configured only when it is enabled and both base URL 
 | `SUPPRESSED` | 403 | A global, tenant, or template kill switch suppressed the send attempt |
 | `PROVIDER_FAILED` | 502/503 | Provider rejected the request, is unavailable, or is not configured |
 
-Concrete contract registration is implemented by later ETP tasks.
+Additional contract families are implemented by later ETP tasks.

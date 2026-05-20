@@ -76,7 +76,7 @@ public class TransactionalEmailService {
    * Creates the default executor with runtime provider configuration.
    */
   public TransactionalEmailService() {
-    this(EmailContractRegistry.empty(), new ApiGatewayEmailProviderAdapter());
+    this(DefaultEmailContractRegistry.createDefault(), new ApiGatewayEmailProviderAdapter());
   }
 
   /**
@@ -156,7 +156,8 @@ public class TransactionalEmailService {
 
     EmailAuthorizationResult authorization = contract.get().authorize(command);
     if (!authorization.isAllowed()) {
-      return contractResponse(authorization.getHttpStatus(), STATUS_UNAUTHORIZED,
+      return contractResponse(authorization.getHttpStatus(),
+          authorizationFailureStatus(authorization.getHttpStatus()),
           normalizedContract, authorization.getMessage(), null);
     }
 
@@ -178,15 +179,10 @@ public class TransactionalEmailService {
     }
 
     EmailProviderRequest providerRequest = resolution.getProviderRequest();
-    String providerRequestError = validateProviderRequest(providerRequest);
-    if (providerRequestError != null) {
-      return contractResponse(HttpServletResponse.SC_BAD_REQUEST, STATUS_VALIDATION_FAILED,
-          normalizedContract, providerRequestError, null);
-    }
-    if (!recipient.getRecipient().equals(providerRequest.getRecipient())) {
-      return contractResponse(HttpServletResponse.SC_BAD_REQUEST, STATUS_VALIDATION_FAILED,
-          normalizedContract,
-          "Email contract provider request recipient must match recipient resolution", null);
+    NeoResponse providerValidation = validateResolvedProviderRequest(normalizedContract,
+        recipient, providerRequest);
+    if (providerValidation != null) {
+      return providerValidation;
     }
 
     EmailSendContext sendContext = new EmailSendContext(command, recipient, providerRequest);
@@ -194,6 +190,11 @@ public class TransactionalEmailService {
         contract.get().deliveryPolicy(command, recipient, providerRequest),
         "Email delivery policy cannot be null");
     return enforceSafetyAndSubmit(sendContext, deliveryPolicy);
+  }
+
+  private static String authorizationFailureStatus(int httpStatus) {
+    return httpStatus == HttpServletResponse.SC_FORBIDDEN ? STATUS_UNAUTHORIZED
+        : STATUS_VALIDATION_FAILED;
   }
 
   private NeoResponse enforceSafetyAndSubmit(EmailSendContext sendContext,
@@ -251,6 +252,21 @@ public class TransactionalEmailService {
     }
     if (StringUtils.isBlank(providerRequest.getTemplate())) {
       return "Email contract did not resolve a template";
+    }
+    return null;
+  }
+
+  private static NeoResponse validateResolvedProviderRequest(String normalizedContract,
+      EmailRecipientResolution recipient, EmailProviderRequest providerRequest) {
+    String providerRequestError = validateProviderRequest(providerRequest);
+    if (providerRequestError != null) {
+      return contractResponse(HttpServletResponse.SC_BAD_REQUEST, STATUS_VALIDATION_FAILED,
+          normalizedContract, providerRequestError, null);
+    }
+    if (!recipient.getRecipient().equals(providerRequest.getRecipient())) {
+      return contractResponse(HttpServletResponse.SC_BAD_REQUEST, STATUS_VALIDATION_FAILED,
+          normalizedContract,
+          "Email contract provider request recipient must match recipient resolution", null);
     }
     return null;
   }
