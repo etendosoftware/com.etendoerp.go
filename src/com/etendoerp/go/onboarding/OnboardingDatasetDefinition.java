@@ -49,6 +49,7 @@ public final class OnboardingDatasetDefinition {
       "AD_ORG_WAREHOUSE",
       "AD_SEQUENCE",
       "C_BP_GROUP",
+      "C_BP_TAXCATEGORY",
       "C_CALENDAR",
       "C_DOCTYPE",
       "C_LOCATION",

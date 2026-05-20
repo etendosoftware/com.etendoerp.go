@@ -27,6 +27,8 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
+import com.smf.securewebservices.SWSConfig;
 
 /**
  * NEO Headless 2.0 servlet.
@@ -97,7 +99,7 @@ public class NeoServlet extends HttpBaseServlet {
         super.service(request, response);
       } catch (Exception e) {
         log.error("Error in NeoServlet.service", e);
-        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
       }
     }
   }
@@ -127,7 +129,7 @@ public class NeoServlet extends HttpBaseServlet {
       requestRouter.handleSpecRequest(pathInfo, method, request, response);
     } catch (Exception e) {
       log.error("Error processing NEO request: {}", e.getMessage(), e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -255,7 +257,7 @@ public class NeoServlet extends HttpBaseServlet {
       OBContext.setAdminMode();
       OBDal.getInstance().getSession()
           .createNativeQuery("SELECT 1").getSingleResult();
-      ready = true;
+      ready = SWSConfig.getInstance().getPrivateKey() != null;
     } catch (Exception e) {
       log.warn("Readiness check failed: {}", e.getMessage());
     } finally {
