@@ -54,6 +54,19 @@ public interface EmailContract {
   }
 
   /**
+   * Resolves anti-abuse policy for this send attempt.
+   *
+   * @param command contract command received by the executor
+   * @param recipient recipient resolved before provider payload creation
+   * @param providerRequest provider request resolved by the contract
+   * @return delivery policy with idempotency and throttle rules
+   */
+  default EmailDeliveryPolicy deliveryPolicy(EmailContractCommand command,
+      EmailRecipientResolution recipient, EmailProviderRequest providerRequest) {
+    return EmailDeliveryPolicy.empty();
+  }
+
+  /**
    * Validates the command and resolves the provider request from server-side
    * context.
    *

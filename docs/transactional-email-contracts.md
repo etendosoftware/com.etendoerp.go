@@ -42,6 +42,9 @@ Rejected provider passthrough shape:
 | `EmailContract` | Authorizes the command, resolves the recipient, and builds template variables from trusted server context |
 | `EmailAuthorizationResult` | Carries contract-specific authorization approval or rejection |
 | `EmailRecipientResolution` | Carries the recipient derived from server state or from an explicit support/admin contract |
+| `EmailDeliveryPolicy` | Carries contract-selected idempotency and throttle rules for a send attempt |
+| `EmailSafetyStore` | Checks kill switches, idempotency, throttle counters, and audit capture |
+| `InMemoryEmailSafetyStore` | Default safety-store implementation until a persistent DAL-backed store is configured |
 | `EmailProviderAdapter` | Backend-only boundary to the external provider |
 | `ApiGatewayEmailProviderAdapter` | HTTP adapter for API Gateway-style providers |
 | `EmailProviderConfig` | Reads provider configuration from server-side properties or environment variables |
@@ -58,6 +61,7 @@ The executor applies contract safety gates before any provider call:
 4. Call `EmailContract.resolveRecipient(command)` before provider payload creation.
 5. Reject blank recipient resolutions and explicit recipient-resolution failures.
 6. Require the final `EmailProviderRequest` recipient to match the resolved recipient.
+7. Apply kill switches, idempotency, throttle rules, and audit before provider submission.
 
 Default contracts must derive recipients from trusted server-side records. A caller-provided recipient is valid only for explicit support/admin contracts that override `allowsCallerProvidedRecipients()` and still apply role checks, audit, reason capture, and throttle in their contract implementation.
 
@@ -68,6 +72,7 @@ Each contract must implement these steps in order:
 1. `authorize`: verify the current user/session can perform the requested send for the record, tenant, and action.
 2. `resolveRecipient`: derive the destination from a trusted record whenever possible.
 3. `resolve`: build the provider template and variables using the resolved recipient.
+4. `deliveryPolicy`: define idempotency and throttle rules for the send attempt.
 
 Edge cases every contract family must cover:
 
@@ -76,6 +81,45 @@ Edge cases every contract family must cover:
 - The command tries to override recipient or provider fields.
 - The contract resolves one recipient but builds a provider payload for another.
 - A support/admin contract receives a caller-provided recipient without the required role or reason.
+- A repeated command arrives with the same idempotency key.
+- A tenant, template, recipient, recipient domain, user, record, or global limit is exceeded.
+- A global, tenant, or template kill switch is active.
+
+## Anti-Abuse, Idempotency, and Audit
+
+The executor builds an `EmailSendContext` after authorization, recipient resolution, and provider request validation. The context exposes:
+
+- contract name
+- tenant/client id from `tenantId` or `clientId`
+- user id from `userId`
+- business record id from `recordId`
+- provider template
+- resolved recipient
+- recipient domain
+
+`EmailDeliveryPolicy` controls per-contract abuse behavior. It supports:
+
+- idempotency key selected by the contract, with fallback to command body `idempotencyKey`
+- `EmailThrottleRule.global(max, windowSeconds)`
+- `EmailThrottleRule.perTenant(max, windowSeconds)`
+- `EmailThrottleRule.perUser(max, windowSeconds)`
+- `EmailThrottleRule.perTemplate(max, windowSeconds)`
+- `EmailThrottleRule.perRecipient(max, windowSeconds)`
+- `EmailThrottleRule.perDomain(max, windowSeconds)`
+- `EmailThrottleRule.perRecord(max, windowSeconds)`
+
+Rules whose context key is unavailable are skipped, so contracts can share policy helpers across flows where not every dimension applies.
+
+`EmailSafetyStore` is the persistence boundary for:
+
+- global, tenant, and template kill switches
+- successful-send idempotency lookups
+- throttle counters
+- audit records
+
+Idempotency lookups are scoped by contract and tenant/client in the default store. Contracts should still generate deterministic keys that include the relevant business record and semantic action/version, for example `invoice-send:<invoiceId>:v1`.
+
+The default `InMemoryEmailSafetyStore` is process-local and suitable for executor wiring and tests. Production deployments that require cluster-wide enforcement must replace it with a persistent implementation without changing contract code.
 
 ## Provider Configuration
 
@@ -101,6 +145,9 @@ The provider is considered configured only when it is enabled and both base URL 
 | `SENT` | 200 | Provider accepted the resolved contract request |
 | `VALIDATION_FAILED` | 400/404 | Command is invalid, uses provider fields, or contract does not exist |
 | `UNAUTHORIZED` | 403 | Contract authorization failed or the command uses caller-provided recipients without an explicit support/admin contract |
+| `DUPLICATE` | 200 | Idempotency key already has a successful send, so the provider call is suppressed |
+| `THROTTLED` | 429 | A configured throttle rule rejected the send attempt |
+| `SUPPRESSED` | 403 | A global, tenant, or template kill switch suppressed the send attempt |
 | `PROVIDER_FAILED` | 502/503 | Provider rejected the request, is unavailable, or is not configured |
 
-Anti-abuse controls, audit persistence, kill switches beyond adapter enabled state, and concrete contract registration are implemented by later ETP tasks.
+Concrete contract registration is implemented by later ETP tasks.

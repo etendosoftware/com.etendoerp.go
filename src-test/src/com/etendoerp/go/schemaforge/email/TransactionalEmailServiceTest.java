@@ -22,6 +22,8 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
 
 import org.codehaus.jettison.json.JSONException;
@@ -235,6 +237,132 @@ public class TransactionalEmailServiceTest {
     assertEquals("Transactional email provider rejected the request", data.getString("message"));
   }
 
+  @Test
+  public void returnsDuplicateForRepeatedIdempotencyKey() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{\"id\":\"provider-id\"}"));
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    TransactionalEmailService service = new TransactionalEmailService(
+        new SingleContractRegistry(new FixtureContract()), adapter, safetyStore);
+
+    JSONObject command = new JSONObject();
+    command.put("recordId", "ABC123");
+    command.put("idempotencyKey", "fixture:ABC123:v1");
+
+    NeoResponse firstResponse = service.send("fixture-contract", command);
+    NeoResponse duplicateResponse = service.send("fixture-contract", command);
+
+    JSONObject duplicateData = responseData(duplicateResponse);
+    assertEquals(200, firstResponse.getHttpStatus());
+    assertEquals(200, duplicateResponse.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_DUPLICATE,
+        duplicateData.getString("status"));
+    assertTrue(duplicateData.getBoolean("duplicate"));
+    assertEquals(202, duplicateData.getInt("providerStatus"));
+    assertEquals(1, adapter.getSendCount());
+    assertEquals(2, safetyStore.getAuditRecords().size());
+    assertEquals(TransactionalEmailService.STATUS_SENT,
+        safetyStore.getAuditRecords().get(0).getStatus());
+    assertEquals(TransactionalEmailService.STATUS_DUPLICATE,
+        safetyStore.getAuditRecords().get(1).getStatus());
+  }
+
+  @Test
+  public void scopesIdempotencyByContract() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}"));
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    TransactionalEmailService service = new TransactionalEmailService(
+        new MultiContractRegistry(new FixtureContract(), new AlternateFixtureContract()),
+        adapter, safetyStore);
+
+    JSONObject command = new JSONObject();
+    command.put("tenantId", "tenant-1");
+    command.put("idempotencyKey", "record-1:v1");
+
+    NeoResponse firstResponse = service.send("fixture-contract", command);
+    NeoResponse secondResponse = service.send("alternate-fixture", command);
+
+    assertEquals(200, firstResponse.getHttpStatus());
+    assertEquals(200, secondResponse.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_SENT,
+        responseData(firstResponse).getString("status"));
+    assertEquals(TransactionalEmailService.STATUS_SENT,
+        responseData(secondResponse).getString("status"));
+    assertEquals(2, adapter.getSendCount());
+  }
+
+  @Test
+  public void throttlesByRecipientLimit() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}"));
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    TransactionalEmailService service = new TransactionalEmailService(
+        new SingleContractRegistry(new RecipientThrottleContract()), adapter, safetyStore);
+
+    JSONObject command = new JSONObject();
+    command.put("recordId", "ABC123");
+
+    NeoResponse firstResponse = service.send("recipient-throttle", command);
+    NeoResponse throttledResponse = service.send("recipient-throttle", command);
+
+    JSONObject throttledData = responseData(throttledResponse);
+    assertEquals(200, firstResponse.getHttpStatus());
+    assertEquals(429, throttledResponse.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_THROTTLED,
+        throttledData.getString("status"));
+    assertEquals(EmailThrottleRule.SCOPE_RECIPIENT,
+        throttledData.getString("throttleScope"));
+    assertTrue(throttledData.getInt("retryAfterSeconds") > 0);
+    assertEquals(1, adapter.getSendCount());
+    assertEquals(TransactionalEmailService.STATUS_THROTTLED,
+        safetyStore.getAuditRecords().get(1).getStatus());
+  }
+
+  @Test
+  public void suppressesSendWhenTemplateKillSwitchIsActive() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}"));
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    safetyStore.disableTemplate("fixture-template");
+    TransactionalEmailService service = new TransactionalEmailService(
+        new SingleContractRegistry(new FixtureContract()), adapter, safetyStore);
+
+    NeoResponse response = service.send("fixture-contract", new JSONObject());
+
+    JSONObject data = responseData(response);
+    assertEquals(403, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_SUPPRESSED, data.getString("status"));
+    assertEquals(EmailThrottleRule.SCOPE_TEMPLATE, data.getString("killSwitchScope"));
+    assertFalse(adapter.wasSendCalled());
+    assertEquals(1, safetyStore.getAuditRecords().size());
+    assertEquals(TransactionalEmailService.STATUS_SUPPRESSED,
+        safetyStore.getAuditRecords().get(0).getStatus());
+  }
+
+  @Test
+  public void resolvesThrottleKeysForSupportedScopes() throws Exception {
+    JSONObject commandBody = new JSONObject();
+    commandBody.put("tenantId", "tenant-1");
+    commandBody.put("userId", "user-1");
+    commandBody.put("recordId", "record-1");
+    EmailContractCommand command = new EmailContractCommand("fixture-contract", commandBody);
+    EmailRecipientResolution recipient = EmailRecipientResolution.serverResolved(
+        "person@example.com");
+    EmailProviderRequest providerRequest = new EmailProviderRequest("person@example.com",
+        "fixture-template", new JSONObject(), null);
+    EmailSendContext context = new EmailSendContext(command, recipient, providerRequest);
+
+    assertEquals("global", EmailThrottleRule.global(1, 60).resolveKey(context));
+    assertEquals("tenant-1", EmailThrottleRule.perTenant(1, 60).resolveKey(context));
+    assertEquals("user-1", EmailThrottleRule.perUser(1, 60).resolveKey(context));
+    assertEquals("fixture-template", EmailThrottleRule.perTemplate(1, 60).resolveKey(context));
+    assertEquals("person@example.com", EmailThrottleRule.perRecipient(1, 60)
+        .resolveKey(context));
+    assertEquals("example.com", EmailThrottleRule.perDomain(1, 60).resolveKey(context));
+    assertEquals("record-1", EmailThrottleRule.perRecord(1, 60).resolveKey(context));
+  }
+
   private static JSONObject responseData(NeoResponse response) throws JSONException {
     return response.getBody().getJSONObject("response").getJSONObject("data");
   }
@@ -250,6 +378,24 @@ public class TransactionalEmailServiceTest {
     public Optional<EmailContract> find(String contractName) {
       if (contract.getName().equals(contractName)) {
         return Optional.of(contract);
+      }
+      return Optional.empty();
+    }
+  }
+
+  private static class MultiContractRegistry implements EmailContractRegistry {
+    private final List<EmailContract> contracts;
+
+    MultiContractRegistry(EmailContract... contracts) {
+      this.contracts = Arrays.asList(contracts);
+    }
+
+    @Override
+    public Optional<EmailContract> find(String contractName) {
+      for (EmailContract contract : contracts) {
+        if (contract.getName().equals(contractName)) {
+          return Optional.of(contract);
+        }
       }
       return Optional.empty();
     }
@@ -283,6 +429,13 @@ public class TransactionalEmailServiceTest {
       } catch (JSONException e) {
         throw new IllegalStateException("Could not build fixture email data", e);
       }
+    }
+  }
+
+  private static class AlternateFixtureContract extends FixtureContract {
+    @Override
+    public String getName() {
+      return "alternate-fixture";
     }
   }
 
@@ -413,10 +566,24 @@ public class TransactionalEmailServiceTest {
     }
   }
 
+  private static class RecipientThrottleContract extends FixtureContract {
+    @Override
+    public String getName() {
+      return "recipient-throttle";
+    }
+
+    @Override
+    public EmailDeliveryPolicy deliveryPolicy(EmailContractCommand command,
+        EmailRecipientResolution recipient, EmailProviderRequest providerRequest) {
+      return EmailDeliveryPolicy.of(null, Arrays.asList(EmailThrottleRule.perRecipient(1, 60)));
+    }
+  }
+
   private static class FakeProviderAdapter implements EmailProviderAdapter {
     private final boolean configured;
     private final EmailProviderResponse response;
     private boolean sendCalled;
+    private int sendCount;
     private EmailProviderRequest lastRequest;
 
     FakeProviderAdapter(boolean configured, EmailProviderResponse response) {
@@ -432,6 +599,7 @@ public class TransactionalEmailServiceTest {
     @Override
     public EmailProviderResponse send(EmailProviderRequest request) throws IOException {
       sendCalled = true;
+      sendCount++;
       lastRequest = request;
       return response;
     }
@@ -442,6 +610,10 @@ public class TransactionalEmailServiceTest {
 
     EmailProviderRequest getLastRequest() {
       return lastRequest;
+    }
+
+    int getSendCount() {
+      return sendCount;
     }
   }
 }

@@ -47,9 +47,19 @@ public class TransactionalEmailService {
   public static final String STATUS_VALIDATION_FAILED = "VALIDATION_FAILED";
   public static final String STATUS_PROVIDER_FAILED = "PROVIDER_FAILED";
   public static final String STATUS_UNAUTHORIZED = "UNAUTHORIZED";
+  public static final String STATUS_DUPLICATE = "DUPLICATE";
+  public static final String STATUS_THROTTLED = "THROTTLED";
+  public static final String STATUS_SUPPRESSED = "SUPPRESSED";
 
   private static final String MESSAGE_RECIPIENT_NOT_RESOLVED =
       "Email contract did not resolve a recipient";
+  private static final String FIELD_DUPLICATE = "duplicate";
+  private static final String FIELD_PROVIDER_STATUS = "providerStatus";
+  private static final String FIELD_RETRY_AFTER_SECONDS = "retryAfterSeconds";
+  private static final String MESSAGE_DUPLICATE =
+      "Duplicate email request suppressed by idempotency key";
+  private static final String MESSAGE_THROTTLED =
+      "Transactional email throttle limit exceeded";
   private static final Set<String> FORBIDDEN_COMMAND_FIELDS =
       Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
           "to", "template", "data", "from", "sender", "fromEmail", "replyTo",
@@ -60,6 +70,7 @@ public class TransactionalEmailService {
 
   private final EmailContractRegistry contractRegistry;
   private final EmailProviderAdapter providerAdapter;
+  private final EmailSafetyStore safetyStore;
 
   /**
    * Creates the default executor with runtime provider configuration.
@@ -76,8 +87,23 @@ public class TransactionalEmailService {
    */
   public TransactionalEmailService(EmailContractRegistry contractRegistry,
       EmailProviderAdapter providerAdapter) {
-    this.contractRegistry = contractRegistry;
-    this.providerAdapter = providerAdapter;
+    this(contractRegistry, providerAdapter, new InMemoryEmailSafetyStore());
+  }
+
+  /**
+   * Creates an executor with explicit registry, provider adapter, and safety store.
+   *
+   * @param contractRegistry registry that resolves server-side email contracts
+   * @param providerAdapter backend-only provider adapter
+   * @param safetyStore anti-abuse, idempotency, kill-switch, and audit store
+   */
+  public TransactionalEmailService(EmailContractRegistry contractRegistry,
+      EmailProviderAdapter providerAdapter, EmailSafetyStore safetyStore) {
+    this.contractRegistry = Objects.requireNonNull(contractRegistry,
+        "Email contract registry cannot be null");
+    this.providerAdapter = Objects.requireNonNull(providerAdapter,
+        "Email provider adapter cannot be null");
+    this.safetyStore = Objects.requireNonNull(safetyStore, "Email safety store cannot be null");
   }
 
   /**
@@ -163,7 +189,22 @@ public class TransactionalEmailService {
           "Email contract provider request recipient must match recipient resolution", null);
     }
 
-    return submitProviderRequest(normalizedContract, providerRequest);
+    EmailSendContext sendContext = new EmailSendContext(command, recipient, providerRequest);
+    EmailDeliveryPolicy deliveryPolicy = Objects.requireNonNull(
+        contract.get().deliveryPolicy(command, recipient, providerRequest),
+        "Email delivery policy cannot be null");
+    return enforceSafetyAndSubmit(sendContext, deliveryPolicy);
+  }
+
+  private NeoResponse enforceSafetyAndSubmit(EmailSendContext sendContext,
+      EmailDeliveryPolicy deliveryPolicy) {
+    String idempotencyKey = deliveryPolicy.resolveIdempotencyKey(sendContext);
+    NeoResponse safetyResponse = enforceSafetyChecks(sendContext, deliveryPolicy, idempotencyKey);
+    if (safetyResponse != null) {
+      return safetyResponse;
+    }
+
+    return submitProviderRequest(sendContext, idempotencyKey);
   }
 
   private static String findForbiddenProviderField(JSONObject commandBody) {
@@ -214,30 +255,114 @@ public class TransactionalEmailService {
     return null;
   }
 
-  private NeoResponse submitProviderRequest(String normalizedContract,
-      EmailProviderRequest providerRequest) {
+  private NeoResponse enforceSafetyChecks(EmailSendContext context,
+      EmailDeliveryPolicy deliveryPolicy, String idempotencyKey) {
+    EmailKillSwitchResult killSwitch = safetyStore.checkKillSwitch(context);
+    if (!killSwitch.isAllowed()) {
+      recordAudit(context, idempotencyKey, HttpServletResponse.SC_FORBIDDEN, STATUS_SUPPRESSED,
+          killSwitch.getMessage(), null, false);
+      return contractResponse(HttpServletResponse.SC_FORBIDDEN, STATUS_SUPPRESSED,
+          context.getContractName(), killSwitch.getMessage(), suppressionExtra(killSwitch));
+    }
+
+    Optional<EmailAuditRecord> duplicate = safetyStore.findSentByIdempotencyKey(context,
+        idempotencyKey);
+    if (duplicate.isPresent()) {
+      EmailAuditRecord prior = duplicate.get();
+      recordAudit(context, idempotencyKey, HttpServletResponse.SC_OK, STATUS_DUPLICATE,
+          MESSAGE_DUPLICATE, prior.getProviderStatus(), true);
+      return contractResponse(HttpServletResponse.SC_OK, STATUS_DUPLICATE,
+          context.getContractName(), MESSAGE_DUPLICATE, duplicateExtra(prior));
+    }
+
+    EmailThrottleResult throttle = safetyStore.checkAndIncrement(context,
+        deliveryPolicy.getThrottleRules());
+    if (!throttle.isAllowed()) {
+      recordAudit(context, idempotencyKey, 429, STATUS_THROTTLED, MESSAGE_THROTTLED, null, false);
+      return contractResponse(429, STATUS_THROTTLED, context.getContractName(),
+          MESSAGE_THROTTLED, throttleExtra(throttle));
+    }
+    return null;
+  }
+
+  private NeoResponse submitProviderRequest(EmailSendContext context, String idempotencyKey) {
     if (!providerAdapter.isConfigured()) {
+      recordAudit(context, idempotencyKey, HttpServletResponse.SC_SERVICE_UNAVAILABLE,
+          STATUS_PROVIDER_FAILED, "Transactional email provider is not configured", null, false);
       return contractResponse(HttpServletResponse.SC_SERVICE_UNAVAILABLE, STATUS_PROVIDER_FAILED,
-          normalizedContract, "Transactional email provider is not configured", null);
+          context.getContractName(), "Transactional email provider is not configured", null);
     }
 
     try {
-      EmailProviderResponse providerResponse = providerAdapter.send(providerRequest);
+      EmailProviderResponse providerResponse = providerAdapter.send(context.getProviderRequest());
       if (providerResponse.isSuccessful()) {
         JSONObject extra = new JSONObject();
-        extra.put("providerStatus", providerResponse.getStatusCode());
-        extra.put("duplicate", false);
-        extra.put("retryAfterSeconds", JSONObject.NULL);
-        return contractResponse(HttpServletResponse.SC_OK, STATUS_SENT, normalizedContract, null,
-            extra);
+        extra.put(FIELD_PROVIDER_STATUS, providerResponse.getStatusCode());
+        extra.put(FIELD_DUPLICATE, false);
+        extra.put(FIELD_RETRY_AFTER_SECONDS, JSONObject.NULL);
+        recordAudit(context, idempotencyKey, HttpServletResponse.SC_OK, STATUS_SENT, null,
+            providerResponse.getStatusCode(), false);
+        return contractResponse(HttpServletResponse.SC_OK, STATUS_SENT, context.getContractName(),
+            null, extra);
       }
+      recordAudit(context, idempotencyKey, HttpServletResponse.SC_BAD_GATEWAY,
+          STATUS_PROVIDER_FAILED, "Transactional email provider rejected the request",
+          providerResponse.getStatusCode(), false);
       return contractResponse(HttpServletResponse.SC_BAD_GATEWAY, STATUS_PROVIDER_FAILED,
-          normalizedContract, "Transactional email provider rejected the request", null);
+          context.getContractName(), "Transactional email provider rejected the request", null);
     } catch (IOException | JSONException e) {
       log.error("Error communicating with the email provider for contract [{}]: {}",
-          normalizedContract, e.getMessage(), e);
+          context.getContractName(), e.getMessage(), e);
+      recordAudit(context, idempotencyKey, HttpServletResponse.SC_BAD_GATEWAY,
+          STATUS_PROVIDER_FAILED, "Transactional email provider is unavailable", null, false);
       return contractResponse(HttpServletResponse.SC_BAD_GATEWAY, STATUS_PROVIDER_FAILED,
-          normalizedContract, "Transactional email provider is unavailable", null);
+          context.getContractName(), "Transactional email provider is unavailable", null);
+    }
+  }
+
+  private void recordAudit(EmailSendContext context, String idempotencyKey, int httpStatus,
+      String status, String message, Integer providerStatus, boolean duplicate) {
+    safetyStore.recordAudit(EmailAuditRecord.create(context, idempotencyKey, httpStatus, status,
+        message, providerStatus, duplicate));
+  }
+
+  private static JSONObject duplicateExtra(EmailAuditRecord prior) {
+    try {
+      JSONObject extra = new JSONObject();
+      extra.put(FIELD_DUPLICATE, true);
+      extra.put(FIELD_RETRY_AFTER_SECONDS, JSONObject.NULL);
+      extra.put(FIELD_PROVIDER_STATUS, prior.getProviderStatus() == null ? JSONObject.NULL
+          : prior.getProviderStatus());
+      return extra;
+    } catch (JSONException e) {
+      log.debug("Could not build duplicate email response metadata: {}", e.getMessage(), e);
+      return null;
+    }
+  }
+
+  private static JSONObject throttleExtra(EmailThrottleResult throttle) {
+    try {
+      JSONObject extra = new JSONObject();
+      extra.put(FIELD_DUPLICATE, false);
+      extra.put(FIELD_RETRY_AFTER_SECONDS, throttle.getRetryAfterSeconds());
+      extra.put("throttleScope", throttle.getScope());
+      return extra;
+    } catch (JSONException e) {
+      log.debug("Could not build throttled email response metadata: {}", e.getMessage(), e);
+      return null;
+    }
+  }
+
+  private static JSONObject suppressionExtra(EmailKillSwitchResult killSwitch) {
+    try {
+      JSONObject extra = new JSONObject();
+      extra.put(FIELD_DUPLICATE, false);
+      extra.put(FIELD_RETRY_AFTER_SECONDS, JSONObject.NULL);
+      extra.put("killSwitchScope", killSwitch.getScope());
+      return extra;
+    } catch (JSONException e) {
+      log.debug("Could not build suppressed email response metadata: {}", e.getMessage(), e);
+      return null;
     }
   }
 
