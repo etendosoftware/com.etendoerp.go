@@ -23,19 +23,30 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+import java.util.Collections;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.utility.Sequence;
 import org.openbravo.model.common.enterprise.Organization;
+
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFField;
+import com.etendoerp.sequences.SequenceUtils;
 
 /**
  * Unit tests for {@link NeoCommercialLinePolicy#injectLineNetAmountIfMissing}.
@@ -242,6 +253,71 @@ public class NeoDefaultsServiceTest {
     NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
 
     assertAmountEquals(89.10, body.getDouble("lineNetAmount")); // overwritten: 29.70 × 3
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveDefaultsSkipsReadonlyComboAutopick() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+    SFField sfField = mock(SFField.class);
+    Column adColumn = mock(Column.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    OBContext obContext = mock(OBContext.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    Entity dalEntity = mock(Entity.class);
+
+    when(sfEntity.getId()).thenReturn("sf-entity-1");
+    when(sfField.getADColumn()).thenReturn(adColumn);
+    when(sfField.isReadOnly()).thenReturn(true);
+    when(sfField.getDefaultValue()).thenReturn(null);
+    when(adColumn.getDBColumnName()).thenReturn("C_Reject_Reason_ID");
+    when(adColumn.getDefaultValue()).thenReturn(null);
+    when(adColumn.isUseAutomaticSequence()).thenReturn(false);
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(dal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock = mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+      obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, null)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity)).thenReturn(dalEntity);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolvePropertyName(dalEntity, "C_Reject_Reason_ID"))
+          .thenReturn("rejectReason");
+      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+      utilityMock.when(() -> Utility.getPreference(vars, "C_Reject_Reason_ID", "")).thenReturn(null);
+      docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(adColumn, ctx)).thenReturn(null);
+
+      NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
+
+      assertEquals(200, response.getHttpStatus());
+      assertFalse(response.getBody().getJSONObject("defaults").has("rejectReason"));
+      selectorMock.verify(() -> NeoSelectorService.getBaseReferenceId(adColumn), never());
+      selectorMock.verify(() -> NeoSelectorService.hasObuiselSelector(adColumn), never());
+      selectorMock.verify(() -> NeoSelectorService.querySelectorByColumn(
+          adColumn,
+          "C_Reject_Reason_ID",
+          null,
+          1,
+          0,
+          Collections.emptyMap()), never());
+      verify(vars).setSessionValue(eq("#Date"), any(String.class));
+      verify(dal, never()).get(eq(Organization.class), any(String.class));
+    }
   }
 
 }

@@ -76,6 +76,9 @@ final class NeoCommercialDocumentFactory {
     invoice.setWithholdingamount(BigDecimal.ZERO);
     invoice.setSalesOrder(order);
     invoice.setDocumentNo("<*>");
+    // Carry over the header-level total discount percentage so TotalDiscountService
+    // can materialize the matching ETGO_DTO discount line on the new invoice.
+    invoice.setEtgoTotalDiscount(order.getEtgoTotalDiscount());
     return invoice;
   }
 }
