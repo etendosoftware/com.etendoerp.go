@@ -19,9 +19,11 @@ package com.etendoerp.go.schemaforge.email;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
@@ -220,6 +222,42 @@ public class TransactionalEmailServiceTest {
   }
 
   @Test
+  public void recordsRedactedObservabilityForSuccessfulSend() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{\"id\":\"provider-id\"}"));
+    RecordingObservabilitySink observabilitySink = new RecordingObservabilitySink();
+    TransactionalEmailService service = new TransactionalEmailService(
+        new SingleContractRegistry(new FixtureContract()), adapter,
+        new InMemoryEmailSafetyStore(), observabilitySink);
+
+    JSONObject command = new JSONObject();
+    command.put("version", "v1");
+    command.put("tenantId", "tenant-1");
+    command.put("userId", "user-1");
+    command.put("recordId", "ABC123");
+
+    NeoResponse response = service.send("fixture-contract", command);
+
+    EmailObservabilityEvent event = observabilitySink.single();
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_SENT, event.getStatus());
+    assertEquals("fixture-contract", event.getContractName());
+    assertEquals("v1", event.getVersion());
+    assertEquals("tenant-1", event.getTenantId());
+    assertEquals("user-1", event.getUserId());
+    assertEquals("ABC123", event.getRecordId());
+    assertEquals("fixture-template", event.getTemplate());
+    assertEquals("example.com", event.getRecipientDomain());
+    assertNotNull("Recipient hash should not be null", event.getRecipientHash());
+    assertFalse(event.getRecipientHash().contains("server-resolved"));
+    assertNotNull("Provider status should not be null", event.getProviderStatus());
+    assertEquals(202, event.getProviderStatus().intValue());
+    assertTrue(event.getProviderDurationMillis() >= 0);
+    assertTrue(event.hasMetric(EmailObservabilityEvent.METRIC_SEND_TOTAL));
+    assertTrue(event.hasMetric(EmailObservabilityEvent.METRIC_PROVIDER_DURATION_SECONDS));
+  }
+
+  @Test
   public void mapsProviderRejectionToProviderFailed() throws Exception {
     FakeProviderAdapter adapter = new FakeProviderAdapter(true,
         new EmailProviderResponse(500, "{\"error\":\"bad\"}"));
@@ -235,6 +273,27 @@ public class TransactionalEmailServiceTest {
     assertEquals(502, response.getHttpStatus());
     assertEquals(TransactionalEmailService.STATUS_PROVIDER_FAILED, data.getString("status"));
     assertEquals("Transactional email provider rejected the request", data.getString("message"));
+  }
+
+  @Test
+  public void recordsProviderFailureObservability() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(500, "{\"error\":\"bad\"}"));
+    RecordingObservabilitySink observabilitySink = new RecordingObservabilitySink();
+    TransactionalEmailService service = new TransactionalEmailService(
+        new SingleContractRegistry(new FixtureContract()), adapter,
+        new InMemoryEmailSafetyStore(), observabilitySink);
+
+    NeoResponse response = service.send("fixture-contract", new JSONObject());
+
+    EmailObservabilityEvent event = observabilitySink.single();
+    assertEquals(502, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_PROVIDER_FAILED, event.getStatus());
+    assertNotNull("Provider status should not be null", event.getProviderStatus());
+    assertEquals(500, event.getProviderStatus().intValue());
+    assertEquals("ProviderRejected", event.getErrorClass());
+    assertTrue(event.hasMetric(EmailObservabilityEvent.METRIC_PROVIDER_ERROR_TOTAL));
+    assertTrue(event.hasMetric(EmailObservabilityEvent.METRIC_PROVIDER_DURATION_SECONDS));
   }
 
   @Test
@@ -265,6 +324,30 @@ public class TransactionalEmailServiceTest {
         safetyStore.getAuditRecords().get(0).getStatus());
     assertEquals(TransactionalEmailService.STATUS_DUPLICATE,
         safetyStore.getAuditRecords().get(1).getStatus());
+  }
+
+  @Test
+  public void recordsDuplicateObservability() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{\"id\":\"provider-id\"}"));
+    RecordingObservabilitySink observabilitySink = new RecordingObservabilitySink();
+    TransactionalEmailService service = new TransactionalEmailService(
+        new SingleContractRegistry(new FixtureContract()), adapter,
+        new InMemoryEmailSafetyStore(), observabilitySink);
+
+    JSONObject command = new JSONObject();
+    command.put("idempotencyKey", "fixture:ABC123:v1");
+
+    service.send("fixture-contract", command);
+    service.send("fixture-contract", command);
+
+    assertEquals(2, observabilitySink.getEvents().size());
+    EmailObservabilityEvent event = observabilitySink.getEvents().get(1);
+    assertEquals(TransactionalEmailService.STATUS_DUPLICATE, event.getStatus());
+    assertTrue(event.isDuplicate());
+    assertNotNull("Provider status should not be null", event.getProviderStatus());
+    assertEquals(202, event.getProviderStatus().intValue());
+    assertTrue(event.hasMetric(EmailObservabilityEvent.METRIC_DUPLICATE_TOTAL));
   }
 
   @Test
@@ -308,7 +391,8 @@ public class TransactionalEmailServiceTest {
 
     JSONObject throttledData = responseData(throttledResponse);
     assertEquals(200, firstResponse.getHttpStatus());
-    assertEquals(429, throttledResponse.getHttpStatus());
+    assertEquals(TransactionalEmailService.HTTP_TOO_MANY_REQUESTS,
+        throttledResponse.getHttpStatus());
     assertEquals(TransactionalEmailService.STATUS_THROTTLED,
         throttledData.getString("status"));
     assertEquals(EmailThrottleRule.SCOPE_RECIPIENT,
@@ -317,6 +401,25 @@ public class TransactionalEmailServiceTest {
     assertEquals(1, adapter.getSendCount());
     assertEquals(TransactionalEmailService.STATUS_THROTTLED,
         safetyStore.getAuditRecords().get(1).getStatus());
+  }
+
+  @Test
+  public void recordsThrottleObservability() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}"));
+    RecordingObservabilitySink observabilitySink = new RecordingObservabilitySink();
+    TransactionalEmailService service = new TransactionalEmailService(
+        new SingleContractRegistry(new RecipientThrottleContract()), adapter,
+        new InMemoryEmailSafetyStore(), observabilitySink);
+
+    service.send("recipient-throttle", new JSONObject());
+    service.send("recipient-throttle", new JSONObject());
+
+    assertEquals(2, observabilitySink.getEvents().size());
+    EmailObservabilityEvent event = observabilitySink.getEvents().get(1);
+    assertEquals(TransactionalEmailService.STATUS_THROTTLED, event.getStatus());
+    assertEquals(EmailThrottleRule.SCOPE_RECIPIENT, event.getThrottleScope());
+    assertTrue(event.hasMetric(EmailObservabilityEvent.METRIC_THROTTLE_TOTAL));
   }
 
   @Test
@@ -338,6 +441,50 @@ public class TransactionalEmailServiceTest {
     assertEquals(1, safetyStore.getAuditRecords().size());
     assertEquals(TransactionalEmailService.STATUS_SUPPRESSED,
         safetyStore.getAuditRecords().get(0).getStatus());
+  }
+
+  @Test
+  public void recordsKillSwitchObservability() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}"));
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    safetyStore.disableTemplate("fixture-template");
+    RecordingObservabilitySink observabilitySink = new RecordingObservabilitySink();
+    TransactionalEmailService service = new TransactionalEmailService(
+        new SingleContractRegistry(new FixtureContract()), adapter, safetyStore,
+        observabilitySink);
+
+    service.send("fixture-contract", new JSONObject());
+
+    EmailObservabilityEvent event = observabilitySink.single();
+    assertEquals(TransactionalEmailService.STATUS_SUPPRESSED, event.getStatus());
+    assertEquals(EmailThrottleRule.SCOPE_TEMPLATE, event.getKillSwitchScope());
+    assertTrue(event.hasMetric(EmailObservabilityEvent.METRIC_SUPPRESSION_TOTAL));
+    assertTrue(event.hasMetric(EmailObservabilityEvent.METRIC_KILL_SWITCH_TOTAL));
+  }
+
+  @Test
+  public void recordsValidationFailureObservabilityWithoutProviderSecrets() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}"));
+    RecordingObservabilitySink observabilitySink = new RecordingObservabilitySink();
+    TransactionalEmailService service = new TransactionalEmailService(
+        new SingleContractRegistry(new FixtureContract()), adapter,
+        new InMemoryEmailSafetyStore(), observabilitySink);
+
+    JSONObject command = new JSONObject();
+    command.put("from", "attacker@example.com");
+    command.put("apiKey", "must-not-appear");
+
+    NeoResponse response = service.send("fixture-contract", command);
+
+    EmailObservabilityEvent event = observabilitySink.single();
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, event.getStatus());
+    assertEquals("fixture-contract", event.getContractName());
+    assertFalse(adapter.wasSendCalled());
+    assertTrue(event.hasMetric(EmailObservabilityEvent.METRIC_SEND_TOTAL));
+    assertFalse(String.valueOf(event.getMessage()).contains("must-not-appear"));
   }
 
   @Test
@@ -614,6 +761,24 @@ public class TransactionalEmailServiceTest {
 
     int getSendCount() {
       return sendCount;
+    }
+  }
+
+  private static class RecordingObservabilitySink implements EmailObservabilitySink {
+    private final List<EmailObservabilityEvent> events = new ArrayList<>();
+
+    @Override
+    public void emit(EmailObservabilityEvent event) {
+      events.add(event);
+    }
+
+    List<EmailObservabilityEvent> getEvents() {
+      return events;
+    }
+
+    EmailObservabilityEvent single() {
+      assertEquals(1, events.size());
+      return events.get(0);
     }
   }
 }
