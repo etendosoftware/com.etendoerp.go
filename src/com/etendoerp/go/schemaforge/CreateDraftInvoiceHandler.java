@@ -19,12 +19,18 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
 
@@ -51,6 +57,7 @@ import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.invoice.InvoiceTax;
 import org.openbravo.model.common.order.Order;
+import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
@@ -494,12 +501,241 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
     OBDal.getInstance().flush();
 
+    // Carry over the per-line discount percentage (OrderLine.discount, standard
+    // Etendo column) into the EM_Etgo_Discount field on each invoice line so the
+    // frontend can display the discount % and compute the totals breakdown.
+    // The native process already copies unitPrice/listPrice/lineNetAmount, but
+    // c_invoiceline has no standard discount column — it lives in the EM_ extension.
+    copyLineDiscountsFromOrder(invoice);
+
+    // If the source order carries a header-level total discount %, materialize the
+    // matching ETGO_DTO discount line on the new invoice (one per tax group) and
+    // refresh the header totals + InvoiceTax aggregates to reflect it.
+    applyTotalDiscountIfPresent(invoice);
+
     InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
 
     OBDal.getInstance().getSession().refresh(invoice);
     ensureLineGrossAmounts(invoice);
 
     return invoice;
+  }
+
+  /**
+   * Copies {@code discount} from each invoice line's source {@link OrderLine} into the
+   * {@code EM_Etgo_Discount} field on the invoice line. Skips lines that have no source
+   * order line, no discount on the source, or already a non-zero value.
+   *
+   * <p>The native {@code CreateInvoiceLinesFromProcess} copies the unit price, list
+   * price and net amount correctly, but {@code C_InvoiceLine} has no standard
+   * {@code discount} column — it lives in the EM_ extension. Without this copy the
+   * frontend reads zero from {@code EM_Etgo_Discount} and renders "0%" alongside an
+   * already-discounted unit price, breaking the totals breakdown displayed in the UI.
+   */
+  protected void copyLineDiscountsFromOrder(Invoice invoice) {
+    boolean dirty = false;
+    for (InvoiceLine il : invoice.getInvoiceLineList()) {
+      BigDecimal srcDiscount = resolveCopyableSourceDiscount(il);
+      if (srcDiscount != null) {
+        il.setEtgoDiscount(srcDiscount);
+        OBDal.getInstance().save(il);
+        dirty = true;
+      }
+    }
+    if (dirty) {
+      OBDal.getInstance().flush();
+    }
+  }
+
+  /**
+   * Returns the source {@link OrderLine#getDiscount()} value that should be copied
+   * into the given invoice line's {@code EM_Etgo_Discount} field, or {@code null}
+   * when the copy should be skipped. The copy is skipped when there is no source
+   * order line, the source carries no discount, or the invoice line already has a
+   * non-zero discount value (set explicitly elsewhere).
+   */
+  private BigDecimal resolveCopyableSourceDiscount(InvoiceLine il) {
+    OrderLine ol = il.getSalesOrderLine();
+    if (ol == null) {
+      return null;
+    }
+    BigDecimal srcDiscount = ol.getDiscount();
+    if (srcDiscount == null || srcDiscount.compareTo(BigDecimal.ZERO) == 0) {
+      return null;
+    }
+    BigDecimal current = il.getEtgoDiscount();
+    if (current != null && current.compareTo(BigDecimal.ZERO) != 0) {
+      return null;
+    }
+    return srcDiscount;
+  }
+
+  /**
+   * Materializes the ETGO_DTO discount line on the invoice when the header carries
+   * a non-zero {@code etgoTotalDiscount} percentage, and refreshes the per-tax
+   * aggregates and header totals to reflect it.
+   *
+   * <p>Delegates the line creation to {@link TotalDiscountService#recalculate} (which
+   * is idempotent: it deletes any pre-existing ETGO_DTO lines first), then
+   * recomputes {@link InvoiceTax} taxable bases / amounts and the invoice header
+   * totals from the current set of lines.
+   *
+   * <p>Bails out early when the ETGO_DTO product is missing (typical for environments
+   * that never ran the discount-product migration) — the invoice is left as the native
+   * process produced it instead of crashing or mutating the InvoiceTax rows.
+   */
+  protected void applyTotalDiscountIfPresent(Invoice invoice) {
+    BigDecimal pct = invoice.getEtgoTotalDiscount();
+    if (pct == null || pct.compareTo(BigDecimal.ZERO) <= 0) {
+      return;
+    }
+    Product discountProduct = OBDal.getInstance().get(Product.class,
+        TotalDiscountService.DISCOUNT_PRODUCT_ID);
+    if (discountProduct == null) {
+      log.warn("Skipping total-discount materialization for invoice {}: ETGO_DTO product "
+              + "({}) is not installed in this database. Run the com.etendoerp.go discount "
+              + "product migration to enable the total-discount feature.",
+          invoice.getId(), TotalDiscountService.DISCOUNT_PRODUCT_ID);
+      return;
+    }
+    TotalDiscountService discountService = WeldUtils.getInstanceFromStaticBeanManager(
+        TotalDiscountService.class);
+    discountService.recalculate(invoice.getId(), true);
+    OBDal.getInstance().flush();
+    updateInvoiceTaxAggregates(invoice);
+  }
+
+  /**
+   * Updates the {@link InvoiceTax} rows of {@code invoice} in place so their
+   * {@code taxableAmount} / {@code taxAmount} reflect the current line set
+   * (including any ETGO_DTO discount line just materialized by
+   * {@link TotalDiscountService#recalculate}), and rewrites the invoice header
+   * {@code summedLineAmount} / {@code grandTotalAmount}.
+   *
+   * <p>Updates in place (rather than delete-and-recreate) for two reasons:
+   * the standard {@code CInvoiceTaxEventHandler} blocks deletion of rows whose
+   * {@code recalculate} flag is set, and removing the entities while leaving them
+   * in the parent's {@code invoiceTaxList} collection triggers Hibernate's
+   * "deleted object would be re-saved by cascade" on the next flush.
+   *
+   * <p>Reads the aggregated net-by-tax via direct SQL so the result reflects the
+   * just-materialized discount line even though that line was added via Hibernate
+   * save and the parent's cached collections may still be out of sync.
+   */
+  private void updateInvoiceTaxAggregates(Invoice invoice) {
+    String invoiceId = invoice.getId();
+    // Defensive null guards: in a fully-populated invoice Currency and its standard
+    // precision are always present, but downstream callers expect this helper to
+    // never throw an NPE in edge cases (e.g. half-built test invoices).
+    int precision = (invoice.getCurrency() != null
+        && invoice.getCurrency().getStandardPrecision() != null)
+        ? invoice.getCurrency().getStandardPrecision().intValue()
+        : 2;
+
+    Map<String, BigDecimal> netByTax = readNetByTaxFromInvoiceLines(invoiceId);
+    BigDecimal totalNet = BigDecimal.ZERO;
+    for (BigDecimal net : netByTax.values()) {
+      totalNet = totalNet.add(net);
+    }
+
+    BigDecimal totalTax = BigDecimal.ZERO;
+    Set<String> handledTaxIds = new HashSet<>();
+    for (InvoiceTax it : new ArrayList<>(invoice.getInvoiceTaxList())) {
+      TaxRate currentTax = it.getTax();
+      if (currentTax != null) {
+        String taxId = currentTax.getId();
+        BigDecimal newBase = netByTax.getOrDefault(taxId, BigDecimal.ZERO)
+            .setScale(precision, RoundingMode.HALF_UP);
+        BigDecimal rate = currentTax.getRate() != null ? currentTax.getRate() : BigDecimal.ZERO;
+        BigDecimal newTaxAmt = newBase.multiply(rate)
+            .divide(new BigDecimal("100"), precision, RoundingMode.HALF_UP);
+        it.setTaxableAmount(newBase);
+        it.setTaxAmount(newTaxAmt);
+        it.setRecalculate(false);
+        OBDal.getInstance().save(it);
+        totalTax = totalTax.add(newTaxAmt);
+        handledTaxIds.add(taxId);
+      }
+    }
+
+    // Defensive: cover tax groups that show up in lines but did not have an
+    // InvoiceTax row produced by CreateInvoiceLinesFromProcess (rare).
+    long nextLineNo = (long) (invoice.getInvoiceTaxList().size() + 1) * 10L;
+    for (Map.Entry<String, BigDecimal> entry : netByTax.entrySet()) {
+      TaxRate tax = resolveMissingInvoiceTax(entry.getKey(), handledTaxIds);
+      if (tax != null) {
+        BigDecimal taxBase = entry.getValue().setScale(precision, RoundingMode.HALF_UP);
+        BigDecimal rate = tax.getRate() != null ? tax.getRate() : BigDecimal.ZERO;
+        BigDecimal taxAmt = taxBase.multiply(rate)
+            .divide(new BigDecimal("100"), precision, RoundingMode.HALF_UP);
+        InvoiceTax it = OBProvider.getInstance().get(InvoiceTax.class);
+        it.setClient(invoice.getClient());
+        it.setOrganization(invoice.getOrganization());
+        it.setInvoice(invoice);
+        it.setTax(tax);
+        it.setLineNo(nextLineNo);
+        it.setTaxableAmount(taxBase);
+        it.setTaxAmount(taxAmt);
+        it.setRecalculate(false);
+        OBDal.getInstance().save(it);
+        totalTax = totalTax.add(taxAmt);
+        nextLineNo += 10;
+      }
+    }
+
+    invoice.setSummedLineAmount(totalNet.setScale(precision, RoundingMode.HALF_UP));
+    invoice.setGrandTotalAmount(totalNet.add(totalTax).setScale(precision, RoundingMode.HALF_UP));
+    OBDal.getInstance().save(invoice);
+    OBDal.getInstance().flush();
+  }
+
+  /**
+   * Returns the {@link TaxRate} for which a new {@link InvoiceTax} row should be
+   * created, or {@code null} when the tax group is already covered by an existing
+   * row or does not represent a real (non-summary) tax.
+   */
+  private TaxRate resolveMissingInvoiceTax(String taxId, Set<String> handledTaxIds) {
+    if (handledTaxIds.contains(taxId)) {
+      return null;
+    }
+    TaxRate tax = OBDal.getInstance().get(TaxRate.class, taxId);
+    if (tax == null || Boolean.TRUE.equals(tax.isSummaryLevel())) {
+      return null;
+    }
+    return tax;
+  }
+
+  /**
+   * Reads {@code SUM(linenetamt)} grouped by tax for the active lines of the given
+   * invoice via direct SQL. Used after a JDBC-level write to keep the aggregation
+   * independent of any stale Hibernate collection state on the parent invoice.
+   */
+  @SuppressWarnings("java:S2077")
+  private Map<String, BigDecimal> readNetByTaxFromInvoiceLines(String invoiceId) {
+    Map<String, BigDecimal> result = new LinkedHashMap<>();
+    String sql = "SELECT c_tax_id, COALESCE(SUM(linenetamt), 0) FROM c_invoiceline"
+        + " WHERE c_invoice_id = ? AND isactive = 'Y' AND c_tax_id IS NOT NULL"
+        + " GROUP BY c_tax_id";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, invoiceId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String taxId = rs.getString(1);
+          BigDecimal net = rs.getBigDecimal(2);
+          if (taxId != null && net != null) {
+            result.put(taxId, net);
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.error("Could not read aggregated net by tax for invoice {}: {}",
+          invoiceId, e.getMessage(), e);
+      // Propagate so callers do NOT silently fall back to an empty map, which
+      // would zero out every tax aggregate and corrupt the invoice totals.
+      throw new OBException(e);
+    }
+    return result;
   }
 
   /**
@@ -550,6 +786,13 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    */
   protected BigDecimal resolvePendingForLine(OrderLine ol, boolean hasOverrides, Map<String, BigDecimal> lineOverrides) {
     if (!ol.isActive() || ol.getProduct() == null) return null;
+    // Skip ETGO_DTO total-discount lines on the source order: the matching invoice
+    // discount line is materialized fresh from invoice.etgoTotalDiscount in
+    // applyTotalDiscountIfPresent(). Copying the source line would leave a stale
+    // duplicate (the source may have been recomputed from a different percentage)
+    // and the JDBC-level delete inside TotalDiscountService.recalculate would
+    // desynchronize the Hibernate session against the just-copied row.
+    if (TotalDiscountService.DISCOUNT_PRODUCT_ID.equals(ol.getProduct().getId())) return null;
     if (hasOverrides && !lineOverrides.containsKey(ol.getId())) return null;
     BigDecimal ordered = ol.getOrderedQuantity() != null ? ol.getOrderedQuantity() : BigDecimal.ZERO;
     BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
