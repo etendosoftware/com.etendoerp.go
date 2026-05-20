@@ -56,6 +56,7 @@ import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
+import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
@@ -234,7 +235,7 @@ class NeoCrudHandler {
       return buildMissingRequiredFieldsResponse(e);
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
     }
   }
 
@@ -514,9 +515,16 @@ class NeoCrudHandler {
 
   private void executePostCalloutCascade(JSONObject filteredBody, Tab adTab,
       NeoContext context, String parentIdValue, Set<String> protectedFields) {
-    if (adTab == null || adTab.getTabLevel() == null || adTab.getTabLevel() != 0) {
+    if (adTab == null) {
       return;
     }
+    // Cascade runs for ALL tab levels, not just headers (level=0). Child tabs
+    // (invoice lines, order lines, ...) need their FK callouts (product → tax,
+    // product → UOM, …) to fire server-side when the line is created via a
+    // path that doesn't go through the React form's client-side callout
+    // dispatch — e.g. the /batch endpoint or any external agent. The
+    // protectedFields snapshot already guards values the caller supplied
+    // explicitly, so UI flows that had already-derived fields stay correct.
 
     Set<String> seqFields = new HashSet<>();
     Iterator<String> bodyKeys = filteredBody.keys();

@@ -275,6 +275,10 @@ public class NeoSelectorService {
         && ctxParamFilter.contains(":priceListId")) {
       ctxFilterParams.put("priceListId", priceListId);
     }
+    String language = safeContextParams.get("language");
+    if (StringUtils.isNotBlank(language)) {
+      ctxFilterParams.put("language", language);
+    }
     return SelectorQueryExecutor.execute(
         meta, search, limit, offset, combineFilters(combinedFilter, ctxParamFilter),
         contextOrganizationId, ctxFilterParams);

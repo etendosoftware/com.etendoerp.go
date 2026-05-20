@@ -43,6 +43,7 @@ final class SelectorQueryExecutor {
   private static final Logger log = LogManager.getLogger(SelectorQueryExecutor.class);
   private static final String PARAM_SEARCH = "search";
   private static final String FIELD_LABEL = "label";
+  private static final String PARAM_LANGUAGE = "language";
 
   private SelectorQueryExecutor() {
   }
@@ -67,6 +68,15 @@ final class SelectorQueryExecutor {
       String search, int limit, int offset, String validationFilter,
       String contextOrganizationId, Map<String, Object> extraFilterParams) throws Exception {
 
+    // Extract language before binding — it is not an HQL parameter
+    String language = null;
+    Map<String, Object> safeExtraParams = extraFilterParams;
+    if (extraFilterParams != null && extraFilterParams.containsKey(PARAM_LANGUAGE)) {
+      language = (String) extraFilterParams.get(PARAM_LANGUAGE);
+      safeExtraParams = new HashMap<>(extraFilterParams);
+      safeExtraParams.remove(PARAM_LANGUAGE);
+    }
+
     StringBuilder hql = new StringBuilder();
     Map<String, Object> queryParams = new HashMap<>();
     NeoSelectorExecutionHelper.appendResolvedWhereClause(hql, queryParams, meta.whereClause);
@@ -74,8 +84,8 @@ final class SelectorQueryExecutor {
     NeoSelectorExecutionHelper.appendSelectorOrganizationFilter(hql, queryParams, meta,
         contextOrganizationId);
     NeoSelectorExecutionHelper.appendSimpleSearchFilter(hql, meta.displayProperty, search);
-    if (extraFilterParams != null) {
-      queryParams.putAll(extraFilterParams);
+    if (safeExtraParams != null) {
+      queryParams.putAll(safeExtraParams);
     }
 
     String whereStr = NeoSelectorExecutionHelper.buildSimpleWhereClause(hql);
@@ -107,6 +117,10 @@ final class SelectorQueryExecutor {
         item.put(FIELD_LABEL, bob.getIdentifier());
       }
       items.put(item);
+    }
+
+    if (language != null && !"en_US".equals(language)) {
+      enrichCountryTranslations(items, meta.entityName, language);
     }
 
     return SelectorResponseSupport.buildSelectorResponse(items, new JSONArray(), totalCount, limit, offset);
@@ -275,6 +289,50 @@ final class SelectorQueryExecutor {
       log.debug("Could not resolve property {} on {}: {}",
           propertyPath, bob.getId(), e.getMessage());
       return null;
+    }
+  }
+
+  /**
+   * Post-processes a selector result to replace English country names with translated names
+   * from the {@code CountryTrl} entity for the requested language.
+   * Falls back silently to the original name when no translation is found.
+   */
+  private static void enrichCountryTranslations(JSONArray items, String entityName, String language) {
+    if (!"Country".equals(entityName)) {
+      return;
+    }
+    try {
+      List<String> ids = new ArrayList<>();
+      for (int i = 0; i < items.length(); i++) {
+        ids.add(items.getJSONObject(i).getString("id"));
+      }
+      if (ids.isEmpty()) {
+        return;
+      }
+      OBQuery<BaseOBObject> trlQuery = OBDal.getInstance().createQuery("CountryTrl",
+          "as t where t.language.language = :lang and t.country.id in :ids");
+      trlQuery.setNamedParameter("lang", language);
+      trlQuery.setNamedParameter("ids", ids);
+
+      Map<String, String> translations = new HashMap<>();
+      for (BaseOBObject trl : trlQuery.list()) {
+        BaseOBObject country = (BaseOBObject) trl.get("country");
+        String name = (String) trl.get("name");
+        if (country != null && StringUtils.isNotBlank(name)) {
+          translations.put(country.getId().toString(), name);
+        }
+      }
+
+      for (int i = 0; i < items.length(); i++) {
+        JSONObject item = items.getJSONObject(i);
+        String id = item.getString("id");
+        String translated = translations.get(id);
+        if (translated != null) {
+          item.put(FIELD_LABEL, translated);
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Country translation enrichment failed for language {}: {}", language, e.getMessage());
     }
   }
 }

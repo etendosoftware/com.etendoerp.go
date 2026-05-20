@@ -352,6 +352,6 @@ public class NeoReportService {
         .replaceAll("[\\s_]+", "-")
         .replaceAll("[^a-z0-9-]", "")
         .replaceAll("-+", "-")
-        .replaceAll("^-|-$", "");
+        .replaceAll("(^-)|(-$)", "");
   }
 }
