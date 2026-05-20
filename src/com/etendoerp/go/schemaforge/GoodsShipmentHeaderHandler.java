@@ -20,7 +20,6 @@ package com.etendoerp.go.schemaforge;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -63,27 +62,16 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse afterHandle(NeoContext context) {
-    if (!"GET".equals(context.getHttpMethod())) {
-      return null;
-    }
-    NeoResponse previousResult = context.getPreviousResult();
-    if (previousResult == null || previousResult.getBody() == null) {
-      return null;
-    }
     try {
-      JSONObject body = previousResult.getBody();
-      JSONObject responseWrapper = body.optJSONObject("response");
-      if (responseWrapper == null) {
+      JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
+      if (dataArr == null) {
         return null;
       }
-      JSONArray dataArr = responseWrapper.optJSONArray("data");
-      if (dataArr == null || dataArr.length() == 0) {
-        return null;
-      }
+      JSONObject body = context.getPreviousResult().getBody();
       if (context.getRecordId() != null) {
-        JSONObject record = dataArr.getJSONObject(0);
-        record.put(FIELD_INVOICE_STATUS, computeSingle(context.getRecordId()));
-        enrichIssuerOrg(record, context.getRecordId());
+        JSONObject shipmentRec = dataArr.getJSONObject(0);
+        shipmentRec.put(FIELD_INVOICE_STATUS, computeSingle(context.getRecordId()));
+        enrichIssuerOrg(shipmentRec, context.getRecordId());
       } else {
         annotateBatch(dataArr);
       }
@@ -94,7 +82,7 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
     }
   }
 
-  private void enrichIssuerOrg(JSONObject record, String recordId) {
+  private void enrichIssuerOrg(JSONObject shipmentRec, String recordId) {
     try {
       OBContext.setAdminMode(true);
       ShipmentInOut shipment = OBDal.getReadOnlyInstance().get(ShipmentInOut.class, recordId);
@@ -104,7 +92,7 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       String orgId = shipment.getOrganization().getId();
       JSONObject orgInfo = NeoSessionService.resolveOrganization(orgId);
       if (orgInfo != null) {
-        record.put("issuerOrg", orgInfo);
+        shipmentRec.put("issuerOrg", orgInfo);
       }
     } catch (Exception e) {
       log.warn("Could not enrich issuer org for shipment {}: {}", recordId, e.getMessage());
@@ -114,13 +102,7 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   }
 
   private void annotateBatch(JSONArray dataArr) throws Exception {
-    List<String> ids = new ArrayList<>();
-    for (int i = 0; i < dataArr.length(); i++) {
-      String id = dataArr.getJSONObject(i).optString("id", null);
-      if (id != null && !id.isEmpty()) {
-        ids.add(id);
-      }
-    }
+    List<String> ids = NeoHandlerUtils.collectIds(dataArr);
     if (ids.isEmpty()) {
       return;
     }
