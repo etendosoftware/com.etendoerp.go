@@ -1,3 +1,19 @@
+/*
+ *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance
+ * with the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ *************************************************************************
+ */
 package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
@@ -9,6 +25,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -39,6 +56,13 @@ class Fiscal303BoxesHandler {
 
   private static final Logger log = Logger.getLogger(Fiscal303BoxesHandler.class);
 
+  private static final String BOXES           = "boxes";
+  private static final String VAT_SALES       = "VAT_SALES";
+  private static final String VAT_PURCHASE    = "VAT_PURCHASE";
+  private static final String PURCHASE        = "Purchase";
+  private static final String TAX_BASE_AMOUNT = "TaxBaseAmount";
+  private static final String TAX_AMOUNT      = "TaxAmount";
+
   private final NeoServlet servlet;
 
   Fiscal303BoxesHandler(NeoServlet servlet) {
@@ -47,7 +71,7 @@ class Fiscal303BoxesHandler {
 
   void handle(String entityName, String method, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
-    if (!"GET".equals(method) || !"boxes".equals(entityName)) {
+    if (!"GET".equals(method) || !BOXES.equals(entityName)) {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
           "Only GET /fiscal303/boxes is supported");
       return;
@@ -81,6 +105,27 @@ class Fiscal303BoxesHandler {
     ComputeResult(Map<Integer, BigDecimal> boxes, List<Map<String, Object>> sources) {
       this.boxes = boxes;
       this.sources = sources;
+    }
+  }
+
+  static class BoxGroupConfig {
+    final String groupKey;
+    final String paramKey;
+    final String taxType;
+    final String equivCharge;
+    final String intracom;
+    final int baseBox;
+    final int taxBox;
+
+    BoxGroupConfig(String groupKey, String paramKey, String taxType,
+        String equivCharge, String intracom, int baseBox, int taxBox) {
+      this.groupKey    = groupKey;
+      this.paramKey    = paramKey;
+      this.taxType     = taxType;
+      this.equivCharge = equivCharge;
+      this.intracom    = intracom;
+      this.baseBox     = baseBox;
+      this.taxBox      = taxBox;
     }
   }
 
@@ -148,13 +193,7 @@ class Fiscal303BoxesHandler {
 
     if (rateToBoxes.isEmpty()) return Collections.emptyList();
 
-    List<TaxRate> allRates = new ArrayList<>();
-    for (String id : rateToBoxes.keySet()) {
-      TaxRate tr = OBDal.getInstance().get(TaxRate.class, id);
-      if (tr != null) allRates.add(tr);
-    }
-
-    // invoiceId → row map (merged across tax lines)
+    List<TaxRate> allRates = buildRatesList(rateToBoxes);
     Map<String, Map<String, Object>> byInvoice = new LinkedHashMap<>();
     SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
 
@@ -164,34 +203,8 @@ class Fiscal303BoxesHandler {
       while (sr.next()) {
         InvoiceTax it = (InvoiceTax) sr.get(0);
         Invoice inv   = it.getInvoice();
-        String invId  = inv.getId();
-
-        Map<String, Object> row = byInvoice.computeIfAbsent(invId, k -> {
-          Map<String, Object> r = new LinkedHashMap<>();
-          r.put("ref",   inv.getDocumentNo());
-          r.put("date",  sdf.format(inv.getInvoiceDate()));
-          String cat = inv.getDocumentType().getDocumentCategory();
-          r.put("type",  "ARI".equals(cat) || "ARI_RM".equals(cat) ? "Venta" : "Compra");
-          r.put("party", inv.getBusinessPartner() != null
-              ? inv.getBusinessPartner().getName() : "");
-          r.put("base",  BigDecimal.ZERO);
-          r.put("vat",   BigDecimal.ZERO);
-          r.put("boxes", new java.util.LinkedHashSet<Integer>());
-          return r;
-        });
-
-        BigDecimal base = it.getTaxableAmount() != null ? it.getTaxableAmount().abs() : BigDecimal.ZERO;
-        BigDecimal tax  = it.getTaxAmount()     != null ? it.getTaxAmount().abs()     : BigDecimal.ZERO;
-        row.put("base", round(((BigDecimal) row.get("base")).add(base)));
-        row.put("vat",  round(((BigDecimal) row.get("vat")).add(tax)));
-
-        List<Integer> boxes = rateToBoxes.get(it.getTax().getId());
-        if (boxes != null) {
-          @SuppressWarnings("unchecked")
-          java.util.LinkedHashSet<Integer> bSet = (java.util.LinkedHashSet<Integer>) row.get("boxes");
-          bSet.addAll(boxes);
-        }
-
+        Map<String, Object> row = byInvoice.computeIfAbsent(inv.getId(), k -> buildNewInvoiceRow(inv, sdf));
+        accumulateInvoiceTax(row, it, rateToBoxes);
         OBDal.getInstance().getSession().evict(it);
         OBDal.getInstance().getSession().evict(inv);
       }
@@ -200,21 +213,62 @@ class Fiscal303BoxesHandler {
     }
 
     List<Map<String, Object>> result = new ArrayList<>(byInvoice.values());
-    for (Map<String, Object> row : result) {
-      // flatten boxes set → comma-separated string
-      @SuppressWarnings("unchecked")
-      java.util.LinkedHashSet<Integer> bSet = (java.util.LinkedHashSet<Integer>) row.get("boxes");
-      List<Integer> sorted = new ArrayList<>(bSet);
-      Collections.sort(sorted);
-      StringBuilder sb = new StringBuilder();
-      for (Integer bx : sorted) { if (sb.length() > 0) sb.append(","); sb.append(bx); }
-      row.put("boxes", sb.toString());
-      // total = base + vat
-      BigDecimal base = (BigDecimal) row.get("base");
-      BigDecimal vat  = (BigDecimal) row.get("vat");
-      row.put("total", round(base.add(vat)));
-    }
+    result.forEach(this::finalizeInvoiceRow);
     return result;
+  }
+
+  private List<TaxRate> buildRatesList(Map<String, List<Integer>> rateToBoxes) {
+    List<TaxRate> allRates = new ArrayList<>();
+    for (String id : rateToBoxes.keySet()) {
+      TaxRate tr = OBDal.getInstance().get(TaxRate.class, id);
+      if (tr != null) allRates.add(tr);
+    }
+    return allRates;
+  }
+
+  private Map<String, Object> buildNewInvoiceRow(Invoice inv, SimpleDateFormat sdf) {
+    Map<String, Object> r = new LinkedHashMap<>();
+    r.put("ref",   inv.getDocumentNo());
+    r.put("date",  sdf.format(inv.getInvoiceDate()));
+    String cat = inv.getDocumentType().getDocumentCategory();
+    r.put("type",  "ARI".equals(cat) || "ARI_RM".equals(cat) ? "Venta" : "Compra");
+    r.put("party", inv.getBusinessPartner() != null ? inv.getBusinessPartner().getName() : "");
+    r.put("base",  BigDecimal.ZERO);
+    r.put("vat",   BigDecimal.ZERO);
+    r.put(BOXES,   new java.util.LinkedHashSet<Integer>());
+    return r;
+  }
+
+  private void accumulateInvoiceTax(Map<String, Object> row, InvoiceTax it,
+      Map<String, List<Integer>> rateToBoxes) {
+    BigDecimal base = it.getTaxableAmount() != null ? it.getTaxableAmount().abs() : BigDecimal.ZERO;
+    BigDecimal tax  = it.getTaxAmount()     != null ? it.getTaxAmount().abs()     : BigDecimal.ZERO;
+    row.put("base", round(((BigDecimal) row.get("base")).add(base)));
+    row.put("vat",  round(((BigDecimal) row.get("vat")).add(tax)));
+    List<Integer> boxes = rateToBoxes.get(it.getTax().getId());
+    if (boxes != null) {
+      @SuppressWarnings("unchecked")
+      java.util.LinkedHashSet<Integer> bSet = (java.util.LinkedHashSet<Integer>) row.get(BOXES);
+      bSet.addAll(boxes);
+    }
+  }
+
+  private void finalizeInvoiceRow(Map<String, Object> row) {
+    @SuppressWarnings("unchecked")
+    java.util.LinkedHashSet<Integer> bSet = (java.util.LinkedHashSet<Integer>) row.get(BOXES);
+    List<Integer> sorted = new ArrayList<>(bSet);
+    Collections.sort(sorted);
+    StringBuilder sb = new StringBuilder();
+    for (Integer bx : sorted) {
+      if (sb.length() > 0) {
+        sb.append(",");
+      }
+      sb.append(bx);
+    }
+    row.put(BOXES, sb.toString());
+    BigDecimal base = (BigDecimal) row.get("base");
+    BigDecimal vat  = (BigDecimal) row.get("vat");
+    row.put("total", round(base.add(vat)));
   }
 
   private void fillSalesBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
@@ -223,81 +277,62 @@ class Fiscal303BoxesHandler {
     // VAT_SALES_GENERAL — split by rate % → boxes 7/9 (21%), 4/6 (10%/7%/8%), 1/3 (4%/5%),
     // 150/152 (0%), 165/167 (2%)
     TaxReportParameter paramGeneral =
-        dao303.getTaxReportParameter(taxReport, "VAT_SALES", "VAT_SALES_GENERAL");
+        dao303.getTaxReportParameter(taxReport, VAT_SALES, "VAT_SALES_GENERAL");
     if (paramGeneral != null) {
       List<TaxRate> salesGeneral =
           dao303.get303Taxes(taxReport.getId(), "All", "All", "All", paramGeneral);
-      for (Map.Entry<BigDecimal, List<TaxRate>> e : splitByPercentage(salesGeneral).entrySet()) {
-        BigDecimal pct = e.getKey();
-        Map<String, BigDecimal> r = helper.calculateAmountsMap(e.getValue(), InvoiceType.ALL);
-        BigDecimal base = r.get("TaxBaseAmount");
-        BigDecimal tax  = r.get("TaxAmount");
-        List<Integer> boxes;
-        if (pct.compareTo(new BigDecimal("21")) == 0) {
-          addToBox(b, 7, base); addToBox(b, 9, tax);
-          boxes = java.util.Arrays.asList(7, 9);
-        } else if (pct.compareTo(new BigDecimal("10")) == 0
-            || pct.compareTo(new BigDecimal("7")) == 0
-            || pct.compareTo(new BigDecimal("8")) == 0) {
-          addToBox(b, 4, base); addToBox(b, 6, tax);
-          boxes = java.util.Arrays.asList(4, 6);
-        } else if (pct.compareTo(new BigDecimal("4")) == 0
-            || pct.compareTo(new BigDecimal("5")) == 0) {
-          addToBox(b, 1, base); addToBox(b, 3, tax);
-          boxes = java.util.Arrays.asList(1, 3);
-        } else if (pct.compareTo(BigDecimal.ZERO) == 0) {
-          addToBox(b, 150, base); addToBox(b, 152, tax);
-          boxes = java.util.Arrays.asList(150, 152);
-        } else if (pct.compareTo(new BigDecimal("2")) == 0) {
-          addToBox(b, 165, base); addToBox(b, 167, tax);
-          boxes = java.util.Arrays.asList(165, 167);
-        } else {
-          boxes = Collections.emptyList();
-        }
-        if (!boxes.isEmpty()) {
-          for (TaxRate tr : e.getValue()) rateToBoxes.put(tr.getId(), boxes);
-        }
-      }
+      applyPercentageSplit(b, helper, salesGeneral, this::vatGeneralBoxes, rateToBoxes);
     }
 
     // VAT_SALES_EU → boxes 10, 11 (adq. intracomunitarias — buyer self-assesses)
-    fillGroupBoxes(b, helper, dao303, taxReport, "VAT_SALES", "VAT_SALES_EU",
-        "Purchase", "No", "Yes", 10, 11, rateToBoxes);
+    fillGroupBoxes(b, helper, dao303, taxReport,
+        new BoxGroupConfig(VAT_SALES, "VAT_SALES_EU", PURCHASE, "No", "Yes", 10, 11), rateToBoxes);
 
     // VAT_SALES_ISP → boxes 12, 13 (inversión sujeto pasivo)
-    fillGroupBoxes(b, helper, dao303, taxReport, "VAT_SALES", "VAT_SALES_ISP",
-        "Purchase", "No", "No", 12, 13, rateToBoxes);
+    fillGroupBoxes(b, helper, dao303, taxReport,
+        new BoxGroupConfig(VAT_SALES, "VAT_SALES_ISP", PURCHASE, "No", "No", 12, 13), rateToBoxes);
 
     // VAT_SALES_EC (recargo equivalencia) — split by %
     TaxReportParameter paramEC =
-        dao303.getTaxReportParameter(taxReport, "VAT_SALES", "VAT_SALES_EC");
+        dao303.getTaxReportParameter(taxReport, VAT_SALES, "VAT_SALES_EC");
     if (paramEC != null) {
       List<TaxRate> ecTaxes =
           dao303.get303Taxes(taxReport.getId(), "All", "All", "All", paramEC);
-      for (Map.Entry<BigDecimal, List<TaxRate>> e : splitByPercentage(ecTaxes).entrySet()) {
-        BigDecimal pct = e.getKey();
-        Map<String, BigDecimal> r = helper.calculateAmountsMap(e.getValue(), InvoiceType.ALL);
-        BigDecimal base = r.get("TaxBaseAmount");
-        BigDecimal tax  = r.get("TaxAmount");
-        List<Integer> boxes;
-        if (pct.compareTo(new BigDecimal("1.40")) == 0) {
-          addToBox(b, 19, base); addToBox(b, 21, tax);
-          boxes = java.util.Arrays.asList(19, 21);
-        } else if (pct.compareTo(new BigDecimal("5.20")) == 0) {
-          addToBox(b, 22, base); addToBox(b, 24, tax);
-          boxes = java.util.Arrays.asList(22, 24);
-        } else if (pct.compareTo(new BigDecimal("0.50")) == 0) {
-          addToBox(b, 16, base); addToBox(b, 18, tax);
-          boxes = java.util.Arrays.asList(16, 18);
-        } else if (pct.compareTo(new BigDecimal("1.75")) == 0) {
-          addToBox(b, 156, base); addToBox(b, 158, tax);
-          boxes = java.util.Arrays.asList(156, 158);
-        } else {
-          boxes = Collections.emptyList();
-        }
-        if (!boxes.isEmpty()) {
-          for (TaxRate tr : e.getValue()) rateToBoxes.put(tr.getId(), boxes);
-        }
+      applyPercentageSplit(b, helper, ecTaxes, this::vatEcBoxes, rateToBoxes);
+    }
+  }
+
+  private List<Integer> vatGeneralBoxes(BigDecimal pct) {
+    if (pct.compareTo(new BigDecimal("21")) == 0) return java.util.Arrays.asList(7, 9);
+    if (pct.compareTo(new BigDecimal("10")) == 0
+        || pct.compareTo(new BigDecimal("7")) == 0
+        || pct.compareTo(new BigDecimal("8")) == 0) return java.util.Arrays.asList(4, 6);
+    if (pct.compareTo(new BigDecimal("4")) == 0
+        || pct.compareTo(new BigDecimal("5")) == 0) return java.util.Arrays.asList(1, 3);
+    if (pct.compareTo(BigDecimal.ZERO) == 0) return java.util.Arrays.asList(150, 152);
+    if (pct.compareTo(new BigDecimal("2")) == 0) return java.util.Arrays.asList(165, 167);
+    return Collections.emptyList();
+  }
+
+  private List<Integer> vatEcBoxes(BigDecimal pct) {
+    if (pct.compareTo(new BigDecimal("1.40")) == 0) return java.util.Arrays.asList(19, 21);
+    if (pct.compareTo(new BigDecimal("5.20")) == 0) return java.util.Arrays.asList(22, 24);
+    if (pct.compareTo(new BigDecimal("0.50")) == 0) return java.util.Arrays.asList(16, 18);
+    if (pct.compareTo(new BigDecimal("1.75")) == 0) return java.util.Arrays.asList(156, 158);
+    return Collections.emptyList();
+  }
+
+  private void applyPercentageSplit(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
+      List<TaxRate> rates, Function<BigDecimal, List<Integer>> boxMapper,
+      Map<String, List<Integer>> rateToBoxes) {
+    for (Map.Entry<BigDecimal, List<TaxRate>> e : splitByPercentage(rates).entrySet()) {
+      BigDecimal pct = e.getKey();
+      Map<String, BigDecimal> r = helper.calculateAmountsMap(e.getValue(), InvoiceType.ALL);
+      List<Integer> boxes = boxMapper.apply(pct);
+      if (!boxes.isEmpty()) {
+        addToBox(b, boxes.get(0), r.get(TAX_BASE_AMOUNT));
+        addToBox(b, boxes.get(1), r.get(TAX_AMOUNT));
+        for (TaxRate tr : e.getValue()) rateToBoxes.put(tr.getId(), boxes);
       }
     }
   }
@@ -305,36 +340,34 @@ class Fiscal303BoxesHandler {
   private void fillPurchaseBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
       AEAT303Report2014Dao dao303, TaxReport taxReport, Map<String, List<Integer>> rateToBoxes) {
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "VAT_PURCHASE", "Normal_Operations",          "Purchase", "No", "No",  28, 29, rateToBoxes);
+        new BoxGroupConfig(VAT_PURCHASE, "Normal_Operations",         PURCHASE, "No", "No",  28, 29), rateToBoxes);
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "VAT_PURCHASE", "Investment_Goods",            "Purchase", "No", "No",  30, 31, rateToBoxes);
+        new BoxGroupConfig(VAT_PURCHASE, "Investment_Goods",           PURCHASE, "No", "No",  30, 31), rateToBoxes);
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "VAT_PURCHASE", "Import_Goods",                "Purchase", "No", "No",  32, 33, rateToBoxes);
+        new BoxGroupConfig(VAT_PURCHASE, "Import_Goods",               PURCHASE, "No", "No",  32, 33), rateToBoxes);
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "VAT_PURCHASE", "Import_Investment_Goods",     "Purchase", "No", "No",  34, 35, rateToBoxes);
+        new BoxGroupConfig(VAT_PURCHASE, "Import_Investment_Goods",    PURCHASE, "No", "No",  34, 35), rateToBoxes);
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "VAT_PURCHASE", "Intracommunity_Goods",        "Purchase", "No", "Yes", 36, 37, rateToBoxes);
+        new BoxGroupConfig(VAT_PURCHASE, "Intracommunity_Goods",       PURCHASE, "No", "Yes", 36, 37), rateToBoxes);
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "VAT_PURCHASE", "Intracommunity_Investments",  "Purchase", "No", "Yes", 38, 39, rateToBoxes);
+        new BoxGroupConfig(VAT_PURCHASE, "Intracommunity_Investments", PURCHASE, "No", "Yes", 38, 39), rateToBoxes);
   }
 
   // taxBox == 0 means base-only (no corresponding tax amount box, e.g. 0% exempt rows)
   private void fillGroupBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
       AEAT303Report2014Dao dao303, TaxReport taxReport,
-      String groupKey, String paramKey,
-      String taxType, String equivCharge, String intracom,
-      int baseBox, int taxBox, Map<String, List<Integer>> rateToBoxes) {
-    TaxReportParameter param = dao303.getTaxReportParameter(taxReport, groupKey, paramKey);
+      BoxGroupConfig cfg, Map<String, List<Integer>> rateToBoxes) {
+    TaxReportParameter param = dao303.getTaxReportParameter(taxReport, cfg.groupKey, cfg.paramKey);
     if (param == null) return;
     List<TaxRate> rates =
-        dao303.get303Taxes(taxReport.getId(), taxType, equivCharge, intracom, param);
+        dao303.get303Taxes(taxReport.getId(), cfg.taxType, cfg.equivCharge, cfg.intracom, param);
     if (rates.isEmpty()) return;
     Map<String, BigDecimal> result = helper.calculateAmountsMap(rates, InvoiceType.ALL);
-    addToBox(b, baseBox, result.get("TaxBaseAmount"));
-    if (taxBox > 0) addToBox(b, taxBox, result.get("TaxAmount"));
-    List<Integer> boxes = taxBox > 0
-        ? java.util.Arrays.asList(baseBox, taxBox)
-        : java.util.Arrays.asList(baseBox);
+    addToBox(b, cfg.baseBox, result.get(TAX_BASE_AMOUNT));
+    if (cfg.taxBox > 0) addToBox(b, cfg.taxBox, result.get(TAX_AMOUNT));
+    List<Integer> boxes = cfg.taxBox > 0
+        ? java.util.Arrays.asList(cfg.baseBox, cfg.taxBox)
+        : java.util.Arrays.asList(cfg.baseBox);
     for (TaxRate tr : rates) rateToBoxes.put(tr.getId(), boxes);
   }
 
@@ -344,12 +377,10 @@ class Fiscal303BoxesHandler {
     // "Difference" is present in all reports and carries the same tax rates, so use it universally.
     // Box 59: intra-community deliveries (entregas intracomunitarias exentas)
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "Difference", "IntracommunitySales",
-        "All", "All", "All", 59, 0, rateToBoxes);
+        new BoxGroupConfig("Difference", "IntracommunitySales", "All", "All", "All", 59, 0), rateToBoxes);
     // Box 60: exports and other exempt operations with deduction right
     fillGroupBoxes(b, helper, dao303, taxReport,
-        "Difference", "ExportsAndOperations",
-        "All", "All", "All", 60, 0, rateToBoxes);
+        new BoxGroupConfig("Difference", "ExportsAndOperations", "All", "All", "All", 60, 0), rateToBoxes);
   }
 
   // ── Resolution helpers ───────────────────────────────────────────
@@ -381,7 +412,8 @@ class Fiscal303BoxesHandler {
 
   @SuppressWarnings("unchecked")
   private List<Period> resolvePeriods(String orgId, int year, String periodCode) {
-    int monthFrom, monthTo;
+    int monthFrom;
+    int monthTo;
     if (periodCode.startsWith("T")) {
       int q = Integer.parseInt(periodCode.substring(1));
       monthFrom = (q - 1) * 3 + 1;
@@ -434,22 +466,22 @@ class Fiscal303BoxesHandler {
       List<Map<String, Object>> sources) throws Exception {
     JSONObject boxes = new JSONObject();
     for (Map.Entry<Integer, BigDecimal> e : b.entrySet()) {
-      boxes.put(String.valueOf(e.getKey()), e.getValue().doubleValue());
+      boxes.put(String.valueOf(e.getKey()), e.getValue().toString());
     }
     BigDecimal accrued    = b.getOrDefault(27, BigDecimal.ZERO);
     BigDecimal deductible = b.getOrDefault(45, BigDecimal.ZERO);
     BigDecimal result     = b.getOrDefault(46, BigDecimal.ZERO);
     JSONObject summary = new JSONObject();
-    summary.put("accrued",    accrued.doubleValue());
-    summary.put("deductible", deductible.doubleValue());
-    summary.put("result",     result.doubleValue());
+    summary.put("accrued",    accrued.toString());
+    summary.put("deductible", deductible.toString());
+    summary.put("result",     result.toString());
     JSONArray sourcesArr = new JSONArray();
     for (Map<String, Object> row : sources) {
       JSONObject s = new JSONObject();
       for (Map.Entry<String, Object> e : row.entrySet()) {
         Object v = e.getValue();
         if (v instanceof BigDecimal) {
-          s.put(e.getKey(), ((BigDecimal) v).doubleValue());
+          s.put(e.getKey(), v.toString());
         } else {
           s.put(e.getKey(), v != null ? v.toString() : "");
         }
@@ -457,7 +489,7 @@ class Fiscal303BoxesHandler {
       sourcesArr.put(s);
     }
     JSONObject root = new JSONObject();
-    root.put("boxes",   boxes);
+    root.put(BOXES,     boxes);
     root.put("summary", summary);
     root.put("sources", sourcesArr);
     return root;
