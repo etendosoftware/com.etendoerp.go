@@ -46,11 +46,17 @@ public class TransactionalEmailService {
   public static final String STATUS_SENT = "SENT";
   public static final String STATUS_VALIDATION_FAILED = "VALIDATION_FAILED";
   public static final String STATUS_PROVIDER_FAILED = "PROVIDER_FAILED";
+  public static final String STATUS_UNAUTHORIZED = "UNAUTHORIZED";
 
+  private static final String MESSAGE_RECIPIENT_NOT_RESOLVED =
+      "Email contract did not resolve a recipient";
   private static final Set<String> FORBIDDEN_COMMAND_FIELDS =
       Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
           "to", "template", "data", "from", "sender", "fromEmail", "replyTo",
           "apiKey", "x-api-key")));
+  private static final Set<String> CALLER_RECIPIENT_FIELDS =
+      Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
+          "recipient", "recipients", "email", "emailAddress")));
 
   private final EmailContractRegistry contractRegistry;
   private final EmailProviderAdapter providerAdapter;
@@ -112,7 +118,32 @@ public class TransactionalEmailService {
       return contractResponse(HttpServletResponse.SC_BAD_REQUEST, STATUS_VALIDATION_FAILED,
           normalizedContract, "Invalid email contract command", null);
     }
-    EmailContractResolution resolution = contract.get().resolve(command);
+
+    String callerRecipientField = findCallerRecipientField(commandBody);
+    if (callerRecipientField != null && !contract.get().allowsCallerProvidedRecipients()) {
+      return contractResponse(HttpServletResponse.SC_FORBIDDEN, STATUS_UNAUTHORIZED,
+          normalizedContract,
+          "Email contract does not allow caller-provided recipient field: "
+              + callerRecipientField,
+          null);
+    }
+
+    EmailAuthorizationResult authorization = contract.get().authorize(command);
+    if (!authorization.isAllowed()) {
+      return contractResponse(authorization.getHttpStatus(), STATUS_UNAUTHORIZED,
+          normalizedContract, authorization.getMessage(), null);
+    }
+
+    EmailRecipientResolution recipient = contract.get().resolveRecipient(command);
+    String recipientError = validateRecipientResolution(recipient, contract.get());
+    if (recipientError != null) {
+      int status = recipient != null && !recipient.isResolved() ? recipient.getHttpStatus()
+          : HttpServletResponse.SC_BAD_REQUEST;
+      return contractResponse(status, STATUS_VALIDATION_FAILED, normalizedContract,
+          recipientError, null);
+    }
+
+    EmailContractResolution resolution = contract.get().resolve(command, recipient);
     Objects.requireNonNull(resolution, "Email contract resolution cannot be null");
 
     if (!resolution.isReady()) {
@@ -126,7 +157,65 @@ public class TransactionalEmailService {
       return contractResponse(HttpServletResponse.SC_BAD_REQUEST, STATUS_VALIDATION_FAILED,
           normalizedContract, providerRequestError, null);
     }
+    if (!recipient.getRecipient().equals(providerRequest.getRecipient())) {
+      return contractResponse(HttpServletResponse.SC_BAD_REQUEST, STATUS_VALIDATION_FAILED,
+          normalizedContract,
+          "Email contract provider request recipient must match recipient resolution", null);
+    }
 
+    return submitProviderRequest(normalizedContract, providerRequest);
+  }
+
+  private static String findForbiddenProviderField(JSONObject commandBody) {
+    for (String field : FORBIDDEN_COMMAND_FIELDS) {
+      if (commandBody.has(field)) {
+        return field;
+      }
+    }
+    return null;
+  }
+
+  private static String findCallerRecipientField(JSONObject commandBody) {
+    for (String field : CALLER_RECIPIENT_FIELDS) {
+      if (commandBody.has(field)) {
+        return field;
+      }
+    }
+    return null;
+  }
+
+  private static String validateRecipientResolution(EmailRecipientResolution recipient,
+      EmailContract contract) {
+    if (recipient == null) {
+      return MESSAGE_RECIPIENT_NOT_RESOLVED;
+    }
+    if (!recipient.isResolved()) {
+      return recipient.getMessage();
+    }
+    if (StringUtils.isBlank(recipient.getRecipient())) {
+      return MESSAGE_RECIPIENT_NOT_RESOLVED;
+    }
+    if (recipient.isCallerProvided() && !contract.allowsCallerProvidedRecipients()) {
+      return "Email contract does not allow caller-provided recipients";
+    }
+    return null;
+  }
+
+  private static String validateProviderRequest(EmailProviderRequest providerRequest) {
+    if (providerRequest == null) {
+      return "Email contract did not resolve a provider request";
+    }
+    if (StringUtils.isBlank(providerRequest.getRecipient())) {
+      return MESSAGE_RECIPIENT_NOT_RESOLVED;
+    }
+    if (StringUtils.isBlank(providerRequest.getTemplate())) {
+      return "Email contract did not resolve a template";
+    }
+    return null;
+  }
+
+  private NeoResponse submitProviderRequest(String normalizedContract,
+      EmailProviderRequest providerRequest) {
     if (!providerAdapter.isConfigured()) {
       return contractResponse(HttpServletResponse.SC_SERVICE_UNAVAILABLE, STATUS_PROVIDER_FAILED,
           normalizedContract, "Transactional email provider is not configured", null);
@@ -150,28 +239,6 @@ public class TransactionalEmailService {
       return contractResponse(HttpServletResponse.SC_BAD_GATEWAY, STATUS_PROVIDER_FAILED,
           normalizedContract, "Transactional email provider is unavailable", null);
     }
-  }
-
-  private static String findForbiddenProviderField(JSONObject commandBody) {
-    for (String field : FORBIDDEN_COMMAND_FIELDS) {
-      if (commandBody.has(field)) {
-        return field;
-      }
-    }
-    return null;
-  }
-
-  private static String validateProviderRequest(EmailProviderRequest providerRequest) {
-    if (providerRequest == null) {
-      return "Email contract did not resolve a provider request";
-    }
-    if (StringUtils.isBlank(providerRequest.getRecipient())) {
-      return "Email contract did not resolve a recipient";
-    }
-    if (StringUtils.isBlank(providerRequest.getTemplate())) {
-      return "Email contract did not resolve a template";
-    }
-    return null;
   }
 
   private static NeoResponse contractResponse(int httpStatus, String status, String contractName,

@@ -37,14 +37,45 @@ Rejected provider passthrough shape:
 
 | Component | Responsibility |
 |-----------|----------------|
-| `TransactionalEmailService` | Executes a named contract and maps provider outcomes to NEO responses |
+| `TransactionalEmailService` | Executes a named contract, enforces executor-level safety gates, and maps provider outcomes to NEO responses |
 | `EmailContractRegistry` | Finds the server-side contract by name |
-| `EmailContract` | Resolves recipient, template, and variables from trusted server context |
+| `EmailContract` | Authorizes the command, resolves the recipient, and builds template variables from trusted server context |
+| `EmailAuthorizationResult` | Carries contract-specific authorization approval or rejection |
+| `EmailRecipientResolution` | Carries the recipient derived from server state or from an explicit support/admin contract |
 | `EmailProviderAdapter` | Backend-only boundary to the external provider |
 | `ApiGatewayEmailProviderAdapter` | HTTP adapter for API Gateway-style providers |
 | `EmailProviderConfig` | Reads provider configuration from server-side properties or environment variables |
 
 Initial contract registration is intentionally separate from the executor. A missing contract returns `VALIDATION_FAILED` with HTTP 404 until a concrete contract is registered.
+
+## Authorization and Recipient Resolution
+
+The executor applies contract safety gates before any provider call:
+
+1. Reject provider passthrough fields such as `to`, `template`, `data`, `from`, `replyTo`, `apiKey`, and `x-api-key`.
+2. Reject caller-provided recipient fields such as `recipient`, `recipients`, `email`, and `emailAddress` unless the contract explicitly allows them.
+3. Call `EmailContract.authorize(command)` so each contract can enforce contextual access to the requested record or action.
+4. Call `EmailContract.resolveRecipient(command)` before provider payload creation.
+5. Reject blank recipient resolutions and explicit recipient-resolution failures.
+6. Require the final `EmailProviderRequest` recipient to match the resolved recipient.
+
+Default contracts must derive recipients from trusted server-side records. A caller-provided recipient is valid only for explicit support/admin contracts that override `allowsCallerProvidedRecipients()` and still apply role checks, audit, reason capture, and throttle in their contract implementation.
+
+## Contract Implementation Rules
+
+Each contract must implement these steps in order:
+
+1. `authorize`: verify the current user/session can perform the requested send for the record, tenant, and action.
+2. `resolveRecipient`: derive the destination from a trusted record whenever possible.
+3. `resolve`: build the provider template and variables using the resolved recipient.
+
+Edge cases every contract family must cover:
+
+- The caller references a record they cannot access.
+- The trusted record has no valid destination email.
+- The command tries to override recipient or provider fields.
+- The contract resolves one recipient but builds a provider payload for another.
+- A support/admin contract receives a caller-provided recipient without the required role or reason.
 
 ## Provider Configuration
 
@@ -69,6 +100,7 @@ The provider is considered configured only when it is enabled and both base URL 
 |--------|------|---------|
 | `SENT` | 200 | Provider accepted the resolved contract request |
 | `VALIDATION_FAILED` | 400/404 | Command is invalid, uses provider fields, or contract does not exist |
+| `UNAUTHORIZED` | 403 | Contract authorization failed or the command uses caller-provided recipients without an explicit support/admin contract |
 | `PROVIDER_FAILED` | 502/503 | Provider rejected the request, is unavailable, or is not configured |
 
-Authorization, recipient derivation for real business records, anti-abuse controls, audit persistence, kill switches beyond adapter enabled state, and concrete contract registration are implemented by later ETP tasks.
+Anti-abuse controls, audit persistence, kill switches beyond adapter enabled state, and concrete contract registration are implemented by later ETP tasks.

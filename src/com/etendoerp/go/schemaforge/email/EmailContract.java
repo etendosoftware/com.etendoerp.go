@@ -29,11 +29,37 @@ public interface EmailContract {
   String getName();
 
   /**
+   * Authorizes this contract command in the current server context.
+   *
+   * @param command contract command received by the executor
+   * @return authorization result
+   */
+  EmailAuthorizationResult authorize(EmailContractCommand command);
+
+  /**
+   * Resolves the recipient before the provider request is created.
+   *
+   * @param command contract command received by the executor
+   * @return recipient resolution
+   */
+  EmailRecipientResolution resolveRecipient(EmailContractCommand command);
+
+  /**
+   * Indicates whether this contract can use caller-provided recipients.
+   *
+   * @return {@code true} only for explicit support/admin recipient contracts
+   */
+  default boolean allowsCallerProvidedRecipients() {
+    return false;
+  }
+
+  /**
    * Validates the command and resolves the provider request from server-side
    * context.
    *
    * @param command contract command received by the executor
+   * @param recipient recipient resolved before provider payload creation
    * @return resolved provider request or a contract-level rejection
    */
-  EmailContractResolution resolve(EmailContractCommand command);
+  EmailContractResolution resolve(EmailContractCommand command, EmailRecipientResolution recipient);
 }
