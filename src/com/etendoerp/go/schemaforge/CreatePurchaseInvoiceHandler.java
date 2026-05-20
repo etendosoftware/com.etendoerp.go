@@ -271,6 +271,14 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
     DocumentType invoiceDocType = resolveAPInvoiceDocType(linkedOrder);
 
+    // Evict receipt and its lines from the Hibernate session before the first flush.
+    // CreateInvoiceLinesFromProcess internally does saveOrUpdate on M_InOutLine objects
+    // and throws EntityExistsException when those objects are already in the session.
+    for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
+      OBDal.getInstance().getSession().evict(rl);
+    }
+    OBDal.getInstance().getSession().evict(receipt);
+
     Invoice invoice = NeoCommercialDocumentFactory.createInvoiceFromOrderHeader(
         linkedOrder, invoiceDocType, false);
 
