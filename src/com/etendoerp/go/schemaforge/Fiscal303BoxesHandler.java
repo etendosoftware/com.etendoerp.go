@@ -283,6 +283,38 @@ class Fiscal303BoxesHandler {
     row.put("total", round(base.add(vat)));
   }
 
+  // Package-private for unit testing — injects pre-built helper and dao,
+  // skips DB lookups and source collection.
+  ComputeResult computeBoxes(Organization org, TaxReport taxReport,
+      List<Period> periods, AEAT303CalculationsHelper helper,
+      AEAT303Report2014Dao dao303) {
+    Map<Integer, BigDecimal> b = new HashMap<>();
+    Map<String, List<Integer>> rateToBoxes = new HashMap<>();
+
+    fillSalesBoxes(b, helper, dao303, taxReport, rateToBoxes);
+    fillPurchaseBoxes(b, helper, dao303, taxReport, rateToBoxes);
+    fillAdditionalInfoBoxes(b, helper, dao303, taxReport, rateToBoxes);
+
+    int[] accruedBoxes   = { 3, 6, 9, 11, 13, 15, 18, 21, 24, 152, 158, 167 };
+    int[] deductibleBoxes = { 29, 31, 33, 35, 37, 39, 41, 42, 43, 44 };
+    BigDecimal accrued    = sumBoxes(b, accruedBoxes);
+    BigDecimal deductible = sumBoxes(b, deductibleBoxes);
+    b.put(27, round(accrued));
+    b.put(45, round(deductible));
+    b.put(46, round(accrued.subtract(deductible)));
+
+    BigDecimal r46 = b.getOrDefault(46, BigDecimal.ZERO);
+    b.put(66, r46);
+    b.put(69, r46);
+    b.put(71, r46);
+    BigDecimal r59 = b.getOrDefault(59, BigDecimal.ZERO);
+    BigDecimal r60 = b.getOrDefault(60, BigDecimal.ZERO);
+    if (r59.compareTo(BigDecimal.ZERO) > 0) b.put(93, r59);
+    if (r60.compareTo(BigDecimal.ZERO) > 0) b.put(94, r60);
+
+    return new ComputeResult(b, Collections.emptyList());
+  }
+
   private void fillSalesBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
       AEAT303Report2014Dao dao303, TaxReport taxReport, Map<String, List<Integer>> rateToBoxes) {
 
