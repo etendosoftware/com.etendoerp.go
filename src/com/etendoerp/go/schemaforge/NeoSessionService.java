@@ -131,7 +131,7 @@ public class NeoSessionService {
    *         when the organization cannot be resolved
    * @throws JSONException on serialization failure
    */
-  private static JSONObject resolveOrganization(String orgId) throws JSONException {
+  public static JSONObject resolveOrganization(String orgId) throws JSONException {
     // AD_ORGINFO shares its PK with AD_ORG — direct get avoids a lazy collection load
     OrganizationInformation info = OBDal.getReadOnlyInstance().get(OrganizationInformation.class, orgId);
     if (info == null) {

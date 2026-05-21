@@ -143,7 +143,11 @@ public class NeoDefaultsService {
             // Contact/BP fields remain empty. The genuinely dangerous fallback that picked
             // the first record for ANY FK column (tryInjectFallbackFkDefault) was removed
             // in ETP-3894 — only that one auto-picked Search-type fields silently.
-            if (resolvedValue == null) {
+            // Readonly SFFields are gated out: the user cannot correct an auto-picked value
+            // in a hidden/readonly field, so preselecting "the first row of the referenced
+            // table" is always wrong for them (e.g. self-referential FKs like
+            // Replacedorder_ID would silently mark every new document as a replacement).
+            if (resolvedValue == null && !Boolean.TRUE.equals(sfField.isReadOnly())) {
               resolvedValue = resolveFirstComboOption(adColumn, ctx);
             }
             if (resolvedValue != null) {

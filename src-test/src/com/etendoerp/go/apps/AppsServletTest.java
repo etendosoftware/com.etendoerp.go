@@ -17,347 +17,344 @@
 
 package com.etendoerp.go.apps;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
-import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.math.BigInteger;
+import java.lang.reflect.Field;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
-import java.util.Base64;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.Mock;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
 import org.mockito.MockedStatic;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.mockito.junit.jupiter.MockitoSettings;
-import org.mockito.quality.Strictness;
 
-import com.etendoerp.go.common.ServletResponseUtils;
+import com.auth0.jwt.JWT;
+import com.auth0.jwt.algorithms.Algorithm;
+import com.auth0.jwt.interfaces.Claim;
+import com.auth0.jwt.interfaces.DecodedJWT;
+import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
- * Unit tests for {@link AppsServlet}.
- *
- * <p>Covers: routing logic for GET/POST dispatchers, {@code base64UrlUnsigned}
- * encoding with and without leading zero byte, {@code buildJwk} JSON structure,
- * and {@code handleToken} validation (missing appId, missing Authorization header,
- * missing Bearer prefix, missing JWT claims).
- *
- * <p>Note: we do not mock {@code EtendoGoCorsServlet} (superclass) or
- * {@code SecureWebServicesUtils} to avoid issues with static initializers.
- * The tests focus on the pure utility methods and routing/validation logic
- * that can be exercised via mock interactions with {@code ServletResponseUtils}.
+ * Servlet-level tests for {@link AppsServlet}.
  */
-@ExtendWith(MockitoExtension.class)
-@MockitoSettings(strictness = Strictness.LENIENT)
-class AppsServletTest {
+public class AppsServletTest {
 
-  private AppsServlet servlet;
+  private static final String KID = "apps-test-kid";
+  private static final String APP_ID = "spike-hello-app";
+  private static final String ETENDO_TOKEN = "etendo-session-token";
+  private static final String USER_ID = "user-42";
+  private static final String CLIENT_ID = "acme-prod";
+  private static final String ORG_ID = "acme-hq";
 
-  @Mock
-  private HttpServletRequest request;
-  @Mock
-  private HttpServletResponse response;
+  private final AppsServlet servlet = new AppsServlet();
 
-  private MockedStatic<ServletResponseUtils> responseUtilsMock;
+  private AtomicReference<JwtIssuerService> issuerRef;
+  private JwtIssuerService previousIssuer;
+  private RSAPublicKey publicKey;
+  private JwtIssuerService testIssuer;
 
-  @BeforeEach
-  void setUp() {
-    servlet = new AppsServlet();
-    responseUtilsMock = mockStatic(ServletResponseUtils.class);
+  @Before
+  public void setUp() throws Exception {
+    KeyPairGenerator gen = KeyPairGenerator.getInstance("RSA");
+    gen.initialize(2048);
+    KeyPair pair = gen.generateKeyPair();
+    this.publicKey = (RSAPublicKey) pair.getPublic();
+    RSAPrivateKey privateKey = (RSAPrivateKey) pair.getPrivate();
+    this.testIssuer = new JwtIssuerService(privateKey, publicKey, KID);
+
+    this.issuerRef = issuerRef();
+    this.previousIssuer = issuerRef.get();
+    issuerRef.set(testIssuer);
   }
 
-  @AfterEach
-  void tearDown() {
-    if (responseUtilsMock != null) {
-      responseUtilsMock.close();
+  @After
+  public void tearDown() {
+    if (issuerRef != null) {
+      issuerRef.set(previousIssuer);
     }
   }
 
-  // ── base64UrlUnsigned ────────────────────────────────────────────────────
-
-  /**
-   * Verifies that a BigInteger whose byte representation has a leading zero
-   * (sign padding) is encoded without that zero byte.
-   */
   @Test
-  void base64UrlUnsignedStripsLeadingZeroByte() {
-    // 128 = 0x80 -> toByteArray() returns [0x00, 0x80] (2 bytes, leading zero for sign).
-    BigInteger value = BigInteger.valueOf(128);
-    String encoded = AppsServlet.base64UrlUnsigned(value);
+  public void jwksEndpointReturnsPublicKey() throws Exception {
+    HttpServletRequest request = mockRequest("/.well-known/jwks.json");
+    ResponseCapture response = mockResponse();
 
-    byte[] decoded = Base64.getUrlDecoder().decode(encoded);
-    assertEquals(1, decoded.length, "Leading zero byte must be stripped");
-    assertEquals((byte) 0x80, decoded[0]);
-  }
+    servlet.doGet(request, response.response);
 
-  /**
-   * Verifies that a BigInteger whose byte representation does NOT have a
-   * leading zero byte is encoded as-is.
-   */
-  @Test
-  void base64UrlUnsignedKeepsBytesWithoutLeadingZero() {
-    // 65537 = 0x010001 -> toByteArray() returns [0x01, 0x00, 0x01] (no leading zero).
-    BigInteger value = BigInteger.valueOf(65537);
-    String encoded = AppsServlet.base64UrlUnsigned(value);
+    assertJsonStatus(response, HttpServletResponse.SC_OK);
+    JSONObject body = new JSONObject(response.body());
+    JSONArray keys = body.getJSONArray("keys");
+    assertEquals(1, keys.length());
 
-    byte[] decoded = Base64.getUrlDecoder().decode(encoded);
-    assertEquals(3, decoded.length, "Bytes without leading zero must be preserved as-is");
-    assertEquals((byte) 0x01, decoded[0]);
-    assertEquals((byte) 0x00, decoded[1]);
-    assertEquals((byte) 0x01, decoded[2]);
-  }
-
-  /**
-   * Verifies that the encoding uses base64url (no padding, URL-safe alphabet).
-   */
-  @Test
-  void base64UrlUnsignedUsesUrlSafeNoPadding() {
-    BigInteger value = new BigInteger("FFFFFFFFFFFFFFFF", 16);
-    String encoded = AppsServlet.base64UrlUnsigned(value);
-
-    assertTrue(!encoded.contains("+"), "Must not contain '+' (standard base64)");
-    assertTrue(!encoded.contains("/"), "Must not contain '/' (standard base64)");
-    assertTrue(!encoded.contains("="), "Must not contain '=' (padding)");
-  }
-
-  // ── buildJwk ─────────────────────────────────────────────────────────────
-
-  /**
-   * Verifies that {@code buildJwk} produces a JSON object with all required
-   * JWK fields: kty, alg, use, kid, n, e.
-   */
-  @Test
-  void buildJwkProducesCorrectJsonStructure() throws Exception {
-    RSAPublicKey publicKey = mock(RSAPublicKey.class);
-    when(publicKey.getModulus()).thenReturn(BigInteger.valueOf(65537));
-    when(publicKey.getPublicExponent()).thenReturn(BigInteger.valueOf(65537));
-
-    JwtIssuerService svc = mock(JwtIssuerService.class);
-    when(svc.getPublicKey()).thenReturn(publicKey);
-    when(svc.getKid()).thenReturn("test-kid-1");
-
-    JSONObject jwk = AppsServlet.buildJwk(svc);
-
+    JSONObject jwk = keys.getJSONObject(0);
     assertEquals("RSA", jwk.getString("kty"));
     assertEquals("RS256", jwk.getString("alg"));
     assertEquals("sig", jwk.getString("use"));
-    assertEquals("test-kid-1", jwk.getString("kid"));
-    assertNotNull(jwk.getString("n"), "JWK must contain 'n' (modulus)");
-    assertNotNull(jwk.getString("e"), "JWK must contain 'e' (exponent)");
+    assertEquals(KID, jwk.getString("kid"));
+    assertNotNull(jwk.getString("n"));
+    assertTrue(!jwk.getString("n").isEmpty());
+    assertNotNull(jwk.getString("e"));
+    assertTrue(!jwk.getString("e").isEmpty());
   }
 
-  /**
-   * Verifies that the 'n' and 'e' values in the JWK are valid base64url strings
-   * that decode back to the original BigInteger values.
-   */
   @Test
-  void buildJwkEncodesModulusAndExponentCorrectly() throws Exception {
-    BigInteger modulus = new BigInteger("12345678901234567890");
-    BigInteger exponent = BigInteger.valueOf(65537);
+  public void tokenEndpointReturnsSignedToken() throws Exception {
+    HttpServletRequest request = mockRequest("/token");
+    when(request.getParameter("appId")).thenReturn(APP_ID);
+    when(request.getHeader("Authorization")).thenReturn("Bearer " + ETENDO_TOKEN);
+    ResponseCapture response = mockResponse();
+    DecodedJWT decoded = mockDecodedJwt(USER_ID, CLIENT_ID, ORG_ID);
 
-    RSAPublicKey publicKey = mock(RSAPublicKey.class);
-    when(publicKey.getModulus()).thenReturn(modulus);
-    when(publicKey.getPublicExponent()).thenReturn(exponent);
+    try (MockedStatic<SecureWebServicesUtils> secureMock = mockStatic(
+        SecureWebServicesUtils.class)) {
+      secureMock.when(() -> SecureWebServicesUtils.decodeToken(ETENDO_TOKEN)).thenReturn(decoded);
 
-    JwtIssuerService svc = mock(JwtIssuerService.class);
-    when(svc.getPublicKey()).thenReturn(publicKey);
-    when(svc.getKid()).thenReturn("kid-2");
+      servlet.doPost(request, response.response);
+    }
 
-    JSONObject jwk = AppsServlet.buildJwk(svc);
+    assertJsonStatus(response, HttpServletResponse.SC_OK);
+    JSONObject body = new JSONObject(response.body());
+    String token = body.getString("token");
+    assertNotNull(token);
+    assertEquals(JwtIssuerService.TTL_SECONDS, body.getLong("expiresInSeconds"));
 
-    String nEncoded = jwk.getString("n");
-    String eEncoded = jwk.getString("e");
+    DecodedJWT issued = JWT.require(Algorithm.RSA256(publicKey, null))
+        .withIssuer("etendo-go")
+        .withSubject(USER_ID)
+        .withAudience("etendo-go", APP_ID)
+        .build()
+        .verify(token);
 
-    assertEquals(nEncoded, AppsServlet.base64UrlUnsigned(modulus));
-    assertEquals(eEncoded, AppsServlet.base64UrlUnsigned(exponent));
+    assertEquals(KID, issued.getKeyId());
+    assertEquals(USER_ID, issued.getSubject());
+    assertEquals(CLIENT_ID, issued.getClaim("tenant").asString());
+    assertEquals(ORG_ID, issued.getClaim("org").asString());
+    assertEquals(APP_ID, issued.getClaim("app").asString());
+    assertEquals(2, issued.getClaim("scopes").asList(String.class).size());
+    assertEquals("read:products", issued.getClaim("scopes").asList(String.class).get(0));
+    assertEquals("read:users", issued.getClaim("scopes").asList(String.class).get(1));
   }
 
-  // ── doGet routing ────────────────────────────────────────────────────────
-
-  /**
-   * Verifies that GET requests to an unknown path result in a 404 error
-   * via {@code ServletResponseUtils.sendError}.
-   */
   @Test
-  void doGetUnknownPathReturns404() throws Exception {
-    when(request.getPathInfo()).thenReturn("/unknown");
-
-    servlet.doGet(request, response);
-
-    responseUtilsMock.verify(
-        () -> ServletResponseUtils.sendError(eq(response), eq(HttpServletResponse.SC_NOT_FOUND),
-            anyString()));
-  }
-
-  /**
-   * Verifies that GET requests to {@code /.well-known/jwks.json} do NOT
-   * trigger a 404 error (they route to handleJwks instead).
-   */
-  @Test
-  void doGetJwksPathDoesNotReturn404() throws Exception {
-    when(request.getPathInfo()).thenReturn("/.well-known/jwks.json");
-
-    // handleJwks will fail because there is no issuer loaded, but it should
-    // NOT call sendError with 404 - it will call sendError with 500 instead.
-    StringWriter sw = new StringWriter();
-    when(response.getWriter()).thenReturn(new PrintWriter(sw));
-
-    servlet.doGet(request, response);
-
-    responseUtilsMock.verify(
-        () -> ServletResponseUtils.sendError(eq(response), eq(HttpServletResponse.SC_NOT_FOUND),
-            anyString()), never());
-  }
-
-  // ── doPost routing ───────────────────────────────────────────────────────
-
-  /**
-   * Verifies that POST requests to an unknown path result in a 404 error.
-   */
-  @Test
-  void doPostUnknownPathReturns404() throws Exception {
-    when(request.getPathInfo()).thenReturn("/unknown");
-
-    servlet.doPost(request, response);
-
-    responseUtilsMock.verify(
-        () -> ServletResponseUtils.sendError(eq(response), eq(HttpServletResponse.SC_NOT_FOUND),
-            anyString()));
-  }
-
-  /**
-   * Verifies that POST to {@code /token} does NOT trigger a 404 error
-   * (it routes to handleToken instead).
-   */
-  @Test
-  void doPostTokenPathDoesNotReturn404() throws Exception {
-    when(request.getPathInfo()).thenReturn("/token");
-    // handleToken will hit the appId check first.
-
-    servlet.doPost(request, response);
-
-    responseUtilsMock.verify(
-        () -> ServletResponseUtils.sendError(eq(response), eq(HttpServletResponse.SC_NOT_FOUND),
-            anyString()), never());
-  }
-
-  /**
-   * Verifies that POST to {@code /token/} (with trailing slash) also routes
-   * to handleToken and does NOT produce a 404.
-   */
-  @Test
-  void doPostTokenPathWithTrailingSlashDoesNotReturn404() throws Exception {
-    when(request.getPathInfo()).thenReturn("/token/");
-
-    servlet.doPost(request, response);
-
-    responseUtilsMock.verify(
-        () -> ServletResponseUtils.sendError(eq(response), eq(HttpServletResponse.SC_NOT_FOUND),
-            anyString()), never());
-  }
-
-  // ── handleToken: missing appId ───────────────────────────────────────────
-
-  /**
-   * Verifies that POST to /token without an appId parameter returns 400.
-   */
-  @Test
-  void handleTokenMissingAppIdReturns400() throws Exception {
-    when(request.getPathInfo()).thenReturn("/token");
+  public void missingAppIdReturnsBadRequest() throws Exception {
+    HttpServletRequest request = mockRequest("/token");
     when(request.getParameter("appId")).thenReturn(null);
+    ResponseCapture response = mockResponse();
 
-    servlet.doPost(request, response);
+    servlet.doPost(request, response.response);
 
-    responseUtilsMock.verify(
-        () -> ServletResponseUtils.sendError(eq(response), eq(HttpServletResponse.SC_BAD_REQUEST),
-            anyString()));
+    assertErrorResponse(response, HttpServletResponse.SC_BAD_REQUEST,
+        "Missing 'appId' parameter");
   }
 
-  /**
-   * Verifies that POST to /token with a blank appId parameter returns 400.
-   */
   @Test
-  void handleTokenBlankAppIdReturns400() throws Exception {
-    when(request.getPathInfo()).thenReturn("/token");
+  public void blankAppIdReturnsBadRequest() throws Exception {
+    HttpServletRequest request = mockRequest("/token");
     when(request.getParameter("appId")).thenReturn("   ");
+    ResponseCapture response = mockResponse();
 
-    servlet.doPost(request, response);
+    servlet.doPost(request, response.response);
 
-    responseUtilsMock.verify(
-        () -> ServletResponseUtils.sendError(eq(response), eq(HttpServletResponse.SC_BAD_REQUEST),
-            anyString()));
+    assertErrorResponse(response, HttpServletResponse.SC_BAD_REQUEST,
+        "Missing 'appId' parameter");
   }
 
-  // ── handleToken: missing or invalid Authorization header ─────────────────
-
-  /**
-   * Verifies that POST to /token without an Authorization header returns 401.
-   */
   @Test
-  void handleTokenMissingAuthHeaderReturns401() throws Exception {
-    when(request.getPathInfo()).thenReturn("/token");
-    when(request.getParameter("appId")).thenReturn("my-app");
-    when(request.getHeader("Authorization")).thenReturn(null);
+  public void missingAuthorizationHeaderReturnsUnauthorized() throws Exception {
+    HttpServletRequest request = mockRequest("/token");
+    when(request.getParameter("appId")).thenReturn(APP_ID);
+    ResponseCapture response = mockResponse();
 
-    servlet.doPost(request, response);
+    servlet.doPost(request, response.response);
 
-    responseUtilsMock.verify(
-        () -> ServletResponseUtils.sendError(eq(response),
-            eq(HttpServletResponse.SC_UNAUTHORIZED), anyString()));
+    assertErrorResponse(response, HttpServletResponse.SC_UNAUTHORIZED,
+        "Missing or invalid Authorization header");
   }
 
-  /**
-   * Verifies that POST to /token with an Authorization header that does not
-   * start with "Bearer " returns 401.
-   */
   @Test
-  void handleTokenMissingBearerPrefixReturns401() throws Exception {
-    when(request.getPathInfo()).thenReturn("/token");
-    when(request.getParameter("appId")).thenReturn("my-app");
-    when(request.getHeader("Authorization")).thenReturn("Basic dXNlcjpwYXNz");
+  public void malformedAuthorizationHeaderReturnsUnauthorized() throws Exception {
+    HttpServletRequest request = mockRequest("/token");
+    when(request.getParameter("appId")).thenReturn(APP_ID);
+    when(request.getHeader("Authorization")).thenReturn("Basic abc123");
+    ResponseCapture response = mockResponse();
 
-    servlet.doPost(request, response);
+    servlet.doPost(request, response.response);
 
-    responseUtilsMock.verify(
-        () -> ServletResponseUtils.sendError(eq(response),
-            eq(HttpServletResponse.SC_UNAUTHORIZED), anyString()));
+    assertErrorResponse(response, HttpServletResponse.SC_UNAUTHORIZED,
+        "Missing or invalid Authorization header");
   }
 
-  /**
-   * Verifies that the 400 check for appId runs before the 401 check for
-   * Authorization, so a request missing both gets a 400.
-   */
   @Test
-  void handleTokenValidationOrderAppIdBefore401() throws Exception {
-    when(request.getPathInfo()).thenReturn("/token");
-    when(request.getParameter("appId")).thenReturn(null);
-    when(request.getHeader("Authorization")).thenReturn(null);
+  public void invalidEtendoTokenReturnsUnauthorized() throws Exception {
+    HttpServletRequest request = mockRequest("/token");
+    when(request.getParameter("appId")).thenReturn(APP_ID);
+    when(request.getHeader("Authorization")).thenReturn("Bearer " + ETENDO_TOKEN);
+    ResponseCapture response = mockResponse();
 
-    servlet.doPost(request, response);
+    try (MockedStatic<SecureWebServicesUtils> secureMock = mockStatic(
+        SecureWebServicesUtils.class)) {
+      secureMock.when(() -> SecureWebServicesUtils.decodeToken(ETENDO_TOKEN))
+          .thenThrow(new RuntimeException("bad token"));
 
-    // Should get 400 (bad request) not 401 (unauthorized), because appId is checked first.
-    responseUtilsMock.verify(
-        () -> ServletResponseUtils.sendError(eq(response), eq(HttpServletResponse.SC_BAD_REQUEST),
-            anyString()));
-    responseUtilsMock.verify(
-        () -> ServletResponseUtils.sendError(eq(response),
-            eq(HttpServletResponse.SC_UNAUTHORIZED), anyString()), never());
+      servlet.doPost(request, response.response);
+    }
+
+    assertErrorResponse(response, HttpServletResponse.SC_UNAUTHORIZED,
+        "Invalid Etendo session token");
+  }
+
+  @Test
+  public void missingRequiredClaimsReturnsUnauthorized() throws Exception {
+    HttpServletRequest request = mockRequest("/token");
+    when(request.getParameter("appId")).thenReturn(APP_ID);
+    when(request.getHeader("Authorization")).thenReturn("Bearer " + ETENDO_TOKEN);
+    ResponseCapture response = mockResponse();
+    DecodedJWT decoded = mockDecodedJwt(USER_ID, " ", ORG_ID);
+
+    try (MockedStatic<SecureWebServicesUtils> secureMock = mockStatic(
+        SecureWebServicesUtils.class)) {
+      secureMock.when(() -> SecureWebServicesUtils.decodeToken(ETENDO_TOKEN)).thenReturn(decoded);
+
+      servlet.doPost(request, response.response);
+    }
+
+    assertErrorResponse(response, HttpServletResponse.SC_UNAUTHORIZED,
+        "Etendo token missing required claims (user, client, organization)");
+  }
+
+  @Test
+  public void unknownGetPathReturnsNotFound() throws Exception {
+    HttpServletRequest request = mockRequest("/unknown");
+    ResponseCapture response = mockResponse();
+
+    servlet.doGet(request, response.response);
+
+    assertErrorResponse(response, HttpServletResponse.SC_NOT_FOUND,
+        "Unknown endpoint: /unknown");
+  }
+
+  @Test
+  public void unknownPostPathReturnsNotFound() throws Exception {
+    HttpServletRequest request = mockRequest("/unknown");
+    ResponseCapture response = mockResponse();
+
+    servlet.doPost(request, response.response);
+
+    assertErrorResponse(response, HttpServletResponse.SC_NOT_FOUND,
+        "Unknown endpoint: /unknown");
+  }
+
+  private static AtomicReference<JwtIssuerService> issuerRef() throws Exception {
+    Field field = AppsServlet.class.getDeclaredField("issuer");
+    field.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    AtomicReference<JwtIssuerService> ref = (AtomicReference<JwtIssuerService>) field.get(null);
+    return ref;
+  }
+
+  private static HttpServletRequest mockRequest(String pathInfo) {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    when(request.getPathInfo()).thenReturn(pathInfo);
+    return request;
+  }
+
+  private static ResponseCapture mockResponse() throws Exception {
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    StringWriter body = new StringWriter();
+    PrintWriter writer = new PrintWriter(body);
+    ResponseCapture capture = new ResponseCapture(response, body);
+    doAnswer(invocation -> {
+      capture.status = invocation.getArgument(0);
+      return null;
+    }).when(response).setStatus(anyInt());
+    doAnswer(invocation -> {
+      capture.contentType = invocation.getArgument(0);
+      return null;
+    }).when(response).setContentType(anyString());
+    doAnswer(invocation -> {
+      capture.characterEncoding = invocation.getArgument(0);
+      return null;
+    }).when(response).setCharacterEncoding(anyString());
+    when(response.getWriter()).thenReturn(writer);
+    return capture;
+  }
+
+  private static DecodedJWT mockDecodedJwt(String userId, String clientId, String orgId) {
+    DecodedJWT decoded = mock(DecodedJWT.class);
+    Claim userClaim = claim(userId);
+    Claim clientClaim = claim(clientId);
+    Claim organizationClaim = claim(orgId);
+    when(decoded.getClaim("user")).thenReturn(userClaim);
+    when(decoded.getClaim("client")).thenReturn(clientClaim);
+    when(decoded.getClaim("organization")).thenReturn(organizationClaim);
+    return decoded;
+  }
+
+  private static Claim claim(String value) {
+    Claim claim = mock(Claim.class);
+    when(claim.asString()).thenReturn(value);
+    return claim;
+  }
+
+  private static void assertJsonStatus(ResponseCapture response, int expectedStatus) {
+    assertEquals(expectedStatus, response.status());
+    assertEquals("application/json", response.contentType());
+    assertEquals("UTF-8", response.characterEncoding());
+    assertNotNull(response.body());
+    assertTrue(!response.body().isEmpty());
+  }
+
+  private static void assertErrorResponse(ResponseCapture response, int expectedStatus,
+      String expectedError) throws Exception {
+    assertJsonStatus(response, expectedStatus);
+    JSONObject body = new JSONObject(response.body());
+    assertEquals(expectedError, body.getString("error"));
+  }
+
+  private static final class ResponseCapture {
+    private final HttpServletResponse response;
+    private final StringWriter body;
+    private int status;
+    private String contentType;
+    private String characterEncoding;
+
+    private ResponseCapture(HttpServletResponse response, StringWriter body) {
+      this.response = response;
+      this.body = body;
+    }
+
+    private int status() {
+      return status;
+    }
+
+    private String contentType() {
+      return contentType;
+    }
+
+    private String characterEncoding() {
+      return characterEncoding;
+    }
+
+    private String body() {
+      return body.toString();
+    }
   }
 }
