@@ -295,6 +295,38 @@ public class Fiscal303BoxesHandlerTest {
     verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
   }
 
+  // ── no-gaps coverage ─────────────────────────────────────────────────────
+
+  /**
+   * Iterates over all 8 known VAT general rates and verifies that none returns
+   * an empty box list. This acts as a deletion guard — if any case is accidentally
+   * removed from the switch/map inside {@code vatGeneralBoxes}, this test fails.
+   */
+  @Test
+  public void testVatGeneralBoxesAllRates_NoGaps() {
+    String[] knownRates = { "21.00", "10.00", "7.00", "8.00", "4.00", "5.00", "0.00", "2.00" };
+    for (String rate : knownRates) {
+      assertFalse(
+          "vatGeneralBoxes returned empty for rate " + rate,
+          handler.vatGeneralBoxes(pct(rate)).isEmpty());
+    }
+  }
+
+  /**
+   * Iterates over all 4 known recargo-de-equivalencia rates and verifies that
+   * none returns an empty box list. Guards against accidental deletion of an EC
+   * mapping entry.
+   */
+  @Test
+  public void testVatEcBoxesAllRates_NoGaps() {
+    String[] ecRates = { "1.40", "5.20", "0.50", "1.75" };
+    for (String rate : ecRates) {
+      assertFalse(
+          "vatEcBoxes returned empty for rate " + rate,
+          handler.vatEcBoxes(pct(rate)).isEmpty());
+    }
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
 
   private static BigDecimal pct(String value) {
