@@ -310,4 +310,235 @@ public class InvoiceFromOrderSupportTest {
     when(il.getTax()).thenReturn(tax);
     assertEquals(new BigDecimal("-2.42"), support.calculateLineGross(il, 2));
   }
+
+  // ── calculateLineGross — null guards on quantity / net / rate ────────────
+
+  /**
+   * Defensive: when {@code invoicedQuantity} is null the method must treat it
+   * as zero and return 0 (not throw NPE) so a half-built line in a callout
+   * pre-save state can't crash the handler.
+   */
+  @Test
+  public void testCalculateLineGrossNullQuantityReturnsZero() {
+    InvoiceFromOrderSupport support = new InvoiceFromOrderSupport();
+    InvoiceLine il = mock(InvoiceLine.class);
+    when(il.getGrossUnitPrice()).thenReturn(new BigDecimal("12.00"));
+    when(il.getInvoicedQuantity()).thenReturn(null);
+    // 0 (default qty) × 12 = 0.
+    assertEquals(new BigDecimal("0.00"), support.calculateLineGross(il, 2));
+  }
+
+  /**
+   * Defensive: when both {@code lineNetAmount} and {@code grossUnitPrice} fall
+   * to the fallback branch, a null net must be treated as zero and a null
+   * tax rate must be treated as zero — together they yield 0 gross.
+   */
+  @Test
+  public void testCalculateLineGrossNullNetAndNullRateYieldsZero() {
+    InvoiceFromOrderSupport support = new InvoiceFromOrderSupport();
+    InvoiceLine il = mock(InvoiceLine.class);
+    when(il.getGrossUnitPrice()).thenReturn(null);
+    when(il.getInvoicedQuantity()).thenReturn(BigDecimal.ONE);
+    when(il.getLineNetAmount()).thenReturn(null);
+    TaxRate tax = mock(TaxRate.class);
+    when(tax.getRate()).thenReturn(null);
+    when(il.getTax()).thenReturn(tax);
+    assertEquals(new BigDecimal("0.00"), support.calculateLineGross(il, 2));
+  }
+
+  // ── ensureLineGrossAmounts — extra branches ───────────────────────────────
+
+  /**
+   * Empty invoice line list: the method must not throw, just flush and return.
+   * Guards against a regression where iterating a null/empty list NPE'd.
+   */
+  @Test
+  public void testEnsureLineGrossEmptyListIsNoop() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.emptyList());
+
+      new InvoiceFromOrderSupport().ensureLineGrossAmounts(invoice);
+
+      verify(dal, never()).save(any());
+      verify(dal).flush();
+    }
+  }
+
+  /**
+   * gross == 0 must NOT be skipped — only strictly-positive gross amounts
+   * are. This locks in the ETGO_DTO scenario where the discount line was
+   * created with gross=0 and needs the gross to be re-computed.
+   */
+  @Test
+  public void testEnsureLineGrossZeroFillsGross() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(il.getGrossAmount()).thenReturn(BigDecimal.ZERO);
+      when(il.getGrossUnitPrice()).thenReturn(new BigDecimal("7.00"));
+      when(il.getInvoicedQuantity()).thenReturn(new BigDecimal("3"));
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(il));
+
+      new InvoiceFromOrderSupport().ensureLineGrossAmounts(invoice);
+
+      verify(il).setGrossAmount(new BigDecimal("21.00"));
+      verify(dal).save(il);
+    }
+  }
+
+  /**
+   * Mixed batch: one line with positive gross must be skipped, the next with
+   * null gross must be filled. Exercises both branches of the per-line guard
+   * in the same invocation.
+   */
+  @Test
+  public void testEnsureLineGrossMixedSkipsAndFills() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+
+      InvoiceLine skipped = mock(InvoiceLine.class);
+      when(skipped.getGrossAmount()).thenReturn(new BigDecimal("12.34"));
+
+      InvoiceLine filled = mock(InvoiceLine.class);
+      when(filled.getGrossAmount()).thenReturn(null);
+      when(filled.getGrossUnitPrice()).thenReturn(new BigDecimal("4.00"));
+      when(filled.getInvoicedQuantity()).thenReturn(new BigDecimal("2"));
+
+      when(invoice.getInvoiceLineList())
+          .thenReturn(java.util.Arrays.asList(skipped, filled));
+
+      new InvoiceFromOrderSupport().ensureLineGrossAmounts(invoice);
+
+      verify(skipped, never()).setGrossAmount(any());
+      verify(filled).setGrossAmount(new BigDecimal("8.00"));
+      verify(dal).save(filled);
+      verify(dal, never()).save(skipped);
+    }
+  }
+
+  // ── applyOrderDiscountToInvoice — service-null + JDBC edge cases ─────────
+
+  /**
+   * When {@code discountService} is null but the order does carry a discount,
+   * the method must still copy the pct to the invoice header and clear the
+   * session — it just skips the {@code recalculate} step. Locks in the
+   * "service kept in the signature for API stability, can be null" contract.
+   */
+  @Test
+  public void testApplyOrderDiscountSkipsMaterializationWhenServiceNull() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+
+      PreparedStatement selectPs = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(rs.next()).thenReturn(true);
+      when(rs.getBigDecimal(1)).thenReturn(new BigDecimal("8"));
+      when(selectPs.executeQuery()).thenReturn(rs);
+      when(conn.prepareStatement(anyString())).thenReturn(selectPs);
+
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("invoice-3");
+      Invoice freshInvoice = mock(Invoice.class);
+      when(dal.get(Invoice.class, "invoice-3")).thenReturn(freshInvoice);
+
+      Invoice returned = new InvoiceFromOrderSupport()
+          .applyOrderDiscountToInvoice(invoice, "order-3", null);
+
+      // Header still gets the discount pct.
+      verify(invoice).setEtgoTotalDiscount(new BigDecimal("8"));
+      verify(dal).save(invoice);
+      // Session still cleared and a fresh invoice returned — same shape as the
+      // happy path; only the recalculate call is skipped.
+      verify(session).clear();
+      assertSame(freshInvoice, returned);
+    }
+  }
+
+  /**
+   * The source order has no row in c_order (rs.next() returns false). The
+   * method must return the input invoice unchanged — no discount applied,
+   * no save, no session.clear().
+   */
+  @Test
+  public void testApplyOrderDiscountNoopWhenOrderMissing() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+
+      PreparedStatement selectPs = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(rs.next()).thenReturn(false);  // ← no row found
+      when(selectPs.executeQuery()).thenReturn(rs);
+      when(conn.prepareStatement(anyString())).thenReturn(selectPs);
+
+      Invoice invoice = mock(Invoice.class);
+      TotalDiscountService discountService = mock(TotalDiscountService.class);
+
+      Invoice returned = new InvoiceFromOrderSupport()
+          .applyOrderDiscountToInvoice(invoice, "missing-order", discountService);
+
+      assertSame("Must return the input invoice unchanged", invoice, returned);
+      verify(invoice, never()).setEtgoTotalDiscount(any());
+      verify(discountService, never()).recalculate(anyString(), any(Boolean.class));
+    }
+  }
+
+  /**
+   * When the JDBC query throws (e.g. connection lost), {@code readOrderDiscountPct}
+   * logs and returns null — the public method must treat that as "no discount"
+   * and skip all the materialisation work. The exception is intentionally
+   * swallowed (logged at WARN) so a transient DB hiccup can't break invoice
+   * creation; the test locks that contract.
+   */
+  @Test
+  public void testApplyOrderDiscountSwallowsJdbcException() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString()))
+          .thenThrow(new java.sql.SQLException("simulated DB hiccup"));
+
+      Invoice invoice = mock(Invoice.class);
+      TotalDiscountService discountService = mock(TotalDiscountService.class);
+
+      Invoice returned = new InvoiceFromOrderSupport()
+          .applyOrderDiscountToInvoice(invoice, "any-order", discountService);
+
+      assertSame(invoice, returned);
+      verify(invoice, never()).setEtgoTotalDiscount(any());
+      verify(discountService, never()).recalculate(anyString(), any(Boolean.class));
+    }
+  }
 }
