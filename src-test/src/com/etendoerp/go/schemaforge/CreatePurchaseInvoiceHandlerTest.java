@@ -80,6 +80,21 @@ public class CreatePurchaseInvoiceHandlerTest {
     protected JSONArray buildSelectedLines(Order order) {
       return selectedLinesToReturn;
     }
+
+    @Override
+    InvoiceFromOrderSupport getSupport() {
+      return new InvoiceFromOrderSupport() {
+        @Override
+        public void applyOrderDiscountToInvoice(Invoice invoice, String sourceOrderId,
+            TotalDiscountService discountService) {
+          // no-op: tested separately in InvoiceFromOrderSupportTest
+        }
+        @Override
+        public void ensureLineGrossAmounts(Invoice invoice) {
+          // no-op: tested separately in InvoiceFromOrderSupportTest
+        }
+      };
+    }
   }
 
   /** Stub an Order with the minimum header data the factory expects. */
