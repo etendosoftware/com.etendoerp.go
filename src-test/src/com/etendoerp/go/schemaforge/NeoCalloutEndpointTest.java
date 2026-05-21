@@ -206,7 +206,7 @@ class NeoCalloutEndpointTest {
     @DisplayName("Successful callout returns 200 and applies cascade")
     void successfulCallout() throws Exception {
       Tab tab = mock(Tab.class);
-      SFEntity sfEntity = mockEntityWithTab(tab);
+      mockEntityWithTab(tab);
 
       JSONObject requestBody = new JSONObject();
       requestBody.put("field", "businessPartner");
@@ -286,7 +286,7 @@ class NeoCalloutEndpointTest {
     @DisplayName("Updates from cascade are merged into base response")
     void updatesMerged() throws Exception {
       Tab tab = mock(Tab.class);
-      SFEntity sfEntity = mockEntityWithTab(tab);
+      mockEntityWithTab(tab);
 
       JSONObject requestBody = new JSONObject();
       requestBody.put("field", "businessPartner");
@@ -330,7 +330,7 @@ class NeoCalloutEndpointTest {
     @DisplayName("Existing keys in base are not overwritten by cascade")
     void existingKeysNotOverwritten() throws Exception {
       Tab tab = mock(Tab.class);
-      SFEntity sfEntity = mockEntityWithTab(tab);
+      mockEntityWithTab(tab);
 
       JSONObject requestBody = new JSONObject();
       requestBody.put("field", "businessPartner");
@@ -373,7 +373,7 @@ class NeoCalloutEndpointTest {
     @DisplayName("Combos from cascade are merged into base response")
     void combosMerged() throws Exception {
       Tab tab = mock(Tab.class);
-      SFEntity sfEntity = mockEntityWithTab(tab);
+      mockEntityWithTab(tab);
 
       JSONObject requestBody = new JSONObject();
       requestBody.put("field", "businessPartner");

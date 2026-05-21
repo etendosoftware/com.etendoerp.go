@@ -398,7 +398,7 @@ class NeoOpenAPIEndpointTest {
       assertNotNull(rootPath, "Root discovery path should exist");
       assertNotNull(rootPath.getGet(), "Root discovery GET should exist");
 
-      // Spec describe: GET /sws/neo/{specName}
+      // Spec describe endpoint
       PathItem specDescribe = openAPI.getPaths().get("/sws/neo/{specName}");
       assertNotNull(specDescribe, "Spec describe path should exist");
       assertNotNull(specDescribe.getGet(), "Spec describe GET should exist");

@@ -109,14 +109,14 @@ class NeoFieldFilterTest {
       Set<String> included = new HashSet<>(Set.of("id", "name", "_entityName"));
       NeoFieldFilter filter = activeFilter(included, included);
 
-      JSONObject record = new JSONObject();
-      record.put("id", "123");
-      record.put("name", "Test");
-      record.put("secretField", "hidden");
-      record.put("_entityName", "Order");
+      JSONObject row = new JSONObject();
+      row.put("id", "123");
+      row.put("name", "Test");
+      row.put("secretField", "hidden");
+      row.put("_entityName", "Order");
 
       JSONArray data = new JSONArray();
-      data.put(record);
+      data.put(row);
       JSONObject response = new JSONObject();
       response.put("data", data);
       JSONObject wrapper = new JSONObject();
@@ -137,16 +137,16 @@ class NeoFieldFilterTest {
       Set<String> included = new HashSet<>(Set.of("id"));
       NeoFieldFilter filter = activeFilter(included, included);
 
-      JSONObject record = new JSONObject();
-      record.put("id", "1");
-      record.put("_identifier", "Order 001");
-      record.put("$ref", "something");
-      record.put("recordTime", "12345");
-      record.put("entityName", "OrderLine");
-      record.put("unwanted", "remove me");
+      JSONObject row = new JSONObject();
+      row.put("id", "1");
+      row.put("_identifier", "Order 001");
+      row.put("$ref", "something");
+      row.put("recordTime", "12345");
+      row.put("entityName", "OrderLine");
+      row.put("unwanted", "remove me");
 
       JSONArray data = new JSONArray();
-      data.put(record);
+      data.put(row);
       JSONObject response = new JSONObject();
       response.put("data", data);
       JSONObject wrapper = new JSONObject();
@@ -171,12 +171,12 @@ class NeoFieldFilterTest {
       NeoFieldFilter filter = activeFilterWithMappings(included, included,
           Collections.emptyMap(), propToApi);
 
-      JSONObject record = new JSONObject();
-      record.put("id", "1");
-      record.put("priceActual", 100.5);
+      JSONObject row = new JSONObject();
+      row.put("id", "1");
+      row.put("priceActual", 100.5);
 
       JSONArray data = new JSONArray();
-      data.put(record);
+      data.put(row);
       JSONObject response = new JSONObject();
       response.put("data", data);
       JSONObject wrapper = new JSONObject();

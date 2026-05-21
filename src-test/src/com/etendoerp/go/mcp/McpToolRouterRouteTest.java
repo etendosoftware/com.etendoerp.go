@@ -194,12 +194,6 @@ class McpToolRouterRouteTest {
     return args;
   }
 
-  private JSONObject buildCrudArgsWithId() throws Exception {
-    JSONObject args = buildCrudArgs();
-    args.put("id", RECORD_ID);
-    return args;
-  }
-
   // ── Authorization ─────────────────────────────────────────────────────
 
   @Nested

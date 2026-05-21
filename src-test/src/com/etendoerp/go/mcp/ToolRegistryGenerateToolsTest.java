@@ -138,7 +138,7 @@ class ToolRegistryGenerateToolsTest {
   }
 
   @SuppressWarnings("unchecked")
-  private void mockEmptyEntities(SFSpec spec) {
+  private void mockEmptyEntities(@SuppressWarnings("unused") SFSpec spec) {
     OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
     when(mockOBDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
     when(entityCriteria.list()).thenReturn(Collections.emptyList());

@@ -297,7 +297,6 @@ class PaymentRegistrationServiceTest {
 
     OBCriteria<FIN_PaymentScheduleDetail> psdCriteria = mock(OBCriteria.class);
     // resolvePaymentMethod criteria (invoice method check + fallback) - both return empty
-    OBCriteria<FinAccPaymentMethod> methodCriteria1 = mock(OBCriteria.class);
     OBCriteria<FinAccPaymentMethod> methodCriteria2 = mock(OBCriteria.class);
 
     // createCriteria calls: 1st = findPendingPSDs, 2nd = resolvePaymentMethod fallback

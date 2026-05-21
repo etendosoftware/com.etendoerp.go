@@ -46,9 +46,7 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.ui.Process;
-import org.openbravo.model.ad.ui.ProcessParameter;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
@@ -107,21 +105,6 @@ class NeoReportServiceTest {
 
   private void mockAccessDenied() {
     accessHelperMock.when(() -> NeoAccessHelper.hasProcessAccess(anyString())).thenReturn(false);
-  }
-
-  private ProcessParameter createProcessParameter(String dbColumnName, String referenceId,
-      boolean active) {
-    ProcessParameter param = mock(ProcessParameter.class);
-    when(param.getDBColumnName()).thenReturn(dbColumnName);
-    when(param.isActive()).thenReturn(active);
-    if (referenceId != null) {
-      Reference ref = mock(Reference.class);
-      when(ref.getId()).thenReturn(referenceId);
-      when(param.getReference()).thenReturn(ref);
-    } else {
-      when(param.getReference()).thenReturn(null);
-    }
-    return param;
   }
 
   // ---- validateReportProcess (via reflection) ----

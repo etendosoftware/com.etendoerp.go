@@ -225,9 +225,9 @@ class ContactsLocationAddressHandlerTest {
     JSONArray data = responseBody.getJSONObject("response").getJSONArray("data");
     assertEquals(1, data.length());
 
-    JSONObject record = data.getJSONObject(0);
-    assertEquals("bp-loc-id", record.getString("id"));
-    assertEquals("geo-loc-id", record.getString("locationAddress"));
+    JSONObject resultRecord = data.getJSONObject(0);
+    assertEquals("bp-loc-id", resultRecord.getString("id"));
+    assertEquals("geo-loc-id", resultRecord.getString("locationAddress"));
   }
 
   // ── handleUpdate ────────────────────────────────────────────────────────
@@ -433,11 +433,11 @@ class ContactsLocationAddressHandlerTest {
 
     when(obDal.get(Location.class, "geo-loc-id")).thenReturn(geoLoc);
 
-    JSONObject record = new JSONObject();
-    record.put("id", "bpl-id");
-    record.put("locationAddress", "geo-loc-id");
+    JSONObject jsonRecord = new JSONObject();
+    jsonRecord.put("id", "bpl-id");
+    jsonRecord.put("locationAddress", "geo-loc-id");
 
-    NeoResponse previousResult = buildPreviousResult(record);
+    NeoResponse previousResult = buildPreviousResult(jsonRecord);
     NeoContext ctx = buildContextWithPrevious("GET", "bpl-id", previousResult);
 
     NeoResponse response = handler.afterHandle(ctx);
@@ -466,11 +466,11 @@ class ContactsLocationAddressHandlerTest {
   void testAfterHandleGetByIdNullGeoLocReturnsNull() throws Exception {
     when(obDal.get(Location.class, "missing-geo")).thenReturn(null);
 
-    JSONObject record = new JSONObject();
-    record.put("id", "bpl-id");
-    record.put("locationAddress", "missing-geo");
+    JSONObject jsonRecord = new JSONObject();
+    jsonRecord.put("id", "bpl-id");
+    jsonRecord.put("locationAddress", "missing-geo");
 
-    NeoResponse previousResult = buildPreviousResult(record);
+    NeoResponse previousResult = buildPreviousResult(jsonRecord);
     NeoContext ctx = buildContextWithPrevious("GET", "bpl-id", previousResult);
 
     assertNull(handler.afterHandle(ctx));
@@ -481,10 +481,10 @@ class ContactsLocationAddressHandlerTest {
    */
   @Test
   void testAfterHandleGetByIdMissingLocationAddressReturnsNull() throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("id", "bpl-id");
+    JSONObject jsonRecord = new JSONObject();
+    jsonRecord.put("id", "bpl-id");
 
-    NeoResponse previousResult = buildPreviousResult(record);
+    NeoResponse previousResult = buildPreviousResult(jsonRecord);
     NeoContext ctx = buildContextWithPrevious("GET", "bpl-id", previousResult);
 
     assertNull(handler.afterHandle(ctx));
@@ -939,9 +939,9 @@ class ContactsLocationAddressHandlerTest {
         .build();
   }
 
-  private NeoResponse buildPreviousResult(JSONObject record) throws Exception {
+  private NeoResponse buildPreviousResult(JSONObject jsonRecord) throws Exception {
     JSONArray dataArr = new JSONArray();
-    dataArr.put(record);
+    dataArr.put(jsonRecord);
     JSONObject responseData = new JSONObject();
     responseData.put("status", 0);
     responseData.put("data", dataArr);
