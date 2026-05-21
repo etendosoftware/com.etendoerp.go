@@ -60,7 +60,12 @@ import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.ComputeResult;
  */
 public class Fiscal303BoxesHandlerTest {
 
-  private final Fiscal303BoxesHandler handler = new Fiscal303BoxesHandler(null);
+  private Fiscal303BoxesHandler handler;
+
+  @org.junit.Before
+  public void setUp() {
+    handler = new Fiscal303BoxesHandler(null);
+  }
 
   // ── BoxGroupConfig ────────────────────────────────────────────────────────
 
@@ -141,7 +146,7 @@ public class Fiscal303BoxesHandlerTest {
   /** 0 % exempt-but-traceable operations → boxes 150/152. */
   @Test
   public void testVatGeneral0MapsToBoxes150And152() {
-    assertEquals(Arrays.asList(150, 152), handler.vatGeneralBoxes(BigDecimal.ZERO));
+    assertEquals(Arrays.asList(150, 152), handler.vatGeneralBoxes(pct("0.00")));
   }
 
   /** 2 % (new reduced rate introduced 2023) → boxes 165/167. */
@@ -157,6 +162,12 @@ public class Fiscal303BoxesHandlerTest {
   @Test
   public void testVatGeneralUnknownPercentReturnsEmpty() {
     assertTrue(handler.vatGeneralBoxes(pct("99.00")).isEmpty());
+  }
+
+  /** Null input must return empty, not throw NPE. */
+  @Test
+  public void testVatGeneralNullReturnsEmpty() {
+    assertTrue(handler.vatGeneralBoxes(null).isEmpty());
   }
 
   // ── vatEcBoxes ────────────────────────────────────────────────────────────
@@ -191,6 +202,12 @@ public class Fiscal303BoxesHandlerTest {
     assertTrue(handler.vatEcBoxes(pct("3.00")).isEmpty());
   }
 
+  /** Null input must return empty, not throw NPE. */
+  @Test
+  public void testVatEcNullReturnsEmpty() {
+    assertTrue(handler.vatEcBoxes(null).isEmpty());
+  }
+
   // ── finalizeInvoiceRow ────────────────────────────────────────────────────
 
   /**
@@ -211,7 +228,8 @@ public class Fiscal303BoxesHandlerTest {
   public void testFinalizeRowComputesTotal() {
     Map<String, Object> row = buildRow(pct("100.00"), pct("21.00"), 7);
     handler.finalizeInvoiceRow(row);
-    assertEquals(new BigDecimal("121.00"), row.get("total"));
+    assertTrue("total should be 121.00",
+        new BigDecimal("121.00").compareTo((BigDecimal) row.get("total")) == 0);
   }
 
   /** A single box number must be serialised without any comma. */

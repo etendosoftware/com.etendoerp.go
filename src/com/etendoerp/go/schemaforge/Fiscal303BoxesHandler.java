@@ -63,6 +63,18 @@ class Fiscal303BoxesHandler {
   private static final String TAX_BASE_AMOUNT = "TaxBaseAmount";
   private static final String TAX_AMOUNT      = "TaxAmount";
 
+  private static final BigDecimal PCT_21   = new BigDecimal("21");
+  private static final BigDecimal PCT_10   = new BigDecimal("10");
+  private static final BigDecimal PCT_7    = new BigDecimal("7");
+  private static final BigDecimal PCT_8    = new BigDecimal("8");
+  private static final BigDecimal PCT_4    = new BigDecimal("4");
+  private static final BigDecimal PCT_5    = new BigDecimal("5");
+  private static final BigDecimal PCT_2    = new BigDecimal("2");
+  private static final BigDecimal PCT_1_40 = new BigDecimal("1.40");
+  private static final BigDecimal PCT_5_20 = new BigDecimal("5.20");
+  private static final BigDecimal PCT_0_50 = new BigDecimal("0.50");
+  private static final BigDecimal PCT_1_75 = new BigDecimal("1.75");
+
   private final NeoServlet servlet;
 
   Fiscal303BoxesHandler(NeoServlet servlet) {
@@ -303,22 +315,24 @@ class Fiscal303BoxesHandler {
   }
 
   List<Integer> vatGeneralBoxes(BigDecimal pct) {
-    if (pct.compareTo(new BigDecimal("21")) == 0) return java.util.Arrays.asList(7, 9);
-    if (pct.compareTo(new BigDecimal("10")) == 0
-        || pct.compareTo(new BigDecimal("7")) == 0
-        || pct.compareTo(new BigDecimal("8")) == 0) return java.util.Arrays.asList(4, 6);
-    if (pct.compareTo(new BigDecimal("4")) == 0
-        || pct.compareTo(new BigDecimal("5")) == 0) return java.util.Arrays.asList(1, 3);
+    if (pct == null) return Collections.emptyList();
+    if (pct.compareTo(PCT_21) == 0) return java.util.Arrays.asList(7, 9);
+    if (pct.compareTo(PCT_10) == 0
+        || pct.compareTo(PCT_7)  == 0
+        || pct.compareTo(PCT_8)  == 0) return java.util.Arrays.asList(4, 6);
+    if (pct.compareTo(PCT_4) == 0
+        || pct.compareTo(PCT_5) == 0) return java.util.Arrays.asList(1, 3);
     if (pct.compareTo(BigDecimal.ZERO) == 0) return java.util.Arrays.asList(150, 152);
-    if (pct.compareTo(new BigDecimal("2")) == 0) return java.util.Arrays.asList(165, 167);
+    if (pct.compareTo(PCT_2) == 0) return java.util.Arrays.asList(165, 167);
     return Collections.emptyList();
   }
 
   List<Integer> vatEcBoxes(BigDecimal pct) {
-    if (pct.compareTo(new BigDecimal("1.40")) == 0) return java.util.Arrays.asList(19, 21);
-    if (pct.compareTo(new BigDecimal("5.20")) == 0) return java.util.Arrays.asList(22, 24);
-    if (pct.compareTo(new BigDecimal("0.50")) == 0) return java.util.Arrays.asList(16, 18);
-    if (pct.compareTo(new BigDecimal("1.75")) == 0) return java.util.Arrays.asList(156, 158);
+    if (pct == null) return Collections.emptyList();
+    if (pct.compareTo(PCT_1_40) == 0) return java.util.Arrays.asList(19, 21);
+    if (pct.compareTo(PCT_5_20) == 0) return java.util.Arrays.asList(22, 24);
+    if (pct.compareTo(PCT_0_50) == 0) return java.util.Arrays.asList(16, 18);
+    if (pct.compareTo(PCT_1_75) == 0) return java.util.Arrays.asList(156, 158);
     return Collections.emptyList();
   }
 
