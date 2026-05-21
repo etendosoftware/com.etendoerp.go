@@ -22,20 +22,14 @@ import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
 
 import javax.enterprise.context.ApplicationScoped;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
-import org.openbravo.model.common.invoice.InvoiceTax;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 
 /**
@@ -43,10 +37,12 @@ import org.openbravo.model.financialmgmt.tax.TaxRate;
  *
  * <p>After {@code CreateInvoiceLinesFromProcess} runs, this bean:
  * <ol>
- *   <li>Copies {@code em_etgo_total_discount} from the source order to the new invoice.</li>
- *   <li>Calls {@link TotalDiscountService#recalculate} to materialize the ETGO_DTO discount lines.</li>
- *   <li>Rebuilds {@code c_invoicetax} so the taxable base reflects product lines plus discount.</li>
- *   <li>Updates the invoice header totals ({@code summedLineAmount}, {@code grandTotalAmount}).</li>
+ *   <li>Copies {@code em_etgo_total_discount} from the source order to the new invoice and
+ *       materialises the ETGO_DTO discount line right away. The DB trigger chain
+ *       ({@code c_invoiceline_trg2 → c_invoicelinetax_trg}) updates {@code c_invoicetax} in place.
+ *       Done at creation rather than at completion so the totals are correct regardless of
+ *       whether the invoice is later completed via NEO Headless or the Classic UI (Classic's
+ *       complete process never invokes our header handlers).</li>
  *   <li>Fills in {@code lineGrossAmount} for invoice lines that have a zero/null gross amount.</li>
  * </ol>
  *
@@ -60,94 +56,55 @@ public class InvoiceFromOrderSupport {
   private static final RoundingMode ROUNDING = RoundingMode.HALF_UP;
 
   /**
-   * Copies the total discount percentage from the source order to the new invoice, materializes
-   * the ETGO_DTO discount lines, and rebuilds {@code c_invoicetax} with the correct taxable base.
+   * Copies {@code etgoTotalDiscount} from the source order to the new invoice and materialises
+   * the ETGO_DTO discount line so the c_invoicetax aggregates and c_invoice totals reflect the
+   * discount regardless of whether the invoice is later completed via NEO Headless or the
+   * Classic UI (Classic's complete path never invokes our header handlers).
    *
-   * <p>Must be called after {@code CreateInvoiceLinesFromProcess} has run AND after
-   * {@code OBDal.flush()} + {@code session.refresh(invoice)} so the invoice's line collection
-   * reflects the product lines.
-   *
-   * <p>No-op when the source order has no total discount ({@code em_etgo_total_discount = 0}
-   * or {@code NULL}).
+   * <p>No-op when the source order has no positive total discount.
    *
    * @param invoice         the newly created draft invoice
    * @param sourceOrderId   the {@code C_Order_ID} from which the invoice was created
-   * @param discountService the {@link TotalDiscountService} CDI bean
+   * @param discountService CDI service that creates the ETGO_DTO line and lets the DB trigger
+   *                        chain ({@code c_invoiceline_trg2 → c_invoicelinetax_trg}) refresh
+   *                        {@code c_invoicetax} in place; pass {@code null} to skip the
+   *                        materialisation step
+   * @return a freshly-reloaded {@link Invoice} instance with up-to-date totals and collections,
+   *         or the same {@code invoice} argument when the order carries no discount (no-op path)
    */
-  public void applyOrderDiscountToInvoice(Invoice invoice, String sourceOrderId,
+  public Invoice applyOrderDiscountToInvoice(Invoice invoice, String sourceOrderId,
       TotalDiscountService discountService) {
-    if (discountService == null) {
-      return;
-    }
     BigDecimal pct = readOrderDiscountPct(sourceOrderId);
     if (pct == null || pct.compareTo(BigDecimal.ZERO) <= 0) {
-      return;
+      return invoice;
     }
-    copyDiscountPctToInvoice(invoice.getId(), pct);
-    OBDal.getInstance().flush();
-    discountService.recalculate(invoice.getId(), true);
-    OBDal.getInstance().flush();
-    OBDal.getInstance().getSession().refresh(invoice);
-    rebuildInvoiceTaxAggregates(invoice);
-  }
-
-  /**
-   * Deletes all existing {@link InvoiceTax} rows for the invoice and recreates them by summing
-   * {@code lineNetAmount} across ALL current invoice lines (product + discount) grouped by tax.
-   * Also updates {@code summedLineAmount} and {@code grandTotalAmount} on the invoice header.
-   *
-   * <p>Package-private for unit testing.
-   */
-  void rebuildInvoiceTaxAggregates(Invoice invoice) {
-    List<InvoiceTax> existing = new ArrayList<>(invoice.getInvoiceTaxList());
-    for (InvoiceTax it : existing) {
-      OBDal.getInstance().remove(it);
-    }
-    OBDal.getInstance().flush();
-    OBDal.getInstance().getSession().refresh(invoice);
-
-    int precision = invoice.getCurrency().getStandardPrecision().intValue();
-    Map<String, BigDecimal> taxBaseMap = new LinkedHashMap<>();
-    Map<String, TaxRate> taxRateMap = new LinkedHashMap<>();
-    BigDecimal totalLines = BigDecimal.ZERO;
-
-    for (InvoiceLine il : invoice.getInvoiceLineList()) {
-      BigDecimal lineNet = il.getLineNetAmount() != null ? il.getLineNetAmount() : BigDecimal.ZERO;
-      totalLines = totalLines.add(lineNet);
-      TaxRate tax = il.getTax();
-      if (tax != null && Boolean.FALSE.equals(tax.isSummaryLevel())) {
-        taxBaseMap.merge(tax.getId(), lineNet, BigDecimal::add);
-        taxRateMap.putIfAbsent(tax.getId(), tax);
-      }
-    }
-
-    BigDecimal totalTax = BigDecimal.ZERO;
-    long lineNo = 10;
-    for (Map.Entry<String, TaxRate> entry : taxRateMap.entrySet()) {
-      TaxRate tax = entry.getValue();
-      BigDecimal taxBase = taxBaseMap.get(entry.getKey());
-      BigDecimal rate = tax.getRate() != null ? tax.getRate() : BigDecimal.ZERO;
-      BigDecimal taxAmt = taxBase.multiply(rate).divide(new BigDecimal("100"), precision, ROUNDING);
-
-      InvoiceTax it = OBProvider.getInstance().get(InvoiceTax.class);
-      it.setClient(invoice.getClient());
-      it.setOrganization(invoice.getOrganization());
-      it.setInvoice(invoice);
-      it.setTax(tax);
-      it.setLineNo(lineNo);
-      it.setTaxableAmount(taxBase.setScale(precision, ROUNDING));
-      it.setTaxAmount(taxAmt);
-      it.setRecalculate(false);
-      OBDal.getInstance().save(it);
-
-      totalTax = totalTax.add(taxAmt);
-      lineNo += 10;
-    }
-
-    invoice.setSummedLineAmount(totalLines.setScale(precision, ROUNDING));
-    invoice.setGrandTotalAmount(totalLines.add(totalTax).setScale(precision, ROUNDING));
+    String invoiceId = invoice.getId();
+    invoice.setEtgoTotalDiscount(pct);
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
+    if (discountService != null) {
+      // Materialise the ETGO_DTO line and let the DB trigger chain
+      // (c_invoiceline_trg2 → c_invoicelinetax_trg) update c_invoicetax in place.
+      // We do this at creation rather than at completion so the totals are
+      // correct regardless of whether the invoice is completed via NEO Headless
+      // or the Classic UI (the latter never invokes our header handlers).
+      discountService.recalculate(invoiceId, true);
+      OBDal.getInstance().flush();
+    }
+    // session.clear() is intentional here. Using session.refresh(invoice) is not an option:
+    // refresh() cascades through invoice.invoiceTaxList and invoice.invoiceLineList, but the
+    // DB triggers above just rewrote those rows out from under Hibernate's L1 cache (in
+    // particular c_invoicetax: the original row is updated in place, the cached proxy still
+    // points to the same id but its state has changed). A cascade refresh on that graph
+    // throws EntityNotFoundException for rows the trigger touched, or — worse — Etendo's
+    // OBInterceptor resurrects detached proxies as fresh INSERTs and we end up with a
+    // duplicate c_invoicetax row (the original ETP-4015 symptom). We tried per-entity evict()
+    // first; it did not work because the parent collection still referenced the proxies.
+    // Clearing the L1 cache is the only approach we found that produces a clean, single
+    // c_invoicetax row in every scenario we tested. The caller must use the returned invoice
+    // and not the one passed in.
+    OBDal.getInstance().getSession().clear();
+    return OBDal.getInstance().get(Invoice.class, invoiceId);
   }
 
   /**
@@ -207,16 +164,4 @@ public class InvoiceFromOrderSupport {
     return null;
   }
 
-  private void copyDiscountPctToInvoice(String invoiceId, BigDecimal pct) {
-    String sql = "UPDATE c_invoice SET em_etgo_total_discount = ? WHERE c_invoice_id = ?";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setBigDecimal(1, pct);
-      ps.setString(2, invoiceId);
-      ps.executeUpdate();
-      log.debug("Copied total discount {}% to invoice {}", pct, invoiceId);
-    } catch (Exception e) {
-      log.error("Could not copy total discount to invoice {}: {}", invoiceId, e.getMessage(), e);
-    }
-  }
 }

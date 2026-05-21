@@ -85,9 +85,10 @@ public class CreatePurchaseInvoiceHandlerTest {
     InvoiceFromOrderSupport getSupport() {
       return new InvoiceFromOrderSupport() {
         @Override
-        public void applyOrderDiscountToInvoice(Invoice invoice, String sourceOrderId,
+        public Invoice applyOrderDiscountToInvoice(Invoice invoice, String sourceOrderId,
             TotalDiscountService discountService) {
           // no-op: tested separately in InvoiceFromOrderSupportTest
+          return invoice;
         }
         @Override
         public void ensureLineGrossAmounts(Invoice invoice) {
