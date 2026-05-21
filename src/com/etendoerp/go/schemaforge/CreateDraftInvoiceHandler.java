@@ -34,6 +34,7 @@ import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
 
+import javax.inject.Inject;
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
@@ -85,6 +86,13 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(CreateDraftInvoiceHandler.class);
   private static final String ACTION_NAME = "createDraftInvoice";
+
+  @Inject
+  InvoiceFromOrderSupport invoiceFromOrderSupport;
+
+  @Inject
+  TotalDiscountService totalDiscountService;
+
   private static final String CHECK_ACTION = "checkDraftInvoice";
   private static final String LIST_ACTION = "listInvoices";
 
@@ -474,6 +482,10 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     if the order is not found, has no invoiceable lines, or
    *     no AR Invoice document type can be resolved
    */
+  InvoiceFromOrderSupport getSupport() {
+    return invoiceFromOrderSupport != null ? invoiceFromOrderSupport : new InvoiceFromOrderSupport();
+  }
+
   protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides) {
     Order order = OBDal.getInstance().get(Order.class, orderId);
     if (order == null) {
@@ -516,6 +528,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
 
     OBDal.getInstance().getSession().refresh(invoice);
+    getSupport().applyOrderDiscountToInvoice(invoice, orderId, totalDiscountService);
     ensureLineGrossAmounts(invoice);
 
     return invoice;
@@ -1107,51 +1120,14 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     return il;
   }
 
-  /**
-   * Ensures every invoice line has its {@code lineGrossAmount} populated.
-   * {@code CreateInvoiceLinesFromProcess} sets {@code lineNetAmount} from the
-   * source order/quotation line, but for tax-not-included price lists the
-   * gross amount is left at zero — which leaves the grid column blank.
-   * This helper fills it in using either {@code grossUnitPrice * qty} when
-   * available, or {@code lineNetAmount * (1 + taxRate/100)} as a fallback.
-   */
+  /** Delegates to {@link InvoiceFromOrderSupport} — logic shared with the purchase path. */
   protected void ensureLineGrossAmounts(Invoice invoice) {
-    int precision = invoice.getCurrency().getStandardPrecision().intValue();
-    for (InvoiceLine il : invoice.getInvoiceLineList()) {
-      BigDecimal current = il.getGrossAmount();
-      if (current != null && current.compareTo(BigDecimal.ZERO) > 0) {
-        continue;
-      }
-      il.setGrossAmount(calculateLineGross(il, precision));
-      OBDal.getInstance().save(il);
-    }
-    OBDal.getInstance().flush();
+    getSupport().ensureLineGrossAmounts(invoice);
   }
 
-  /**
-   * Computes the gross amount for a single invoice line.
-   * Uses {@code grossUnitPrice * qty} when {@code grossUnitPrice} is set and
-   * positive; otherwise derives it from {@code lineNetAmount * (1 + taxRate/100)}.
-   * The result is scaled to {@code precision} decimal places using
-   * {@link RoundingMode#HALF_UP}.
-   *
-   * @param il
-   *     the invoice line to compute the gross amount for
-   * @param precision
-   *     the number of decimal places (from the invoice currency)
-   * @return the computed gross amount, never {@code null}
-   */
+  /** Delegates to {@link InvoiceFromOrderSupport} — logic shared with the purchase path. */
   protected BigDecimal calculateLineGross(InvoiceLine il, int precision) {
-    BigDecimal qty = il.getInvoicedQuantity() != null ? il.getInvoicedQuantity() : BigDecimal.ZERO;
-    BigDecimal grossPrice = il.getGrossUnitPrice();
-    if (grossPrice != null && grossPrice.compareTo(BigDecimal.ZERO) > 0) {
-      return qty.multiply(grossPrice).setScale(precision, RoundingMode.HALF_UP);
-    }
-    BigDecimal net = il.getLineNetAmount() != null ? il.getLineNetAmount() : BigDecimal.ZERO;
-    TaxRate tax = il.getTax();
-    BigDecimal rate = (tax != null && tax.getRate() != null) ? tax.getRate() : BigDecimal.ZERO;
-    BigDecimal taxAmt = net.multiply(rate).divide(new BigDecimal("100"), precision, RoundingMode.HALF_UP);
-    return net.add(taxAmt).setScale(precision, RoundingMode.HALF_UP);
+    return getSupport().calculateLineGross(il, precision);
   }
 
   /**
