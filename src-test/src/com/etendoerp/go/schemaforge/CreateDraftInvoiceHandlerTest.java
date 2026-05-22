@@ -1278,7 +1278,6 @@ public class CreateDraftInvoiceHandlerTest {
     Map<String, BigDecimal> receivedOverrides;
     Invoice ensuredGrossInvoice;
     Invoice copiedDiscountsInvoice;
-    Invoice appliedTotalDiscountInvoice;
 
     @Override
     protected JSONArray buildSelectedLinesForOrder(Order order, Map<String, BigDecimal> lineOverrides) {
@@ -1299,11 +1298,6 @@ public class CreateDraftInvoiceHandlerTest {
     @Override
     protected void copyLineDiscountsFromOrder(Invoice invoice) {
       copiedDiscountsInvoice = invoice;
-    }
-
-    @Override
-    protected void applyTotalDiscountIfPresent(Invoice invoice) {
-      appliedTotalDiscountInvoice = invoice;
     }
   }
 
@@ -1926,7 +1920,6 @@ public class CreateDraftInvoiceHandlerTest {
       assertEquals(overrides, handler.receivedOverrides);
       assertSame(invoice, handler.ensuredGrossInvoice);
       assertSame(invoice, handler.copiedDiscountsInvoice);
-      assertSame(invoice, handler.appliedTotalDiscountInvoice);
       verify(invoice).setDocumentType(handler.resolvedDocType);
       verify(invoice).setTransactionDocument(handler.resolvedDocType);
       // Factory delegates document numbering to DocumentNoHandlerLegacy
