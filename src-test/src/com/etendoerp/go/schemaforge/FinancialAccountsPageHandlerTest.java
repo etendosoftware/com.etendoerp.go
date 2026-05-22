@@ -63,6 +63,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.AccountRow;
+import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.Currency;
 
 /**
  * Mockito-driven unit tests for {@link FinancialAccountsPageHandler}.
@@ -439,7 +440,7 @@ public class FinancialAccountsPageHandlerTest {
       assertEquals("BBVA", first.name);
       assertEquals("B", first.type);
       assertEquals(0, new BigDecimal("1500.00").compareTo(first.currentBalance));
-      assertEquals("EUR", first.currencyIso);
+      assertEquals("EUR", first.currency.iso);
       assertTrue("first row is default", first.isDefault);
 
       AccountRow second = rows.get(1);
@@ -596,8 +597,9 @@ public class FinancialAccountsPageHandlerTest {
    */
   private static AccountRow account(String id, String name, String type, BigDecimal balance,
       String currencyIso) {
-    return new AccountRow(id, name, type, balance, currencyId(currencyIso),
-        currencyIso, "ES1200000000000000000001", false);
+    return new AccountRow(id, name, type, balance,
+        new Currency(currencyId(currencyIso), currencyIso),
+        "ES1200000000000000000001", false);
   }
 
   /**

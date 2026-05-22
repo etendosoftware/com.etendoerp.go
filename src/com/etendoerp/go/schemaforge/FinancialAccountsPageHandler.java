@@ -186,8 +186,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
               StringUtils.trimToEmpty(rs.getString(2)),
               StringUtils.trimToEmpty(rs.getString(3)),
               nullSafeBigDecimal(rs.getBigDecimal(4)),
-              rs.getString(5),
-              StringUtils.trimToEmpty(rs.getString(6)),
+              new Currency(rs.getString(5), StringUtils.trimToEmpty(rs.getString(6))),
               StringUtils.trimToEmpty(rs.getString(7)),
               "Y".equals(rs.getString(8))));
         }
@@ -224,8 +223,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("name", account.name);
       json.put("type", account.type);
       json.put("currentBalance", account.currentBalance);
-      json.put("currencyId", account.currencyId);
-      json.put("currencyIso", account.currencyIso);
+      json.put("currencyId", account.currency.id);
+      json.put("currencyIso", account.currency.iso);
       json.put("iban", account.iban);
       json.put("isDefault", account.isDefault);
       json.put("pendingCount", pendingByAccount.getOrDefault(account.id, 0));
@@ -244,7 +243,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
 
     for (AccountRow account : accounts) {
       total = total.add(account.currentBalance);
-      byCurrency.merge(account.currencyIso, account.currentBalance, BigDecimal::add);
+      byCurrency.merge(account.currency.iso, account.currentBalance, BigDecimal::add);
       if (pendingByAccount.getOrDefault(account.id, 0) > 0) {
         accountsWithPending++;
       }
@@ -295,21 +294,34 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     final String name;
     final String type;
     final BigDecimal currentBalance;
-    final String currencyId;
-    final String currencyIso;
+    final Currency currency;
     final String iban;
     final boolean isDefault;
 
     AccountRow(String id, String name, String type, BigDecimal currentBalance,
-        String currencyId, String currencyIso, String iban, boolean isDefault) {
+        Currency currency, String iban, boolean isDefault) {
       this.id = id;
       this.name = name;
       this.type = type;
       this.currentBalance = currentBalance;
-      this.currencyId = currencyId;
-      this.currencyIso = currencyIso;
+      this.currency = currency;
       this.iban = iban;
       this.isDefault = isDefault;
+    }
+  }
+
+  /**
+   * Currency descriptor co-located with {@link AccountRow}. Groups the id and
+   * ISO code into a single value to keep the row constructor below Sonar's
+   * 7-parameter ceiling and to make the dependency explicit in the SQL layer.
+   */
+  static class Currency {
+    final String id;
+    final String iso;
+
+    Currency(String id, String iso) {
+      this.id = id;
+      this.iso = iso;
     }
   }
 }
