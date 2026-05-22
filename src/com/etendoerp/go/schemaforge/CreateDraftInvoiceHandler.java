@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -28,6 +29,7 @@ import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 
+import javax.inject.Inject;
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
@@ -78,6 +80,13 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(CreateDraftInvoiceHandler.class);
   private static final String ACTION_NAME = "createDraftInvoice";
+
+  @Inject
+  InvoiceFromOrderSupport invoiceFromOrderSupport;
+
+  @Inject
+  TotalDiscountService totalDiscountService;
+
   private static final String CHECK_ACTION = "checkDraftInvoice";
   private static final String LIST_ACTION = "listInvoices";
 
@@ -467,6 +476,10 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     if the order is not found, has no invoiceable lines, or
    *     no AR Invoice document type can be resolved
    */
+  InvoiceFromOrderSupport getSupport() {
+    return invoiceFromOrderSupport != null ? invoiceFromOrderSupport : new InvoiceFromOrderSupport();
+  }
+
   protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides) {
     Order order = OBDal.getInstance().get(Order.class, orderId);
     if (order == null) {
@@ -494,12 +507,69 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
     OBDal.getInstance().flush();
 
+    // Carry over the per-line discount percentage (OrderLine.discount, standard
+    // Etendo column) into the EM_Etgo_Discount field on each invoice line so the
+    // frontend can display the discount % and compute the totals breakdown.
+    // The native process already copies unitPrice/listPrice/lineNetAmount, but
+    // c_invoiceline has no standard discount column — it lives in the EM_ extension.
+    copyLineDiscountsFromOrder(invoice);
+
     InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
 
     OBDal.getInstance().getSession().refresh(invoice);
+    invoice = getSupport().applyOrderDiscountToInvoice(invoice, orderId, totalDiscountService);
     ensureLineGrossAmounts(invoice);
 
     return invoice;
+  }
+
+  /**
+   * Copies {@code discount} from each invoice line's source {@link OrderLine} into the
+   * {@code EM_Etgo_Discount} field on the invoice line. Skips lines that have no source
+   * order line, no discount on the source, or already a non-zero value.
+   *
+   * <p>The native {@code CreateInvoiceLinesFromProcess} copies the unit price, list
+   * price and net amount correctly, but {@code C_InvoiceLine} has no standard
+   * {@code discount} column — it lives in the EM_ extension. Without this copy the
+   * frontend reads zero from {@code EM_Etgo_Discount} and renders "0%" alongside an
+   * already-discounted unit price, breaking the totals breakdown displayed in the UI.
+   */
+  protected void copyLineDiscountsFromOrder(Invoice invoice) {
+    boolean dirty = false;
+    for (InvoiceLine il : invoice.getInvoiceLineList()) {
+      BigDecimal srcDiscount = resolveCopyableSourceDiscount(il);
+      if (srcDiscount != null) {
+        il.setEtgoDiscount(srcDiscount);
+        OBDal.getInstance().save(il);
+        dirty = true;
+      }
+    }
+    if (dirty) {
+      OBDal.getInstance().flush();
+    }
+  }
+
+  /**
+   * Returns the source {@link OrderLine#getDiscount()} value that should be copied
+   * into the given invoice line's {@code EM_Etgo_Discount} field, or {@code null}
+   * when the copy should be skipped. The copy is skipped when there is no source
+   * order line, the source carries no discount, or the invoice line already has a
+   * non-zero discount value (set explicitly elsewhere).
+   */
+  private BigDecimal resolveCopyableSourceDiscount(InvoiceLine il) {
+    OrderLine ol = il.getSalesOrderLine();
+    if (ol == null) {
+      return null;
+    }
+    BigDecimal srcDiscount = ol.getDiscount();
+    if (srcDiscount == null || srcDiscount.compareTo(BigDecimal.ZERO) == 0) {
+      return null;
+    }
+    BigDecimal current = il.getEtgoDiscount();
+    if (current != null && current.compareTo(BigDecimal.ZERO) != 0) {
+      return null;
+    }
+    return srcDiscount;
   }
 
   /**
@@ -550,6 +620,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    */
   protected BigDecimal resolvePendingForLine(OrderLine ol, boolean hasOverrides, Map<String, BigDecimal> lineOverrides) {
     if (!ol.isActive() || ol.getProduct() == null) return null;
+    // Skip ETGO_DTO total-discount lines on the source order: the invoice carries
+    // em_etgo_total_discount on its header and the matching discount line is
+    // materialized at completion time by AbstractOrderHeaderHandler. Copying the
+    // source line here would leave a stale duplicate after that recalculation.
+    if (TotalDiscountService.DISCOUNT_PRODUCT_ID.equals(ol.getProduct().getId())) return null;
     if (hasOverrides && !lineOverrides.containsKey(ol.getId())) return null;
     BigDecimal ordered = ol.getOrderedQuantity() != null ? ol.getOrderedQuantity() : BigDecimal.ZERO;
     BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
@@ -864,51 +939,14 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     return il;
   }
 
-  /**
-   * Ensures every invoice line has its {@code lineGrossAmount} populated.
-   * {@code CreateInvoiceLinesFromProcess} sets {@code lineNetAmount} from the
-   * source order/quotation line, but for tax-not-included price lists the
-   * gross amount is left at zero — which leaves the grid column blank.
-   * This helper fills it in using either {@code grossUnitPrice * qty} when
-   * available, or {@code lineNetAmount * (1 + taxRate/100)} as a fallback.
-   */
+  /** Delegates to {@link InvoiceFromOrderSupport} — logic shared with the purchase path. */
   protected void ensureLineGrossAmounts(Invoice invoice) {
-    int precision = invoice.getCurrency().getStandardPrecision().intValue();
-    for (InvoiceLine il : invoice.getInvoiceLineList()) {
-      BigDecimal current = il.getGrossAmount();
-      if (current != null && current.compareTo(BigDecimal.ZERO) > 0) {
-        continue;
-      }
-      il.setGrossAmount(calculateLineGross(il, precision));
-      OBDal.getInstance().save(il);
-    }
-    OBDal.getInstance().flush();
+    getSupport().ensureLineGrossAmounts(invoice);
   }
 
-  /**
-   * Computes the gross amount for a single invoice line.
-   * Uses {@code grossUnitPrice * qty} when {@code grossUnitPrice} is set and
-   * positive; otherwise derives it from {@code lineNetAmount * (1 + taxRate/100)}.
-   * The result is scaled to {@code precision} decimal places using
-   * {@link RoundingMode#HALF_UP}.
-   *
-   * @param il
-   *     the invoice line to compute the gross amount for
-   * @param precision
-   *     the number of decimal places (from the invoice currency)
-   * @return the computed gross amount, never {@code null}
-   */
+  /** Delegates to {@link InvoiceFromOrderSupport} — logic shared with the purchase path. */
   protected BigDecimal calculateLineGross(InvoiceLine il, int precision) {
-    BigDecimal qty = il.getInvoicedQuantity() != null ? il.getInvoicedQuantity() : BigDecimal.ZERO;
-    BigDecimal grossPrice = il.getGrossUnitPrice();
-    if (grossPrice != null && grossPrice.compareTo(BigDecimal.ZERO) > 0) {
-      return qty.multiply(grossPrice).setScale(precision, RoundingMode.HALF_UP);
-    }
-    BigDecimal net = il.getLineNetAmount() != null ? il.getLineNetAmount() : BigDecimal.ZERO;
-    TaxRate tax = il.getTax();
-    BigDecimal rate = (tax != null && tax.getRate() != null) ? tax.getRate() : BigDecimal.ZERO;
-    BigDecimal taxAmt = net.multiply(rate).divide(new BigDecimal("100"), precision, RoundingMode.HALF_UP);
-    return net.add(taxAmt).setScale(precision, RoundingMode.HALF_UP);
+    return getSupport().calculateLineGross(il, precision);
   }
 
   /**

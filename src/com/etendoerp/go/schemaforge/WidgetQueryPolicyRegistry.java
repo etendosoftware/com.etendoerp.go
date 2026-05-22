@@ -178,6 +178,31 @@ final class WidgetQueryPolicyRegistry {
             + " ORDER BY all_data.qty DESC LIMIT 10");
   }
 
+  static WidgetQueryPolicy recentInvoices() {
+    return new WidgetQueryPolicy(
+        "WITH max_date AS ( "
+            + "  SELECT MAX(dateinvoiced) AS last_date "
+            + "  FROM c_invoice "
+            + "  WHERE issotrx = 'Y' AND docstatus IN ('CO','CL') AND ad_client_id = :clientId "
+            + ") "
+            + "SELECT i.c_invoice_id, i.documentno, bp.name AS client, "
+            + "  TO_CHAR(i.dateinvoiced, 'DD-MM-YYYY') AS date, i.grandtotal AS amount, i.docstatus AS status "
+            + "FROM c_invoice i "
+            + "JOIN c_bpartner bp ON bp.c_bpartner_id = i.c_bpartner_id "
+            + "WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') "
+            + "  AND i.ad_client_id = :clientId "
+            + "  AND i.dateinvoiced > (SELECT last_date - CAST('30 days' AS interval) FROM max_date) "
+            + "ORDER BY i.dateinvoiced DESC LIMIT 5",
+        "SELECT i.c_invoice_id, i.documentno, bp.name AS client, "
+            + "  TO_CHAR(i.dateinvoiced, 'DD-MM-YYYY') AS date, i.grandtotal AS amount, i.docstatus AS status "
+            + "FROM c_invoice i "
+            + "JOIN c_bpartner bp ON bp.c_bpartner_id = i.c_bpartner_id "
+            + "WHERE i.issotrx = 'Y' AND i.docstatus IN ('CO','CL') "
+            + "  AND i.ad_client_id = :clientId "
+            + "  AND i.dateinvoiced >= %s "
+            + "ORDER BY i.dateinvoiced DESC LIMIT 5");
+  }
+
   static WidgetQueryPolicy topClients() {
     return new WidgetQueryPolicy(
         "WITH max_date AS ( "

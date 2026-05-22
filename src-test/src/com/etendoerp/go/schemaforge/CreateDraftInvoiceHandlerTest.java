@@ -455,6 +455,17 @@ public class CreateDraftInvoiceHandlerTest {
         new CreateDraftInvoiceHandler().resolvePendingForLine(ol, true, overrides));
   }
 
+  @Test
+  public void testResolvePendingLineDiscountProductReturnsNull() {
+    OrderLine ol = mock(OrderLine.class);
+    Product product = mock(Product.class);
+    when(ol.isActive()).thenReturn(true);
+    when(ol.getProduct()).thenReturn(product);
+    when(product.getId()).thenReturn(TotalDiscountService.DISCOUNT_PRODUCT_ID);
+
+    assertNull(new CreateDraftInvoiceHandler().resolvePendingForLine(ol, false, new HashMap<>()));
+  }
+
   // ── resolveShipmentLineQty ────────────────────────────────────────────────
 
   @Test
@@ -1266,6 +1277,7 @@ public class CreateDraftInvoiceHandlerTest {
     DocumentType resolvedDocType;
     Map<String, BigDecimal> receivedOverrides;
     Invoice ensuredGrossInvoice;
+    Invoice copiedDiscountsInvoice;
 
     @Override
     protected JSONArray buildSelectedLinesForOrder(Order order, Map<String, BigDecimal> lineOverrides) {
@@ -1281,6 +1293,11 @@ public class CreateDraftInvoiceHandlerTest {
     @Override
     protected void ensureLineGrossAmounts(Invoice invoice) {
       ensuredGrossInvoice = invoice;
+    }
+
+    @Override
+    protected void copyLineDiscountsFromOrder(Invoice invoice) {
+      copiedDiscountsInvoice = invoice;
     }
   }
 
@@ -1902,6 +1919,7 @@ public class CreateDraftInvoiceHandlerTest {
       assertSame(invoice, result);
       assertEquals(overrides, handler.receivedOverrides);
       assertSame(invoice, handler.ensuredGrossInvoice);
+      assertSame(invoice, handler.copiedDiscountsInvoice);
       verify(invoice).setDocumentType(handler.resolvedDocType);
       verify(invoice).setTransactionDocument(handler.resolvedDocType);
       // Factory delegates document numbering to DocumentNoHandlerLegacy
@@ -1912,6 +1930,66 @@ public class CreateDraftInvoiceHandlerTest {
       verify(process).createInvoiceLinesFromDocumentLines(eq(handler.selectedLines), eq(invoice), eq(OrderLine.class));
       verify(session).refresh(invoice);
       verify(dal, Mockito.atLeastOnce()).flush();
+    }
+  }
+
+  @Test
+  public void testCopyLineDiscountsFromOrderCopiesOnlyMissingInvoiceDiscounts() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      OrderLine discountedOrderLine = mock(OrderLine.class);
+      when(discountedOrderLine.getDiscount()).thenReturn(new BigDecimal("10"));
+
+      InvoiceLine emptyInvoiceLine = mock(InvoiceLine.class);
+      when(emptyInvoiceLine.getSalesOrderLine()).thenReturn(discountedOrderLine);
+      when(emptyInvoiceLine.getEtgoDiscount()).thenReturn(null);
+
+      OrderLine zeroDiscountOrderLine = mock(OrderLine.class);
+      when(zeroDiscountOrderLine.getDiscount()).thenReturn(BigDecimal.ZERO);
+
+      InvoiceLine zeroDiscountInvoiceLine = mock(InvoiceLine.class);
+      when(zeroDiscountInvoiceLine.getSalesOrderLine()).thenReturn(zeroDiscountOrderLine);
+      when(zeroDiscountInvoiceLine.getEtgoDiscount()).thenReturn(null);
+
+      OrderLine alreadyCopiedOrderLine = mock(OrderLine.class);
+      when(alreadyCopiedOrderLine.getDiscount()).thenReturn(new BigDecimal("7"));
+
+      InvoiceLine existingDiscountInvoiceLine = mock(InvoiceLine.class);
+      when(existingDiscountInvoiceLine.getSalesOrderLine()).thenReturn(alreadyCopiedOrderLine);
+      when(existingDiscountInvoiceLine.getEtgoDiscount()).thenReturn(new BigDecimal("3"));
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getInvoiceLineList()).thenReturn(Arrays.asList(
+          emptyInvoiceLine,
+          zeroDiscountInvoiceLine,
+          existingDiscountInvoiceLine));
+
+      new CreateDraftInvoiceHandler().copyLineDiscountsFromOrder(invoice);
+
+      verify(emptyInvoiceLine).setEtgoDiscount(new BigDecimal("10"));
+      verify(dal).save(emptyInvoiceLine);
+      verify(zeroDiscountInvoiceLine, never()).setEtgoDiscount(any(BigDecimal.class));
+      verify(existingDiscountInvoiceLine, never()).setEtgoDiscount(any(BigDecimal.class));
+      verify(dal).flush();
+    }
+  }
+
+  @Test
+  public void testCreateInvoiceFromOrderHeaderCarriesTotalDiscountToInvoiceHeader() {
+    try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      Order order = mock(Order.class);
+      when(order.getEtgoTotalDiscount()).thenReturn(new BigDecimal("12.5"));
+
+      NeoCommercialDocumentFactory.createInvoiceFromOrderHeader(order, mock(DocumentType.class), true);
+
+      verify(invoice).setEtgoTotalDiscount(new BigDecimal("12.5"));
     }
   }
 

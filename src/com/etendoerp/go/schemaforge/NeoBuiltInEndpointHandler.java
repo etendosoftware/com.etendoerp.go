@@ -29,10 +29,12 @@ class NeoBuiltInEndpointHandler {
 
   private final NeoServlet servlet;
   private final NeoDiscoveryHandler discoveryHandler;
+  private final Fiscal303BoxesHandler fiscal303Handler;
 
   NeoBuiltInEndpointHandler(NeoServlet servlet, NeoDiscoveryHandler discoveryHandler) {
     this.servlet = servlet;
     this.discoveryHandler = discoveryHandler;
+    this.fiscal303Handler = new Fiscal303BoxesHandler(servlet);
   }
 
   boolean handle(NeoServlet.NeoPathInfo pathInfo, String method,
@@ -61,6 +63,10 @@ class NeoBuiltInEndpointHandler {
     }
     if ("preview-file".equals(pathInfo.specName)) {
       handlePreviewFileEndpoint(method, request, response);
+      return true;
+    }
+    if ("fiscal303".equals(pathInfo.specName)) {
+      fiscal303Handler.handle(pathInfo.entityName, method, request, response);
       return true;
     }
     return false;
