@@ -247,9 +247,9 @@ public final class NeoDiscoveryHelper {
     Language lang = OBContext.getOBContext().getLanguage();
     OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
     criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-    criteria.addOrder(Order.asc(SFEntity.PROPERTY_SEQNO));
+    criteria.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
+    criteria.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
+    criteria.addOrder(Order.asc(SFField.PROPERTY_SEQNO));
     List<SFField> fields = criteria.list();
     JSONArray arr = new JSONArray();
     for (SFField field : fields) {

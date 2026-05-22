@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_GET_LOCATION">
+    <function name="ETGO_GET_LOCATION" type="VARCHAR" volatility="STABLE">
+      <parameter name="p_bpartner_id" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <body><![CDATA[v_location character varying;
+BEGIN
+    select
+        ad_column_identifier_std('c_location', bploc.c_location_id)
+    into v_location
+    from c_bpartner_location bploc
+    where bploc.c_bpartner_id = p_bpartner_id
+      and bploc.isactive = 'Y'
+    order by
+        case
+            when bploc.isbillto = 'Y' then 1
+            when bploc.isshipto = 'Y' then 2
+            else 3
+        end,
+        bploc.created desc
+    limit 1;
+
+    return v_location;
+END ETGO_GET_LOCATION
+]]></body>
+    </function>
+  </database>

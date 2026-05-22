@@ -37,6 +37,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.common.PublicUrlResolver;
+
 /**
  * Servlet filter that validates OAuth2 Bearer tokens on requests to /sws/mcp.
  * <p>
@@ -229,9 +231,11 @@ public class OAuth2Filter implements Filter {
     response.setContentType(CONTENT_TYPE_JSON);
     if (statusCode == HttpServletResponse.SC_UNAUTHORIZED) {
       String metaUrl = buildResourceMetadataUrl(request);
-      response.setHeader("WWW-Authenticate",
-          "Bearer error=\"" + error + "\","
-          + " resource_metadata=\"" + metaUrl + "\"");
+      if (metaUrl != null) {
+        response.setHeader("WWW-Authenticate",
+            "Bearer error=\"" + error + "\","
+            + " resource_metadata=\"" + metaUrl + "\"");
+      }
     }
     try (PrintWriter writer = response.getWriter()) {
       writer.write("{\"error\":\"" + escapeJson(error)
@@ -241,14 +245,8 @@ public class OAuth2Filter implements Filter {
   }
 
   private String buildResourceMetadataUrl(HttpServletRequest request) {
-    String scheme = request.getScheme();
-    String host = request.getServerName();
-    int port = request.getServerPort();
-    String contextPath = request.getContextPath();
-    boolean defaultPort = ("http".equals(scheme) && port == 80)
-        || ("https".equals(scheme) && port == 443);
-    return scheme + "://" + host + (defaultPort ? "" : ":" + port)
-        + contextPath + "/sws/mcp/.well-known/oauth-protected-resource";
+    return PublicUrlResolver.appendPath(PublicUrlResolver.resolveMcpResourceUrl(request),
+        ".well-known/oauth-protected-resource");
   }
 
   private String escapeJson(String value) {

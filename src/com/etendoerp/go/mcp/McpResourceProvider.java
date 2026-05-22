@@ -26,6 +26,8 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.base.exception.OBSecurityException;
+
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.ProcessParameter;
 import org.openbravo.model.ad.ui.Window;
@@ -56,56 +58,78 @@ public class McpResourceProvider {
   private static final String URI_SPECS_PREFIX = URI_SPECS + "/";
   private static final String URI_PROCESSES_PREFIX = "neo://processes/";
 
+  private static final String ACCESS_DENIED_TO_SPEC_PREFIX = "Access denied to spec '";
   /**
    * List all available MCP resources.
    * Returns one static resource (neo://specs) plus one resource per active spec.
    *
-  * @return a JSONArray of resource descriptors
-  * @throws Exception if schema metadata cannot be read
+   * @return a JSONArray of resource descriptors
+   * @throws Exception if schema metadata cannot be read
    */
   public JSONArray listResources() throws Exception {
     JSONArray resources = new JSONArray();
+    resources.put(buildSpecsListResource());
 
-    // Static resource: list of all specs
+    for (SFSpec spec : listActiveSpecs()) {
+      appendSpecResources(resources, spec);
+    }
+
+    return resources;
+  }
+
+  private JSONObject buildSpecsListResource() throws Exception {
     JSONObject specsList = new JSONObject();
     specsList.put("uri", URI_SPECS);
     specsList.put("name", "Available NEO Specs");
     specsList.put(FIELD_DESCRIPTION,
         "List of all NEO Headless API specs configured in this instance");
     specsList.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
-    resources.put(specsList);
+    return specsList;
+  }
 
-    // Dynamic resources: one per active spec
+  private List<SFSpec> listActiveSpecs() {
     OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
     criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
     criteria.addOrder(Order.asc(SFSpec.PROPERTY_NAME));
+    return criteria.list();
+  }
 
-    for (SFSpec spec : criteria.list()) {
-      String specType = spec.getSpecType();
-      String specName = spec.getName();
-
-      // Spec schema resource
-      JSONObject specResource = new JSONObject();
-        specResource.put("uri", URI_SPECS_PREFIX + specName);
-      specResource.put("name", "Spec: " + specName);
-        specResource.put(FIELD_DESCRIPTION,
-          spec.getDescription() != null ? spec.getDescription() : "Schema for " + specName);
-        specResource.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
-      resources.put(specResource);
-
-      // Process description resource (for process and report specs)
-      if ("P".equals(specType) || "R".equals(specType)) {
-        JSONObject processResource = new JSONObject();
-        processResource.put("uri", URI_PROCESSES_PREFIX + specName);
-        processResource.put("name", "Process: " + specName);
-        processResource.put(FIELD_DESCRIPTION,
-            ("R".equals(specType) ? "Report" : "Process") + " parameters for " + specName);
-        processResource.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
-        resources.put(processResource);
-      }
+  private void appendSpecResources(JSONArray resources, SFSpec spec) throws Exception {
+    if (spec == null) {
+      return;
     }
+    String specType = spec.getSpecType();
+    if (!McpToolRouterSupport.hasSpecAccess(spec, specType)) {
+      return;
+    }
+    resources.put(buildSpecResource(spec));
+    appendProcessResource(resources, spec, specType);
+  }
 
-    return resources;
+  private JSONObject buildSpecResource(SFSpec spec) throws Exception {
+    String specName = spec.getName();
+    JSONObject specResource = new JSONObject();
+    specResource.put("uri", URI_SPECS_PREFIX + specName);
+    specResource.put("name", "Spec: " + specName);
+    specResource.put(FIELD_DESCRIPTION,
+        spec.getDescription() != null ? spec.getDescription() : "Schema for " + specName);
+    specResource.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
+    return specResource;
+  }
+
+  private void appendProcessResource(JSONArray resources, SFSpec spec, String specType)
+      throws Exception {
+    if (!"P".equals(specType) && !"R".equals(specType)) {
+      return;
+    }
+    String specName = spec.getName();
+    JSONObject processResource = new JSONObject();
+    processResource.put("uri", URI_PROCESSES_PREFIX + specName);
+    processResource.put("name", "Process: " + specName);
+    processResource.put(FIELD_DESCRIPTION,
+        ("R".equals(specType) ? "Report" : "Process") + " parameters for " + specName);
+    processResource.put(FIELD_MIME_TYPE, MIME_TYPE_JSON);
+    resources.put(processResource);
   }
 
   /**
@@ -151,41 +175,47 @@ public class McpResourceProvider {
 
     JSONArray specsArray = new JSONArray();
     for (SFSpec spec : specs) {
-      JSONObject specObj = new JSONObject();
-      specObj.put("name", spec.getName());
-      specObj.put("type", spec.getSpecType());
-      specObj.put(FIELD_DESCRIPTION, spec.getDescription());
-
-      // Include linked AD object info
-      if ("W".equals(spec.getSpecType())) {
-        Window window = spec.getADWindow();
-        if (window != null) {
-          specObj.put("windowName", window.getName());
-        }
-      } else if ("P".equals(spec.getSpecType()) || "R".equals(spec.getSpecType())) {
-        Process process = spec.getProcess();
-        if (process != null) {
-          specObj.put(FIELD_PROCESS_NAME, process.getName());
-        }
-        if ("R".equals(spec.getSpecType())) {
-          specObj.put("isReport", true);
-        }
+      JSONObject specObj = buildAccessibleSpecSummary(spec);
+      if (specObj != null) {
+        specsArray.put(specObj);
       }
-
-      // Count entities
-      OBCriteria<SFEntity> entityCriteria = OBDal.getInstance().createCriteria(SFEntity.class);
-      entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
-      entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
-      entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-      specObj.put("entityCount", entityCriteria.list().size());
-
-      specsArray.put(specObj);
     }
-
     JSONObject result = new JSONObject();
     result.put("specs", specsArray);
     result.put("count", specsArray.length());
     return result;
+  }
+
+  private JSONObject buildAccessibleSpecSummary(SFSpec spec) throws Exception {
+    if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
+      return null;
+    }
+    JSONObject specObj = new JSONObject();
+    specObj.put("name", spec.getName());
+    specObj.put("type", spec.getSpecType());
+    specObj.put(FIELD_DESCRIPTION, spec.getDescription());
+
+    if ("W".equals(spec.getSpecType())) {
+      Window window = spec.getADWindow();
+      if (window != null) {
+        specObj.put("windowName", window.getName());
+      }
+    } else if ("P".equals(spec.getSpecType()) || "R".equals(spec.getSpecType())) {
+      Process process = spec.getProcess();
+      if (process != null) {
+        specObj.put(FIELD_PROCESS_NAME, process.getName());
+      }
+      if ("R".equals(spec.getSpecType())) {
+        specObj.put("isReport", true);
+      }
+    }
+
+    OBCriteria<SFEntity> entityCriteria = OBDal.getInstance().createCriteria(SFEntity.class);
+    entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
+    entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
+    entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
+    specObj.put("entityCount", entityCriteria.list().size());
+    return specObj;
   }
 
   /**
@@ -193,6 +223,9 @@ public class McpResourceProvider {
    */
   private JSONObject readSpec(String specName) throws Exception {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    if (spec == null || !McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
+      throw new OBSecurityException(ACCESS_DENIED_TO_SPEC_PREFIX + specName + "'");
+    }
 
     JSONObject result = new JSONObject();
     result.put("name", spec.getName());
@@ -230,6 +263,9 @@ public class McpResourceProvider {
    */
   private JSONObject readEntity(String specName, String entityName) throws Exception {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    if (spec == null || !McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
+      throw new OBSecurityException(ACCESS_DENIED_TO_SPEC_PREFIX + specName + "'");
+    }
     SFEntity entity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
     JSONObject result = buildEntityJson(entity, true);
     result.put("specName", specName);
@@ -242,7 +278,10 @@ public class McpResourceProvider {
    */
   private JSONObject readProcess(String specName) throws Exception {
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
-    String specType = spec.getSpecType();
+    String specType = spec != null ? spec.getSpecType() : null;
+    if (spec == null || !McpToolRouterSupport.hasSpecAccess(spec, specType)) {
+      throw new OBSecurityException(ACCESS_DENIED_TO_SPEC_PREFIX + specName + "'");
+    }
 
     if (!"P".equals(specType) && !"R".equals(specType)) {
       throw new IllegalArgumentException(

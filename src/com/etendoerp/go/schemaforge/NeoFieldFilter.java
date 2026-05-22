@@ -51,6 +51,7 @@ import com.etendoerp.go.schemaforge.data.SFField;
 public class NeoFieldFilter {
 
   private static final Logger log = LogManager.getLogger(NeoFieldFilter.class);
+  private static final String IDENTIFIER_SUFFIX = "$_identifier";
 
   /** Set of DAL property names that are included (IsIncluded=Y). */
   private final Set<String> includedFields;
@@ -176,12 +177,12 @@ public class NeoFieldFilter {
         // For FK properties, also include the "_identifier" variant
         // that DefaultJsonDataService adds to the JSON
         if (!prop.isPrimitive() && prop.getTargetEntity() != null) {
-          included.add(propName + "$_identifier");
+          included.add(propName + IDENTIFIER_SUFFIX);
           // When a javaQualifier alias exists, the $_identifier must also be renamed
           // so the frontend receives "account$_identifier" instead of "finFinancialAccount$_identifier"
           if (qualifier != null && !qualifier.equals(propName)) {
-            propToApiMap.put(propName + "$_identifier", qualifier + "$_identifier");
-            apiKeyMap.put(qualifier + "$_identifier", propName + "$_identifier");
+            propToApiMap.put(propName + IDENTIFIER_SUFFIX, qualifier + IDENTIFIER_SUFFIX);
+            apiKeyMap.put(qualifier + IDENTIFIER_SUFFIX, propName + IDENTIFIER_SUFFIX);
           }
         }
 

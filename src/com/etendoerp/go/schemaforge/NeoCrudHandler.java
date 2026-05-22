@@ -31,6 +31,9 @@ import java.util.Set;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -40,6 +43,7 @@ import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.client.kernel.KernelUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
@@ -52,6 +56,7 @@ import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
+import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
@@ -225,9 +230,44 @@ class NeoCrudHandler {
 
       return executeJsonServiceAndBuildResponse(
           context, adTab, dalEntityName, fieldFilter, jsonService, params);
+    } catch (MissingRequiredFieldsException e) {
+      // ETP-3894: structured 400 lists the missing fields so the UI can highlight them.
+      return buildMissingRequiredFieldsResponse(e);
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
+    }
+  }
+
+  /**
+   * ETP-3894: build the structured 400 response returned when a create/update is rejected
+   * because mandatory user-input fields are missing. Body shape:
+   * <pre>{
+   *   "error": {
+   *     "code": "MISSING_REQUIRED_FIELDS",
+   *     "message": "...",
+   *     "fields": ["bpartner", "priceList", ...]
+   *   }
+   * }</pre>
+   */
+  private NeoResponse buildMissingRequiredFieldsResponse(MissingRequiredFieldsException e) {
+    try {
+      JSONArray fieldsArr = new JSONArray();
+      for (String f : e.getFields()) {
+        fieldsArr.put(f);
+      }
+      JSONObject errorObj = new JSONObject();
+      errorObj.put("code", MissingRequiredFieldsException.ERROR_CODE);
+      errorObj.put("status", HttpServletResponse.SC_BAD_REQUEST);
+      errorObj.put("message", "Missing required fields");
+      errorObj.put("fields", fieldsArr);
+      JSONObject body = new JSONObject();
+      body.put("error", errorObj);
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
+    } catch (Exception fallback) {
+      log.warn("Could not build MISSING_REQUIRED_FIELDS body: {}", fallback.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          MissingRequiredFieldsException.ERROR_CODE);
     }
   }
 
@@ -266,7 +306,7 @@ class NeoCrudHandler {
     String tabWhere = adTab.getHqlwhereclause();
     if (StringUtils.isNotBlank(tabWhere)) {
       if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = tabWhere.replaceAll("@[A-Za-z_.]+@", "'" + parentId.replace("'", "''") + "'");
+        tabWhere = resolveTabWhereTokens(adTab, tabWhere, parentId);
       }
       where.append("(").append(tabWhere).append(")");
     }
@@ -435,9 +475,10 @@ class NeoCrudHandler {
     long perfInjectDefaults = System.nanoTime();
     executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, userSubmittedFields);
     long perfCalloutCascade = System.nanoTime();
-    NeoDefaultsService.injectProductDerivedUomIfMissing(filteredBody);
-    NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
-    // TODO move this compatibility rule into the shared create-defaults helper once the merge settles.
+    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(filteredBody);
     stripContactsPreCreateBillingDefaults(filteredBody, context, adTab);
     // Coerce String primitives injected by injectMandatoryDefaults to their correct Java types.
     // Utility.getDefault() always returns String; JsonToDataConverter has no String→BigDecimal/
@@ -448,6 +489,14 @@ class NeoCrudHandler {
     // to UPDATE an existing record instead of INSERT a new one.
     if (filteredBody != null) {
       filteredBody.remove("id");
+    }
+    // ETP-3894: validate that all mandatory user-input fields have values after the full
+    // resolution chain (defaults + session + parent + callout cascade). Throw a structured
+    // exception so the UI can highlight the missing fields instead of letting Hibernate fail
+    // with a generic not-null violation.
+    List<String> missing = NeoDefaultsService.findMissingMandatoryFields(filteredBody, adTab, userSubmittedFields);
+    if (!missing.isEmpty()) {
+      throw new MissingRequiredFieldsException(missing);
     }
     long perfPreSave = System.nanoTime();
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
@@ -466,9 +515,16 @@ class NeoCrudHandler {
 
   private void executePostCalloutCascade(JSONObject filteredBody, Tab adTab,
       NeoContext context, String parentIdValue, Set<String> protectedFields) {
-    if (adTab == null || adTab.getTabLevel() == null || adTab.getTabLevel() != 0) {
+    if (adTab == null) {
       return;
     }
+    // Cascade runs for ALL tab levels, not just headers (level=0). Child tabs
+    // (invoice lines, order lines, ...) need their FK callouts (product → tax,
+    // product → UOM, …) to fire server-side when the line is created via a
+    // path that doesn't go through the React form's client-side callout
+    // dispatch — e.g. the /batch endpoint or any external agent. The
+    // protectedFields snapshot already guards values the caller supplied
+    // explicitly, so UI flows that had already-derived fields stay correct.
 
     Set<String> seqFields = new HashSet<>();
     Iterator<String> bodyKeys = filteredBody.keys();
@@ -543,6 +599,7 @@ class NeoCrudHandler {
     }
   }
 
+
   /**
    * Executes the PUT/PATCH (update) JSON service operation and returns the raw result string.
    */
@@ -554,7 +611,9 @@ class NeoCrudHandler {
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
     // available here to compute the correct net amount even for products where SL_Invoice_Amt
     // throws on the sales invoice context (e.g. tax-exclusive price lists).
-    NeoDefaultsService.injectLineNetAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectGrossAmountIfMissing(filteredBody);
+    NeoCommercialLinePolicy.injectLineGrossAmountIfMissing(filteredBody);
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
   }
@@ -576,6 +635,121 @@ class NeoCrudHandler {
   private String wrapForSmartclient(JSONObject filteredBody, String dalEntityName,
       String recordId) {
     return NeoTypeCoercionHelper.wrapForSmartclient(filteredBody, dalEntityName, recordId);
+  }
+
+  private static final Pattern TAB_WHERE_TOKEN_PATTERN = Pattern.compile("@([A-Za-z_.]+)@");
+
+  /**
+   * Replaces {@code @token@} placeholders in a tab HQL where clause using the actual column
+   * values from the parent record rather than substituting all tokens with the same parentId.
+   *
+   * <p>Classic Etendo resolves each {@code @ColumnName@} against the corresponding column on the
+   * parent record. NEO previously replaced every token with the same parentId, which broke cases
+   * where a tab has two different tokens — e.g. {@code @AD_Org_ID@} (the parent's organization
+   * UUID) and {@code @aeatsii_config_id@} (the parent record's primary key).</p>
+   *
+   * <p>Resolution order for each token:</p>
+   * <ol>
+   *   <li>{@code @AD_Org_ID@} / {@code @Org_ID@} → parent record's {@code organization.id}</li>
+   *   <li>{@code @AD_Client_ID@} / {@code @Client_ID@} → parent record's {@code client.id}</li>
+   *   <li>{@code @<tableName>_id@} → {@code parentId} (the parent PK)</li>
+   *   <li>Any other token → matched against parent entity property column names</li>
+   *   <li>Fallback → {@code parentId}</li>
+   * </ol>
+   */
+  private String resolveTabWhereTokens(Tab adTab, String tabWhere, String parentId) {
+    Tab parentTab = null;
+    BaseOBObject parentRecord = null;
+    Entity parentEntity = null;
+    String parentTableName = null;
+
+    try {
+      parentTab = KernelUtils.getInstance().getParentTab(adTab);
+      if (parentTab != null && parentTab.getTable() != null) {
+        parentTableName = parentTab.getTable().getName().toLowerCase();
+        parentEntity = ModelProvider.getInstance()
+            .getEntityByTableId(parentTab.getTable().getId());
+        if (parentEntity != null) {
+          parentRecord = OBDal.getInstance().get(parentEntity.getName(), parentId);
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not load parent record for tab '{}' parentId='{}': {}",
+          adTab.getName(), parentId, e.getMessage());
+    }
+
+    final BaseOBObject finalParentRecord = parentRecord;
+    final Entity finalParentEntity = parentEntity;
+    final String finalParentTableName = parentTableName;
+
+    Matcher matcher = TAB_WHERE_TOKEN_PATTERN.matcher(tabWhere);
+    StringBuilder result = new StringBuilder();
+    while (matcher.find()) {
+      String token = matcher.group(1);
+      String value = resolveTokenFromParent(
+          token, parentId, finalParentRecord, finalParentEntity, finalParentTableName);
+      matcher.appendReplacement(result, Matcher.quoteReplacement("'" + value.replace("'", "''") + "'"));
+    }
+    matcher.appendTail(result);
+    return result.toString();
+  }
+
+  /**
+   * Resolves a single {@code @token@} value from the parent record.
+   */
+  private String resolveTokenFromParent(String token, String parentId,
+      BaseOBObject parentRecord, Entity parentEntity, String parentTableName) {
+    if (parentRecord == null) {
+      return parentId;
+    }
+    String tokenLower = token.toLowerCase();
+
+    // Organization ID
+    if ("ad_org_id".equals(tokenLower) || "org_id".equals(tokenLower)) {
+      try {
+        Object org = parentRecord.get("organization");
+        if (org instanceof BaseOBObject) {
+          return ((BaseOBObject) org).getId().toString();
+        }
+      } catch (Exception ignored) {}
+      return parentId;
+    }
+
+    // Client ID
+    if ("ad_client_id".equals(tokenLower) || "client_id".equals(tokenLower)) {
+      try {
+        Object client = parentRecord.get("client");
+        if (client instanceof BaseOBObject) {
+          return ((BaseOBObject) client).getId().toString();
+        }
+      } catch (Exception ignored) {}
+      return parentId;
+    }
+
+    // Primary key: <tableName>_id → parentId itself
+    if (parentTableName != null && tokenLower.equals(parentTableName + "_id")) {
+      return parentId;
+    }
+
+    // Generic: find a property whose column name matches the token
+    if (parentEntity != null) {
+      try {
+        for (Property prop : parentEntity.getProperties()) {
+          if (prop.getColumnName() != null && prop.getColumnName().equalsIgnoreCase(token)) {
+            Object val = parentRecord.get(prop.getName());
+            if (val instanceof BaseOBObject) {
+              return ((BaseOBObject) val).getId().toString();
+            }
+            if (val != null) {
+              return val.toString();
+            }
+            return "";
+          }
+        }
+      } catch (Exception ignored) {}
+    }
+
+    return parentId;
   }
 
   /**
@@ -662,7 +836,7 @@ class NeoCrudHandler {
     String tabWhere = adTab.getHqlwhereclause();
     if (StringUtils.isNotBlank(tabWhere)) {
       if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = tabWhere.replaceAll("@[A-Za-z_.]+@", "'" + parentId.replace("'", "''") + "'");
+        tabWhere = resolveTabWhereTokens(adTab, tabWhere, parentId);
       }
       if (!tabWhere.contains("@")) {
         // Skip when unresolved @session_tokens@ remain — OBQuery can't bind

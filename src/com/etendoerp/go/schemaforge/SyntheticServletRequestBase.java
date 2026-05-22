@@ -44,6 +44,10 @@ import javax.servlet.http.Part;
  * Subclasses only need to override the methods that carry real behaviour.
  * </p>
  */
+@SuppressWarnings("java:S1448")
+// The high method count is forced by the HttpServletRequest contract: most methods here are
+// trivial no-op defaults required by the interface. Splitting them across helper classes does
+// not reduce the surface that any concrete subclass must satisfy.
 public abstract class SyntheticServletRequestBase implements javax.servlet.http.HttpServletRequest {
 
   /** Local hostname constant used for synthetic network metadata. */

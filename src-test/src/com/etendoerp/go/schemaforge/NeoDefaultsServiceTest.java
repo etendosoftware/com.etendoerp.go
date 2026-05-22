@@ -19,13 +19,37 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import java.util.Collections;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.Utility;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.utility.Sequence;
+import org.openbravo.model.common.enterprise.Organization;
+
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFField;
+import com.etendoerp.sequences.SequenceUtils;
 
 /**
- * Unit tests for {@link NeoDefaultsService#injectLineNetAmountIfMissing}.
+ * Unit tests for {@link NeoCommercialLinePolicy#injectLineNetAmountIfMissing}.
  *
  * <p>These tests do NOT require a database connection. All tests exercise the
  * server-side computation of {@code lineNetAmount = invoicedQuantity × unitPrice},
@@ -51,7 +75,7 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testNullBodyIsIgnored() {
     // Should not throw
-    NeoDefaultsService.injectLineNetAmountIfMissing(null);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(null);
   }
 
   // ── injectLineNetAmountIfMissing — zero qty → no injection ─────────────────
@@ -62,7 +86,7 @@ public class NeoDefaultsServiceTest {
     body.put("invoicedQuantity", "0");
     body.put("unitPrice", 29.70);
 
-    NeoDefaultsService.injectLineNetAmountIfMissing(body);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
 
     assertFalse("lineNetAmount should not be injected when invoicedQuantity is zero",
         body.has("lineNetAmount"));
@@ -75,7 +99,7 @@ public class NeoDefaultsServiceTest {
     JSONObject body = new JSONObject();
     body.put("unitPrice", 29.70);
 
-    NeoDefaultsService.injectLineNetAmountIfMissing(body);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
 
     assertFalse("lineNetAmount should not be injected when invoicedQuantity is absent",
         body.has("lineNetAmount"));
@@ -89,7 +113,7 @@ public class NeoDefaultsServiceTest {
     body.put("invoicedQuantity", "3");
     body.put("unitPrice", 0);
 
-    NeoDefaultsService.injectLineNetAmountIfMissing(body);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
 
     assertFalse("lineNetAmount should not be injected when unitPrice is zero",
         body.has("lineNetAmount"));
@@ -103,7 +127,7 @@ public class NeoDefaultsServiceTest {
     body.put("invoicedQuantity", "3");
     body.put("unitPrice", 29.70);
 
-    NeoDefaultsService.injectLineNetAmountIfMissing(body);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
 
     assertTrue("lineNetAmount should be injected", body.has("lineNetAmount"));
     assertAmountEquals(89.10, body.getDouble("lineNetAmount")); // 29.70 × 3
@@ -117,10 +141,99 @@ public class NeoDefaultsServiceTest {
     body.put("invoicedQuantity", "5");
     body.put("unitPrice", 10.00);
 
-    NeoDefaultsService.injectLineNetAmountIfMissing(body);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
 
     assertTrue("lineNetAmount should be injected", body.has("lineNetAmount"));
     assertAmountEquals(50.00, body.getDouble("lineNetAmount")); // 10 × 5
+  }
+
+  // ── resolveTransactionalSequencePreview ──────────────────────────────────────
+
+  /**
+   * When the transactional sequence is found for the given column and organization,
+   * the preview must be wrapped in angle brackets (e.g. {@code <1000067>}).
+   */
+  @Test
+  public void testTransactionalPreviewSequenceFoundReturnsFormattedValue() {
+    Column column = mock(Column.class);
+    OBContext obContextMock = mock(OBContext.class);
+    Organization orgMock = mock(Organization.class);
+    OBDal obDalMock = mock(OBDal.class);
+    OBCriteria<Sequence> criteriaMock = mock(OBCriteria.class);
+    Sequence sequenceMock = mock(Sequence.class);
+
+    when(obContextMock.getCurrentOrganization()).thenReturn(orgMock);
+    when(orgMock.getId()).thenReturn("TEST_ORG");
+    when(obDalMock.get(eq(Organization.class), eq("TEST_ORG"))).thenReturn(orgMock);
+    when(obDalMock.createCriteria(Sequence.class)).thenReturn(criteriaMock);
+    when(criteriaMock.uniqueResult()).thenReturn(sequenceMock);
+    when(sequenceMock.getNextAssignedNumber()).thenReturn(1000067L);
+
+    try (MockedStatic<OBContext> mockedCtx = mockStatic(OBContext.class); MockedStatic<OBDal> mockedDal = mockStatic(
+        OBDal.class)) {
+      mockedCtx.when(OBContext::getOBContext).thenReturn(obContextMock);
+      mockedDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      String result = NeoDefaultsService.resolveTransactionalSequencePreview(column);
+
+      assertEquals("<1000067>", result);
+    }
+  }
+
+  /**
+   * When no sequence record exists for the column and organization combination,
+   * the method must return {@code null} so the field is omitted from defaults.
+   */
+  @Test
+  public void testTransactionalPreviewSequenceNotFoundReturnsNull() {
+    Column column = mock(Column.class);
+    OBContext obContextMock = mock(OBContext.class);
+    Organization orgMock = mock(Organization.class);
+    OBDal obDalMock = mock(OBDal.class);
+    OBCriteria<Sequence> criteriaMock = mock(OBCriteria.class);
+
+    when(obContextMock.getCurrentOrganization()).thenReturn(orgMock);
+    when(orgMock.getId()).thenReturn("TEST_ORG");
+    when(obDalMock.get(eq(Organization.class), eq("TEST_ORG"))).thenReturn(orgMock);
+    when(obDalMock.createCriteria(Sequence.class)).thenReturn(criteriaMock);
+    when(criteriaMock.uniqueResult()).thenReturn(null);
+
+    try (MockedStatic<OBContext> mockedCtx = mockStatic(OBContext.class); MockedStatic<OBDal> mockedDal = mockStatic(
+        OBDal.class)) {
+      mockedCtx.when(OBContext::getOBContext).thenReturn(obContextMock);
+      mockedDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      String result = NeoDefaultsService.resolveTransactionalSequencePreview(column);
+
+      assertNull("Should return null when no sequence is found", result);
+    }
+  }
+
+  /**
+   * When the DAL layer throws an unexpected exception, the method must swallow it
+   * and return {@code null} rather than propagating the error to the defaults response.
+   */
+  @Test
+  public void testTransactionalPreviewDalThrowsReturnsNull() {
+    Column column = mock(Column.class);
+    OBContext obContextMock = mock(OBContext.class);
+    Organization orgMock = mock(Organization.class);
+    OBDal obDalMock = mock(OBDal.class);
+
+    when(obContextMock.getCurrentOrganization()).thenReturn(orgMock);
+    when(orgMock.getId()).thenReturn("TEST_ORG");
+    when(obDalMock.get(eq(Organization.class), eq("TEST_ORG"))).thenReturn(orgMock);
+    when(obDalMock.createCriteria(any(Class.class))).thenThrow(new RuntimeException("DAL unavailable"));
+
+    try (MockedStatic<OBContext> mockedCtx = mockStatic(OBContext.class); MockedStatic<OBDal> mockedDal = mockStatic(
+        OBDal.class)) {
+      mockedCtx.when(OBContext::getOBContext).thenReturn(obContextMock);
+      mockedDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      String result = NeoDefaultsService.resolveTransactionalSequencePreview(column);
+
+      assertNull("Exception should be swallowed and null returned", result);
+    }
   }
 
   // ── injectLineNetAmountIfMissing — always recomputes (no early-return) ─────
@@ -137,9 +250,74 @@ public class NeoDefaultsServiceTest {
     body.put("unitPrice", 29.70);
     body.put("lineNetAmount", 999.99); // stale value from callout
 
-    NeoDefaultsService.injectLineNetAmountIfMissing(body);
+    NeoCommercialLinePolicy.injectLineNetAmountIfMissing(body);
 
     assertAmountEquals(89.10, body.getDouble("lineNetAmount")); // overwritten: 29.70 × 3
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveDefaultsSkipsReadonlyComboAutopick() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+    SFField sfField = mock(SFField.class);
+    Column adColumn = mock(Column.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    OBContext obContext = mock(OBContext.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    Entity dalEntity = mock(Entity.class);
+
+    when(sfEntity.getId()).thenReturn("sf-entity-1");
+    when(sfField.getADColumn()).thenReturn(adColumn);
+    when(sfField.isReadOnly()).thenReturn(true);
+    when(sfField.getDefaultValue()).thenReturn(null);
+    when(adColumn.getDBColumnName()).thenReturn("C_Reject_Reason_ID");
+    when(adColumn.getDefaultValue()).thenReturn(null);
+    when(adColumn.isUseAutomaticSequence()).thenReturn(false);
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(dal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock = mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+      obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, null)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity)).thenReturn(dalEntity);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolvePropertyName(dalEntity, "C_Reject_Reason_ID"))
+          .thenReturn("rejectReason");
+      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+      utilityMock.when(() -> Utility.getPreference(vars, "C_Reject_Reason_ID", "")).thenReturn(null);
+      docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(adColumn, ctx)).thenReturn(null);
+
+      NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
+
+      assertEquals(200, response.getHttpStatus());
+      assertFalse(response.getBody().getJSONObject("defaults").has("rejectReason"));
+      selectorMock.verify(() -> NeoSelectorService.getBaseReferenceId(adColumn), never());
+      selectorMock.verify(() -> NeoSelectorService.hasObuiselSelector(adColumn), never());
+      selectorMock.verify(() -> NeoSelectorService.querySelectorByColumn(
+          adColumn,
+          "C_Reject_Reason_ID",
+          null,
+          1,
+          0,
+          Collections.emptyMap()), never());
+      verify(vars).setSessionValue(eq("#Date"), any(String.class));
+      verify(dal, never()).get(eq(Organization.class), any(String.class));
+    }
   }
 
 }

@@ -191,11 +191,6 @@ public class OnboardingDatasetImportServiceTest {
     }
 
     @Override
-    protected void commitImport() {
-      // No DAL commit in unit tests.
-    }
-
-    @Override
     protected void flushImport() {
       flushCalled = true;
     }

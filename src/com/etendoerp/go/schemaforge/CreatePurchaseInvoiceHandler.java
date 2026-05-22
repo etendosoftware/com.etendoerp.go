@@ -21,6 +21,7 @@ import java.math.BigDecimal;
 import java.util.Date;
 import java.util.List;
 
+import javax.inject.Inject;
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
@@ -55,6 +56,12 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   private static final String ACTION_NAME = "createPurchaseInvoice";
   private static final String SPEC_PURCHASE_ORDER = "purchase-order";
 
+  @Inject
+  InvoiceFromOrderSupport invoiceFromOrderSupport;
+
+  @Inject
+  TotalDiscountService totalDiscountService;
+
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!NeoEndpointType.ACTION.equals(context.getEndpointType())) {
@@ -79,6 +86,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         OBDal.getInstance().flush();
         // Refresh to pick up trigger-generated documentNo and totals set by CreateInvoiceLinesFromProcess.
         OBDal.getInstance().getSession().refresh(invoice);
+        ensureDocumentNo(invoice);
 
         JSONObject data = new JSONObject();
         data.put("id", invoice.getId());
@@ -104,7 +112,48 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     }
   }
 
-  private Invoice createFromOrder(String orderId) {
+  /**
+   * Defensive fallback when DocumentNoHandlerLegacy fails to resolve the
+   * sequence. The stock {@code AP Invoice} document type ships with
+   * {@code IsDocNoControlled='N'} and no {@code DocNoSequence_ID}, so the
+   * listener returns an empty string. Resolves the next number directly from
+   * the table-level {@code DocumentNo_C_Invoice} sequence using the invoice's
+   * own client (not {@code vars.getClient()}, which can differ under
+   * {@code OBContext.setAdminMode(true)} + NEO Headless), and reuses the OBDal
+   * JDBC connection so the sequence advance stays in the same transaction.
+   */
+  protected void ensureDocumentNo(Invoice invoice) {
+    String current = invoice.getDocumentNo();
+    if (StringUtils.isNotBlank(current) && !current.startsWith("<")) {
+      return;
+    }
+    String docNo = Utility.getDocumentNoConnection(
+        OBDal.getInstance().getConnection(false),
+        new DalConnectionProvider(false),
+        invoice.getClient().getId(),
+        "C_Invoice",
+        true);
+    if (StringUtils.isBlank(docNo)) {
+      log.warn(
+          "Could not generate documentNo for purchase invoice {} (docType={}, client={}). "
+              + "Configure DocNoSequence_ID on the document type or activate "
+              + "AD_Sequence 'DocumentNo_C_Invoice' for the client.",
+          invoice.getId(),
+          invoice.getDocumentType() != null ? invoice.getDocumentType().getName() : "null",
+          invoice.getClient().getId());
+      return;
+    }
+    log.info("Generated documentNo='{}' for purchase invoice {}", docNo, invoice.getId());
+    invoice.setDocumentNo(docNo);
+    OBDal.getInstance().save(invoice);
+    OBDal.getInstance().flush();
+  }
+
+  InvoiceFromOrderSupport getSupport() {
+    return invoiceFromOrderSupport != null ? invoiceFromOrderSupport : new InvoiceFromOrderSupport();
+  }
+
+  protected Invoice createFromOrder(String orderId) {
     Order order = OBDal.getInstance().get(Order.class, orderId);
     if (order == null) {
       throw new OBException("Purchase order not found: " + orderId);
@@ -117,30 +166,10 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
     DocumentType invoiceDocType = resolveAPInvoiceDocType(order);
 
-    Invoice invoice = OBProvider.getInstance().get(Invoice.class);
-    invoice.setClient(order.getClient());
-    invoice.setOrganization(order.getOrganization());
-    invoice.setDocumentType(invoiceDocType);
-    invoice.setTransactionDocument(invoiceDocType);
-    invoice.setDocumentStatus("DR");
-    invoice.setDocumentAction("CO");
-    invoice.setSalesTransaction(false);
-    invoice.setInvoiceDate(new Date());
-    invoice.setAccountingDate(new Date());
-    invoice.setBusinessPartner(order.getBusinessPartner());
-    invoice.setPartnerAddress(order.getPartnerAddress());
-    invoice.setPriceList(order.getPriceList());
-    invoice.setCurrency(order.getCurrency());
-    invoice.setPaymentTerms(order.getPaymentTerms());
-    invoice.setPaymentMethod(order.getPaymentMethod());
-    invoice.setSummedLineAmount(BigDecimal.ZERO);
-    invoice.setGrandTotalAmount(BigDecimal.ZERO);
-    invoice.setWithholdingamount(BigDecimal.ZERO);
-    invoice.setSalesOrder(order);
-
-    String documentNo = Utility.getDocumentNo(
-        new DalConnectionProvider(false), order.getClient().getId(), "C_Invoice", true);
-    invoice.setDocumentNo(StringUtils.isNotBlank(documentNo) ? documentNo : "*");
+    Invoice invoice = NeoCommercialDocumentFactory.createInvoiceFromOrderHeader(
+        order,
+        invoiceDocType,
+        false);
 
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
@@ -150,10 +179,19 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class);
     proc.createInvoiceLinesFromDocumentLines(selectedLines, invoice, OrderLine.class);
 
+    OBDal.getInstance().flush();
+
+    InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
+
+    OBDal.getInstance().flush();
+    OBDal.getInstance().getSession().refresh(invoice);
+    invoice = getSupport().applyOrderDiscountToInvoice(invoice, orderId, totalDiscountService);
+    getSupport().ensureLineGrossAmounts(invoice);
+
     return invoice;
   }
 
-  private JSONArray buildSelectedLines(Order order) {
+  protected JSONArray buildSelectedLines(Order order) {
     JSONArray selectedLines = new JSONArray();
     for (OrderLine ol : order.getOrderLineList()) {
       BigDecimal pending = getPendingQuantity(ol);
@@ -180,7 +218,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
   // Discard the placeholder doc type ('0' = "** New **", docBasetype="---")
   // which is stored when no invoice doc type is linked to the PO doc type.
-  private DocumentType resolveAPInvoiceDocType(Order order) {
+  protected DocumentType resolveAPInvoiceDocType(Order order) {
     DocumentType orderDocType = order.getTransactionDocument();
     DocumentType invoiceDocType = orderDocType != null
         ? orderDocType.getDocumentTypeForInvoice()

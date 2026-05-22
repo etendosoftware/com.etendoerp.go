@@ -20,9 +20,6 @@ package com.etendoerp.go.mcp;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -40,6 +37,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.common.CorsUtils;
+import com.etendoerp.go.common.ProtocolErrorAdapters;
+import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 
 /**
@@ -69,6 +68,7 @@ public class McpServlet extends HttpServlet {
   private static final String SERVER_VERSION = "1.0.0";
 
   private static final String CONTENT_TYPE_JSON = "application/json;charset=UTF-8";
+  private static final String LEGACY_JWT_FALLBACK_SCOPES = "neo:read";
 
   // ── CORS ───────────────────────────────────────────────────────────────
 
@@ -188,30 +188,25 @@ public class McpServlet extends HttpServlet {
    */
   private void handleResourceMetadata(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    String baseUrl = buildBaseUrl(request);
+    String mcpResourceUrl = PublicUrlResolver.resolveMcpResourceUrl(request);
+    String oauth2Url = PublicUrlResolver.resolveOAuth2Url(request);
     response.setStatus(HttpServletResponse.SC_OK);
+    if (mcpResourceUrl == null || oauth2Url == null) {
+      ProtocolErrorAdapters.writeSimpleJsonError(response,
+          HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Unable to resolve public MCP/OAuth2 URL");
+      return;
+    }
     try {
       JSONObject meta = new JSONObject();
-      meta.put("resource", baseUrl + "/sws/mcp");
-      meta.put("authorization_servers", new JSONArray()
-          .put(baseUrl + "/oauth2"));
+      meta.put("resource", mcpResourceUrl);
+      meta.put("authorization_servers", new JSONArray().put(oauth2Url));
       meta.put("scopes_supported", new JSONArray()
-          .put("neo:read").put("neo:write").put("neo:process").put("neo:report").put("neo:*"));
+          .put(LEGACY_JWT_FALLBACK_SCOPES).put("neo:write").put("neo:process").put("neo:report").put("neo:*"));
       meta.put("bearer_methods_supported", new JSONArray().put("header"));
       response.getWriter().write(meta.toString());
     } catch (JSONException e) {
-      response.getWriter().write("{\"resource\":\"" + baseUrl + "/sws/mcp\"}");
+      response.getWriter().write("{\"resource\":\"" + mcpResourceUrl + "\"}");
     }
-  }
-
-  private String buildBaseUrl(HttpServletRequest request) {
-    String scheme = request.getScheme();
-    String host = request.getServerName();
-    int port = request.getServerPort();
-    String contextPath = request.getContextPath();
-    boolean defaultPort = ("http".equals(scheme) && port == 80)
-        || ("https".equals(scheme) && port == 443);
-    return scheme + "://" + host + (defaultPort ? "" : ":" + port) + contextPath;
   }
 
   // ── Authentication ─────────────────────────────────────────────────────
@@ -264,7 +259,7 @@ public class McpServlet extends HttpServlet {
           jwt.getClaim("role").asString(),
           jwt.getClaim("client").asString(),
           jwt.getClaim("organization").asString(),
-          "neo:*");
+          LEGACY_JWT_FALLBACK_SCOPES);
     } catch (Exception e) {
       log.warn("Both OAuth2 and JWT authentication failed for MCP request");
       sendJsonError(request, response, HttpServletResponse.SC_UNAUTHORIZED,
@@ -293,9 +288,9 @@ public class McpServlet extends HttpServlet {
       case "tools/call":
         return handleToolsCall(identity, params);
       case "resources/list":
-        return handleResourcesList();
+        return handleResourcesList(identity);
       case "resources/read":
-        return handleResourcesRead(params);
+        return handleResourcesRead(identity, params);
       default:
         throw new McpMethodNotFoundException("Method not found: " + method);
     }
@@ -371,7 +366,7 @@ public class McpServlet extends HttpServlet {
           OBContext.setAdminMode(true);
           try {
             McpToolRouter router = new McpToolRouter();
-            return router.route(toolName, arguments);
+            return router.route(toolName, arguments, parseScopes(identity.scopes));
           } finally {
             OBContext.restorePreviousMode();
           }
@@ -380,13 +375,19 @@ public class McpServlet extends HttpServlet {
 
   // ── Handler: resources/list ─────────────────────────────────────────────
 
-  private JSONObject handleResourcesList() throws Exception {
+  private JSONObject handleResourcesList(AuthIdentity identity) throws Exception {
+    Set<String> scopes = parseScopes(identity != null ? identity.scopes : null);
+    McpAuthorizationService.authorizeResourceRead(scopes);
     OBContext.setAdminMode(true);
     try {
       McpResourceProvider provider = new McpResourceProvider();
       JSONObject result = new JSONObject();
       result.put("resources", provider.listResources());
       return result;
+    } catch (org.openbravo.base.exception.OBException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new org.openbravo.base.exception.OBException(e);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -394,12 +395,14 @@ public class McpServlet extends HttpServlet {
 
   // ── Handler: resources/read ─────────────────────────────────────────────
 
-  private JSONObject handleResourcesRead(JSONObject params) throws Exception {
+  private JSONObject handleResourcesRead(AuthIdentity identity, JSONObject params) throws Exception {
     String uri = params != null ? params.optString("uri", "") : "";
     if (uri.isEmpty()) {
       throw new IllegalArgumentException("Missing 'uri' parameter for resources/read");
     }
 
+    Set<String> scopes = parseScopes(identity.scopes);
+    McpAuthorizationService.authorizeResourceRead(scopes);
     OBContext.setAdminMode(true);
     try {
       McpResourceProvider provider = new McpResourceProvider();
@@ -422,15 +425,7 @@ public class McpServlet extends HttpServlet {
   // ── JSON-RPC error builder ──────────────────────────────────────────────
 
   private JSONObject buildJsonRpcError(Object id, int code, String message) throws JSONException {
-    JSONObject error = new JSONObject();
-    error.put("code", code);
-    error.put("message", message != null ? message : "Internal error");
-
-    JSONObject resp = new JSONObject();
-    resp.put("jsonrpc", "2.0");
-    resp.put("id", id != null ? id : JSONObject.NULL);
-    resp.put("error", error);
-    return resp;
+    return ProtocolErrorAdapters.buildJsonRpcError(id, code, message);
   }
 
   // ── Utility methods ─────────────────────────────────────────────────────
@@ -447,33 +442,23 @@ public class McpServlet extends HttpServlet {
   }
 
   private Set<String> parseScopes(String scopes) {
-    if (scopes == null || scopes.trim().isEmpty()) {
-      return Collections.emptySet();
-    }
-    return new HashSet<>(Arrays.asList(scopes.trim().split("\\s+")));
+    return McpAuthorizationService.parseScopes(scopes);
   }
 
   private void sendJsonError(HttpServletRequest request, HttpServletResponse response,
       int status, String message) throws IOException {
-    response.setStatus(status);
-    response.setContentType(CONTENT_TYPE_JSON);
     if (status == HttpServletResponse.SC_UNAUTHORIZED) {
-      String metaUrl = buildBaseUrl(request) + "/sws/mcp/.well-known/oauth-protected-resource";
-      response.setHeader("WWW-Authenticate",
-          "Bearer resource_metadata=\"" + metaUrl + "\"");
+      String metaUrl = PublicUrlResolver.appendPath(
+          PublicUrlResolver.resolveMcpResourceUrl(request),
+          ".well-known/oauth-protected-resource");
+      if (metaUrl != null) {
+        response.setHeader("WWW-Authenticate",
+            "Bearer resource_metadata=\"" + metaUrl + "\"");
+      }
     }
-    response.getWriter().write("{\"error\":\"" + escapeJson(message) + "\"}");
+    ProtocolErrorAdapters.writeSimpleJsonError(response, status, message);
   }
 
-  private String escapeJson(String value) {
-    if (value == null) {
-      return "";
-    }
-    return value.replace("\\", "\\\\")
-        .replace("\"", "\\\"")
-        .replace("\n", "\\n")
-        .replace("\r", "\\r");
-  }
 
   @SuppressWarnings("unchecked")
   private JSONObject mapToJsonObject(Map<String, Object> map) throws JSONException {

@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_GET_DELIVERY_STATUS">
+    <function name="ETGO_GET_DELIVERY_STATUS" type="NUMERIC" volatility="STABLE">
+      <parameter name="p_c_invoice_id" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <body><![CDATA[v_total NUMBER:= 0;
+v_delivered NUMBER:= 0;
+BEGIN
+  -- Returns the delivery progress (0-100) of an invoice as the qty-weighted
+  -- ratio of physically delivered/received units to invoiced units, using
+  -- the matching tables (m_matchinv for purchase, m_matchsi for sales) as
+  -- the source of truth. Etendo populates these tables when the related
+  -- shipment/receipt is completed for an invoice that already exists and
+  -- is linked to the same purchase/sales order.
+  SELECT
+    COALESCE(SUM(ABS(il.qtyinvoiced)), 0),
+    COALESCE(SUM(
+      LEAST(
+        ABS(il.qtyinvoiced),
+        COALESCE((SELECT SUM(ABS(qty)) FROM m_matchinv
+                   WHERE c_invoiceline_id = il.c_invoiceline_id), 0)
+      + COALESCE((SELECT SUM(ABS(qty)) FROM m_matchsi
+                   WHERE c_invoiceline_id = il.c_invoiceline_id), 0)
+      )
+    ), 0)
+  INTO v_total, v_delivered
+  FROM c_invoiceline il
+  WHERE il.c_invoice_id = p_c_invoice_id;
+
+  IF v_total = 0 THEN
+    RETURN 0;
+  END IF;
+
+  RETURN ROUND(100 * v_delivered / v_total);
+END ETGO_GET_DELIVERY_STATUS
+]]></body>
+    </function>
+  </database>

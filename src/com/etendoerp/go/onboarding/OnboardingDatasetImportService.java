@@ -83,7 +83,6 @@ public class OnboardingDatasetImportService {
 
     flushImport();
     validateImportedSeed(client, organization);
-    commitImport();
     return result;
   }
 
@@ -124,14 +123,6 @@ public class OnboardingDatasetImportService {
   }
 
 
-  protected void commitImport() {
-    OBContext.setAdminMode(true);
-    try {
-      OBDal.getInstance().commitAndClose();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
 
   /**
    * Validates that the imported dataset contains visible seed data for the target organization.

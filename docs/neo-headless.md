@@ -44,18 +44,18 @@ NeoServlet (/sws/neo/*)
 ```
 
 Key components:
-
-| Class | Lines | Responsibility |
-|-------|-------|----------------|
-| `NeoServlet` | 953 | Main entry point. JWT auth, path parsing, routing, parent-child filtering. |
-| `NeoHandler` | 22 | CDI hook interface. Return `NeoResponse` or `null` to fall through. |
-| `NeoContext` | 147 | Immutable request context (builder pattern). Carries spec, entity, method, body, tab, OBContext. |
-| `NeoResponse` | 65 | Response wrapper with static builders: `ok()`, `created()`, `noContent()`, `error()`. |
-| `NeoSelectorService` | -- | FK dropdown resolution and querying (TableDir, Table, Search, OBUISEL). Supports custom HQL selectors. |
-| `NeoProcessService` | 564 | Process execution (OBUIAPP, Classic). Parameter validation. Process metadata. |
-| `PopulateSpecHelper` | 273 | Auto-populates entities and fields from AD metadata. |
-| `PopulateSpecProcess` | 55 | AD_Process (button) wrapper around PopulateSpecHelper. |
-
+| Class / package | Responsibility |
+|-------|----------------|
+| `NeoServlet` | Main entry point. JWT auth, path parsing, routing, parent-child filtering. |
+| `NeoHandler` | CDI hook interface. Return `NeoResponse` or `null` to fall through. |
+| `NeoContext` | Immutable request context (builder pattern). Carries spec, entity, method, body, tab, OBContext. |
+| `NeoResponse` | Response wrapper with static builders: `ok()`, `created()`, `noContent()`, `error()`. |
+| `NeoSelectorService` | Selector facade for FK dropdown listing and querying. Delegates metadata discovery and policy dispatch to selector subpackages. |
+| `schemaforge.selector.meta` | Selector descriptor and context metadata (`SelectorMeta`, `RichFieldMeta`, `SelectorContextResolver`, `SelectorDescriptorResolver`). |
+| `schemaforge.selector.policy` | Selector policy SPI/registry for context filters, reference overrides, virtual columns, and response enrichment. |
+| `NeoProcessService` | Process execution (OBUIAPP, Classic, scheduling, DB procedure). Parameter validation and process metadata. |
+| `PopulateSpecHelper` | Auto-populates entities and fields from AD metadata. |
+| `PopulateSpecProcess` | AD_Process (button) wrapper around PopulateSpecHelper. |
 ---
 
 ## 3. Database Schema
@@ -116,6 +116,26 @@ Represents a column (for window specs) or a process parameter (for process specs
 | `JAVA_QUALIFIER` | VARCHAR | For process specs: stores the parameter DB column name. |
 | `SEQNO` | NUMERIC | Display/processing order. |
 | `AD_MODULE_ID` | VARCHAR (FK) | Module that owns this field. |
+
+### ETGO_PREVIEW_FILE
+
+Stores one preview file per `(AD_CLIENT_ID, SPEC_NAME, RECORD_ID)` tuple. Used by `GET/POST/DELETE /sws/neo/preview-file`.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `ETGO_PREVIEW_FILE_ID` | VARCHAR(32) | PK — 32-char uppercase UUID |
+| `AD_CLIENT_ID` | VARCHAR(32) | FK → AD_Client |
+| `AD_ORG_ID` | VARCHAR(32) | FK → AD_Org |
+| `ISACTIVE` | CHAR(1) | Always `'Y'` |
+| `CREATED` / `UPDATED` | TIMESTAMP | Audit timestamps |
+| `CREATEDBY` / `UPDATEDBY` | VARCHAR(32) | Audit user FKs |
+| `RECORD_ID` | VARCHAR(32) | PK of the source document |
+| `SPEC_NAME` | VARCHAR(100) | Spec identifier (e.g. `purchase-invoice`) |
+| `FILE_NAME` | VARCHAR(255) | Original filename |
+| `MIME_TYPE` | VARCHAR(100) | e.g. `application/pdf`, `image/png` |
+| `FILE_DATA` | CLOB | Base64-encoded file content |
+
+Access level: `3` (Client + Org). One row per tuple — `POST` uses upsert semantics.
 
 ---
 
@@ -286,6 +306,17 @@ OBUISEL selectors with custom HQL queries are fully supported. The service uses 
 
 The service resolves `@param@` placeholders in OBUISEL HQL where clauses: `@AD_Org_ID@`, `@AD_Client_ID@`, `@AD_User_ID@`, `@AD_Role_ID@`.
 
+**Internal package split:**
+
+| Layer | Package / classes | Notes |
+|---|---|---|
+| Request facade | `NeoSelectorService` | Resolves the requested field and orchestrates list/query responses. |
+| Metadata | `com.etendoerp.go.schemaforge.selector.meta` | Reads AD/OBUISEL metadata and normalizes selector descriptors. |
+| Policies | `com.etendoerp.go.schemaforge.selector.policy` | Applies registered context filters and post-query enrichments through `SelectorPolicyRegistry`. |
+| Execution | `SelectorQueryExecutor`, `SelectorQueryBuilder`, `ComboReferenceSelectorExecutor`, `ListReferenceSelectorExecutor`, `SelectorResponseSupport` | Executes HQL/reference lookups and shapes the response. These remain in `schemaforge` to avoid widening package-private contracts. |
+
+New entity-specific selector behavior should be implemented as a selector policy where possible, not as another hardcoded branch in `NeoSelectorService`.
+
 ### 4.5 Button Actions (Process Execution on Records)
 
 Button actions are fields whose AD_Column has `AD_Reference_ID = '28'` (Button type) with a linked process.
@@ -388,6 +419,74 @@ Classic processes return OBError results, translated to:
 ```
 
 Errors from either type return HTTP 400 with `"status": "error"`.
+
+### 4.7 Preview File Endpoint
+
+A built-in endpoint for persisting document preview files. Files are stored per `(clientId, specName, recordId)` tuple in `ETGO_PREVIEW_FILE`.
+
+**Base path:** `/sws/neo/preview-file`
+
+#### GET — Fetch stored file
+
+```
+GET /sws/neo/preview-file?specName={spec}&recordId={id}
+Authorization: Bearer {token}
+```
+
+Returns `200` with a JSON body on both hit and miss:
+
+```json
+// Hit — file found
+{ "fileName": "receipt.pdf", "mimeType": "application/pdf", "fileData": "<base64>" }
+
+// Miss — no file stored yet
+{}
+```
+
+Required query parameters: `specName`, `recordId`. Returns `400` if either is missing.
+
+#### POST — Store or replace file
+
+```
+POST /sws/neo/preview-file
+Authorization: Bearer {token}
+Content-Type: application/json
+
+{
+  "specName": "purchase-invoice",
+  "recordId": "ABC123",
+  "fileName": "receipt.pdf",
+  "mimeType": "application/pdf",
+  "fileData": "<base64>"
+}
+```
+
+Upsert semantics: inserts a new row if no file exists for the tuple; otherwise updates `FILE_NAME`, `MIME_TYPE`, and `FILE_DATA` in place. Returns `200` with `{ "id": "<saved-record-id>" }`.
+
+All five body fields are required. Returns `400` if any is blank or missing, or if the body is not valid JSON.
+
+#### DELETE — Remove stored file
+
+```
+DELETE /sws/neo/preview-file?specName={spec}&recordId={id}
+Authorization: Bearer {token}
+```
+
+Returns `200 {}` when the row is removed. Returns `404` when no file exists for the tuple. Returns `400` if `specName` or `recordId` is missing.
+
+#### Frontend integration
+
+The React hook `usePreviewAttachment` (`tools/app-shell/src/windows/custom/shared/usePreviewAttachment.js`) wraps all three methods. It is activated only when `storeCondition=true`; when false the hook is a no-op and nothing is fetched or stored.
+
+`GenericPreviewModal` consumes `usePreviewAttachment` internally via its `attachmentConfig` prop and manages the left-panel state machine:
+
+| State | Left panel shown |
+|-------|-----------------|
+| `storeCondition=false` | Caller's `leftPanel` prop unchanged |
+| Checking / storing | Spinner |
+| No file cached, `autoFetch=false` | Drop zone (upload via drag-and-drop or file picker) |
+| No file cached, `autoFetch=true` | Caller's `leftPanel` (live viewer) while background caching runs |
+| File cached | PDF/image viewer + delete button |
 
 ---
 
@@ -572,6 +671,7 @@ The module includes unit tests that run without a backend:
 | `NeoContextTest` | 148 | Builder pattern, all fields, HTTP method values, mutable `previousResult`. |
 | `NeoResponseTest` | -- | Static builders (`ok`, `created`, `noContent`, `error`), custom headers. |
 | `NeoServletTabFilterTest` | -- | Parent-child HQL where clause generation. |
+| `NeoPreviewFileServiceTest` | ~250 | Validation (invalid JSON, blank fields), GET miss/hit, POST INSERT/UPDATE paths, DELETE miss/hit. All without a live DB via `MockedStatic<OBDal>` + `MockedStatic<OBContext>`. |
 
 Tests are located in `src-test/src/com/etendoerp/go/schemaforge/`.
 

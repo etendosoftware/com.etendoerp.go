@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE C_BPARTNER_LOCATION">
+    <table name="C_BPARTNER_LOCATION" primaryKey="C_BPARTNER_LOCATION_KEY">
+      <index name="EM_ETGO_BPLOC_IDX" unique="false">
+        <index-column name="C_BPARTNER_ID"/>
+        <index-column name="functionBasedColumn" functionExpression="CASE WHEN ISBILLTO=&apos;Y&apos; THEN 1 WHEN ISSHIPTO=&apos;Y&apos; THEN 2 ELSE 3 END"/>
+        <index-column name="CREATED"/>
+        <whereClause><![CDATA[ISACTIVE='Y']]></whereClause>
+      </index>
+    </table>
+  </database>

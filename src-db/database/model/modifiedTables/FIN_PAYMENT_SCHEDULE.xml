@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE FIN_PAYMENT_SCHEDULE">
+    <table name="FIN_PAYMENT_SCHEDULE" primaryKey="FIN_PAYMENT_SCHEDULE_KEY">
+      <index name="EM_ETGO_INV_DUEDATE_IDX" unique="false">
+        <index-column name="C_INVOICE_ID"/>
+        <index-column name="DUEDATE"/>
+        <whereClause><![CDATA[ISACTIVE='Y' AND outstandingamt > 0]]></whereClause>
+      </index>
+    </table>
+  </database>

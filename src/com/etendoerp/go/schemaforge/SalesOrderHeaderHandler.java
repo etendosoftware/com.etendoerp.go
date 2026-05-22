@@ -30,7 +30,11 @@ import javax.inject.Named;
  *   <li>{@code createDraftInvoice} / {@code checkDraftInvoice} / {@code listInvoices} → {@link CreateDraftInvoiceHandler}</li>
  * </ul>
  *
- * GET post-hook (hasLinkedDocuments annotation) is inherited from
+ * <p>Before the Complete action (documentAction=CO), creates the total discount line so it is
+ * included in the completed document. Delegates to {@link TotalDiscountService} via the shared
+ * helper in {@link AbstractOrderHeaderHandler}.
+ *
+ * <p>GET post-hook (hasLinkedDocuments annotation) is inherited from
  * {@link AbstractOrderHeaderHandler}.
  */
 @Named("salesOrderHeaderHandler")
@@ -39,16 +43,22 @@ public class SalesOrderHeaderHandler extends AbstractOrderHeaderHandler {
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
 
+  @Inject
+  private CreateShipmentHandler createShipmentHandler;
+
+  @Inject
+  private CreateDraftInvoiceHandler createDraftInvoiceHandler;
+
+  @Inject
+  private TotalDiscountService totalDiscountService;
+
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse result = cloneRecordHandler.handle(context);
-    if (result != null) {
-      return result;
-    }
-    result = new CreateShipmentHandler().handle(context);
-    if (result != null) {
-      return result;
-    }
-    return new CreateDraftInvoiceHandler().handle(context);
+    AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
+    return NeoHeaderActionRouter.dispatch(
+        context,
+        cloneRecordHandler,
+        createShipmentHandler,
+        createDraftInvoiceHandler);
   }
 }

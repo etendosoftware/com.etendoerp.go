@@ -101,13 +101,20 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
       this.selectedOrgId = safeId(request.getParameter(PARAM_SELECTED_ORG_ID));
       this.selectedAcctSchemaId = safeId(request.getParameter(PARAM_SELECTED_ACCT_SCHEMA_ID));
       this.warehouseIds = parseSafeIdList(request.getParameter(PARAM_WAREHOUSE_IDS));
-      this.roleOrgIds = parseSafeIdList(request.getParameter(PARAM_ROLE_ORG_IDS));
+      this.roleOrgIds = readableOrganizationIds();
     }
 
     private List<String> parseSafeIdList(String param) {
       if (StringUtils.isBlank(param)) return List.of();
       return Arrays.stream(param.split(","))
           .map(String::trim)
+          .map(ReportSelectorsServlet.this::safeId)
+          .filter(Objects::nonNull)
+          .collect(Collectors.toList());
+    }
+
+    private List<String> readableOrganizationIds() {
+      return Arrays.stream(OBContext.getOBContext().getReadableOrganizations())
           .map(ReportSelectorsServlet.this::safeId)
           .filter(Objects::nonNull)
           .collect(Collectors.toList());
@@ -329,7 +336,8 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     return new SelectorQuery(
         "SELECT ad_org_id AS id, name, name AS label",
         new StringBuilder("FROM ad_org WHERE isactive='Y' AND ad_org_id != '0'"
-            + ACTIVE_CLIENT_NAME_SEARCH),
+            + ACTIVE_CLIENT_NAME_SEARCH
+            + " AND ad_org_id IN (:roleOrgIds)"),
         ORDER_BY_NAME, true);
   }
 

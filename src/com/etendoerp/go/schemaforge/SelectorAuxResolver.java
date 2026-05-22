@@ -26,6 +26,8 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import com.etendoerp.go.schemaforge.selector.meta.AuxFieldMeta;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
 
@@ -163,7 +165,7 @@ class SelectorAuxResolver {
 
       // Build and execute the aux query filtered by the already-fetched IDs
       SelectorQueryBuilder.HqlWithParams auxQueryFragment =
-          SelectorQueryBuilder.resolveObuiselParams(
+          SelectorValidationResolver.resolveObuiselParams(
               buildAuxIdListQuery(selectClause + fromOnwards, entityAlias));
 
       org.hibernate.query.Query<Object[]> auxQuery = OBDal.getInstance()

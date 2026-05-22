@@ -20,9 +20,11 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.times;
@@ -40,13 +42,26 @@ import org.mockito.MockedStatic;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.secureApp.LoginUtils;
+import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.database.ConnectionProvider;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.domain.Callout;
 import org.openbravo.model.ad.domain.ModelImplementation;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.ad.ui.Window;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.Warehouse;
+
+import com.etendoerp.go.schemaforge.util.NeoSessionVarsCache;
 
 /**
  * Unit tests for {@link NeoCalloutService}.
@@ -247,6 +262,166 @@ public class NeoCalloutServiceTest {
       assertEquals("com.example.BPartnerCallout", second.className);
       verify(obDal, times(1)).createCriteria(Column.class);
       verify(callout, times(1)).getADModelImplementationList();
+    }
+  }
+
+  // ── Name mapping cache tests ────────────────────────────────────────
+
+  /**
+   * Build the mocks needed to drive {@code getNameMappings} for a single column.
+   * Every test in this section uses the same shape: one column on a table, with the
+   * Entity returning a property named {@code businessPartner}.
+   */
+  private MappingMocks setupSingleColumnMocks(String tableId, String dbColumnName,
+      String propertyName) {
+    OBDal obDal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<Column> criteria = mock(OBCriteria.class);
+    Column column = mock(Column.class);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+    Property property = mock(Property.class);
+
+    when(obDal.createCriteria(Column.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(column));
+    when(column.getDBColumnName()).thenReturn(dbColumnName);
+    when(column.getCallout()).thenReturn(null);
+    when(modelProvider.getEntityByTableId(tableId)).thenReturn(entity);
+    when(entity.getPropertyByColumnName(dbColumnName)).thenReturn(property);
+    when(property.getName()).thenReturn(propertyName);
+
+    return new MappingMocks(obDal, modelProvider, entity);
+  }
+
+  private static class MappingMocks {
+    final OBDal obDal;
+    final ModelProvider modelProvider;
+    final Entity entity;
+    MappingMocks(OBDal obDal, ModelProvider modelProvider, Entity entity) {
+      this.obDal = obDal;
+      this.modelProvider = modelProvider;
+      this.entity = entity;
+    }
+  }
+
+  @Test
+  public void testGetNameMappingsCachedAcrossInpAndProperty() {
+    NeoCalloutService.clearMetadataCache();
+    Tab tab = mock(Tab.class);
+    Table table = mock(Table.class);
+    when(tab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("C_ORDER");
+
+    MappingMocks m = setupSingleColumnMocks("C_ORDER", "C_BPartner_ID", "businessPartner");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelProviderMock = mockStatic(ModelProvider.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(m.obDal);
+      modelProviderMock.when(ModelProvider::getInstance).thenReturn(m.modelProvider);
+
+      NeoCalloutService.TableNameMappings first =
+          NeoCalloutService.getNameMappings("C_ORDER");
+      NeoCalloutService.TableNameMappings second =
+          NeoCalloutService.getNameMappings("C_ORDER");
+
+      assertEquals("businessPartner", first.inpToProperty.get("inpcBpartnerId"));
+      assertEquals("C_BPartner_ID", first.propertyToColumn.get("businessPartner"));
+      // Same instance returned (computeIfAbsent is hit only once).
+      assertTrue(first == second);
+      // The DB and model lookups happen exactly once across both calls.
+      verify(m.obDal, times(1)).createCriteria(Column.class);
+      verify(m.entity, times(1)).getPropertyByColumnName("C_BPartner_ID");
+    }
+  }
+
+  @Test
+  public void testFromCleanFieldNameUsesCacheAndPreservesContract() {
+    NeoCalloutService.clearMetadataCache();
+    Tab tab = mock(Tab.class);
+    Table table = mock(Table.class);
+    when(tab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("C_ORDER");
+
+    MappingMocks m = setupSingleColumnMocks("C_ORDER", "C_BPartner_ID", "businessPartner");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelProviderMock = mockStatic(ModelProvider.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(m.obDal);
+      modelProviderMock.when(ModelProvider::getInstance).thenReturn(m.modelProvider);
+
+      // Same contract as the old method: DAL property name → DB column name.
+      assertEquals("C_BPartner_ID",
+          NeoCalloutService.fromCleanFieldName("businessPartner", tab));
+      assertEquals("C_BPartner_ID",
+          NeoCalloutService.fromCleanFieldName("businessPartner", tab));
+
+      // Unknown name still falls back to the input.
+      assertEquals("totallyUnknown",
+          NeoCalloutService.fromCleanFieldName("totallyUnknown", tab));
+
+      // Three calls, but only one DB hit and one Entity lookup.
+      verify(m.obDal, times(1)).createCriteria(Column.class);
+      verify(m.entity, times(1)).getPropertyByColumnName("C_BPartner_ID");
+    }
+  }
+
+  @Test
+  public void testNameMappingsFallsBackWhenEntityLacksProperty() {
+    NeoCalloutService.clearMetadataCache();
+
+    OBDal obDal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<Column> criteria = mock(OBCriteria.class);
+    Column column = mock(Column.class);
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+
+    when(obDal.createCriteria(Column.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(column));
+    when(column.getDBColumnName()).thenReturn("M_Warehouse_ID");
+    when(column.getCallout()).thenReturn(null);
+    when(modelProvider.getEntityByTableId("M_TEST")).thenReturn(entity);
+    // Entity returns null property — exercises the fallback to toCleanFieldName.
+    when(entity.getPropertyByColumnName("M_Warehouse_ID")).thenReturn(null);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelProviderMock = mockStatic(ModelProvider.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      modelProviderMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+
+      NeoCalloutService.TableNameMappings mappings =
+          NeoCalloutService.getNameMappings("M_TEST");
+
+      // Falls back to toCleanFieldName — same heuristic as the old code.
+      assertEquals("warehouse", mappings.inpToProperty.get("inpmWarehouseId"));
+      assertEquals("M_Warehouse_ID", mappings.propertyToColumn.get("warehouse"));
+    }
+  }
+
+  @Test
+  public void testClearMetadataCacheInvalidatesNameMappings() {
+    NeoCalloutService.clearMetadataCache();
+    Tab tab = mock(Tab.class);
+    Table table = mock(Table.class);
+    when(tab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("C_ORDER");
+
+    MappingMocks m = setupSingleColumnMocks("C_ORDER", "C_BPartner_ID", "businessPartner");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> modelProviderMock = mockStatic(ModelProvider.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(m.obDal);
+      modelProviderMock.when(ModelProvider::getInstance).thenReturn(m.modelProvider);
+
+      NeoCalloutService.getNameMappings("C_ORDER");
+      NeoCalloutService.clearMetadataCache();
+      NeoCalloutService.getNameMappings("C_ORDER");
+
+      // Both the column metadata cache and the name mappings cache have been refilled.
+      verify(m.obDal, times(2)).createCriteria(Column.class);
+      verify(m.entity, times(2)).getPropertyByColumnName("C_BPartner_ID");
     }
   }
 
@@ -468,5 +643,101 @@ public class NeoCalloutServiceTest {
 
     request.removeAttribute("test");
     assertNull(request.getAttribute("test"));
+  }
+
+  // ── IsSOTrx per-tab regression ─────────────────────────────────────
+
+  /**
+   * Build a mocked OBContext exposing the minimum chain required by
+   * {@link NeoCalloutService#buildVars(OBContext, Tab)}.
+   */
+  private static OBContext mockOBContext(String userId, String roleId, String clientId,
+      String orgId, String warehouseId, String lang) {
+    OBContext ctx = mock(OBContext.class);
+    User user = mock(User.class);
+    Role role = mock(Role.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    Warehouse warehouse = mock(Warehouse.class);
+    Language language = mock(Language.class);
+    when(user.getId()).thenReturn(userId);
+    when(role.getId()).thenReturn(roleId);
+    when(client.getId()).thenReturn(clientId);
+    when(org.getId()).thenReturn(orgId);
+    when(warehouse.getId()).thenReturn(warehouseId);
+    when(language.getLanguage()).thenReturn(lang);
+    when(ctx.getUser()).thenReturn(user);
+    when(ctx.getRole()).thenReturn(role);
+    when(ctx.getCurrentClient()).thenReturn(client);
+    when(ctx.getCurrentOrganization()).thenReturn(org);
+    when(ctx.getWarehouse()).thenReturn(warehouse);
+    when(ctx.getLanguage()).thenReturn(language);
+    return ctx;
+  }
+
+  private static Tab mockTabWithSalesFlag(boolean isSales) {
+    Tab tab = mock(Tab.class);
+    Window window = mock(Window.class);
+    when(tab.getWindow()).thenReturn(window);
+    when(window.isSalesTransaction()).thenReturn(isSales);
+    return tab;
+  }
+
+  /**
+   * The cached snapshot is identity-only. The two windows below share user, role,
+   * client, org, warehouse and language — so they hit the same cache entry — but
+   * one is a sales window and the other a purchase window. The test guards that:
+   *
+   * <ol>
+   *   <li>Each VSA receives its own {@code IsSOTrx}/{@code isSOTrx} value.</li>
+   *   <li>The two VSAs are distinct instances (no aliasing of mutable state).</li>
+   *   <li>The slow path ({@code fillSessionArguments}) runs only once because the
+   *       snapshot is reused across tabs.</li>
+   * </ol>
+   */
+  @Test
+  public void testBuildVarsAppliesIsSOTrxPerTabOnSharedCacheSnapshot() {
+    NeoSessionVarsCache.clear();
+    try (MockedStatic<LoginUtils> loginMock = mockStatic(LoginUtils.class)) {
+      loginMock.when(() -> LoginUtils.fillSessionArguments(
+              any(ConnectionProvider.class), any(VariablesSecureApp.class),
+              anyString(), anyString(), anyString(),
+              anyString(), anyString(), anyString(), anyString()))
+          .thenAnswer(inv -> {
+            VariablesSecureApp vars = inv.getArgument(1);
+            vars.setSessionValue("#AD_User_ID", inv.getArgument(2));
+            vars.setSessionValue("#AD_Role_ID", inv.getArgument(5));
+            vars.setSessionValue("#AD_Client_ID", inv.getArgument(6));
+            vars.setSessionValue("#AD_Org_ID", inv.getArgument(7));
+            return Boolean.TRUE;
+          });
+      loginMock.when(() -> LoginUtils.readNumberFormat(
+              any(VariablesSecureApp.class), anyString()))
+          .thenAnswer(inv -> null);
+
+      OBContext ctx = mockOBContext("U1", "R1", "C1", "O1", "W1", "es_ES");
+      Tab salesTab = mockTabWithSalesFlag(true);
+      Tab purchaseTab = mockTabWithSalesFlag(false);
+
+      VariablesSecureApp salesVars = NeoCalloutService.buildVars(ctx, salesTab);
+      VariablesSecureApp purchaseVars = NeoCalloutService.buildVars(ctx, purchaseTab);
+
+      assertNotSame("VSAs must not alias — IsSOTrx would leak otherwise",
+          salesVars, purchaseVars);
+      assertEquals("Y", salesVars.getSessionValue("IsSOTrx"));
+      assertEquals("Y", salesVars.getSessionValue("isSOTrx"));
+      assertEquals("N", purchaseVars.getSessionValue("IsSOTrx"));
+      assertEquals("N", purchaseVars.getSessionValue("isSOTrx"));
+      // Identity payload still came from the same cached snapshot.
+      assertEquals("U1", salesVars.getSessionValue("#AD_User_ID"));
+      assertEquals("U1", purchaseVars.getSessionValue("#AD_User_ID"));
+      // Slow path runs only once even though two tabs were materialized.
+      loginMock.verify(() -> LoginUtils.fillSessionArguments(
+              any(), any(), anyString(), anyString(), anyString(),
+              anyString(), anyString(), anyString(), anyString()),
+          times(1));
+    } finally {
+      NeoSessionVarsCache.clear();
+    }
   }
 }

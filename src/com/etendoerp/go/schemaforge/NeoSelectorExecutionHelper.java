@@ -6,6 +6,8 @@ import java.util.Map;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.openbravo.model.ad.datamodel.Column;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorDescriptorBuilder;
+import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
 import org.openbravo.dal.service.OBQuery;
 
 /**
@@ -39,7 +41,7 @@ class NeoSelectorExecutionHelper {
       return;
     }
     SelectorQueryBuilder.HqlWithParams resolvedWhereClause =
-        SelectorQueryBuilder.resolveObuiselParams(whereClause);
+        SelectorValidationResolver.resolveObuiselParams(whereClause);
     hql.append(resolvedWhereClause.getHql());
     queryParams.putAll(resolvedWhereClause.getParams());
   }
@@ -54,10 +56,10 @@ class NeoSelectorExecutionHelper {
 
   static void appendSelectorOrganizationFilter(StringBuilder hql,
       Map<String, Object> queryParams, SelectorMeta meta, String contextOrganizationId) {
-    SelectorQueryBuilder.HqlWithParams orgFilter = SelectorQueryBuilder.buildOrganizationPredicate(
+    SelectorQueryBuilder.HqlWithParams orgFilter = SelectorOrgFilter.buildOrganizationPredicate(
         meta.entityName, "e", contextOrganizationId, true);
     if (orgFilter == null || orgFilter.isBlank()) {
-      orgFilter = SelectorQueryBuilder.buildReadableOrgsPredicate(meta.entityName, "e", true);
+      orgFilter = SelectorOrgFilter.buildReadableOrgsPredicate(meta.entityName, "e", true);
     }
     if (orgFilter == null || orgFilter.isBlank()) {
       return;

@@ -16,29 +16,24 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.util.Set;
+
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 
 import javax.inject.Named;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 /**
  * Pre/post-save hook for the businessPartner entity in the contacts spec.
- *
- * <p>On GET (defaults endpoint):
- * <ul>
- *   <li>{@code afterHandle()} replaces the incorrect AD-sequence placeholder for
- *       {@code etgoIdentifier} with the real next value from the
- *       {@code BusinessPartner-EM_Etgo_Identifier} AD sequence.</li>
- * </ul>
  *
  * <p>On POST (new record):
  * <ul>
@@ -65,199 +60,38 @@ public class BusinessPartnerHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(BusinessPartnerHandler.class);
   private static final String FIELD_SEARCH_KEY = "searchKey";
-  private static final String FIELD_ETGO_IDENTIFIER = "etgoIdentifier";
   private static final String FIELD_NAME = "name";
+
+  private static final Set<String> PRECREATE_BILLING_FIELDS = Set.of("priceList", "paymentMethod", "paymentTerms",
+      "account", "customerBlocking", "purchasePricelist", "pOPaymentMethod", "pOPaymentTerms", "pOFinancialAccount",
+      "vendorBlocking");
   private static final String FIELD_FIRSTNAME = "etgoFirstname";
   private static final String FIELD_LASTNAME = "etgoLastname";
 
-  @Override
-  public NeoResponse handle(NeoContext ctx) {
-    String method = ctx.getHttpMethod();
-    boolean isWrite = "POST".equals(method) || "PATCH".equals(method) || "PUT".equals(method);
-    if (!isWrite) {
-      return null;
-    }
-    JSONObject body = ctx.getRequestBody();
-    if (body == null) {
-      return null;
-    }
-    try {
-      deriveNameFromPerson(ctx, body);
-
-      // POST only: inject searchKey = name as temporary mandatory-field placeholder.
-      if ("POST".equals(method)) {
-        String name = body.optString(FIELD_NAME, null);
-        if (StringUtils.isNotBlank(name) && !body.has(FIELD_SEARCH_KEY)) {
-          body.put(FIELD_SEARCH_KEY, name);
-        }
-      }
-    } catch (Exception e) {
-      log.error("BusinessPartnerHandler: error in handle()", e);
-      throw new OBException("Error processing BusinessPartner name derivation", e);
-    }
-    return null;
-  }
-
   /**
-   * Derives {@code name} from {@code etgoFirstname} + {@code etgoLastname} when:
-   * <ul>
-   *   <li>At least one of the name parts is present in the request body.</li>
-   *   <li>The effective {@code name} is blank (body value for POST; DB value for PATCH/PUT).</li>
-   * </ul>
-   * If {@code name} already has a value it is left untouched.
+   * Concatenates non-blank parts separated by a single space.
    */
-  private void deriveNameFromPerson(NeoContext ctx, JSONObject body) throws Exception {
-    boolean hasFirstname = body.has(FIELD_FIRSTNAME);
-    boolean hasLastname = body.has(FIELD_LASTNAME);
-    if (!hasFirstname && !hasLastname) {
-      return;
-    }
-
-    String firstname;
-    String lastname;
-
-    if ("POST".equals(ctx.getHttpMethod())) {
-      // New record: name must be absent or blank to auto-fill.
-      if (StringUtils.isNotBlank(body.optString(FIELD_NAME, null))) {
-        return;
-      }
-      firstname = StringUtils.trimToEmpty(body.optString(FIELD_FIRSTNAME, ""));
-      lastname  = StringUtils.trimToEmpty(body.optString(FIELD_LASTNAME, ""));
-    } else {
-      // PATCH / PUT: check the persisted name; if already set, respect it.
-      String recordId = ctx.getRecordId();
-      if (StringUtils.isBlank(recordId)) {
-        return;
-      }
-      String[] persisted = queryPersistedNameParts(recordId);
-      // persisted[0] = name, persisted[1] = firstname, persisted[2] = lastname
-      if (StringUtils.isNotBlank(persisted[0])) {
-        return;
-      }
-      // Merge: body value takes precedence over persisted value for each part.
-      firstname = hasFirstname
-          ? StringUtils.trimToEmpty(body.optString(FIELD_FIRSTNAME, ""))
-          : StringUtils.trimToEmpty(persisted[1]);
-      lastname = hasLastname
-          ? StringUtils.trimToEmpty(body.optString(FIELD_LASTNAME, ""))
-          : StringUtils.trimToEmpty(persisted[2]);
-    }
-
-    String derived = buildFullName(firstname, lastname);
-    if (StringUtils.isNotBlank(derived)) {
-      body.put(FIELD_NAME, derived);
-    }
-  }
-
-  /** Concatenates non-blank parts separated by a single space. */
   private static String buildFullName(String firstname, String lastname) {
     String combined = (firstname + " " + lastname).trim();
     return combined.replaceAll("\\s{2,}", " ");
   }
 
-  /** Returns [name, em_etgo_firstname, em_etgo_lastname] for the given record. */
+  /**
+   * Returns [name, em_etgo_firstname, em_etgo_lastname] for the given record.
+   */
   private static String[] queryPersistedNameParts(String recordId) throws Exception {
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT name, em_etgo_firstname, em_etgo_lastname" +
-        "  FROM c_bpartner WHERE c_bpartner_id = ?")) {
+        "SELECT name, em_etgo_firstname, em_etgo_lastname" + "  FROM c_bpartner WHERE c_bpartner_id = ?")) {
       ps.setString(1, recordId);
       try (ResultSet rs = ps.executeQuery()) {
         if (rs.next()) {
-          return new String[]{
-              StringUtils.trimToEmpty(rs.getString(1)),
-              StringUtils.trimToEmpty(rs.getString(2)),
-              StringUtils.trimToEmpty(rs.getString(3))
-          };
+          return new String[]{ StringUtils.trimToEmpty(rs.getString(1)), StringUtils.trimToEmpty(
+              rs.getString(2)), StringUtils.trimToEmpty(rs.getString(3)) };
         }
       }
     }
-    return new String[]{"", "", ""};
-  }
-
-  @Override
-  public NeoResponse afterHandle(NeoContext ctx) {
-    if ("GET".equals(ctx.getHttpMethod())) {
-      return patchDefaultsIdentifier(ctx);
-    }
-    if (!"POST".equals(ctx.getHttpMethod())) {
-      return null;
-    }
-    NeoResponse previousResult = ctx.getPreviousResult();
-    if (previousResult == null || previousResult.getBody() == null) {
-      return null;
-    }
-    try {
-      String recordId = extractRecordId(previousResult.getBody());
-      if (recordId == null) {
-        return null;
-      }
-      String identifier = queryIdentifier(recordId);
-      if (StringUtils.isBlank(identifier)) {
-        return null;
-      }
-      updateSearchKey(recordId, identifier);
-      patchSearchKeyInResponse(previousResult.getBody(), identifier);
-      return NeoResponse.ok(previousResult.getBody());
-    } catch (Exception e) {
-      log.error("BusinessPartnerHandler: error updating searchKey from em_etgo_identifier", e);
-      return null;
-    }
-  }
-
-  private NeoResponse patchDefaultsIdentifier(NeoContext ctx) {
-    NeoResponse previousResult = ctx.getPreviousResult();
-    if (previousResult == null || previousResult.getBody() == null) {
-      return null;
-    }
-    JSONObject body = previousResult.getBody();
-    if (!body.has("defaults")) {
-      return null;
-    }
-    try {
-      String clientId = OBContext.getOBContext().getCurrentClient().getId();
-      long nextValue = queryNextIdentifier(clientId);
-      if (nextValue <= 0) {
-        return null;
-      }
-      body.getJSONObject("defaults").put(FIELD_ETGO_IDENTIFIER, "<" + nextValue + ">");
-      JSONArray seqFields = body.optJSONArray("sequenceFields");
-      if (seqFields == null) {
-        seqFields = new JSONArray();
-        body.put("sequenceFields", seqFields);
-      }
-      boolean alreadyPresent = false;
-      for (int i = 0; i < seqFields.length(); i++) {
-        if (FIELD_ETGO_IDENTIFIER.equals(seqFields.getString(i))) {
-          alreadyPresent = true;
-          break;
-        }
-      }
-      if (!alreadyPresent) {
-        seqFields.put(FIELD_ETGO_IDENTIFIER);
-      }
-      return NeoResponse.ok(body);
-    } catch (Exception e) {
-      log.error("BusinessPartnerHandler: error patching defaults with etgoIdentifier", e);
-      return null;
-    }
-  }
-
-  private static long queryNextIdentifier(String clientId) throws Exception {
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT currentnext FROM ad_sequence" +
-        " WHERE name = 'BusinessPartner-EM_Etgo_Identifier'" +
-        " AND ad_client_id = ?" +
-        " ORDER BY currentnext DESC LIMIT 1")) {
-      ps.setString(1, clientId);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          return rs.getLong(1);
-        }
-      }
-    }
-    return -1;
+    return new String[]{ "", "", "" };
   }
 
   private static String extractRecordId(JSONObject body) {
@@ -293,8 +127,7 @@ public class BusinessPartnerHandler implements NeoHandler {
 
   private static void updateSearchKey(String recordId, String identifier) throws Exception {
     Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(
-        "UPDATE c_bpartner SET value = ? WHERE c_bpartner_id = ?")) {
+    try (PreparedStatement ps = conn.prepareStatement("UPDATE c_bpartner SET value = ? WHERE c_bpartner_id = ?")) {
       ps.setString(1, identifier);
       ps.setString(2, recordId);
       ps.executeUpdate();
@@ -314,6 +147,117 @@ public class BusinessPartnerHandler implements NeoHandler {
       data.getJSONObject(0).put(FIELD_SEARCH_KEY, identifier);
     } catch (Exception e) {
       log.warn("BusinessPartnerHandler: could not patch searchKey in response", e);
+    }
+  }
+
+  @Override
+  public NeoResponse handle(NeoContext ctx) {
+    String method = ctx.getHttpMethod();
+    boolean isWrite = "POST".equals(method) || "PATCH".equals(method) || "PUT".equals(method);
+    if (!isWrite) {
+      return null;
+    }
+    JSONObject body = ctx.getRequestBody();
+    if (body == null) {
+      return null;
+    }
+    try {
+      deriveNameFromPerson(ctx, body);
+
+      if ("POST".equals(method)) {
+        stripPreCreateBillingDefaults(body);
+        String name = body.optString(FIELD_NAME, null);
+        if (StringUtils.isNotBlank(name) && !body.has(FIELD_SEARCH_KEY)) {
+          body.put(FIELD_SEARCH_KEY, name);
+        }
+      }
+    } catch (Exception e) {
+      log.error("BusinessPartnerHandler: error in handle()", e);
+      throw new OBException("Error processing BusinessPartner name derivation", e);
+    }
+    return null;
+  }
+
+  private void stripPreCreateBillingDefaults(JSONObject body) {
+    for (String key : PRECREATE_BILLING_FIELDS) {
+      body.remove(key);
+      body.remove(key + "$_identifier");
+    }
+  }
+
+  /**
+   * Derives {@code name} from {@code etgoFirstname} + {@code etgoLastname} when:
+   * <ul>
+   *   <li>At least one of the name parts is present in the request body.</li>
+   *   <li>The effective {@code name} is blank (body value for POST; DB value for PATCH/PUT).</li>
+   * </ul>
+   * If {@code name} already has a value it is left untouched.
+   */
+  private void deriveNameFromPerson(NeoContext ctx, JSONObject body) throws Exception {
+    boolean hasFirstname = body.has(FIELD_FIRSTNAME);
+    boolean hasLastname = body.has(FIELD_LASTNAME);
+    if (!hasFirstname && !hasLastname) {
+      return;
+    }
+
+    String firstname;
+    String lastname;
+
+    if ("POST".equals(ctx.getHttpMethod())) {
+      // New record: name must be absent or blank to auto-fill.
+      if (StringUtils.isNotBlank(body.optString(FIELD_NAME, null))) {
+        return;
+      }
+      firstname = StringUtils.trimToEmpty(body.optString(FIELD_FIRSTNAME, ""));
+      lastname = StringUtils.trimToEmpty(body.optString(FIELD_LASTNAME, ""));
+    } else {
+      // PATCH / PUT: check the persisted name; if already set, respect it.
+      String recordId = ctx.getRecordId();
+      if (StringUtils.isBlank(recordId)) {
+        return;
+      }
+      String[] persisted = queryPersistedNameParts(recordId);
+      // persisted[0] = name, persisted[1] = firstname, persisted[2] = lastname
+      if (StringUtils.isNotBlank(persisted[0])) {
+        return;
+      }
+      // Merge: body value takes precedence over persisted value for each part.
+      firstname = hasFirstname ? StringUtils.trimToEmpty(body.optString(FIELD_FIRSTNAME, "")) : StringUtils.trimToEmpty(
+          persisted[1]);
+      lastname = hasLastname ? StringUtils.trimToEmpty(body.optString(FIELD_LASTNAME, "")) : StringUtils.trimToEmpty(
+          persisted[2]);
+    }
+
+    String derived = buildFullName(firstname, lastname);
+    if (StringUtils.isNotBlank(derived)) {
+      body.put(FIELD_NAME, derived);
+    }
+  }
+
+  @Override
+  public NeoResponse afterHandle(NeoContext ctx) {
+    if (!"POST".equals(ctx.getHttpMethod())) {
+      return null;
+    }
+    NeoResponse previousResult = ctx.getPreviousResult();
+    if (previousResult == null || previousResult.getBody() == null) {
+      return null;
+    }
+    try {
+      String recordId = extractRecordId(previousResult.getBody());
+      if (recordId == null) {
+        return null;
+      }
+      String identifier = queryIdentifier(recordId);
+      if (StringUtils.isBlank(identifier)) {
+        return null;
+      }
+      updateSearchKey(recordId, identifier);
+      patchSearchKeyInResponse(previousResult.getBody(), identifier);
+      return NeoResponse.ok(previousResult.getBody());
+    } catch (Exception e) {
+      log.error("BusinessPartnerHandler: error updating searchKey from em_etgo_identifier", e);
+      return null;
     }
   }
 }

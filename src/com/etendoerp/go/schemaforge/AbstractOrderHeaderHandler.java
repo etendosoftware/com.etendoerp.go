@@ -35,14 +35,139 @@ import org.openbravo.dal.service.OBDal;
 /**
  * Shared base for order-type header handlers (Sales Order, Purchase Order).
  *
- * The {@code afterHandle} post-hook appends {@code hasLinkedDocuments} to every
+ * <p>The {@code afterHandle} post-hook appends {@code hasLinkedDocuments} to every
  * record in GET responses. Single-record GETs use a LIMIT 1 query; list GETs
  * use a single batch IN query to avoid N+1. Subclasses only need to implement
  * {@code handle()} with their window-specific action dispatching.
+ *
+ * <p>The static helper {@link #applyTotalDiscountBeforeComplete(NeoContext, TotalDiscountService, boolean)}
+ * is called from the pre-hook ({@code handle()}) of each header subclass. It creates the discount
+ * line just before the Complete action (documentAction=CO) is processed by the CRUD layer, so the
+ * discount line reflects the final set of product lines and is included in the completed document.
  */
 public abstract class AbstractOrderHeaderHandler implements NeoHandler {
 
-  private final Logger log = LogManager.getLogger(getClass());
+  private static final Logger log = LogManager.getLogger(AbstractOrderHeaderHandler.class);
+  private static final String FIELD_DOCUMENT_ACTION = "documentAction";
+  private static final String DOC_TYPE_ORDER = "order";
+  private static final String DOC_TYPE_INVOICE = "invoice";
+
+  /**
+   * Creates (or re-creates) the total discount line immediately before the Complete action
+   * (documentAction=CO) is processed by the default handler.
+   *
+   * <p>Must be called at the top of {@code handle()} in every header subclass that supports
+   * total discount. It intercepts two paths:
+   * <ul>
+   *   <li><b>CRUD PATCH/PUT</b> — body contains {@code { documentAction: "CO" }}</li>
+   *   <li><b>ACTION POST /documentAction</b> — frontend confirm button sends
+   *       POST to {@code /action/documentAction} with body
+   *       {@code { fieldValues: { documentAction: "CO" } }}</li>
+   * </ul>
+   *
+   * <p>Document types that use a different action endpoint (e.g. quotations via
+   * {@code DocAction}) must call {@link #syncTotalDiscountOnDocAction} explicitly
+   * in their own {@code handle()} implementation.
+   *
+   * @param context   the current NeoContext
+   * @param service   the TotalDiscountService CDI bean injected by the subclass
+   * @param isInvoice {@code true} for invoice documents, {@code false} for order documents
+   */
+  static void applyTotalDiscountBeforeComplete(NeoContext context, TotalDiscountService service,
+      boolean isInvoice) {
+    if (service == null) {
+      return;
+    }
+    String recordId = context.getRecordId();
+    if (recordId == null || recordId.isEmpty()) {
+      return;
+    }
+    if (!isCompleteAction(context)) {
+      return;
+    }
+    String docType = isInvoice ? DOC_TYPE_INVOICE : DOC_TYPE_ORDER;
+    try {
+      log.info("Recalculating total discount before complete for {} id={}", docType, recordId);
+      service.recalculate(recordId, isInvoice);
+    } catch (Exception e) {
+      log.error("Error recalculating total discount before complete for {} id={}", docType, recordId, e);
+    }
+  }
+
+  private static boolean isCompleteAction(NeoContext context) {
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
+      return isCrudComplete(context);
+    }
+    return NeoEndpointType.ACTION.equals(context.getEndpointType())
+        && isActionDocumentActionComplete(context);
+  }
+
+  private static boolean isCrudComplete(NeoContext context) {
+    String method = context.getHttpMethod();
+    if (!"PATCH".equals(method) && !"PUT".equals(method)) {
+      return false;
+    }
+    JSONObject body = context.getRequestBody();
+    return body != null && "CO".equals(body.optString(FIELD_DOCUMENT_ACTION, ""));
+  }
+
+  private static boolean isActionDocumentActionComplete(NeoContext context) {
+    if (!FIELD_DOCUMENT_ACTION.equals(context.getFieldName())) {
+      return false;
+    }
+    JSONObject body = context.getRequestBody();
+    if (body == null) {
+      return false;
+    }
+    // Two body formats: root-level docAction (useDocumentAction hook)
+    // or nested fieldValues.documentAction (handleSaveAndProcess path).
+    JSONObject fieldValues = body.optJSONObject("fieldValues");
+    String docAction = fieldValues != null
+        ? fieldValues.optString(FIELD_DOCUMENT_ACTION, "")
+        : body.optString("docAction", body.optString(FIELD_DOCUMENT_ACTION, ""));
+    return "CO".equals(docAction);
+  }
+
+  /**
+   * Syncs the total discount line when a {@code DocAction} process-button request is received.
+   *
+   * <p>The quotation {@code SendToEvaluationModal} sends
+   * {@code POST /action/DocAction { fieldValues: {} }} without an explicit {@code docAction}
+   * value. This helper delegates to {@link TotalDiscountService#recalculate} unconditionally:
+   * when {@code pct > 0} (CO path) it creates the discount line; when the document is
+   * reopened (RE path) it cleans up any stale line.
+   *
+   * <p>Call this from {@code handle()} only in handlers whose window uses the {@code DocAction}
+   * button path to complete/evaluate the document — currently only
+   * {@link SalesQuotationHeaderHandler}.
+   *
+   * @param context   the current NeoContext
+   * @param service   the TotalDiscountService CDI bean injected by the subclass
+   * @param isInvoice {@code true} for invoice documents, {@code false} for order documents
+   */
+  static void syncTotalDiscountOnDocAction(NeoContext context, TotalDiscountService service,
+      boolean isInvoice) {
+    if (service == null) {
+      return;
+    }
+    if (!NeoEndpointType.ACTION.equals(context.getEndpointType())) {
+      return;
+    }
+    if (!"DocAction".equals(context.getFieldName())) {
+      return;
+    }
+    String recordId = context.getRecordId();
+    if (recordId == null || recordId.isEmpty()) {
+      return;
+    }
+    String docType = isInvoice ? DOC_TYPE_INVOICE : DOC_TYPE_ORDER;
+    try {
+      log.info("Syncing total discount on DocAction for {} id={}", docType, recordId);
+      service.recalculate(recordId, isInvoice);
+    } catch (Exception e) {
+      log.error("Error syncing total discount on DocAction for {} id={}", docType, recordId, e);
+    }
+  }
 
   @Override
   public NeoResponse afterHandle(NeoContext context) {

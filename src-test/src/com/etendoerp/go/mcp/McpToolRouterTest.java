@@ -22,6 +22,9 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+import java.util.Set;
+
+import org.openbravo.base.exception.OBSecurityException;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -157,6 +160,53 @@ public class McpToolRouterTest {
     assertFalse(ToolRegistry.isCrudTool(""));
   }
 
+  /** Tests that neo_batch is treated as a CRUD tool so spec resolution is skipped. */
+  @Test
+  public void testNeoBatchIsCrudTool() {
+    assertTrue(ToolRegistry.isCrudTool("neo_batch"));
+  }
+
+  /**
+   * Tests that resolveSpecName returns null for neo_batch even with arguments —
+   * each operation carries its own spec, there is no top-level spec.
+   */
+  @Test
+  public void testResolveSpecNameForBatchTool() throws Exception {
+    JSONObject args = new JSONObject();
+    JSONArray ops = new JSONArray();
+    JSONObject op = new JSONObject();
+    op.put("id", "h");
+    op.put("spec", SPEC_SALES_ORDER);
+    op.put("entity", "Header");
+    ops.put(op);
+    args.put("operations", ops);
+
+    assertNull(ToolRegistry.resolveSpecName("neo_batch", args));
+  }
+
+  /**
+   * Tests that the router rejects neo_batch with missing/empty operations as an MCP
+   * error content block, without dispatching to BatchService (no DAL touched).
+   */
+  @Test
+  public void testHandleBatchEmptyOperationsReturnsError() throws Exception {
+    McpToolRouter router = new McpToolRouter();
+
+    JSONObject result1 = router.handleBatch(null);
+    assertTrue(result1.optBoolean("isError", false));
+    assertTrue(result1.getJSONArray(FIELD_CONTENT).getJSONObject(0)
+        .getString("text").toLowerCase().contains("operations"));
+
+    JSONObject empty = new JSONObject();
+    empty.put("operations", new JSONArray());
+    JSONObject result2 = router.handleBatch(empty);
+    assertTrue(result2.optBoolean("isError", false));
+
+    JSONObject missing = new JSONObject();
+    JSONObject result3 = router.handleBatch(missing);
+    assertTrue(result3.optBoolean("isError", false));
+  }
+
   // ── ToolRegistry.snakeToKebab ─────────────────────────────────────────
 
   /** Tests that snakeToKebab correctly converts underscores to hyphens. */
@@ -165,5 +215,33 @@ public class McpToolRouterTest {
     assertEquals("complete-order", ToolRegistry.snakeToKebab(TOOL_COMPLETE_ORDER));
     assertEquals("sales-order-lines", ToolRegistry.snakeToKebab("sales_order_lines"));
     assertEquals("invoices", ToolRegistry.snakeToKebab("invoices"));
+  }
+
+  // ── McpAuthorizationService ────────────────────────────────────────────
+
+  /** Tests that write tools require write scope at execution time. */
+  @Test(expected = OBSecurityException.class)
+  public void testAuthorizeToolCallRejectsCreateWithoutWriteScope() {
+    McpAuthorizationService.authorizeToolCall("neo_create", Set.of("neo:read"));
+  }
+
+  /** Tests that write scope allows write tools at execution time. */
+  @Test
+  public void testAuthorizeToolCallAllowsCreateWithWriteScope() {
+    McpAuthorizationService.authorizeToolCall("neo_create", Set.of("neo:write"));
+  }
+
+  /** Tests that report tools require report scope at execution time. */
+  @Test(expected = OBSecurityException.class)
+  public void testAuthorizeToolCallRejectsReportWithoutReportScope() {
+    McpAuthorizationService.authorizeToolCall("generate_invoice_report", Set.of("neo:read"));
+  }
+
+  /** Tests that the wildcard scope allows every tool type at execution time. */
+  @Test
+  public void testAuthorizeToolCallAllowsWildcardScope() {
+    McpAuthorizationService.authorizeToolCall("neo_create", Set.of("neo:*"));
+    McpAuthorizationService.authorizeToolCall("complete_order", Set.of("neo:*"));
+    McpAuthorizationService.authorizeToolCall("generate_invoice_report", Set.of("neo:*"));
   }
 }

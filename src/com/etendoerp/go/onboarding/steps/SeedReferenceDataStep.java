@@ -358,6 +358,7 @@ public class SeedReferenceDataStep implements OnboardingStep {
     paymentTerm.setNextBusinessDay(false);
     paymentTerm.setDefault(netDays == 0L);
     paymentTerm.setValid(true);
+    paymentTerm.setMaturityDate3(0L);
     OBDal.getInstance().save(paymentTerm);
 
     PaymentTermLine paymentTermLine = OBProvider.getInstance().get(PaymentTermLine.class);

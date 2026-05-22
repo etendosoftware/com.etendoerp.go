@@ -9,7 +9,7 @@
  * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
  * implied. See the License for the specific language governing rights
  * and limitations under the License.
- * All portions are Copyright © 2021–2026 FUTIT SERVICES, S.L
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
  * All Rights Reserved.
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
@@ -18,6 +18,7 @@
 package com.etendoerp.go.common;
 
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
 
 import javax.servlet.http.HttpServletResponse;
@@ -46,16 +47,32 @@ public class ServletResponseUtils {
    * @param message  the error message included in the body
    * @throws IOException if the response writer cannot be obtained or fails to write
    */
-  public static void sendError(HttpServletResponse response, int status, String message) throws IOException {
+  public static void sendError(HttpServletResponse response, int status, String message)
+      throws IOException {
     try {
       JSONObject body = new JSONObject();
       body.put("error", message);
-      response.setStatus(status);
-      response.setContentType(ContentType.APPLICATION_JSON.getMimeType());
-      response.setCharacterEncoding(StandardCharsets.UTF_8.name());
-      response.getWriter().write(body.toString());
+      writeJson(response, status, body);
     } catch (JSONException ex) {
       log.error("Failed to write error response", ex);
+    }
+  }
+
+  /**
+   * Writes a JSON response with the given status code.
+   *
+   * @param response the HTTP response to write to
+   * @param status   the HTTP status code
+   * @param body     the JSON body to serialize
+   * @throws IOException if the response writer cannot be obtained or fails to write
+   */
+  public static void writeJson(HttpServletResponse response, int status, JSONObject body)
+      throws IOException {
+    response.setStatus(status);
+    response.setContentType(ContentType.APPLICATION_JSON.getMimeType());
+    response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+    try (PrintWriter writer = response.getWriter()) {
+      writer.write(body.toString());
     }
   }
 }

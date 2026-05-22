@@ -19,16 +19,16 @@ package com.etendoerp.go.schemaforge;
 
 import javax.inject.Named;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-
 /**
  * NeoHandler for invoice line entities (Sales Invoice, Purchase Invoice).
  *
- * <p>Currently only implements {@link #afterCallout(NeoContext)} to publish the
- * tax rate to the frontend when the user changes the line tax. The shared logic
- * lives in {@link LineCalloutTaxRateHelper}, mirroring what {@link OrderLineHandler}
- * does for order/quotation lines.
+ * <p>Implements {@link #afterCallout(NeoContext)} to publish the tax rate to the frontend
+ * when the user changes the line tax. The shared logic lives in {@link LineCalloutTaxRateHelper},
+ * mirroring what {@link OrderLineHandler} does for order/quotation lines.
+ *
+ * <p>On GET: filters discount lines (dummy product {@code ETGO_DTO}) from the response so the
+ * UI never displays the internal discount line as a regular product line.
+ * Filtering logic is shared with {@link OrderLineHandler} via {@link DiscountLineFilter}.
  *
  * <p>Registered via {@code javaQualifier = "invoiceLineHandler"} on the lines
  * entity of sales-invoice and purchase-invoice specs.
@@ -36,14 +36,27 @@ import org.apache.logging.log4j.Logger;
 @Named("invoiceLineHandler")
 public class InvoiceLineHandler implements NeoHandler {
 
-  @SuppressWarnings("unused")
-  private static final Logger log = LogManager.getLogger(InvoiceLineHandler.class);
-
   @Override
   public NeoResponse handle(NeoContext context) {
     return null;
   }
 
+  @Override
+  public NeoResponse afterHandle(NeoContext context) {
+    if (!NeoEndpointType.CRUD.equals(context.getEndpointType())) {
+      return null;
+    }
+    if ("GET".equals(context.getHttpMethod())) {
+      return DiscountLineFilter.filterFromResponse(context);
+    }
+    return null;
+  }
+
+  /**
+   * Callout post-hook: enrich the response with a synthetic {@code taxRate} update
+   * when the user changed the line tax. Logic shared with order lines lives in
+   * {@link LineCalloutTaxRateHelper}.
+   */
   @Override
   public NeoResponse afterCallout(NeoContext context) {
     return LineCalloutTaxRateHelper.augmentTaxRate(context);
