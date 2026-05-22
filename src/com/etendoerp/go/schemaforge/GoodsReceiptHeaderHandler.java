@@ -25,17 +25,26 @@ import javax.inject.Named;
  *
  * <p>Routes custom ACTION requests:
  * <ul>
+ *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler}</li>
  *   <li>{@code createPurchaseInvoice} → {@link CreatePurchaseInvoiceHandler}</li>
+ *   <li>{@code createPurchaseReturn} → {@link CreatePurchaseReturnHandler}</li>
  * </ul>
  */
 @Named("goodsReceiptHeaderHandler")
 public class GoodsReceiptHeaderHandler implements NeoHandler {
 
   @Inject
+  private NeoCloneRecordHandler cloneRecordHandler;
+
+  @Inject
   private CreatePurchaseInvoiceHandler createPurchaseInvoiceHandler;
+
+  @Inject
+  private CreatePurchaseReturnHandler createPurchaseReturnHandler;
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    return NeoHeaderActionRouter.dispatch(context, createPurchaseInvoiceHandler);
+    return NeoHeaderActionRouter.dispatch(context,
+        cloneRecordHandler, createPurchaseInvoiceHandler, createPurchaseReturnHandler);
   }
 }

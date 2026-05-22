@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -25,6 +26,12 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+import java.math.BigDecimal;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -48,7 +55,10 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
+import org.openbravo.model.common.product.Product;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 import org.openbravo.model.financialmgmt.payment.PaymentTerm;
 import org.openbravo.model.pricing.pricelist.PriceList;
 
@@ -162,5 +172,137 @@ public class CreatePurchaseInvoiceHandlerTest {
       verify(linkQuery).setParameter(eq("invoiceId"), eq("invoice-PO"));
       verify(linkQuery).executeUpdate();
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // buildSelectedLinesFromReceipt — ETP-4032: receipt-to-invoice line mapping
+  // -------------------------------------------------------------------------
+
+  private static ShipmentInOutLine mockReceiptLine(String id, boolean active, Product product,
+      BigDecimal movementQty, OrderLine salesOrderLine) {
+    ShipmentInOutLine rl = mock(ShipmentInOutLine.class);
+    when(rl.getId()).thenReturn(id);
+    when(rl.isActive()).thenReturn(active);
+    when(rl.getProduct()).thenReturn(product);
+    when(rl.getMovementQuantity()).thenReturn(movementQty);
+    when(rl.getSalesOrderLine()).thenReturn(salesOrderLine);
+    return rl;
+  }
+
+  private static ShipmentInOut receiptWith(ShipmentInOutLine... lines) {
+    ShipmentInOut receipt = mock(ShipmentInOut.class);
+    when(receipt.getMaterialMgmtShipmentInOutLineList())
+        .thenReturn(Arrays.asList(lines));
+    return receipt;
+  }
+
+  @Test
+  public void buildSelectedLinesFromReceipt_usesMovementQtyWhenNoOverride() throws JSONException {
+    OrderLine ol = mock(OrderLine.class);
+    when(ol.getId()).thenReturn("ol-1");
+    Product product = mock(Product.class);
+    when(product.getId()).thenReturn("prod-1");
+    ShipmentInOutLine rl = mockReceiptLine("rl-1", true, product, BigDecimal.valueOf(3), ol);
+
+    JSONArray result = new CreatePurchaseInvoiceHandler()
+        .buildSelectedLinesFromReceipt(receiptWith(rl), Collections.emptyMap(), null);
+
+    assertEquals(1, result.length());
+    assertEquals("ol-1", result.getJSONObject(0).getString("id"));
+    assertEquals("3", result.getJSONObject(0).getString("orderedQuantity"));
+  }
+
+  @Test
+  public void buildSelectedLinesFromReceipt_appliesQtyOverrideInsteadOfMovementQty() throws JSONException {
+    OrderLine ol = mock(OrderLine.class);
+    when(ol.getId()).thenReturn("ol-1");
+    ShipmentInOutLine rl = mockReceiptLine("rl-1", true, mock(Product.class), BigDecimal.valueOf(5), ol);
+
+    Map<String, BigDecimal> overrides = new HashMap<>();
+    overrides.put("rl-1", BigDecimal.valueOf(2));
+
+    JSONArray result = new CreatePurchaseInvoiceHandler()
+        .buildSelectedLinesFromReceipt(receiptWith(rl), overrides, null);
+
+    assertEquals(1, result.length());
+    assertEquals("2", result.getJSONObject(0).getString("orderedQuantity"));
+  }
+
+  @Test
+  public void buildSelectedLinesFromReceipt_skipsInactiveLine() throws JSONException {
+    ShipmentInOutLine rl = mockReceiptLine("rl-1", false, mock(Product.class), BigDecimal.ONE, mock(OrderLine.class));
+
+    JSONArray result = new CreatePurchaseInvoiceHandler()
+        .buildSelectedLinesFromReceipt(receiptWith(rl), Collections.emptyMap(), null);
+
+    assertEquals(0, result.length());
+  }
+
+  @Test
+  public void buildSelectedLinesFromReceipt_skipsLineWithNeitherDirectLinkNorProductMatch() throws JSONException {
+    Product product = mock(Product.class);
+    when(product.getId()).thenReturn("prod-orphan");
+    ShipmentInOutLine rl = mockReceiptLine("rl-1", true, product, BigDecimal.ONE, null);
+
+    JSONArray result = new CreatePurchaseInvoiceHandler()
+        .buildSelectedLinesFromReceipt(receiptWith(rl), Collections.emptyMap(), null);
+
+    assertEquals(0, result.length());
+  }
+
+  @Test
+  public void buildSelectedLinesFromReceipt_fallsBackToProductMatchWhenNoDirectOrderLine() throws JSONException {
+    Product product = mock(Product.class);
+    when(product.getId()).thenReturn("prod-1");
+
+    ShipmentInOutLine rl = mockReceiptLine("rl-1", true, product, BigDecimal.valueOf(4), null);
+
+    OrderLine ol = mock(OrderLine.class);
+    when(ol.getId()).thenReturn("ol-fallback");
+    when(ol.isActive()).thenReturn(true);
+    when(ol.getProduct()).thenReturn(product);
+
+    Order linkedOrder = mock(Order.class);
+    when(linkedOrder.getOrderLineList()).thenReturn(Collections.singletonList(ol));
+
+    JSONArray result = new CreatePurchaseInvoiceHandler()
+        .buildSelectedLinesFromReceipt(receiptWith(rl), Collections.emptyMap(), linkedOrder);
+
+    assertEquals(1, result.length());
+    assertEquals("ol-fallback", result.getJSONObject(0).getString("id"));
+    assertEquals("4", result.getJSONObject(0).getString("orderedQuantity"));
+  }
+
+  @Test
+  public void buildSelectedLinesFromReceipt_skipsLineWhenQtyOverrideIsZero() throws JSONException {
+    OrderLine ol = mock(OrderLine.class);
+    when(ol.getId()).thenReturn("ol-1");
+    ShipmentInOutLine rl = mockReceiptLine("rl-1", true, mock(Product.class), BigDecimal.valueOf(3), ol);
+
+    Map<String, BigDecimal> overrides = new HashMap<>();
+    overrides.put("rl-1", BigDecimal.ZERO);
+
+    JSONArray result = new CreatePurchaseInvoiceHandler()
+        .buildSelectedLinesFromReceipt(receiptWith(rl), overrides, null);
+
+    assertEquals(0, result.length());
+  }
+
+  @Test
+  public void buildSelectedLinesFromReceipt_multipleLines_onlyActiveWithOrderLineIncluded() throws JSONException {
+    OrderLine ol1 = mock(OrderLine.class);
+    when(ol1.getId()).thenReturn("ol-1");
+    OrderLine ol2 = mock(OrderLine.class);
+    when(ol2.getId()).thenReturn("ol-2");
+
+    ShipmentInOutLine active = mockReceiptLine("rl-a", true, mock(Product.class), BigDecimal.valueOf(2), ol1);
+    ShipmentInOutLine inactive = mockReceiptLine("rl-b", false, mock(Product.class), BigDecimal.ONE, ol2);
+    ShipmentInOutLine noLink = mockReceiptLine("rl-c", true, mock(Product.class), BigDecimal.ONE, null);
+
+    JSONArray result = new CreatePurchaseInvoiceHandler()
+        .buildSelectedLinesFromReceipt(receiptWith(active, inactive, noLink), Collections.emptyMap(), null);
+
+    assertEquals(1, result.length());
+    assertEquals("ol-1", result.getJSONObject(0).getString("id"));
   }
 }
