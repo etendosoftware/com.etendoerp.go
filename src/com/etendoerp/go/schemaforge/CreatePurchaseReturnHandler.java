@@ -36,12 +36,9 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.erpCommon.utility.CSResponse;
-import org.openbravo.erpCommon.utility.DocumentNoData;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
-import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * NeoHandler that creates a draft Purchase Return Receipt (M_InOut with movementType='V-') from a
@@ -195,36 +192,16 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
       return;
     }
     String clientId = returnReceipt.getClient().getId();
-    DalConnectionProvider conn = new DalConnectionProvider(false);
-
-    if (returnReceipt.getDocumentType() != null) {
-      try {
-        CSResponse cs = DocumentNoData.nextDocType(conn,
-            returnReceipt.getDocumentType().getId(), clientId, "Y");
-        if (cs != null && StringUtils.isNotBlank(cs.razon)) {
-          returnReceipt.setDocumentNo(cs.razon);
-          OBDal.getInstance().save(returnReceipt);
-          OBDal.getInstance().flush();
-          return;
-        }
-      } catch (Exception ex) {
-        log.debug("nextDocType failed for purchase return: {}", ex.getMessage());
-      }
-    }
-
-    try {
-      CSResponse cs = DocumentNoData.nextDoc(conn, "DocumentNo_M_InOut", clientId, "Y");
-      if (cs != null && StringUtils.isNotBlank(cs.razon)) {
-        returnReceipt.setDocumentNo(cs.razon);
-        OBDal.getInstance().save(returnReceipt);
-        OBDal.getInstance().flush();
-      } else {
-        log.warn("Could not generate documentNo for purchase return receipt {}",
-            returnReceipt.getId());
-      }
-    } catch (Exception ex) {
-      log.warn("Could not generate documentNo for purchase return {}: {}", returnReceipt.getId(),
-          ex.getMessage());
+    String docTypeId = returnReceipt.getDocumentType() != null
+        ? returnReceipt.getDocumentType().getId() : "";
+    String docNo = NeoHandlerUtils.fetchDocumentNo(docTypeId, clientId, "M_InOut", log);
+    if (StringUtils.isNotBlank(docNo)) {
+      returnReceipt.setDocumentNo(docNo);
+      OBDal.getInstance().save(returnReceipt);
+      OBDal.getInstance().flush();
+    } else {
+      log.warn("Could not generate documentNo for purchase return receipt {}",
+          returnReceipt.getId());
     }
   }
 
