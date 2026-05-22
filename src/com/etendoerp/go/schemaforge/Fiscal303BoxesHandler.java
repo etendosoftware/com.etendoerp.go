@@ -115,7 +115,8 @@ class Fiscal303BoxesHandler {
         response.setContentType("application/json;charset=UTF-8");
         response.getWriter().write(result.toString());
       } else {
-        handleGenerate(orgId, year, period, response);
+        String tipo = request.getParameter("tipo");
+        handleGenerate(orgId, year, period, tipo, response);
       }
     } catch (Exception e) {
       log.error("Error in /fiscal303/" + entityName, e);
@@ -123,7 +124,7 @@ class Fiscal303BoxesHandler {
     }
   }
 
-  private void handleGenerate(String orgId, int year, String period,
+  private void handleGenerate(String orgId, int year, String period, String tipo,
       HttpServletResponse response) throws Exception {
     Organization org = OBDal.getInstance().get(Organization.class, orgId);
 
@@ -148,6 +149,19 @@ class Fiscal303BoxesHandler {
     Map<String, String> inputParams = new HashMap<>();
     String filename = "303_" + period + "_" + year;
     inputParams.put("FileName", filename);
+    // Declaration type required by AEAT303_Utility.getCheckedInputParameter.
+    // Maps result kind from frontend: compensar→C, ingresar→I, devolver→V, default→N (result zero).
+    String decl = "N";
+    if ("C".equals(tipo) || "I".equals(tipo) || "V".equals(tipo) || "U".equals(tipo) || "G".equals(tipo)) {
+      decl = tipo;
+    } else if ("compensar".equals(tipo)) {
+      decl = "C";
+    } else if ("ingresar".equals(tipo)) {
+      decl = "I";
+    } else if ("devolver".equals(tipo)) {
+      decl = "V";
+    }
+    inputParams.put("Declaration_" + decl, "Y");
 
     OBTL_TaxReport_I report = (OBTL_TaxReport_I)
         Class.forName(className).getDeclaredConstructor().newInstance();
