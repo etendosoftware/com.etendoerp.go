@@ -308,6 +308,48 @@ public class Fiscal303BoxesHandlerTest {
     verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
   }
 
+  /**
+   * POST to /fiscal303/generate must be rejected with 405 — only GET is supported.
+   */
+  @Test
+  public void testHandleGenerateRejectsPostMethod() throws IOException {
+    NeoServlet servlet = mock(NeoServlet.class);
+    HttpServletResponse res = mock(HttpServletResponse.class);
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    h.handle("generate", "POST", mock(HttpServletRequest.class), res);
+    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED), anyString());
+  }
+
+  /**
+   * GET /fiscal303/generate with no year param must be rejected with 400
+   * before reaching the DB layer.
+   */
+  @Test
+  public void testHandleGenerateMissingYearReturns400() throws IOException {
+    NeoServlet servlet = mock(NeoServlet.class);
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse res = mock(HttpServletResponse.class);
+    // getParameter returns null by default — year is missing
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    h.handle("generate", "GET", req, res);
+    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+  }
+
+  /**
+   * GET /fiscal303/generate with year but no period must be rejected with 400.
+   */
+  @Test
+  public void testHandleGenerateMissingPeriodReturns400() throws IOException {
+    NeoServlet servlet = mock(NeoServlet.class);
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse res = mock(HttpServletResponse.class);
+    when(req.getParameter("year")).thenReturn("2026");
+    // period is null (default)
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    h.handle("generate", "GET", req, res);
+    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+  }
+
   // ── no-gaps coverage ─────────────────────────────────────────────────────
 
   /**
