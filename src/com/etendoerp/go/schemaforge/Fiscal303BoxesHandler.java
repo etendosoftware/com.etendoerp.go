@@ -162,6 +162,8 @@ class Fiscal303BoxesHandler {
       decl = "V";
     }
     inputParams.put("Declaration_" + decl, "Y");
+    // Box 65: percentage attributable to the State (always 100 for Modelo 303).
+    inputParams.put("ToPublicTreasury", "100");
 
     OBTL_TaxReport_I report = (OBTL_TaxReport_I)
         Class.forName(className).getDeclaredConstructor().newInstance();
