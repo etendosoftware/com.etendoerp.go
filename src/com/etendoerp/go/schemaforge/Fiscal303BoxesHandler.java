@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -26,6 +27,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -51,6 +53,7 @@ import org.openbravo.module.aeat303.es.report.v2014.AEAT303Report2014Dao;
 import org.openbravo.module.aeat303.es.util.AEAT303CalculationsHelper;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.TaxReportParameter;
+import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxReport_I;
 
 class Fiscal303BoxesHandler {
 
@@ -122,7 +125,48 @@ class Fiscal303BoxesHandler {
 
   private void handleGenerate(String orgId, int year, String period,
       HttpServletResponse response) throws Exception {
-    servlet.sendError(response, 501, "Not yet implemented");
+    Organization org = OBDal.getInstance().get(Organization.class, orgId);
+
+    boolean quarterly = period.startsWith("T");
+    String valueKey = quarterly ? "AEAT303_Q_" + year : "AEAT303_M_" + year;
+
+    TaxReport taxReport   = resolveTaxReport(orgId, valueKey);
+    AcctSchema acctSchema = resolveAcctSchema(org);
+    List<Period> periods  = resolvePeriods(orgId, year, period);
+
+    if (periods.isEmpty()) {
+      throw new OBException(
+          "No fiscal periods found for org=" + orgId + " year=" + year + " period=" + period);
+    }
+
+    String yearId    = periods.get(0).getYear().getId();
+    String periodIds = periods.stream().map(Period::getId).collect(Collectors.joining(","));
+    String reportId  = taxReport.getId();
+    String acctId    = acctSchema.getId();
+    String className = taxReport.getJavaClassName();
+
+    Map<String, String> inputParams = new HashMap<>();
+    String filename = "303_" + period + "_" + year;
+    inputParams.put("FileName", filename);
+
+    OBTL_TaxReport_I report = (OBTL_TaxReport_I)
+        Class.forName(className).getDeclaredConstructor().newInstance();
+
+    HashMap<String, Object> result =
+        report.generateElectronicFile(orgId, reportId, acctId, yearId, periodIds, inputParams);
+
+    StringBuffer fileContent = (StringBuffer) result.get("file");
+    if (fileContent == null) {
+      throw new OBException("generateElectronicFile returned no file content");
+    }
+
+    byte[] bytes = fileContent.toString().getBytes(StandardCharsets.ISO_8859_1);
+    response.setContentType("text/plain");
+    response.setCharacterEncoding("ISO-8859-1");
+    response.setHeader("Content-Disposition", "attachment; filename=\"" + filename + ".txt\"");
+    response.setContentLength(bytes.length);
+    response.getOutputStream().write(bytes);
+    response.flushBuffer();
   }
 
   // ── Internal ─────────────────────────────────────────────────────
