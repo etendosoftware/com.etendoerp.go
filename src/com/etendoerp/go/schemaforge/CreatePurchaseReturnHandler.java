@@ -117,37 +117,7 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
         OBDal.getInstance().save(returnReceipt);
         OBDal.getInstance().flush();
 
-        long lineNo = 10L;
-        for (ShipmentInOutLine originalLine : original.getMaterialMgmtShipmentInOutLineList()) {
-          if (!originalLine.isActive() || originalLine.getProduct() == null) {
-            continue;
-          }
-          BigDecimal returnQty = lineQtyMap.get(originalLine.getId());
-          if (returnQty == null || returnQty.compareTo(BigDecimal.ZERO) <= 0) {
-            continue;
-          }
-
-          ShipmentInOutLine returnLine = OBProvider.getInstance().get(ShipmentInOutLine.class);
-          returnLine.setClient(original.getClient());
-          returnLine.setOrganization(original.getOrganization());
-          returnLine.setShipmentReceipt(returnReceipt);
-          returnLine.setLineNo(lineNo);
-          lineNo += 10L;
-          returnLine.setProduct(originalLine.getProduct());
-          returnLine.setUOM(originalLine.getUOM());
-          if (originalLine.getStorageBin() != null) {
-            returnLine.setStorageBin(originalLine.getStorageBin());
-          }
-          returnLine.setMovementQuantity(returnQty.negate());
-          returnLine.setCanceledInoutLine(originalLine);
-          returnLine.setCreatedBy(currentUser);
-          returnLine.setUpdatedBy(currentUser);
-          returnLine.setCreationDate(new Date());
-          returnLine.setUpdated(new Date());
-
-          returnReceipt.getMaterialMgmtShipmentInOutLineList().add(returnLine);
-          OBDal.getInstance().save(returnLine);
-        }
+        buildReturnLines(original, returnReceipt, lineQtyMap, currentUser);
 
         OBDal.getInstance().flush();
         OBDal.getInstance().refresh(returnReceipt);
@@ -174,6 +144,49 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the purchase return");
     }
+  }
+
+  private void buildReturnLines(ShipmentInOut original, ShipmentInOut returnReceipt,
+      Map<String, BigDecimal> lineQtyMap, User currentUser) {
+    long lineNo = 10L;
+    for (ShipmentInOutLine originalLine : original.getMaterialMgmtShipmentInOutLineList()) {
+      BigDecimal returnQty = resolveReturnQty(originalLine, lineQtyMap);
+      if (returnQty != null) {
+        addReturnLine(original, originalLine, returnReceipt, returnQty, currentUser, lineNo);
+        lineNo += 10L;
+      }
+    }
+  }
+
+  private BigDecimal resolveReturnQty(ShipmentInOutLine originalLine,
+      Map<String, BigDecimal> lineQtyMap) {
+    if (!originalLine.isActive() || originalLine.getProduct() == null) {
+      return null;
+    }
+    BigDecimal qty = lineQtyMap.get(originalLine.getId());
+    return (qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) ? null : qty;
+  }
+
+  private void addReturnLine(ShipmentInOut original, ShipmentInOutLine originalLine,
+      ShipmentInOut returnReceipt, BigDecimal returnQty, User currentUser, long lineNo) {
+    ShipmentInOutLine returnLine = OBProvider.getInstance().get(ShipmentInOutLine.class);
+    returnLine.setClient(original.getClient());
+    returnLine.setOrganization(original.getOrganization());
+    returnLine.setShipmentReceipt(returnReceipt);
+    returnLine.setLineNo(lineNo);
+    returnLine.setProduct(originalLine.getProduct());
+    returnLine.setUOM(originalLine.getUOM());
+    if (originalLine.getStorageBin() != null) {
+      returnLine.setStorageBin(originalLine.getStorageBin());
+    }
+    returnLine.setMovementQuantity(returnQty.negate());
+    returnLine.setCanceledInoutLine(originalLine);
+    returnLine.setCreatedBy(currentUser);
+    returnLine.setUpdatedBy(currentUser);
+    returnLine.setCreationDate(new Date());
+    returnLine.setUpdated(new Date());
+    returnReceipt.getMaterialMgmtShipmentInOutLineList().add(returnLine);
+    OBDal.getInstance().save(returnLine);
   }
 
   private void ensureDocumentNo(ShipmentInOut returnReceipt) {

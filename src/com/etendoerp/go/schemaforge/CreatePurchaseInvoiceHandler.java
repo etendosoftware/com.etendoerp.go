@@ -322,43 +322,56 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
    */
   protected JSONArray buildSelectedLinesFromReceipt(ShipmentInOut receipt,
       Map<String, BigDecimal> qtyOverrides, Order linkedOrder) {
-    Map<String, OrderLine> orderLineByProduct = new HashMap<>();
-    if (linkedOrder != null) {
-      for (OrderLine ol : linkedOrder.getOrderLineList()) {
-        if (ol.isActive() && ol.getProduct() != null) {
-          orderLineByProduct.putIfAbsent(ol.getProduct().getId(), ol);
-        }
-      }
-    }
-
+    Map<String, OrderLine> orderLineByProduct = buildOrderLineByProduct(linkedOrder);
     JSONArray selectedLines = new JSONArray();
     for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
-      if (!rl.isActive() || rl.getProduct() == null) {
-        continue;
-      }
-      OrderLine ol = rl.getSalesOrderLine();
-      if (ol == null) {
-        ol = orderLineByProduct.get(rl.getProduct().getId());
-      }
-      if (ol == null) {
-        continue;
-      }
-      BigDecimal qty = qtyOverrides.containsKey(rl.getId())
-          ? qtyOverrides.get(rl.getId())
-          : rl.getMovementQuantity();
-      if (qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) {
-        continue;
-      }
-      try {
-        JSONObject entry = new JSONObject();
-        entry.put("id", ol.getId());
-        entry.put("orderedQuantity", qty.toPlainString());
+      JSONObject entry = buildLineEntry(rl, orderLineByProduct, qtyOverrides);
+      if (entry != null) {
         selectedLines.put(entry);
-      } catch (Exception e) {
-        log.warn("Failed to add receipt line {} to selectedLines: {}", rl.getId(), e.getMessage());
       }
     }
     return selectedLines;
+  }
+
+  private Map<String, OrderLine> buildOrderLineByProduct(Order linkedOrder) {
+    Map<String, OrderLine> result = new HashMap<>();
+    if (linkedOrder != null) {
+      for (OrderLine ol : linkedOrder.getOrderLineList()) {
+        if (ol.isActive() && ol.getProduct() != null) {
+          result.putIfAbsent(ol.getProduct().getId(), ol);
+        }
+      }
+    }
+    return result;
+  }
+
+  private JSONObject buildLineEntry(ShipmentInOutLine rl,
+      Map<String, OrderLine> orderLineByProduct, Map<String, BigDecimal> qtyOverrides) {
+    if (!rl.isActive() || rl.getProduct() == null) {
+      return null;
+    }
+    OrderLine ol = rl.getSalesOrderLine();
+    if (ol == null) {
+      ol = orderLineByProduct.get(rl.getProduct().getId());
+    }
+    if (ol == null) {
+      return null;
+    }
+    BigDecimal qty = qtyOverrides.containsKey(rl.getId())
+        ? qtyOverrides.get(rl.getId())
+        : rl.getMovementQuantity();
+    if (qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) {
+      return null;
+    }
+    try {
+      JSONObject entry = new JSONObject();
+      entry.put("id", ol.getId());
+      entry.put("orderedQuantity", qty.toPlainString());
+      return entry;
+    } catch (Exception e) {
+      log.warn("Failed to add receipt line {} to selectedLines: {}", rl.getId(), e.getMessage());
+      return null;
+    }
   }
 
   private Order deriveOrderFromLines(ShipmentInOut receipt) {
