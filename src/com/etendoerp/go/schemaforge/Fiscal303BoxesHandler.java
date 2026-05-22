@@ -57,6 +57,7 @@ class Fiscal303BoxesHandler {
   private static final Logger log = Logger.getLogger(Fiscal303BoxesHandler.class);
 
   private static final String BOXES           = "boxes";
+  private static final String GENERATE        = "generate";
   private static final String VAT_SALES       = "VAT_SALES";
   private static final String VAT_PURCHASE    = "VAT_PURCHASE";
   private static final String PURCHASE        = "Purchase";
@@ -83,30 +84,45 @@ class Fiscal303BoxesHandler {
 
   void handle(String entityName, String method, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
-    if (!"GET".equals(method) || !BOXES.equals(entityName)) {
+    if (!BOXES.equals(entityName) && !GENERATE.equals(entityName)) {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          "Only GET /fiscal303/boxes is supported");
+          "Unknown fiscal303 entity: " + entityName);
       return;
     }
+    if (!"GET".equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Only GET is supported for /fiscal303/" + entityName);
+      return;
+    }
+
+    String yearStr = request.getParameter("year");
+    String period  = request.getParameter("period");
+    if (yearStr == null || period == null) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Missing required params: year, period");
+      return;
+    }
+
     try {
-      String yearStr = request.getParameter("year");
-      String period  = request.getParameter("period");
-      if (yearStr == null || period == null) {
-        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Missing required params: year, period");
-        return;
-      }
       int year = Integer.parseInt(yearStr);
       String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-
-      ComputeResult cr = computeBoxes(orgId, year, period);
-      JSONObject result = buildResponse(cr.boxes, cr.sources);
-      response.setContentType("application/json;charset=UTF-8");
-      response.getWriter().write(result.toString());
+      if (BOXES.equals(entityName)) {
+        ComputeResult cr = computeBoxes(orgId, year, period);
+        JSONObject result = buildResponse(cr.boxes, cr.sources);
+        response.setContentType("application/json;charset=UTF-8");
+        response.getWriter().write(result.toString());
+      } else {
+        handleGenerate(orgId, year, period, response);
+      }
     } catch (Exception e) {
-      log.error("Error computing 303 boxes", e);
+      log.error("Error in /fiscal303/" + entityName, e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
     }
+  }
+
+  private void handleGenerate(String orgId, int year, String period,
+      HttpServletResponse response) throws Exception {
+    servlet.sendError(response, 501, "Not yet implemented");
   }
 
   // ── Internal ─────────────────────────────────────────────────────
