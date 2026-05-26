@@ -26,7 +26,6 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 
-import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Named;
 
 import org.apache.commons.lang3.StringUtils;
@@ -81,7 +80,6 @@ import org.openbravo.dal.service.OBDal;
  * <p>The {@code balance} column is the running account balance after each transaction,
  * computed as {@code currentBalance - SUM(subsequent transactions)}.
  */
-@ApplicationScoped
 @Named("financial-account-transactions")
 public class FinancialAccountTransactionsHandler implements NeoHandler {
 
