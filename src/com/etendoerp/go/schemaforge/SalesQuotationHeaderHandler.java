@@ -39,9 +39,12 @@ import javax.inject.Named;
  *       {@link AbstractOrderHeaderHandler#syncTotalDiscountOnDocAction},
  *       used by {@code SendToEvaluationModal} when confirming a draft quotation (DR→UE)</li>
  * </ul>
+ *
+ * <p>Currency / price-list / exchange-rate behaviors are inherited from
+ * {@link AbstractOrderHeaderHandler#afterCallout}.
  */
 @Named("salesQuotationHeaderHandler")
-public class SalesQuotationHeaderHandler implements NeoHandler {
+public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
@@ -53,6 +56,10 @@ public class SalesQuotationHeaderHandler implements NeoHandler {
   public NeoResponse handle(NeoContext context) {
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
     AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction(context, totalDiscountService, false);
+    NeoResponse blocked = AbstractOrderHeaderHandler.blockCompleteWhenNoExchangeRate(context);
+    if (blocked != null) {
+      return blocked;
+    }
     NeoResponse result = cloneRecordHandler.handle(context);
     if (result != null) {
       return result;
