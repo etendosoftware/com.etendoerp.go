@@ -564,6 +564,57 @@ Si un selector tiene un `AD_Validation` con codigo que referencia parametros (ej
 GET /sws/neo/sales-order/OrderLine/selectors/M_Product_ID?q=laptop&M_Product_Category_ID=CAT123
 ```
 
+### Context params en MCP `neo_selectors`
+
+El tool MCP `neo_selectors` acepta contexto estructurado para resolver selectors dependientes sin que el agente tenga que hardcodear ids ni conocer los nombres internos de todos los parametros de validacion.
+
+Campos soportados:
+
+- `recordContext`: valores del registro actual.
+- `parentContext`: valores del header/padre cuando se consulta un selector de lineas.
+- `parentId`: id del registro padre para entidades hijas.
+
+Ejemplo para direccion de tercero:
+
+```json
+{
+  "spec": "return-to-vendor",
+  "entity": "header",
+  "column": "partnerAddress",
+  "recordContext": {
+    "businessPartner": "A6750F0D15334FB890C254369AC750A8"
+  }
+}
+```
+
+Ejemplo para impuesto de linea:
+
+```json
+{
+  "spec": "return-to-vendor",
+  "entity": "lines",
+  "column": "tax",
+  "parentId": "D1B79F29FA384A098BA64A6CC75B1F6D",
+  "parentContext": {
+    "businessPartner": "A6750F0D15334FB890C254369AC750A8",
+    "partnerAddress": "7E9A9E23C6ED4EABAE4B2CE9A9767D4A",
+    "orderDate": "2026-05-12",
+    "priceList": "8E7D3B782AC84D19A0BA84C3B46E61E8"
+  }
+}
+```
+
+El router MCP normaliza estos valores a los parametros que espera Classic:
+`C_BPartner_ID`, `C_BPartner_Location_ID`, `priceList`/`PriceList`/`M_PriceList_ID`,
+`isSOTrx`/`IsSOTrx`, `DateInvoiced` y `DateOrdered`. Las fechas ISO
+`YYYY-MM-DD` se convierten a `DD-MM-YYYY` porque varias validaciones Classic las
+consumen con ese formato. Si no se envia `isSOTrx`, se deriva desde la ventana y
+tambien se inyecta `isCustomer=Y` o `isVendor=Y` para selectors de terceros.
+
+Cuando el selector devuelve cero resultados, la respuesta MCP puede incluir
+`diagnostics.missingContext` con los parametros recomendados para reintentar la
+consulta.
+
 ---
 ### Internal selector package split
 
