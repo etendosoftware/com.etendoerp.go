@@ -17,6 +17,8 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
@@ -108,6 +110,7 @@ public class CreateReturnReceiptHandler implements NeoHandler {
         }
 
         OBDal.getInstance().flush();
+        storeSourceShipmentDocNo(returnReceipt.getId(), source.getDocumentNo());
         ensureDocumentNo(returnReceipt);
 
         JSONObject data = new JSONObject();
@@ -138,6 +141,21 @@ public class CreateReturnReceiptHandler implements NeoHandler {
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     return null;
+  }
+
+  @SuppressWarnings("java:S2077")
+  private void storeSourceShipmentDocNo(String returnReceiptId, String sourceDocNo) {
+    try {
+      Connection conn = OBDal.getInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(
+          "UPDATE M_InOut SET em_etgo_sourceshipmentdocno = ? WHERE M_InOut_ID = ?")) {
+        ps.setString(1, sourceDocNo);
+        ps.setString(2, returnReceiptId);
+        ps.executeUpdate();
+      }
+    } catch (Exception e) {
+      log.warn("Could not store source shipment docno on return receipt {}: {}", returnReceiptId, e.getMessage());
+    }
   }
 
   private int createReturnLines(ShipmentInOut returnReceipt, ShipmentInOut source,
