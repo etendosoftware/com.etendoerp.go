@@ -55,9 +55,13 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   @Inject
   private NeoCloneRecordHandler neoCloneRecordHandler;
 
+  @Inject
+  private CreateReturnReceiptHandler createReturnReceiptHandler;
+
   @Override
   public NeoResponse handle(NeoContext context) {
-    return NeoHeaderActionRouter.dispatch(context, createDraftInvoiceHandler, neoCloneRecordHandler);
+    return NeoHeaderActionRouter.dispatch(context,
+        createDraftInvoiceHandler, neoCloneRecordHandler, createReturnReceiptHandler);
   }
 
   @Override
