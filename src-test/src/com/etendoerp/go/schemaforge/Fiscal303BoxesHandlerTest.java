@@ -1015,6 +1015,51 @@ public class Fiscal303BoxesHandlerTest {
     return m;
   }
 
+  // ── /fiscal303/modified routing ──────────────────────────────────────────
+
+  /**
+   * POST to /fiscal303/modified must be rejected with 405 — only GET is supported.
+   */
+  @Test
+  public void testHandleModifiedRejectsPostMethod() throws IOException {
+    NeoServlet servlet = mock(NeoServlet.class);
+    HttpServletResponse res = mock(HttpServletResponse.class);
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    h.handle("modified", "POST", mock(HttpServletRequest.class), res);
+    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED), anyString());
+  }
+
+  /**
+   * GET /fiscal303/modified with no year param must return 400.
+   */
+  @Test
+  public void testHandleModifiedMissingYearReturns400() throws IOException {
+    NeoServlet servlet = mock(NeoServlet.class);
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse res = mock(HttpServletResponse.class);
+    // year is null (default), period is null (default)
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    h.handle("modified", "GET", req, res);
+    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+  }
+
+  /**
+   * GET /fiscal303/modified with year+period but no since must return 400
+   * before reaching the DB layer (OBContext is never touched).
+   */
+  @Test
+  public void testHandleModifiedMissingSinceReturns400() throws IOException {
+    NeoServlet servlet = mock(NeoServlet.class);
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse res = mock(HttpServletResponse.class);
+    when(req.getParameter("year")).thenReturn("2026");
+    when(req.getParameter("period")).thenReturn("T2");
+    // since is null (default)
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    h.handle("modified", "GET", req, res);
+    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+  }
+
   private static void assertBd(String expected, BigDecimal actual) {
     assertTrue("Expected " + expected + " but got " + actual,
         new BigDecimal(expected).compareTo(actual) == 0);

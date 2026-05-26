@@ -61,6 +61,7 @@ class Fiscal303BoxesHandler {
 
   private static final String BOXES           = "boxes";
   private static final String GENERATE        = "generate";
+  private static final String MODIFIED        = "modified";
   private static final String VAT_SALES       = "VAT_SALES";
   private static final String VAT_PURCHASE    = "VAT_PURCHASE";
   private static final String PURCHASE        = "Purchase";
@@ -87,7 +88,7 @@ class Fiscal303BoxesHandler {
 
   void handle(String entityName, String method, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
-    if (!BOXES.equals(entityName) && !GENERATE.equals(entityName)) {
+    if (!BOXES.equals(entityName) && !GENERATE.equals(entityName) && !MODIFIED.equals(entityName)) {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
           "Unknown fiscal303 entity: " + entityName);
       return;
@@ -105,6 +106,11 @@ class Fiscal303BoxesHandler {
           "Missing required params: year, period");
       return;
     }
+    if (MODIFIED.equals(entityName) && request.getParameter("since") == null) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Missing required param: since");
+      return;
+    }
 
     try {
       int year = Integer.parseInt(yearStr);
@@ -114,9 +120,12 @@ class Fiscal303BoxesHandler {
         JSONObject result = buildResponse(cr.boxes, cr.sources);
         response.setContentType("application/json;charset=UTF-8");
         response.getWriter().write(result.toString());
-      } else {
+      } else if (GENERATE.equals(entityName)) {
         String tipo = request.getParameter("tipo");
         handleGenerate(orgId, year, period, tipo, response);
+      } else {
+        long sinceMs = Long.parseLong(request.getParameter("since"));
+        handleModified(orgId, year, period, new java.util.Date(sinceMs), response);
       }
     } catch (Exception e) {
       log.error("Error in /fiscal303/" + entityName, e);
@@ -183,6 +192,46 @@ class Fiscal303BoxesHandler {
     response.setContentLength(bytes.length);
     response.getOutputStream().write(bytes);
     response.flushBuffer();
+  }
+
+  private void handleModified(String orgId, int year, String period, java.util.Date since,
+      HttpServletResponse response) throws Exception {
+    List<Period> periods = resolvePeriods(orgId, year, period);
+    if (periods.isEmpty()) {
+      writeModifiedJson(response, false, 0);
+      return;
+    }
+
+    java.util.Date fromDate = periods.get(0).getStartingDate();
+    java.util.Date toDate   = periods.get(periods.size() - 1).getEndingDate();
+    if (fromDate == null || toDate == null) {
+      writeModifiedJson(response, false, 0);
+      return;
+    }
+
+    Long count = (Long) OBDal.getInstance().getSession()
+        .createQuery(
+            "select count(i.id) from Invoice i "
+            + "where i.organization.id = :orgId "
+            + "  and i.invoiceDate between :fromDate and :toDate "
+            + "  and i.updated > :since")
+        .setParameter("orgId",    orgId)
+        .setParameter("fromDate", fromDate)
+        .setParameter("toDate",   toDate)
+        .setParameter("since",    since)
+        .uniqueResult();
+
+    boolean modified = count != null && count > 0;
+    writeModifiedJson(response, modified, count == null ? 0 : count.intValue());
+  }
+
+  private void writeModifiedJson(HttpServletResponse response, boolean modified, int count)
+      throws Exception {
+    JSONObject out = new JSONObject();
+    out.put("modified", modified);
+    out.put("count", count);
+    response.setContentType("application/json;charset=UTF-8");
+    response.getWriter().write(out.toString());
   }
 
   // ── Internal ─────────────────────────────────────────────────────
