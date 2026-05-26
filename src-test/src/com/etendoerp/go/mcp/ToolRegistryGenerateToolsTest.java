@@ -138,7 +138,7 @@ class ToolRegistryGenerateToolsTest {
   }
 
   @SuppressWarnings("unchecked")
-  private void mockEmptyEntities(@SuppressWarnings("unused") SFSpec spec) {
+  private void mockEmptyEntities() {
     OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
     when(mockOBDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
     when(entityCriteria.list()).thenReturn(Collections.emptyList());
@@ -191,11 +191,11 @@ class ToolRegistryGenerateToolsTest {
 
       SFSpec processSpec = createProcessSpec(SPEC_COMPLETE_ORDER);
       when(processSpec.getProcess()).thenReturn(null);
-      mockEmptyEntities(processSpec);
+      mockEmptyEntities();
 
       SFSpec reportSpec = createReportSpec(SPEC_PRINT_INVOICE);
       when(reportSpec.getProcess()).thenReturn(null);
-      mockEmptyEntities(reportSpec);
+      mockEmptyEntities();
 
       mockSpecCriteria(List.of(windowSpec, processSpec, reportSpec));
 
@@ -380,7 +380,7 @@ class ToolRegistryGenerateToolsTest {
     void processSpecWithAccessGeneratesTool() {
       SFSpec spec = createProcessSpec(SPEC_COMPLETE_ORDER);
       when(spec.getProcess()).thenReturn(null);
-      mockEmptyEntities(spec);
+      mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:process"));
@@ -423,7 +423,7 @@ class ToolRegistryGenerateToolsTest {
       when(adProcess.getId()).thenReturn(PROCESS_ID);
       when(spec.getProcess()).thenReturn(adProcess);
       accessMock.when(() -> NeoAccessUtils.hasProcessAccess(PROCESS_ID)).thenReturn(true);
-      mockEmptyEntities(spec);
+      mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:process"));
@@ -436,7 +436,7 @@ class ToolRegistryGenerateToolsTest {
     void processToolNameIsSnakeCase() {
       SFSpec spec = createProcessSpec("multi-step-process");
       when(spec.getProcess()).thenReturn(null);
-      mockEmptyEntities(spec);
+      mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:process"));
@@ -450,7 +450,7 @@ class ToolRegistryGenerateToolsTest {
       SFSpec spec = createProcessSpec(SPEC_COMPLETE_ORDER);
       when(spec.getProcess()).thenReturn(null);
       when(spec.getDescription()).thenReturn("Completes a sales order");
-      mockEmptyEntities(spec);
+      mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:process"));
@@ -475,7 +475,7 @@ class ToolRegistryGenerateToolsTest {
     void reportSpecWithAccessGeneratesTool() {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
       when(spec.getProcess()).thenReturn(null);
-      mockEmptyEntities(spec);
+      mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:report"));
@@ -516,7 +516,7 @@ class ToolRegistryGenerateToolsTest {
     void reportToolIncludesFormatParam() {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
       when(spec.getProcess()).thenReturn(null);
-      mockEmptyEntities(spec);
+      mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:report"));
@@ -536,7 +536,7 @@ class ToolRegistryGenerateToolsTest {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
       when(spec.getProcess()).thenReturn(null);
       when(spec.getDescription()).thenReturn("Generates a PDF invoice");
-      mockEmptyEntities(spec);
+      mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:report"));
@@ -564,11 +564,11 @@ class ToolRegistryGenerateToolsTest {
 
       SFSpec processSpec = createProcessSpec(SPEC_COMPLETE_ORDER);
       when(processSpec.getProcess()).thenReturn(null);
-      mockEmptyEntities(processSpec);
+      mockEmptyEntities();
 
       SFSpec reportSpec = createReportSpec(SPEC_PRINT_INVOICE);
       when(reportSpec.getProcess()).thenReturn(null);
-      mockEmptyEntities(reportSpec);
+      mockEmptyEntities();
 
       mockSpecCriteria(List.of(windowSpec, processSpec, reportSpec));
 

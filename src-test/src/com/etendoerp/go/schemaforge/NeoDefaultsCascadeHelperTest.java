@@ -757,8 +757,7 @@ public class NeoDefaultsCascadeHelperTest {
       Set<String> protectedFields = new HashSet<>();
       protectedFields.add("protectedField");
 
-      NeoDefaultsService.CalloutCascadeResult result =
-          NeoDefaultsCascadeHelper.executeCalloutCascade(
+      NeoDefaultsCascadeHelper.executeCalloutCascade(
               ctx, adTab, defaults, new HashSet<>(), protectedFields);
 
       assertEquals("Protected field must keep its original value",

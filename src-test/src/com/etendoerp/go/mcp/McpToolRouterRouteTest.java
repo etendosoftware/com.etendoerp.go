@@ -78,7 +78,6 @@ class McpToolRouterRouteTest {
 
   private static final String SPEC_NAME = "sales-order";
   private static final String ENTITY_NAME = "header";
-  private static final String RECORD_ID = "ABC123DEF456";
   private static final String SPEC_ID = "spec-id-001";
   private static final String ENTITY_ID = "entity-id-001";
   private static final String TAB_ID = "tab-id-001";

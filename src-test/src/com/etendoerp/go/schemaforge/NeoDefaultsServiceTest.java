@@ -23,8 +23,6 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -65,6 +63,7 @@ import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.ad.utility.Sequence;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.schemaforge.NeoMandatoryFieldValidator;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -94,17 +93,6 @@ public class NeoDefaultsServiceTest {
     Method method = NeoDefaultsService.class.getDeclaredMethod(methodName, paramTypes);
     method.setAccessible(true);
     return method.invoke(null, args);
-  }
-
-  /**
-   * Creates a minimal NeoContext with the given sfEntity, obContext, and adTab.
-   */
-  private NeoContext buildCtx(SFEntity sfEntity, OBContext obContext, Tab adTab) {
-    return NeoContext.builder()
-        .sfEntity(sfEntity)
-        .obContext(obContext)
-        .adTab(adTab)
-        .build();
   }
 
   /**
@@ -1030,14 +1018,14 @@ public class NeoDefaultsServiceTest {
   }
 
   @Test
-  public void testInjectMandatoryDefaultsNullTabNoOp() throws Exception {
+  public void testInjectMandatoryDefaultsNullTabNoOp() {
     JSONObject body = new JSONObject();
     NeoDefaultsService.injectMandatoryDefaults(body, null, mock(NeoContext.class));
     assertEquals(0, body.length());
   }
 
   @Test
-  public void testInjectMandatoryDefaultsNullCtxNoOp() throws Exception {
+  public void testInjectMandatoryDefaultsNullCtxNoOp() {
     JSONObject body = new JSONObject();
     NeoDefaultsService.injectMandatoryDefaults(body, mock(Tab.class), null);
     assertEquals(0, body.length());
@@ -1049,7 +1037,7 @@ public class NeoDefaultsServiceTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  public void testInjectMandatoryDefaultsSkipsKeyAndAuditColumns() throws Exception {
+  public void testInjectMandatoryDefaultsSkipsKeyAndAuditColumns() {
     JSONObject body = new JSONObject();
     Tab adTab = mock(Tab.class);
     Table table = mock(Table.class);
@@ -1112,7 +1100,7 @@ public class NeoDefaultsServiceTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  public void testInjectMandatoryDefaultsSkipsInactiveAndNonMandatory() throws Exception {
+  public void testInjectMandatoryDefaultsSkipsInactiveAndNonMandatory() {
     JSONObject body = new JSONObject();
     Tab adTab = mock(Tab.class);
     Table table = mock(Table.class);
@@ -1202,7 +1190,7 @@ public class NeoDefaultsServiceTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  public void testInjectMandatoryDefaultsNoCascadeWhenRunCascadeFalse() throws Exception {
+  public void testInjectMandatoryDefaultsNoCascadeWhenRunCascadeFalse() {
     JSONObject body = new JSONObject();
     Tab adTab = mock(Tab.class);
     Table table = mock(Table.class);
@@ -1243,7 +1231,7 @@ public class NeoDefaultsServiceTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  public void testInjectMandatoryDefaultsTwoArgOverload() throws Exception {
+  public void testInjectMandatoryDefaultsTwoArgOverload() {
     JSONObject body = new JSONObject();
     Tab adTab = mock(Tab.class);
     Table table = mock(Table.class);
@@ -1284,7 +1272,7 @@ public class NeoDefaultsServiceTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  public void testInjectMandatoryDefaultsNullDalEntityReturnsEarly() throws Exception {
+  public void testInjectMandatoryDefaultsNullDalEntityReturnsEarly() {
     JSONObject body = new JSONObject();
     Tab adTab = mock(Tab.class);
     Table table = mock(Table.class);
@@ -1318,14 +1306,14 @@ public class NeoDefaultsServiceTest {
 
   @Test
   public void testFindMissingMandatoryFieldsNullBodyReturnsEmpty() {
-    List<String> missing = NeoDefaultsService.findMissingMandatoryFields(null, mock(Tab.class));
+    List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(null, mock(Tab.class));
     assertNotNull(missing);
     assertTrue(missing.isEmpty());
   }
 
   @Test
   public void testFindMissingMandatoryFieldsNullTabReturnsEmpty() {
-    List<String> missing = NeoDefaultsService.findMissingMandatoryFields(
+    List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(
         new JSONObject(), null);
     assertNotNull(missing);
     assertTrue(missing.isEmpty());
@@ -1335,7 +1323,7 @@ public class NeoDefaultsServiceTest {
   public void testFindMissingMandatoryFieldsNullTableReturnsEmpty() {
     Tab adTab = mock(Tab.class);
     when(adTab.getTable()).thenReturn(null);
-    List<String> missing = NeoDefaultsService.findMissingMandatoryFields(
+    List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(
         new JSONObject(), adTab);
     assertNotNull(missing);
     assertTrue(missing.isEmpty());
@@ -1387,7 +1375,7 @@ public class NeoDefaultsServiceTest {
       modelMock.when(ModelProvider::getInstance).thenReturn(mp);
       when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
 
-      List<String> missing = NeoDefaultsService.findMissingMandatoryFields(
+      List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(
           new JSONObject(), adTab);
 
       assertTrue("All columns should be skipped", missing.isEmpty());
@@ -1423,7 +1411,7 @@ public class NeoDefaultsServiceTest {
       when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
 
       JSONObject body = new JSONObject();
-      List<String> missing = NeoDefaultsService.findMissingMandatoryFields(body, adTab);
+      List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(body, adTab);
 
       assertEquals(1, missing.size());
       assertEquals("businessPartner", missing.get(0));
@@ -1473,7 +1461,7 @@ public class NeoDefaultsServiceTest {
       body.put("businessPartner", JSONObject.NULL);
       body.put("documentStatus", "  ");
 
-      List<String> missing = NeoDefaultsService.findMissingMandatoryFields(body, adTab);
+      List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(body, adTab);
 
       assertEquals(2, missing.size());
       assertTrue(missing.contains("businessPartner"));
@@ -1524,7 +1512,7 @@ public class NeoDefaultsServiceTest {
       Set<String> userFields = new HashSet<>();
       userFields.add("product");
 
-      List<String> missing = NeoDefaultsService.findMissingMandatoryFields(
+      List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(
           body, adTab, userFields);
 
       assertEquals(1, missing.size());
@@ -1563,7 +1551,7 @@ public class NeoDefaultsServiceTest {
       JSONObject body = new JSONObject();
       body.put("businessPartner", "BP-123");
 
-      List<String> missing = NeoDefaultsService.findMissingMandatoryFields(body, adTab);
+      List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(body, adTab);
 
       assertTrue("Should not be missing when value is present", missing.isEmpty());
     }
@@ -1585,7 +1573,7 @@ public class NeoDefaultsServiceTest {
       modelMock.when(ModelProvider::getInstance).thenReturn(mp);
       when(mp.getEntityByTableId("TABLE-MISSING")).thenReturn(null);
 
-      List<String> missing = NeoDefaultsService.findMissingMandatoryFields(
+      List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(
           new JSONObject(), adTab);
       assertTrue(missing.isEmpty());
     }
@@ -2274,7 +2262,7 @@ public class NeoDefaultsServiceTest {
       when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
 
       // Two-arg overload should check all mandatory columns (no filter)
-      List<String> missing = NeoDefaultsService.findMissingMandatoryFields(
+      List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(
           new JSONObject(), adTab);
 
       assertEquals(1, missing.size());
@@ -2310,7 +2298,7 @@ public class NeoDefaultsServiceTest {
       modelMock.when(ModelProvider::getInstance).thenReturn(mp);
       when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
 
-      List<String> missing = NeoDefaultsService.findMissingMandatoryFields(
+      List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(
           new JSONObject(), adTab);
 
       assertTrue("Integer fields should be skipped", missing.isEmpty());
@@ -2345,7 +2333,7 @@ public class NeoDefaultsServiceTest {
       modelMock.when(ModelProvider::getInstance).thenReturn(mp);
       when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
 
-      List<String> missing = NeoDefaultsService.findMissingMandatoryFields(
+      List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(
           new JSONObject(), adTab);
 
       assertTrue("Amount fields should be skipped", missing.isEmpty());
@@ -2380,7 +2368,7 @@ public class NeoDefaultsServiceTest {
       modelMock.when(ModelProvider::getInstance).thenReturn(mp);
       when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
 
-      List<String> missing = NeoDefaultsService.findMissingMandatoryFields(
+      List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(
           new JSONObject(), adTab);
 
       assertTrue("Quantity fields should be skipped", missing.isEmpty());
@@ -2409,7 +2397,7 @@ public class NeoDefaultsServiceTest {
       modelMock.when(ModelProvider::getInstance).thenReturn(mp);
       when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
 
-      List<String> missing = NeoDefaultsService.findMissingMandatoryFields(
+      List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(
           new JSONObject(), adTab);
 
       assertTrue("Null property should be skipped", missing.isEmpty());

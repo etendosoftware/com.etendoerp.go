@@ -66,7 +66,6 @@ public class OAuth2ServletTest {
   private static final String ADMIN_USER_ID = "0";
   private static final String ADMIN_ROLE_ID = "0";
   private static final String TEST_CLIENT_ID = "etgo-test123456";
-  private static final String TEST_CLIENT_SECRET = "a1b2c3d4";
   private static final String TEST_CLIENT_DB_ID = "uuid-client-1";
 
   private final OAuth2Servlet servlet = new OAuth2Servlet();

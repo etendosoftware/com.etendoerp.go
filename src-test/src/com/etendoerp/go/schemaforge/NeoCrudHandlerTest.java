@@ -122,23 +122,6 @@ class NeoCrudHandlerTest {
         .build();
   }
 
-  private NeoContext buildContextWithSpec(String specName, String entityName,
-      String method, String recordId, Tab adTab, SFEntity sfEntity,
-      JSONObject body, Map<String, String> queryParams) {
-    return NeoContext.builder()
-        .specName(specName)
-        .entityName(entityName)
-        .httpMethod(method)
-        .recordId(recordId)
-        .requestBody(body)
-        .queryParams(queryParams)
-        .adTab(adTab)
-        .sfEntity(sfEntity)
-        .obContext(mock(OBContext.class))
-        .endpointType(NeoEndpointType.CRUD)
-        .build();
-  }
-
   private static Object invokePrivate(Object target, String methodName,
       Class<?>[] paramTypes, Object... args) throws Exception {
     Method method = target.getClass().getDeclaredMethod(methodName, paramTypes);
