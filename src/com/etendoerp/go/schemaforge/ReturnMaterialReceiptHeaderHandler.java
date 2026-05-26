@@ -49,6 +49,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ReturnMaterialReceiptHeaderHandler.class);
   private static final String FIELD_SOURCE_SHIPMENT_DOC_NO = "sourceShipmentDocNo";
+  private static final String FIELD_ORDER_REFERENCE = "orderReference";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -71,6 +72,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
         String sourceDocNo = docNoMap.get(id);
         if (sourceDocNo != null) {
           rec.put(FIELD_SOURCE_SHIPMENT_DOC_NO, sourceDocNo);
+          rec.put(FIELD_ORDER_REFERENCE, sourceDocNo);
         }
       }
       if (context.getRecordId() != null) {
