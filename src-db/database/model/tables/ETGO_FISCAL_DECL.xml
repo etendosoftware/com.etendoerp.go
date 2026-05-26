@@ -37,7 +37,7 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="FISCAL_YEAR" primaryKey="false" required="true" type="INTEGER" autoIncrement="false">
+      <column name="FISCAL_YEAR" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
@@ -64,11 +64,11 @@
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_FISCAL_DECL_CLI_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
-      <foreign-key foreignTable="AD_ORG" name="ETGO_FISCAL_DECL_ORG_FK">
-        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
-      </foreign-key>
       <foreign-key foreignTable="AD_USER" name="ETGO_FISCAL_DECL_CRTBY_FK">
         <reference local="CREATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_FISCAL_DECL_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
       </foreign-key>
       <foreign-key foreignTable="AD_USER" name="ETGO_FISCAL_DECL_UPDBY_FK">
         <reference local="UPDATEDBY" foreign="AD_USER_ID"/>
@@ -81,8 +81,8 @@
         <unique-column name="PERIOD"/>
         <unique-column name="DECL_TYPE"/>
       </unique>
-      <check name="ETGO_FISCAL_DECL_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_FISCAL_DECL_FEXT"><![CDATA[FILE_EXTERNAL IN ('Y', 'N')]]></check>
+      <check name="ETGO_FISCAL_DECL_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_FISCAL_DECL_TYPE"><![CDATA[DECL_TYPE IN ('O', 'C')]]></check>
     </table>
   </database>

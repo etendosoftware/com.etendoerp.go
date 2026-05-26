@@ -262,7 +262,7 @@ class Fiscal303BoxesHandler {
     if ("GET".equals(method)) {
       handleDeclGet(clientId, orgId, response);
     } else if ("POST".equals(method)) {
-      handleDeclPost(orgId, request, response);
+      handleDeclPost(request, response);
     } else if ("PUT".equals(method)) {
       handleDeclPut(clientId, request, response);
     } else if ("DELETE".equals(method)) {
@@ -288,7 +288,7 @@ class Fiscal303BoxesHandler {
     response.getWriter().write(out.toString());
   }
 
-  private void handleDeclPost(String orgId, HttpServletRequest request,
+  private void handleDeclPost(HttpServletRequest request,
       HttpServletResponse response) throws Exception {
     JSONObject body = readJsonBody(request);
     String model    = body.getString("model");
