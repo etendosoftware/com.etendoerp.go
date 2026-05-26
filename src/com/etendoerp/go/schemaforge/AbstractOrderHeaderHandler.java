@@ -32,9 +32,14 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.common.order.Order;
+import org.openbravo.model.pricing.pricelist.PriceList;
 
 /**
  * Shared base for order-type header handlers (Sales Order, Purchase Order).
@@ -207,6 +212,288 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     } catch (Exception e) {
       log.error("Error syncing total discount on DocAction for {} id={}", docType, recordId, e);
     }
+  }
+
+  // -----------------------------------------------------------------------
+  // Currency / price-list / exchange-rate hooks (ETP-4027)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Post-callout hook shared by all order-header handlers.
+   *
+   * <p>Three behaviors, evaluated in order:
+   * <ol>
+   *   <li><b>Block callout-driven currency updates.</b> When a callout (e.g.
+   *       {@code SL_Order_PriceList} or {@code SE_Order_BPartner}) pushes a
+   *       {@code currency} key in its {@code updates} map, we remove it. Currency
+   *       is only changed by the user directly.</li>
+   *   <li><b>Price list fallback.</b> When {@code SE_Order_BPartner} returns a
+   *       {@code priceList} whose {@code M_PriceList.IsActive = 'N'}, replace it
+   *       with the client's first active price list of the correct type and append
+   *       a WARNING message.</li>
+   *   <li><b>Exchange rate warning.</b> When the user directly changes
+   *       {@code currency}, check whether a {@code C_Conversion_Rate} row exists
+   *       for (docCurrency → orgCurrency, orderDate). If none exists, append a
+   *       WARNING message so the user can create the rate before confirming.</li>
+   * </ol>
+   *
+   * <p>All mutations are applied directly to the callout response body so they
+   * survive even if the handler returns {@code null}. The dispatcher merges only
+   * {@code updates}/{@code combos} from the returned response; messages and
+   * removals must be applied in-place.
+   *
+   * @param context callout context; {@code previousResult} carries the callout response
+   * @return {@code null} — mutations are applied in-place on the body
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    try {
+      NeoResponse previous = context.getPreviousResult();
+      if (previous == null || previous.getBody() == null) {
+        return null;
+      }
+
+      JSONObject body = previous.getBody();
+      JSONObject updates = body.optJSONObject("updates");
+      JSONObject requestBody = context.getRequestBody();
+      String triggerField = (requestBody != null) ? requestBody.optString("field", "") : "";
+      JSONObject formState = (requestBody != null) ? requestBody.optJSONObject("formState") : null;
+
+      // Behavior 1: Remove currency pushed by any callout (currency = user-only)
+      if (updates != null && updates.has("currency") && !"currency".equals(triggerField)) {
+        updates.remove("currency");
+        log.debug("[ETP-4027] Removed callout-driven currency update (trigger={})", triggerField);
+      }
+
+      // Behavior 2: Inactive price list fallback (only on businessPartner change)
+      if ("businessPartner".equals(triggerField) && updates != null && updates.has("priceList")) {
+        applyPriceListFallbackIfNeeded(body, updates);
+      }
+
+      // Behavior 3: Exchange rate warning (only when user changes currency directly)
+      if (("currencyid".equals(triggerField) || "currency".equals(triggerField)) && formState != null) {
+        // Use requestBody.value (the newly selected currency) instead of formState.currency,
+        // which may still carry the previous value when the callout fires.
+        String docCurrencyId = (requestBody != null) ? requestBody.optString("value", "") : "";
+        if (docCurrencyId.isEmpty()) {
+          docCurrencyId = formState.optString("currencyid", "");
+        }
+        String orderDate = formState.optString("orderDate", "");
+        String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+        String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+        if (!docCurrencyId.isEmpty() && orgCurrencyId != null
+            && !docCurrencyId.equals(orgCurrencyId) && !orderDate.isEmpty()) {
+          if (!hasConversionRate(orgCurrencyId, docCurrencyId, orderDate)) {
+            appendMessage(body, "WARNING", "noExchangeRateAvailable");
+            log.debug("[ETP-4027] No conversion rate warning added (currency={})", docCurrencyId);
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.warn("[ETP-4027] afterCallout failed (non-fatal): {}", e.getMessage());
+    }
+    return null; // mutations applied in-place; dispatcher merges nothing extra
+  }
+
+  /**
+   * Checks whether a {@code C_Conversion_Rate} row exists for the given currency pair
+   * and date, scoped to the current client and org (including global org '0').
+   *
+   * @return {@code true} if a rate exists (safe default on error)
+   */
+  private boolean hasConversionRate(String fromCurrencyId, String toCurrencyId,
+      String dateStr) {
+    try {
+      java.time.LocalDate localDate = java.time.LocalDate.parse(dateStr.substring(0, 10));
+      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+
+      String sql =
+          "SELECT 1 FROM c_conversion_rate"
+        + " WHERE c_currency_id = ?"
+        + " AND c_currency_id_to = ?"
+        + " AND isactive = 'Y'"
+        + " AND ad_client_id = ?"
+        + " AND (ad_org_id = '0' OR ad_org_id = ?)"
+        + " AND validfrom <= ?"
+        + " AND (validto IS NULL OR validto >= ?)"
+        + " LIMIT 1";
+      Connection conn = OBDal.getInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, fromCurrencyId);
+        ps.setString(2, toCurrencyId);
+        ps.setString(3, clientId);
+        ps.setString(4, orgId);
+        ps.setDate(5, java.sql.Date.valueOf(localDate));
+        ps.setDate(6, java.sql.Date.valueOf(localDate));
+        try (ResultSet rs = ps.executeQuery()) {
+          return rs.next();
+        }
+      }
+    } catch (Exception e) {
+      log.warn("[ETP-4027] hasConversionRate check failed (assuming rate exists): {}", e.getMessage());
+      return true; // fail-open: avoid blocking when DB check fails
+    }
+  }
+
+  /**
+   * Replaces an inactive price list in the callout {@code updates} with the
+   * client's first active price list of the matching type (sales or purchase).
+   * Appends a WARNING message if a fallback is applied.
+   */
+  private void applyPriceListFallbackIfNeeded(JSONObject body, JSONObject updates) {
+    try {
+      // Extract the priceList id from updates (may be a nested object or a plain string)
+      String priceListId = extractPriceListId(updates);
+      if (priceListId == null || priceListId.isEmpty()) {
+        return;
+      }
+      PriceList pl = OBDal.getInstance().get(PriceList.class, priceListId);
+      if (pl == null || pl.isActive()) {
+        return; // active (or unknown) — nothing to do
+      }
+
+      String defaultId = findDefaultActivePriceList();
+      if (defaultId == null) {
+        return;
+      }
+
+      // Replace in updates (preserve object wrapper format if present)
+      Object existing = updates.get("priceList");
+      if (existing instanceof JSONObject existingObj) {
+        existingObj.put("value", defaultId);
+        existingObj.remove("identifier");
+      } else {
+        updates.put("priceList", defaultId);
+      }
+      appendMessage(body, "WARNING", "priceListFallbackAlert");
+      log.debug("[ETP-4027] Replaced inactive priceList {} with default {}", priceListId, defaultId);
+    } catch (Exception e) {
+      log.warn("[ETP-4027] applyPriceListFallbackIfNeeded failed (non-fatal): {}", e.getMessage());
+    }
+  }
+
+  private String extractPriceListId(JSONObject updates) {
+    try {
+      Object raw = updates.get("priceList");
+      if (raw instanceof JSONObject rawObj) {
+        return rawObj.optString("value", null);
+      }
+      return updates.optString("priceList", null);
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  private String findDefaultActivePriceList() {
+    try {
+      // OBCriteria automatically scopes to the current client via DAL security
+      OBCriteria<PriceList> crit = OBDal.getInstance().createCriteria(PriceList.class);
+      crit.add(Restrictions.eq(PriceList.PROPERTY_ACTIVE, true));
+      crit.add(Restrictions.eq(PriceList.PROPERTY_SALESPRICELIST, isSalesTransaction()));
+      crit.setMaxResults(1);
+      List<PriceList> results = crit.list();
+      return results.isEmpty() ? null : results.get(0).getId();
+    } catch (Exception e) {
+      log.warn("[ETP-4027] findDefaultActivePriceList failed: {}", e.getMessage());
+      return null;
+    }
+  }
+
+  private static void appendMessage(JSONObject body, String type, String text) {
+    try {
+      JSONArray messages = body.optJSONArray("messages");
+      if (messages == null) {
+        messages = new JSONArray();
+        body.put("messages", messages);
+      }
+      JSONObject msg = new JSONObject();
+      msg.put("type", type);
+      msg.put("text", text);
+      messages.put(msg);
+    } catch (Exception e) {
+      log.warn("[ETP-4027] appendMessage failed: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Pre-hook helper: blocks the Complete action (documentAction=CO) when no
+   * conversion rate exists between the document currency and the org currency.
+   *
+   * <p>Call this at the top of {@code handle()} in each header subclass that
+   * supports the Complete action, AFTER {@link #applyTotalDiscountBeforeComplete}.
+   *
+   * @param context the current NeoContext
+   * @return a 422 NeoResponse if the check fails, or {@code null} to continue
+   */
+  static NeoResponse blockCompleteWhenNoExchangeRate(NeoContext context) {
+    try {
+      if (!isCompleteAction(context)) {
+        return null;
+      }
+      String recordId = context.getRecordId();
+      if (recordId == null || recordId.isEmpty()) {
+        return null;
+      }
+      Order order = OBDal.getInstance().get(Order.class, recordId);
+      if (order == null) {
+        return null;
+      }
+      String docCurrencyId = order.getCurrency() != null ? order.getCurrency().getId() : null;
+      java.util.Date orderDate = order.getOrderDate();
+      if (docCurrencyId == null || orderDate == null) {
+        return null;
+      }
+      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+      String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+      if (orgCurrencyId == null || docCurrencyId.equals(orgCurrencyId)) {
+        return null; // same currency — no rate needed
+      }
+
+      // Check via direct SQL (same pattern as hasConversionRate)
+      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+      java.time.LocalDate localDate = orderDate.toInstant()
+          .atZone(java.time.ZoneId.systemDefault()).toLocalDate();
+      String sql =
+          "SELECT 1 FROM c_conversion_rate"
+        + " WHERE c_currency_id = ?"
+        + " AND c_currency_id_to = ?"
+        + " AND isactive = 'Y'"
+        + " AND ad_client_id = ?"
+        + " AND (ad_org_id = '0' OR ad_org_id = ?)"
+        + " AND validfrom <= ?"
+        + " AND (validto IS NULL OR validto >= ?)"
+        + " LIMIT 1";
+      Connection conn = OBDal.getInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, docCurrencyId);
+        ps.setString(2, orgCurrencyId);
+        ps.setString(3, clientId);
+        ps.setString(4, orgId);
+        ps.setDate(5, java.sql.Date.valueOf(localDate));
+        ps.setDate(6, java.sql.Date.valueOf(localDate));
+        try (ResultSet rs = ps.executeQuery()) {
+          if (!rs.next()) {
+            log.debug("[ETP-4027] Blocking CO for order {} — no conversion rate", recordId);
+            return NeoResponse.error(422, "noExchangeRateAvailable");
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.warn("[ETP-4027] blockCompleteWhenNoExchangeRate failed (non-fatal, allowing CO): {}",
+          e.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * Returns {@code true} if this handler is for a sales transaction
+   * (used to select the matching price list type on fallback).
+   *
+   * <p>Defaults to {@code true}. Override in purchase-order handlers.
+   */
+  protected boolean isSalesTransaction() {
+    return true;
   }
 
   @Override

@@ -99,6 +99,10 @@ class NeoBuiltInEndpointHandler {
       handleAmortizationEndpoint(method, request, response);
       return true;
     }
+    if ("validate-exchange-rate".equals(pathInfo.specName)) {
+      handleValidateExchangeRateEndpoint(method, request, response);
+      return true;
+    }
     return false;
   }
 
@@ -453,5 +457,16 @@ class NeoBuiltInEndpointHandler {
       return;
     }
     servlet.writeResponse(response, AmortizationPlanService.generatePlan(assetId));
+  }
+
+  private void handleValidateExchangeRateEndpoint(String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!METHOD_GET.equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "validate-exchange-rate only supports GET");
+      return;
+    }
+    servlet.writeResponse(response,
+        NeoExchangeRateService.handleValidateExchangeRate(request));
   }
 }
