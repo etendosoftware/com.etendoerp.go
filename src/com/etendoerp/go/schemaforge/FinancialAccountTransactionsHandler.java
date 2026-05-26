@@ -25,6 +25,7 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 
 import javax.inject.Named;
 
@@ -90,6 +91,12 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final DateTimeFormatter ISO_UTC = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
       .withZone(ZoneOffset.UTC);
 
+  /** JSON key reused across rows and totals — extracted to satisfy Sonar S1192. */
+  private static final String KEY_BALANCE = "balance";
+
+  /** Rolling window for inflow/outflow KPIs, in days. */
+  private static final int KPI_WINDOW_DAYS = 30;
+
   /**
    * Returns transactions (newest first) plus KPI totals for the requested account.
    * The running {@code balance} per row is anchored to {@code FIN_Financial_Account.currentbalance}.
@@ -121,14 +128,17 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           + "   AND ft.isactive = 'Y'"
           + " ORDER BY ft.statementdate DESC, ft.line DESC";
 
+  // The cutoff timestamp (NOW - KPI_WINDOW_DAYS) is computed in Java and bound
+  // twice as the first two parameters so the query stays portable across
+  // PostgreSQL and Oracle (no NOW()/INTERVAL vendor syntax).
   private static final String TOTALS_SQL =
       "SELECT fa.currentbalance,"
           + "       cur.iso_code,"
           + "       COALESCE(SUM(CASE WHEN ft.trxtype = 'BPD'"
-          + "                          AND ft.statementdate >= NOW() - INTERVAL '30 days'"
+          + "                          AND ft.statementdate >= ?"
           + "                         THEN ft.depositamt ELSE 0 END), 0) AS inflows_30d,"
           + "       COALESCE(SUM(CASE WHEN ft.trxtype = 'BPW'"
-          + "                          AND ft.statementdate >= NOW() - INTERVAL '30 days'"
+          + "                          AND ft.statementdate >= ?"
           + "                         THEN ft.paymentamt ELSE 0 END), 0) AS outflows_30d"
           + "  FROM fin_financial_account fa"
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id"
@@ -191,7 +201,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           row.put("paymentStatus", StringUtils.trimToEmpty(rs.getString("status")));
           row.put("trxType", StringUtils.trimToEmpty(rs.getString("trxtype")));
           row.put("amount", nullSafeBigDecimal(rs.getBigDecimal("amount")));
-          row.put("balance", nullSafeBigDecimal(rs.getBigDecimal("balance")));
+          row.put(KEY_BALANCE, nullSafeBigDecimal(rs.getBigDecimal(KEY_BALANCE)));
           row.put("description", StringUtils.trimToEmpty(rs.getString("description")));
           row.put("posted", StringUtils.trimToEmpty(rs.getString("posted")));
           row.put("documentNo", StringUtils.trimToEmpty(rs.getString("document_no")));
@@ -207,16 +217,19 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   JSONObject loadTotals(String accountId) throws Exception {
     JSONObject totals = new JSONObject();
     Connection conn = OBDal.getInstance().getConnection();
+    Timestamp cutoff = Timestamp.from(Instant.now().minus(KPI_WINDOW_DAYS, ChronoUnit.DAYS));
     try (PreparedStatement ps = conn.prepareStatement(TOTALS_SQL)) {
-      ps.setString(1, accountId);
+      ps.setTimestamp(1, cutoff);
+      ps.setTimestamp(2, cutoff);
+      ps.setString(3, accountId);
       try (ResultSet rs = ps.executeQuery()) {
         if (rs.next()) {
-          totals.put("balance", nullSafeBigDecimal(rs.getBigDecimal("currentbalance")));
+          totals.put(KEY_BALANCE, nullSafeBigDecimal(rs.getBigDecimal("currentbalance")));
           totals.put("currency", StringUtils.trimToEmpty(rs.getString("iso_code")));
           totals.put("inflows", nullSafeBigDecimal(rs.getBigDecimal("inflows_30d")));
           totals.put("outflows", nullSafeBigDecimal(rs.getBigDecimal("outflows_30d")));
         } else {
-          totals.put("balance", BigDecimal.ZERO);
+          totals.put(KEY_BALANCE, BigDecimal.ZERO);
           totals.put("currency", "EUR");
           totals.put("inflows", BigDecimal.ZERO);
           totals.put("outflows", BigDecimal.ZERO);
