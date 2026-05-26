@@ -41,10 +41,10 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
-import org.openbravo.model.ad.ui.Window;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
@@ -122,6 +122,8 @@ public class McpToolRouter {
             return handleDefaults(specName, arguments);
           case "neo_schema":
             return handleSchema(specName, arguments);
+          case "neo_batch":
+            return handleBatch(arguments);
           default:
             // Check if it's a report tool (generate_*)
             if (toolName.startsWith(McpConstants.GENERATE_PREFIX)) {
@@ -134,7 +136,7 @@ public class McpToolRouter {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
-      log.error("Error routing MCP tool '{}': {}", toolName, e.getMessage(), e);
+      log.error("Error routing MCP tool '{}'", toolName, e);
       return wrapAsErrorContent("Error executing " + toolName + ": " + e.getMessage());
     }
   }
@@ -447,13 +449,19 @@ public class McpToolRouter {
    * Query FK selector values for a column.
    * Resolves the AD_Column from the dictionary (AD_Tab → AD_Table → AD_Column),
    * bypassing ETGO_SF_FIELD so all FK columns are queryable — not just included ones.
+   *
+   * Supports optional recordContext for dependent selectors:
+   * - partnerAddress: { "businessPartner": "..." }
+   * - priceList: { "isSOTrx": "Y" } (auto-derived from window category if omitted)
+   * - tax: { "invoiceDate": "2026-05-12", "priceList": "..." }
+   * Also supports parentContext for child selectors that depend on header values.
    */
   private JSONObject handleSelectors(String specName, JSONObject args) throws Exception {
     validateArgs(args, McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String columnName = args.getString(McpConstants.PARAM_COLUMN);
-    String query = args.optString("query", null);
+    String query = args.optString(McpConstants.PARAM_QUERY, null);
 
     SFSpec spec = findSpecOrThrow(specName);
     SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
@@ -468,21 +476,29 @@ public class McpToolRouter {
       throw new IllegalArgumentException("Column not found in table: " + columnName);
     }
 
-    NeoResponse neoResponse = NeoSelectorService.querySelectorByColumn(
-        adColumn, columnName, query, 50, 0, new HashMap<>());
+    // Build contextParams from recordContext and window category
+    Map<String, String> contextParams = McpSelectorContextHelper.buildSelectorContextParams(
+        args, adTab);
 
-    return neoResponseToMcpResult(neoResponse);
+    NeoResponse neoResponse = NeoSelectorService.querySelectorByColumn(
+        adColumn, columnName, query, 50, 0, contextParams);
+
+    NeoResponse response = McpSelectorContextHelper.withDiagnostics(
+        neoResponse, columnName, contextParams);
+    return neoResponseToMcpResult(response);
   }
 
   // ── neo_defaults ──────────────────────────────────────────────────────
 
   /**
    * Get default field values for creating a new record.
+   * Supports optional parentId for child entity defaults.
    */
   private JSONObject handleDefaults(String specName, JSONObject args) throws Exception {
     validateArgs(args, McpConstants.PARAM_ENTITY);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
+    String parentId = args.optString(McpConstants.PARAM_PARENT_ID, null);
 
     SFSpec spec = findSpecOrThrow(specName);
     SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
@@ -497,7 +513,7 @@ public class McpToolRouter {
         .obContext(OBContext.getOBContext())
         .build();
 
-    NeoResponse neoResponse = NeoDefaultsService.resolveDefaults(ctx, null);
+    NeoResponse neoResponse = NeoDefaultsService.resolveDefaults(ctx, parentId);
     return neoResponseToMcpResult(neoResponse);
   }
 
@@ -579,6 +595,57 @@ public class McpToolRouter {
     return McpToolRouterSupport.mapSelectorType(refId);
   }
 
+  // ── neo_batch ─────────────────────────────────────────────────────────
+
+  /**
+   * Execute a transactional batch of create operations across specs.
+   * Delegates to {@link BatchService#executeBatch(JSONArray)} which owns the
+   * OBDal transaction lifecycle and returns a JSONObject describing success
+   * (committed) or failure (rolled back).
+   *
+   * <p>Package-private to keep the unit test free of reflection.</p>
+   *
+   * <p>OBDal session ownership: {@code BatchService} calls
+   * {@code commitAndClose()} / {@code rollbackAndClose()} on the shared session.
+   * That is safe here because {@link #route} performs no further DAL work after
+   * this method returns — the only remaining step is
+   * {@code OBContext.restorePreviousMode()} in the {@code finally} block.</p>
+   */
+  JSONObject handleBatch(JSONObject args) {
+    if (args == null) {
+      return wrapAsErrorContent("operations must be a non-empty array");
+    }
+    JSONArray operations = args.optJSONArray("operations");
+    if (operations == null || operations.length() == 0) {
+      return wrapAsErrorContent("operations must be a non-empty array");
+    }
+    try {
+      // Per-spec access check: a single batch can mix specs from different
+      // windows, and the top-level authorizeSpecAccess(null) on neo_batch is a
+      // no-op. Authorise each distinct spec before any DAL work happens so an
+      // LLM agent cannot smuggle writes into a spec it lacks CRUD access to.
+      java.util.Set<String> seen = new java.util.HashSet<>();
+      for (int i = 0; i < operations.length(); i++) {
+        JSONObject op = operations.optJSONObject(i);
+        if (op == null) {
+          continue;
+        }
+        String specName = op.optString("spec", null);
+        if (StringUtils.isNotBlank(specName) && seen.add(specName)) {
+          authorizeSpecAccess(specName);
+        }
+      }
+      JSONObject result = BatchService.forBatchOnly().executeBatch(operations);
+      return wrapAsTextContent(result.toString(2));
+    } catch (SecurityException e) {
+      log.warn("neo_batch access denied", e);
+      return wrapAsErrorContent(e.getMessage());
+    } catch (Exception e) {
+      log.error("Error executing neo_batch", e);
+      return wrapAsErrorContent("Error executing neo_batch: " + e.getMessage());
+    }
+  }
+
   // ── Process execution ─────────────────────────────────────────────────
 
   /**
@@ -645,7 +712,7 @@ public class McpToolRouter {
 
       return wrapAsTextContent(reportResult.toString());
     } catch (Exception e) {
-      log.error("Error generating report '{}': {}", specName, e.getMessage(), e);
+      log.error("Error generating report '{}'", specName, e);
       // Fall back to describe
       NeoResponse describeResponse = NeoReportService.describeReport(adProcess);
       JSONObject fallback = new JSONObject();

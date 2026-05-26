@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -44,6 +45,7 @@ import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.KernelUtils;
+import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
@@ -56,6 +58,7 @@ import org.openbravo.service.json.JsonConstants;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
+import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
@@ -234,7 +237,7 @@ class NeoCrudHandler {
       return buildMissingRequiredFieldsResponse(e);
     } catch (Exception e) {
       log.error("Error in default handler for {} {}", context.getHttpMethod(), context.getEntityName(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
     }
   }
 
@@ -493,7 +496,8 @@ class NeoCrudHandler {
     // resolution chain (defaults + session + parent + callout cascade). Throw a structured
     // exception so the UI can highlight the missing fields instead of letting Hibernate fail
     // with a generic not-null violation.
-    List<String> missing = NeoDefaultsService.findMissingMandatoryFields(filteredBody, adTab, userSubmittedFields);
+    List<String> missing = NeoMandatoryFieldValidator.findMissingMandatoryFields(filteredBody,
+        adTab, userSubmittedFields);
     if (!missing.isEmpty()) {
       throw new MissingRequiredFieldsException(missing);
     }
@@ -514,9 +518,16 @@ class NeoCrudHandler {
 
   private void executePostCalloutCascade(JSONObject filteredBody, Tab adTab,
       NeoContext context, String parentIdValue, Set<String> protectedFields) {
-    if (adTab == null || adTab.getTabLevel() == null || adTab.getTabLevel() != 0) {
+    if (adTab == null) {
       return;
     }
+    // Cascade runs for ALL tab levels, not just headers (level=0). Child tabs
+    // (invoice lines, order lines, ...) need their FK callouts (product → tax,
+    // product → UOM, …) to fire server-side when the line is created via a
+    // path that doesn't go through the React form's client-side callout
+    // dispatch — e.g. the /batch endpoint or any external agent. The
+    // protectedFields snapshot already guards values the caller supplied
+    // explicitly, so UI flows that had already-derived fields stay correct.
 
     Set<String> seqFields = new HashSet<>();
     Iterator<String> bodyKeys = filteredBody.keys();
@@ -694,54 +705,60 @@ class NeoCrudHandler {
     if (parentRecord == null) {
       return parentId;
     }
-    String tokenLower = token.toLowerCase();
+    String tokenLower = token.toLowerCase(Locale.ROOT);
 
-    // Organization ID
     if ("ad_org_id".equals(tokenLower) || "org_id".equals(tokenLower)) {
-      try {
-        Object org = parentRecord.get("organization");
-        if (org instanceof BaseOBObject) {
-          return ((BaseOBObject) org).getId().toString();
-        }
-      } catch (Exception ignored) {}
-      return parentId;
+      return resolveRelatedObjectId(parentRecord, "organization", parentId);
     }
 
-    // Client ID
     if ("ad_client_id".equals(tokenLower) || "client_id".equals(tokenLower)) {
-      try {
-        Object client = parentRecord.get("client");
-        if (client instanceof BaseOBObject) {
-          return ((BaseOBObject) client).getId().toString();
-        }
-      } catch (Exception ignored) {}
-      return parentId;
+      return resolveRelatedObjectId(parentRecord, "client", parentId);
     }
 
-    // Primary key: <tableName>_id → parentId itself
     if (parentTableName != null && tokenLower.equals(parentTableName + "_id")) {
       return parentId;
     }
 
-    // Generic: find a property whose column name matches the token
     if (parentEntity != null) {
-      try {
-        for (Property prop : parentEntity.getProperties()) {
-          if (prop.getColumnName() != null && prop.getColumnName().equalsIgnoreCase(token)) {
-            Object val = parentRecord.get(prop.getName());
-            if (val instanceof BaseOBObject) {
-              return ((BaseOBObject) val).getId().toString();
-            }
-            if (val != null) {
-              return val.toString();
-            }
-            return "";
-          }
-        }
-      } catch (Exception ignored) {}
+      String entityValue = resolveTokenFromEntityProperty(token, parentRecord, parentEntity);
+      return entityValue != null ? entityValue : parentId;
     }
 
     return parentId;
+  }
+
+  private String resolveRelatedObjectId(BaseOBObject parentRecord, String propertyName,
+      String fallbackValue) {
+    try {
+      Object relatedObject = parentRecord.get(propertyName);
+      if (relatedObject instanceof BaseOBObject) {
+        return DalUtil.getId((BaseOBObject) relatedObject).toString();
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve parent {} token", propertyName, e);
+    }
+    return fallbackValue;
+  }
+
+  private String resolveTokenFromEntityProperty(String token, BaseOBObject parentRecord,
+      Entity parentEntity) {
+    try {
+      for (Property prop : parentEntity.getProperties()) {
+        if (prop.getColumnName() != null && prop.getColumnName().equalsIgnoreCase(token)) {
+          return stringifyParentValue(parentRecord.get(prop.getName()));
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve parent token {}", token, e);
+    }
+    return null;
+  }
+
+  private String stringifyParentValue(Object value) {
+    if (value instanceof BaseOBObject) {
+      return DalUtil.getId((BaseOBObject) value).toString();
+    }
+    return value != null ? value.toString() : "";
   }
 
   /**
