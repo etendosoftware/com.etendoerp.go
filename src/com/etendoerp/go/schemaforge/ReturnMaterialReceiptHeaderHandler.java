@@ -31,7 +31,9 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
 /**
  * Post-hook for the Return Material Receipt header entity (qualifier: return-material-receipt).
@@ -71,10 +73,32 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           rec.put(FIELD_SOURCE_SHIPMENT_DOC_NO, sourceDocNo);
         }
       }
+      if (context.getRecordId() != null) {
+        enrichIssuerOrg(dataArr.getJSONObject(0), context.getRecordId());
+      }
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching return-material-receipt with sourceShipmentDocNo", e);
       return null;
+    }
+  }
+
+  private void enrichIssuerOrg(JSONObject rec, String recordId) {
+    try {
+      OBContext.setAdminMode(true);
+      ShipmentInOut receipt = OBDal.getReadOnlyInstance().get(ShipmentInOut.class, recordId);
+      if (receipt == null) {
+        return;
+      }
+      String orgId = receipt.getOrganization().getId();
+      JSONObject orgInfo = NeoSessionService.resolveOrganization(orgId);
+      if (orgInfo != null) {
+        rec.put("issuerOrg", orgInfo);
+      }
+    } catch (Exception e) {
+      log.warn("Could not enrich issuer org for return receipt {}: {}", recordId, e.getMessage());
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
