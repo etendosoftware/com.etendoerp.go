@@ -16,7 +16,9 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.sql.Timestamp;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
@@ -61,6 +63,7 @@ class Fiscal303BoxesHandler {
 
   private static final String BOXES           = "boxes";
   private static final String GENERATE        = "generate";
+  private static final String DECLARATIONS    = "declarations";
   private static final String MODIFIED        = "modified";
   private static final String VAT_SALES       = "VAT_SALES";
   private static final String VAT_PURCHASE    = "VAT_PURCHASE";
@@ -88,6 +91,15 @@ class Fiscal303BoxesHandler {
 
   void handle(String entityName, String method, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
+    if (DECLARATIONS.equals(entityName)) {
+      try {
+        handleDeclarations(method, request, response);
+      } catch (Exception e) {
+        log.error("Error in /fiscal303/declarations", e);
+        servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      }
+      return;
+    }
     if (!BOXES.equals(entityName) && !GENERATE.equals(entityName) && !MODIFIED.equals(entityName)) {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
           "Unknown fiscal303 entity: " + entityName);
@@ -232,6 +244,175 @@ class Fiscal303BoxesHandler {
     out.put("count", count);
     response.setContentType("application/json;charset=UTF-8");
     response.getWriter().write(out.toString());
+  }
+
+  @SuppressWarnings("unchecked")
+  private void handleDeclarations(String method, HttpServletRequest request,
+      HttpServletResponse response) throws Exception {
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    String orgId    = OBContext.getOBContext().getCurrentOrganization().getId();
+    String userId   = OBContext.getOBContext().getUser().getId();
+    Timestamp now   = new Timestamp(System.currentTimeMillis());
+
+    response.setContentType("application/json;charset=UTF-8");
+
+    if ("GET".equals(method)) {
+      List<Object[]> rows = OBDal.getInstance().getSession()
+          .createNativeQuery(
+              "SELECT ETGO_FISCAL_DECL_ID, MODEL, FISCAL_YEAR, PERIOD, DECL_TYPE, STATUS, "
+              + "FILE_NAME, FILE_EXTERNAL, "
+              + "CAST(EXTRACT(EPOCH FROM UPDATED) * 1000 AS BIGINT) "
+              + "FROM ETGO_FISCAL_DECL "
+              + "WHERE AD_CLIENT_ID = :clientId AND AD_ORG_ID = :orgId AND ISACTIVE = 'Y' "
+              + "ORDER BY FISCAL_YEAR DESC, PERIOD DESC, MODEL")
+          .setParameter("clientId", clientId)
+          .setParameter("orgId",    orgId)
+          .list();
+      JSONArray arr = new JSONArray();
+      for (Object[] row : rows) arr.put(declRowToJson(row));
+      JSONObject out = new JSONObject();
+      out.put("data", arr);
+      response.getWriter().write(out.toString());
+      return;
+    }
+
+    if ("POST".equals(method)) {
+      JSONObject body = readJsonBody(request);
+      String newId    = java.util.UUID.randomUUID().toString().replace("-", "").toUpperCase();
+      String model    = body.getString("model");
+      int    year     = body.getInt("year");
+      String period   = body.getString("period");
+      String declType = "com".equals(body.optString("type")) ? "C" : "O";
+      String status   = body.has("status") ? body.getString("status") : "borrador";
+
+      OBDal.getInstance().getSession()
+          .createNativeQuery(
+              "INSERT INTO ETGO_FISCAL_DECL "
+              + "(ETGO_FISCAL_DECL_ID, AD_CLIENT_ID, AD_ORG_ID, ISACTIVE, "
+              + " CREATED, CREATEDBY, UPDATED, UPDATEDBY, "
+              + " MODEL, FISCAL_YEAR, PERIOD, DECL_TYPE, STATUS, FILE_NAME, FILE_EXTERNAL) "
+              + "VALUES (:id, :clientId, :orgId, 'Y', :now, :userId, :now, :userId, "
+              + "        :model, :year, :period, :declType, :status, NULL, 'N')")
+          .setParameter("id",       newId)
+          .setParameter("clientId", clientId)
+          .setParameter("orgId",    orgId)
+          .setParameter("now",      now)
+          .setParameter("userId",   userId)
+          .setParameter("model",    model)
+          .setParameter("year",     year)
+          .setParameter("period",   period)
+          .setParameter("declType", declType)
+          .setParameter("status",   status)
+          .executeUpdate();
+
+      List<Object[]> rows = OBDal.getInstance().getSession()
+          .createNativeQuery(
+              "SELECT ETGO_FISCAL_DECL_ID, MODEL, FISCAL_YEAR, PERIOD, DECL_TYPE, STATUS, "
+              + "FILE_NAME, FILE_EXTERNAL, "
+              + "CAST(EXTRACT(EPOCH FROM UPDATED) * 1000 AS BIGINT) "
+              + "FROM ETGO_FISCAL_DECL WHERE ETGO_FISCAL_DECL_ID = :id")
+          .setParameter("id", newId)
+          .list();
+      response.setStatus(HttpServletResponse.SC_CREATED);
+      response.getWriter().write(rows.isEmpty() ? "{}" : declRowToJson(rows.get(0)).toString());
+      return;
+    }
+
+    if ("PUT".equals(method)) {
+      String id = request.getParameter("id");
+      if (id == null || id.isEmpty()) {
+        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing param: id");
+        return;
+      }
+      JSONObject body     = readJsonBody(request);
+      String status       = body.has("status") ? body.getString("status") : "borrador";
+      String fileExternal = body.optBoolean("fileExternal", false) ? "Y" : "N";
+      boolean hasFileName = body.has("fileName");
+      String  fileName    = hasFileName && !body.isNull("fileName")
+          ? body.getString("fileName") : null;
+
+      if (hasFileName && fileName != null) {
+        OBDal.getInstance().getSession()
+            .createNativeQuery(
+                "UPDATE ETGO_FISCAL_DECL SET STATUS = :status, FILE_NAME = :fileName, "
+                + "FILE_EXTERNAL = :fileExternal, UPDATED = :now, UPDATEDBY = :userId "
+                + "WHERE ETGO_FISCAL_DECL_ID = :id AND AD_CLIENT_ID = :clientId")
+            .setParameter("status",       status)
+            .setParameter("fileName",     fileName)
+            .setParameter("fileExternal", fileExternal)
+            .setParameter("now",          now)
+            .setParameter("userId",       userId)
+            .setParameter("id",           id)
+            .setParameter("clientId",     clientId)
+            .executeUpdate();
+      } else {
+        OBDal.getInstance().getSession()
+            .createNativeQuery(
+                "UPDATE ETGO_FISCAL_DECL SET STATUS = :status, FILE_NAME = NULL, "
+                + "FILE_EXTERNAL = :fileExternal, UPDATED = :now, UPDATEDBY = :userId "
+                + "WHERE ETGO_FISCAL_DECL_ID = :id AND AD_CLIENT_ID = :clientId")
+            .setParameter("status",       status)
+            .setParameter("fileExternal", fileExternal)
+            .setParameter("now",          now)
+            .setParameter("userId",       userId)
+            .setParameter("id",           id)
+            .setParameter("clientId",     clientId)
+            .executeUpdate();
+      }
+      response.getWriter().write("{\"ok\":true}");
+      return;
+    }
+
+    if ("DELETE".equals(method)) {
+      String id = request.getParameter("id");
+      if (id == null || id.isEmpty()) {
+        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing param: id");
+        return;
+      }
+      int deleted = OBDal.getInstance().getSession()
+          .createNativeQuery(
+              "DELETE FROM ETGO_FISCAL_DECL "
+              + "WHERE ETGO_FISCAL_DECL_ID = :id AND AD_CLIENT_ID = :clientId")
+          .setParameter("id",       id)
+          .setParameter("clientId", clientId)
+          .executeUpdate();
+      if (deleted == 0) {
+        servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
+            "Declaration not found: " + id);
+        return;
+      }
+      response.getWriter().write("{\"ok\":true}");
+      return;
+    }
+
+    servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+        "Unsupported method for /fiscal303/declarations: " + method);
+  }
+
+  private JSONObject declRowToJson(Object[] row) throws Exception {
+    // row order: id, model, year, period, declType, status, fileName, fileExternal, updatedMs
+    JSONObject o = new JSONObject();
+    o.put("id",           row[0] != null ? row[0].toString() : "");
+    o.put("model",        row[1] != null ? row[1].toString() : "");
+    o.put("year",         row[2] != null ? ((Number) row[2]).intValue() : 0);
+    o.put("period",       row[3] != null ? row[3].toString() : "");
+    String dt = row[4] != null ? row[4].toString().trim() : "";
+    o.put("type",         "C".equals(dt) ? "com" : "ord");
+    o.put("status",       row[5] != null ? row[5].toString() : "borrador");
+    o.put("fileName",     row[6] != null ? row[6].toString() : JSONObject.NULL);
+    String fe = row[7] != null ? row[7].toString().trim() : "";
+    o.put("fileExternal", "Y".equals(fe));
+    o.put("updatedAt",    row[8] != null ? ((Number) row[8]).longValue() : 0L);
+    return o;
+  }
+
+  private JSONObject readJsonBody(HttpServletRequest request) throws Exception {
+    StringBuilder sb = new StringBuilder();
+    try (BufferedReader reader = request.getReader()) {
+      String line;
+      while ((line = reader.readLine()) != null) sb.append(line);
+    }
+    return new JSONObject(sb.toString());
   }
 
   // ── Internal ─────────────────────────────────────────────────────
