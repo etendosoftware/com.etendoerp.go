@@ -37,6 +37,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 import org.openbravo.service.db.DalConnectionProvider;
@@ -166,8 +167,9 @@ public class CreateReturnReceiptHandler implements NeoHandler {
       retLine.setProduct(sourceLine.getProduct());
       retLine.setUOM(sourceLine.getUOM());
       retLine.setMovementQuantity(returnQty);
-      if (sourceLine.getStorageLocator() != null) {
-        retLine.setStorageLocator(sourceLine.getStorageLocator());
+      Locator bin = sourceLine.getStorageBin();
+      if (bin != null) {
+        retLine.setStorageBin(bin);
       }
       retLine.setCanceledInoutLine(sourceLine);
       OBDal.getInstance().save(retLine);
@@ -181,7 +183,7 @@ public class CreateReturnReceiptHandler implements NeoHandler {
     List<DocumentType> results = OBDal.getInstance().createCriteria(DocumentType.class)
         .add(Restrictions.eq(DocumentType.PROPERTY_CLIENT, source.getClient()))
         .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, true))
-        .add(Restrictions.eq(DocumentType.PROPERTY_RETURNMATERIAL, true))
+        .add(Restrictions.eq(DocumentType.PROPERTY_RETURN, true))
         .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true))
         .add(Restrictions.in(DocumentType.PROPERTY_DOCUMENTCATEGORY,
             Arrays.asList("MMS", "MMR")))
