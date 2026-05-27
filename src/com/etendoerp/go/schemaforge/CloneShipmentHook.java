@@ -25,6 +25,7 @@ import org.openbravo.client.kernel.ComponentProvider.Qualifier;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
 import javax.enterprise.context.ApplicationScoped;
 import java.util.Calendar;
@@ -68,6 +69,10 @@ public class CloneShipmentHook extends CloneRecordHook {
     clone.setUpdated(new Date());
     clone.setCreatedBy(currentUser);
     clone.setUpdatedBy(currentUser);
+
+    for (ShipmentInOutLine line : clone.getMaterialMgmtShipmentInOutLineList()) {
+      line.setCanceledInoutLine(null);
+    }
 
     return clone;
   }
