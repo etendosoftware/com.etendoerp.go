@@ -19,10 +19,58 @@ package com.etendoerp.go.schemaforge;
 
 import javax.inject.Named;
 
+import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.order.OrderLine;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+
 /**
  * NeoHandler for the Goods Shipment line entity.
- * Delegates all logic to {@link AbstractInOutLineHandler}.
+ *
+ * Extends {@link AbstractInOutLineHandler} with a pre-hook that links the parent
+ * shipment header to its sales order when a line is imported from an order line.
+ * This mirrors the behaviour of {@code CreateShipmentHandler}, which sets the
+ * {@code C_Order_ID} on the header at creation time.
  */
 @Named("goodsShipmentLineHandler")
 public class GoodsShipmentLineHandler extends AbstractInOutLineHandler {
+
+  private static final Logger log = LogManager.getLogger(GoodsShipmentLineHandler.class);
+
+  @Override
+  public NeoResponse handle(NeoContext context) {
+    if (!"POST".equals(context.getHttpMethod())) {
+      return null;
+    }
+    JSONObject body = context.getRequestBody();
+    if (body == null) {
+      return null;
+    }
+    String orderLineId = body.optString("salesOrderLine", null);
+    String parentId = body.optString("parentId", null);
+    if (StringUtils.isBlank(orderLineId) || StringUtils.isBlank(parentId)) {
+      return null;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      OrderLine orderLine = OBDal.getInstance().get(OrderLine.class, orderLineId);
+      ShipmentInOut shipment = OBDal.getInstance().get(ShipmentInOut.class, parentId);
+      if (orderLine != null && shipment != null
+          && shipment.getSalesOrder() == null
+          && orderLine.getSalesOrder() != null) {
+        shipment.setSalesOrder(orderLine.getSalesOrder());
+        OBDal.getInstance().save(shipment);
+      }
+    } catch (Exception e) {
+      log.warn("Could not link salesOrder on shipment {} from line {}: {}", parentId, orderLineId,
+          e.getMessage());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    return null;
+  }
 }
