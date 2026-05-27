@@ -17,17 +17,20 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+import javax.inject.Inject;
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
@@ -35,9 +38,17 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Locator;
+import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
@@ -51,17 +62,29 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ReturnMaterialReceiptHeaderHandler.class);
+
+  @Inject
+  CreateDraftInvoiceHandler createDraftInvoiceHandler;
+
+  @Inject
+  NeoCloneRecordHandler cloneRecordHandler;
+
   private static final String FIELD_SOURCE_SHIPMENT_DOC_NO = "sourceShipmentDocNo";
   private static final String FIELD_SOURCE_SHIPMENTS = "sourceShipments";
   private static final String ACTION_IMPORT_LINES = "importShipmentLines";
   private static final String ACTION_AVAILABLE_SHIPMENTS = "availableShipments";
   private static final String ACTION_AVAILABLE_LINES = "availableShipmentLines";
+  private static final String ACTION_CREATE_RETURN_INVOICE = "createReturnInvoice";
+  private static final String ACTION_DOCUMENT_ACTION = "documentAction";
 
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!NeoEndpointType.ACTION.equals(context.getEndpointType())) {
       return null;
     }
+    NeoResponse cloneResponse = cloneRecordHandler.handle(context);
+    if (cloneResponse != null) return cloneResponse;
+
     String action = context.getFieldName();
     String method = context.getHttpMethod();
     if (ACTION_IMPORT_LINES.equals(action) && "POST".equals(method)) {
@@ -72,6 +95,63 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
     }
     if (ACTION_AVAILABLE_LINES.equals(action) && "POST".equals(method)) {
       return handleAvailableShipmentLines(context);
+    }
+    if (ACTION_CREATE_RETURN_INVOICE.equals(action) && "POST".equals(method)) {
+      return handleCreateReturnInvoice(context);
+    }
+    if (ACTION_DOCUMENT_ACTION.equals(action) && "POST".equals(method)) {
+      fillMissingStorageBins(context.getRecordId());
+      return null; // let NEO native process handle completion
+    }
+    return null;
+  }
+
+  private void fillMissingStorageBins(String receiptId) {
+    if (receiptId == null) return;
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        ShipmentInOut receipt = OBDal.getInstance().get(ShipmentInOut.class, receiptId);
+        if (receipt == null) return;
+        Locator defaultLocator = null;
+        for (ShipmentInOutLine line : receipt.getMaterialMgmtShipmentInOutLineList()) {
+          ShipmentInOutLine origLine = line.getCanceledInoutLine();
+          Locator target = (origLine != null && origLine.getStorageBin() != null)
+              ? origLine.getStorageBin()
+              : line.getStorageBin();
+          if (target == null) {
+            if (defaultLocator == null) {
+              defaultLocator = findDefaultLocator(receipt.getWarehouse().getId());
+            }
+            target = defaultLocator;
+          }
+          if (target != null && !target.equals(line.getStorageBin())) {
+            line.setStorageBin(target);
+            OBDal.getInstance().save(line);
+          }
+        }
+        OBDal.getInstance().flush();
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("Could not fill missing storage bins for receipt {}: {}", receiptId, e.getMessage());
+    }
+  }
+
+  @SuppressWarnings("java:S2077")
+  private Locator findDefaultLocator(String warehouseId) {
+    String sql = "SELECT m_locator_id FROM m_locator WHERE m_warehouse_id = ? AND isdefault = 'Y' AND isactive = 'Y' LIMIT 1";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, warehouseId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          return OBDal.getInstance().get(Locator.class, rs.getString(1));
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not find default locator for warehouse {}: {}", warehouseId, e.getMessage());
     }
     return null;
   }
@@ -262,6 +342,197 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while fetching available lines");
     }
+  }
+
+  private NeoResponse handleCreateReturnInvoice(NeoContext context) {
+    String receiptId = context.getRecordId();
+    if (receiptId == null || receiptId.isBlank()) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Record ID is required");
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        ShipmentInOut receipt = OBDal.getInstance().get(ShipmentInOut.class, receiptId);
+        if (receipt == null) {
+          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Receipt not found");
+        }
+        if (!"CO".equals(receipt.getDocumentStatus())) {
+          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+              "Receipt must be completed before creating a return invoice");
+        }
+
+        List<ShipmentInOutLine> lines = receipt.getMaterialMgmtShipmentInOutLineList()
+            .stream().filter(l -> l.getProduct() != null).collect(Collectors.toList());
+        if (lines.isEmpty()) {
+          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "No product lines in this receipt");
+        }
+
+        DocumentType docType = findAriRmDocType(receipt.getOrganization().getId());
+        if (docType == null) {
+          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+              "No return invoice document type (ARI_RM) found for this organization");
+        }
+
+        Invoice invoice = buildReturnInvoiceHeader(receipt, docType, lines);
+        OBDal.getInstance().save(invoice);
+        OBDal.getInstance().flush();
+
+        addReturnInvoiceLines(invoice, lines);
+        OBDal.getInstance().flush();
+        OBDal.getInstance().getSession().refresh(invoice);
+
+        createDraftInvoiceHandler.ensureDocumentNo(invoice);
+        createDraftInvoiceHandler.ensureLineGrossAmounts(invoice);
+        createDraftInvoiceHandler.recalculateTotals(invoice);
+        OBDal.getInstance().flush();
+
+        JSONObject data = new JSONObject();
+        data.put("id", invoice.getId());
+        data.put("documentNo", invoice.getDocumentNo());
+        JSONObject responseData = new JSONObject();
+        responseData.put("data", data);
+        JSONObject wrapper = new JSONObject();
+        wrapper.put("response", responseData);
+        return NeoResponse.ok(wrapper);
+
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (OBException e) {
+      log.warn("Return invoice creation rejected for receipt {}: {}", receiptId, e.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+    } catch (Exception e) {
+      log.error("Error creating return invoice for receipt {}: {}", receiptId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "An internal error occurred while creating the return invoice");
+    }
+  }
+
+  private DocumentType findAriRmDocType(String orgId) {
+    List<DocumentType> candidates = OBDal.getInstance().createCriteria(DocumentType.class)
+        .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, "ARI_RM"))
+        .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, true))
+        .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true))
+        .addOrderBy(DocumentType.PROPERTY_DEFAULT, false)
+        .list();
+    for (DocumentType dt : candidates) {
+      if (orgId.equals(dt.getOrganization().getId())) return dt;
+    }
+    for (DocumentType dt : candidates) {
+      if ("0".equals(dt.getOrganization().getId())) return dt;
+    }
+    return candidates.isEmpty() ? null : candidates.get(0);
+  }
+
+  private Invoice buildReturnInvoiceHeader(ShipmentInOut receipt, DocumentType docType,
+      List<ShipmentInOutLine> lines) {
+    Invoice sourceInvoice = findSourceInvoice(lines);
+    BusinessPartner bp = receipt.getBusinessPartner();
+
+    Invoice invoice = OBProvider.getInstance().get(Invoice.class);
+    invoice.setClient(receipt.getClient());
+    invoice.setOrganization(receipt.getOrganization());
+    invoice.setDocumentType(docType);
+    invoice.setTransactionDocument(docType);
+    invoice.setDocumentStatus("DR");
+    invoice.setDocumentAction("CO");
+    invoice.setSalesTransaction(true);
+    invoice.setInvoiceDate(new Date());
+    invoice.setAccountingDate(new Date());
+    invoice.setBusinessPartner(bp);
+    invoice.setPartnerAddress(receipt.getPartnerAddress());
+    invoice.setSummedLineAmount(BigDecimal.ZERO);
+    invoice.setGrandTotalAmount(BigDecimal.ZERO);
+    invoice.setWithholdingamount(BigDecimal.ZERO);
+
+    if (sourceInvoice != null) {
+      invoice.setCurrency(sourceInvoice.getCurrency());
+      invoice.setPriceList(sourceInvoice.getPriceList());
+      invoice.setPaymentTerms(sourceInvoice.getPaymentTerms());
+      invoice.setPaymentMethod(sourceInvoice.getPaymentMethod());
+    } else {
+      invoice.setPriceList(bp.getPriceList());
+      if (bp.getPriceList() != null) {
+        invoice.setCurrency(bp.getPriceList().getCurrency());
+      }
+      if (bp.getPaymentTerms() == null || bp.getPaymentMethod() == null) {
+        throw new OBException("Business Partner is missing mandatory Payment Terms or Payment Method");
+      }
+      invoice.setPaymentTerms(bp.getPaymentTerms());
+      invoice.setPaymentMethod(bp.getPaymentMethod());
+    }
+
+    return invoice;
+  }
+
+  private Invoice findSourceInvoice(List<ShipmentInOutLine> lines) {
+    for (ShipmentInOutLine retLine : lines) {
+      ShipmentInOutLine origLine = retLine.getCanceledInoutLine();
+      if (origLine == null) continue;
+      String hql = "SELECT il.invoice FROM InvoiceLine il " +
+          "WHERE il.goodsShipmentLine.id = :lineId AND il.invoice.documentStatus != 'VO'";
+      List<Invoice> results = OBDal.getInstance().getSession()
+          .createQuery(hql, Invoice.class)
+          .setParameter("lineId", origLine.getId())
+          .setMaxResults(1)
+          .list();
+      if (!results.isEmpty()) return results.get(0);
+    }
+    return null;
+  }
+
+  private void addReturnInvoiceLines(Invoice invoice, List<ShipmentInOutLine> lines) {
+    int precision = invoice.getCurrency() != null
+        ? invoice.getCurrency().getStandardPrecision().intValue() : 2;
+    long lineNo = 10;
+    for (ShipmentInOutLine retLine : lines) {
+      if (retLine.getProduct() == null) continue;
+      BigDecimal qty = retLine.getMovementQuantity() != null
+          ? retLine.getMovementQuantity().negate() : BigDecimal.ZERO;
+      if (qty.compareTo(BigDecimal.ZERO) == 0) continue;
+
+      BigDecimal unitPrice = BigDecimal.ZERO;
+      BigDecimal listPrice = BigDecimal.ZERO;
+      TaxRate tax = null;
+      ShipmentInOutLine origLine = retLine.getCanceledInoutLine();
+      if (origLine != null) {
+        Object[] prices = findPricesAndTaxForShipmentLine(origLine.getId());
+        if (prices != null) {
+          unitPrice = prices[0] != null ? (BigDecimal) prices[0] : BigDecimal.ZERO;
+          listPrice = prices[1] != null ? (BigDecimal) prices[1] : BigDecimal.ZERO;
+          tax = (TaxRate) prices[2];
+        }
+      }
+
+      InvoiceLine il = OBProvider.getInstance().get(InvoiceLine.class);
+      il.setOrganization(retLine.getOrganization());
+      il.setInvoice(invoice);
+      il.setLineNo(lineNo);
+      il.setProduct(retLine.getProduct());
+      il.setInvoicedQuantity(qty);
+      il.setUOM(retLine.getUOM());
+      il.setGoodsShipmentLine(retLine);
+      il.setUnitPrice(unitPrice);
+      il.setListPrice(listPrice);
+      il.setLineNetAmount(qty.multiply(unitPrice).setScale(precision, RoundingMode.HALF_UP));
+      if (tax != null) {
+        il.setTax(tax);
+      }
+      OBDal.getInstance().save(il);
+      lineNo += 10;
+    }
+  }
+
+  private Object[] findPricesAndTaxForShipmentLine(String origShipmentLineId) {
+    String hql = "SELECT il.unitPrice, il.listPrice, il.tax FROM InvoiceLine il " +
+        "WHERE il.goodsShipmentLine.id = :lineId AND il.invoice.documentStatus != 'VO' " +
+        "ORDER BY il.invoice.invoiceDate DESC";
+    List<Object[]> rows = OBDal.getInstance().getSession()
+        .createQuery(hql, Object[].class)
+        .setParameter("lineId", origShipmentLineId)
+        .setMaxResults(1)
+        .list();
+    return rows.isEmpty() ? null : rows.get(0);
   }
 
   @Override
