@@ -19,6 +19,11 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -39,6 +44,17 @@ import org.junit.Test;
  * {@code tbai_syncinvoice} table and is covered by integration tests.
  */
 public class TbaiSyncStatusInjectorTest {
+
+  // ── inject() null guard ──────────────────────────────────────────────────
+
+  /**
+   * {@code inject(null)} must return immediately without throwing.
+   */
+  @Test
+  public void testInjectNullDataIsNoop() {
+    TbaiSyncStatusInjector.inject(null);
+    // no exception = pass
+  }
 
   // ── early-return paths (no OBDal contact) ───────────────────────────────
 
@@ -142,5 +158,84 @@ public class TbaiSyncStatusInjectorTest {
         data.getJSONObject(0).has("tbaiSyncEstado"));
     assertFalse("Record without id must not gain tbaiSyncEstado",
         data.getJSONObject(1).has("tbaiSyncEstado"));
+  }
+
+  // ── applyTbaiMap() — injection logic without DB ──────────────────────────
+
+  /**
+   * Verifies that a matching estado is written into the record under {@code tbaiSyncEstado}.
+   */
+  @Test
+  public void testApplyTbaiMapInjectsMatchingEstado() throws JSONException {
+    JSONArray data = new JSONArray()
+        .put(new JSONObject().put("id", "INV-001").put("documentNo", "SI-001"));
+    Map<String, String> tbaiMap = new HashMap<>();
+    tbaiMap.put("INV-001", "Recibido");
+
+    TbaiSyncStatusInjector.applyTbaiMap(data, tbaiMap);
+
+    assertEquals("Recibido", data.getJSONObject(0).getString("tbaiSyncEstado"));
+  }
+
+  /**
+   * Verifies that a record with no match in the map is left untouched.
+   */
+  @Test
+  public void testApplyTbaiMapSkipsRecordWithNoMatch() throws JSONException {
+    JSONArray data = new JSONArray()
+        .put(new JSONObject().put("id", "INV-999").put("documentNo", "SI-999"));
+    Map<String, String> tbaiMap = Collections.singletonMap("INV-001", "Recibido");
+
+    TbaiSyncStatusInjector.applyTbaiMap(data, tbaiMap);
+
+    assertFalse("Record with no matching tbai row must not gain tbaiSyncEstado",
+        data.getJSONObject(0).has("tbaiSyncEstado"));
+  }
+
+  /**
+   * Verifies that only the matched record is updated in a mixed list.
+   */
+  @Test
+  public void testApplyTbaiMapOnlyUpdatesMatchedRecord() throws JSONException {
+    JSONArray data = new JSONArray()
+        .put(new JSONObject().put("id", "INV-001").put("documentNo", "SI-001"))
+        .put(new JSONObject().put("id", "INV-002").put("documentNo", "SI-002"));
+    Map<String, String> tbaiMap = Collections.singletonMap("INV-001", "Rechazado");
+
+    TbaiSyncStatusInjector.applyTbaiMap(data, tbaiMap);
+
+    assertEquals("Rechazado", data.getJSONObject(0).getString("tbaiSyncEstado"));
+    assertFalse("Record with no match must not gain tbaiSyncEstado",
+        data.getJSONObject(1).has("tbaiSyncEstado"));
+  }
+
+  /**
+   * Verifies that a record without an {@code id} field is skipped safely.
+   */
+  @Test
+  public void testApplyTbaiMapSkipsRecordWithNullId() throws JSONException {
+    JSONArray data = new JSONArray()
+        .put(new JSONObject().put("documentNo", "SI-001")); // no id field
+    Map<String, String> tbaiMap = Collections.singletonMap("INV-001", "Recibido");
+
+    TbaiSyncStatusInjector.applyTbaiMap(data, tbaiMap);
+
+    assertFalse("Record without id must not gain tbaiSyncEstado",
+        data.getJSONObject(0).has("tbaiSyncEstado"));
+  }
+
+  /**
+   * Verifies all known TBAI estados are written correctly.
+   */
+  @Test
+  public void testApplyTbaiMapHandlesAllKnownEstados() throws JSONException {
+    String[] estados = { "Recibido", "Rechazado", "Error", "Pendiente" };
+    for (String estado : estados) {
+      JSONArray data = new JSONArray()
+          .put(new JSONObject().put("id", "INV-001"));
+      TbaiSyncStatusInjector.applyTbaiMap(data, Collections.singletonMap("INV-001", estado));
+      assertEquals("Expected estado " + estado + " to be injected",
+          estado, data.getJSONObject(0).getString("tbaiSyncEstado"));
+    }
   }
 }

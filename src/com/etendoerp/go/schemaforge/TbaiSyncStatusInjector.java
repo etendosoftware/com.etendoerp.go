@@ -67,21 +67,28 @@ class TbaiSyncStatusInjector {
       if (ids.isEmpty()) {
         return;
       }
-      Map<String, String> tbaiMap = fetchLatestByInvoice(ids);
-      for (int i = 0; i < data.length(); i++) {
-        JSONObject rec = data.getJSONObject(i);
-        String id = rec.optString("id", null);
-        if (id != null) {
-          String estado = tbaiMap.get(id);
-          if (estado != null) {
-            rec.put("tbaiSyncEstado", estado);
-          }
-        }
-      }
+      applyTbaiMap(data, fetchLatestByInvoice(ids));
     } catch (org.hibernate.exception.SQLGrammarException e) {
       log.debug("Could not inject tbaiSyncEstado (TBAI module may not be installed): {}", e.getMessage());
     } catch (Exception e) {
       log.error("Unexpected error injecting tbaiSyncEstado: ", e);
+    }
+  }
+
+  /**
+   * Writes {@code tbaiSyncEstado} from {@code tbaiMap} into each matching record in {@code data}.
+   * Package-private to allow direct unit testing without a database.
+   */
+  static void applyTbaiMap(JSONArray data, Map<String, String> tbaiMap) throws org.codehaus.jettison.json.JSONException {
+    for (int i = 0; i < data.length(); i++) {
+      JSONObject rec = data.getJSONObject(i);
+      String id = rec.optString("id", null);
+      if (id != null) {
+        String estado = tbaiMap.get(id);
+        if (estado != null) {
+          rec.put("tbaiSyncEstado", estado);
+        }
+      }
     }
   }
 
