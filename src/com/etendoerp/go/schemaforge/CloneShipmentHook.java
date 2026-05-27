@@ -17,30 +17,26 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.math.BigDecimal;
-
 import com.smf.jobs.hooks.CloneRecordHook;
 
 import org.apache.commons.lang3.time.DateUtils;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.ComponentProvider.Qualifier;
-import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
-import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
 import javax.enterprise.context.ApplicationScoped;
 import java.util.Calendar;
 import java.util.Date;
 
 /**
- * CloneRecordHook for Goods Shipments (M_InOut with issotrx='Y').
+ * CloneRecordHook for Goods Shipments (M_InOut).
  *
- * Mirrors the pattern of {@link com.smf.jobs.defaults.CloneInvoiceHook}:
- * resets header state to Draft, copies lines, and leaves documentNo null so
- * that {@link NeoCloneRecordHandler} can assign the next sequence number.
+ * DalUtil.copy handles line copying (shouldCopyChildren = true).
+ * postCopy only resets the header state to Draft so the clone
+ * can be processed independently.
+ * documentNo is left null so NeoCloneRecordHandler assigns the next sequence.
  */
 @ApplicationScoped
 @Qualifier(ShipmentInOut.ENTITY_NAME)
@@ -48,7 +44,7 @@ public class CloneShipmentHook extends CloneRecordHook {
 
   @Override
   public boolean shouldCopyChildren(boolean uiCopyChildren) {
-    return false;
+    return true;
   }
 
   @Override
@@ -58,10 +54,8 @@ public class CloneShipmentHook extends CloneRecordHook {
 
   @Override
   public BaseOBObject postCopy(BaseOBObject originalRecord, BaseOBObject newRecord) {
-    ShipmentInOut original = (ShipmentInOut) originalRecord;
     ShipmentInOut clone = (ShipmentInOut) newRecord;
     User currentUser = OBContext.getOBContext().getUser();
-
     Date today = DateUtils.truncate(new Date(), Calendar.DATE);
 
     clone.setDocumentStatus("DR");
@@ -75,26 +69,6 @@ public class CloneShipmentHook extends CloneRecordHook {
     clone.setCreatedBy(currentUser);
     clone.setUpdatedBy(currentUser);
 
-    for (ShipmentInOutLine line : original.getMaterialMgmtShipmentInOutLineList()) {
-      BigDecimal movQty = line.getMovementQuantity();
-      ShipmentInOutLine clonedLine = (ShipmentInOutLine) DalUtil.copy(line, false);
-      clonedLine.setCanceledInoutLine(null);
-      clonedLine.setSalesOrderLine(null);
-      // Restore movementQuantity: listeners may reset it when canceledInoutLine is cleared
-      if (movQty != null) {
-        clonedLine.setMovementQuantity(movQty);
-      }
-      clonedLine.setCreationDate(new Date());
-      clonedLine.setUpdated(new Date());
-      clonedLine.setCreatedBy(currentUser);
-      clonedLine.setUpdatedBy(currentUser);
-      clonedLine.setShipmentReceipt(clone);
-      clone.getMaterialMgmtShipmentInOutLineList().add(clonedLine);
-    }
-
-    OBDal.getInstance().save(clone);
-    OBDal.getInstance().flush();
-    OBDal.getInstance().refresh(clone);
     return clone;
   }
 }

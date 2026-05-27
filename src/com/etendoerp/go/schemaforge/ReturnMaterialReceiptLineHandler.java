@@ -36,16 +36,22 @@ import org.openbravo.dal.service.OBDal;
 /**
  * Post-hook for the Return Material Receipt line entity.
  *
- * Injects {@code orderQuantity} into every GET response by reading
- * MovementQty from the canceled source line
- * (M_InOutLine.Canceled_Inoutline_ID → M_InOutLine.MovementQty).
- * This gives the UI "Cant. entregada original" without touching the
- * QuantityOrder column (which Etendo reserves for order-UOM quantities).
+ * Injects {@code orderQuantity} (original delivered qty from canceled source line)
+ * and {@code productCode} (M_Product.Value / search key) into every GET response.
  */
 @Named("returnMaterialReceiptLineHandler")
 public class ReturnMaterialReceiptLineHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ReturnMaterialReceiptLineHandler.class);
+
+  private static final class LineData {
+    final BigDecimal qty;
+    final String productCode;
+    LineData(BigDecimal qty, String productCode) {
+      this.qty = qty;
+      this.productCode = productCode;
+    }
+  }
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -61,35 +67,40 @@ public class ReturnMaterialReceiptLineHandler implements NeoHandler {
       }
       JSONObject body = context.getPreviousResult().getBody();
       List<String> lineIds = NeoHandlerUtils.collectIds(dataArr);
-      Map<String, BigDecimal> originalQtyMap = fetchOriginalQtys(lineIds);
+      Map<String, LineData> lineDataMap = fetchLineData(lineIds);
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
         String id = rec.optString("id", null);
-        BigDecimal qty = originalQtyMap.get(id);
-        if (qty != null) {
-          rec.put("orderQuantity", qty);
+        LineData ld = lineDataMap.get(id);
+        if (ld != null) {
+          if (ld.qty != null) {
+            rec.put("orderQuantity", ld.qty);
+          }
+          if (ld.productCode != null) {
+            rec.put("productCode", ld.productCode);
+          }
         }
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {
-      log.error("Error enriching return-material-receipt lines with orderQuantity", e);
+      log.error("Error enriching return-material-receipt lines", e);
       return null;
     }
   }
 
   @SuppressWarnings("java:S2077")
-  private Map<String, BigDecimal> fetchOriginalQtys(List<String> lineIds) {
-    Map<String, BigDecimal> result = new HashMap<>();
+  private Map<String, LineData> fetchLineData(List<String> lineIds) {
+    Map<String, LineData> result = new HashMap<>();
     if (lineIds.isEmpty()) {
       return result;
     }
     String placeholders = lineIds.stream().map(id -> "?").collect(Collectors.joining(","));
     String sql =
-        "SELECT l.M_InOutLine_ID, orig.MovementQty " +
+        "SELECT l.M_InOutLine_ID, COALESCE(orig.MovementQty, l.QuantityOrder) AS effective_qty, p.Value AS product_code " +
         "FROM M_InOutLine l " +
-        "JOIN M_InOutLine orig ON orig.M_InOutLine_ID = l.Canceled_Inoutline_ID " +
-        "WHERE l.M_InOutLine_ID IN (" + placeholders + ") " +
-        "  AND l.Canceled_Inoutline_ID IS NOT NULL";
+        "LEFT JOIN M_InOutLine orig ON orig.M_InOutLine_ID = l.Canceled_Inoutline_ID " +
+        "LEFT JOIN M_Product p ON p.M_Product_ID = l.M_Product_ID " +
+        "WHERE l.M_InOutLine_ID IN (" + placeholders + ")";
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       for (int i = 0; i < lineIds.size(); i++) {
@@ -97,11 +108,11 @@ public class ReturnMaterialReceiptLineHandler implements NeoHandler {
       }
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          result.put(rs.getString(1), rs.getBigDecimal(2));
+          result.put(rs.getString(1), new LineData(rs.getBigDecimal(2), rs.getString(3)));
         }
       }
     } catch (Exception e) {
-      log.warn("Error fetching original qty for return receipt lines: {}", e.getMessage());
+      log.warn("Error fetching line data for return receipt lines: {}", e.getMessage());
     }
     return result;
   }

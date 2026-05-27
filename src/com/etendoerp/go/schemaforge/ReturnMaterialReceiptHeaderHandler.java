@@ -547,6 +547,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
 
       Map<String, String> docNoMap = fetchSourceDocNos(ids);
       Map<String, List<JSONObject>> shipmentsMap = fetchSourceShipments(ids);
+      Map<String, List<JSONObject>> returnInvoicesMap = fetchReturnInvoices(ids);
 
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
@@ -563,6 +564,14 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           shipmentsArr.put(s);
         }
         rec.put(FIELD_SOURCE_SHIPMENTS, shipmentsArr);
+
+        List<JSONObject> invoices = returnInvoicesMap.getOrDefault(id, Collections.emptyList());
+        JSONArray invoicesArr = new JSONArray();
+        for (JSONObject inv : invoices) {
+          invoicesArr.put(inv);
+        }
+        rec.put("returnInvoices", invoicesArr);
+        rec.put("hasReturnInvoice", !invoices.isEmpty());
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {
@@ -623,6 +632,40 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       }
     } catch (Exception e) {
       log.warn("Error fetching source shipments: {}", e.getMessage());
+    }
+    return result;
+  }
+
+  @SuppressWarnings("java:S2077")
+  private Map<String, List<JSONObject>> fetchReturnInvoices(List<String> receiptIds) {
+    Map<String, List<JSONObject>> result = new HashMap<>();
+    if (receiptIds.isEmpty()) return result;
+    String placeholders = receiptIds.stream().map(id -> "?").collect(Collectors.joining(","));
+    String sql =
+        "SELECT DISTINCT l.M_InOut_ID, i.C_Invoice_ID, i.DocumentNo " +
+        "FROM M_InOutLine l " +
+        "JOIN C_InvoiceLine il ON il.M_InOutLine_ID = l.M_InOutLine_ID " +
+        "JOIN C_Invoice i ON i.C_Invoice_ID = il.C_Invoice_ID " +
+        "WHERE l.M_InOut_ID IN (" + placeholders + ") " +
+        "  AND i.DocStatus != 'VO'";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      for (int i = 0; i < receiptIds.size(); i++) ps.setString(i + 1, receiptIds.get(i));
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String receiptId = rs.getString(1);
+          try {
+            JSONObject inv = new JSONObject();
+            inv.put("id", rs.getString(2));
+            inv.put("documentNo", rs.getString(3));
+            result.computeIfAbsent(receiptId, k -> new ArrayList<>()).add(inv);
+          } catch (Exception je) {
+            log.warn("Error building returnInvoice JSON: {}", je.getMessage());
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Error fetching return invoices for receipts: {}", e.getMessage());
     }
     return result;
   }
