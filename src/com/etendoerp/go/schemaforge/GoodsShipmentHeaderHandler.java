@@ -77,6 +77,7 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
         shipmentRec.put(FIELD_INVOICE_STATUS, computeSingle(context.getRecordId()));
         enrichIssuerOrg(shipmentRec, context.getRecordId());
         enrichReturnReceipts(shipmentRec, context.getRecordId());
+        enrichRelatedInvoices(shipmentRec, context.getRecordId());
       } else {
         annotateBatch(dataArr);
       }
@@ -214,6 +215,33 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       shipmentRec.put("returnReceipts", arr);
     } catch (Exception e) {
       log.warn("Could not enrich returnReceipts for shipment {}: {}", shipmentId, e.getMessage());
+    }
+  }
+
+  @SuppressWarnings("java:S2077")
+  private void enrichRelatedInvoices(JSONObject shipmentRec, String shipmentId) {
+    String sql =
+        "SELECT DISTINCT i.C_Invoice_ID, i.DocumentNo, i.DocStatus " +
+        "FROM M_InOutLine iol " +
+        "JOIN C_InvoiceLine il ON il.M_InOutLine_ID = iol.M_InOutLine_ID " +
+        "JOIN C_Invoice i ON i.C_Invoice_ID = il.C_Invoice_ID " +
+        "WHERE iol.M_InOut_ID = ? AND i.DocStatus != 'VO' AND i.IsActive = 'Y'";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, shipmentId);
+      JSONArray arr = new JSONArray();
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONObject row = new JSONObject();
+          row.put("id", rs.getString(1));
+          row.put("documentNo", rs.getString(2));
+          row.put("documentStatus", rs.getString(3));
+          arr.put(row);
+        }
+      }
+      shipmentRec.put("relatedInvoices", arr);
+    } catch (Exception e) {
+      log.warn("Could not enrich relatedInvoices for shipment {}: {}", shipmentId, e.getMessage());
     }
   }
 }

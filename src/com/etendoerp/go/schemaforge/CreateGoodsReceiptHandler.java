@@ -197,6 +197,7 @@ public class CreateGoodsReceiptHandler implements NeoHandler {
         .add(Restrictions.eq(DocumentType.PROPERTY_CLIENT, order.getClient()))
         .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, "MMR"))
         .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, false))
+        .add(Restrictions.eq(DocumentType.PROPERTY_RETURN, false))
         .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true))
         .addOrderBy(DocumentType.PROPERTY_DEFAULT, false)
         .setMaxResults(1)

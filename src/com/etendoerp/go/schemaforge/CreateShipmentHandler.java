@@ -160,7 +160,9 @@ public class CreateShipmentHandler implements NeoHandler {
         .add(Restrictions.eq(DocumentType.PROPERTY_CLIENT, order.getClient()))
         .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, "MMS"))
         .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, true))
+        .add(Restrictions.eq(DocumentType.PROPERTY_RETURN, false))
         .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true))
+        .addOrderBy(DocumentType.PROPERTY_DEFAULT, false)
         .setMaxResults(1)
         .list();
     return results.isEmpty() ? null : results.get(0);
