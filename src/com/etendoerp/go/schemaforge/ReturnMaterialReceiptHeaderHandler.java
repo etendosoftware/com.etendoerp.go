@@ -70,6 +70,8 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
 
   private static final String FIELD_SOURCE_SHIPMENT_DOC_NO = "sourceShipmentDocNo";
   private static final String FIELD_SOURCE_SHIPMENTS = "sourceShipments";
+  private static final String FIELD_DOCUMENT_NO = "documentNo";
+  private static final String KEY_RESPONSE = "response";
   private static final String ACTION_IMPORT_LINES = "importShipmentLines";
   private static final String ACTION_AVAILABLE_SHIPMENTS = "availableShipments";
   private static final String ACTION_AVAILABLE_LINES = "availableShipmentLines";
@@ -181,10 +183,9 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           JSONObject req = requestedLines.getJSONObject(i);
           String sourceLineId = req.optString("sourceLineId", null);
           BigDecimal qty = BigDecimal.valueOf(req.optDouble("returnQuantity", 0));
-          if (sourceLineId == null || qty.compareTo(BigDecimal.ZERO) <= 0) continue;
-
-          ShipmentInOutLine sourceLine = OBDal.getInstance().get(ShipmentInOutLine.class, sourceLineId);
-          if (sourceLine == null) continue;
+          ShipmentInOutLine sourceLine = sourceLineId != null
+              ? OBDal.getInstance().get(ShipmentInOutLine.class, sourceLineId) : null;
+          if (sourceLineId == null || qty.compareTo(BigDecimal.ZERO) <= 0 || sourceLine == null) continue;
 
           ShipmentInOutLine retLine = OBProvider.getInstance().get(ShipmentInOutLine.class);
           retLine.setClient(receipt.getClient());
@@ -207,11 +208,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
 
         JSONObject data = new JSONObject();
         data.put("importedCount", imported);
-        JSONObject responseData = new JSONObject();
-        responseData.put("data", data);
-        JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
-        return NeoResponse.ok(wrapper);
+        return wrapOkData(data);
 
       } finally {
         OBContext.restorePreviousMode();
@@ -259,7 +256,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           while (rs.next()) {
             JSONObject row = new JSONObject();
             row.put("id", rs.getString(1));
-            row.put("documentNo", rs.getString(2));
+            row.put(FIELD_DOCUMENT_NO, rs.getString(2));
             row.put("movementDate", rs.getString(3));
             row.put("businessPartner$_identifier", rs.getString(4));
             row.put("businessPartner", rs.getString(5));
@@ -267,11 +264,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           }
         }
       }
-      JSONObject responseData = new JSONObject();
-      responseData.put("data", data);
-      JSONObject wrapper = new JSONObject();
-      wrapper.put("response", responseData);
-      return NeoResponse.ok(wrapper);
+      return wrapOkData(data);
     } catch (Exception e) {
       log.error("Error fetching available shipments for BP {}: {}", bpId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -319,11 +312,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           }
         }
       }
-      JSONObject responseData = new JSONObject();
-      responseData.put("data", data);
-      JSONObject wrapper = new JSONObject();
-      wrapper.put("response", responseData);
-      return NeoResponse.ok(wrapper);
+      return wrapOkData(data);
     } catch (Exception e) {
       log.error("Error fetching available lines for shipment {}: {}", shipmentId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -375,12 +364,8 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
 
         JSONObject data = new JSONObject();
         data.put("id", invoice.getId());
-        data.put("documentNo", invoice.getDocumentNo());
-        JSONObject responseData = new JSONObject();
-        responseData.put("data", data);
-        JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
-        return NeoResponse.ok(wrapper);
+        data.put(FIELD_DOCUMENT_NO, invoice.getDocumentNo());
+        return wrapOkData(data);
 
       } finally {
         OBContext.restorePreviousMode();
@@ -473,41 +458,43 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
         ? invoice.getCurrency().getStandardPrecision().intValue() : 2;
     long lineNo = 10;
     for (ShipmentInOutLine retLine : lines) {
-      if (retLine.getProduct() == null) continue;
       BigDecimal qty = retLine.getMovementQuantity() != null
           ? retLine.getMovementQuantity().negate() : BigDecimal.ZERO;
-      if (qty.compareTo(BigDecimal.ZERO) == 0) continue;
-
-      BigDecimal unitPrice = BigDecimal.ZERO;
-      BigDecimal listPrice = BigDecimal.ZERO;
-      TaxRate tax = null;
-      ShipmentInOutLine origLine = retLine.getCanceledInoutLine();
-      if (origLine != null) {
-        Object[] prices = findPricesAndTaxForShipmentLine(origLine.getId());
-        if (prices != null) {
-          unitPrice = prices[0] != null ? (BigDecimal) prices[0] : BigDecimal.ZERO;
-          listPrice = prices[1] != null ? (BigDecimal) prices[1] : BigDecimal.ZERO;
-          tax = (TaxRate) prices[2];
-        }
-      }
-
-      InvoiceLine il = OBProvider.getInstance().get(InvoiceLine.class);
-      il.setOrganization(retLine.getOrganization());
-      il.setInvoice(invoice);
-      il.setLineNo(lineNo);
-      il.setProduct(retLine.getProduct());
-      il.setInvoicedQuantity(qty);
-      il.setUOM(retLine.getUOM());
-      il.setGoodsShipmentLine(retLine);
-      il.setUnitPrice(unitPrice);
-      il.setListPrice(listPrice);
-      il.setLineNetAmount(qty.multiply(unitPrice).setScale(precision, RoundingMode.HALF_UP));
-      if (tax != null) {
-        il.setTax(tax);
-      }
-      OBDal.getInstance().save(il);
+      if (retLine.getProduct() == null || qty.compareTo(BigDecimal.ZERO) == 0) continue;
+      buildAndSaveInvoiceLine(invoice, retLine, qty, precision, lineNo);
       lineNo += 10;
     }
+  }
+
+  private void buildAndSaveInvoiceLine(Invoice invoice, ShipmentInOutLine retLine,
+      BigDecimal qty, int precision, long lineNo) {
+    BigDecimal unitPrice = BigDecimal.ZERO;
+    BigDecimal listPrice = BigDecimal.ZERO;
+    TaxRate tax = null;
+    ShipmentInOutLine origLine = retLine.getCanceledInoutLine();
+    if (origLine != null) {
+      Object[] prices = findPricesAndTaxForShipmentLine(origLine.getId());
+      if (prices != null) {
+        unitPrice = prices[0] != null ? (BigDecimal) prices[0] : BigDecimal.ZERO;
+        listPrice = prices[1] != null ? (BigDecimal) prices[1] : BigDecimal.ZERO;
+        tax = (TaxRate) prices[2];
+      }
+    }
+    InvoiceLine il = OBProvider.getInstance().get(InvoiceLine.class);
+    il.setOrganization(retLine.getOrganization());
+    il.setInvoice(invoice);
+    il.setLineNo(lineNo);
+    il.setProduct(retLine.getProduct());
+    il.setInvoicedQuantity(qty);
+    il.setUOM(retLine.getUOM());
+    il.setGoodsShipmentLine(retLine);
+    il.setUnitPrice(unitPrice);
+    il.setListPrice(listPrice);
+    il.setLineNetAmount(qty.multiply(unitPrice).setScale(precision, RoundingMode.HALF_UP));
+    if (tax != null) {
+      il.setTax(tax);
+    }
+    OBDal.getInstance().save(il);
   }
 
   private Object[] findPricesAndTaxForShipmentLine(String origShipmentLineId) {
@@ -548,7 +535,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
 
         if (!shipments.isEmpty()) {
           String combined = shipments.stream()
-              .map(s -> s.optString("documentNo", ""))
+              .map(s -> s.optString(FIELD_DOCUMENT_NO, ""))
               .filter(s -> !s.isEmpty())
               .collect(Collectors.joining(", "));
           if (!combined.isEmpty()) {
@@ -588,21 +575,25 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       for (int i = 0; i < receiptIds.size(); i++) ps.setString(i + 1, receiptIds.get(i));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          String receiptId = rs.getString(1);
-          try {
-            JSONObject ship = new JSONObject();
-            ship.put("id", rs.getString(2));
-            ship.put("documentNo", rs.getString(3));
-            result.computeIfAbsent(receiptId, k -> new ArrayList<>()).add(ship);
-          } catch (Exception je) {
-            log.warn("Error building sourceShipment JSON: {}", je.getMessage());
-          }
+          addShipmentToMap(result, rs);
         }
       }
     } catch (Exception e) {
       log.warn("Error fetching source shipments: {}", e.getMessage());
     }
     return result;
+  }
+
+  private void addShipmentToMap(Map<String, List<JSONObject>> result, ResultSet rs) {
+    try {
+      String receiptId = rs.getString(1);
+      JSONObject ship = new JSONObject();
+      ship.put("id", rs.getString(2));
+      ship.put(FIELD_DOCUMENT_NO, rs.getString(3));
+      result.computeIfAbsent(receiptId, k -> new ArrayList<>()).add(ship);
+    } catch (Exception je) {
+      log.warn("Error building sourceShipment JSON: {}", je.getMessage());
+    }
   }
 
   @SuppressWarnings("java:S2077")
@@ -622,21 +613,25 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       for (int i = 0; i < receiptIds.size(); i++) ps.setString(i + 1, receiptIds.get(i));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          String receiptId = rs.getString(1);
-          try {
-            JSONObject inv = new JSONObject();
-            inv.put("id", rs.getString(2));
-            inv.put("documentNo", rs.getString(3));
-            result.computeIfAbsent(receiptId, k -> new ArrayList<>()).add(inv);
-          } catch (Exception je) {
-            log.warn("Error building returnInvoice JSON: {}", je.getMessage());
-          }
+          addInvoiceToMap(result, rs);
         }
       }
     } catch (Exception e) {
       log.warn("Error fetching return invoices for receipts: {}", e.getMessage());
     }
     return result;
+  }
+
+  private void addInvoiceToMap(Map<String, List<JSONObject>> result, ResultSet rs) {
+    try {
+      String receiptId = rs.getString(1);
+      JSONObject inv = new JSONObject();
+      inv.put("id", rs.getString(2));
+      inv.put(FIELD_DOCUMENT_NO, rs.getString(3));
+      result.computeIfAbsent(receiptId, k -> new ArrayList<>()).add(inv);
+    } catch (Exception je) {
+      log.warn("Error building returnInvoice JSON: {}", je.getMessage());
+    }
   }
 
   @SuppressWarnings("java:S2077")
@@ -652,5 +647,13 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       log.warn("Could not fetch max lineNo for receipt {}: {}", receiptId, e.getMessage());
     }
     return 0;
+  }
+
+  private static NeoResponse wrapOkData(Object data) throws Exception {
+    JSONObject responseData = new JSONObject();
+    responseData.put("data", data);
+    JSONObject wrapper = new JSONObject();
+    wrapper.put(KEY_RESPONSE, responseData);
+    return NeoResponse.ok(wrapper);
   }
 }
