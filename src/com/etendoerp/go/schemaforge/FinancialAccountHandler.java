@@ -81,6 +81,8 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final int IBAN_MAX_LENGTH = 34;
   private static final int SWIFT_MAX_LENGTH = 20;
 
+  private static final String FIELD_SWIFT_CODE = "swiftCode";
+
   private static final String KEY_RESPONSE = "response";
   private static final String KEY_DATA = "data";
 
@@ -112,9 +114,11 @@ public class FinancialAccountHandler implements NeoHandler {
       }
       return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED, "Method not allowed.");
     } catch (OBException e) {
+      OBDal.getInstance().rollbackAndClose();
       log.warn("financial-account handler business error: {}", e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
+      OBDal.getInstance().rollbackAndClose();
       log.error("financial-account handler error", e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal Server Error");
     } finally {
@@ -134,7 +138,7 @@ public class FinancialAccountHandler implements NeoHandler {
     String currencyId = body.optString("currencyId", "").trim();
     String type = normalizeType(body.optString("type", TYPE_BANK).trim());
     String iban = body.optString("iban", "").trim();
-    String swift = body.optString("swiftCode", "").trim();
+    String swift = body.optString(FIELD_SWIFT_CODE, "").trim();
 
     if (StringUtils.isBlank(name)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is required");
@@ -215,7 +219,7 @@ public class FinancialAccountHandler implements NeoHandler {
     String name = body.optString("name", "").trim();
     String currencyId = body.optString("currencyId", "").trim();
     String iban = body.optString("iban", "").trim();
-    String swift = body.optString("swiftCode", "").trim();
+    String swift = body.optString(FIELD_SWIFT_CODE, "").trim();
 
     if (StringUtils.isBlank(name)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is required");
@@ -244,7 +248,7 @@ public class FinancialAccountHandler implements NeoHandler {
     if (body.has("iban")) {
       account.setIBAN(StringUtils.trimToNull(iban));
     }
-    if (body.has("swiftCode")) {
+    if (body.has(FIELD_SWIFT_CODE)) {
       account.setSwiftCode(StringUtils.trimToNull(swift));
     }
     OBDal.getInstance().save(account);
