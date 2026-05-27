@@ -30,6 +30,25 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
  */
 final class NeoCommercialDocumentFactory {
 
+  static ShipmentInOut createReturnReceiptHeader(ShipmentInOut source, DocumentType docType) {
+    ShipmentInOut ret = OBProvider.getInstance().get(ShipmentInOut.class);
+    ret.setClient(source.getClient());
+    ret.setOrganization(source.getOrganization());
+    ret.setBusinessPartner(source.getBusinessPartner());
+    ret.setPartnerAddress(source.getPartnerAddress());
+    ret.setWarehouse(source.getWarehouse());
+    ret.setMovementDate(new Date());
+    ret.setAccountingDate(new Date());
+    ret.setDocumentType(docType);
+    ret.setDocumentNo("<*>");
+    ret.setSalesTransaction(true);
+    ret.setSalesOrder(source.getSalesOrder());
+    ret.setProcessed(false);
+    ret.setDocumentStatus("DR");
+    ret.setMovementType("C-");
+    return ret;
+  }
+
   private NeoCommercialDocumentFactory() {
   }
 

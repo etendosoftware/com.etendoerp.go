@@ -55,9 +55,13 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   @Inject
   private NeoCloneRecordHandler neoCloneRecordHandler;
 
+  @Inject
+  private CreateReturnReceiptHandler createReturnReceiptHandler;
+
   @Override
   public NeoResponse handle(NeoContext context) {
-    return NeoHeaderActionRouter.dispatch(context, createDraftInvoiceHandler, neoCloneRecordHandler);
+    return NeoHeaderActionRouter.dispatch(context,
+        createDraftInvoiceHandler, neoCloneRecordHandler, createReturnReceiptHandler);
   }
 
   @Override
@@ -72,6 +76,7 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
         JSONObject shipmentRec = dataArr.getJSONObject(0);
         shipmentRec.put(FIELD_INVOICE_STATUS, computeSingle(context.getRecordId()));
         enrichIssuerOrg(shipmentRec, context.getRecordId());
+        enrichReturnReceipts(shipmentRec, context.getRecordId());
       } else {
         annotateBatch(dataArr);
       }
@@ -183,5 +188,32 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       ") direct_qty ON direct_qty.m_inoutline_id = iol.m_inoutline_id " +
       "WHERE iol.isactive = 'Y' AND " + whereClause + " " +
       "GROUP BY iol.m_inout_id";
+  }
+
+  @SuppressWarnings("java:S2077")
+  private void enrichReturnReceipts(JSONObject shipmentRec, String shipmentId) {
+    String sql =
+        "SELECT DISTINCT ret.M_InOut_ID, ret.DocumentNo, ret.DocStatus " +
+        "FROM M_InOutLine src " +
+        "JOIN M_InOutLine ret_line ON ret_line.Canceled_Inoutline_ID = src.M_InOutLine_ID " +
+        "JOIN M_InOut ret ON ret.M_InOut_ID = ret_line.M_InOut_ID " +
+        "WHERE src.M_InOut_ID = ? AND ret.DocStatus != 'VO'";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, shipmentId);
+      JSONArray arr = new JSONArray();
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONObject row = new JSONObject();
+          row.put("id", rs.getString(1));
+          row.put("documentNo", rs.getString(2));
+          row.put("documentStatus", rs.getString(3));
+          arr.put(row);
+        }
+      }
+      shipmentRec.put("returnReceipts", arr);
+    } catch (Exception e) {
+      log.warn("Could not enrich returnReceipts for shipment {}: {}", shipmentId, e.getMessage());
+    }
   }
 }
