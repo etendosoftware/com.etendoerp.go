@@ -81,7 +81,8 @@ public class TbaiSyncStatusInjectorTest {
 
     TbaiSyncStatusInjector.inject(data);
 
-    assertFalse(data.getJSONObject(0).has("tbaiSyncEstado"));
+    assertFalse("Record with empty ID should not have tbaiSyncEstado injected",
+        data.getJSONObject(0).has("tbaiSyncEstado"));
     assertEquals("SI-001", data.getJSONObject(0).getString("documentNo"));
   }
 
@@ -94,10 +95,10 @@ public class TbaiSyncStatusInjectorTest {
    */
   @Test
   public void testInjectWithOBDalUnavailableLeavesDataUnchanged() throws JSONException {
-    JSONObject record = new JSONObject()
+    JSONObject invoice = new JSONObject()
         .put("id", "INV-001")
         .put("grandTotalAmount", 500.0);
-    JSONArray data = new JSONArray().put(record);
+    JSONArray data = new JSONArray().put(invoice);
 
     TbaiSyncStatusInjector.inject(data);
 
@@ -117,8 +118,10 @@ public class TbaiSyncStatusInjectorTest {
 
     TbaiSyncStatusInjector.inject(data);
 
-    assertFalse(data.getJSONObject(0).has("tbaiSyncEstado"));
-    assertFalse(data.getJSONObject(1).has("tbaiSyncEstado"));
+    assertFalse("First record must not gain tbaiSyncEstado when OBDal is unavailable",
+        data.getJSONObject(0).has("tbaiSyncEstado"));
+    assertFalse("Second record must not gain tbaiSyncEstado when OBDal is unavailable",
+        data.getJSONObject(1).has("tbaiSyncEstado"));
     assertEquals("SI-001", data.getJSONObject(0).getString("documentNo"));
     assertEquals("SI-002", data.getJSONObject(1).getString("documentNo"));
   }
@@ -135,7 +138,9 @@ public class TbaiSyncStatusInjectorTest {
 
     TbaiSyncStatusInjector.inject(data);
 
-    assertFalse(data.getJSONObject(0).has("tbaiSyncEstado"));
-    assertFalse(data.getJSONObject(1).has("tbaiSyncEstado"));
+    assertFalse("Record with id must not gain tbaiSyncEstado when OBDal is unavailable",
+        data.getJSONObject(0).has("tbaiSyncEstado"));
+    assertFalse("Record without id must not gain tbaiSyncEstado",
+        data.getJSONObject(1).has("tbaiSyncEstado"));
   }
 }

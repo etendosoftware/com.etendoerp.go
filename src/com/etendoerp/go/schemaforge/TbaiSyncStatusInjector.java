@@ -32,10 +32,11 @@ import org.openbravo.dal.service.OBDal;
 /**
  * Injects the latest TBAI sync status ({@code tbaiSyncEstado}) into a NEO list response.
  *
- * <p>Reads from {@code tbai_syncinvoice} using {@code DISTINCT ON (c_invoice_id) ORDER BY created DESC}
- * so only one SQL round-trip is needed for the whole page. If the TBAI module is not installed the
- * table will not exist; the exception is caught and logged at DEBUG level so the main response is
- * returned unmodified.
+ * <p>Reads from {@code tbai_syncinvoice} using a single portable SQL query (ROW_NUMBER window
+ * function, compatible with both PostgreSQL and Oracle) so only one round-trip is needed for the
+ * whole page. If the TBAI module is not installed the table will not exist; the resulting
+ * {@link org.hibernate.exception.SQLGrammarException} is caught and logged at DEBUG level so the
+ * main response is returned unmodified. Unexpected exceptions are logged at ERROR level.
  */
 class TbaiSyncStatusInjector {
 
@@ -52,6 +53,9 @@ class TbaiSyncStatusInjector {
    *     the {@code response.data} array from a NEO GET response; modified in-place
    */
   static void inject(JSONArray data) {
+    if (data == null) {
+      return;
+    }
     try {
       List<String> ids = new ArrayList<>(data.length());
       for (int i = 0; i < data.length(); i++) {
@@ -74,17 +78,21 @@ class TbaiSyncStatusInjector {
           }
         }
       }
-    } catch (Exception e) {
+    } catch (org.hibernate.exception.SQLGrammarException e) {
       log.debug("Could not inject tbaiSyncEstado (TBAI module may not be installed): {}", e.getMessage());
+    } catch (Exception e) {
+      log.error("Unexpected error injecting tbaiSyncEstado: ", e);
     }
   }
 
   @SuppressWarnings("unchecked")
   private static Map<String, String> fetchLatestByInvoice(List<String> invoiceIds) {
-    String sql = "SELECT DISTINCT ON (c_invoice_id) c_invoice_id, estado "
-        + "FROM tbai_syncinvoice "
-        + "WHERE c_invoice_id IN (:invoiceIds) "
-        + "ORDER BY c_invoice_id, created DESC";
+    String sql = "SELECT c_invoice_id, estado FROM ("
+        + "  SELECT c_invoice_id, estado,"
+        + "    ROW_NUMBER() OVER (PARTITION BY c_invoice_id ORDER BY created DESC) AS rn"
+        + "  FROM tbai_syncinvoice"
+        + "  WHERE c_invoice_id IN (:invoiceIds)"
+        + ") t WHERE rn = 1";
     NativeQuery<Object[]> nq = OBDal.getInstance().getSession()
         .createNativeQuery(sql, Object[].class);
     nq.setParameterList("invoiceIds", invoiceIds);
@@ -92,7 +100,7 @@ class TbaiSyncStatusInjector {
     Map<String, String> result = new HashMap<>(rows.size());
     for (Object[] row : rows) {
       if (row[0] != null) {
-        result.put((String) row[0], row[1] != null ? (String) row[1] : null);
+        result.put((String) row[0], (String) row[1]);
       }
     }
     return result;
