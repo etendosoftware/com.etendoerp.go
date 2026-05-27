@@ -16,8 +16,10 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -26,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -36,9 +39,11 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.ScrollableResults;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import com.etendoerp.go.schemaforge.data.FiscalDecl;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceTax;
@@ -51,17 +56,29 @@ import org.openbravo.module.aeat303.es.report.v2014.AEAT303Report2014Dao;
 import org.openbravo.module.aeat303.es.util.AEAT303CalculationsHelper;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.TaxReportParameter;
+import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxReport_I;
 
 class Fiscal303BoxesHandler {
 
   private static final Logger log = Logger.getLogger(Fiscal303BoxesHandler.class);
 
   private static final String BOXES           = "boxes";
+  private static final String GENERATE        = "generate";
+  private static final String DECLARATIONS    = "declarations";
+  private static final String MODIFIED        = "modified";
   private static final String VAT_SALES       = "VAT_SALES";
   private static final String VAT_PURCHASE    = "VAT_PURCHASE";
   private static final String PURCHASE        = "Purchase";
   private static final String TAX_BASE_AMOUNT = "TaxBaseAmount";
   private static final String TAX_AMOUNT      = "TaxAmount";
+
+  private static final String JSON_CONTENT_TYPE = "application/json;charset=UTF-8";
+  private static final String DEFAULT_STATUS    = "borrador";
+  private static final String PERIOD_KEY        = "period";
+  private static final String SINCE_KEY         = "since";
+  private static final String STATUS_KEY        = "status";
+  private static final String FILE_NAME_KEY     = "fileName";
+  private static final String FILE_EXTERNAL_KEY = "fileExternal";
 
   private static final BigDecimal PCT_21   = new BigDecimal("21");
   private static final BigDecimal PCT_10   = new BigDecimal("10");
@@ -83,30 +100,298 @@ class Fiscal303BoxesHandler {
 
   void handle(String entityName, String method, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
-    if (!"GET".equals(method) || !BOXES.equals(entityName)) {
-      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          "Only GET /fiscal303/boxes is supported");
+    if (DECLARATIONS.equals(entityName)) {
+      try {
+        handleDeclarations(method, request, response);
+      } catch (Exception e) {
+        log.error("Error in /fiscal303/declarations", e);
+        servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      }
       return;
     }
+    if (!BOXES.equals(entityName) && !GENERATE.equals(entityName) && !MODIFIED.equals(entityName)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Unknown fiscal303 entity: " + entityName);
+      return;
+    }
+    if (!"GET".equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Only GET is supported for /fiscal303/" + entityName);
+      return;
+    }
+
+    String yearStr = request.getParameter("year");
+    String period  = request.getParameter(PERIOD_KEY);
+    if (yearStr == null || period == null) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Missing required params: year, period");
+      return;
+    }
+    if (MODIFIED.equals(entityName) && request.getParameter(SINCE_KEY) == null) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Missing required param: since");
+      return;
+    }
+
     try {
-      String yearStr = request.getParameter("year");
-      String period  = request.getParameter("period");
-      if (yearStr == null || period == null) {
-        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Missing required params: year, period");
-        return;
-      }
       int year = Integer.parseInt(yearStr);
       String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-
-      ComputeResult cr = computeBoxes(orgId, year, period);
-      JSONObject result = buildResponse(cr.boxes, cr.sources);
-      response.setContentType("application/json;charset=UTF-8");
-      response.getWriter().write(result.toString());
+      if (BOXES.equals(entityName)) {
+        ComputeResult cr = computeBoxes(orgId, year, period);
+        JSONObject result = buildResponse(cr.boxes, cr.sources);
+        response.setContentType(JSON_CONTENT_TYPE);
+        response.getWriter().write(result.toString());
+      } else if (GENERATE.equals(entityName)) {
+        String tipo = request.getParameter("tipo");
+        handleGenerate(orgId, year, period, tipo, response);
+      } else {
+        long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
+        handleModified(orgId, year, period, new java.util.Date(sinceMs), response);
+      }
     } catch (Exception e) {
-      log.error("Error computing 303 boxes", e);
+      log.error("Error in /fiscal303/" + entityName, e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
     }
+  }
+
+  private void handleGenerate(String orgId, int year, String period, String tipo,
+      HttpServletResponse response) throws Exception {
+    Organization org = OBDal.getInstance().get(Organization.class, orgId);
+
+    boolean quarterly = period.startsWith("T");
+    String valueKey = quarterly ? "AEAT303_Q_" + year : "AEAT303_M_" + year;
+
+    TaxReport taxReport   = resolveTaxReport(orgId, valueKey);
+    AcctSchema acctSchema = resolveAcctSchema(org);
+    List<Period> periods  = resolvePeriods(orgId, year, period);
+
+    if (periods.isEmpty()) {
+      throw new OBException(
+          "No fiscal periods found for org=" + orgId + " year=" + year + " period=" + period);
+    }
+
+    String yearId    = periods.get(0).getYear().getId();
+    String periodIds = periods.stream().map(Period::getId).collect(Collectors.joining(","));
+    String reportId  = taxReport.getId();
+    String acctId    = acctSchema.getId();
+    String className = taxReport.getJavaClassName();
+
+    Map<String, String> inputParams = new HashMap<>();
+    String filename = "303_" + period + "_" + year;
+    inputParams.put("FileName", filename);
+    // Declaration type required by AEAT303_Utility.getCheckedInputParameter.
+    // Maps result kind from frontend: compensar→C, ingresar→I, devolver→V, default→N (result zero).
+    String decl = "N";
+    if ("C".equals(tipo) || "I".equals(tipo) || "V".equals(tipo) || "U".equals(tipo) || "G".equals(tipo)) {
+      decl = tipo;
+    } else if ("compensar".equals(tipo)) {
+      decl = "C";
+    } else if ("ingresar".equals(tipo)) {
+      decl = "I";
+    } else if ("devolver".equals(tipo)) {
+      decl = "V";
+    }
+    inputParams.put("Declaration_" + decl, "Y");
+    // Box 65: percentage attributable to the State (always 100 for Modelo 303).
+    inputParams.put("ToPublicTreasury", "100");
+
+    OBTL_TaxReport_I report = (OBTL_TaxReport_I)
+        Class.forName(className).getDeclaredConstructor().newInstance();
+
+    HashMap<String, Object> result =
+        report.generateElectronicFile(orgId, reportId, acctId, yearId, periodIds, inputParams);
+
+    Object fileContent = result.get("file");
+    if (fileContent == null) {
+      throw new OBException("generateElectronicFile returned no file content");
+    }
+
+    byte[] bytes = fileContent.toString().getBytes(StandardCharsets.ISO_8859_1);
+    response.setContentType("text/plain");
+    response.setCharacterEncoding("ISO-8859-1");
+    response.setHeader("Content-Disposition", "attachment; filename=\"" + filename + ".txt\"");
+    response.setContentLength(bytes.length);
+    response.getOutputStream().write(bytes);
+    response.flushBuffer();
+  }
+
+  private void handleModified(String orgId, int year, String period, java.util.Date since,
+      HttpServletResponse response) throws Exception {
+    List<Period> periods = resolvePeriods(orgId, year, period);
+    if (periods.isEmpty()) {
+      writeModifiedJson(response, false, 0);
+      return;
+    }
+
+    java.util.Date fromDate = periods.get(0).getStartingDate();
+    java.util.Date toDate   = periods.get(periods.size() - 1).getEndingDate();
+    if (fromDate == null || toDate == null) {
+      writeModifiedJson(response, false, 0);
+      return;
+    }
+
+    Long count = (Long) OBDal.getInstance().getSession()
+        .createQuery(
+            "select count(i.id) from Invoice i "
+            + "where i.organization.id = :orgId "
+            + "  and i.invoiceDate between :fromDate and :toDate "
+            + "  and i.updated > :since")
+        .setParameter("orgId",    orgId)
+        .setParameter("fromDate", fromDate)
+        .setParameter("toDate",   toDate)
+        .setParameter(SINCE_KEY,  since)
+        .uniqueResult();
+
+    boolean modified = count != null && count > 0;
+    writeModifiedJson(response, modified, count == null ? 0 : count.intValue());
+  }
+
+  private void writeModifiedJson(HttpServletResponse response, boolean modified, int count)
+      throws Exception {
+    JSONObject out = new JSONObject();
+    out.put(MODIFIED, modified);
+    out.put("count", count);
+    response.setContentType(JSON_CONTENT_TYPE);
+    response.getWriter().write(out.toString());
+  }
+
+  private void handleDeclarations(String method, HttpServletRequest request,
+      HttpServletResponse response) throws Exception {
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    String orgId    = OBContext.getOBContext().getCurrentOrganization().getId();
+    response.setContentType(JSON_CONTENT_TYPE);
+    if ("GET".equals(method)) {
+      handleDeclGet(clientId, orgId, response);
+    } else if ("POST".equals(method)) {
+      handleDeclPost(request, response);
+    } else if ("PUT".equals(method)) {
+      handleDeclPut(clientId, request, response);
+    } else if ("DELETE".equals(method)) {
+      handleDeclDelete(clientId, request, response);
+    } else {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Unsupported method for /fiscal303/declarations: " + method);
+    }
+  }
+
+  private void handleDeclGet(String clientId, String orgId, HttpServletResponse response)
+      throws Exception {
+    OBCriteria<FiscalDecl> crit = OBDal.getInstance().createCriteria(FiscalDecl.class);
+    crit.add(Restrictions.eq("client.id", clientId));
+    crit.add(Restrictions.eq("organization.id", orgId));
+    crit.addOrderBy(FiscalDecl.PROPERTY_FISCALYEAR, false);
+    crit.addOrderBy(FiscalDecl.PROPERTY_PERIOD, false);
+    crit.addOrderBy(FiscalDecl.PROPERTY_FISCALMODEL, true);
+    JSONArray arr = new JSONArray();
+    for (FiscalDecl decl : crit.list()) arr.put(declToJson(decl));
+    JSONObject out = new JSONObject();
+    out.put("data", arr);
+    response.getWriter().write(out.toString());
+  }
+
+  private void handleDeclPost(HttpServletRequest request,
+      HttpServletResponse response) throws Exception {
+    JSONObject body = readJsonBody(request);
+    String model    = body.getString("model");
+    long   year     = body.getLong("year");
+    String period   = body.getString(PERIOD_KEY);
+    String declType = "com".equals(body.optString("type")) ? "C" : "O";
+    String status   = body.has(STATUS_KEY) ? body.getString(STATUS_KEY) : DEFAULT_STATUS;
+
+    FiscalDecl decl = OBProvider.getInstance().get(FiscalDecl.class);
+    decl.setClient(OBContext.getOBContext().getCurrentClient());
+    decl.setOrganization(OBContext.getOBContext().getCurrentOrganization());
+    decl.setCreatedBy(OBContext.getOBContext().getUser());
+    decl.setUpdatedBy(OBContext.getOBContext().getUser());
+    decl.setFiscalModel(model);
+    decl.setFiscalYear(year);
+    decl.setPeriod(period);
+    decl.setDeclarationType(declType);
+    decl.setDeclarationStatus(status);
+    OBDal.getInstance().save(decl);
+    JSONObject created = declToJson(decl);
+    OBDal.getInstance().commitAndClose();
+
+    response.setStatus(HttpServletResponse.SC_CREATED);
+    response.getWriter().write(created.toString());
+  }
+
+  private void handleDeclPut(String clientId, HttpServletRequest request,
+      HttpServletResponse response) throws Exception {
+    String id    = request.getParameter("id");
+    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+    if (id == null || id.isEmpty()) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing param: id");
+      return;
+    }
+    JSONObject body      = readJsonBody(request);
+    boolean hasStatus    = body.has(STATUS_KEY);
+    String status        = hasStatus ? body.getString(STATUS_KEY) : null;
+    boolean hasFileExt   = body.has(FILE_EXTERNAL_KEY);
+    boolean fileExternal = body.optBoolean(FILE_EXTERNAL_KEY, false);
+    boolean hasFileName  = body.has(FILE_NAME_KEY);
+    String  fileName     = hasFileName && !body.isNull(FILE_NAME_KEY)
+        ? body.getString(FILE_NAME_KEY) : null;
+
+    FiscalDecl decl = OBDal.getInstance().get(FiscalDecl.class, id);
+    if (decl == null || !clientId.equals(decl.getClient().getId())
+        || !orgId.equals(decl.getOrganization().getId())) {
+      servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
+          "Declaration not found: " + id);
+      return;
+    }
+    if (hasStatus)   decl.setDeclarationStatus(status);
+    if (hasFileExt)  decl.setFileExternal(fileExternal);
+    if (hasFileName) decl.setDeclarationFileName(fileName);
+    decl.setUpdatedBy(OBContext.getOBContext().getUser());
+    OBDal.getInstance().commitAndClose();
+    response.getWriter().write("{\"ok\":true}");
+  }
+
+  private void handleDeclDelete(String clientId, HttpServletRequest request,
+      HttpServletResponse response) throws Exception {
+    String id    = request.getParameter("id");
+    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+    if (id == null || id.isEmpty()) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing param: id");
+      return;
+    }
+    FiscalDecl decl = OBDal.getInstance().get(FiscalDecl.class, id);
+    if (decl == null || !clientId.equals(decl.getClient().getId())
+        || !orgId.equals(decl.getOrganization().getId())) {
+      servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
+          "Declaration not found: " + id);
+      return;
+    }
+    OBDal.getInstance().remove(decl);
+    OBDal.getInstance().commitAndClose();
+    response.getWriter().write("{\"ok\":true}");
+  }
+
+  private JSONObject declToJson(FiscalDecl decl) throws Exception {
+    JSONObject o = new JSONObject();
+    o.put("id",           decl.getId() != null ? decl.getId() : "");
+    o.put("model",        decl.getFiscalModel() != null ? decl.getFiscalModel() : "");
+    o.put("year",         decl.getFiscalYear() != null ? decl.getFiscalYear().intValue() : 0);
+    o.put(PERIOD_KEY,     decl.getPeriod() != null ? decl.getPeriod() : "");
+    String dt = decl.getDeclarationType();
+    String dtNormalized = dt != null ? dt.trim() : "";
+    o.put("type",         "C".equals(dtNormalized) ? "com" : "ord");
+    o.put(STATUS_KEY,     decl.getDeclarationStatus() != null ? decl.getDeclarationStatus() : DEFAULT_STATUS);
+    o.put(FILE_NAME_KEY,  decl.getDeclarationFileName() != null
+        ? decl.getDeclarationFileName() : JSONObject.NULL);
+    o.put(FILE_EXTERNAL_KEY, Boolean.TRUE.equals(decl.isFileExternal()));
+    o.put("updatedAt",    decl.getUpdated() != null ? decl.getUpdated().getTime() : 0L);
+    return o;
+  }
+
+  private JSONObject readJsonBody(HttpServletRequest request) throws Exception {
+    StringBuilder sb = new StringBuilder();
+    try (BufferedReader reader = request.getReader()) {
+      String line;
+      while ((line = reader.readLine()) != null) sb.append(line);
+    }
+    return new JSONObject(sb.toString());
   }
 
   // ── Internal ─────────────────────────────────────────────────────
@@ -170,24 +455,7 @@ class Fiscal303BoxesHandler {
     fillPurchaseBoxes(b, helper, dao303, taxReport, rateToBoxes);
     fillAdditionalInfoBoxes(b, helper, dao303, taxReport, rateToBoxes);
 
-    int[] accruedBoxes   = { 3, 6, 9, 11, 13, 15, 18, 21, 24, 152, 158, 167 };
-    int[] deductibleBoxes = { 29, 31, 33, 35, 37, 39, 41, 42, 43, 44 };
-    BigDecimal accrued    = sumBoxes(b, accruedBoxes);
-    BigDecimal deductible = sumBoxes(b, deductibleBoxes);
-    b.put(27, round(accrued));
-    b.put(45, round(deductible));
-    b.put(46, round(accrued.subtract(deductible)));
-
-    // resultado_final — standard company (100 % Estado, no pending credits, no complementary)
-    BigDecimal r46 = b.getOrDefault(46, BigDecimal.ZERO);
-    b.put(66, r46);   // amount attributable to Estado (box 65 % × box 46)
-    b.put(69, r46);   // result before final adjustments (assumes boxes 64/76/77/78/68/108 = 0)
-    b.put(71, r46);   // final declaration result (assumes boxes 70/109 = 0)
-    // volume of operations — intracom and export mirrors
-    BigDecimal r59 = b.getOrDefault(59, BigDecimal.ZERO);
-    BigDecimal r60 = b.getOrDefault(60, BigDecimal.ZERO);
-    if (r59.compareTo(BigDecimal.ZERO) > 0) b.put(93, r59);
-    if (r60.compareTo(BigDecimal.ZERO) > 0) b.put(94, r60);
+    computeSummaryBoxes(b);
 
     List<Map<String, Object>> sources = collectSources(org, periods, dao303, rateToBoxes);
 
@@ -281,6 +549,23 @@ class Fiscal303BoxesHandler {
     BigDecimal base = (BigDecimal) row.get("base");
     BigDecimal vat  = (BigDecimal) row.get("vat");
     row.put("total", round(base.add(vat)));
+  }
+
+  // Package-private for unit testing — injects pre-built helper and dao,
+  // skips DB lookups and source collection.
+  @SuppressWarnings("java:S1172")
+  ComputeResult computeBoxes(Organization org, TaxReport taxReport,
+      List<Period> periods, AEAT303CalculationsHelper helper,
+      AEAT303Report2014Dao dao303) {
+    Map<Integer, BigDecimal> b = new HashMap<>();
+    Map<String, List<Integer>> rateToBoxes = new HashMap<>();
+
+    fillSalesBoxes(b, helper, dao303, taxReport, rateToBoxes);
+    fillPurchaseBoxes(b, helper, dao303, taxReport, rateToBoxes);
+    fillAdditionalInfoBoxes(b, helper, dao303, taxReport, rateToBoxes);
+    computeSummaryBoxes(b);
+
+    return new ComputeResult(b, Collections.emptyList());
   }
 
   private void fillSalesBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
@@ -395,6 +680,27 @@ class Fiscal303BoxesHandler {
     // Box 60: exports and other exempt operations with deduction right
     fillGroupBoxes(b, helper, dao303, taxReport,
         new BoxGroupConfig("Difference", "ExportsAndOperations", "All", "All", "All", 60, 0), rateToBoxes);
+  }
+
+  // resultado_final — standard company (100 % Estado, no pending credits, no complementary)
+  private void computeSummaryBoxes(Map<Integer, BigDecimal> b) {
+    int[] accruedBoxes    = { 3, 6, 9, 11, 13, 15, 18, 21, 24, 152, 158, 167 };
+    int[] deductibleBoxes = { 29, 31, 33, 35, 37, 39, 41, 42, 43, 44 };
+    BigDecimal accrued    = sumBoxes(b, accruedBoxes);
+    BigDecimal deductible = sumBoxes(b, deductibleBoxes);
+    b.put(27, round(accrued));
+    b.put(45, round(deductible));
+    b.put(46, round(accrued.subtract(deductible)));
+
+    BigDecimal r46 = b.getOrDefault(46, BigDecimal.ZERO);
+    b.put(66, r46);   // amount attributable to Estado (box 65 % × box 46)
+    b.put(69, r46);   // result before final adjustments (assumes boxes 64/76/77/78/68/108 = 0)
+    b.put(71, r46);   // final declaration result (assumes boxes 70/109 = 0)
+
+    BigDecimal r59 = b.getOrDefault(59, BigDecimal.ZERO);
+    BigDecimal r60 = b.getOrDefault(60, BigDecimal.ZERO);
+    if (r59.compareTo(BigDecimal.ZERO) > 0) b.put(93, r59);
+    if (r60.compareTo(BigDecimal.ZERO) > 0) b.put(94, r60);
   }
 
   // ── Resolution helpers ───────────────────────────────────────────
