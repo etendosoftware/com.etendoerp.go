@@ -112,8 +112,9 @@ public class DocTypeResolver {
       }
 
       String[] subTypeFilters = parseSubTypeFilters(ctx);
+      boolean excludeReturn = "M_INOUT".equals(col.getTable().getDBTableName().toUpperCase());
       return queryDefaultDocType(clientId, docBaseType, isSOTrx,
-          subTypeFilters[0], subTypeFilters[1], colName);
+          subTypeFilters[0], subTypeFilters[1], colName, excludeReturn);
 
     } catch (Exception e) {
       log.debug("Could not resolve default doctype for {}: {}", colName, e.getMessage());
@@ -155,7 +156,8 @@ public class DocTypeResolver {
    * Query the C_DocType table for the default document type matching the given criteria.
    */
   private static String queryDefaultDocType(String clientId, String docBaseType,
-      String isSOTrx, String subTypeFilter, String subTypeExclude, String colName)
+      String isSOTrx, String subTypeFilter, String subTypeExclude, String colName,
+      boolean excludeReturn)
       throws Exception {
     String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
 
@@ -165,6 +167,9 @@ public class DocTypeResolver {
     sql.append("AND dt.AD_Client_ID = ? ");
     sql.append("AND dt.DocBaseType = ? ");
     sql.append("AND dt.IsSOTrx = ? ");
+    if (excludeReturn) {
+      sql.append("AND dt.IsReturn = 'N' ");
+    }
     sql.append("AND (dt.AD_Org_ID = '0' OR AD_ISORGINCLUDED(?, dt.AD_Org_ID, ?) <> '-1') ");
 
     if (subTypeFilter != null) {
