@@ -78,6 +78,7 @@ class Fiscal303BoxesHandler {
   private static final String SINCE_KEY         = "since";
   private static final String STATUS_KEY        = "status";
   private static final String FILE_NAME_KEY     = "fileName";
+  private static final String FILE_EXTERNAL_KEY = "fileExternal";
 
   private static final BigDecimal PCT_21   = new BigDecimal("21");
   private static final BigDecimal PCT_10   = new BigDecimal("10");
@@ -327,8 +328,8 @@ class Fiscal303BoxesHandler {
     JSONObject body      = readJsonBody(request);
     boolean hasStatus    = body.has(STATUS_KEY);
     String status        = hasStatus ? body.getString(STATUS_KEY) : null;
-    boolean hasFileExt   = body.has("fileExternal");
-    boolean fileExternal = body.optBoolean("fileExternal", false);
+    boolean hasFileExt   = body.has(FILE_EXTERNAL_KEY);
+    boolean fileExternal = body.optBoolean(FILE_EXTERNAL_KEY, false);
     boolean hasFileName  = body.has(FILE_NAME_KEY);
     String  fileName     = hasFileName && !body.isNull(FILE_NAME_KEY)
         ? body.getString(FILE_NAME_KEY) : null;
@@ -380,7 +381,7 @@ class Fiscal303BoxesHandler {
     o.put(STATUS_KEY,     decl.getDeclarationStatus() != null ? decl.getDeclarationStatus() : DEFAULT_STATUS);
     o.put(FILE_NAME_KEY,  decl.getDeclarationFileName() != null
         ? decl.getDeclarationFileName() : JSONObject.NULL);
-    o.put("fileExternal", Boolean.TRUE.equals(decl.isFileExternal()));
+    o.put(FILE_EXTERNAL_KEY, Boolean.TRUE.equals(decl.isFileExternal()));
     o.put("updatedAt",    decl.getUpdated() != null ? decl.getUpdated().getTime() : 0L);
     return o;
   }
