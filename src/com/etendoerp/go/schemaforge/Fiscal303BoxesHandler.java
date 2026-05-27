@@ -300,6 +300,8 @@ class Fiscal303BoxesHandler {
     FiscalDecl decl = OBProvider.getInstance().get(FiscalDecl.class);
     decl.setClient(OBContext.getOBContext().getCurrentClient());
     decl.setOrganization(OBContext.getOBContext().getCurrentOrganization());
+    decl.setCreatedBy(OBContext.getOBContext().getUser());
+    decl.setUpdatedBy(OBContext.getOBContext().getUser());
     decl.setFiscalModel(model);
     decl.setFiscalYear(year);
     decl.setPeriod(period);
