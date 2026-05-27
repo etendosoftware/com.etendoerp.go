@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
+
 import com.smf.jobs.hooks.CloneRecordHook;
 
 import org.apache.commons.lang3.time.DateUtils;
