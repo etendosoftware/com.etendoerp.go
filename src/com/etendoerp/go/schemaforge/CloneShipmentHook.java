@@ -74,9 +74,14 @@ public class CloneShipmentHook extends CloneRecordHook {
     clone.setUpdatedBy(currentUser);
 
     for (ShipmentInOutLine line : original.getMaterialMgmtShipmentInOutLineList()) {
+      BigDecimal movQty = line.getMovementQuantity();
       ShipmentInOutLine clonedLine = (ShipmentInOutLine) DalUtil.copy(line, false);
       clonedLine.setCanceledInoutLine(null);
       clonedLine.setSalesOrderLine(null);
+      // Restore movementQuantity: listeners may reset it when canceledInoutLine is cleared
+      if (movQty != null) {
+        clonedLine.setMovementQuantity(movQty);
+      }
       clonedLine.setCreationDate(new Date());
       clonedLine.setUpdated(new Date());
       clonedLine.setCreatedBy(currentUser);
