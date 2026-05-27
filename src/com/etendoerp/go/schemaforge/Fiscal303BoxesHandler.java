@@ -309,7 +309,6 @@ class Fiscal303BoxesHandler {
     decl.setDeclarationType(declType);
     decl.setDeclarationStatus(status);
     OBDal.getInstance().save(decl);
-    OBDal.getInstance().flush();
     JSONObject created = declToJson(decl);
     OBDal.getInstance().commitAndClose();
 
