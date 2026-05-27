@@ -17,40 +17,48 @@
 
 package com.etendoerp.go.schemaforge;
 
-import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+import java.util.Date;
 
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
 /**
  * Unit tests for {@link CloneShipmentHook}.
  *
- * <p>Covers the two lifecycle methods that can be tested without CDI or DB access:
+ * <p>Covers:
  * <ul>
- *   <li>{@code shouldCopyChildren()} — must always return false so the hook manages
- *       line copying itself instead of delegating to the framework's generic copy.</li>
- *   <li>{@code preCopy()} — must return the original record unchanged so the framework
- *       proceeds with the unmodified source before {@code postCopy} resets the clone.</li>
+ *   <li>{@code shouldCopyChildren()} — must always return true so the framework copies
+ *       lines via DalUtil.copy; the hook no longer manages line copying manually.</li>
+ *   <li>{@code preCopy()} — must return the original record unchanged.</li>
+ *   <li>{@code postCopy()} — must reset header state fields to draft on the clone.</li>
  * </ul>
- *
- * <p>{@code postCopy()} requires {@link org.openbravo.dal.core.OBContext} and
- * {@link org.openbravo.dal.service.OBDal} and is covered by integration tests only.
  */
 public class CloneShipmentHookTest {
 
   // ── shouldCopyChildren() ──────────────────────────────────────────────────
 
   /**
-   * Verifies that shouldCopyChildren always returns false regardless of the uiCopyChildren flag,
-   * so the hook manages line copying in postCopy and avoids the framework's generic child copy.
+   * Verifies that shouldCopyChildren always returns true regardless of the uiCopyChildren flag,
+   * so the framework (DalUtil.copy) handles line copying and the hook only resets header state.
    */
   @Test
-  public void testShouldCopyChildrenReturnsFalse() {
+  public void testShouldCopyChildrenReturnsTrue() {
     CloneShipmentHook hook = new CloneShipmentHook();
-    assertFalse(hook.shouldCopyChildren(true));
-    assertFalse(hook.shouldCopyChildren(false));
+    assertTrue(hook.shouldCopyChildren(true));
+    assertTrue(hook.shouldCopyChildren(false));
   }
 
   // ── preCopy() ─────────────────────────────────────────────────────────────
@@ -64,5 +72,114 @@ public class CloneShipmentHookTest {
     CloneShipmentHook hook = new CloneShipmentHook();
     BaseOBObject original = mock(BaseOBObject.class);
     assertSame(original, hook.preCopy(original));
+  }
+
+  // ── postCopy() ────────────────────────────────────────────────────────────
+
+  /**
+   * Verifies that postCopy resets documentStatus, documentAction, posted, processed,
+   * and documentNo on the clone to put it in a clean Draft state.
+   */
+  @Test
+  public void testPostCopyResetsDocumentStatusToDraft() throws Exception {
+    CloneShipmentHook hook = new CloneShipmentHook();
+    ShipmentInOut original = mock(ShipmentInOut.class);
+    ShipmentInOut clone = mock(ShipmentInOut.class);
+
+    User currentUser = mock(User.class);
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+      OBContext obContext = mock(OBContext.class);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+      when(obContext.getUser()).thenReturn(currentUser);
+
+      BaseOBObject result = hook.postCopy(original, clone);
+
+      assertSame(clone, result);
+      Mockito.verify(clone).setDocumentStatus("DR");
+      Mockito.verify(clone).setDocumentAction("CO");
+      Mockito.verify(clone).setPosted("N");
+      Mockito.verify(clone).setProcessed(false);
+      Mockito.verify(clone).setDocumentNo(null);
+    }
+  }
+
+  /**
+   * Verifies that postCopy sets movementDate to today (not null) on the clone.
+   */
+  @Test
+  public void testPostCopySetsMovementDateToToday() throws Exception {
+    CloneShipmentHook hook = new CloneShipmentHook();
+    ShipmentInOut original = mock(ShipmentInOut.class);
+    ShipmentInOut clone = mock(ShipmentInOut.class);
+
+    User currentUser = mock(User.class);
+    long beforeMs = System.currentTimeMillis();
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+      OBContext obContext = mock(OBContext.class);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+      when(obContext.getUser()).thenReturn(currentUser);
+
+      hook.postCopy(original, clone);
+      long afterMs = System.currentTimeMillis();
+
+      // Capture the Date passed to setMovementDate via an ArgumentCaptor-style check:
+      // verify it was called with a non-null date that is <= today (truncated to day).
+      org.mockito.ArgumentCaptor<Date> captor = org.mockito.ArgumentCaptor.forClass(Date.class);
+      Mockito.verify(clone).setMovementDate(captor.capture());
+      Date movementDate = captor.getValue();
+      assertNotNull(movementDate);
+      // Truncated to day — should be <= today and >= start of today
+      assertTrue(movementDate.getTime() <= afterMs);
+      assertTrue(movementDate.getTime() >= beforeMs - 86400_000L);
+    }
+  }
+
+  /**
+   * Verifies that postCopy sets creationDate and updatedDate to non-null values.
+   */
+  @Test
+  public void testPostCopySetsAuditDatesAsNonNull() throws Exception {
+    CloneShipmentHook hook = new CloneShipmentHook();
+    ShipmentInOut original = mock(ShipmentInOut.class);
+    ShipmentInOut clone = mock(ShipmentInOut.class);
+
+    User currentUser = mock(User.class);
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+      OBContext obContext = mock(OBContext.class);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+      when(obContext.getUser()).thenReturn(currentUser);
+
+      hook.postCopy(original, clone);
+
+      org.mockito.ArgumentCaptor<Date> creationCaptor = org.mockito.ArgumentCaptor.forClass(Date.class);
+      Mockito.verify(clone).setCreationDate(creationCaptor.capture());
+      assertNotNull(creationCaptor.getValue());
+
+      org.mockito.ArgumentCaptor<Date> updatedCaptor = org.mockito.ArgumentCaptor.forClass(Date.class);
+      Mockito.verify(clone).setUpdated(updatedCaptor.capture());
+      assertNotNull(updatedCaptor.getValue());
+    }
+  }
+
+  /**
+   * Verifies that postCopy assigns the current OBContext user to both createdBy and updatedBy.
+   */
+  @Test
+  public void testPostCopySetsCreatedByAndUpdatedByToCurrentUser() throws Exception {
+    CloneShipmentHook hook = new CloneShipmentHook();
+    ShipmentInOut original = mock(ShipmentInOut.class);
+    ShipmentInOut clone = mock(ShipmentInOut.class);
+
+    User currentUser = mock(User.class);
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+      OBContext obContext = mock(OBContext.class);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+      when(obContext.getUser()).thenReturn(currentUser);
+
+      hook.postCopy(original, clone);
+
+      Mockito.verify(clone).setCreatedBy(currentUser);
+      Mockito.verify(clone).setUpdatedBy(currentUser);
+    }
   }
 }
