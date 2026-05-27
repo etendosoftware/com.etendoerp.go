@@ -41,6 +41,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
@@ -83,6 +84,11 @@ public class FinancialAccountHandlerTest {
   @Before
   public void setUp() {
     handler = spy(new FinancialAccountHandler());
+    // Stub the OBContext/OBDal seams so routing tests run without a live
+    // Etendo session (CI has no initialized OBContext on the thread).
+    org.mockito.Mockito.doNothing().when(handler).enterAdminMode();
+    org.mockito.Mockito.doNothing().when(handler).exitAdminMode();
+    org.mockito.Mockito.doNothing().when(handler).doRollbackAndClose();
   }
 
   // ── handle() routing ─────────────────────────────────────────────────────
@@ -647,7 +653,7 @@ public class FinancialAccountHandlerTest {
           mock(org.openbravo.model.common.enterprise.Organization.class);
       when(org.getId()).thenReturn("org-1");
       when(obCtx.getCurrentOrganization()).thenReturn(org);
-      obContextMock.when(org.openbravo.dal.core.OBContext::getOBContext).thenReturn(obCtx);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
 
       NeoResponse response = handler.buildDefaults();
 
@@ -679,7 +685,7 @@ public class FinancialAccountHandlerTest {
           mock(org.openbravo.model.common.enterprise.Organization.class);
       when(org.getId()).thenReturn("org-1");
       when(obCtx.getCurrentOrganization()).thenReturn(org);
-      obContextMock.when(org.openbravo.dal.core.OBContext::getOBContext).thenReturn(obCtx);
+      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
 
       NeoResponse response = handler.buildDefaults();
 

@@ -99,7 +99,7 @@ public class FinancialAccountHandler implements NeoHandler {
     String action = params != null ? params.get(PARAM_ACTION) : null;
 
     try {
-      OBContext.setAdminMode(true);
+      enterAdminMode();
       if (METHOD_GET.equals(method) && ACTION_DEFAULTS.equals(action)) {
         return buildDefaults();
       }
@@ -114,15 +114,15 @@ public class FinancialAccountHandler implements NeoHandler {
       }
       return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED, "Method not allowed.");
     } catch (OBException e) {
-      OBDal.getInstance().rollbackAndClose();
+      doRollbackAndClose();
       log.warn("financial-account handler business error: {}", e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
-      OBDal.getInstance().rollbackAndClose();
+      doRollbackAndClose();
       log.error("financial-account handler error", e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal Server Error");
     } finally {
-      OBContext.restorePreviousMode();
+      exitAdminMode();
     }
   }
 
@@ -320,6 +320,18 @@ public class FinancialAccountHandler implements NeoHandler {
   // ---------------------------------------------------------------------------
   // Seams (package-private to allow unit tests to stub the DAL layer)
   // ---------------------------------------------------------------------------
+
+  void enterAdminMode() {
+    OBContext.setAdminMode(true);
+  }
+
+  void exitAdminMode() {
+    OBContext.restorePreviousMode();
+  }
+
+  void doRollbackAndClose() {
+    OBDal.getInstance().rollbackAndClose();
+  }
 
   String normalizeType(String type) {
     return TYPE_CASH.equals(type) ? TYPE_CASH : TYPE_BANK;
