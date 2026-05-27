@@ -18,8 +18,6 @@
 package com.etendoerp.go.schemaforge;
 
 import com.smf.jobs.hooks.CloneRecordHook;
-import org.openbravo.erpCommon.utility.CSResponse;
-import org.openbravo.erpCommon.utility.DocumentNoData;
 
 import javax.enterprise.context.ApplicationScoped;
 import javax.enterprise.inject.Any;
@@ -42,7 +40,6 @@ import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Tab;
-import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * Generic NEO handler that clones any record into a new draft using the
@@ -200,30 +197,7 @@ public class NeoCloneRecordHandler implements NeoHandler {
    */
   private String fetchDocumentNo(String docTypeId, String clientId, String tableDBName,
       String entityName) {
-    DalConnectionProvider conn = new DalConnectionProvider(false);
-
-    if (!docTypeId.isEmpty()) {
-      try {
-        CSResponse cs = DocumentNoData.nextDocType(conn, docTypeId, clientId, "Y");
-        if (cs != null && StringUtils.isNotBlank(cs.razon)) {
-          return cs.razon;
-        }
-      } catch (Exception ex) {
-        log.debug("nextDocType failed for {} doctype {}: {}", entityName, docTypeId,
-            ex.getMessage());
-      }
-    }
-
-    try {
-      CSResponse cs = DocumentNoData.nextDoc(conn, "DocumentNo_" + tableDBName, clientId, "Y");
-      if (cs != null && StringUtils.isNotBlank(cs.razon)) {
-        return cs.razon;
-      }
-    } catch (Exception ex) {
-      log.debug("nextDoc fallback failed for table {}: {}", tableDBName, ex.getMessage());
-    }
-
-    return null;
+    return NeoHandlerUtils.fetchDocumentNo(docTypeId, clientId, tableDBName, log);
   }
 
   /**
