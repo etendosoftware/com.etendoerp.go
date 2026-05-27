@@ -25,7 +25,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -177,8 +176,6 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
 
         long nextLineNo = fetchMaxLineNo(receiptId) + 10;
         int imported = 0;
-        // preserve insertion order so the single-shipment check is deterministic
-        Map<String, String> sourceShipmentDocNos = new LinkedHashMap<>();
 
         for (int i = 0; i < requestedLines.length(); i++) {
           JSONObject req = requestedLines.getJSONObject(i);
@@ -204,19 +201,9 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           OBDal.getInstance().save(retLine);
           nextLineNo += 10;
           imported++;
-
-          ShipmentInOut sourceShipment = sourceLine.getShipmentReceipt();
-          if (sourceShipment != null) {
-            sourceShipmentDocNos.put(sourceShipment.getId(), sourceShipment.getDocumentNo());
-          }
         }
 
         OBDal.getInstance().flush();
-
-        // If all lines come from one shipment, fill the header field
-        if (sourceShipmentDocNos.size() == 1) {
-          storeSourceShipmentDocNo(receiptId, sourceShipmentDocNos.values().iterator().next());
-        }
 
         JSONObject data = new JSONObject();
         data.put("importedCount", imported);
@@ -545,7 +532,6 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       JSONObject body = context.getPreviousResult().getBody();
       List<String> ids = NeoHandlerUtils.collectIds(dataArr);
 
-      Map<String, String> docNoMap = fetchSourceDocNos(ids);
       Map<String, List<JSONObject>> shipmentsMap = fetchSourceShipments(ids);
       Map<String, List<JSONObject>> returnInvoicesMap = fetchReturnInvoices(ids);
 
@@ -553,17 +539,22 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
         JSONObject rec = dataArr.getJSONObject(i);
         String id = rec.optString("id", null);
 
-        String sourceDocNo = docNoMap.get(id);
-        if (sourceDocNo != null) {
-          rec.put(FIELD_SOURCE_SHIPMENT_DOC_NO, sourceDocNo);
-        }
-
         List<JSONObject> shipments = shipmentsMap.getOrDefault(id, Collections.emptyList());
         JSONArray shipmentsArr = new JSONArray();
         for (JSONObject s : shipments) {
           shipmentsArr.put(s);
         }
         rec.put(FIELD_SOURCE_SHIPMENTS, shipmentsArr);
+
+        if (!shipments.isEmpty()) {
+          String combined = shipments.stream()
+              .map(s -> s.optString("documentNo", ""))
+              .filter(s -> !s.isEmpty())
+              .collect(Collectors.joining(", "));
+          if (!combined.isEmpty()) {
+            rec.put(FIELD_SOURCE_SHIPMENT_DOC_NO, combined);
+          }
+        }
 
         List<JSONObject> invoices = returnInvoicesMap.getOrDefault(id, Collections.emptyList());
         JSONArray invoicesArr = new JSONArray();
@@ -578,28 +569,6 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       log.error("Error enriching return-material-receipt header", e);
       return null;
     }
-  }
-
-  @SuppressWarnings("java:S2077")
-  private Map<String, String> fetchSourceDocNos(List<String> receiptIds) {
-    Map<String, String> result = new HashMap<>();
-    if (receiptIds.isEmpty()) return result;
-    String placeholders = receiptIds.stream().map(id -> "?").collect(Collectors.joining(","));
-    String sql =
-        "SELECT M_InOut_ID, em_etgo_sourceshipmentdocno " +
-        "FROM M_InOut " +
-        "WHERE M_InOut_ID IN (" + placeholders + ") " +
-        "  AND em_etgo_sourceshipmentdocno IS NOT NULL";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      for (int i = 0; i < receiptIds.size(); i++) ps.setString(i + 1, receiptIds.get(i));
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) result.put(rs.getString(1), rs.getString(2));
-      }
-    } catch (Exception e) {
-      log.warn("Error fetching sourceShipmentDocNo: {}", e.getMessage());
-    }
-    return result;
   }
 
   @SuppressWarnings("java:S2077")
@@ -668,21 +637,6 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       log.warn("Error fetching return invoices for receipts: {}", e.getMessage());
     }
     return result;
-  }
-
-  @SuppressWarnings("java:S2077")
-  private void storeSourceShipmentDocNo(String receiptId, String sourceDocNo) {
-    try {
-      Connection conn = OBDal.getInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(
-          "UPDATE M_InOut SET em_etgo_sourceshipmentdocno = ? WHERE M_InOut_ID = ?")) {
-        ps.setString(1, sourceDocNo);
-        ps.setString(2, receiptId);
-        ps.executeUpdate();
-      }
-    } catch (Exception e) {
-      log.warn("Could not store sourceShipmentDocNo on receipt {}: {}", receiptId, e.getMessage());
-    }
   }
 
   @SuppressWarnings("java:S2077")
