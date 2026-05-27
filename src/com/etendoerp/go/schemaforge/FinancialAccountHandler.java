@@ -367,7 +367,7 @@ public class FinancialAccountHandler implements NeoHandler {
     criteria.add(Restrictions.not(
         Restrictions.in(FIN_Reconciliation.PROPERTY_DOCUMENTSTATUS, CLOSED_RECONCILIATION_STATUSES)));
     criteria.setMaxResults(1);
-    return !criteria.list().isEmpty();
+    return criteria.uniqueResult() != null;
   }
 
   Currency resolveDefaultCurrency(String orgId) {
