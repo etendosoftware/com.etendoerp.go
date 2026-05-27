@@ -27,6 +27,7 @@ import java.util.Objects;
 
 import org.apache.commons.io.IOUtils;
 import org.codehaus.jettison.json.JSONException;
+import org.openbravo.base.exception.OBException;
 
 /**
  * Provider adapter for an API Gateway-style transactional email endpoint.
@@ -73,7 +74,7 @@ public class ApiGatewayEmailProviderAdapter implements EmailProviderAdapter {
       throws IOException, JSONException {
     Objects.requireNonNull(request, "Email provider request cannot be null");
     if (!isConfigured()) {
-      throw new IOException("Email provider is not properly configured. "
+      throw new OBException("Email provider is not properly configured. "
           + "Check base URL and API key.");
     }
     return transport.post(config.getBaseUrl(), config.getApiKey(),

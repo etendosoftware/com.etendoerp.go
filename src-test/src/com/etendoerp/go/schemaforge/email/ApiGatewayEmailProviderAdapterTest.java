@@ -25,6 +25,7 @@ import java.io.IOException;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.openbravo.base.exception.OBException;
 
 /**
  * Unit tests for {@link ApiGatewayEmailProviderAdapter}.
@@ -64,7 +65,7 @@ public class ApiGatewayEmailProviderAdapterTest {
     try {
       adapter.send(new EmailProviderRequest("user@example.com", "reset-password",
           new JSONObject(), null));
-    } catch (IOException e) {
+    } catch (OBException e) {
       assertTrue(e.getMessage().contains("not properly configured"));
       assertEquals(null, transport.endpoint);
       return;

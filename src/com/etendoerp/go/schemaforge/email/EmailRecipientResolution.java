@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge.email;
 
 import org.apache.commons.lang3.StringUtils;
+import org.openbravo.base.exception.OBException;
 
 /**
  * Recipient resolved by a contract before provider payload creation.
@@ -78,7 +79,7 @@ public final class EmailRecipientResolution {
   private static String requireRecipient(String recipient) {
     String normalized = StringUtils.trimToNull(recipient);
     if (normalized == null) {
-      throw new IllegalArgumentException("Recipient email cannot be null or empty");
+      throw new OBException("Recipient email cannot be null or empty");
     }
     return normalized;
   }

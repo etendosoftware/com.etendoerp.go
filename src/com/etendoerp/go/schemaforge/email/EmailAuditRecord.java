@@ -41,6 +41,7 @@ public final class EmailAuditRecord {
 
   private EmailAuditRecord(EmailSendContext context, String idempotencyKey, int httpStatus,
       String status, String message, Integer providerStatus, boolean duplicate) {
+    Check.isNotNull(context, "EmailSendContext cannot be null");
     this.contractName = context.getContractName();
     this.idempotencyKey = idempotencyKey;
     this.tenantId = context.getTenantId();
