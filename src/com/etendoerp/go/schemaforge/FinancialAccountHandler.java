@@ -40,6 +40,7 @@ import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
+import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
 /**
  * NeoHandler that powers the offline management of financial accounts introduced
@@ -157,7 +158,10 @@ public class FinancialAccountHandler implements NeoHandler {
           "An account with this name already exists");
     }
 
-    FIN_FinancialAccount account = persist(name, type, currency, iban, swift);
+    List<MatchingAlgorithm> algorithms = listMatchingAlgorithms();
+    MatchingAlgorithm defaultAlgorithm = algorithms.isEmpty() ? null : algorithms.get(0);
+
+    FIN_FinancialAccount account = persist(name, type, currency, iban, swift, defaultAlgorithm);
 
     JSONObject data = new JSONObject();
     data.put("id", account.getId());
@@ -169,7 +173,8 @@ public class FinancialAccountHandler implements NeoHandler {
    * Persists a new {@link FIN_FinancialAccount} under the current OBContext client
    * and organization. Exposed package-private so unit tests can stub the OBDal layer.
    */
-  FIN_FinancialAccount persist(String name, String type, Currency currency, String iban, String swift) {
+  FIN_FinancialAccount persist(String name, String type, Currency currency, String iban,
+      String swift, MatchingAlgorithm algorithm) {
     FIN_FinancialAccount account = OBProvider.getInstance().get(FIN_FinancialAccount.class);
     account.setClient(OBContext.getOBContext().getCurrentClient());
     account.setOrganization(OBContext.getOBContext().getCurrentOrganization());
@@ -182,6 +187,9 @@ public class FinancialAccountHandler implements NeoHandler {
     }
     if (StringUtils.isNotBlank(swift)) {
       account.setSwiftCode(swift);
+    }
+    if (algorithm != null) {
+      account.setMatchingAlgorithm(algorithm);
     }
     OBDal.getInstance().save(account);
     OBDal.getInstance().flush();
@@ -355,6 +363,14 @@ public class FinancialAccountHandler implements NeoHandler {
     OBCriteria<Currency> criteria = OBDal.getInstance().createCriteria(Currency.class);
     criteria.add(Restrictions.eq(Currency.PROPERTY_ACTIVE, true));
     criteria.addOrderBy(Currency.PROPERTY_ISOCODE, true);
+    return criteria.list();
+  }
+
+  List<MatchingAlgorithm> listMatchingAlgorithms() {
+    OBCriteria<MatchingAlgorithm> criteria =
+        OBDal.getInstance().createCriteria(MatchingAlgorithm.class);
+    criteria.add(Restrictions.eq(MatchingAlgorithm.PROPERTY_ACTIVE, true));
+    criteria.addOrderBy(MatchingAlgorithm.PROPERTY_NAME, true);
     return criteria.list();
   }
 }

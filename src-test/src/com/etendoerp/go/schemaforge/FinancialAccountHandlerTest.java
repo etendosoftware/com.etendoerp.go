@@ -213,8 +213,9 @@ public class FinancialAccountHandlerTest {
     when(account.getName()).thenReturn("BBVA");
     doReturn(currency).when(handler).loadCurrency(EUR_ID);
     doReturn(false).when(handler).nameExists(eq("BBVA"), isNull());
+    doReturn(Collections.emptyList()).when(handler).listMatchingAlgorithms();
     doReturn(account).when(handler).persist(eq("BBVA"), eq("B"), eq(currency),
-        eq("ES9121000418450200051332"), eq("BBVAESMM"));
+        eq("ES9121000418450200051332"), eq("BBVAESMM"), isNull());
 
     NeoResponse response = handler.create(body);
 
@@ -241,13 +242,14 @@ public class FinancialAccountHandlerTest {
     when(account.getName()).thenReturn("Caja Central");
     doReturn(currency).when(handler).loadCurrency(EUR_ID);
     doReturn(false).when(handler).nameExists(eq("Caja Central"), isNull());
+    doReturn(Collections.emptyList()).when(handler).listMatchingAlgorithms();
     doReturn(account).when(handler).persist(eq("Caja Central"), eq("C"), eq(currency),
-        eq(""), eq(""));
+        eq(""), eq(""), isNull());
 
     NeoResponse response = handler.create(body);
 
     assertEquals(201, response.getHttpStatus());
-    verify(handler).persist(eq("Caja Central"), eq("C"), eq(currency), eq(""), eq(""));
+    verify(handler).persist(eq("Caja Central"), eq("C"), eq(currency), eq(""), eq(""), isNull());
   }
 
   /**
@@ -257,7 +259,7 @@ public class FinancialAccountHandlerTest {
   public void testCreateNullBodyReturns400() throws Exception {
     NeoResponse response = handler.create(null);
     assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).persist(any(), any(), any(), any(), any());
+    verify(handler, never()).persist(any(), any(), any(), any(), any(), any());
   }
 
   /**
@@ -269,7 +271,7 @@ public class FinancialAccountHandlerTest {
     JSONObject body = new JSONObject().put("name", "   ").put("currencyId", EUR_ID);
     NeoResponse response = handler.create(body);
     assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).persist(any(), any(), any(), any(), any());
+    verify(handler, never()).persist(any(), any(), any(), any(), any(), any());
   }
 
   /**
@@ -294,7 +296,7 @@ public class FinancialAccountHandlerTest {
         .put("currencyId", EUR_ID);
     NeoResponse response = handler.create(body);
     assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).persist(any(), any(), any(), any(), any());
+    verify(handler, never()).persist(any(), any(), any(), any(), any(), any());
   }
 
   /**
@@ -308,7 +310,7 @@ public class FinancialAccountHandlerTest {
         .put("iban", repeat("E", 35));
     NeoResponse response = handler.create(body);
     assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).persist(any(), any(), any(), any(), any());
+    verify(handler, never()).persist(any(), any(), any(), any(), any(), any());
   }
 
   /**
@@ -322,7 +324,7 @@ public class FinancialAccountHandlerTest {
         .put("swiftCode", repeat("S", 21));
     NeoResponse response = handler.create(body);
     assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).persist(any(), any(), any(), any(), any());
+    verify(handler, never()).persist(any(), any(), any(), any(), any(), any());
   }
 
   /**
@@ -338,7 +340,7 @@ public class FinancialAccountHandlerTest {
 
     assertEquals(400, response.getHttpStatus());
     verify(handler, never()).nameExists(any(), any());
-    verify(handler, never()).persist(any(), any(), any(), any(), any());
+    verify(handler, never()).persist(any(), any(), any(), any(), any(), any());
   }
 
   /**
@@ -355,7 +357,7 @@ public class FinancialAccountHandlerTest {
     NeoResponse response = handler.create(body);
 
     assertEquals(409, response.getHttpStatus());
-    verify(handler, never()).persist(any(), any(), any(), any(), any());
+    verify(handler, never()).persist(any(), any(), any(), any(), any(), any());
   }
 
   // ── update() ─────────────────────────────────────────────────────────────
