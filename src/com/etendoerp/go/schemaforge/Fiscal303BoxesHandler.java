@@ -318,40 +318,47 @@ class Fiscal303BoxesHandler {
 
   private void handleDeclPut(String clientId, HttpServletRequest request,
       HttpServletResponse response) throws Exception {
-    String id = request.getParameter("id");
+    String id    = request.getParameter("id");
+    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
     if (id == null || id.isEmpty()) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing param: id");
       return;
     }
     JSONObject body      = readJsonBody(request);
-    String status        = body.has(STATUS_KEY) ? body.getString(STATUS_KEY) : DEFAULT_STATUS;
+    boolean hasStatus    = body.has(STATUS_KEY);
+    String status        = hasStatus ? body.getString(STATUS_KEY) : null;
+    boolean hasFileExt   = body.has("fileExternal");
     boolean fileExternal = body.optBoolean("fileExternal", false);
     boolean hasFileName  = body.has(FILE_NAME_KEY);
     String  fileName     = hasFileName && !body.isNull(FILE_NAME_KEY)
         ? body.getString(FILE_NAME_KEY) : null;
 
     FiscalDecl decl = OBDal.getInstance().get(FiscalDecl.class, id);
-    if (decl == null || !clientId.equals(decl.getClient().getId())) {
+    if (decl == null || !clientId.equals(decl.getClient().getId())
+        || !orgId.equals(decl.getOrganization().getId())) {
       servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
           "Declaration not found: " + id);
       return;
     }
-    decl.setDeclarationStatus(status);
-    decl.setFileExternal(fileExternal);
+    if (hasStatus)   decl.setDeclarationStatus(status);
+    if (hasFileExt)  decl.setFileExternal(fileExternal);
     if (hasFileName) decl.setDeclarationFileName(fileName);
+    decl.setUpdatedBy(OBContext.getOBContext().getUser());
     OBDal.getInstance().commitAndClose();
     response.getWriter().write("{\"ok\":true}");
   }
 
   private void handleDeclDelete(String clientId, HttpServletRequest request,
       HttpServletResponse response) throws Exception {
-    String id = request.getParameter("id");
+    String id    = request.getParameter("id");
+    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
     if (id == null || id.isEmpty()) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing param: id");
       return;
     }
     FiscalDecl decl = OBDal.getInstance().get(FiscalDecl.class, id);
-    if (decl == null || !clientId.equals(decl.getClient().getId())) {
+    if (decl == null || !clientId.equals(decl.getClient().getId())
+        || !orgId.equals(decl.getOrganization().getId())) {
       servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
           "Declaration not found: " + id);
       return;
@@ -448,24 +455,7 @@ class Fiscal303BoxesHandler {
     fillPurchaseBoxes(b, helper, dao303, taxReport, rateToBoxes);
     fillAdditionalInfoBoxes(b, helper, dao303, taxReport, rateToBoxes);
 
-    int[] accruedBoxes   = { 3, 6, 9, 11, 13, 15, 18, 21, 24, 152, 158, 167 };
-    int[] deductibleBoxes = { 29, 31, 33, 35, 37, 39, 41, 42, 43, 44 };
-    BigDecimal accrued    = sumBoxes(b, accruedBoxes);
-    BigDecimal deductible = sumBoxes(b, deductibleBoxes);
-    b.put(27, round(accrued));
-    b.put(45, round(deductible));
-    b.put(46, round(accrued.subtract(deductible)));
-
-    // resultado_final — standard company (100 % Estado, no pending credits, no complementary)
-    BigDecimal r46 = b.getOrDefault(46, BigDecimal.ZERO);
-    b.put(66, r46);   // amount attributable to Estado (box 65 % × box 46)
-    b.put(69, r46);   // result before final adjustments (assumes boxes 64/76/77/78/68/108 = 0)
-    b.put(71, r46);   // final declaration result (assumes boxes 70/109 = 0)
-    // volume of operations — intracom and export mirrors
-    BigDecimal r59 = b.getOrDefault(59, BigDecimal.ZERO);
-    BigDecimal r60 = b.getOrDefault(60, BigDecimal.ZERO);
-    if (r59.compareTo(BigDecimal.ZERO) > 0) b.put(93, r59);
-    if (r60.compareTo(BigDecimal.ZERO) > 0) b.put(94, r60);
+    computeSummaryBoxes(b);
 
     List<Map<String, Object>> sources = collectSources(org, periods, dao303, rateToBoxes);
 
@@ -573,23 +563,7 @@ class Fiscal303BoxesHandler {
     fillSalesBoxes(b, helper, dao303, taxReport, rateToBoxes);
     fillPurchaseBoxes(b, helper, dao303, taxReport, rateToBoxes);
     fillAdditionalInfoBoxes(b, helper, dao303, taxReport, rateToBoxes);
-
-    int[] accruedBoxes   = { 3, 6, 9, 11, 13, 15, 18, 21, 24, 152, 158, 167 };
-    int[] deductibleBoxes = { 29, 31, 33, 35, 37, 39, 41, 42, 43, 44 };
-    BigDecimal accrued    = sumBoxes(b, accruedBoxes);
-    BigDecimal deductible = sumBoxes(b, deductibleBoxes);
-    b.put(27, round(accrued));
-    b.put(45, round(deductible));
-    b.put(46, round(accrued.subtract(deductible)));
-
-    BigDecimal r46 = b.getOrDefault(46, BigDecimal.ZERO);
-    b.put(66, r46);
-    b.put(69, r46);
-    b.put(71, r46);
-    BigDecimal r59 = b.getOrDefault(59, BigDecimal.ZERO);
-    BigDecimal r60 = b.getOrDefault(60, BigDecimal.ZERO);
-    if (r59.compareTo(BigDecimal.ZERO) > 0) b.put(93, r59);
-    if (r60.compareTo(BigDecimal.ZERO) > 0) b.put(94, r60);
+    computeSummaryBoxes(b);
 
     return new ComputeResult(b, Collections.emptyList());
   }
@@ -706,6 +680,27 @@ class Fiscal303BoxesHandler {
     // Box 60: exports and other exempt operations with deduction right
     fillGroupBoxes(b, helper, dao303, taxReport,
         new BoxGroupConfig("Difference", "ExportsAndOperations", "All", "All", "All", 60, 0), rateToBoxes);
+  }
+
+  // resultado_final — standard company (100 % Estado, no pending credits, no complementary)
+  private void computeSummaryBoxes(Map<Integer, BigDecimal> b) {
+    int[] accruedBoxes    = { 3, 6, 9, 11, 13, 15, 18, 21, 24, 152, 158, 167 };
+    int[] deductibleBoxes = { 29, 31, 33, 35, 37, 39, 41, 42, 43, 44 };
+    BigDecimal accrued    = sumBoxes(b, accruedBoxes);
+    BigDecimal deductible = sumBoxes(b, deductibleBoxes);
+    b.put(27, round(accrued));
+    b.put(45, round(deductible));
+    b.put(46, round(accrued.subtract(deductible)));
+
+    BigDecimal r46 = b.getOrDefault(46, BigDecimal.ZERO);
+    b.put(66, r46);   // amount attributable to Estado (box 65 % × box 46)
+    b.put(69, r46);   // result before final adjustments (assumes boxes 64/76/77/78/68/108 = 0)
+    b.put(71, r46);   // final declaration result (assumes boxes 70/109 = 0)
+
+    BigDecimal r59 = b.getOrDefault(59, BigDecimal.ZERO);
+    BigDecimal r60 = b.getOrDefault(60, BigDecimal.ZERO);
+    if (r59.compareTo(BigDecimal.ZERO) > 0) b.put(93, r59);
+    if (r60.compareTo(BigDecimal.ZERO) > 0) b.put(94, r60);
   }
 
   // ── Resolution helpers ───────────────────────────────────────────
