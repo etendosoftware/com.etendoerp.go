@@ -73,7 +73,7 @@ class Fiscal303BoxesHandler {
   private static final String TAX_AMOUNT      = "TaxAmount";
 
   private static final String JSON_CONTENT_TYPE = "application/json;charset=UTF-8";
-  private static final String DEFAULT_STATUS    = "borrador";
+  private static final String DEFAULT_STATUS    = "draft";
   private static final String PERIOD_KEY        = "period";
   private static final String SINCE_KEY         = "since";
   private static final String STATUS_KEY        = "status";

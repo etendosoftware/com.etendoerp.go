@@ -50,7 +50,7 @@
         <onCreateDefault/>
       </column>
       <column name="STATUS" primaryKey="false" required="true" type="VARCHAR" size="30" autoIncrement="false">
-        <default><![CDATA[borrador]]></default>
+        <default><![CDATA[draft]]></default>
         <onCreateDefault/>
       </column>
       <column name="FILE_NAME" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
