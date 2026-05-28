@@ -28,6 +28,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
 import java.util.Date;
+import java.util.List;
 
 import javax.inject.Named;
 
@@ -39,7 +40,9 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.advpaymentmngt.utility.FIN_BankStatementImport;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
@@ -89,7 +92,7 @@ public class BankStatementsHandler implements NeoHandler {
 
   private static final String LINES_SQL =
       "SELECT bsl.fin_bankstatementline_id,"
-          + "       bsl.lineno,"
+          + "       bsl.line,"
           + "       bsl.transactiondate,"
           + "       bsl.description,"
           + "       bsl.referenceno,"
@@ -100,7 +103,7 @@ public class BankStatementsHandler implements NeoHandler {
           + "  FROM fin_bankstatementline bsl"
           + " WHERE bsl.fin_bankstatement_id = ?"
           + "   AND bsl.isactive = 'Y'"
-          + " ORDER BY bsl.lineno ASC";
+          + " ORDER BY bsl.line ASC";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -210,6 +213,8 @@ public class BankStatementsHandler implements NeoHandler {
       ByteArrayInputStream stream = new ByteArrayInputStream(fileBytes);
       int lineCount = parseC43(stream, statement);
 
+      processStatement(statement);
+
       OBDal.getInstance().flush();
 
       JSONObject result = new JSONObject();
@@ -242,7 +247,36 @@ public class BankStatementsHandler implements NeoHandler {
     statement.setTransactionDate(new Date());
     statement.setProcessed(false);
     statement.setPosted("N");
+    statement.setDocumentType(resolveBsfDocType(account));
     return statement;
+  }
+
+  void processStatement(FIN_BankStatement statement) {
+    statement.setProcessNow(true);
+    OBDal.getInstance().save(statement);
+    OBDal.getInstance().flush();
+
+    statement.setProcessed(true);
+    statement.setAPRMProcessBankStatement("R");
+    statement.setAPRMProcessBankStatementForce("R");
+    OBDal.getInstance().save(statement);
+    OBDal.getInstance().flush();
+
+    statement.setProcessNow(false);
+    OBDal.getInstance().save(statement);
+  }
+
+  private DocumentType resolveBsfDocType(FIN_FinancialAccount account) {
+    OBCriteria<DocumentType> crit = OBDal.getInstance().createCriteria(DocumentType.class);
+    crit.add(org.hibernate.criterion.Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, "BSF"));
+    crit.add(org.hibernate.criterion.Restrictions.eq(DocumentType.PROPERTY_CLIENT, account.getClient()));
+    crit.setFilterOnReadableOrganization(false);
+    crit.setMaxResults(1);
+    List<DocumentType> results = crit.list();
+    if (results.isEmpty()) {
+      throw new IllegalStateException("No BSF document type found for client: " + account.getClient().getId());
+    }
+    return results.get(0);
   }
 
   /**
@@ -303,7 +337,7 @@ public class BankStatementsHandler implements NeoHandler {
           BigDecimal debit = nullSafeBigDecimal(rs.getBigDecimal("dramount"));
           JSONObject row = new JSONObject();
           row.put("id", rs.getString("fin_bankstatementline_id"));
-          row.put("lineNo", rs.getLong("lineno"));
+          row.put("lineNo", rs.getLong("line"));
           row.put("date", formatDate(rs.getTimestamp("transactiondate")));
           row.put("description", StringUtils.trimToEmpty(rs.getString("description")));
           row.put("reference", StringUtils.trimToEmpty(rs.getString("referenceno")));
