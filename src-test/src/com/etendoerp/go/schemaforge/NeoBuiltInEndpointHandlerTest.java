@@ -32,9 +32,13 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.StringReader;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 
+import javax.servlet.ReadListener;
+import javax.servlet.ServletInputStream;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -81,6 +85,32 @@ public class NeoBuiltInEndpointHandlerTest {
     when(request.getReader()).thenReturn(new BufferedReader(new StringReader(body)));
     return (String) invokePrivate(handler, "readDescriptionFromBody",
         new Class<?>[] {HttpServletRequest.class, HttpServletResponse.class}, request, response);
+  }
+
+  private static ServletInputStream toServletInputStream(String content) {
+    ByteArrayInputStream stream = new ByteArrayInputStream(
+        content.getBytes(StandardCharsets.UTF_8));
+    return new ServletInputStream() {
+      @Override
+      public int read() {
+        return stream.read();
+      }
+
+      @Override
+      public boolean isFinished() {
+        return stream.available() == 0;
+      }
+
+      @Override
+      public boolean isReady() {
+        return true;
+      }
+
+      @Override
+      public void setReadListener(ReadListener readListener) {
+        // Synchronous test stream.
+      }
+    };
   }
 
   /**
@@ -237,8 +267,8 @@ public class NeoBuiltInEndpointHandlerTest {
     NeoDiscoveryHandler discoveryHandler = mock(NeoDiscoveryHandler.class);
     handler = new NeoBuiltInEndpointHandler(servlet, discoveryHandler, emailService);
 
-    when(request.getReader()).thenReturn(new BufferedReader(
-        new StringReader("{\"recordId\":\"1\"}")));
+    when(request.getPathInfo()).thenReturn("/email-contracts/reset-password/send");
+    when(request.getInputStream()).thenReturn(toServletInputStream("{\"recordId\":\"1\"}"));
     when(emailService.send(eq("reset-password"), any(JSONObject.class))).thenReturn(serviceResponse);
 
     boolean handled = handler.handle(new NeoServlet.NeoPathInfo("email-contracts", "reset-password",
@@ -293,8 +323,8 @@ public class NeoBuiltInEndpointHandlerTest {
     OBDal dal = mock(OBDal.class);
     handler = new NeoBuiltInEndpointHandler(servlet, discoveryHandler, emailService);
 
-    when(request.getReader()).thenReturn(new BufferedReader(
-        new StringReader("{\"recordId\":\"1\"}")));
+    when(request.getPathInfo()).thenReturn("/email-contracts/reset-password/send");
+    when(request.getInputStream()).thenReturn(toServletInputStream("{\"recordId\":\"1\"}"));
     when(emailService.send(eq("reset-password"), any(JSONObject.class)))
         .thenThrow(new RuntimeException("boom"));
 

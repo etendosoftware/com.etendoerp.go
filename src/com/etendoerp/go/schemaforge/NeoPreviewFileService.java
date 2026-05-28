@@ -17,8 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.sql.Clob;
-import java.sql.SQLException;
 import java.util.UUID;
 
 import org.apache.logging.log4j.LogManager;
@@ -28,6 +26,9 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
+
+import com.etendoerp.go.schemaforge.data.PreviewFile;
 
 /**
  * Persists preview file attachments per (client, specName, recordId) tuple in ETGO_PREVIEW_FILE.
@@ -58,14 +59,14 @@ class NeoPreviewFileService {
 
   static NeoResponse getPreviewFile(String specName, String recordId) {
     try {
-      PreviewFileRecord pf = findByTuple(currentClientId(), specName, recordId);
+      PreviewFile pf = findByTuple(currentClientId(), specName, recordId);
       if (pf == null) {
         return NeoResponse.ok(new JSONObject());
       }
       JSONObject result = new JSONObject();
-      result.put(PARAM_FILE_NAME, pf.fileName);
-      result.put(PARAM_MIME_TYPE, pf.mimeType);
-      result.put(PARAM_FILE_DATA, pf.fileData);
+      result.put(PARAM_FILE_NAME, pf.getFileName());
+      result.put(PARAM_MIME_TYPE, pf.getMIMEType());
+      result.put(PARAM_FILE_DATA, pf.getFileData());
       return NeoResponse.ok(result);
     } catch (Exception e) {
       log.error("Error fetching preview file spec={} record={}", specName, recordId, e);
@@ -74,12 +75,10 @@ class NeoPreviewFileService {
   }
 
   static NeoResponse savePreviewFile(String body) {
-    String specName = null;
-    String recordId = null;
     try {
       JSONObject req = new JSONObject(body);
-      specName = req.optString(PARAM_SPEC_NAME, null);
-      recordId = req.optString(PARAM_RECORD_ID, null);
+      String specName = req.optString(PARAM_SPEC_NAME, null);
+      String recordId = req.optString(PARAM_RECORD_ID, null);
       String fileName = req.optString(PARAM_FILE_NAME, null);
       String mimeType = req.optString(PARAM_MIME_TYPE, null);
       String fileData = req.optString(PARAM_FILE_DATA, null);
@@ -91,7 +90,7 @@ class NeoPreviewFileService {
       }
 
       String clientId = currentClientId();
-      PreviewFileRecord existing = findByTuple(clientId, specName, recordId);
+      PreviewFile existing = findByTuple(clientId, specName, recordId);
 
       Session session = OBDal.getInstance().getSession();
       String savedId;
@@ -117,7 +116,7 @@ class NeoPreviewFileService {
             .setParameter(PARAM_FILE_DATA, fileData)
             .executeUpdate();
       } else {
-        savedId = existing.id;
+        savedId = existing.getId();
         session.createNativeQuery(
             "UPDATE ETGO_PREVIEW_FILE"
             + " SET FILE_NAME = :fileName, MIME_TYPE = :mimeType,"
@@ -138,7 +137,7 @@ class NeoPreviewFileService {
       log.warn("Invalid JSON body in preview-file POST: {}", e.getMessage());
       return NeoResponse.error(400, "Invalid JSON body");
     } catch (Exception e) {
-      log.error("Error saving preview file spec={} record={}", specName, recordId, e);
+      log.error("Error saving preview file", e);
       OBDal.getInstance().rollbackAndClose();
       return NeoResponse.error(500, "Internal error saving preview file");
     }
@@ -168,39 +167,17 @@ class NeoPreviewFileService {
     }
   }
 
-  private static PreviewFileRecord findByTuple(String clientId, String specName, String recordId)
-      throws SQLException {
-    Object result = OBDal.getInstance().getSession().createNativeQuery(
-        "SELECT ETGO_PREVIEW_FILE_ID, FILE_NAME, MIME_TYPE, FILE_DATA"
-        + " FROM ETGO_PREVIEW_FILE"
-        + " WHERE AD_CLIENT_ID = :clientId"
-        + " AND SPEC_NAME = :specName"
-        + " AND RECORD_ID = :recordId")
-        .setParameter(PARAM_CLIENT_ID, clientId)
-        .setParameter(PARAM_SPEC_NAME, specName)
-        .setParameter(PARAM_RECORD_ID, recordId)
-        .uniqueResult();
-    if (!(result instanceof Object[])) {
-      return null;
-    }
-
-    Object[] row = (Object[]) result;
-    return new PreviewFileRecord(
-        stringValue(row[0]),
-        stringValue(row[1]),
-        stringValue(row[2]),
-        stringValue(row[3]));
-  }
-
-  private static String stringValue(Object value) throws SQLException {
-    if (value == null) {
-      return null;
-    }
-    if (value instanceof Clob) {
-      Clob clob = (Clob) value;
-      return clob.getSubString(1L, (int) Math.min(clob.length(), Integer.MAX_VALUE));
-    }
-    return value.toString();
+  private static PreviewFile findByTuple(String clientId, String specName, String recordId) {
+    OBQuery<PreviewFile> query = OBDal.getInstance().createQuery(PreviewFile.class,
+        "as pf where pf.client.id = :clientId"
+            + " and pf.specName = :specName"
+            + " and pf.recordID = :recordId");
+    query.setNamedParameter(PARAM_CLIENT_ID, clientId);
+    query.setNamedParameter(PARAM_SPEC_NAME, specName);
+    query.setNamedParameter(PARAM_RECORD_ID, recordId);
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    return query.uniqueResult();
   }
 
   private static String currentClientId() {
@@ -217,19 +194,5 @@ class NeoPreviewFileService {
 
   private static boolean isBlank(String s) {
     return s == null || s.isBlank();
-  }
-
-  private static final class PreviewFileRecord {
-    private final String id;
-    private final String fileName;
-    private final String mimeType;
-    private final String fileData;
-
-    private PreviewFileRecord(String id, String fileName, String mimeType, String fileData) {
-      this.id = id;
-      this.fileName = fileName;
-      this.mimeType = mimeType;
-      this.fileData = fileData;
-    }
   }
 }
