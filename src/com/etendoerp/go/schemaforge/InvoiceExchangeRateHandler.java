@@ -25,6 +25,7 @@ import javax.inject.Named;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -80,7 +81,11 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
       }
       computeRateAndForeignAmount(body, invoice);
     } catch (Exception e) {
+      // Abort the save: persisting the row without the derived currency/rate would
+      // create an inconsistent document-level exchange rate. OBException rolls back
+      // the transaction and surfaces the failure to the caller.
       log.error("Failed to inject derived fields on POST for invoice {}", invoiceId, e);
+      throw new OBException(e);
     }
     return null;
   }
