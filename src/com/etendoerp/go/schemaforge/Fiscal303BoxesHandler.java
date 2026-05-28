@@ -180,16 +180,10 @@ class Fiscal303BoxesHandler {
     String filename = "303_" + period + "_" + year;
     inputParams.put("FileName", filename);
     // Declaration type required by AEAT303_Utility.getCheckedInputParameter.
-    // Maps result kind from frontend: compensar→C, ingresar→I, devolver→V, default→N (result zero).
+    // Frontend sends AEAT letter codes directly: C, I, V, U, G. Default N (zero result).
     String decl = "N";
     if ("C".equals(tipo) || "I".equals(tipo) || "V".equals(tipo) || "U".equals(tipo) || "G".equals(tipo)) {
       decl = tipo;
-    } else if ("compensar".equals(tipo)) {
-      decl = "C";
-    } else if ("ingresar".equals(tipo)) {
-      decl = "I";
-    } else if ("devolver".equals(tipo)) {
-      decl = "V";
     }
     inputParams.put("Declaration_" + decl, "Y");
     // Box 65: percentage attributable to the State (always 100 for Modelo 303).
