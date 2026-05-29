@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
+import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
@@ -58,7 +59,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * </ul>
  */
 @Named("bank-statements")
-public class BankStatementsHandler implements NeoHandler {
+public class  BankStatementsHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(BankStatementsHandler.class);
 
@@ -414,7 +415,11 @@ public class BankStatementsHandler implements NeoHandler {
    */
   JSONArray readLinesForPreview(String statementId) throws Exception {
     JSONArray arr = new JSONArray();
-    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(LINES_SQL)) {
+    // NOTE: the Connection returned by OBDal is managed by Hibernate's
+    // Session — DO NOT close it here. Only the PreparedStatement and
+    // ResultSet go inside try-with-resources.
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(LINES_SQL)) {
       ps.setString(1, statementId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
@@ -627,7 +632,9 @@ public class BankStatementsHandler implements NeoHandler {
 
   JSONArray loadStatements(String accountId) throws Exception {
     JSONArray arr = new JSONArray();
-    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(STATEMENTS_SQL)) {
+    // Connection is managed by the DAL's Hibernate Session; don't close it.
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(STATEMENTS_SQL)) {
       ps.setString(1, accountId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
@@ -678,7 +685,9 @@ public class BankStatementsHandler implements NeoHandler {
 
   JSONArray loadLines(String statementId) throws Exception {
     JSONArray arr = new JSONArray();
-    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(LINES_SQL)) {
+    // Connection is managed by the DAL's Hibernate Session; don't close it.
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(LINES_SQL)) {
       ps.setString(1, statementId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
