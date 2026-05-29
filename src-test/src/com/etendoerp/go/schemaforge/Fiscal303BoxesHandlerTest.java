@@ -77,10 +77,12 @@ import com.etendoerp.go.schemaforge.data.FiscalDecl;
 public class Fiscal303BoxesHandlerTest {
 
   private Fiscal303BoxesHandler handler;
+  private FiscalDeclCrudHandler declHandler;
 
   @org.junit.Before
   public void setUp() {
     handler = new Fiscal303BoxesHandler(null);
+    declHandler = new FiscalDeclCrudHandler(null);
   }
 
   // ── BoxGroupConfig ────────────────────────────────────────────────────────
@@ -1105,7 +1107,7 @@ public class Fiscal303BoxesHandlerTest {
   /** The hard-coded default status must be the locale-neutral English value "draft". */
   @Test
   public void testDefaultStatusIsDraft() {
-    assertEquals("draft", Fiscal303BoxesHandler.DEFAULT_STATUS);
+    assertEquals("draft", FiscalDeclCrudHandler.DEFAULT_STATUS);
   }
 
   /**
@@ -1126,7 +1128,7 @@ public class Fiscal303BoxesHandlerTest {
     when(decl.isFileExternal()).thenReturn(false);
     when(decl.getUpdated()).thenReturn(null);
 
-    JSONObject json = handler.declToJson(decl);
+    JSONObject json = declHandler.declToJson(decl);
     assertEquals("draft", json.getString("status"));
   }
 
@@ -1147,7 +1149,7 @@ public class Fiscal303BoxesHandlerTest {
     when(decl.isFileExternal()).thenReturn(false);
     when(decl.getUpdated()).thenReturn(null);
 
-    JSONObject json = handler.declToJson(decl);
+    JSONObject json = declHandler.declToJson(decl);
     assertEquals("submitted", json.getString("status"));
   }
 

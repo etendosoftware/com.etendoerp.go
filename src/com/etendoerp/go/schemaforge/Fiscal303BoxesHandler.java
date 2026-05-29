@@ -16,7 +16,6 @@
  */
 package com.etendoerp.go.schemaforge;
 
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -39,11 +38,9 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.ScrollableResults;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import com.etendoerp.go.schemaforge.data.FiscalDecl;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceTax;
@@ -73,12 +70,8 @@ class Fiscal303BoxesHandler {
   private static final String TAX_AMOUNT      = "TaxAmount";
 
   private static final String JSON_CONTENT_TYPE = "application/json;charset=UTF-8";
-  static final String DEFAULT_STATUS    = "draft";
   private static final String PERIOD_KEY        = "period";
   private static final String SINCE_KEY         = "since";
-  private static final String STATUS_KEY        = "status";
-  private static final String FILE_NAME_KEY     = "fileName";
-  private static final String FILE_EXTERNAL_KEY = "fileExternal";
 
   private static final BigDecimal PCT_21   = new BigDecimal("21");
   private static final BigDecimal PCT_10   = new BigDecimal("10");
@@ -93,16 +86,18 @@ class Fiscal303BoxesHandler {
   private static final BigDecimal PCT_1_75 = new BigDecimal("1.75");
 
   private final NeoServlet servlet;
+  private final FiscalDeclCrudHandler declHandler;
 
   Fiscal303BoxesHandler(NeoServlet servlet) {
     this.servlet = servlet;
+    this.declHandler = new FiscalDeclCrudHandler(servlet);
   }
 
   void handle(String entityName, String method, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     if (DECLARATIONS.equals(entityName)) {
       try {
-        handleDeclarations(method, request, response);
+        declHandler.handleDeclarations(method, request, response);
       } catch (Exception e) {
         log.error("Error in /fiscal303/declarations", e);
         servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
@@ -243,145 +238,6 @@ class Fiscal303BoxesHandler {
     out.put("count", count);
     response.setContentType(JSON_CONTENT_TYPE);
     response.getWriter().write(out.toString());
-  }
-
-  private void handleDeclarations(String method, HttpServletRequest request,
-      HttpServletResponse response) throws Exception {
-    String clientId = OBContext.getOBContext().getCurrentClient().getId();
-    String orgId    = OBContext.getOBContext().getCurrentOrganization().getId();
-    response.setContentType(JSON_CONTENT_TYPE);
-    if ("GET".equals(method)) {
-      handleDeclGet(clientId, orgId, response);
-    } else if ("POST".equals(method)) {
-      handleDeclPost(request, response);
-    } else if ("PUT".equals(method)) {
-      handleDeclPut(clientId, request, response);
-    } else if ("DELETE".equals(method)) {
-      handleDeclDelete(clientId, request, response);
-    } else {
-      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          "Unsupported method for /fiscal303/declarations: " + method);
-    }
-  }
-
-  private void handleDeclGet(String clientId, String orgId, HttpServletResponse response)
-      throws Exception {
-    OBCriteria<FiscalDecl> crit = OBDal.getInstance().createCriteria(FiscalDecl.class);
-    crit.add(Restrictions.eq("client.id", clientId));
-    crit.add(Restrictions.eq("organization.id", orgId));
-    crit.addOrderBy(FiscalDecl.PROPERTY_FISCALYEAR, false);
-    crit.addOrderBy(FiscalDecl.PROPERTY_PERIOD, false);
-    crit.addOrderBy(FiscalDecl.PROPERTY_FISCALMODEL, true);
-    JSONArray arr = new JSONArray();
-    for (FiscalDecl decl : crit.list()) arr.put(declToJson(decl));
-    JSONObject out = new JSONObject();
-    out.put("data", arr);
-    response.getWriter().write(out.toString());
-  }
-
-  private void handleDeclPost(HttpServletRequest request,
-      HttpServletResponse response) throws Exception {
-    JSONObject body = readJsonBody(request);
-    String model    = body.getString("model");
-    long   year     = body.getLong("year");
-    String period   = body.getString(PERIOD_KEY);
-    String declType = "com".equals(body.optString("type")) ? "C" : "O";
-    String status   = body.has(STATUS_KEY) ? body.getString(STATUS_KEY) : DEFAULT_STATUS;
-
-    FiscalDecl decl = OBProvider.getInstance().get(FiscalDecl.class);
-    decl.setClient(OBContext.getOBContext().getCurrentClient());
-    decl.setOrganization(OBContext.getOBContext().getCurrentOrganization());
-    decl.setCreatedBy(OBContext.getOBContext().getUser());
-    decl.setUpdatedBy(OBContext.getOBContext().getUser());
-    decl.setFiscalModel(model);
-    decl.setFiscalYear(year);
-    decl.setPeriod(period);
-    decl.setDeclarationType(declType);
-    decl.setDeclarationStatus(status);
-    OBDal.getInstance().save(decl);
-    JSONObject created = declToJson(decl);
-    OBDal.getInstance().commitAndClose();
-
-    response.setStatus(HttpServletResponse.SC_CREATED);
-    response.getWriter().write(created.toString());
-  }
-
-  private void handleDeclPut(String clientId, HttpServletRequest request,
-      HttpServletResponse response) throws Exception {
-    String id    = request.getParameter("id");
-    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-    if (id == null || id.isEmpty()) {
-      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing param: id");
-      return;
-    }
-    JSONObject body      = readJsonBody(request);
-    boolean hasStatus    = body.has(STATUS_KEY);
-    String status        = hasStatus ? body.getString(STATUS_KEY) : null;
-    boolean hasFileExt   = body.has(FILE_EXTERNAL_KEY);
-    boolean fileExternal = body.optBoolean(FILE_EXTERNAL_KEY, false);
-    boolean hasFileName  = body.has(FILE_NAME_KEY);
-    String  fileName     = hasFileName && !body.isNull(FILE_NAME_KEY)
-        ? body.getString(FILE_NAME_KEY) : null;
-
-    FiscalDecl decl = OBDal.getInstance().get(FiscalDecl.class, id);
-    if (decl == null || !clientId.equals(decl.getClient().getId())
-        || !orgId.equals(decl.getOrganization().getId())) {
-      servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
-          "Declaration not found: " + id);
-      return;
-    }
-    if (hasStatus)   decl.setDeclarationStatus(status);
-    if (hasFileExt)  decl.setFileExternal(fileExternal);
-    if (hasFileName) decl.setDeclarationFileName(fileName);
-    decl.setUpdatedBy(OBContext.getOBContext().getUser());
-    OBDal.getInstance().commitAndClose();
-    response.getWriter().write("{\"ok\":true}");
-  }
-
-  private void handleDeclDelete(String clientId, HttpServletRequest request,
-      HttpServletResponse response) throws Exception {
-    String id    = request.getParameter("id");
-    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-    if (id == null || id.isEmpty()) {
-      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing param: id");
-      return;
-    }
-    FiscalDecl decl = OBDal.getInstance().get(FiscalDecl.class, id);
-    if (decl == null || !clientId.equals(decl.getClient().getId())
-        || !orgId.equals(decl.getOrganization().getId())) {
-      servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
-          "Declaration not found: " + id);
-      return;
-    }
-    OBDal.getInstance().remove(decl);
-    OBDal.getInstance().commitAndClose();
-    response.getWriter().write("{\"ok\":true}");
-  }
-
-  JSONObject declToJson(FiscalDecl decl) throws Exception {
-    JSONObject o = new JSONObject();
-    o.put("id",           decl.getId() != null ? decl.getId() : "");
-    o.put("model",        decl.getFiscalModel() != null ? decl.getFiscalModel() : "");
-    o.put("year",         decl.getFiscalYear() != null ? decl.getFiscalYear().intValue() : 0);
-    o.put(PERIOD_KEY,     decl.getPeriod() != null ? decl.getPeriod() : "");
-    String dt = decl.getDeclarationType();
-    String dtNormalized = dt != null ? dt.trim() : "";
-    o.put("type",         "C".equals(dtNormalized) ? "com" : "ord");
-    o.put(STATUS_KEY,     decl.getDeclarationStatus() != null ? decl.getDeclarationStatus() : DEFAULT_STATUS);
-    o.put(FILE_NAME_KEY,  decl.getDeclarationFileName() != null
-        ? decl.getDeclarationFileName() : JSONObject.NULL);
-    o.put(FILE_EXTERNAL_KEY, Boolean.TRUE.equals(decl.isFileExternal()));
-    o.put("updatedAt",    decl.getUpdated() != null ? decl.getUpdated().getTime() : 0L);
-    return o;
-  }
-
-  private JSONObject readJsonBody(HttpServletRequest request) throws Exception {
-    StringBuilder sb = new StringBuilder();
-    try (BufferedReader reader = request.getReader()) {
-      String line;
-      while ((line = reader.readLine()) != null) sb.append(line);
-    }
-    return new JSONObject(sb.toString());
   }
 
   // ── Package-private helpers (tested directly) ─────────────────────────────
