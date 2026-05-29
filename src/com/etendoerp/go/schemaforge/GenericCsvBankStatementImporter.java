@@ -308,7 +308,7 @@ public class GenericCsvBankStatementImporter {
 
   private static void require(Map<String, Integer> idx, String col) {
     if (!idx.containsKey(col)) {
-      throw new IllegalArgumentException("Missing required CSV column: " + col);
+      throw new CsvParseException("Missing required CSV column: " + col);
     }
   }
 
