@@ -15,28 +15,30 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge.email;
+package com.etendoerp.go.schemaforge.email.contracts;
 
-import java.util.Optional;
+import org.apache.commons.lang3.StringUtils;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
 
-/**
- * Resolves generic contract data used by built-in email contracts.
- */
-public interface EmailContractDataResolver {
+final class SalesDocumentEmailRecipientResolver {
 
-  /**
-   * Resolves an Etendo Go account contact by trusted account id.
-   *
-   * @param accountId ETGO_Account id
-   * @return account contact when available
-   */
-  Optional<EmailContactRecord> findAccountContact(String accountId);
+  private SalesDocumentEmailRecipientResolver() {
+  }
 
-  /**
-   * Resolves an application user contact by trusted user id.
-   *
-   * @param userId AD_User id
-   * @return user contact when available
-   */
-  Optional<EmailContactRecord> findUserContact(String userId);
+  static String resolveBusinessPartnerEmail(BusinessPartner businessPartner) {
+    if (businessPartner == null) {
+      return null;
+    }
+    String email = StringUtils.trimToNull(businessPartner.getEtgoEmail());
+    if (email != null) {
+      return email;
+    }
+    for (User user : businessPartner.getADUserList()) {
+      if (Boolean.TRUE.equals(user.isActive()) && StringUtils.isNotBlank(user.getEmail())) {
+        return user.getEmail();
+      }
+    }
+    return null;
+  }
 }

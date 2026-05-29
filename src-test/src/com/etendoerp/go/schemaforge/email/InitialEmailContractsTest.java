@@ -19,9 +19,13 @@ package com.etendoerp.go.schemaforge.email;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 
 import org.codehaus.jettison.json.JSONException;
@@ -29,6 +33,10 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.email.contracts.CoreEmailContractProvider;
+import com.etendoerp.go.schemaforge.email.contracts.SalesInvoiceSendEmailContract;
+import com.etendoerp.go.schemaforge.email.contracts.SalesOrderSendEmailContract;
+import com.etendoerp.go.schemaforge.email.contracts.SalesQuotationSendEmailContract;
 
 /**
  * Tests the built-in transactional email contracts.
@@ -38,12 +46,14 @@ public class InitialEmailContractsTest {
   @Test
   public void registersInitialContractsButNotCustomPayloads() {
     DefaultEmailContractRegistry registry = DefaultEmailContractRegistry.create(
-        new FixtureDataResolver());
+        fixtureProviders());
 
     assertTrue(registry.find("reset-password").isPresent());
     assertTrue(registry.find("new-account").isPresent());
     assertTrue(registry.find("login-alert").isPresent());
     assertTrue(registry.find("sales-invoice-send").isPresent());
+    assertTrue(registry.find("sales-order-send").isPresent());
+    assertTrue(registry.find("sales-quotation-send").isPresent());
     assertFalse(registry.find("custom").isPresent());
     assertFalse(registry.find("support-custom-email").isPresent());
   }
@@ -88,6 +98,22 @@ public class InitialEmailContractsTest {
   }
 
   @Test
+  public void accountLinkDefaultsBlankContactNameToUser() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-blank-name");
+    command.put(EmailContractCommandSupport.FIELD_LINK, "https://app.example.test/welcome");
+
+    NeoResponse response = service.send("new-account", command);
+
+    assertSent(response);
+    assertEquals("blank-name@example.com", adapter.getLastRequest().getRecipient());
+    assertEquals("User", adapter.getLastRequest().getData().getString("name"));
+  }
+
+  @Test
   public void loginAlertUsesUserRecipientAndEventMetadata() throws Exception {
     FakeProviderAdapter adapter = new FakeProviderAdapter();
     TransactionalEmailService service = service(adapter);
@@ -109,6 +135,38 @@ public class InitialEmailContractsTest {
   }
 
   @Test
+  public void loginAlertDefaultsMissingIpAndDate() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_USER_ID, "user-1");
+
+    NeoResponse response = service.send("login-alert", command);
+
+    assertSent(response);
+    assertEquals("unknown", adapter.getLastRequest().getData().getString("ip"));
+    assertTrue(adapter.getLastRequest().getData().getString("date").contains("T"));
+  }
+
+  @Test
+  public void loginAlertRejectsInvalidResolvedRecipient() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_USER_ID, "user-invalid-email");
+
+    NeoResponse response = service.send("login-alert", command);
+
+    JSONObject data = responseData(response);
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
+    assertEquals("Email recipient is invalid", data.getString("message"));
+    assertEquals(0, adapter.getSendCount());
+  }
+
+  @Test
   public void salesInvoiceSendUsesDocumentRecipientAndInvoiceVariables() throws Exception {
     FakeProviderAdapter adapter = new FakeProviderAdapter();
     TransactionalEmailService service = service(adapter);
@@ -124,9 +182,126 @@ public class InitialEmailContractsTest {
     assertEquals("Empresa SRL", adapter.getLastRequest().getData().getString("name"));
     assertEquals("0001-00042",
         adapter.getLastRequest().getData().getString("invoice_number"));
+    assertEquals("0001-00042",
+        adapter.getLastRequest().getData().getString("document_number"));
+    assertEquals("Sales Invoice",
+        adapter.getLastRequest().getData().getString("document_type"));
     assertEquals("1500.00 USD", adapter.getLastRequest().getData().getString("amount"));
     assertEquals("https://app.example.test/doc/sales-invoice/invoice-1",
         adapter.getLastRequest().getData().getString("download_link"));
+  }
+
+  @Test
+  public void salesOrderSendUsesDefaultDocumentPayload() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "order-1");
+
+    NeoResponse response = service.send("sales-order-send", command);
+
+    assertSent(response);
+    assertEquals(DefaultDocumentSendEmailContract.DEFAULT_TEMPLATE,
+        adapter.getLastRequest().getTemplate());
+    assertEquals("orders@example.com", adapter.getLastRequest().getRecipient());
+    assertEquals("Empresa SRL", adapter.getLastRequest().getData().getString("name"));
+    assertEquals("SO-0007", adapter.getLastRequest().getData().getString("document_number"));
+    assertEquals("Sales Order", adapter.getLastRequest().getData().getString("document_type"));
+    assertFalse(adapter.getLastRequest().getData().has("order_number"));
+    assertFalse(adapter.getLastRequest().getData().has("amount"));
+    assertEquals("https://app.example.test/doc/sales-order/order-1",
+        adapter.getLastRequest().getData().getString("download_link"));
+  }
+
+  @Test
+  public void salesQuotationSendUsesDefaultDocumentPayload() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "quotation-1");
+
+    NeoResponse response = service.send("sales-quotation-send", command);
+
+    assertSent(response);
+    assertEquals(DefaultDocumentSendEmailContract.DEFAULT_TEMPLATE,
+        adapter.getLastRequest().getTemplate());
+    assertEquals("quotes@example.com", adapter.getLastRequest().getRecipient());
+    assertEquals("Empresa SRL", adapter.getLastRequest().getData().getString("name"));
+    assertEquals("SQ-0009", adapter.getLastRequest().getData().getString("document_number"));
+    assertEquals("Sales Quotation",
+        adapter.getLastRequest().getData().getString("document_type"));
+    assertFalse(adapter.getLastRequest().getData().has("quotation_number"));
+    assertFalse(adapter.getLastRequest().getData().has("amount"));
+    assertEquals("https://app.example.test/doc/sales-quotation/quotation-1",
+        adapter.getLastRequest().getData().getString("download_link"));
+  }
+
+  @Test
+  public void documentContractDefaultsBlankRecipientNameToCustomer() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "order-blank-name");
+
+    NeoResponse response = service.send("sales-order-send", command);
+
+    assertSent(response);
+    assertEquals("blank-document@example.com", adapter.getLastRequest().getRecipient());
+    assertEquals("Customer", adapter.getLastRequest().getData().getString("name"));
+  }
+
+  @Test
+  public void documentContractRejectsMissingDocument() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "missing-document");
+
+    NeoResponse response = service.send("sales-order-send", command);
+
+    JSONObject data = responseData(response);
+    assertEquals(404, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
+    assertEquals("Email document record was not found", data.getString("message"));
+    assertEquals(0, adapter.getSendCount());
+  }
+
+  @Test
+  public void documentContractRejectsInvalidResolvedRecipient() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "order-invalid-email");
+
+    NeoResponse response = service.send("sales-order-send", command);
+
+    JSONObject data = responseData(response);
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
+    assertEquals("Email recipient is invalid", data.getString("message"));
+    assertEquals(0, adapter.getSendCount());
+  }
+
+  @Test
+  public void documentContractRejectsMissingDownloadLink() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "order-invalid-link");
+
+    NeoResponse response = service.send("sales-order-send", command);
+
+    JSONObject data = responseData(response);
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
+    assertEquals("Document download link is not configured", data.getString("message"));
+    assertEquals(0, adapter.getSendCount());
   }
 
   @Test
@@ -168,6 +343,42 @@ public class InitialEmailContractsTest {
   }
 
   @Test
+  public void rejectsUnknownAccountForAccountLinkContract() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "missing-account");
+    command.put(EmailContractCommandSupport.FIELD_LINK, "https://app.example.test/welcome");
+
+    NeoResponse response = service.send("new-account", command);
+
+    JSONObject data = responseData(response);
+    assertEquals(404, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
+    assertEquals("Email account record was not found", data.getString("message"));
+    assertEquals(0, adapter.getSendCount());
+  }
+
+  @Test
+  public void rejectsInvalidAccountRecipient() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-invalid-email");
+    command.put(EmailContractCommandSupport.FIELD_LINK, "https://app.example.test/welcome");
+
+    NeoResponse response = service.send("new-account", command);
+
+    JSONObject data = responseData(response);
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
+    assertEquals("Email recipient is invalid", data.getString("message"));
+    assertEquals(0, adapter.getSendCount());
+  }
+
+  @Test
   public void keepsCustomContractDisabledByDefault() throws Exception {
     FakeProviderAdapter adapter = new FakeProviderAdapter();
     TransactionalEmailService service = service(adapter);
@@ -181,10 +392,28 @@ public class InitialEmailContractsTest {
     assertEquals(0, adapter.getSendCount());
   }
 
+  @Test
+  public void emailContactRecordUsesNormalizedValueEquality() {
+    EmailContactRecord first = new EmailContactRecord(" Lucas ", " account@example.com ");
+    EmailContactRecord second = new EmailContactRecord("Lucas", "account@example.com");
+    EmailContactRecord different = new EmailContactRecord("Lucas", "other@example.com");
+
+    assertEquals(first, second);
+    assertEquals(first.hashCode(), second.hashCode());
+    assertNotEquals(first, different);
+    assertNotEquals(first, "Lucas");
+  }
+
   private static TransactionalEmailService service(FakeProviderAdapter adapter) {
     return new TransactionalEmailService(
-        DefaultEmailContractRegistry.create(new FixtureDataResolver()), adapter,
+        DefaultEmailContractRegistry.create(fixtureProviders()), adapter,
         new InMemoryEmailSafetyStore());
+  }
+
+  private static List<EmailContractProvider> fixtureProviders() {
+    FixtureDataResolver dataResolver = new FixtureDataResolver();
+    return Arrays.asList(new CoreEmailContractProvider(dataResolver),
+        new FixtureSalesDocumentEmailContractProvider());
   }
 
   private static JSONObject baseCommand() throws JSONException {
@@ -213,6 +442,12 @@ public class InitialEmailContractsTest {
       if ("account-1".equals(accountId)) {
         return Optional.of(new EmailContactRecord("Lucas", "account@example.com"));
       }
+      if ("account-blank-name".equals(accountId)) {
+        return Optional.of(new EmailContactRecord(" ", "blank-name@example.com"));
+      }
+      if ("account-invalid-email".equals(accountId)) {
+        return Optional.of(new EmailContactRecord("Lucas", "not-an-email"));
+      }
       return Optional.empty();
     }
 
@@ -221,15 +456,50 @@ public class InitialEmailContractsTest {
       if ("user-1".equals(userId)) {
         return Optional.of(new EmailContactRecord("Ana", "user@example.com"));
       }
+      if ("user-invalid-email".equals(userId)) {
+        return Optional.of(new EmailContactRecord("Ana", "not-an-email"));
+      }
       return Optional.empty();
     }
 
+  }
+
+  private static final class FixtureSalesDocumentEmailContractProvider
+      implements EmailContractProvider {
+
     @Override
-    public Optional<EmailDocumentRecord> findSalesInvoice(String invoiceId) {
-      if ("invoice-1".equals(invoiceId)) {
-        return Optional.of(new EmailDocumentRecord("Empresa SRL", "billing@example.com",
-            "0001-00042", "1500.00 USD",
-            "https://app.example.test/doc/sales-invoice/invoice-1"));
+    public Collection<EmailContract> getContracts() {
+      return Arrays.asList(
+          new SalesInvoiceSendEmailContract(recordId -> resolveDocument(recordId, "invoice-1",
+              "billing@example.com", "0001-00042", "1500.00 USD",
+              "https://app.example.test/doc/sales-invoice/invoice-1")),
+          new SalesOrderSendEmailContract(recordId -> resolveDocument(recordId, "order-1",
+              "orders@example.com", "SO-0007", "2600.50 USD",
+              "https://app.example.test/doc/sales-order/order-1")),
+          new SalesQuotationSendEmailContract(recordId -> resolveDocument(recordId, "quotation-1",
+              "quotes@example.com", "SQ-0009", "950.25 USD",
+              "https://app.example.test/doc/sales-quotation/quotation-1")));
+    }
+
+    private Optional<EmailDocumentRecord> resolveDocument(String recordId, String expectedId,
+        String recipientEmail, String documentNo, String amount, String downloadLink) {
+      if ("order-blank-name".equals(recordId)) {
+        return Optional.of(new EmailDocumentRecord(" ", "blank-document@example.com",
+            "SO-BLANK", "10.00 USD", "https://app.example.test/doc/sales-order/order-blank-name",
+            "tenant-1"));
+      }
+      if ("order-invalid-email".equals(recordId)) {
+        return Optional.of(new EmailDocumentRecord("Empresa SRL", "not-an-email",
+            "SO-BAD-EMAIL", "10.00 USD",
+            "https://app.example.test/doc/sales-order/order-invalid-email", "tenant-1"));
+      }
+      if ("order-invalid-link".equals(recordId)) {
+        return Optional.of(new EmailDocumentRecord("Empresa SRL", "orders@example.com",
+            "SO-BAD-LINK", "10.00 USD", null, "tenant-1"));
+      }
+      if (expectedId.equals(recordId)) {
+        return Optional.of(new EmailDocumentRecord("Empresa SRL", recipientEmail, documentNo,
+            amount, downloadLink, "tenant-1"));
       }
       return Optional.empty();
     }

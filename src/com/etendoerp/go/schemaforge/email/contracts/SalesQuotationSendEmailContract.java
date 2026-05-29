@@ -15,28 +15,26 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge.email;
+package com.etendoerp.go.schemaforge.email.contracts;
 
-import java.util.Optional;
+import com.etendoerp.go.schemaforge.email.DefaultDocumentSendEmailContract;
+import com.etendoerp.go.schemaforge.email.EmailDocumentRecordResolver;
+
+import java.util.Objects;
 
 /**
- * Resolves generic contract data used by built-in email contracts.
+ * Contract for sending sales quotation document notifications.
  */
-public interface EmailContractDataResolver {
+public final class SalesQuotationSendEmailContract extends DefaultDocumentSendEmailContract {
+
+  static final String NAME = "sales-quotation-send";
 
   /**
-   * Resolves an Etendo Go account contact by trusted account id.
+   * Creates the sales quotation send contract.
    *
-   * @param accountId ETGO_Account id
-   * @return account contact when available
+   * @param documentResolver resolver for trusted sales quotation records
    */
-  Optional<EmailContactRecord> findAccountContact(String accountId);
-
-  /**
-   * Resolves an application user contact by trusted user id.
-   *
-   * @param userId AD_User id
-   * @return user contact when available
-   */
-  Optional<EmailContactRecord> findUserContact(String userId);
+  public SalesQuotationSendEmailContract(EmailDocumentRecordResolver documentResolver) {
+    super(NAME, "Sales Quotation", Objects.requireNonNull(documentResolver, "documentResolver"));
+  }
 }

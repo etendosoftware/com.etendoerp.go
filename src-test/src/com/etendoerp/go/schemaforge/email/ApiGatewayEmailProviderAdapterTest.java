@@ -21,7 +21,13 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import java.io.OutputStream;
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicReference;
+
+import com.sun.net.httpserver.HttpServer;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -73,6 +79,84 @@ public class ApiGatewayEmailProviderAdapterTest {
     throw new AssertionError("Expected incomplete provider configuration to fail");
   }
 
+  @Test
+  public void httpTransportPostsJsonPayloadAndReadsSuccessResponse() throws Exception {
+    AtomicReference<String> method = new AtomicReference<>();
+    AtomicReference<String> apiKey = new AtomicReference<>();
+    AtomicReference<String> requestBody = new AtomicReference<>();
+    HttpServer server = startServer(exchange -> {
+      method.set(exchange.getRequestMethod());
+      apiKey.set(exchange.getRequestHeaders().getFirst("x-api-key"));
+      requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+      byte[] response = "{\"accepted\":true}".getBytes(StandardCharsets.UTF_8);
+      exchange.sendResponseHeaders(202, response.length);
+      try (OutputStream outputStream = exchange.getResponseBody()) {
+        outputStream.write(response);
+      }
+    });
+
+    try {
+      EmailProviderResponse response = new ApiGatewayEmailProviderAdapter.HttpUrlConnectionEmailTransport()
+          .post(endpoint(server, "/send"), "server-secret", "{\"to\":\"user@example.com\"}", 1000);
+
+      assertEquals(202, response.getStatusCode());
+      assertEquals("{\"accepted\":true}", response.getBody());
+      assertEquals("POST", method.get());
+      assertEquals("server-secret", apiKey.get());
+      assertEquals("{\"to\":\"user@example.com\"}", requestBody.get());
+    } finally {
+      server.stop(0);
+    }
+  }
+
+  @Test
+  public void httpTransportReadsErrorResponseBody() throws Exception {
+    HttpServer server = startServer(exchange -> {
+      byte[] response = "provider down".getBytes(StandardCharsets.UTF_8);
+      exchange.sendResponseHeaders(503, response.length);
+      try (OutputStream outputStream = exchange.getResponseBody()) {
+        outputStream.write(response);
+      }
+    });
+
+    try {
+      EmailProviderResponse response = new ApiGatewayEmailProviderAdapter.HttpUrlConnectionEmailTransport()
+          .post(endpoint(server, "/send"), "server-secret", "{}", 1000);
+
+      assertEquals(503, response.getStatusCode());
+      assertEquals("provider down", response.getBody());
+      assertFalse(response.isSuccessful());
+    } finally {
+      server.stop(0);
+    }
+  }
+
+  @Test
+  public void httpTransportDefaultsMissingResponseBodyToEmptyString() throws Exception {
+    HttpServer server = startServer(exchange -> exchange.sendResponseHeaders(500, -1));
+
+    try {
+      EmailProviderResponse response = new ApiGatewayEmailProviderAdapter.HttpUrlConnectionEmailTransport()
+          .post(endpoint(server, "/send"), "server-secret", "{}", 1000);
+
+      assertEquals(500, response.getStatusCode());
+      assertEquals("", response.getBody());
+    } finally {
+      server.stop(0);
+    }
+  }
+
+  private static HttpServer startServer(HttpHandler handler) throws IOException {
+    HttpServer server = HttpServer.create(new InetSocketAddress(0), 0);
+    server.createContext("/send", handler::handle);
+    server.start();
+    return server;
+  }
+
+  private static String endpoint(HttpServer server, String path) {
+    return "http://127.0.0.1:" + server.getAddress().getPort() + path;
+  }
+
   private static class CapturingTransport implements ApiGatewayEmailProviderAdapter.EmailTransport {
     private final EmailProviderResponse response;
     private String endpoint;
@@ -93,5 +177,10 @@ public class ApiGatewayEmailProviderAdapterTest {
       this.timeoutMs = timeoutMs;
       return response;
     }
+  }
+
+  @FunctionalInterface
+  private interface HttpHandler {
+    void handle(com.sun.net.httpserver.HttpExchange exchange) throws IOException;
   }
 }
