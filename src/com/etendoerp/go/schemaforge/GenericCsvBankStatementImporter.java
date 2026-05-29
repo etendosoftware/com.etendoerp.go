@@ -177,8 +177,29 @@ public class GenericCsvBankStatementImporter {
    */
   public static class CsvParseException extends OBException {
     private static final long serialVersionUID = 1L;
-    public CsvParseException(String message) { super(message); }
-    public CsvParseException(String message, Throwable cause) { super(message, cause); }
+
+    /**
+     * Builds a CSV parse failure carrying only a human-readable explanation.
+     * Use this overload when the caller didn't catch an underlying exception
+     * (e.g. a validation error like "missing required column").
+     *
+     * @param message description of the parse failure
+     */
+    public CsvParseException(String message) {
+      super(message);
+    }
+
+    /**
+     * Builds a CSV parse failure that wraps a lower-level error (typically a
+     * {@link java.text.ParseException} or an {@link java.io.IOException}) so
+     * its stack trace is preserved in the logs.
+     *
+     * @param message description of the parse failure
+     * @param cause   the underlying exception that triggered this failure
+     */
+    public CsvParseException(String message, Throwable cause) {
+      super(message, cause);
+    }
   }
 
   // -------------------------------------------------------------------------
