@@ -577,4 +577,380 @@ public class FinancialAccountTransactionsHandlerTest {
     when(rs.getString("contact")).thenReturn(contact);
     when(rs.getString("currency_iso")).thenReturn(currencyIso);
   }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // handleCreate() validation paths (POST ?action=create)
+  // ─────────────────────────────────────────────────────────────────────
+
+  /** Tests below cover the {@code POST ?action=create} endpoint and its
+   *  lookup siblings ({@code action=bpartner-lookup}, {@code action=glitem-lookup}).
+   */
+
+  @Test
+  public void testHandleCreateRejectsNullBody() {
+
+    NeoResponse r = handler.handle(postCreateCtx(null));
+    assertEquals(400, r.getHttpStatus());
+  }
+
+  @Test
+  public void testHandleCreateRejectsMissingAccountId() throws Exception {
+
+    NeoContext ctx = postCreateCtx(new JSONObject());
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      NeoResponse r = handler.handle(ctx);
+      assertEquals(400, r.getHttpStatus());
+      assertTrue(r.getBody().getJSONObject("error").getString("message").contains("FIN_Financial_Account_ID"));
+    }
+  }
+
+  @Test
+  public void testHandleCreateRejectsInvalidTrxType() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("trxType", "FOO");
+    body.put("depositAmount", "10");
+
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      NeoResponse r = handler.handle(postCreateCtx(body));
+      assertEquals(400, r.getHttpStatus());
+      assertTrue(r.getBody().getJSONObject("error").getString("message").contains("Invalid trxType"));
+    }
+  }
+
+  @Test
+  public void testHandleCreateRejectsZeroAmounts() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("trxType", "BPD");
+    body.put("depositAmount", "0");
+    body.put("paymentAmount", "0");
+
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      NeoResponse r = handler.handle(postCreateCtx(body));
+      assertEquals(400, r.getHttpStatus());
+      assertTrue(r.getBody().getJSONObject("error").getString("message").contains("At least one"));
+    }
+  }
+
+  @Test
+  public void testHandleCreateRejectsNegativeAmounts() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("trxType", "BPD");
+    body.put("depositAmount", "-5");
+    body.put("paymentAmount", "0");
+
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      NeoResponse r = handler.handle(postCreateCtx(body));
+      assertEquals(400, r.getHttpStatus());
+      assertTrue(r.getBody().getJSONObject("error").getString("message").contains("non-negative"));
+    }
+  }
+
+  @Test
+  public void testHandleCreateRejectsUnknownAccount() throws Exception {
+    JSONObject body = goodCreateBody();
+
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount.class),
+          anyString())).thenReturn(null);
+
+      NeoResponse r = handler.handle(postCreateCtx(body));
+      assertEquals(400, r.getHttpStatus());
+      assertTrue(r.getBody().getJSONObject("error").getString("message").contains("Financial account not found"));
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Lookups (GET ?action=bpartner-lookup / glitem-lookup)
+  // ─────────────────────────────────────────────────────────────────────
+
+  @Test
+  public void testHandleBpartnerLookupReturnsMappedRows() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    Map<String, String> qp = new HashMap<>();
+    qp.put("action", "bpartner-lookup");
+    qp.put("q", "ac");
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getQueryParams()).thenReturn(qp);
+
+    NeoResponse r = runLookupWithStubs(ctx, "bp-1", "Acme");
+    assertEquals(200, r.getHttpStatus());
+    JSONArray bps = r.getBody().getJSONObject("response").getJSONObject("data").getJSONArray("bpartners");
+    assertEquals(1, bps.length());
+    assertEquals("Acme", bps.getJSONObject(0).getString("name"));
+  }
+
+  @Test
+  public void testHandleGlItemLookupReturnsMappedRows() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    Map<String, String> qp = new HashMap<>();
+    qp.put("action", "glitem-lookup");
+    qp.put("q", "tr");
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getQueryParams()).thenReturn(qp);
+
+    NeoResponse r = runLookupWithStubs(ctx, "gl-1", "Transfer");
+    assertEquals(200, r.getHttpStatus());
+    JSONArray gls = r.getBody().getJSONObject("response").getJSONObject("data").getJSONArray("glItems");
+    assertEquals(1, gls.length());
+    assertEquals("Transfer", gls.getJSONObject(0).getString("name"));
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Helpers for the new POST / lookup tests
+  // ─────────────────────────────────────────────────────────────────────
+
+  /** Builds a {@link NeoContext} mock for POST /sws/neo/...?action=create. */
+  private static NeoContext postCreateCtx(JSONObject body) {
+    NeoContext ctx = mock(NeoContext.class);
+    Map<String, String> qp = new HashMap<>();
+    qp.put("action", "create");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getQueryParams()).thenReturn(qp);
+    when(ctx.getRequestBody()).thenReturn(body);
+    return ctx;
+  }
+
+  /** Minimal request body that passes every validation in handleCreate. */
+  private static JSONObject goodCreateBody() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("trxType", "BPD");
+    body.put("depositAmount", "100");
+    body.put("paymentAmount", "0");
+    body.put("description", "Sample");
+    return body;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // handleCreate() happy path + downstream helpers
+  // ─────────────────────────────────────────────────────────────────────
+
+  @Test
+  public void testHandleCreateHappyPathPersistsTransaction() throws Exception {
+    JSONObject body = goodCreateBody();
+    body.put("bpartnerId", "bp-1");
+    body.put("glItemId", "gl-1");
+    body.put("transactionDate", "2026-01-15T00:00:00Z");
+    body.put("accountingDate", "2026-01-15T00:00:00Z");
+
+
+    org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount account =
+        mock(org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount.class);
+    org.openbravo.model.ad.system.Client client = mock(org.openbravo.model.ad.system.Client.class);
+    org.openbravo.model.common.enterprise.Organization orga =
+        mock(org.openbravo.model.common.enterprise.Organization.class);
+    org.openbravo.model.common.currency.Currency currency =
+        mock(org.openbravo.model.common.currency.Currency.class);
+    when(account.getClient()).thenReturn(client);
+    when(account.getOrganization()).thenReturn(orga);
+    when(account.getCurrency()).thenReturn(currency);
+    when(account.getId()).thenReturn("acc-1");
+
+    org.openbravo.model.common.businesspartner.BusinessPartner bp =
+        mock(org.openbravo.model.common.businesspartner.BusinessPartner.class);
+    org.openbravo.model.financialmgmt.gl.GLItem gl =
+        mock(org.openbravo.model.financialmgmt.gl.GLItem.class);
+    org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction trx =
+        mock(org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction.class);
+    when(trx.getId()).thenReturn("tx-new");
+    when(trx.getTransactionType()).thenReturn("BPD");
+    when(trx.getStatus()).thenReturn("RPAE");
+
+    // nextLineNo() executes a SQL query; stub the JDBC chain to return 30.
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true);
+    when(rs.getLong("next_line")).thenReturn(30L);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<org.openbravo.base.provider.OBProvider> providerMock =
+             mockStatic(org.openbravo.base.provider.OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount.class), eq("acc-1")))
+          .thenReturn(account);
+      when(dal.get(eq(org.openbravo.model.common.businesspartner.BusinessPartner.class), eq("bp-1")))
+          .thenReturn(bp);
+      when(dal.get(eq(org.openbravo.model.financialmgmt.gl.GLItem.class), eq("gl-1"))).thenReturn(gl);
+      when(dal.getConnection()).thenReturn(conn);
+
+      org.openbravo.base.provider.OBProvider provider = mock(org.openbravo.base.provider.OBProvider.class);
+      providerMock.when(org.openbravo.base.provider.OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction.class)).thenReturn(trx);
+
+      NeoResponse r = handler.handle(postCreateCtx(body));
+      assertEquals(201, r.getHttpStatus());
+      JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals("tx-new", data.getString("id"));
+      assertEquals("BPD", data.getString("trxType"));
+
+      // Verify the transaction was assembled with the expected linkages.
+      verify(trx).setAccount(account);
+      verify(trx).setCurrency(currency);
+      verify(trx).setTransactionType("BPD");
+      verify(trx).setLineNo(30L);
+      verify(trx).setStatus("RPAE");
+      verify(trx).setBusinessPartner(bp);
+      verify(trx).setGLItem(gl);
+      verify(dal).save(trx);
+    }
+  }
+
+  @Test
+  public void testHandleCreateFallsBackToAccountCurrencyWhenIdMissing() throws Exception {
+    JSONObject body = goodCreateBody();   // no currencyId in the body
+    body.put("trxType", "BPW");
+    body.put("depositAmount", "0");
+    body.put("paymentAmount", "50");
+
+
+    org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount account =
+        mock(org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount.class);
+    org.openbravo.model.common.currency.Currency accountCurrency =
+        mock(org.openbravo.model.common.currency.Currency.class);
+    when(account.getCurrency()).thenReturn(accountCurrency);
+    when(account.getId()).thenReturn("acc-1");
+    when(account.getClient()).thenReturn(mock(org.openbravo.model.ad.system.Client.class));
+    when(account.getOrganization()).thenReturn(mock(org.openbravo.model.common.enterprise.Organization.class));
+
+    org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction trx =
+        mock(org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction.class);
+    when(trx.getId()).thenReturn("tx-new");
+    when(trx.getTransactionType()).thenReturn("BPW");
+    when(trx.getStatus()).thenReturn("RPAP");
+
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);  // exercise nextLineNo() default branch
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<org.openbravo.base.provider.OBProvider> providerMock =
+             mockStatic(org.openbravo.base.provider.OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount.class), eq("acc-1")))
+          .thenReturn(account);
+      when(dal.getConnection()).thenReturn(conn);
+
+      org.openbravo.base.provider.OBProvider provider = mock(org.openbravo.base.provider.OBProvider.class);
+      providerMock.when(org.openbravo.base.provider.OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction.class)).thenReturn(trx);
+
+      NeoResponse r = handler.handle(postCreateCtx(body));
+      assertEquals(201, r.getHttpStatus());
+      verify(trx).setCurrency(accountCurrency);
+      // BPW with paymentAmount > 0 → status RPAP
+      verify(trx).setStatus("RPAP");
+      // nextLineNo's empty result-set branch → defaults to 10
+      verify(trx).setLineNo(10L);
+    }
+  }
+
+  @Test
+  public void testHandleCreateReturns500WhenSaveExplodes() throws Exception {
+    JSONObject body = goodCreateBody();
+
+    org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount account =
+        mock(org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount.class);
+    when(account.getCurrency()).thenReturn(mock(org.openbravo.model.common.currency.Currency.class));
+    when(account.getId()).thenReturn("acc-1");
+    when(account.getClient()).thenReturn(mock(org.openbravo.model.ad.system.Client.class));
+    when(account.getOrganization()).thenReturn(mock(org.openbravo.model.common.enterprise.Organization.class));
+
+    org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction trx =
+        mock(org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction.class);
+
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<org.openbravo.base.provider.OBProvider> providerMock =
+             mockStatic(org.openbravo.base.provider.OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount.class), eq("acc-1")))
+          .thenReturn(account);
+      when(dal.getConnection()).thenReturn(conn);
+      org.mockito.Mockito.doThrow(new RuntimeException("db boom")).when(dal).flush();
+
+      org.openbravo.base.provider.OBProvider provider = mock(org.openbravo.base.provider.OBProvider.class);
+      providerMock.when(org.openbravo.base.provider.OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction.class)).thenReturn(trx);
+
+      NeoResponse r = handler.handle(postCreateCtx(body));
+      assertEquals(500, r.getHttpStatus());
+    }
+  }
+
+  @Test
+  public void testNextLineNoReturnsDefaultOnSqlException() throws Exception {
+
+    org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount account =
+        mock(org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn("acc-1");
+
+    Connection conn = mock(Connection.class);
+    when(conn.prepareStatement(anyString())).thenThrow(new java.sql.SQLException("driver fail"));
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      long result = handler.nextLineNo(account);
+      assertEquals(10L, result);  // catch branch fallback
+    }
+  }
+
+  /** Drives a lookup endpoint with a single row mocked in the ResultSet. */
+  private NeoResponse runLookupWithStubs(NeoContext ctx, String id, String name) throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, false);
+    when(rs.getString("id")).thenReturn(id);
+    when(rs.getString("name")).thenReturn(name);
+
+    OBContext realCtx = mock(OBContext.class);
+    org.openbravo.model.ad.system.Client client = mock(org.openbravo.model.ad.system.Client.class);
+    when(client.getId()).thenReturn("client-1");
+    when(realCtx.getCurrentClient()).thenReturn(client);
+
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(realCtx);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      return handler.handle(ctx);
+    }
+  }
 }
