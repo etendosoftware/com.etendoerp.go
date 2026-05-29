@@ -17,7 +17,9 @@
 
 package com.etendoerp.go.schemaforge.email.contracts;
 
-import com.etendoerp.go.schemaforge.email.*;
+import com.etendoerp.go.schemaforge.email.EmailContract;
+import com.etendoerp.go.schemaforge.email.EmailContractDataResolver;
+import com.etendoerp.go.schemaforge.email.EmailContractProvider;
 
 import java.util.Arrays;
 import java.util.Collection;
@@ -30,21 +32,34 @@ import javax.enterprise.context.ApplicationScoped;
 @ApplicationScoped
 public final class CoreEmailContractProvider implements EmailContractProvider {
 
-  private final EmailContractDataResolver contactResolver;
+  private final EmailContractDataResolver contractResolver;
+  private static final int RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT = 3;
+  private static final int NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT = 2;
+  private static final int ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS = 900;
 
+  /**
+   * Creates the provider with the default DAL-backed contact resolver.
+   */
   public CoreEmailContractProvider() {
     this(new DalEmailContractDataResolver());
   }
 
-  public CoreEmailContractProvider(EmailContractDataResolver contactResolver) {
-    this.contactResolver = contactResolver;
+  /**
+   * Creates the provider with an explicit contract resolver.
+   *
+   * @param contractResolver resolver used by account and login alert contracts
+   */
+  public CoreEmailContractProvider(EmailContractDataResolver contractResolver) {
+    this.contractResolver = contractResolver;
   }
 
   @Override
   public Collection<EmailContract> getContracts() {
     return Arrays.asList(
-        new AccountLinkEmailContract("reset-password", "reset-password", contactResolver, 3, 900),
-        new AccountLinkEmailContract("new-account", "new-account", contactResolver, 2, 900),
-        new LoginAlertEmailContract(contactResolver));
+        new AccountLinkEmailContract("reset-password", "reset-password", contractResolver,
+            RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
+        new AccountLinkEmailContract("new-account", "new-account", contractResolver,
+            NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
+        new LoginAlertEmailContract(contractResolver));
   }
 }

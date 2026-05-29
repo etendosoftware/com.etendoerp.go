@@ -24,6 +24,7 @@ import static org.junit.Assert.assertTrue;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.List;
 import java.util.Optional;
 
 import org.codehaus.jettison.json.JSONException;
@@ -247,7 +248,7 @@ public class InitialEmailContractsTest {
         new InMemoryEmailSafetyStore());
   }
 
-  private static java.util.List<EmailContractProvider> fixtureProviders() {
+  private static List<EmailContractProvider> fixtureProviders() {
     FixtureDataResolver dataResolver = new FixtureDataResolver();
     return Arrays.asList(new CoreEmailContractProvider(dataResolver),
         new FixtureSalesDocumentEmailContractProvider());
@@ -313,7 +314,7 @@ public class InitialEmailContractsTest {
         String recipientEmail, String documentNo, String amount, String downloadLink) {
       if (expectedId.equals(recordId)) {
         return Optional.of(new EmailDocumentRecord("Empresa SRL", recipientEmail, documentNo,
-            amount, downloadLink));
+            amount, downloadLink, "tenant-1"));
       }
       return Optional.empty();
     }

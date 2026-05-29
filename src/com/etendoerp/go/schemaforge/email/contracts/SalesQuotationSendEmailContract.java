@@ -17,7 +17,10 @@
 
 package com.etendoerp.go.schemaforge.email.contracts;
 
-import com.etendoerp.go.schemaforge.email.*;
+import com.etendoerp.go.schemaforge.email.DefaultDocumentSendEmailContract;
+import com.etendoerp.go.schemaforge.email.EmailDocumentRecordResolver;
+
+import java.util.Objects;
 
 /**
  * Contract for sending sales quotation document notifications.
@@ -26,7 +29,12 @@ public final class SalesQuotationSendEmailContract extends DefaultDocumentSendEm
 
   static final String NAME = "sales-quotation-send";
 
+  /**
+   * Creates the sales quotation send contract.
+   *
+   * @param documentResolver resolver for trusted sales quotation records
+   */
   public SalesQuotationSendEmailContract(EmailDocumentRecordResolver documentResolver) {
-    super(NAME, "Sales Quotation", documentResolver);
+    super(NAME, "Sales Quotation", Objects.requireNonNull(documentResolver, "documentResolver"));
   }
 }

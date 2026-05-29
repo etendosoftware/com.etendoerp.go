@@ -17,13 +17,24 @@
 
 package com.etendoerp.go.schemaforge.email;
 
+import java.util.Objects;
+
 import org.apache.commons.lang3.StringUtils;
 
+/**
+ * Contact data resolved from a trusted server-side record for email contracts.
+ */
 public final class EmailContactRecord {
 
   private final String name;
   private final String email;
 
+  /**
+   * Creates a normalized contact record.
+   *
+   * @param name display name for the contact
+   * @param email email address for the contact
+   */
   public EmailContactRecord(String name, String email) {
     this.name = StringUtils.trimToNull(name);
     this.email = StringUtils.trimToNull(email);
@@ -35,5 +46,22 @@ public final class EmailContactRecord {
 
   public String getEmail() {
     return email;
+  }
+
+  @Override
+  public boolean equals(Object other) {
+    if (this == other) {
+      return true;
+    }
+    if (!(other instanceof EmailContactRecord)) {
+      return false;
+    }
+    EmailContactRecord that = (EmailContactRecord) other;
+    return Objects.equals(name, that.name) && Objects.equals(email, that.email);
+  }
+
+  @Override
+  public int hashCode() {
+    return Objects.hash(name, email);
   }
 }

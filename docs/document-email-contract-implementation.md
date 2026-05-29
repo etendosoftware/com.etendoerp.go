@@ -112,7 +112,7 @@ public final class SalesDocumentEmailContractProvider implements EmailContractPr
 
 `DefaultDocumentSendEmailContract` provides the standard document send policy:
 
-- deterministic idempotency key based on contract and record
+- deterministic idempotency key based on contract, trusted document tenant, and record
 - per-user throttle
 - per-recipient throttle
 - per-record throttle

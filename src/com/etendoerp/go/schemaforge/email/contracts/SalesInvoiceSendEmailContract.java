@@ -17,14 +17,26 @@
 
 package com.etendoerp.go.schemaforge.email.contracts;
 
-import com.etendoerp.go.schemaforge.email.*;
+import com.etendoerp.go.schemaforge.email.DefaultDocumentSendEmailContract;
+import com.etendoerp.go.schemaforge.email.EmailDocumentRecordResolver;
 
+import java.util.Objects;
+
+/**
+ * Contract for sending sales invoice document notifications.
+ */
 public final class SalesInvoiceSendEmailContract extends DefaultDocumentSendEmailContract {
 
   static final String NAME = "sales-invoice-send";
   private static final String TEMPLATE = "invoice";
 
+  /**
+   * Creates the sales invoice send contract.
+   *
+   * @param documentResolver resolver for trusted sales invoice records
+   */
   public SalesInvoiceSendEmailContract(EmailDocumentRecordResolver documentResolver) {
-    super(NAME, TEMPLATE, "Sales Invoice", "invoice_number", true, documentResolver);
+    super(NAME, TEMPLATE, "Sales Invoice", "invoice_number", true,
+        Objects.requireNonNull(documentResolver, "documentResolver"));
   }
 }

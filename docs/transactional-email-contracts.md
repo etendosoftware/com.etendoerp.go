@@ -122,7 +122,7 @@ Rules whose context key is unavailable are skipped, so contracts can share polic
 - throttle counters
 - audit records
 
-Idempotency lookups are scoped by contract and tenant/client in the default store. Contracts should still generate deterministic keys that include the relevant business record and semantic action/version, for example `invoice-send:<invoiceId>:v1`.
+Idempotency lookups are scoped by contract and tenant/client in the default store. Contracts should still generate deterministic keys that include the relevant business record and semantic action/version, for example `invoice-send:<invoiceId>:v1`. Document-send contracts must derive the tenant/client part from the trusted resolved document record instead of caller-provided payload fields.
 
 The default `InMemoryEmailSafetyStore` is process-local and suitable for executor wiring and tests. Production deployments that require cluster-wide enforcement must replace it with a persistent implementation without changing contract code.
 

@@ -17,7 +17,8 @@
 
 package com.etendoerp.go.schemaforge.email.contracts;
 
-import com.etendoerp.go.schemaforge.email.*;
+import com.etendoerp.go.schemaforge.email.EmailDocumentRecord;
+import com.etendoerp.go.schemaforge.email.EmailDocumentRecordResolver;
 
 import java.util.Optional;
 
@@ -26,6 +27,9 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.order.Order;
 
+/**
+ * Resolves trusted sales order and quotation records for document email contracts.
+ */
 final class DalOrderEmailDocumentResolver implements EmailDocumentRecordResolver {
 
   private final String documentType;
@@ -47,13 +51,17 @@ final class DalOrderEmailDocumentResolver implements EmailDocumentRecordResolver
       return Optional.empty();
     }
     BusinessPartner businessPartner = order.getBusinessPartner();
-    String recipientEmail = DalEmailContractDataResolver.resolveBusinessPartnerEmail(
-        businessPartner);
+    String recipientEmail = null;
+    if (businessPartner != null) {
+      recipientEmail = SalesDocumentEmailRecipientResolver.resolveBusinessPartnerEmail(
+          businessPartner);
+    }
     String recipientName = businessPartner == null ? null : businessPartner.getName();
     return Optional.of(new EmailDocumentRecord(recipientName, recipientEmail,
         order.getDocumentNo(),
         DalEmailContractDataResolver.formatAmount(order.getGrandTotalAmount(),
             order.getCurrency()),
-        DalEmailContractDataResolver.buildDocumentDownloadLink(documentType, order.getId())));
+        DalEmailContractDataResolver.buildDocumentDownloadLink(documentType, order.getId()),
+        order.getClient().getId()));
   }
 }

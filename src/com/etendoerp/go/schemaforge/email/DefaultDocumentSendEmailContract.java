@@ -18,12 +18,16 @@
 package com.etendoerp.go.schemaforge.email;
 
 import java.util.Optional;
+import java.util.Objects;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 
+/**
+ * Base contract for document-send transactional emails resolved from trusted server records.
+ */
 public class DefaultDocumentSendEmailContract implements EmailContract {
 
   public static final String DEFAULT_TEMPLATE = "document";
@@ -56,7 +60,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     this.documentType = StringUtils.trimToNull(documentType);
     this.documentNumberAlias = StringUtils.trimToNull(documentNumberAlias);
     this.includeAmount = includeAmount;
-    this.documentResolver = documentResolver;
+    this.documentResolver = Objects.requireNonNull(documentResolver, "documentResolver");
   }
 
   @Override
@@ -115,8 +119,8 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
       EmailRecipientResolution recipient, EmailProviderRequest providerRequest) {
     String recordId = EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_RECORD_ID);
-    String tenantId = EmailContractCommandSupport.text(command,
-        EmailContractCommandSupport.FIELD_TENANT_ID);
+    Optional<EmailDocumentRecord> document = resolveDocument(command);
+    String tenantId = document.map(EmailDocumentRecord::getClientId).orElse(null);
     return EmailContractCommandSupport.deliveryPolicy(
         EmailContractCommandSupport.idempotencyKey(name, tenantId, recordId),
         EmailThrottleRule.perTenant(100, 3600),

@@ -29,14 +29,26 @@ public final class EmailDocumentRecord {
   private final String documentNumber;
   private final String amount;
   private final String downloadLink;
+  private final String clientId;
 
+  /**
+   * Creates a normalized document email record.
+   *
+   * @param recipientName display name for the server-resolved recipient
+   * @param recipientEmail email address for the server-resolved recipient
+   * @param documentNumber human-readable document number
+   * @param amount formatted amount for templates that include totals
+   * @param downloadLink absolute link used by the template
+   * @param clientId trusted client id that owns the document
+   */
   public EmailDocumentRecord(String recipientName, String recipientEmail, String documentNumber,
-      String amount, String downloadLink) {
+      String amount, String downloadLink, String clientId) {
     this.recipientName = StringUtils.trimToNull(recipientName);
     this.recipientEmail = StringUtils.trimToNull(recipientEmail);
     this.documentNumber = StringUtils.trimToNull(documentNumber);
     this.amount = StringUtils.trimToNull(amount);
     this.downloadLink = StringUtils.trimToNull(downloadLink);
+    this.clientId = StringUtils.trimToNull(clientId);
   }
 
   public String getRecipientName() {
@@ -57,5 +69,9 @@ public final class EmailDocumentRecord {
 
   public String getDownloadLink() {
     return downloadLink;
+  }
+
+  public String getClientId() {
+    return clientId;
   }
 }

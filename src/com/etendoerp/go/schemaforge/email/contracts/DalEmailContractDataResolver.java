@@ -17,7 +17,8 @@
 
 package com.etendoerp.go.schemaforge.email.contracts;
 
-import com.etendoerp.go.schemaforge.email.*;
+import com.etendoerp.go.schemaforge.email.EmailContactRecord;
+import com.etendoerp.go.schemaforge.email.EmailContractDataResolver;
 
 import java.math.BigDecimal;
 import java.net.URLEncoder;
@@ -30,7 +31,6 @@ import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
-import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
 
 import com.etendoerp.go.schemaforge.data.Account;
@@ -70,22 +70,6 @@ final class DalEmailContractDataResolver implements EmailContractDataResolver {
       return Optional.empty();
     }
     return Optional.of(new EmailContactRecord(user.getName(), user.getEmail()));
-  }
-
-  static String resolveBusinessPartnerEmail(BusinessPartner businessPartner) {
-    if (businessPartner == null) {
-      return null;
-    }
-    String email = StringUtils.trimToNull(businessPartner.getEtgoEmail());
-    if (email != null) {
-      return email;
-    }
-    for (User user : businessPartner.getADUserList()) {
-      if (Boolean.TRUE.equals(user.isActive()) && StringUtils.isNotBlank(user.getEmail())) {
-        return user.getEmail();
-      }
-    }
-    return null;
   }
 
   static String formatAmount(BigDecimal amount, Currency currency) {
