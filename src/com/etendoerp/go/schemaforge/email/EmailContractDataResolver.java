@@ -44,4 +44,12 @@ interface EmailContractDataResolver {
    * @return invoice email data when available
    */
   Optional<EmailDocumentRecord> findSalesInvoice(String invoiceId);
+
+  /**
+   * Resolves a sales order document and its recipient data.
+   *
+   * @param orderId C_Order id
+   * @return order email data when available
+   */
+  Optional<EmailDocumentRecord> findSalesOrder(String orderId);
 }

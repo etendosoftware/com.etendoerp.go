@@ -31,6 +31,7 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.common.order.Order;
 
 import com.etendoerp.go.schemaforge.data.Account;
 
@@ -88,6 +89,26 @@ final class DalEmailContractDataResolver implements EmailContractDataResolver {
     return Optional.of(new EmailDocumentRecord(recipientName, recipientEmail, invoice.getDocumentNo(),
         formatAmount(invoice.getGrandTotalAmount(), invoice.getCurrency()),
         buildDocumentDownloadLink("sales-invoice", invoice.getId())));
+  }
+
+  @Override
+  public Optional<EmailDocumentRecord> findSalesOrder(String orderId) {
+    String normalizedId = StringUtils.trimToNull(orderId);
+    if (normalizedId == null) {
+      return Optional.empty();
+    }
+    Order order = OBDal.getInstance().get(Order.class, normalizedId);
+    if (order == null || !Boolean.TRUE.equals(order.isActive())
+        || !Boolean.TRUE.equals(order.isSalesTransaction())
+        || !isReadableClient(order.getClient().getId())) {
+      return Optional.empty();
+    }
+    BusinessPartner businessPartner = order.getBusinessPartner();
+    String recipientEmail = resolveBusinessPartnerEmail(businessPartner);
+    String recipientName = businessPartner == null ? null : businessPartner.getName();
+    return Optional.of(new EmailDocumentRecord(recipientName, recipientEmail, order.getDocumentNo(),
+        formatAmount(order.getGrandTotalAmount(), order.getCurrency()),
+        buildDocumentDownloadLink("sales-order", order.getId())));
   }
 
   private static String resolveBusinessPartnerEmail(BusinessPartner businessPartner) {

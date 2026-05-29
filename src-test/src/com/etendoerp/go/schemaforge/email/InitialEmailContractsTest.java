@@ -44,6 +44,7 @@ public class InitialEmailContractsTest {
     assertTrue(registry.find("new-account").isPresent());
     assertTrue(registry.find("login-alert").isPresent());
     assertTrue(registry.find("sales-invoice-send").isPresent());
+    assertTrue(registry.find("sales-order-send").isPresent());
     assertFalse(registry.find("custom").isPresent());
     assertFalse(registry.find("support-custom-email").isPresent());
   }
@@ -124,8 +125,35 @@ public class InitialEmailContractsTest {
     assertEquals("Empresa SRL", adapter.getLastRequest().getData().getString("name"));
     assertEquals("0001-00042",
         adapter.getLastRequest().getData().getString("invoice_number"));
+    assertEquals("0001-00042",
+        adapter.getLastRequest().getData().getString("document_number"));
+    assertEquals("Sales Invoice",
+        adapter.getLastRequest().getData().getString("document_type"));
     assertEquals("1500.00 USD", adapter.getLastRequest().getData().getString("amount"));
     assertEquals("https://app.example.test/doc/sales-invoice/invoice-1",
+        adapter.getLastRequest().getData().getString("download_link"));
+  }
+
+  @Test
+  public void salesOrderSendUsesDefaultDocumentPayload() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "order-1");
+
+    NeoResponse response = service.send("sales-order-send", command);
+
+    assertSent(response);
+    assertEquals(DefaultDocumentSendEmailContract.DEFAULT_TEMPLATE,
+        adapter.getLastRequest().getTemplate());
+    assertEquals("orders@example.com", adapter.getLastRequest().getRecipient());
+    assertEquals("Empresa SRL", adapter.getLastRequest().getData().getString("name"));
+    assertEquals("SO-0007", adapter.getLastRequest().getData().getString("document_number"));
+    assertEquals("Sales Order", adapter.getLastRequest().getData().getString("document_type"));
+    assertFalse(adapter.getLastRequest().getData().has("order_number"));
+    assertFalse(adapter.getLastRequest().getData().has("amount"));
+    assertEquals("https://app.example.test/doc/sales-order/order-1",
         adapter.getLastRequest().getData().getString("download_link"));
   }
 
@@ -230,6 +258,16 @@ public class InitialEmailContractsTest {
         return Optional.of(new EmailDocumentRecord("Empresa SRL", "billing@example.com",
             "0001-00042", "1500.00 USD",
             "https://app.example.test/doc/sales-invoice/invoice-1"));
+      }
+      return Optional.empty();
+    }
+
+    @Override
+    public Optional<EmailDocumentRecord> findSalesOrder(String orderId) {
+      if ("order-1".equals(orderId)) {
+        return Optional.of(new EmailDocumentRecord("Empresa SRL", "orders@example.com",
+            "SO-0007", "2600.50 USD",
+            "https://app.example.test/doc/sales-order/order-1"));
       }
       return Optional.empty();
     }

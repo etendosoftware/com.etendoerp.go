@@ -130,14 +130,17 @@ The default `InMemoryEmailSafetyStore` is process-local and suitable for executo
 | `new-account` | `new-account` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link` |
 | `login-alert` | `login-alert` | `AD_User.email` resolved by `userId` | `version`, `userId`; optional `loginEventId`, `ip`, `date` |
 | `sales-invoice-send` | `invoice` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the invoice business partner | `version`, `recordId` |
+| `sales-order-send` | `document` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the sales order business partner | `version`, `recordId` |
 
 `custom` and `support-custom-email` are not registered by default. A custom HTML email can only be added later as an explicit support/admin contract with role checks, reason capture, sanitizer, throttle, and audit.
 
-The account-link contracts accept only absolute `http://` or `https://` links. The sales invoice contract generates `download_link` from server configuration:
+The account-link contracts accept only absolute `http://` or `https://` links. Document-send contracts share the default document payload strategy: `name`, `document_type`, `document_number`, and `download_link`. Optional fields such as `amount`, and document-specific aliases such as `invoice_number`, must be enabled by the explicit contract only when a provider template requires them.
+
+Document-send contracts generate `download_link` from server configuration:
 
 | Property | Environment Variable | Purpose |
 |----------|----------------------|---------|
-| `etendo.go.email.documentDownloadBaseUrl` | `ETGO_EMAIL_DOCUMENT_DOWNLOAD_BASE_URL` | Base URL used to build document download links as `{base}/sales-invoice/{recordId}` |
+| `etendo.go.email.documentDownloadBaseUrl` | `ETGO_EMAIL_DOCUMENT_DOWNLOAD_BASE_URL` | Base URL used to build document download links as `{base}/{documentType}/{recordId}` |
 
 ## Provider Configuration
 

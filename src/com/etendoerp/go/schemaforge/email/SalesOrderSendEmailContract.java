@@ -17,13 +17,11 @@
 
 package com.etendoerp.go.schemaforge.email;
 
-final class SalesInvoiceSendEmailContract extends DefaultDocumentSendEmailContract {
+final class SalesOrderSendEmailContract extends DefaultDocumentSendEmailContract {
 
-  static final String NAME = "sales-invoice-send";
-  private static final String TEMPLATE = "invoice";
+  static final String NAME = "sales-order-send";
 
-  SalesInvoiceSendEmailContract(EmailContractDataResolver dataResolver) {
-    super(NAME, TEMPLATE, "Sales Invoice", "invoice_number", true,
-        dataResolver::findSalesInvoice);
+  SalesOrderSendEmailContract(EmailContractDataResolver dataResolver) {
+    super(NAME, "Sales Order", dataResolver::findSalesOrder);
   }
 }

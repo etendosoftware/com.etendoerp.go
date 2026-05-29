@@ -51,7 +51,8 @@ public final class DefaultEmailContractRegistry implements EmailContractRegistry
         new AccountLinkEmailContract("reset-password", "reset-password", dataResolver, 3, 900),
         new AccountLinkEmailContract("new-account", "new-account", dataResolver, 2, 900),
         new LoginAlertEmailContract(dataResolver),
-        new SalesInvoiceSendEmailContract(dataResolver)));
+        new SalesInvoiceSendEmailContract(dataResolver),
+        new SalesOrderSendEmailContract(dataResolver)));
   }
 
   @Override
