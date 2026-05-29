@@ -140,6 +140,159 @@ public class EmailFrameworkValueObjectsTest {
     assertNullPointerException(() -> EmailContractResolution.ready(null));
   }
 
+  @Test
+  public void providerConfigNormalizesExplicitValuesAndRuntimeProperties() {
+    EmailProviderConfig disabledConfig = new EmailProviderConfig(" ", " ", false, -1);
+
+    assertFalse(disabledConfig.isConfigured());
+    assertFalse(disabledConfig.isEnabled());
+    assertNull(disabledConfig.getBaseUrl());
+    assertNull(disabledConfig.getApiKey());
+    assertEquals(EmailProviderConfig.DEFAULT_TIMEOUT_MS, disabledConfig.getTimeoutMs());
+
+    withProviderProperties(" https://provider.example/send ", " secret ", "Y", "2500",
+        () -> {
+          EmailProviderConfig config = EmailProviderConfig.fromRuntime();
+
+          assertTrue(config.isConfigured());
+          assertTrue(config.isEnabled());
+          assertEquals("https://provider.example/send", config.getBaseUrl());
+          assertEquals("secret", config.getApiKey());
+          assertEquals(2500, config.getTimeoutMs());
+        });
+  }
+
+  @Test
+  public void providerConfigFallsBackForDisabledOrInvalidRuntimeValues() {
+    withProviderProperties("https://provider.example/send", "secret", "false", "not-a-number",
+        () -> {
+          EmailProviderConfig config = EmailProviderConfig.fromRuntime();
+
+          assertFalse(config.isConfigured());
+          assertFalse(config.isEnabled());
+          assertEquals(EmailProviderConfig.DEFAULT_TIMEOUT_MS, config.getTimeoutMs());
+        });
+  }
+
+  @Test
+  public void sendContextExposesCommandProviderAndRecipientMetadata() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put(EmailContractCommandSupport.FIELD_TENANT_ID, " tenant-1 ");
+    body.put(EmailContractCommandSupport.FIELD_CLIENT_ID, " client-1 ");
+    body.put(EmailContractCommandSupport.FIELD_USER_ID, " user-1 ");
+    body.put(EmailContractCommandSupport.FIELD_RECORD_ID, " record-1 ");
+    EmailSendContext context = new EmailSendContext(
+        new EmailContractCommand("fixture-contract", body),
+        EmailRecipientResolution.serverResolved("person@example.com"),
+        new EmailProviderRequest(" Person@Example.COM ", " fixture-template ",
+            new JSONObject(), null));
+
+    assertEquals("fixture-contract", context.getContractName());
+    assertEquals("tenant-1", context.getTenantId());
+    assertEquals("user-1", context.getUserId());
+    assertEquals("record-1", context.getRecordId());
+    assertEquals("fixture-template", context.getTemplate());
+    assertEquals("Person@Example.COM", context.getRecipientAddress());
+    assertEquals("example.com", context.getRecipientDomain());
+
+    JSONObject clientOnlyBody = new JSONObject();
+    clientOnlyBody.put(EmailContractCommandSupport.FIELD_CLIENT_ID, " client-2 ");
+    EmailSendContext clientOnlyContext = new EmailSendContext(
+        new EmailContractCommand("fixture-contract", clientOnlyBody),
+        EmailRecipientResolution.serverResolved("person@example.com"),
+        new EmailProviderRequest("no-domain", "fixture-template", new JSONObject(), null));
+
+    assertEquals("client-2", clientOnlyContext.getTenantId());
+    assertNull(clientOnlyContext.getRecipientDomain());
+  }
+
+  @Test
+  public void auditRecordCapturesResolvedSendContext() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put(EmailContractCommandSupport.FIELD_TENANT_ID, "tenant-1");
+    body.put(EmailContractCommandSupport.FIELD_USER_ID, "user-1");
+    body.put(EmailContractCommandSupport.FIELD_RECORD_ID, "record-1");
+    EmailSendContext context = new EmailSendContext(
+        new EmailContractCommand("fixture-contract", body),
+        EmailRecipientResolution.serverResolved("person@example.com"),
+        new EmailProviderRequest("person@example.com", "fixture-template",
+            new JSONObject(), null));
+
+    EmailAuditRecord auditRecord = EmailAuditRecord.create(context,
+        "fixture-contract:tenant-1:record-1:v1", 200, TransactionalEmailService.STATUS_SENT,
+        "Sent", Integer.valueOf(202), true);
+
+    assertEquals("fixture-contract", auditRecord.getContractName());
+    assertEquals("fixture-contract:tenant-1:record-1:v1", auditRecord.getIdempotencyKey());
+    assertEquals("tenant-1", auditRecord.getTenantId());
+    assertEquals("user-1", auditRecord.getUserId());
+    assertEquals("record-1", auditRecord.getRecordId());
+    assertEquals("fixture-template", auditRecord.getTemplate());
+    assertEquals("person@example.com", auditRecord.getRecipient());
+    assertEquals("example.com", auditRecord.getRecipientDomain());
+    assertEquals(200, auditRecord.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_SENT, auditRecord.getStatus());
+    assertEquals("Sent", auditRecord.getMessage());
+    assertEquals(Integer.valueOf(202), auditRecord.getProviderStatus());
+    assertTrue(auditRecord.isDuplicate());
+    assertTrue(auditRecord.getCreatedAtMillis() > 0);
+  }
+
+  @Test
+  public void throttleAndKillSwitchResultsExposeMetadata() {
+    EmailThrottleResult allowedThrottle = EmailThrottleResult.allowed();
+    EmailThrottleResult throttled = EmailThrottleResult.throttled(
+        EmailThrottleRule.SCOPE_RECIPIENT, "person@example.com", 0);
+    EmailKillSwitchResult allowedKillSwitch = EmailKillSwitchResult.allowed();
+    EmailKillSwitchResult suppressed = EmailKillSwitchResult.suppressed(
+        EmailThrottleRule.SCOPE_TEMPLATE, "fixture-template", "Template disabled");
+    EmailThrottleRule rule = EmailThrottleRule.perTenant(0, 0);
+
+    assertTrue(allowedThrottle.isAllowed());
+    assertNull(allowedThrottle.getScope());
+    assertFalse(throttled.isAllowed());
+    assertEquals(EmailThrottleRule.SCOPE_RECIPIENT, throttled.getScope());
+    assertEquals("person@example.com", throttled.getKey());
+    assertEquals(1, throttled.getRetryAfterSeconds());
+    assertTrue(allowedKillSwitch.isAllowed());
+    assertNull(allowedKillSwitch.getMessage());
+    assertFalse(suppressed.isAllowed());
+    assertEquals(EmailThrottleRule.SCOPE_TEMPLATE, suppressed.getScope());
+    assertEquals("fixture-template", suppressed.getKey());
+    assertEquals("Template disabled", suppressed.getMessage());
+    assertEquals(EmailThrottleRule.SCOPE_TENANT, rule.getScope());
+    assertEquals(1, rule.getMaxAttempts());
+    assertEquals(1, rule.getWindowSeconds());
+  }
+
+  private static void withProviderProperties(String baseUrl, String apiKey, String enabled,
+      String timeoutMs, Runnable runnable) {
+    String previousBaseUrl = System.getProperty(EmailProviderConfig.PROP_BASE_URL);
+    String previousApiKey = System.getProperty(EmailProviderConfig.PROP_API_KEY);
+    String previousEnabled = System.getProperty(EmailProviderConfig.PROP_ENABLED);
+    String previousTimeoutMs = System.getProperty(EmailProviderConfig.PROP_TIMEOUT_MS);
+    try {
+      System.setProperty(EmailProviderConfig.PROP_BASE_URL, baseUrl);
+      System.setProperty(EmailProviderConfig.PROP_API_KEY, apiKey);
+      System.setProperty(EmailProviderConfig.PROP_ENABLED, enabled);
+      System.setProperty(EmailProviderConfig.PROP_TIMEOUT_MS, timeoutMs);
+      runnable.run();
+    } finally {
+      restoreProperty(EmailProviderConfig.PROP_BASE_URL, previousBaseUrl);
+      restoreProperty(EmailProviderConfig.PROP_API_KEY, previousApiKey);
+      restoreProperty(EmailProviderConfig.PROP_ENABLED, previousEnabled);
+      restoreProperty(EmailProviderConfig.PROP_TIMEOUT_MS, previousTimeoutMs);
+    }
+  }
+
+  private static void restoreProperty(String name, String value) {
+    if (value == null) {
+      System.clearProperty(name);
+    } else {
+      System.setProperty(name, value);
+    }
+  }
+
   private static void assertNullPointerException(Runnable runnable) {
     try {
       runnable.run();
