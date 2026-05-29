@@ -104,8 +104,10 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final DateTimeFormatter ISO_UTC = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
       .withZone(ZoneOffset.UTC);
 
-  /** JSON key reused across rows and totals — extracted to satisfy Sonar S1192. */
+  /** JSON keys reused across rows and totals — extracted to satisfy Sonar S1192. */
   private static final String KEY_BALANCE = "balance";
+  private static final String FIELD_TRX_TYPE = "trxType";
+  private static final String FIELD_DESCRIPTION = "description";
 
   /** Rolling window for inflow/outflow KPIs, in days. */
   private static final int KPI_WINDOW_DAYS = 30;
@@ -225,10 +227,10 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           row.put("id", rs.getString("fin_finacc_transaction_id"));
           row.put("date", formatDate(rs.getTimestamp("statementdate")));
           row.put("paymentStatus", StringUtils.trimToEmpty(rs.getString("status")));
-          row.put("trxType", StringUtils.trimToEmpty(rs.getString("trxtype")));
+          row.put(FIELD_TRX_TYPE, StringUtils.trimToEmpty(rs.getString("trxtype")));
           row.put("amount", nullSafeBigDecimal(rs.getBigDecimal("amount")));
           row.put(KEY_BALANCE, nullSafeBigDecimal(rs.getBigDecimal(KEY_BALANCE)));
-          row.put("description", StringUtils.trimToEmpty(rs.getString("description")));
+          row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
           row.put("posted", StringUtils.trimToEmpty(rs.getString("posted")));
           row.put("documentNo", StringUtils.trimToEmpty(rs.getString("document_no")));
           row.put("contact", StringUtils.trimToEmpty(rs.getString("contact")));
@@ -275,85 +277,38 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     return value == null ? BigDecimal.ZERO : value;
   }
 
-  // ===========================================================================
-  // Create movement (POST ?action=create)
-  // ===========================================================================
-
+  /**
+   * Handles {@code POST ?action=create} — inserts a new {@code FIN_FinaccTransaction}
+   * row for the requested account. Validation is delegated to
+   * {@link #validateCreateBody(JSONObject)}; the actual entity assembly to
+   * {@link #buildTransaction(JSONObject, FIN_FinancialAccount, Currency)}.
+   */
   private NeoResponse handleCreate(NeoContext context) {
     JSONObject body = context.getRequestBody();
     if (body == null) return NeoResponse.error(400, "Request body is required");
     try {
       OBContext.setAdminMode(true);
+
+      NeoResponse validationError = validateCreateBody(body);
+      if (validationError != null) return validationError;
+
       String accountId = body.optString(PARAM_ACCOUNT_ID, null);
-      String trxType = body.optString("trxType", null);
-      String description = body.optString("description", "");
-      String bpartnerId = body.optString("bpartnerId", null);
-      String glItemId = body.optString("glItemId", null);
-      String currencyId = body.optString("currencyId", null);
-      String transactionDateStr = body.optString("transactionDate", null);
-      String accountingDateStr = body.optString("accountingDate", null);
-
-      // Caller sends explicit deposit and payment amounts mirroring Classic's
-      // FIN_Finacc_Transaction columns. Each is required to be non-negative;
-      // we then derive status and column semantics below.
-      BigDecimal depositAmount = nullSafeBigDecimal(optBigDecimal(body, "depositAmount"));
-      BigDecimal paymentAmount = nullSafeBigDecimal(optBigDecimal(body, "paymentAmount"));
-
-      if (StringUtils.isBlank(accountId)) return NeoResponse.error(400, "Missing FIN_Financial_Account_ID");
-      if (!"BPD".equals(trxType) && !"BPW".equals(trxType) && !"BF".equals(trxType)) {
-        return NeoResponse.error(400, "Invalid trxType. Must be 'BPD' (deposit), 'BPW' (withdrawal) or 'BF' (bank fee).");
-      }
-      if (depositAmount.signum() < 0 || paymentAmount.signum() < 0) {
-        return NeoResponse.error(400, "Amounts must be non-negative");
-      }
-      if (depositAmount.signum() == 0 && paymentAmount.signum() == 0) {
-        return NeoResponse.error(400, "At least one amount must be > 0");
-      }
-
       FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
       if (account == null) return NeoResponse.error(400, "Financial account not found: " + accountId);
 
+      String currencyId = body.optString("currencyId", null);
       Currency currency = StringUtils.isBlank(currencyId)
           ? account.getCurrency()
           : OBDal.getInstance().get(Currency.class, currencyId);
       if (currency == null) return NeoResponse.error(400, "Currency not found: " + currencyId);
 
-      Date transactionDate = parseDate(transactionDateStr, new Date());
-      Date accountingDate = parseDate(accountingDateStr, transactionDate);
-
-      FIN_FinaccTransaction trx = OBProvider.getInstance().get(FIN_FinaccTransaction.class);
-      trx.setClient(account.getClient());
-      trx.setOrganization(account.getOrganization());
-      trx.setActive(true);
-      trx.setAccount(account);
-      trx.setCurrency(currency);
-      trx.setTransactionType(trxType);
-      trx.setTransactionDate(transactionDate);
-      trx.setDateAcct(accountingDate);
-      trx.setDescription(description);
-      trx.setLineNo(nextLineNo(account));
-
-      // For BPD/BPW only one column is editable in Classic; for BF both are.
-      // Status follows the convention: any deposit → RPAE, otherwise → RPAP.
-      trx.setDepositAmount(depositAmount);
-      trx.setPaymentAmount(paymentAmount);
-      trx.setStatus(depositAmount.signum() > 0 ? "RPAE" : "RPAP");
-
-      if (StringUtils.isNotBlank(bpartnerId)) {
-        BusinessPartner bp = OBDal.getInstance().get(BusinessPartner.class, bpartnerId);
-        if (bp != null) trx.setBusinessPartner(bp);
-      }
-      if (StringUtils.isNotBlank(glItemId)) {
-        GLItem gl = OBDal.getInstance().get(GLItem.class, glItemId);
-        if (gl != null) trx.setGLItem(gl);
-      }
-
+      FIN_FinaccTransaction trx = buildTransaction(body, account, currency);
       OBDal.getInstance().save(trx);
       OBDal.getInstance().flush();
 
       JSONObject result = new JSONObject();
       result.put("id", trx.getId());
-      result.put("trxType", trx.getTransactionType());
+      result.put(FIELD_TRX_TYPE, trx.getTransactionType());
       result.put("status", trx.getStatus());
       return NeoResponse.createdWithData(result);
 
@@ -364,6 +319,76 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Validates the body of {@code POST ?action=create}. Returns {@code null}
+   * when everything is fine, or a {@link NeoResponse} carrying the appropriate
+   * 400 response when not. Extracted so {@link #handleCreate} stays under
+   * Sonar's cognitive-complexity threshold.
+   */
+  private static NeoResponse validateCreateBody(JSONObject body) {
+    if (StringUtils.isBlank(body.optString(PARAM_ACCOUNT_ID, null))) {
+      return NeoResponse.error(400, "Missing FIN_Financial_Account_ID");
+    }
+    String trxType = body.optString(FIELD_TRX_TYPE, null);
+    if (!"BPD".equals(trxType) && !"BPW".equals(trxType) && !"BF".equals(trxType)) {
+      return NeoResponse.error(400, "Invalid trxType. Must be 'BPD' (deposit), 'BPW' (withdrawal) or 'BF' (bank fee).");
+    }
+    BigDecimal deposit = nullSafeBigDecimal(optBigDecimal(body, "depositAmount"));
+    BigDecimal payment = nullSafeBigDecimal(optBigDecimal(body, "paymentAmount"));
+    if (deposit.signum() < 0 || payment.signum() < 0) {
+      return NeoResponse.error(400, "Amounts must be non-negative");
+    }
+    if (deposit.signum() == 0 && payment.signum() == 0) {
+      return NeoResponse.error(400, "At least one amount must be > 0");
+    }
+    return null;
+  }
+
+  /**
+   * Maps a validated request body to a fresh {@link FIN_FinaccTransaction}.
+   * Optional FK references (business partner, G/L item) are looked up only
+   * when their id is non-blank.
+   */
+  private FIN_FinaccTransaction buildTransaction(JSONObject body,
+                                                 FIN_FinancialAccount account,
+                                                 Currency currency) {
+    String trxType = body.optString(FIELD_TRX_TYPE, null);
+    String description = body.optString(FIELD_DESCRIPTION, "");
+    BigDecimal depositAmount = nullSafeBigDecimal(optBigDecimal(body, "depositAmount"));
+    BigDecimal paymentAmount = nullSafeBigDecimal(optBigDecimal(body, "paymentAmount"));
+    Date transactionDate = parseDate(body.optString("transactionDate", null), new Date());
+    Date accountingDate = parseDate(body.optString("accountingDate", null), transactionDate);
+
+    FIN_FinaccTransaction trx = OBProvider.getInstance().get(FIN_FinaccTransaction.class);
+    trx.setClient(account.getClient());
+    trx.setOrganization(account.getOrganization());
+    trx.setActive(true);
+    trx.setAccount(account);
+    trx.setCurrency(currency);
+    trx.setTransactionType(trxType);
+    trx.setTransactionDate(transactionDate);
+    trx.setDateAcct(accountingDate);
+    trx.setDescription(description);
+    trx.setLineNo(nextLineNo(account));
+
+    // For BPD/BPW only one column is editable in Classic; for BF both are.
+    // Status follows the convention: any deposit → RPAE, otherwise → RPAP.
+    trx.setDepositAmount(depositAmount);
+    trx.setPaymentAmount(paymentAmount);
+    trx.setStatus(depositAmount.signum() > 0 ? "RPAE" : "RPAP");
+
+    attachOptional(body.optString("bpartnerId", null), BusinessPartner.class, trx::setBusinessPartner);
+    attachOptional(body.optString("glItemId", null), GLItem.class, trx::setGLItem);
+    return trx;
+  }
+
+  private static <T extends org.openbravo.base.structure.BaseOBObject> void attachOptional(
+      String id, Class<T> entityClass, java.util.function.Consumer<T> setter) {
+    if (StringUtils.isBlank(id)) return;
+    T ref = OBDal.getInstance().get(entityClass, id);
+    if (ref != null) setter.accept(ref);
   }
 
   private static BigDecimal optBigDecimal(JSONObject body, String key) {
@@ -403,10 +428,10 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     return 10L;
   }
 
-  // ===========================================================================
-  // Lookups (BP / GL Item) — GET ?action=...
-  // ===========================================================================
-
+  /**
+   * Handles {@code GET ?action=bpartner-lookup&q=...} — fuzzy search over
+   * {@code c_bpartner.name}, scoped to the current client + system records.
+   */
   private NeoResponse handleBpartnerLookup(NeoContext context) {
     String q = context.getQueryParams() != null ? context.getQueryParams().get("q") : "";
     return runLookup(

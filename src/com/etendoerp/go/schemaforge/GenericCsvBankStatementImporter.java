@@ -18,12 +18,14 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
+import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -71,10 +73,23 @@ public class GenericCsvBankStatementImporter {
   private final char delimiter;
   private final SimpleDateFormat dateFormat;
 
+  /**
+   * Creates an importer with the upstream module's defaults: comma as field
+   * delimiter and {@code dd/MM/yyyy} as date format. Decimal separator is
+   * autodetected per file at parse time.
+   */
   public GenericCsvBankStatementImporter() {
     this(DEFAULT_DELIMITER, DEFAULT_DATE_FORMAT);
   }
 
+  /**
+   * Creates an importer that overrides the defaults. Useful for callers
+   * (or tests) targeting banks that ship statements with a different field
+   * separator or date pattern.
+   *
+   * @param delimiter         single-character CSV field separator (e.g. {@code ','}, {@code ';'})
+   * @param dateFormatPattern {@link SimpleDateFormat} pattern used to parse the {@code Transaction Date} column
+   */
   public GenericCsvBankStatementImporter(char delimiter, String dateFormatPattern) {
     this.delimiter = delimiter;
     this.dateFormat = new SimpleDateFormat(dateFormatPattern);
@@ -85,10 +100,19 @@ public class GenericCsvBankStatementImporter {
    * Parses {@code stream} and creates one {@link FIN_BankStatementLine} per CSV row,
    * attaching them to {@code statement}. Lines are also saved via {@link OBDal}.
    *
+   * @param stream    input stream pointing at the CSV file content (UTF-8); fully consumed by this method
+   * @param statement persisted statement the new lines will be linked to
    * @return the number of lines parsed and saved
+   * @throws CsvParseException when a required column is missing, a date or number can't be parsed,
+   *                           or the underlying I/O fails
    */
-  public int loadFile(InputStream stream, FIN_BankStatement statement) throws Exception {
-    List<String[]> rows = readRows(stream);
+  public int loadFile(InputStream stream, FIN_BankStatement statement) throws CsvParseException {
+    List<String[]> rows;
+    try {
+      rows = readRows(stream);
+    } catch (IOException e) {
+      throw new CsvParseException("Failed to read CSV stream", e);
+    }
     if (rows.isEmpty()) return 0;
 
     Map<String, Integer> headerIdx = indexHeaders(rows.get(0));
@@ -103,89 +127,149 @@ public class GenericCsvBankStatementImporter {
     for (int r = 1; r < rows.size(); r++) {
       String[] row = rows.get(r);
       if (isBlankRow(row)) continue;
-
-      FIN_BankStatementLine line = OBProvider.getInstance().get(FIN_BankStatementLine.class);
-      line.setBankStatement(statement);
-      line.setClient(statement.getClient());
-      line.setOrganization(statement.getOrganization());
-      line.setLineNo(lineNo);
-
-      line.setTransactionDate(dateFormat.parse(get(row, headerIdx, COL_DATE)));
-      line.setDramount(parseAmount(get(row, headerIdx, COL_AMOUNT_OUT), decimalSep));
-      line.setCramount(parseAmount(get(row, headerIdx, COL_AMOUNT_IN), decimalSep));
-
-      String reference = get(row, headerIdx, COL_REFERENCE);
-      line.setReferenceNo(StringUtils.isBlank(reference) ? "**" : truncate(reference, 30));
-
-      String bp = get(row, headerIdx, COL_BPARTNER);
-      if (StringUtils.isNotBlank(bp)) line.setBpartnername(truncate(bp, 60));
-
-      String desc = get(row, headerIdx, COL_DESCRIPTION);
-      if (StringUtils.isNotBlank(desc)) line.setDescription(truncate(desc, 2000));
-
-      OBDal.getInstance().save(line);
+      saveLine(statement, row, headerIdx, decimalSep, lineNo);
       lineNo += 10L;
       count++;
     }
     return count;
   }
 
+  /**
+   * Maps a single CSV row to a {@link FIN_BankStatementLine} and persists it.
+   * Extracted from {@link #loadFile} so the loop body stays small enough for
+   * Sonar's cognitive-complexity check.
+   */
+  private void saveLine(FIN_BankStatement statement, String[] row,
+                        Map<String, Integer> headerIdx, char decimalSep, long lineNo)
+      throws CsvParseException {
+    FIN_BankStatementLine line = OBProvider.getInstance().get(FIN_BankStatementLine.class);
+    line.setBankStatement(statement);
+    line.setClient(statement.getClient());
+    line.setOrganization(statement.getOrganization());
+    line.setLineNo(lineNo);
+
+    String rawDate = get(row, headerIdx, COL_DATE);
+    try {
+      line.setTransactionDate(dateFormat.parse(rawDate));
+    } catch (ParseException e) {
+      throw new CsvParseException("Invalid date in CSV row: " + rawDate, e);
+    }
+    line.setDramount(parseAmount(get(row, headerIdx, COL_AMOUNT_OUT), decimalSep));
+    line.setCramount(parseAmount(get(row, headerIdx, COL_AMOUNT_IN), decimalSep));
+
+    String reference = get(row, headerIdx, COL_REFERENCE);
+    line.setReferenceNo(StringUtils.isBlank(reference) ? "**" : truncate(reference, 30));
+
+    String bp = get(row, headerIdx, COL_BPARTNER);
+    if (StringUtils.isNotBlank(bp)) line.setBpartnername(truncate(bp, 60));
+
+    String desc = get(row, headerIdx, COL_DESCRIPTION);
+    if (StringUtils.isNotBlank(desc)) line.setDescription(truncate(desc, 2000));
+
+    OBDal.getInstance().save(line);
+  }
+
+  /**
+   * Checked exception thrown for any failure during CSV parsing — I/O, missing
+   * columns, malformed dates or amounts. Dedicated type so callers can catch
+   * something narrower than {@code Exception} (Sonar S112).
+   */
+  public static class CsvParseException extends Exception {
+    private static final long serialVersionUID = 1L;
+    public CsvParseException(String message) { super(message); }
+    public CsvParseException(String message, Throwable cause) { super(message, cause); }
+  }
+
   // -------------------------------------------------------------------------
   // CSV tokenisation
   // -------------------------------------------------------------------------
 
-  private List<String[]> readRows(InputStream stream) throws Exception {
-    List<String[]> rows = new ArrayList<>();
+  /**
+   * Mutable state shared between {@link #readRows} and its two sub-readers.
+   * Wrapping the iteration state in a tiny holder keeps {@link #readRows}
+   * focused on the loop while the actual branching lives in
+   * {@link #consumeInQuotes} and {@link #consumeOutOfQuotes}.
+   */
+  private static final class CsvState {
+    final List<String[]> rows = new ArrayList<>();
+    final StringBuilder cell = new StringBuilder();
+    List<String> currentRow = new ArrayList<>();
+    boolean inQuotes;
+
+    void endCell() {
+      currentRow.add(cell.toString());
+      cell.setLength(0);
+    }
+
+    void endRow() {
+      endCell();
+      rows.add(currentRow.toArray(new String[0]));
+      currentRow = new ArrayList<>();
+    }
+  }
+
+  private List<String[]> readRows(InputStream stream) throws IOException {
+    CsvState st = new CsvState();
     try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-      StringBuilder cell = new StringBuilder();
-      List<String> currentRow = new ArrayList<>();
-      boolean inQuotes = false;
       int c;
       while ((c = reader.read()) != -1) {
         char ch = (char) c;
-        if (inQuotes) {
-          if (ch == '"') {
-            // Peek next char for doubled-quote escape
-            reader.mark(1);
-            int next = reader.read();
-            if (next == '"') {
-              cell.append('"');
-            } else {
-              inQuotes = false;
-              if (next != -1) reader.reset();
-            }
-          } else {
-            cell.append(ch);
-          }
+        if (st.inQuotes) {
+          consumeInQuotes(reader, ch, st);
         } else {
-          if (ch == '"') {
-            inQuotes = true;
-          } else if (ch == delimiter) {
-            currentRow.add(cell.toString());
-            cell.setLength(0);
-          } else if (ch == '\n' || ch == '\r') {
-            // Treat \r\n as one newline; swallow the \n that may follow a \r
-            if (ch == '\r') {
-              reader.mark(1);
-              int next = reader.read();
-              if (next != -1 && next != '\n') reader.reset();
-            }
-            currentRow.add(cell.toString());
-            cell.setLength(0);
-            rows.add(currentRow.toArray(new String[0]));
-            currentRow = new ArrayList<>();
-          } else {
-            cell.append(ch);
-          }
+          consumeOutOfQuotes(reader, ch, st);
         }
       }
       // Flush the last cell/row if the file didn't end with newline
-      if (cell.length() > 0 || !currentRow.isEmpty()) {
-        currentRow.add(cell.toString());
-        rows.add(currentRow.toArray(new String[0]));
+      if (st.cell.length() > 0 || !st.currentRow.isEmpty()) {
+        st.endRow();
       }
     }
-    return rows;
+    return st.rows;
+  }
+
+  /**
+   * Handles a character read while inside a quoted field. A lone {@code "}
+   * exits the quoted state; a doubled {@code ""} appends a literal quote and
+   * stays inside. Everything else accumulates into the current cell.
+   */
+  private static void consumeInQuotes(BufferedReader reader, char ch, CsvState st) throws IOException {
+    if (ch != '"') {
+      st.cell.append(ch);
+      return;
+    }
+    // Peek next char for doubled-quote escape
+    reader.mark(1);
+    int next = reader.read();
+    if (next == '"') {
+      st.cell.append('"');
+    } else {
+      st.inQuotes = false;
+      if (next != -1) reader.reset();
+    }
+  }
+
+  /**
+   * Handles a character read while OUTSIDE a quoted field. Opening quote,
+   * delimiter and CR/LF each trigger their own transition; everything else
+   * just appends to the running cell.
+   */
+  private void consumeOutOfQuotes(BufferedReader reader, char ch, CsvState st) throws IOException {
+    if (ch == '"') {
+      st.inQuotes = true;
+    } else if (ch == delimiter) {
+      st.endCell();
+    } else if (ch == '\n' || ch == '\r') {
+      // Treat \r\n as one newline; swallow the \n that may follow a \r
+      if (ch == '\r') {
+        reader.mark(1);
+        int next = reader.read();
+        if (next != -1 && next != '\n') reader.reset();
+      }
+      st.endRow();
+    } else {
+      st.cell.append(ch);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -231,22 +315,32 @@ public class GenericCsvBankStatementImporter {
   private static char detectDecimalSeparator(List<String[]> rows, Map<String, Integer> headerIdx) {
     for (int r = 1; r < rows.size(); r++) {
       for (String col : Arrays.asList(COL_AMOUNT_OUT, COL_AMOUNT_IN)) {
-        String raw = get(rows.get(r), headerIdx, col);
-        if (StringUtils.isBlank(raw)) continue;
-        boolean hasComma = raw.indexOf(',') >= 0;
-        boolean hasDot = raw.indexOf('.') >= 0;
-        if (hasComma && !hasDot) return ',';
-        if (hasDot && !hasComma) return '.';
-        if (hasComma && hasDot) {
-          // Both present → the rightmost is the decimal separator
-          return raw.lastIndexOf(',') > raw.lastIndexOf('.') ? ',' : '.';
-        }
+        Character separator = detectSeparatorIn(get(rows.get(r), headerIdx, col));
+        if (separator != null) return separator;
       }
     }
     return ',';
   }
 
-  private static BigDecimal parseAmount(String raw, char decimalSep) {
+  /**
+   * Returns {@code ','}, {@code '.'} or {@code null} (undecidable) for a
+   * single raw amount cell. Extracted so {@link #detectDecimalSeparator}
+   * stays under Sonar's cognitive-complexity threshold.
+   */
+  private static Character detectSeparatorIn(String raw) {
+    if (StringUtils.isBlank(raw)) return null;
+    boolean hasComma = raw.indexOf(',') >= 0;
+    boolean hasDot = raw.indexOf('.') >= 0;
+    if (hasComma && !hasDot) return ',';
+    if (hasDot && !hasComma) return '.';
+    if (hasComma && hasDot) {
+      // Both present → the rightmost is the decimal separator
+      return raw.lastIndexOf(',') > raw.lastIndexOf('.') ? ',' : '.';
+    }
+    return null;
+  }
+
+  private static BigDecimal parseAmount(String raw, char decimalSep) throws CsvParseException {
     if (StringUtils.isBlank(raw)) return BigDecimal.ZERO;
     DecimalFormatSymbols symbols = new DecimalFormatSymbols(Locale.US);
     symbols.setDecimalSeparator(decimalSep);
@@ -256,8 +350,8 @@ public class GenericCsvBankStatementImporter {
     df.setParseBigDecimal(true);
     try {
       return (BigDecimal) df.parse(raw);
-    } catch (Exception e) {
-      throw new IllegalArgumentException("Impossible to parse number: " + raw, e);
+    } catch (ParseException e) {
+      throw new CsvParseException("Impossible to parse number: " + raw, e);
     }
   }
 

@@ -19,7 +19,6 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
-import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
@@ -38,6 +37,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.advpaymentmngt.utility.FIN_BankStatementImport;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -73,6 +73,17 @@ public class BankStatementsHandler implements NeoHandler {
 
   private static final String C43_CLASS_NAME =
       "org.openbravo.module.cuaderno43.es.utility.Cuaderno43";
+
+  // JSON / SQL field keys reused across the handler (kept here to avoid
+  // duplicating string literals — flagged by Sonar S1192).
+  private static final String JSON_RESPONSE = "response";
+  private static final String JSON_DATA = "data";
+  private static final String FIELD_FILE_NAME = "fileName";
+  private static final String FIELD_LINE_COUNT = "lineCount";
+  private static final String FIELD_DESCRIPTION = "description";
+  private static final String FIELD_CRAMOUNT = "cramount";
+  private static final String FIELD_DRAMOUNT = "dramount";
+  private static final String FIELD_CONTENT_BASE64 = "contentBase64";
 
   private static final DateTimeFormatter ISO_UTC =
       DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
@@ -130,19 +141,12 @@ public class BankStatementsHandler implements NeoHandler {
         : null;
 
     if (METHOD_GET.equals(method)) {
-      if (ACTION_LINES.equals(action)) {
-        return handleGetLines(context);
-      }
-      return handleList(context);
+      return ACTION_LINES.equals(action) ? handleGetLines(context) : handleList(context);
     }
-
-    if (METHOD_POST.equals(method) && ACTION_IMPORT.equals(action)) {
-      return handleImport(context);
+    if (METHOD_POST.equals(method)) {
+      if (ACTION_IMPORT.equals(action))  return handleImport(context);
+      if (ACTION_PREVIEW.equals(action)) return handlePreview(context);
     }
-    if (METHOD_POST.equals(method) && ACTION_PREVIEW.equals(action)) {
-      return handlePreview(context);
-    }
-
     return NeoResponse.error(405, "Method not allowed.");
   }
 
@@ -155,14 +159,7 @@ public class BankStatementsHandler implements NeoHandler {
     }
     try {
       OBContext.setAdminMode(true);
-      JSONArray statements = loadStatements(accountId);
-      JSONObject data = new JSONObject();
-      data.put("statements", statements);
-      JSONObject responseData = new JSONObject();
-      responseData.put("data", data);
-      JSONObject envelope = new JSONObject();
-      envelope.put("response", responseData);
-      return NeoResponse.ok(envelope);
+      return NeoResponse.ok(wrapInEnvelope("statements", loadStatements(accountId)));
     } catch (Exception e) {
       log.error("Error listing bank statements for account {}", accountId, e);
       return NeoResponse.error(500, "Internal Server Error");
@@ -180,20 +177,28 @@ public class BankStatementsHandler implements NeoHandler {
     }
     try {
       OBContext.setAdminMode(true);
-      JSONArray lines = loadLines(statementId);
-      JSONObject data = new JSONObject();
-      data.put("lines", lines);
-      JSONObject responseData = new JSONObject();
-      responseData.put("data", data);
-      JSONObject envelope = new JSONObject();
-      envelope.put("response", responseData);
-      return NeoResponse.ok(envelope);
+      return NeoResponse.ok(wrapInEnvelope("lines", loadLines(statementId)));
     } catch (Exception e) {
       log.error("Error loading lines for statement {}", statementId, e);
       return NeoResponse.error(500, "Internal Server Error");
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Builds the {@code { "response": { "data": { <key>: <payload> } } }} envelope
+   * shared by every successful GET endpoint here. Pulled out so the literal
+   * keys "response" / "data" only appear once (S1192).
+   */
+  private static JSONObject wrapInEnvelope(String key, Object payload) throws Exception {
+    JSONObject data = new JSONObject();
+    data.put(key, payload);
+    JSONObject responseData = new JSONObject();
+    responseData.put(JSON_DATA, data);
+    JSONObject env = new JSONObject();
+    env.put(JSON_RESPONSE, responseData);
+    return env;
   }
 
   private NeoResponse handleImport(NeoContext context) {
@@ -204,17 +209,17 @@ public class BankStatementsHandler implements NeoHandler {
     try {
       OBContext.setAdminMode(true);
       String accountId = body.optString(PARAM_ACCOUNT_ID, null);
-      String fileName = body.optString("fileName", null);
-      String contentBase64 = body.optString("contentBase64", null);
+      String fileName = body.optString(FIELD_FILE_NAME, null);
+      String contentBase64 = body.optString(FIELD_CONTENT_BASE64, null);
 
       if (StringUtils.isBlank(accountId)) {
         return NeoResponse.error(400, "Missing required field: " + PARAM_ACCOUNT_ID);
       }
       if (StringUtils.isBlank(fileName)) {
-        return NeoResponse.error(400, "Missing required field: fileName");
+        return NeoResponse.error(400, "Missing required field: " + FIELD_FILE_NAME);
       }
       if (StringUtils.isBlank(contentBase64)) {
-        return NeoResponse.error(400, "Missing required field: contentBase64");
+        return NeoResponse.error(400, "Missing required field: " + FIELD_CONTENT_BASE64);
       }
 
       FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
@@ -248,8 +253,8 @@ public class BankStatementsHandler implements NeoHandler {
 
       JSONObject result = new JSONObject();
       result.put("id", statement.getId());
-      result.put("fileName", fileName);
-      result.put("lineCount", lineCount);
+      result.put(FIELD_FILE_NAME, fileName);
+      result.put(FIELD_LINE_COUNT, lineCount);
       return NeoResponse.createdWithData(result);
 
     } catch (IllegalArgumentException e) {
@@ -299,17 +304,17 @@ public class BankStatementsHandler implements NeoHandler {
     try {
       OBContext.setAdminMode(true);
       String accountId = body.optString(PARAM_ACCOUNT_ID, null);
-      String fileName = body.optString("fileName", null);
-      String contentBase64 = body.optString("contentBase64", null);
+      String fileName = body.optString(FIELD_FILE_NAME, null);
+      String contentBase64 = body.optString(FIELD_CONTENT_BASE64, null);
 
       if (StringUtils.isBlank(accountId)) {
         return NeoResponse.error(400, "Missing required field: " + PARAM_ACCOUNT_ID);
       }
       if (StringUtils.isBlank(fileName)) {
-        return NeoResponse.error(400, "Missing required field: fileName");
+        return NeoResponse.error(400, "Missing required field: " + FIELD_FILE_NAME);
       }
       if (StringUtils.isBlank(contentBase64)) {
-        return NeoResponse.error(400, "Missing required field: contentBase64");
+        return NeoResponse.error(400, "Missing required field: " + FIELD_CONTENT_BASE64);
       }
 
       FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
@@ -363,7 +368,11 @@ public class BankStatementsHandler implements NeoHandler {
       // discards both the statement and the cascaded lines from the DB.
       OBDal.getInstance().rollbackAndClose();
 
-      return NeoResponse.ok(envelope(result));
+      JSONObject responseData = new JSONObject();
+      responseData.put(JSON_DATA, result);
+      JSONObject env = new JSONObject();
+      env.put(JSON_RESPONSE, responseData);
+      return NeoResponse.ok(env);
     } catch (IllegalArgumentException e) {
       log.warn("Invalid base64 content in preview request", e);
       OBDal.getInstance().rollbackAndClose();
@@ -385,21 +394,20 @@ public class BankStatementsHandler implements NeoHandler {
    */
   JSONArray readLinesForPreview(String statementId) throws Exception {
     JSONArray arr = new JSONArray();
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(LINES_SQL)) {
+    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(LINES_SQL)) {
       ps.setString(1, statementId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          BigDecimal credit = nullSafeBd(rs.getBigDecimal("cramount"));
-          BigDecimal debit = nullSafeBd(rs.getBigDecimal("dramount"));
+          BigDecimal credit = nullSafeBd(rs.getBigDecimal(FIELD_CRAMOUNT));
+          BigDecimal debit = nullSafeBd(rs.getBigDecimal(FIELD_DRAMOUNT));
           JSONObject row = new JSONObject();
           row.put("lineNo", rs.getLong("line"));
           row.put("date", formatDate(rs.getTimestamp("datetrx")));
-          row.put("description", StringUtils.trimToEmpty(rs.getString("description")));
+          row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
           row.put("bpartnerName", StringUtils.trimToEmpty(rs.getString("bpartnername")));
           row.put("reference", StringUtils.trimToEmpty(rs.getString("referenceno")));
-          row.put("cramount", credit);
-          row.put("dramount", debit);
+          row.put(FIELD_CRAMOUNT, credit);
+          row.put(FIELD_DRAMOUNT, debit);
           arr.put(row);
         }
       }
@@ -421,10 +429,10 @@ public class BankStatementsHandler implements NeoHandler {
 
     for (int i = 0; i < lines.length(); i++) {
       JSONObject row = lines.getJSONObject(i);
-      BigDecimal credit = row.has("cramount") && !row.isNull("cramount")
-          ? new BigDecimal(row.getString("cramount")) : BigDecimal.ZERO;
-      BigDecimal debit = row.has("dramount") && !row.isNull("dramount")
-          ? new BigDecimal(row.getString("dramount")) : BigDecimal.ZERO;
+      BigDecimal credit = row.has(FIELD_CRAMOUNT) && !row.isNull(FIELD_CRAMOUNT)
+          ? new BigDecimal(row.getString(FIELD_CRAMOUNT)) : BigDecimal.ZERO;
+      BigDecimal debit = row.has(FIELD_DRAMOUNT) && !row.isNull(FIELD_DRAMOUNT)
+          ? new BigDecimal(row.getString(FIELD_DRAMOUNT)) : BigDecimal.ZERO;
       totalIn = totalIn.add(credit);
       totalOut = totalOut.add(debit);
 
@@ -437,22 +445,14 @@ public class BankStatementsHandler implements NeoHandler {
 
     JSONObject result = new JSONObject();
     result.put("format", format.name());
-    result.put("fileName", fileName);
-    result.put("lineCount", lineCount);
+    result.put(FIELD_FILE_NAME, fileName);
+    result.put(FIELD_LINE_COUNT, lineCount);
     result.put("totalIn", totalIn);
     result.put("totalOut", totalOut);
     result.put("periodFrom", periodFrom);
     result.put("periodTo", periodTo);
     result.put("lines", lines);
     return result;
-  }
-
-  private static JSONObject envelope(JSONObject data) throws Exception {
-    JSONObject responseData = new JSONObject();
-    responseData.put("data", data);
-    JSONObject env = new JSONObject();
-    env.put("response", responseData);
-    return env;
   }
 
   private static BigDecimal nullSafeBd(BigDecimal value) {
@@ -498,7 +498,7 @@ public class BankStatementsHandler implements NeoHandler {
     crit.setMaxResults(1);
     List<DocumentType> results = crit.list();
     if (results.isEmpty()) {
-      throw new IllegalStateException("No BSF document type found for client: " + account.getClient().getId());
+      throw new OBException("No BSF document type found for client: " + account.getClient().getId());
     }
     return results.get(0);
   }
@@ -538,67 +538,64 @@ public class BankStatementsHandler implements NeoHandler {
 
   enum StatementFormat { C43, GENERIC_CSV, UNKNOWN }
 
+  /** Record markers that identify a Cuaderno 43 line by its first two chars. */
+  private static final java.util.Set<String> C43_CODES =
+      java.util.Set.of("11", "22", "33", "99");
+
+  /** Known header tokens used to recognise the generic CSV format. */
+  private static final String[] CSV_HEADER_TOKENS = {
+      "transaction date", "amount in", "amount out",
+      "reference no.", "business partner name", "description"
+  };
+
   /**
-   * Sniffs the first few lines of {@code fileBytes} to decide which parser to
-   * dispatch — neither the file extension nor a user choice is taken into
-   * account.
+   * Sniffs the first non-blank line of {@code fileBytes} to decide which parser
+   * to dispatch — neither the file extension nor a user choice is consulted.
    *
    * <p>Heuristics, in priority order:
    * <ul>
-   *   <li><b>Cuaderno 43</b>: at least one of the first non-blank lines is
-   *       exactly 80 chars long and starts with one of the record markers
-   *       {@code 11}, {@code 22}, {@code 33}, {@code 99}. The C43 spec
-   *       mandates fixed-width 80-char records, so this is essentially zero
-   *       false-positive against any plain-text or CSV file.</li>
-   *   <li><b>Generic CSV</b>: the first non-blank line contains at least two
-   *       of the known headers (case-insensitive): {@code Transaction Date},
-   *       {@code Amount IN}, {@code Amount OUT}, {@code Reference No.},
-   *       {@code Business Partner Name}, {@code Description}.</li>
+   *   <li><b>Cuaderno 43</b>: the line is exactly 80 chars and starts with
+   *       one of {@code 11}, {@code 22}, {@code 33}, {@code 99}.</li>
+   *   <li><b>Generic CSV</b>: the line contains at least two of the known
+   *       header tokens (case-insensitive).</li>
    *   <li>Otherwise {@code UNKNOWN}.</li>
    * </ul>
    */
   static StatementFormat detectFormat(byte[] fileBytes) {
     if (fileBytes == null || fileBytes.length == 0) return StatementFormat.UNKNOWN;
-    // Only the head of the file is needed; this also caps cost on large uploads.
+    // Only the head of the file is needed; caps cost on large uploads too.
     int sampleLen = Math.min(fileBytes.length, 4096);
     String head = new String(fileBytes, 0, sampleLen, java.nio.charset.StandardCharsets.UTF_8);
-
-    String[] lines = head.split("\\r?\\n", -1);
-    for (String line : lines) {
-      if (StringUtils.isBlank(line)) continue;
-      if (line.length() == 80 && line.length() >= 2) {
-        String code = line.substring(0, 2);
-        if ("11".equals(code) || "22".equals(code) || "33".equals(code) || "99".equals(code)) {
-          return StatementFormat.C43;
-        }
-      }
-      // First non-blank line is interesting for both formats — keep going to
-      // check the CSV header only if no C43 marker is found.
-      break;
-    }
-
-    // CSV header check: look at the first non-blank line again (the file
-    // header) regardless of where it landed in the byte sample.
-    for (String line : lines) {
-      if (StringUtils.isBlank(line)) continue;
-      String lower = line.toLowerCase(java.util.Locale.ROOT);
-      int hits = 0;
-      for (String hdr : new String[] {
-          "transaction date", "amount in", "amount out",
-          "reference no.", "business partner name", "description" }) {
-        if (lower.contains(hdr)) hits++;
-      }
-      if (hits >= 2) return StatementFormat.GENERIC_CSV;
-      break;
-    }
-
+    String firstLine = firstNonBlankLine(head);
+    if (firstLine == null) return StatementFormat.UNKNOWN;
+    if (looksLikeC43Record(firstLine)) return StatementFormat.C43;
+    if (looksLikeCsvHeader(firstLine)) return StatementFormat.GENERIC_CSV;
     return StatementFormat.UNKNOWN;
+  }
+
+  private static String firstNonBlankLine(String text) {
+    for (String line : text.split("\\r?\\n", -1)) {
+      if (StringUtils.isNotBlank(line)) return line;
+    }
+    return null;
+  }
+
+  private static boolean looksLikeC43Record(String line) {
+    return line.length() == 80 && C43_CODES.contains(line.substring(0, 2));
+  }
+
+  private static boolean looksLikeCsvHeader(String line) {
+    String lower = line.toLowerCase(java.util.Locale.ROOT);
+    int hits = 0;
+    for (String token : CSV_HEADER_TOKENS) {
+      if (lower.contains(token)) hits++;
+    }
+    return hits >= 2;
   }
 
   JSONArray loadStatements(String accountId) throws Exception {
     JSONArray arr = new JSONArray();
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(STATEMENTS_SQL)) {
+    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(STATEMENTS_SQL)) {
       ps.setString(1, accountId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
@@ -611,12 +608,12 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("id", rs.getString("fin_bankstatement_id"));
           row.put("documentNo", StringUtils.trimToEmpty(rs.getString("documentno")));
           row.put("name", StringUtils.trimToEmpty(rs.getString("name")));
-          row.put("fileName", StringUtils.trimToEmpty(rs.getString("filename")));
+          row.put(FIELD_FILE_NAME, StringUtils.trimToEmpty(rs.getString("filename")));
           row.put("importDate", formatDate(rs.getTimestamp("importdate")));
           row.put("transactionDate", formatDate(rs.getTimestamp("statementdate")));
           row.put("processed", StringUtils.trimToEmpty(rs.getString("processed")));
           row.put("posted", StringUtils.trimToEmpty(rs.getString("posted")));
-          row.put("lineCount", lineCount);
+          row.put(FIELD_LINE_COUNT, lineCount);
           row.put("matchedCount", matchedCount);
           row.put("totalAmount", nullSafeBigDecimal(rs.getBigDecimal("total_amount")));
           row.put("periodFrom", periodFrom);
@@ -649,18 +646,17 @@ public class BankStatementsHandler implements NeoHandler {
 
   JSONArray loadLines(String statementId) throws Exception {
     JSONArray arr = new JSONArray();
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(LINES_SQL)) {
+    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(LINES_SQL)) {
       ps.setString(1, statementId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          BigDecimal credit = nullSafeBigDecimal(rs.getBigDecimal("cramount"));
-          BigDecimal debit = nullSafeBigDecimal(rs.getBigDecimal("dramount"));
+          BigDecimal credit = nullSafeBigDecimal(rs.getBigDecimal(FIELD_CRAMOUNT));
+          BigDecimal debit = nullSafeBigDecimal(rs.getBigDecimal(FIELD_DRAMOUNT));
           JSONObject row = new JSONObject();
           row.put("id", rs.getString("fin_bankstatementline_id"));
           row.put("lineNo", rs.getLong("line"));
           row.put("date", formatDate(rs.getTimestamp("datetrx")));
-          row.put("description", StringUtils.trimToEmpty(rs.getString("description")));
+          row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
           row.put("reference", StringUtils.trimToEmpty(rs.getString("referenceno")));
           row.put("bpartnerName", StringUtils.trimToEmpty(rs.getString("bpartnername")));
           row.put("amount", credit.subtract(debit));
