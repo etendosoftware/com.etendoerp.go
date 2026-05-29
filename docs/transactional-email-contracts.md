@@ -39,7 +39,8 @@ Rejected provider passthrough shape:
 |-----------|----------------|
 | `TransactionalEmailService` | Executes a named contract, enforces executor-level safety gates, and maps provider outcomes to NEO responses |
 | `EmailContractRegistry` | Finds the server-side contract by name |
-| `DefaultEmailContractRegistry` | Registers the built-in v1 transactional contracts |
+| `DefaultEmailContractRegistry` | Builds the runtime registry from injected `EmailContractProvider` implementations |
+| `EmailContractProvider` | CDI extension point used by feature implementations to provide one or more contracts |
 | `EmailContract` | Authorizes the command, resolves the recipient, and builds template variables from trusted server context |
 | `EmailAuthorizationResult` | Carries contract-specific authorization approval or rejection |
 | `EmailRecipientResolution` | Carries the recipient derived from server state or from an explicit support/admin contract |
@@ -50,7 +51,7 @@ Rejected provider passthrough shape:
 | `ApiGatewayEmailProviderAdapter` | HTTP adapter for API Gateway-style providers |
 | `EmailProviderConfig` | Reads provider configuration from server-side properties or environment variables |
 
-The default executor registers the built-in v1 contracts. A missing contract still returns `VALIDATION_FAILED` with HTTP 404.
+The default executor loads injected contract providers. A missing contract still returns `VALIDATION_FAILED` with HTTP 404.
 
 ## Authorization and Recipient Resolution
 
@@ -74,6 +75,8 @@ Each contract must implement these steps in order:
 2. `resolveRecipient`: derive the destination from a trusted record whenever possible.
 3. `resolve`: build the provider template and variables using the resolved recipient.
 4. `deliveryPolicy`: define idempotency and throttle rules for the send attempt.
+
+Feature implementations should provide contracts through `EmailContractProvider`. Document contracts should inject an `EmailDocumentRecordResolver` owned by the document implementation. Do not add document-specific resolver methods to the framework package.
 
 Edge cases every contract family must cover:
 

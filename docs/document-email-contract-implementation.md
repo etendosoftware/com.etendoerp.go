@@ -47,8 +47,8 @@ Example:
 public class SalesOrderSendEmailContract extends DefaultDocumentSendEmailContract {
   public static final String NAME = "sales-order-send";
 
-  public SalesOrderSendEmailContract(EmailContractDataResolver dataResolver) {
-    super(NAME, "Sales Order", dataResolver::findSalesOrder);
+  public SalesOrderSendEmailContract(EmailDocumentRecordResolver documentResolver) {
+    super(NAME, "Sales Order", documentResolver);
   }
 }
 ```
@@ -56,24 +56,29 @@ public class SalesOrderSendEmailContract extends DefaultDocumentSendEmailContrac
 Use the extended constructor only when the provider template requires extra compatibility fields:
 
 ```java
-super(NAME, "invoice", "Sales Invoice", "invoice_number", true, dataResolver::findSalesInvoice);
+super(NAME, "invoice", "Sales Invoice", "invoice_number", true, documentResolver);
 ```
 
 The final boolean controls whether `amount` is emitted.
 
-### 2. Add a resolver method
+### 2. Create a document resolver
 
-Add a method to `EmailContractDataResolver`:
+Create a resolver for one document family by implementing `EmailDocumentRecordResolver`:
 
 ```java
-Optional<EmailDocumentRecord> findSalesOrder(String orderId);
+final class DalSalesOrderEmailDocumentResolver implements EmailDocumentRecordResolver {
+  @Override
+  public Optional<EmailDocumentRecord> resolve(String recordId) {
+    // Load and validate one trusted document family.
+  }
+}
 ```
 
-The method must return an empty result for invalid, inactive, inaccessible, or unsupported records.
+Do not add document-specific methods to a shared framework resolver. The email framework must not grow methods such as `findSalesOrder`, `findSalesQuotation`, or `findPurchaseInvoice`. Each document implementation owns its resolver and injects it into its contract.
 
 ### 3. Resolve the trusted record with DAL
 
-Implement the resolver in `DalEmailContractDataResolver`.
+Implement the resolver in a document-owned class, for example `DalOrderEmailDocumentResolver` or `DalInvoiceEmailDocumentResolver`.
 
 Rules:
 
@@ -86,15 +91,22 @@ Rules:
 
 Do not trust browser-provided recipient, template, or variable values.
 
-### 4. Register the contract
+### 4. Provide the contract through CDI
 
-Add the contract to `DefaultEmailContractRegistry`:
+Expose document contracts through an injected `EmailContractProvider`:
 
 ```java
-register(new SalesOrderSendEmailContract(dataResolver));
+@ApplicationScoped
+public final class SalesDocumentEmailContractProvider implements EmailContractProvider {
+  @Override
+  public Collection<EmailContract> getContracts() {
+    return List.of(
+        new SalesOrderSendEmailContract(new DalOrderEmailDocumentResolver("sales-order")));
+  }
+}
 ```
 
-Registry lookup is the boundary that turns a route name into a server-owned contract. Missing contracts should keep returning `VALIDATION_FAILED` with HTTP 404.
+`DefaultEmailContractRegistry` loads `EmailContractProvider` instances through CDI. Registry lookup is the boundary that turns a route name into a server-owned contract. Missing contracts should keep returning `VALIDATION_FAILED` with HTTP 404.
 
 ### 5. Keep delivery policy explicit
 
@@ -137,10 +149,12 @@ Update:
 ## Review Checklist
 
 - Contract class is small and delegates common document behavior to `DefaultDocumentSendEmailContract` when possible.
+- Document resolver is owned by the implementation and injected into the contract.
+- No document-specific method is added to `EmailContractDataResolver` or any shared framework resolver.
 - Resolver loads and validates trusted server records.
 - Recipient is resolved server-side.
 - Browser-provided provider payload fields are rejected.
 - Default payload remains `name`, `document_type`, `document_number`, and `download_link`.
 - `amount` and aliases are explicit compatibility opt-ins only.
-- Registry, resolver, payload, failure, and idempotency behavior are covered by tests.
+- Provider registration, resolver, payload, failure, and idempotency behavior are covered by tests.
 - Runtime and Schema Forge docs are updated in the same change.

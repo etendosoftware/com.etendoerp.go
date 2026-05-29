@@ -17,23 +17,22 @@
 
 package com.etendoerp.go.schemaforge.email;
 
-import java.util.Optional;
+import java.util.Arrays;
+import java.util.Collection;
 
-interface EmailContractDataResolver {
+import javax.enterprise.context.ApplicationScoped;
 
-  /**
-   * Resolves an Etendo Go account contact by trusted account id.
-   *
-   * @param accountId ETGO_Account id
-   * @return account contact when available
-   */
-  Optional<EmailContactRecord> findAccountContact(String accountId);
+/**
+ * Provides sales document email contracts through injected contract ownership.
+ */
+@ApplicationScoped
+public final class SalesDocumentEmailContractProvider implements EmailContractProvider {
 
-  /**
-   * Resolves an application user contact by trusted user id.
-   *
-   * @param userId AD_User id
-   * @return user contact when available
-   */
-  Optional<EmailContactRecord> findUserContact(String userId);
+  @Override
+  public Collection<EmailContract> getContracts() {
+    return Arrays.asList(
+        new SalesInvoiceSendEmailContract(new DalInvoiceEmailDocumentResolver("sales-invoice")),
+        new SalesOrderSendEmailContract(new DalOrderEmailDocumentResolver("sales-order")),
+        new SalesQuotationSendEmailContract(new DalOrderEmailDocumentResolver("sales-quotation")));
+  }
 }

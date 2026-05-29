@@ -18,7 +18,6 @@
 package com.etendoerp.go.schemaforge.email;
 
 import java.util.Optional;
-import java.util.function.Function;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
@@ -36,22 +35,22 @@ class DefaultDocumentSendEmailContract implements EmailContract {
   private final String documentType;
   private final String documentNumberAlias;
   private final boolean includeAmount;
-  private final Function<String, Optional<EmailDocumentRecord>> documentResolver;
+  private final EmailDocumentRecordResolver documentResolver;
 
   DefaultDocumentSendEmailContract(String name, String documentType,
-      Function<String, Optional<EmailDocumentRecord>> documentResolver) {
+      EmailDocumentRecordResolver documentResolver) {
     this(name, DEFAULT_TEMPLATE, documentType, null, false, documentResolver);
   }
 
   DefaultDocumentSendEmailContract(String name, String template, String documentType,
       String documentNumberAlias,
-      Function<String, Optional<EmailDocumentRecord>> documentResolver) {
+      EmailDocumentRecordResolver documentResolver) {
     this(name, template, documentType, documentNumberAlias, false, documentResolver);
   }
 
   DefaultDocumentSendEmailContract(String name, String template, String documentType,
       String documentNumberAlias, boolean includeAmount,
-      Function<String, Optional<EmailDocumentRecord>> documentResolver) {
+      EmailDocumentRecordResolver documentResolver) {
     this.name = StringUtils.trimToNull(name);
     this.template = StringUtils.trimToNull(template);
     this.documentType = StringUtils.trimToNull(documentType);
@@ -146,7 +145,7 @@ class DefaultDocumentSendEmailContract implements EmailContract {
     if (documentResolver == null) {
       return Optional.empty();
     }
-    return documentResolver.apply(EmailContractCommandSupport.text(command,
+    return documentResolver.resolve(EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_RECORD_ID));
   }
 }

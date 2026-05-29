@@ -21,7 +21,7 @@ final class SalesOrderSendEmailContract extends DefaultDocumentSendEmailContract
 
   static final String NAME = "sales-order-send";
 
-  SalesOrderSendEmailContract(EmailContractDataResolver dataResolver) {
-    super(NAME, "Sales Order", dataResolver::findSalesOrder);
+  SalesOrderSendEmailContract(EmailDocumentRecordResolver documentResolver) {
+    super(NAME, "Sales Order", documentResolver);
   }
 }

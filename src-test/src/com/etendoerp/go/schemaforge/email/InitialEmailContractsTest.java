@@ -22,6 +22,8 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.Optional;
 
 import org.codehaus.jettison.json.JSONException;
@@ -38,7 +40,7 @@ public class InitialEmailContractsTest {
   @Test
   public void registersInitialContractsButNotCustomPayloads() {
     DefaultEmailContractRegistry registry = DefaultEmailContractRegistry.create(
-        new FixtureDataResolver());
+        fixtureProviders());
 
     assertTrue(registry.find("reset-password").isPresent());
     assertTrue(registry.find("new-account").isPresent());
@@ -237,8 +239,14 @@ public class InitialEmailContractsTest {
 
   private static TransactionalEmailService service(FakeProviderAdapter adapter) {
     return new TransactionalEmailService(
-        DefaultEmailContractRegistry.create(new FixtureDataResolver()), adapter,
+        DefaultEmailContractRegistry.create(fixtureProviders()), adapter,
         new InMemoryEmailSafetyStore());
+  }
+
+  private static java.util.List<EmailContractProvider> fixtureProviders() {
+    FixtureDataResolver dataResolver = new FixtureDataResolver();
+    return Arrays.asList(new CoreEmailContractProvider(dataResolver),
+        new FixtureSalesDocumentEmailContractProvider());
   }
 
   private static JSONObject baseCommand() throws JSONException {
@@ -278,32 +286,30 @@ public class InitialEmailContractsTest {
       return Optional.empty();
     }
 
-    @Override
-    public Optional<EmailDocumentRecord> findSalesInvoice(String invoiceId) {
-      if ("invoice-1".equals(invoiceId)) {
-        return Optional.of(new EmailDocumentRecord("Empresa SRL", "billing@example.com",
-            "0001-00042", "1500.00 USD",
-            "https://app.example.test/doc/sales-invoice/invoice-1"));
-      }
-      return Optional.empty();
-    }
+  }
+
+  private static final class FixtureSalesDocumentEmailContractProvider
+      implements EmailContractProvider {
 
     @Override
-    public Optional<EmailDocumentRecord> findSalesOrder(String orderId) {
-      if ("order-1".equals(orderId)) {
-        return Optional.of(new EmailDocumentRecord("Empresa SRL", "orders@example.com",
-            "SO-0007", "2600.50 USD",
-            "https://app.example.test/doc/sales-order/order-1"));
-      }
-      return Optional.empty();
+    public Collection<EmailContract> getContracts() {
+      return Arrays.asList(
+          new SalesInvoiceSendEmailContract(recordId -> resolveDocument(recordId, "invoice-1",
+              "billing@example.com", "0001-00042", "1500.00 USD",
+              "https://app.example.test/doc/sales-invoice/invoice-1")),
+          new SalesOrderSendEmailContract(recordId -> resolveDocument(recordId, "order-1",
+              "orders@example.com", "SO-0007", "2600.50 USD",
+              "https://app.example.test/doc/sales-order/order-1")),
+          new SalesQuotationSendEmailContract(recordId -> resolveDocument(recordId, "quotation-1",
+              "quotes@example.com", "SQ-0009", "950.25 USD",
+              "https://app.example.test/doc/sales-quotation/quotation-1")));
     }
 
-    @Override
-    public Optional<EmailDocumentRecord> findSalesQuotation(String quotationId) {
-      if ("quotation-1".equals(quotationId)) {
-        return Optional.of(new EmailDocumentRecord("Empresa SRL", "quotes@example.com",
-            "SQ-0009", "950.25 USD",
-            "https://app.example.test/doc/sales-quotation/quotation-1"));
+    private Optional<EmailDocumentRecord> resolveDocument(String recordId, String expectedId,
+        String recipientEmail, String documentNo, String amount, String downloadLink) {
+      if (expectedId.equals(recordId)) {
+        return Optional.of(new EmailDocumentRecord("Empresa SRL", recipientEmail, documentNo,
+            amount, downloadLink));
       }
       return Optional.empty();
     }

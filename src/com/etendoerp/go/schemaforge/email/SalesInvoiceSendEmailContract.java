@@ -22,8 +22,7 @@ final class SalesInvoiceSendEmailContract extends DefaultDocumentSendEmailContra
   static final String NAME = "sales-invoice-send";
   private static final String TEMPLATE = "invoice";
 
-  SalesInvoiceSendEmailContract(EmailContractDataResolver dataResolver) {
-    super(NAME, TEMPLATE, "Sales Invoice", "invoice_number", true,
-        dataResolver::findSalesInvoice);
+  SalesInvoiceSendEmailContract(EmailDocumentRecordResolver documentResolver) {
+    super(NAME, TEMPLATE, "Sales Invoice", "invoice_number", true, documentResolver);
   }
 }

@@ -17,23 +17,15 @@
 
 package com.etendoerp.go.schemaforge.email;
 
-import java.util.Optional;
+import java.util.Collection;
 
-interface EmailContractDataResolver {
-
-  /**
-   * Resolves an Etendo Go account contact by trusted account id.
-   *
-   * @param accountId ETGO_Account id
-   * @return account contact when available
-   */
-  Optional<EmailContactRecord> findAccountContact(String accountId);
+/**
+ * Extension point for injecting transactional email contracts.
+ */
+public interface EmailContractProvider {
 
   /**
-   * Resolves an application user contact by trusted user id.
-   *
-   * @param userId AD_User id
-   * @return user contact when available
+   * @return contracts owned by this provider
    */
-  Optional<EmailContactRecord> findUserContact(String userId);
+  Collection<EmailContract> getContracts();
 }

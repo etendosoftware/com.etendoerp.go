@@ -17,14 +17,32 @@
 
 package com.etendoerp.go.schemaforge.email;
 
+import java.util.Arrays;
+import java.util.Collection;
+
+import javax.enterprise.context.ApplicationScoped;
+
 /**
- * Contract for sending sales quotation document notifications.
+ * Provides non-document built-in email contracts.
  */
-final class SalesQuotationSendEmailContract extends DefaultDocumentSendEmailContract {
+@ApplicationScoped
+public final class CoreEmailContractProvider implements EmailContractProvider {
 
-  static final String NAME = "sales-quotation-send";
+  private final EmailContractDataResolver contactResolver;
 
-  SalesQuotationSendEmailContract(EmailDocumentRecordResolver documentResolver) {
-    super(NAME, "Sales Quotation", documentResolver);
+  public CoreEmailContractProvider() {
+    this(new DalEmailContractDataResolver());
+  }
+
+  CoreEmailContractProvider(EmailContractDataResolver contactResolver) {
+    this.contactResolver = contactResolver;
+  }
+
+  @Override
+  public Collection<EmailContract> getContracts() {
+    return Arrays.asList(
+        new AccountLinkEmailContract("reset-password", "reset-password", contactResolver, 3, 900),
+        new AccountLinkEmailContract("new-account", "new-account", contactResolver, 2, 900),
+        new LoginAlertEmailContract(contactResolver));
   }
 }

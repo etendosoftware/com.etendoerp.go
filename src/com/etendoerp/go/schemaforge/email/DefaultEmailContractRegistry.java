@@ -17,16 +17,24 @@
 
 package com.etendoerp.go.schemaforge.email;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.openbravo.base.weld.WeldUtils;
+
 /**
  * Default registry for built-in transactional email contracts.
  */
 public final class DefaultEmailContractRegistry implements EmailContractRegistry {
+
+  private static final Logger log = LogManager.getLogger(DefaultEmailContractRegistry.class);
 
   private final Map<String, EmailContract> contracts;
 
@@ -43,17 +51,33 @@ public final class DefaultEmailContractRegistry implements EmailContractRegistry
    * @return default transactional email registry
    */
   public static DefaultEmailContractRegistry createDefault() {
-    return create(new DalEmailContractDataResolver());
+    return create(loadProviders());
   }
 
   static DefaultEmailContractRegistry create(EmailContractDataResolver dataResolver) {
-    return new DefaultEmailContractRegistry(Arrays.asList(
-        new AccountLinkEmailContract("reset-password", "reset-password", dataResolver, 3, 900),
-        new AccountLinkEmailContract("new-account", "new-account", dataResolver, 2, 900),
-        new LoginAlertEmailContract(dataResolver),
-        new SalesInvoiceSendEmailContract(dataResolver),
-        new SalesOrderSendEmailContract(dataResolver),
-        new SalesQuotationSendEmailContract(dataResolver)));
+    return create(Arrays.asList(new CoreEmailContractProvider(dataResolver),
+        new SalesDocumentEmailContractProvider()));
+  }
+
+  static DefaultEmailContractRegistry create(List<EmailContractProvider> providers) {
+    List<EmailContract> providedContracts = new ArrayList<>();
+    for (EmailContractProvider provider : providers) {
+      providedContracts.addAll(provider.getContracts());
+    }
+    return new DefaultEmailContractRegistry(providedContracts);
+  }
+
+  private static List<EmailContractProvider> loadProviders() {
+    try {
+      Collection<EmailContractProvider> injectedProviders = WeldUtils.getInstances(
+          EmailContractProvider.class);
+      if (!injectedProviders.isEmpty()) {
+        return new ArrayList<>(injectedProviders);
+      }
+    } catch (Exception e) {
+      log.debug("Could not load injected email contract providers: {}", e.getMessage(), e);
+    }
+    return Arrays.asList(new CoreEmailContractProvider(), new SalesDocumentEmailContractProvider());
   }
 
   @Override
