@@ -588,14 +588,14 @@ public class FinancialAccountTransactionsHandlerTest {
 
   @Test
   public void testHandleCreateRejectsNullBody() {
-    FinancialAccountTransactionsHandler handler = new FinancialAccountTransactionsHandler();
+
     NeoResponse r = handler.handle(postCreateCtx(null));
     assertEquals(400, r.getHttpStatus());
   }
 
   @Test
   public void testHandleCreateRejectsMissingAccountId() throws Exception {
-    FinancialAccountTransactionsHandler handler = new FinancialAccountTransactionsHandler();
+
     NeoContext ctx = postCreateCtx(new JSONObject());
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse r = handler.handle(ctx);
@@ -611,7 +611,7 @@ public class FinancialAccountTransactionsHandlerTest {
     body.put("trxType", "FOO");
     body.put("depositAmount", "10");
 
-    FinancialAccountTransactionsHandler handler = new FinancialAccountTransactionsHandler();
+
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse r = handler.handle(postCreateCtx(body));
       assertEquals(400, r.getHttpStatus());
@@ -627,7 +627,7 @@ public class FinancialAccountTransactionsHandlerTest {
     body.put("depositAmount", "0");
     body.put("paymentAmount", "0");
 
-    FinancialAccountTransactionsHandler handler = new FinancialAccountTransactionsHandler();
+
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse r = handler.handle(postCreateCtx(body));
       assertEquals(400, r.getHttpStatus());
@@ -643,7 +643,7 @@ public class FinancialAccountTransactionsHandlerTest {
     body.put("depositAmount", "-5");
     body.put("paymentAmount", "0");
 
-    FinancialAccountTransactionsHandler handler = new FinancialAccountTransactionsHandler();
+
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse r = handler.handle(postCreateCtx(body));
       assertEquals(400, r.getHttpStatus());
@@ -654,7 +654,7 @@ public class FinancialAccountTransactionsHandlerTest {
   @Test
   public void testHandleCreateRejectsUnknownAccount() throws Exception {
     JSONObject body = goodCreateBody();
-    FinancialAccountTransactionsHandler handler = new FinancialAccountTransactionsHandler();
+
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
@@ -743,7 +743,7 @@ public class FinancialAccountTransactionsHandlerTest {
     body.put("transactionDate", "2026-01-15T00:00:00Z");
     body.put("accountingDate", "2026-01-15T00:00:00Z");
 
-    FinancialAccountTransactionsHandler handler = new FinancialAccountTransactionsHandler();
+
     org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount account =
         mock(org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount.class);
     org.openbravo.model.ad.system.Client client = mock(org.openbravo.model.ad.system.Client.class);
@@ -817,7 +817,7 @@ public class FinancialAccountTransactionsHandlerTest {
     body.put("depositAmount", "0");
     body.put("paymentAmount", "50");
 
-    FinancialAccountTransactionsHandler handler = new FinancialAccountTransactionsHandler();
+
     org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount account =
         mock(org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount.class);
     org.openbravo.model.common.currency.Currency accountCurrency =
@@ -867,7 +867,7 @@ public class FinancialAccountTransactionsHandlerTest {
   @Test
   public void testHandleCreateReturns500WhenSaveExplodes() throws Exception {
     JSONObject body = goodCreateBody();
-    FinancialAccountTransactionsHandler handler = new FinancialAccountTransactionsHandler();
+
     org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount account =
         mock(org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount.class);
     when(account.getCurrency()).thenReturn(mock(org.openbravo.model.common.currency.Currency.class));
@@ -907,7 +907,7 @@ public class FinancialAccountTransactionsHandlerTest {
 
   @Test
   public void testNextLineNoReturnsDefaultOnSqlException() throws Exception {
-    FinancialAccountTransactionsHandler handler = new FinancialAccountTransactionsHandler();
+
     org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount account =
         mock(org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount.class);
     when(account.getId()).thenReturn("acc-1");
@@ -942,7 +942,7 @@ public class FinancialAccountTransactionsHandlerTest {
     when(client.getId()).thenReturn("client-1");
     when(realCtx.getCurrentClient()).thenReturn(client);
 
-    FinancialAccountTransactionsHandler handler = new FinancialAccountTransactionsHandler();
+
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       obContextMock.when(OBContext::getOBContext).thenReturn(realCtx);
