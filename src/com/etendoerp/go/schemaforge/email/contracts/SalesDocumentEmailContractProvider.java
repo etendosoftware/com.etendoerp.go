@@ -15,7 +15,9 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge.email;
+package com.etendoerp.go.schemaforge.email.contracts;
+
+import com.etendoerp.go.schemaforge.email.*;
 
 import java.util.Arrays;
 import java.util.Collection;
@@ -23,26 +25,16 @@ import java.util.Collection;
 import javax.enterprise.context.ApplicationScoped;
 
 /**
- * Provides non-document built-in email contracts.
+ * Provides sales document email contracts through injected contract ownership.
  */
 @ApplicationScoped
-public final class CoreEmailContractProvider implements EmailContractProvider {
-
-  private final EmailContractDataResolver contactResolver;
-
-  public CoreEmailContractProvider() {
-    this(new DalEmailContractDataResolver());
-  }
-
-  CoreEmailContractProvider(EmailContractDataResolver contactResolver) {
-    this.contactResolver = contactResolver;
-  }
+public final class SalesDocumentEmailContractProvider implements EmailContractProvider {
 
   @Override
   public Collection<EmailContract> getContracts() {
     return Arrays.asList(
-        new AccountLinkEmailContract("reset-password", "reset-password", contactResolver, 3, 900),
-        new AccountLinkEmailContract("new-account", "new-account", contactResolver, 2, 900),
-        new LoginAlertEmailContract(contactResolver));
+        new SalesInvoiceSendEmailContract(new DalInvoiceEmailDocumentResolver("sales-invoice")),
+        new SalesOrderSendEmailContract(new DalOrderEmailDocumentResolver("sales-order")),
+        new SalesQuotationSendEmailContract(new DalOrderEmailDocumentResolver("sales-quotation")));
   }
 }

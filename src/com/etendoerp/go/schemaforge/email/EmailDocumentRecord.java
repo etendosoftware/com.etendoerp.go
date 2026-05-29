@@ -22,7 +22,7 @@ import org.apache.commons.lang3.StringUtils;
 /**
  * Document metadata used to resolve a transactional email recipient and payload.
  */
-final class EmailDocumentRecord {
+public final class EmailDocumentRecord {
 
   private final String recipientName;
   private final String recipientEmail;
@@ -30,7 +30,7 @@ final class EmailDocumentRecord {
   private final String amount;
   private final String downloadLink;
 
-  EmailDocumentRecord(String recipientName, String recipientEmail, String documentNumber,
+  public EmailDocumentRecord(String recipientName, String recipientEmail, String documentNumber,
       String amount, String downloadLink) {
     this.recipientName = StringUtils.trimToNull(recipientName);
     this.recipientEmail = StringUtils.trimToNull(recipientEmail);
@@ -39,23 +39,23 @@ final class EmailDocumentRecord {
     this.downloadLink = StringUtils.trimToNull(downloadLink);
   }
 
-  String getRecipientName() {
+  public String getRecipientName() {
     return recipientName;
   }
 
-  String getRecipientEmail() {
+  public String getRecipientEmail() {
     return recipientEmail;
   }
 
-  String getDocumentNumber() {
+  public String getDocumentNumber() {
     return documentNumber;
   }
 
-  String getAmount() {
+  public String getAmount() {
     return amount;
   }
 
-  String getDownloadLink() {
+  public String getDownloadLink() {
     return downloadLink;
   }
 }

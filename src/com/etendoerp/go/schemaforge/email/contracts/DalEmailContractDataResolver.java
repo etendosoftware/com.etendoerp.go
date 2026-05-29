@@ -15,7 +15,9 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge.email;
+package com.etendoerp.go.schemaforge.email.contracts;
+
+import com.etendoerp.go.schemaforge.email.*;
 
 import java.math.BigDecimal;
 import java.net.URLEncoder;

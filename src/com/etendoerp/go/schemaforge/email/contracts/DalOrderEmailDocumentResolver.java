@@ -15,20 +15,22 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge.email;
+package com.etendoerp.go.schemaforge.email.contracts;
+
+import com.etendoerp.go.schemaforge.email.*;
 
 import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
-import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.common.order.Order;
 
-final class DalInvoiceEmailDocumentResolver implements EmailDocumentRecordResolver {
+final class DalOrderEmailDocumentResolver implements EmailDocumentRecordResolver {
 
   private final String documentType;
 
-  DalInvoiceEmailDocumentResolver(String documentType) {
+  DalOrderEmailDocumentResolver(String documentType) {
     this.documentType = documentType;
   }
 
@@ -38,19 +40,20 @@ final class DalInvoiceEmailDocumentResolver implements EmailDocumentRecordResolv
     if (normalizedId == null) {
       return Optional.empty();
     }
-    Invoice invoice = OBDal.getInstance().get(Invoice.class, normalizedId);
-    if (invoice == null || !Boolean.TRUE.equals(invoice.isActive())
-        || !DalEmailContractDataResolver.isReadableClient(invoice.getClient().getId())) {
+    Order order = OBDal.getInstance().get(Order.class, normalizedId);
+    if (order == null || !Boolean.TRUE.equals(order.isActive())
+        || !Boolean.TRUE.equals(order.isSalesTransaction())
+        || !DalEmailContractDataResolver.isReadableClient(order.getClient().getId())) {
       return Optional.empty();
     }
-    BusinessPartner businessPartner = invoice.getBusinessPartner();
+    BusinessPartner businessPartner = order.getBusinessPartner();
     String recipientEmail = DalEmailContractDataResolver.resolveBusinessPartnerEmail(
         businessPartner);
     String recipientName = businessPartner == null ? null : businessPartner.getName();
     return Optional.of(new EmailDocumentRecord(recipientName, recipientEmail,
-        invoice.getDocumentNo(),
-        DalEmailContractDataResolver.formatAmount(invoice.getGrandTotalAmount(),
-            invoice.getCurrency()),
-        DalEmailContractDataResolver.buildDocumentDownloadLink(documentType, invoice.getId())));
+        order.getDocumentNo(),
+        DalEmailContractDataResolver.formatAmount(order.getGrandTotalAmount(),
+            order.getCurrency()),
+        DalEmailContractDataResolver.buildDocumentDownloadLink(documentType, order.getId())));
   }
 }

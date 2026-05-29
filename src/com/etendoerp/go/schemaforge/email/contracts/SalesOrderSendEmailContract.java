@@ -15,24 +15,15 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge.email;
+package com.etendoerp.go.schemaforge.email.contracts;
 
-import java.util.Arrays;
-import java.util.Collection;
+import com.etendoerp.go.schemaforge.email.*;
 
-import javax.enterprise.context.ApplicationScoped;
+public final class SalesOrderSendEmailContract extends DefaultDocumentSendEmailContract {
 
-/**
- * Provides sales document email contracts through injected contract ownership.
- */
-@ApplicationScoped
-public final class SalesDocumentEmailContractProvider implements EmailContractProvider {
+  static final String NAME = "sales-order-send";
 
-  @Override
-  public Collection<EmailContract> getContracts() {
-    return Arrays.asList(
-        new SalesInvoiceSendEmailContract(new DalInvoiceEmailDocumentResolver("sales-invoice")),
-        new SalesOrderSendEmailContract(new DalOrderEmailDocumentResolver("sales-order")),
-        new SalesQuotationSendEmailContract(new DalOrderEmailDocumentResolver("sales-quotation")));
+  public SalesOrderSendEmailContract(EmailDocumentRecordResolver documentResolver) {
+    super(NAME, "Sales Order", documentResolver);
   }
 }

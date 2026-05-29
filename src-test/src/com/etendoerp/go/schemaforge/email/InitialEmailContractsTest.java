@@ -31,6 +31,10 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.email.contracts.CoreEmailContractProvider;
+import com.etendoerp.go.schemaforge.email.contracts.SalesInvoiceSendEmailContract;
+import com.etendoerp.go.schemaforge.email.contracts.SalesOrderSendEmailContract;
+import com.etendoerp.go.schemaforge.email.contracts.SalesQuotationSendEmailContract;
 
 /**
  * Tests the built-in transactional email contracts.

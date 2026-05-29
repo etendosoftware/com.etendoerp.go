@@ -15,16 +15,16 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge.email;
+package com.etendoerp.go.schemaforge.email.contracts;
 
-/**
- * Contract for sending sales quotation document notifications.
- */
-final class SalesQuotationSendEmailContract extends DefaultDocumentSendEmailContract {
+import com.etendoerp.go.schemaforge.email.*;
 
-  static final String NAME = "sales-quotation-send";
+public final class SalesInvoiceSendEmailContract extends DefaultDocumentSendEmailContract {
 
-  SalesQuotationSendEmailContract(EmailDocumentRecordResolver documentResolver) {
-    super(NAME, "Sales Quotation", documentResolver);
+  static final String NAME = "sales-invoice-send";
+  private static final String TEMPLATE = "invoice";
+
+  public SalesInvoiceSendEmailContract(EmailDocumentRecordResolver documentResolver) {
+    super(NAME, TEMPLATE, "Sales Invoice", "invoice_number", true, documentResolver);
   }
 }

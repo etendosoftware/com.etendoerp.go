@@ -38,7 +38,7 @@ Do not include `amount` by default. Enable it only when a provider template expl
 For a minimal document contract, create a small class under:
 
 ```text
-src/com/etendoerp/go/schemaforge/email/
+src/com/etendoerp/go/schemaforge/email/contracts/
 ```
 
 Example:
@@ -63,7 +63,7 @@ The final boolean controls whether `amount` is emitted.
 
 ### 2. Create a document resolver
 
-Create a resolver for one document family by implementing `EmailDocumentRecordResolver`:
+Create a resolver for one document family by implementing `EmailDocumentRecordResolver` in the implementation package:
 
 ```java
 final class DalSalesOrderEmailDocumentResolver implements EmailDocumentRecordResolver {
@@ -78,7 +78,7 @@ Do not add document-specific methods to a shared framework resolver. The email f
 
 ### 3. Resolve the trusted record with DAL
 
-Implement the resolver in a document-owned class, for example `DalOrderEmailDocumentResolver` or `DalInvoiceEmailDocumentResolver`.
+Implement the resolver in a document-owned class, for example `DalOrderEmailDocumentResolver` or `DalInvoiceEmailDocumentResolver`, under `com.etendoerp.go.schemaforge.email.contracts`.
 
 Rules:
 
@@ -93,7 +93,7 @@ Do not trust browser-provided recipient, template, or variable values.
 
 ### 4. Provide the contract through CDI
 
-Expose document contracts through an injected `EmailContractProvider`:
+Expose document contracts through an injected `EmailContractProvider` in the implementation package:
 
 ```java
 @ApplicationScoped

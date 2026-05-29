@@ -41,6 +41,7 @@ Rejected provider passthrough shape:
 | `EmailContractRegistry` | Finds the server-side contract by name |
 | `DefaultEmailContractRegistry` | Builds the runtime registry from injected `EmailContractProvider` implementations |
 | `EmailContractProvider` | CDI extension point used by feature implementations to provide one or more contracts |
+| `com.etendoerp.go.schemaforge.email.contracts` | Built-in contract implementations and DAL-backed resolvers, kept outside the framework package |
 | `EmailContract` | Authorizes the command, resolves the recipient, and builds template variables from trusted server context |
 | `EmailAuthorizationResult` | Carries contract-specific authorization approval or rejection |
 | `EmailRecipientResolution` | Carries the recipient derived from server state or from an explicit support/admin contract |

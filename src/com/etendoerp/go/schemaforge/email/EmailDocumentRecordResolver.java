@@ -23,7 +23,7 @@ import java.util.Optional;
  * Resolves one document family for one email contract.
  */
 @FunctionalInterface
-interface EmailDocumentRecordResolver {
+public interface EmailDocumentRecordResolver {
 
   /**
    * Resolves the trusted document record used by a document-send contract.

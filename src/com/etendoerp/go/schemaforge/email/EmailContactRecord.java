@@ -19,21 +19,21 @@ package com.etendoerp.go.schemaforge.email;
 
 import org.apache.commons.lang3.StringUtils;
 
-final class EmailContactRecord {
+public final class EmailContactRecord {
 
   private final String name;
   private final String email;
 
-  EmailContactRecord(String name, String email) {
+  public EmailContactRecord(String name, String email) {
     this.name = StringUtils.trimToNull(name);
     this.email = StringUtils.trimToNull(email);
   }
 
-  String getName() {
+  public String getName() {
     return name;
   }
 
-  String getEmail() {
+  public String getEmail() {
     return email;
   }
 }

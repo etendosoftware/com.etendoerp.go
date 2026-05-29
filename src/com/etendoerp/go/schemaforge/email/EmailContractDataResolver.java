@@ -19,7 +19,7 @@ package com.etendoerp.go.schemaforge.email;
 
 import java.util.Optional;
 
-interface EmailContractDataResolver {
+public interface EmailContractDataResolver {
 
   /**
    * Resolves an Etendo Go account contact by trusted account id.

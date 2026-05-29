@@ -24,9 +24,9 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 
-class DefaultDocumentSendEmailContract implements EmailContract {
+public class DefaultDocumentSendEmailContract implements EmailContract {
 
-  static final String DEFAULT_TEMPLATE = "document";
+  public static final String DEFAULT_TEMPLATE = "document";
 
   private static final String DOCUMENT_RECORD_NOT_FOUND = "Email document record was not found";
 
@@ -37,18 +37,18 @@ class DefaultDocumentSendEmailContract implements EmailContract {
   private final boolean includeAmount;
   private final EmailDocumentRecordResolver documentResolver;
 
-  DefaultDocumentSendEmailContract(String name, String documentType,
+  protected DefaultDocumentSendEmailContract(String name, String documentType,
       EmailDocumentRecordResolver documentResolver) {
     this(name, DEFAULT_TEMPLATE, documentType, null, false, documentResolver);
   }
 
-  DefaultDocumentSendEmailContract(String name, String template, String documentType,
+  protected DefaultDocumentSendEmailContract(String name, String template, String documentType,
       String documentNumberAlias,
       EmailDocumentRecordResolver documentResolver) {
     this(name, template, documentType, documentNumberAlias, false, documentResolver);
   }
 
-  DefaultDocumentSendEmailContract(String name, String template, String documentType,
+  protected DefaultDocumentSendEmailContract(String name, String template, String documentType,
       String documentNumberAlias, boolean includeAmount,
       EmailDocumentRecordResolver documentResolver) {
     this.name = StringUtils.trimToNull(name);
