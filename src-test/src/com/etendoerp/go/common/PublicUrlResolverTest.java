@@ -81,6 +81,8 @@ public class PublicUrlResolverTest {
 
     assertEquals("https://go.experimental.etendo.cloud/app",
         PublicUrlResolver.resolveAppBaseUrl(request));
+    assertEquals("https://go.experimental.etendo.cloud/app",
+        PublicUrlResolver.resolveConfiguredAppBaseUrl());
   }
 
   @Test

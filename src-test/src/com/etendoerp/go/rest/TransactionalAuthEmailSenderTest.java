@@ -82,8 +82,7 @@ public class TransactionalAuthEmailSenderTest {
         "environment-ready");
 
     assertBaseCommand(command);
-    assertEquals("https://app.example.test/dashboard",
-        command.getString(EmailContractCommandSupport.FIELD_LINK));
+    assertFalse(command.has(EmailContractCommandSupport.FIELD_LINK));
     assertEquals("client-1", command.getString(EmailContractCommandSupport.FIELD_RECORD_ID));
   }
 
@@ -181,7 +180,7 @@ public class TransactionalAuthEmailSenderTest {
     assertEquals(EmailContractCommandSupport.VERSION,
         command.getString(EmailContractCommandSupport.FIELD_VERSION));
     assertEquals("account-1", command.getString(EmailContractCommandSupport.FIELD_ACCOUNT_ID));
-    assertEquals("0", command.getString(EmailContractCommandSupport.FIELD_TENANT_ID));
+    assertEquals("account-1", command.getString(EmailContractCommandSupport.FIELD_TENANT_ID));
   }
 
   private static Account account(String id) {

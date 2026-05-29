@@ -134,7 +134,7 @@ Auth transactional emails are created server-side by the `/sws/go/*` endpoints. 
 | Endpoint | Transactional email behavior |
 |----------|------------------------------|
 | `POST /sws/go/register` | Creates the local account, commits it, then sends `new-account` best-effort |
-| `POST /sws/go/password-reset/request` | Returns neutral success for known, unknown, disabled, throttled, or provider-failed cases; known active accounts receive a hashed expiring reset token and a best-effort `reset-password` email |
+| `POST /sws/go/password-reset/request` | Returns neutral success for known, unknown, disabled, throttled, or provider-failed cases; known active accounts receive a hashed expiring reset token only when the best-effort `reset-password` email is accepted for delivery |
 | `POST /sws/go/password-reset/confirm` | Accepts one valid unexpired token once, changes the password, clears/consumes reset token fields, and clears the platform session token |
 | `POST /sws/go/change-password` | Requires a valid platform bearer token and current password, changes the password, rotates the platform token, and sends `password-changed` best-effort |
 | `POST /sws/go/onboarding` | Commits onboarding first, then sends `environment-ready` best-effort |
@@ -147,7 +147,7 @@ Email delivery failure is audited and must not roll back registration, onboardin
 |----------|-------------------|------------------|-------------------------|
 | `reset-password` | `reset-password` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link` |
 | `new-account` | `new-account` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link` |
-| `environment-ready` | `environment-ready` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link`, `recordId` |
+| `environment-ready` | `environment-ready` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId` |
 | `password-changed` | `password-changed` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId`; optional `date` |
 | `login-alert` | `login-alert` | `AD_User.email` resolved by `userId` | `version`, `userId`; optional `loginEventId`, `ip`, `date` |
 | `sales-invoice-send` | `invoice` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the invoice business partner | `version`, `recordId` |
@@ -158,7 +158,7 @@ Email delivery failure is audited and must not roll back registration, onboardin
 
 `login-alert` is registered but not triggered by login. It remains deferred until the SSO and risk-policy model is defined.
 
-The account-link contracts accept only absolute `http://` or `https://` links. Document-send contracts share the default document payload strategy: `name`, `document_type`, `document_number`, and `download_link`. Optional fields such as `amount`, and document-specific aliases such as `invoice_number`, must be enabled by the explicit contract only when a provider template requires them.
+Caller-supplied account-link contracts accept only absolute `http://` or `https://` links. The `environment-ready` contract builds the dashboard link from server configuration and does not accept a caller-provided link. Document-send contracts share the default document payload strategy: `name`, `document_type`, `document_number`, and `download_link`. Optional fields such as `amount`, and document-specific aliases such as `invoice_number`, must be enabled by the explicit contract only when a provider template requires them.
 
 Auth account-link contracts generate app links from server configuration:
 

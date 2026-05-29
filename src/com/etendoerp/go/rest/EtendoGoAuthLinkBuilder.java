@@ -34,12 +34,12 @@ final class EtendoGoAuthLinkBuilder {
   }
 
   static String onboardingLink(HttpServletRequest request) {
-    return PublicUrlResolver.appendPath(PublicUrlResolver.resolveAppBaseUrl(request),
+    return PublicUrlResolver.appendPath(PublicUrlResolver.resolveConfiguredAppBaseUrl(),
         ONBOARDING_PATH);
   }
 
   static String dashboardLink(HttpServletRequest request) {
-    return PublicUrlResolver.appendPath(PublicUrlResolver.resolveAppBaseUrl(request),
+    return PublicUrlResolver.appendPath(PublicUrlResolver.resolveConfiguredAppBaseUrl(),
         DASHBOARD_PATH);
   }
 

@@ -348,12 +348,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
       Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
       if (account != null) {
+        EtendoGoJwtDalHelper.PasswordResetTokenState previousTokenState =
+            EtendoGoJwtDalHelper.capturePasswordResetToken(account);
         String resetToken = generatePasswordResetToken();
         String resetTokenHash = hashResetToken(resetToken);
         Date expiresAt = Date.from(Instant.now().plusSeconds(PASSWORD_RESET_TTL_SECONDS));
         EtendoGoJwtDalHelper.storePasswordResetToken(account, resetTokenHash, expiresAt);
-        sendAuthEmailBestEffort("reset-password",
-            () -> authEmailSender.sendPasswordReset(request, account, resetToken, resetTokenHash));
+        boolean emailSent = false;
+        try {
+          emailSent = authEmailSender.sendPasswordReset(request, account, resetToken,
+              resetTokenHash);
+        } catch (RuntimeException e) {
+          log.warn("Auth email reset-password failed after token storage", e);
+        }
+        if (!emailSent) {
+          EtendoGoJwtDalHelper.restorePasswordResetToken(account, previousTokenState);
+        }
       }
       writePasswordResetNeutralResponse(response);
     } catch (RuntimeException e) {
@@ -617,6 +627,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
 
     try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
       String accountEmail = EtendoGoJwtSupport.requireAccountEmail(token);
       if (accountEmail == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
@@ -642,6 +654,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (Exception e) {
       log.error("Token generation error in /login", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Token generation failed");
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
@@ -667,6 +681,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
     final String accountEmail;
     try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
       accountEmail = EtendoGoJwtSupport.requireAccountEmail(token);
       if (accountEmail == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
@@ -676,6 +692,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       log.error("Database error validating token for onboarding", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
       return;
+    } finally {
+      OBContext.restorePreviousMode();
     }
 
     OnboardingRequestData onboardingRequest = parseOnboardingRequest(request, response);

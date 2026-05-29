@@ -52,40 +52,51 @@ class TransactionalAuthEmailSender {
     this.emailService = emailService;
   }
 
-  void sendNewAccount(HttpServletRequest request, Account account) {
-    sendAccountLink(CONTRACT_NEW_ACCOUNT, account,
+  boolean sendNewAccount(HttpServletRequest request, Account account) {
+    return sendAccountLink(CONTRACT_NEW_ACCOUNT, account,
         EtendoGoAuthLinkBuilder.onboardingLink(request), null);
   }
 
-  void sendEnvironmentReady(HttpServletRequest request, Account account, String clientId) {
-    sendAccountLink(CONTRACT_ENVIRONMENT_READY, account,
-        EtendoGoAuthLinkBuilder.dashboardLink(request), clientId);
+  boolean sendEnvironmentReady(HttpServletRequest request, Account account, String clientId) {
+    if (account == null) {
+      return false;
+    }
+    try {
+      JSONObject body = baseCommand(account);
+      body.put(EmailContractCommandSupport.FIELD_RECORD_ID, clientId);
+      return sendBestEffort(CONTRACT_ENVIRONMENT_READY, body);
+    } catch (JSONException e) {
+      log.warn("Could not build environment-ready email command", e);
+      return false;
+    }
   }
 
-  void sendPasswordReset(HttpServletRequest request, Account account, String resetToken,
+  boolean sendPasswordReset(HttpServletRequest request, Account account, String resetToken,
       String resetTokenHash) {
-    sendAccountLink(CONTRACT_RESET_PASSWORD, account,
+    return sendAccountLink(CONTRACT_RESET_PASSWORD, account,
         EtendoGoAuthLinkBuilder.resetPasswordLink(request, resetToken), resetTokenHash);
   }
 
-  void sendPasswordChanged(Account account) {
+  boolean sendPasswordChanged(Account account) {
     if (account == null) {
-      return;
+      return false;
     }
     try {
       JSONObject body = baseCommand(account);
       body.put(EmailContractCommandSupport.FIELD_DATE, Instant.now().toString());
       body.put(EmailContractCommandSupport.FIELD_RECORD_ID,
           account.getId() + ":" + java.util.UUID.randomUUID());
-      sendBestEffort(CONTRACT_PASSWORD_CHANGED, body);
+      return sendBestEffort(CONTRACT_PASSWORD_CHANGED, body);
     } catch (JSONException e) {
       log.warn("Could not build password-changed email command", e);
+      return false;
     }
   }
 
-  private void sendAccountLink(String contractName, Account account, String link, String recordId) {
+  private boolean sendAccountLink(String contractName, Account account, String link,
+      String recordId) {
     if (account == null || link == null) {
-      return;
+      return false;
     }
     try {
       JSONObject body = baseCommand(account);
@@ -93,9 +104,10 @@ class TransactionalAuthEmailSender {
       if (recordId != null) {
         body.put(EmailContractCommandSupport.FIELD_RECORD_ID, recordId);
       }
-      sendBestEffort(contractName, body);
+      return sendBestEffort(contractName, body);
     } catch (JSONException e) {
       log.warn("Could not build {} email command", contractName, e);
+      return false;
     }
   }
 
@@ -103,11 +115,11 @@ class TransactionalAuthEmailSender {
     JSONObject body = new JSONObject();
     body.put(EmailContractCommandSupport.FIELD_VERSION, EmailContractCommandSupport.VERSION);
     body.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, account.getId());
-    body.put(EmailContractCommandSupport.FIELD_TENANT_ID, "0");
+    body.put(EmailContractCommandSupport.FIELD_TENANT_ID, account.getId());
     return body;
   }
 
-  private void sendBestEffort(String contractName, JSONObject body) {
+  private boolean sendBestEffort(String contractName, JSONObject body) {
     try {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
@@ -117,11 +129,14 @@ class TransactionalAuthEmailSender {
       if (response != null && response.getHttpStatus() >= 400) {
         log.warn("Transactional auth email {} finished with HTTP {}", contractName,
             response.getHttpStatus());
+        return false;
       }
+      return response != null;
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("transactional auth email", e, log);
       log.warn("Transactional auth email {} failed after the account transaction was committed",
           contractName, e);
+      return false;
     } finally {
       OBContext.restorePreviousMode();
     }

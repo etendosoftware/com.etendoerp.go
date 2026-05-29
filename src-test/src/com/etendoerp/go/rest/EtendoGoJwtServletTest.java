@@ -311,10 +311,14 @@ public class EtendoGoJwtServletTest {
         "{\"email\":\"user@test.com\"}")));
 
     Account account = mock(Account.class);
+    when(emailSender.sendPasswordReset(eq(req), eq(account), anyString(), anyString()))
+        .thenReturn(true);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
+          .thenCallRealMethod();
 
       servletWithEmailSender.doPost(req, resp.response);
 
@@ -337,19 +341,51 @@ public class EtendoGoJwtServletTest {
         "{\"email\":\"user@test.com\"}")));
 
     Account account = mock(Account.class);
-    doThrow(new RuntimeException("provider unavailable"))
-        .when(emailSender).sendPasswordReset(eq(req), eq(account), anyString(), anyString());
+    when(emailSender.sendPasswordReset(eq(req), eq(account), anyString(), anyString()))
+        .thenReturn(false);
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
+          .thenCallRealMethod();
+
+      servletWithEmailSender.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.restorePasswordResetToken(
+          eq(account), any(EtendoGoJwtDalHelper.PasswordResetTokenState.class)));
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("success", respBody.getString("status"));
+  }
+
+  @Test
+  public void passwordResetRequestProviderExceptionRestoresPreviousToken() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/password-reset/request");
+    TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
+    EtendoGoJwtServlet servletWithEmailSender = new EtendoGoJwtServlet(emailSender);
+    when(req.getContentType()).thenReturn("application/json");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"email\":\"user@test.com\"}")));
+
+    Account account = mock(Account.class);
+    when(emailSender.sendPasswordReset(eq(req), eq(account), anyString(), anyString()))
+        .thenThrow(new RuntimeException("provider unavailable"));
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
           .thenReturn(account);
 
       servletWithEmailSender.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.restorePasswordResetToken(
+          eq(account), any(EtendoGoJwtDalHelper.PasswordResetTokenState.class)));
     }
 
     assertEquals(200, resp.status);
-    JSONObject respBody = new JSONObject(resp.body());
-    assertEquals("success", respBody.getString("status"));
   }
 
   // ===================== POST /password-reset/confirm =====================
@@ -597,7 +633,8 @@ public class EtendoGoJwtServletTest {
     when(req.getHeader("Authorization")).thenReturn("Bearer bad-token");
     when(req.getParameter("userId")).thenReturn("user-1");
 
-    try (MockedStatic<EtendoGoJwtSupport> supportMock = mockStatic(EtendoGoJwtSupport.class)) {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtSupport> supportMock = mockStatic(EtendoGoJwtSupport.class)) {
       supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("bad-token"))
           .thenReturn(null);
 
@@ -614,7 +651,8 @@ public class EtendoGoJwtServletTest {
     when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
     when(req.getParameter("userId")).thenReturn("other-user");
 
-    try (MockedStatic<EtendoGoJwtSupport> supportMock = mockStatic(EtendoGoJwtSupport.class)) {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtSupport> supportMock = mockStatic(EtendoGoJwtSupport.class)) {
       supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("valid-token"))
           .thenReturn("user@test.com");
       supportMock.when(() -> EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(
@@ -645,7 +683,8 @@ public class EtendoGoJwtServletTest {
     HttpServletRequest req = mockRequest("/onboarding");
     when(req.getHeader("Authorization")).thenReturn("Bearer bad-token");
 
-    try (MockedStatic<EtendoGoJwtSupport> supportMock = mockStatic(EtendoGoJwtSupport.class)) {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtSupport> supportMock = mockStatic(EtendoGoJwtSupport.class)) {
       supportMock.when(() -> EtendoGoJwtSupport.requireAccountEmail("bad-token"))
           .thenReturn(null);
 

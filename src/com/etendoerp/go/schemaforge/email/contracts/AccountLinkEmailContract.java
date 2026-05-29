@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.email.contracts;
 
+import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.email.EmailAuthorizationResult;
 import com.etendoerp.go.schemaforge.email.EmailContactRecord;
 import com.etendoerp.go.schemaforge.email.EmailContract;
@@ -46,14 +47,21 @@ final class AccountLinkEmailContract implements EmailContract {
   private final EmailContractDataResolver dataResolver;
   private final int recipientThrottleLimit;
   private final int throttleWindowSeconds;
+  private final String configuredLinkPath;
 
   AccountLinkEmailContract(String name, String template, EmailContractDataResolver dataResolver,
       int recipientThrottleLimit, int throttleWindowSeconds) {
+    this(name, template, dataResolver, recipientThrottleLimit, throttleWindowSeconds, null);
+  }
+
+  AccountLinkEmailContract(String name, String template, EmailContractDataResolver dataResolver,
+      int recipientThrottleLimit, int throttleWindowSeconds, String configuredLinkPath) {
     this.name = name;
     this.template = template;
     this.dataResolver = dataResolver;
     this.recipientThrottleLimit = recipientThrottleLimit;
     this.throttleWindowSeconds = throttleWindowSeconds;
+    this.configuredLinkPath = configuredLinkPath;
   }
 
   @Override
@@ -63,8 +71,12 @@ final class AccountLinkEmailContract implements EmailContract {
 
   @Override
   public EmailAuthorizationResult authorize(EmailContractCommand command) {
-    EmailAuthorizationResult validation = EmailContractCommandSupport.validateCommand(command,
-        EmailContractCommandSupport.FIELD_ACCOUNT_ID, EmailContractCommandSupport.FIELD_LINK);
+    EmailAuthorizationResult validation = configuredLinkPath == null
+        ? EmailContractCommandSupport.validateCommand(command,
+            EmailContractCommandSupport.FIELD_ACCOUNT_ID,
+            EmailContractCommandSupport.FIELD_LINK)
+        : EmailContractCommandSupport.validateCommand(command,
+            EmailContractCommandSupport.FIELD_ACCOUNT_ID);
     if (!validation.isAllowed()) {
       return validation;
     }
@@ -88,7 +100,12 @@ final class AccountLinkEmailContract implements EmailContract {
   @Override
   public EmailContractResolution resolve(EmailContractCommand command,
       EmailRecipientResolution recipient) {
-    String link = EmailContractCommandSupport.text(command, EmailContractCommandSupport.FIELD_LINK);
+    String link = resolveLink(command);
+    if (configuredLinkPath != null && link == null) {
+      return EmailContractResolution.rejected(400,
+          TransactionalEmailService.STATUS_VALIDATION_FAILED,
+          "Configured app base URL is required for this email contract");
+    }
     if (!EmailContractCommandSupport.isHttpUrl(link)) {
       return EmailContractResolution.rejected(400,
           TransactionalEmailService.STATUS_VALIDATION_FAILED,
@@ -132,5 +149,13 @@ final class AccountLinkEmailContract implements EmailContract {
   private Optional<EmailContactRecord> resolveAccount(EmailContractCommand command) {
     return dataResolver.findAccountContact(EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_ACCOUNT_ID));
+  }
+
+  private String resolveLink(EmailContractCommand command) {
+    if (configuredLinkPath == null) {
+      return EmailContractCommandSupport.text(command, EmailContractCommandSupport.FIELD_LINK);
+    }
+    return PublicUrlResolver.appendPath(PublicUrlResolver.resolveConfiguredAppBaseUrl(),
+        configuredLinkPath);
   }
 }

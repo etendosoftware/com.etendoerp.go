@@ -106,6 +106,20 @@ final class EtendoGoJwtDalHelper {
     flushAndCommitDalChanges();
   }
 
+  static PasswordResetTokenState capturePasswordResetToken(Account account) {
+    return new PasswordResetTokenState((String) account.get(PROPERTY_RESET_TOKEN_HASH),
+        (Date) account.get(PROPERTY_RESET_TOKEN_EXPIRES),
+        (Date) account.get(PROPERTY_RESET_TOKEN_CONSUMED));
+  }
+
+  static void restorePasswordResetToken(Account account, PasswordResetTokenState tokenState) {
+    account.set(PROPERTY_RESET_TOKEN_HASH, tokenState.resetTokenHash);
+    account.set(PROPERTY_RESET_TOKEN_EXPIRES, tokenState.resetTokenExpires);
+    account.set(PROPERTY_RESET_TOKEN_CONSUMED, tokenState.resetTokenConsumed);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+  }
+
   static Account findActiveAccountByResetTokenHash(String resetTokenHash, Date now) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
         "as account where account." + PROPERTY_RESET_TOKEN_HASH + " = :"
@@ -135,6 +149,9 @@ final class EtendoGoJwtDalHelper {
       Date changedAt) {
     account.setPasswordHash(passwordHash);
     account.setSessionToken(sessionToken);
+    account.set(PROPERTY_RESET_TOKEN_HASH, null);
+    account.set(PROPERTY_RESET_TOKEN_EXPIRES, null);
+    account.set(PROPERTY_RESET_TOKEN_CONSUMED, changedAt);
     account.set(PROPERTY_PASSWORD_CHANGED, changedAt);
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
@@ -218,5 +235,18 @@ final class EtendoGoJwtDalHelper {
   private static void flushAndCommitDalChanges() {
     OBDal.getInstance().flush();
     OBDal.getInstance().commitAndClose();
+  }
+
+  static final class PasswordResetTokenState {
+    private final String resetTokenHash;
+    private final Date resetTokenExpires;
+    private final Date resetTokenConsumed;
+
+    private PasswordResetTokenState(String resetTokenHash, Date resetTokenExpires,
+        Date resetTokenConsumed) {
+      this.resetTokenHash = resetTokenHash;
+      this.resetTokenExpires = resetTokenExpires;
+      this.resetTokenConsumed = resetTokenConsumed;
+    }
   }
 }

@@ -80,15 +80,24 @@ public final class PublicUrlResolver {
    * @return configured public app URL, request-derived app URL, or null when neither can be resolved
    */
   public static String resolveAppBaseUrl(HttpServletRequest request) {
-    String configured = resolveConfiguredUrl(APP_BASE_URL_PROPERTY, APP_BASE_URL_ENV);
-    if (configured != null) {
-      return configured;
-    }
-    configured = resolveConfiguredUrl(LEGACY_APP_URL_PROPERTY, LEGACY_APP_URL_ENV);
+    String configured = resolveConfiguredAppBaseUrl();
     if (configured != null) {
       return configured;
     }
     return buildBaseUrl(request);
+  }
+
+  /**
+   * Returns only the configured public Etendo Go app base URL.
+   *
+   * @return configured public app URL, or null when no configured app URL exists
+   */
+  public static String resolveConfiguredAppBaseUrl() {
+    String configured = resolveConfiguredUrl(APP_BASE_URL_PROPERTY, APP_BASE_URL_ENV);
+    if (configured != null) {
+      return configured;
+    }
+    return resolveConfiguredUrl(LEGACY_APP_URL_PROPERTY, LEGACY_APP_URL_ENV);
   }
 
   /**

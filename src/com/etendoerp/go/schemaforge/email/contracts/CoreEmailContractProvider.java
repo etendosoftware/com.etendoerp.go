@@ -62,7 +62,8 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
         new AccountLinkEmailContract("new-account", "new-account", contractResolver,
             NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
         new AccountLinkEmailContract("environment-ready", "environment-ready", contractResolver,
-            ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
+            ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS,
+            "dashboard"),
         new AccountNoticeEmailContract("password-changed", "password-changed", contractResolver),
         new LoginAlertEmailContract(contractResolver));
   }
