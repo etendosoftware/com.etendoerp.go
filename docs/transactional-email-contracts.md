@@ -39,7 +39,9 @@ Rejected provider passthrough shape:
 |-----------|----------------|
 | `TransactionalEmailService` | Executes a named contract, enforces executor-level safety gates, and maps provider outcomes to NEO responses |
 | `EmailContractRegistry` | Finds the server-side contract by name |
-| `DefaultEmailContractRegistry` | Registers the built-in v1 transactional contracts |
+| `DefaultEmailContractRegistry` | Builds the runtime registry from injected `EmailContractProvider` implementations |
+| `EmailContractProvider` | CDI extension point used by feature implementations to provide one or more contracts |
+| `com.etendoerp.go.schemaforge.email.contracts` | Built-in contract implementations and DAL-backed resolvers, kept outside the framework package |
 | `EmailContract` | Authorizes the command, resolves the recipient, and builds template variables from trusted server context |
 | `EmailAuthorizationResult` | Carries contract-specific authorization approval or rejection |
 | `EmailRecipientResolution` | Carries the recipient derived from server state or from an explicit support/admin contract |
@@ -50,7 +52,7 @@ Rejected provider passthrough shape:
 | `ApiGatewayEmailProviderAdapter` | HTTP adapter for API Gateway-style providers |
 | `EmailProviderConfig` | Reads provider configuration from server-side properties or environment variables |
 
-The default executor registers the built-in v1 contracts. A missing contract still returns `VALIDATION_FAILED` with HTTP 404.
+The default executor loads injected contract providers. A missing contract still returns `VALIDATION_FAILED` with HTTP 404.
 
 ## Authorization and Recipient Resolution
 
@@ -74,6 +76,8 @@ Each contract must implement these steps in order:
 2. `resolveRecipient`: derive the destination from a trusted record whenever possible.
 3. `resolve`: build the provider template and variables using the resolved recipient.
 4. `deliveryPolicy`: define idempotency and throttle rules for the send attempt.
+
+Feature implementations should provide contracts through `EmailContractProvider`. Document contracts should inject an `EmailDocumentRecordResolver` owned by the document implementation. Do not add document-specific resolver methods to the framework package.
 
 Edge cases every contract family must cover:
 
@@ -118,7 +122,7 @@ Rules whose context key is unavailable are skipped, so contracts can share polic
 - throttle counters
 - audit records
 
-Idempotency lookups are scoped by contract and tenant/client in the default store. Contracts should still generate deterministic keys that include the relevant business record and semantic action/version, for example `invoice-send:<invoiceId>:v1`.
+Idempotency lookups are scoped by contract and tenant/client in the default store. Contracts should still generate deterministic keys that include the relevant business record and semantic action/version, for example `invoice-send:<invoiceId>:v1`. Document-send contracts must derive the tenant/client part from the trusted resolved document record instead of caller-provided payload fields.
 
 The default `InMemoryEmailSafetyStore` is process-local and suitable for executor wiring and tests. Production deployments that require cluster-wide enforcement must replace it with a persistent implementation without changing contract code.
 
@@ -130,14 +134,18 @@ The default `InMemoryEmailSafetyStore` is process-local and suitable for executo
 | `new-account` | `new-account` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link` |
 | `login-alert` | `login-alert` | `AD_User.email` resolved by `userId` | `version`, `userId`; optional `loginEventId`, `ip`, `date` |
 | `sales-invoice-send` | `invoice` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the invoice business partner | `version`, `recordId` |
+| `sales-order-send` | `document` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the sales order business partner | `version`, `recordId` |
+| `sales-quotation-send` | `document` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the sales quotation business partner | `version`, `recordId` |
 
 `custom` and `support-custom-email` are not registered by default. A custom HTML email can only be added later as an explicit support/admin contract with role checks, reason capture, sanitizer, throttle, and audit.
 
-The account-link contracts accept only absolute `http://` or `https://` links. The sales invoice contract generates `download_link` from server configuration:
+The account-link contracts accept only absolute `http://` or `https://` links. Document-send contracts share the default document payload strategy: `name`, `document_type`, `document_number`, and `download_link`. Optional fields such as `amount`, and document-specific aliases such as `invoice_number`, must be enabled by the explicit contract only when a provider template requires them.
+
+Document-send contracts generate `download_link` from server configuration:
 
 | Property | Environment Variable | Purpose |
 |----------|----------------------|---------|
-| `etendo.go.email.documentDownloadBaseUrl` | `ETGO_EMAIL_DOCUMENT_DOWNLOAD_BASE_URL` | Base URL used to build document download links as `{base}/sales-invoice/{recordId}` |
+| `etendo.go.email.documentDownloadBaseUrl` | `ETGO_EMAIL_DOCUMENT_DOWNLOAD_BASE_URL` | Base URL used to build document download links as `{base}/{documentType}/{recordId}` |
 
 ## Provider Configuration
 

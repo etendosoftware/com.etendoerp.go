@@ -15,7 +15,10 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge.email;
+package com.etendoerp.go.schemaforge.email.contracts;
+
+import com.etendoerp.go.schemaforge.email.EmailContactRecord;
+import com.etendoerp.go.schemaforge.email.EmailContractDataResolver;
 
 import java.math.BigDecimal;
 import java.net.URLEncoder;
@@ -28,9 +31,7 @@ import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
-import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
-import org.openbravo.model.common.invoice.Invoice;
 
 import com.etendoerp.go.schemaforge.data.Account;
 
@@ -71,48 +72,13 @@ final class DalEmailContractDataResolver implements EmailContractDataResolver {
     return Optional.of(new EmailContactRecord(user.getName(), user.getEmail()));
   }
 
-  @Override
-  public Optional<EmailDocumentRecord> findSalesInvoice(String invoiceId) {
-    String normalizedId = StringUtils.trimToNull(invoiceId);
-    if (normalizedId == null) {
-      return Optional.empty();
-    }
-    Invoice invoice = OBDal.getInstance().get(Invoice.class, normalizedId);
-    if (invoice == null || !Boolean.TRUE.equals(invoice.isActive())
-        || !isReadableClient(invoice.getClient().getId())) {
-      return Optional.empty();
-    }
-    BusinessPartner businessPartner = invoice.getBusinessPartner();
-    String recipientEmail = resolveBusinessPartnerEmail(businessPartner);
-    String recipientName = businessPartner == null ? null : businessPartner.getName();
-    return Optional.of(new EmailDocumentRecord(recipientName, recipientEmail, invoice.getDocumentNo(),
-        formatAmount(invoice.getGrandTotalAmount(), invoice.getCurrency()),
-        buildDocumentDownloadLink("sales-invoice", invoice.getId())));
-  }
-
-  private static String resolveBusinessPartnerEmail(BusinessPartner businessPartner) {
-    if (businessPartner == null) {
-      return null;
-    }
-    String email = StringUtils.trimToNull(businessPartner.getEtgoEmail());
-    if (email != null) {
-      return email;
-    }
-    for (User user : businessPartner.getADUserList()) {
-      if (Boolean.TRUE.equals(user.isActive()) && StringUtils.isNotBlank(user.getEmail())) {
-        return user.getEmail();
-      }
-    }
-    return null;
-  }
-
-  private static String formatAmount(BigDecimal amount, Currency currency) {
+  static String formatAmount(BigDecimal amount, Currency currency) {
     String value = amount == null ? "0" : amount.toPlainString();
     String isoCode = currency == null ? null : StringUtils.trimToNull(currency.getISOCode());
     return isoCode == null ? value : value + " " + isoCode;
   }
 
-  private static String buildDocumentDownloadLink(String documentType, String recordId) {
+  static String buildDocumentDownloadLink(String documentType, String recordId) {
     String baseUrl = readConfig(PROP_DOCUMENT_DOWNLOAD_BASE_URL, ENV_DOCUMENT_DOWNLOAD_BASE_URL);
     if (baseUrl == null) {
       return null;
@@ -144,7 +110,7 @@ final class DalEmailContractDataResolver implements EmailContractDataResolver {
     return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
   }
 
-  private static boolean isReadableClient(String clientId) {
+  static boolean isReadableClient(String clientId) {
     if (StringUtils.isBlank(clientId) || "0".equals(clientId)) {
       return true;
     }

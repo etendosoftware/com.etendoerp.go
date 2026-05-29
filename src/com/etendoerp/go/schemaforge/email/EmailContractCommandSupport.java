@@ -23,21 +23,24 @@ import java.util.regex.Pattern;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONObject;
 
-final class EmailContractCommandSupport {
+/**
+ * Shared helpers for validating and reading transactional email contract commands.
+ */
+public final class EmailContractCommandSupport {
 
-  static final String FIELD_ACCOUNT_ID = "accountId";
-  static final String FIELD_CLIENT_ID = "clientId";
-  static final String FIELD_DATE = "date";
-  static final String FIELD_IDEMPOTENCY_KEY = "idempotencyKey";
-  static final String FIELD_IP = "ip";
-  static final String FIELD_LINK = "link";
-  static final String FIELD_LOGIN_EVENT_ID = "loginEventId";
-  static final String FIELD_RECORD_ID = "recordId";
-  static final String FIELD_RECIPIENT = "recipient";
-  static final String FIELD_TENANT_ID = "tenantId";
-  static final String FIELD_USER_ID = "userId";
-  static final String FIELD_VERSION = "version";
-  static final String VERSION = "v1";
+  public static final String FIELD_ACCOUNT_ID = "accountId";
+  public static final String FIELD_CLIENT_ID = "clientId";
+  public static final String FIELD_DATE = "date";
+  public static final String FIELD_IDEMPOTENCY_KEY = "idempotencyKey";
+  public static final String FIELD_IP = "ip";
+  public static final String FIELD_LINK = "link";
+  public static final String FIELD_LOGIN_EVENT_ID = "loginEventId";
+  public static final String FIELD_RECORD_ID = "recordId";
+  public static final String FIELD_RECIPIENT = "recipient";
+  public static final String FIELD_TENANT_ID = "tenantId";
+  public static final String FIELD_USER_ID = "userId";
+  public static final String FIELD_VERSION = "version";
+  public static final String VERSION = "v1";
 
   private static final Pattern EMAIL_PATTERN = Pattern.compile(
       "^[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}$", Pattern.CASE_INSENSITIVE);
@@ -45,7 +48,14 @@ final class EmailContractCommandSupport {
   private EmailContractCommandSupport() {
   }
 
-  static EmailAuthorizationResult validateCommand(EmailContractCommand command,
+  /**
+   * Validates contract version and required command fields.
+   *
+   * @param command contract command received by the service
+   * @param requiredFields body fields that must be present and non-blank
+   * @return allowed result when the command is valid, otherwise a rejection
+   */
+  public static EmailAuthorizationResult validateCommand(EmailContractCommand command,
       String... requiredFields) {
     String version = text(command, FIELD_VERSION);
     if (version != null && !VERSION.equals(version)) {
@@ -60,7 +70,14 @@ final class EmailContractCommandSupport {
     return EmailAuthorizationResult.allowed();
   }
 
-  static String text(EmailContractCommand command, String field) {
+  /**
+   * Reads a normalized text field from the command body.
+   *
+   * @param command contract command received by the service
+   * @param field body field name
+   * @return trimmed value or {@code null}
+   */
+  public static String text(EmailContractCommand command, String field) {
     if (command == null) {
       return null;
     }
@@ -68,33 +85,72 @@ final class EmailContractCommandSupport {
     return body == null ? null : StringUtils.trimToNull(body.optString(field));
   }
 
-  static String firstNonBlank(String first, String second) {
+  /**
+   * Returns the first non-blank value from two candidates.
+   *
+   * @param first first candidate value
+   * @param second fallback candidate value
+   * @return normalized value or {@code null}
+   */
+  public static String firstNonBlank(String first, String second) {
     String normalized = StringUtils.trimToNull(first);
     return normalized == null ? StringUtils.trimToNull(second) : normalized;
   }
 
-  static boolean isValidEmail(String email) {
+  /**
+   * Checks whether a value looks like a syntactically valid email address.
+   *
+   * @param email candidate email address
+   * @return {@code true} when the value matches the contract email pattern
+   */
+  public static boolean isValidEmail(String email) {
     String normalized = StringUtils.trimToNull(email);
     return normalized != null && EMAIL_PATTERN.matcher(normalized).matches();
   }
 
-  static boolean isHttpUrl(String value) {
+  /**
+   * Checks whether a value is an absolute HTTP or HTTPS URL.
+   *
+   * @param value candidate URL
+   * @return {@code true} when the value starts with {@code http://} or {@code https://}
+   */
+  public static boolean isHttpUrl(String value) {
     String normalized = StringUtils.trimToNull(value);
     return normalized != null
         && (StringUtils.startsWithIgnoreCase(normalized, "https://")
         || StringUtils.startsWithIgnoreCase(normalized, "http://"));
   }
 
-  static EmailRecipientResolution invalidRecipient() {
+  /**
+   * Builds the standard rejection used when a server-resolved recipient is invalid.
+   *
+   * @return recipient rejection result
+   */
+  public static EmailRecipientResolution invalidRecipient() {
     return EmailRecipientResolution.rejected(400, "Email recipient is invalid");
   }
 
-  static EmailDeliveryPolicy deliveryPolicy(String idempotencyKey,
+  /**
+   * Builds a delivery policy from an idempotency key and throttle rules.
+   *
+   * @param idempotencyKey idempotency key for the email event
+   * @param throttleRules throttle rules applied before delivery
+   * @return delivery policy
+   */
+  public static EmailDeliveryPolicy deliveryPolicy(String idempotencyKey,
       EmailThrottleRule... throttleRules) {
     return EmailDeliveryPolicy.of(idempotencyKey, Arrays.asList(throttleRules));
   }
 
-  static String idempotencyKey(String contractName, String tenantId, String recordId) {
+  /**
+   * Builds the standard versioned idempotency key for contract deliveries.
+   *
+   * @param contractName email contract name
+   * @param tenantId tenant id, or global when blank
+   * @param recordId trusted record id for the delivery
+   * @return versioned idempotency key
+   */
+  public static String idempotencyKey(String contractName, String tenantId, String recordId) {
     String normalizedTenant = StringUtils.defaultIfBlank(tenantId, "global");
     return contractName + ":" + normalizedTenant + ":" + recordId + ":" + VERSION;
   }

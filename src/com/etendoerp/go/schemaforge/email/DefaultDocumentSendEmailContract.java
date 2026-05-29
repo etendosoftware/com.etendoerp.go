@@ -18,27 +18,54 @@
 package com.etendoerp.go.schemaforge.email;
 
 import java.util.Optional;
+import java.util.Objects;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 
-final class SalesInvoiceSendEmailContract implements EmailContract {
+/**
+ * Base contract for document-send transactional emails resolved from trusted server records.
+ */
+public class DefaultDocumentSendEmailContract implements EmailContract {
 
-  static final String NAME = "sales-invoice-send";
-  private static final String TEMPLATE = "invoice";
+  public static final String DEFAULT_TEMPLATE = "document";
+
   private static final String DOCUMENT_RECORD_NOT_FOUND = "Email document record was not found";
 
-  private final EmailContractDataResolver dataResolver;
+  private final String name;
+  private final String template;
+  private final String documentType;
+  private final String documentNumberAlias;
+  private final boolean includeAmount;
+  private final EmailDocumentRecordResolver documentResolver;
 
-  SalesInvoiceSendEmailContract(EmailContractDataResolver dataResolver) {
-    this.dataResolver = dataResolver;
+  protected DefaultDocumentSendEmailContract(String name, String documentType,
+      EmailDocumentRecordResolver documentResolver) {
+    this(name, DEFAULT_TEMPLATE, documentType, null, false, documentResolver);
+  }
+
+  protected DefaultDocumentSendEmailContract(String name, String template, String documentType,
+      String documentNumberAlias,
+      EmailDocumentRecordResolver documentResolver) {
+    this(name, template, documentType, documentNumberAlias, false, documentResolver);
+  }
+
+  protected DefaultDocumentSendEmailContract(String name, String template, String documentType,
+      String documentNumberAlias, boolean includeAmount,
+      EmailDocumentRecordResolver documentResolver) {
+    this.name = StringUtils.trimToNull(name);
+    this.template = StringUtils.trimToNull(template);
+    this.documentType = StringUtils.trimToNull(documentType);
+    this.documentNumberAlias = StringUtils.trimToNull(documentNumberAlias);
+    this.includeAmount = includeAmount;
+    this.documentResolver = Objects.requireNonNull(documentResolver, "documentResolver");
   }
 
   @Override
   public String getName() {
-    return NAME;
+    return name;
   }
 
   @Override
@@ -48,14 +75,14 @@ final class SalesInvoiceSendEmailContract implements EmailContract {
     if (!validation.isAllowed()) {
       return validation;
     }
-    return resolveInvoice(command).isPresent()
+    return resolveDocument(command).isPresent()
         ? EmailAuthorizationResult.allowed()
         : EmailAuthorizationResult.rejected(404, DOCUMENT_RECORD_NOT_FOUND);
   }
 
   @Override
   public EmailRecipientResolution resolveRecipient(EmailContractCommand command) {
-    Optional<EmailDocumentRecord> document = resolveInvoice(command);
+    Optional<EmailDocumentRecord> document = resolveDocument(command);
     if (!document.isPresent()) {
       return EmailRecipientResolution.rejected(404, DOCUMENT_RECORD_NOT_FOUND);
     }
@@ -68,7 +95,7 @@ final class SalesInvoiceSendEmailContract implements EmailContract {
   @Override
   public EmailContractResolution resolve(EmailContractCommand command,
       EmailRecipientResolution recipient) {
-    Optional<EmailDocumentRecord> document = resolveInvoice(command);
+    Optional<EmailDocumentRecord> document = resolveDocument(command);
     if (!document.isPresent()) {
       return EmailContractResolution.rejected(404,
           TransactionalEmailService.STATUS_VALIDATION_FAILED,
@@ -80,15 +107,10 @@ final class SalesInvoiceSendEmailContract implements EmailContract {
           "Document download link is not configured");
     }
     try {
-      JSONObject data = new JSONObject();
-      data.put("name", StringUtils.defaultIfBlank(document.get().getRecipientName(), "Customer"));
-      data.put("invoice_number", document.get().getDocumentNumber());
-      data.put("amount", document.get().getAmount());
-      data.put("download_link", document.get().getDownloadLink());
       return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipient(),
-          TEMPLATE, data, null));
+          template, buildTemplateData(document.get()), null));
     } catch (JSONException e) {
-      throw new OBException("Could not build sales invoice email payload", e);
+      throw new OBException("Could not build document email payload for " + name, e);
     }
   }
 
@@ -97,10 +119,10 @@ final class SalesInvoiceSendEmailContract implements EmailContract {
       EmailRecipientResolution recipient, EmailProviderRequest providerRequest) {
     String recordId = EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_RECORD_ID);
-    String tenantId = EmailContractCommandSupport.text(command,
-        EmailContractCommandSupport.FIELD_TENANT_ID);
+    Optional<EmailDocumentRecord> document = resolveDocument(command);
+    String tenantId = document.map(EmailDocumentRecord::getClientId).orElse(null);
     return EmailContractCommandSupport.deliveryPolicy(
-        EmailContractCommandSupport.idempotencyKey(NAME, tenantId, recordId),
+        EmailContractCommandSupport.idempotencyKey(name, tenantId, recordId),
         EmailThrottleRule.perTenant(100, 3600),
         EmailThrottleRule.perRecord(3, 3600),
         EmailThrottleRule.perRecipient(20, 3600),
@@ -108,8 +130,26 @@ final class SalesInvoiceSendEmailContract implements EmailContract {
         EmailThrottleRule.global(2000, 60));
   }
 
-  private Optional<EmailDocumentRecord> resolveInvoice(EmailContractCommand command) {
-    return dataResolver.findSalesInvoice(EmailContractCommandSupport.text(command,
+  private JSONObject buildTemplateData(EmailDocumentRecord document) throws JSONException {
+    JSONObject data = new JSONObject();
+    data.put("name", StringUtils.defaultIfBlank(document.getRecipientName(), "Customer"));
+    data.put("document_type", documentType);
+    data.put("document_number", document.getDocumentNumber());
+    if (documentNumberAlias != null) {
+      data.put(documentNumberAlias, document.getDocumentNumber());
+    }
+    if (includeAmount) {
+      data.put("amount", document.getAmount());
+    }
+    data.put("download_link", document.getDownloadLink());
+    return data;
+  }
+
+  private Optional<EmailDocumentRecord> resolveDocument(EmailContractCommand command) {
+    if (documentResolver == null) {
+      return Optional.empty();
+    }
+    return documentResolver.resolve(EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_RECORD_ID));
   }
 }
