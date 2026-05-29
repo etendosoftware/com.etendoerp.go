@@ -35,16 +35,16 @@ public class EmailFrameworkValueObjectsTest {
 
   @Test
   public void documentRecordNormalizesBlankFields() {
-    EmailDocumentRecord record = new EmailDocumentRecord(" Customer ", " customer@example.com ",
+    EmailDocumentRecord document = new EmailDocumentRecord(" Customer ", " customer@example.com ",
         " SO-1 ", " 10.00 USD ", " https://app.example.test/doc ", " tenant-1 ");
     EmailDocumentRecord blankRecord = new EmailDocumentRecord(" ", " ", " ", " ", " ", " ");
 
-    assertEquals("Customer", record.getRecipientName());
-    assertEquals("customer@example.com", record.getRecipientEmail());
-    assertEquals("SO-1", record.getDocumentNumber());
-    assertEquals("10.00 USD", record.getAmount());
-    assertEquals("https://app.example.test/doc", record.getDownloadLink());
-    assertEquals("tenant-1", record.getClientId());
+    assertEquals("Customer", document.getRecipientName());
+    assertEquals("customer@example.com", document.getRecipientEmail());
+    assertEquals("SO-1", document.getDocumentNumber());
+    assertEquals("10.00 USD", document.getAmount());
+    assertEquals("https://app.example.test/doc", document.getDownloadLink());
+    assertEquals("tenant-1", document.getClientId());
     assertNull(blankRecord.getRecipientName());
     assertNull(blankRecord.getRecipientEmail());
     assertNull(blankRecord.getDocumentNumber());
