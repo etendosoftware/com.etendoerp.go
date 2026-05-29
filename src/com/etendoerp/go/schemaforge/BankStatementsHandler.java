@@ -59,7 +59,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * </ul>
  */
 @Named("bank-statements")
-public class  BankStatementsHandler implements NeoHandler {
+public class BankStatementsHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(BankStatementsHandler.class);
 
