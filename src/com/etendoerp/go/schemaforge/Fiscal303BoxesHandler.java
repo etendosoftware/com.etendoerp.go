@@ -73,7 +73,7 @@ class Fiscal303BoxesHandler {
   private static final String TAX_AMOUNT      = "TaxAmount";
 
   private static final String JSON_CONTENT_TYPE = "application/json;charset=UTF-8";
-  private static final String DEFAULT_STATUS    = "draft";
+  static final String DEFAULT_STATUS    = "draft";
   private static final String PERIOD_KEY        = "period";
   private static final String SINCE_KEY         = "since";
   private static final String STATUS_KEY        = "status";
@@ -181,11 +181,7 @@ class Fiscal303BoxesHandler {
     inputParams.put("FileName", filename);
     // Declaration type required by AEAT303_Utility.getCheckedInputParameter.
     // Frontend sends AEAT letter codes directly: C, I, V, U, G. Default N (zero result).
-    String decl = "N";
-    if ("C".equals(tipo) || "I".equals(tipo) || "V".equals(tipo) || "U".equals(tipo) || "G".equals(tipo)) {
-      decl = tipo;
-    }
-    inputParams.put("Declaration_" + decl, "Y");
+    inputParams.put("Declaration_" + resolveDeclType(tipo), "Y");
     // Box 65: percentage attributable to the State (always 100 for Modelo 303).
     inputParams.put("ToPublicTreasury", "100");
 
@@ -362,7 +358,7 @@ class Fiscal303BoxesHandler {
     response.getWriter().write("{\"ok\":true}");
   }
 
-  private JSONObject declToJson(FiscalDecl decl) throws Exception {
+  JSONObject declToJson(FiscalDecl decl) throws Exception {
     JSONObject o = new JSONObject();
     o.put("id",           decl.getId() != null ? decl.getId() : "");
     o.put("model",        decl.getFiscalModel() != null ? decl.getFiscalModel() : "");
@@ -386,6 +382,21 @@ class Fiscal303BoxesHandler {
       while ((line = reader.readLine()) != null) sb.append(line);
     }
     return new JSONObject(sb.toString());
+  }
+
+  // ── Package-private helpers (tested directly) ─────────────────────────────
+
+  /**
+   * Maps a frontend AEAT letter code to the declaration type used by
+   * {@code AEAT303_Utility.getCheckedInputParameter}. Accepted codes: C, I, V, U, G.
+   * Anything else (null, empty, unknown alias) falls back to "N" (zero result).
+   */
+  static String resolveDeclType(String tipo) {
+    if ("C".equals(tipo) || "I".equals(tipo) || "V".equals(tipo)
+        || "U".equals(tipo) || "G".equals(tipo)) {
+      return tipo;
+    }
+    return "N";
   }
 
   // ── Internal ─────────────────────────────────────────────────────

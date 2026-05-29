@@ -51,8 +51,11 @@ import org.openbravo.module.aeat303.es.util.AEAT303CalculationsHelper;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.TaxReportParameter;
 
+import org.codehaus.jettison.json.JSONObject;
+
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.BoxGroupConfig;
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.ComputeResult;
+import com.etendoerp.go.schemaforge.data.FiscalDecl;
 
 /**
  * Unit tests for {@link Fiscal303BoxesHandler}.
@@ -1058,6 +1061,94 @@ public class Fiscal303BoxesHandlerTest {
     Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
     h.handle("modified", "GET", req, res);
     verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+  }
+
+  // ── resolveDeclType — AEAT letter code contract ────────────────────────────
+
+  /** Each accepted AEAT code must be returned unchanged. */
+  @Test
+  public void testResolveDeclType_acceptedCodes() {
+    for (String code : new String[]{"I", "C", "V", "U", "G"}) {
+      assertEquals("Expected " + code + " to pass through unchanged",
+          code, Fiscal303BoxesHandler.resolveDeclType(code));
+    }
+  }
+
+  /** Null tipo must fall back to "N". */
+  @Test
+  public void testResolveDeclType_nullFallsBackToN() {
+    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType(null));
+  }
+
+  /** Empty string must fall back to "N". */
+  @Test
+  public void testResolveDeclType_emptyFallsBackToN() {
+    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType(""));
+  }
+
+  /** Unknown code (old Spanish alias) must fall back to "N". */
+  @Test
+  public void testResolveDeclType_unknownAliasFallsBackToN() {
+    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("ingresar"));
+    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("compensar"));
+    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("devolver"));
+  }
+
+  /** "N" itself must be treated as an unknown code and return "N" via the fallback path. */
+  @Test
+  public void testResolveDeclType_literalNReturnedAsDefault() {
+    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("N"));
+  }
+
+  // ── DEFAULT_STATUS contract ────────────────────────────────────────────────
+
+  /** The hard-coded default status must be the locale-neutral English value "draft". */
+  @Test
+  public void testDefaultStatusIsDraft() {
+    assertEquals("draft", Fiscal303BoxesHandler.DEFAULT_STATUS);
+  }
+
+  /**
+   * {@code declToJson} must use DEFAULT_STATUS ("draft") when
+   * {@link FiscalDecl#getDeclarationStatus()} returns null, so that GET
+   * serialization is never locale-specific.
+   */
+  @Test
+  public void testDeclToJson_nullStatusFallsBackToDraft() throws Exception {
+    FiscalDecl decl = mock(FiscalDecl.class);
+    when(decl.getId()).thenReturn("test-id");
+    when(decl.getFiscalModel()).thenReturn("303");
+    when(decl.getFiscalYear()).thenReturn(2026L);
+    when(decl.getPeriod()).thenReturn("T1");
+    when(decl.getDeclarationType()).thenReturn("O");
+    when(decl.getDeclarationStatus()).thenReturn(null);  // null → must fall back to DEFAULT_STATUS
+    when(decl.getDeclarationFileName()).thenReturn(null);
+    when(decl.isFileExternal()).thenReturn(false);
+    when(decl.getUpdated()).thenReturn(null);
+
+    JSONObject json = handler.declToJson(decl);
+    assertEquals("draft", json.getString("status"));
+  }
+
+  /**
+   * {@code declToJson} must preserve an explicit "submitted" status without
+   * overwriting it with the default.
+   */
+  @Test
+  public void testDeclToJson_explicitStatusIsPreserved() throws Exception {
+    FiscalDecl decl = mock(FiscalDecl.class);
+    when(decl.getId()).thenReturn("test-id");
+    when(decl.getFiscalModel()).thenReturn("303");
+    when(decl.getFiscalYear()).thenReturn(2026L);
+    when(decl.getPeriod()).thenReturn("T1");
+    when(decl.getDeclarationType()).thenReturn("O");
+    when(decl.getDeclarationStatus()).thenReturn("submitted");
+    when(decl.getDeclarationFileName()).thenReturn(null);
+    when(decl.isFileExternal()).thenReturn(false);
+    when(decl.getUpdated()).thenReturn(null);
+
+    JSONObject json = handler.declToJson(decl);
+    assertEquals("submitted", json.getString("status"));
   }
 
   private static void assertBd(String expected, BigDecimal actual) {
