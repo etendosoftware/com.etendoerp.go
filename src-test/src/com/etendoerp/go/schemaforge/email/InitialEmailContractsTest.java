@@ -45,6 +45,7 @@ public class InitialEmailContractsTest {
     assertTrue(registry.find("login-alert").isPresent());
     assertTrue(registry.find("sales-invoice-send").isPresent());
     assertTrue(registry.find("sales-order-send").isPresent());
+    assertTrue(registry.find("sales-quotation-send").isPresent());
     assertFalse(registry.find("custom").isPresent());
     assertFalse(registry.find("support-custom-email").isPresent());
   }
@@ -158,6 +159,31 @@ public class InitialEmailContractsTest {
   }
 
   @Test
+  public void salesQuotationSendUsesDefaultDocumentPayload() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "quotation-1");
+
+    NeoResponse response = service.send("sales-quotation-send", command);
+
+    assertSent(response);
+    assertEquals(DefaultDocumentSendEmailContract.DEFAULT_TEMPLATE,
+        adapter.getLastRequest().getTemplate());
+    assertEquals("quotes@example.com", adapter.getLastRequest().getRecipient());
+    assertEquals("Empresa SRL", adapter.getLastRequest().getData().getString("name"));
+    assertEquals("SQ-0009", adapter.getLastRequest().getData().getString("document_number"));
+    assertEquals("Sales Quotation",
+        adapter.getLastRequest().getData().getString("document_type"));
+    assertFalse(adapter.getLastRequest().getData().has("quotation_number"));
+    assertFalse(adapter.getLastRequest().getData().has("amount"));
+    assertEquals("https://app.example.test/doc/sales-quotation/quotation-1",
+        adapter.getLastRequest().getData().getString("download_link"));
+  }
+
+
+  @Test
   public void rejectsUnsupportedVersionAsValidationFailure() throws Exception {
     FakeProviderAdapter adapter = new FakeProviderAdapter();
     TransactionalEmailService service = service(adapter);
@@ -268,6 +294,16 @@ public class InitialEmailContractsTest {
         return Optional.of(new EmailDocumentRecord("Empresa SRL", "orders@example.com",
             "SO-0007", "2600.50 USD",
             "https://app.example.test/doc/sales-order/order-1"));
+      }
+      return Optional.empty();
+    }
+
+    @Override
+    public Optional<EmailDocumentRecord> findSalesQuotation(String quotationId) {
+      if ("quotation-1".equals(quotationId)) {
+        return Optional.of(new EmailDocumentRecord("Empresa SRL", "quotes@example.com",
+            "SQ-0009", "950.25 USD",
+            "https://app.example.test/doc/sales-quotation/quotation-1"));
       }
       return Optional.empty();
     }

@@ -93,6 +93,16 @@ final class DalEmailContractDataResolver implements EmailContractDataResolver {
 
   @Override
   public Optional<EmailDocumentRecord> findSalesOrder(String orderId) {
+    return findSalesDocumentOrder(orderId, "sales-order");
+  }
+
+  @Override
+  public Optional<EmailDocumentRecord> findSalesQuotation(String quotationId) {
+    return findSalesDocumentOrder(quotationId, "sales-quotation");
+  }
+
+  private Optional<EmailDocumentRecord> findSalesDocumentOrder(String orderId,
+      String documentType) {
     String normalizedId = StringUtils.trimToNull(orderId);
     if (normalizedId == null) {
       return Optional.empty();
@@ -108,7 +118,7 @@ final class DalEmailContractDataResolver implements EmailContractDataResolver {
     String recipientName = businessPartner == null ? null : businessPartner.getName();
     return Optional.of(new EmailDocumentRecord(recipientName, recipientEmail, order.getDocumentNo(),
         formatAmount(order.getGrandTotalAmount(), order.getCurrency()),
-        buildDocumentDownloadLink("sales-order", order.getId())));
+        buildDocumentDownloadLink(documentType, order.getId())));
   }
 
   private static String resolveBusinessPartnerEmail(BusinessPartner businessPartner) {

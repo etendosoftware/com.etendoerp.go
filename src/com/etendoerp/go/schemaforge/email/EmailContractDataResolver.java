@@ -52,4 +52,12 @@ interface EmailContractDataResolver {
    * @return order email data when available
    */
   Optional<EmailDocumentRecord> findSalesOrder(String orderId);
+
+  /**
+   * Resolves a sales quotation document and its recipient data.
+   *
+   * @param quotationId C_Order id
+   * @return quotation email data when available
+   */
+  Optional<EmailDocumentRecord> findSalesQuotation(String quotationId);
 }
