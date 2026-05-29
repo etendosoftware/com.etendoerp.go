@@ -66,6 +66,7 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String METHOD_POST = "POST";
   private static final String ACTION_LINES = "lines";
   private static final String ACTION_IMPORT = "import";
+  private static final String ACTION_PREVIEW = "preview";
   private static final String PARAM_ACCOUNT_ID = "FIN_Financial_Account_ID";
   private static final String PARAM_STATEMENT_ID = "statementId";
   private static final String PARAM_ACTION = "action";
@@ -137,6 +138,9 @@ public class BankStatementsHandler implements NeoHandler {
 
     if (METHOD_POST.equals(method) && ACTION_IMPORT.equals(action)) {
       return handleImport(context);
+    }
+    if (METHOD_POST.equals(method) && ACTION_PREVIEW.equals(action)) {
+      return handlePreview(context);
     }
 
     return NeoResponse.error(405, "Method not allowed.");
@@ -258,6 +262,201 @@ public class BankStatementsHandler implements NeoHandler {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Parses the uploaded file in-memory and returns what would be imported,
+   * WITHOUT persisting anything. Same body shape as `?action=import`:
+   *   { FIN_Financial_Account_ID, fileName, contentBase64 }
+   *
+   * Used by the multi-step "Importar extracto" modal to show the
+   * "Revisar líneas" preview before the user confirms.
+   *
+   * <p>Response data:
+   * <pre>
+   * {
+   *   "format": "C43" | "GENERIC_CSV",
+   *   "fileName": "...",
+   *   "lineCount": 7,
+   *   "totalIn":  64806.00,
+   *   "totalOut": 13454.00,
+   *   "periodFrom": "2026-01-15T00:00:00Z",
+   *   "periodTo":   "2026-01-26T00:00:00Z",
+   *   "lines": [
+   *     { "date": "...", "description": "...", "bpartnerName": "...",
+   *       "dramount": 0,    "cramount": 35000.00 }
+   *   ]
+   * }
+   * </pre>
+   *
+   * <p>We always {@code rollbackAndClose()} the OBDal session at the end so
+   * no statement/line rows leak into the DB even if the parser inserts them
+   * along the way (Cuaderno43 / OpenCSV both call {@code save()} internally).
+   */
+  private NeoResponse handlePreview(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) return NeoResponse.error(400, "Request body is required");
+    try {
+      OBContext.setAdminMode(true);
+      String accountId = body.optString(PARAM_ACCOUNT_ID, null);
+      String fileName = body.optString("fileName", null);
+      String contentBase64 = body.optString("contentBase64", null);
+
+      if (StringUtils.isBlank(accountId)) {
+        return NeoResponse.error(400, "Missing required field: " + PARAM_ACCOUNT_ID);
+      }
+      if (StringUtils.isBlank(fileName)) {
+        return NeoResponse.error(400, "Missing required field: fileName");
+      }
+      if (StringUtils.isBlank(contentBase64)) {
+        return NeoResponse.error(400, "Missing required field: contentBase64");
+      }
+
+      FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+      if (account == null) {
+        return NeoResponse.error(400, "Financial account not found: " + accountId);
+      }
+
+      byte[] fileBytes = Base64.getDecoder().decode(contentBase64);
+      if (fileBytes.length == 0) {
+        return NeoResponse.error(400, "File content is empty");
+      }
+
+      StatementFormat format = detectFormat(fileBytes);
+      if (format == StatementFormat.UNKNOWN) {
+        return NeoResponse.error(400, "Unsupported file format");
+      }
+
+      // Both parsers (Cuaderno43 by reflection, our GenericCsv) call
+      // OBDal.save(line) per parsed line. For that to keep the lines
+      // attached to the statement's collection (getFINBankStatementLineList)
+      // we need the statement persisted first — otherwise Hibernate cascades
+      // can drop them silently. We persist + flush, then rollback at the end
+      // so the import is genuinely read-only.
+      FIN_BankStatement transientStmt = newBankStatement(account, fileName);
+      OBDal.getInstance().save(transientStmt);
+      OBDal.getInstance().flush();
+
+      ByteArrayInputStream stream = new ByteArrayInputStream(fileBytes);
+      // We ignore the parser's reported line count: Cuaderno43's reflection
+      // path returns 0 because statement.getFINBankStatementLineList() is
+      // not refreshed after save(line). We re-read from the DB right below.
+      if (format == StatementFormat.GENERIC_CSV) {
+        parseGenericCsv(stream, transientStmt);
+      } else {
+        parseC43(stream, transientStmt);
+      }
+      OBDal.getInstance().flush();
+
+      // Read the parsed lines straight from the DB instead of going through
+      // statement.getFINBankStatementLineList(). The entity collection isn't
+      // refreshed after save(line), so it can come back empty even when the
+      // rows are physically there. We're still in the same transaction; the
+      // rollback below discards everything anyway.
+      JSONArray lines = readLinesForPreview(transientStmt.getId());
+
+      // Use the SQL row count as the canonical lineCount — that's the only
+      // value guaranteed to match what the user will actually see in step 2.
+      JSONObject result = buildPreviewPayload(format, fileName, lines.length(), lines);
+
+      // Drop everything we parsed — preview is read-only. rollbackAndClose
+      // discards both the statement and the cascaded lines from the DB.
+      OBDal.getInstance().rollbackAndClose();
+
+      return NeoResponse.ok(envelope(result));
+    } catch (IllegalArgumentException e) {
+      log.warn("Invalid base64 content in preview request", e);
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(400, "Invalid base64 content: " + e.getMessage());
+    } catch (Exception e) {
+      log.error("Error generating bank-statement preview", e);
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(500, "Preview failed: " + e.getMessage());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Reads the parsed lines for a statement directly from the DB via the same
+   * LINES_SQL used by the GET endpoint. We're still inside the preview
+   * transaction (which the caller will roll back), so the rows are visible
+   * without a commit and they go away cleanly afterwards.
+   */
+  JSONArray readLinesForPreview(String statementId) throws Exception {
+    JSONArray arr = new JSONArray();
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(LINES_SQL)) {
+      ps.setString(1, statementId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          BigDecimal credit = nullSafeBd(rs.getBigDecimal("cramount"));
+          BigDecimal debit = nullSafeBd(rs.getBigDecimal("dramount"));
+          JSONObject row = new JSONObject();
+          row.put("lineNo", rs.getLong("line"));
+          row.put("date", formatDate(rs.getTimestamp("datetrx")));
+          row.put("description", StringUtils.trimToEmpty(rs.getString("description")));
+          row.put("bpartnerName", StringUtils.trimToEmpty(rs.getString("bpartnername")));
+          row.put("reference", StringUtils.trimToEmpty(rs.getString("referenceno")));
+          row.put("cramount", credit);
+          row.put("dramount", debit);
+          arr.put(row);
+        }
+      }
+    }
+    return arr;
+  }
+
+  /**
+   * Builds the envelope JSON returned by {@code handlePreview}. Aggregates
+   * totals (abonos / cargos) and the period (min/max transaction date) over
+   * the {@code lines} array supplied by {@link #readLinesForPreview}.
+   */
+  private JSONObject buildPreviewPayload(StatementFormat format, String fileName,
+                                         int lineCount, JSONArray lines) throws Exception {
+    BigDecimal totalIn = BigDecimal.ZERO;
+    BigDecimal totalOut = BigDecimal.ZERO;
+    String periodFrom = "";
+    String periodTo = "";
+
+    for (int i = 0; i < lines.length(); i++) {
+      JSONObject row = lines.getJSONObject(i);
+      BigDecimal credit = row.has("cramount") && !row.isNull("cramount")
+          ? new BigDecimal(row.getString("cramount")) : BigDecimal.ZERO;
+      BigDecimal debit = row.has("dramount") && !row.isNull("dramount")
+          ? new BigDecimal(row.getString("dramount")) : BigDecimal.ZERO;
+      totalIn = totalIn.add(credit);
+      totalOut = totalOut.add(debit);
+
+      String d = row.optString("date", "");
+      if (!d.isEmpty()) {
+        if (periodFrom.isEmpty() || d.compareTo(periodFrom) < 0) periodFrom = d;
+        if (periodTo.isEmpty()   || d.compareTo(periodTo)   > 0) periodTo = d;
+      }
+    }
+
+    JSONObject result = new JSONObject();
+    result.put("format", format.name());
+    result.put("fileName", fileName);
+    result.put("lineCount", lineCount);
+    result.put("totalIn", totalIn);
+    result.put("totalOut", totalOut);
+    result.put("periodFrom", periodFrom);
+    result.put("periodTo", periodTo);
+    result.put("lines", lines);
+    return result;
+  }
+
+  private static JSONObject envelope(JSONObject data) throws Exception {
+    JSONObject responseData = new JSONObject();
+    responseData.put("data", data);
+    JSONObject env = new JSONObject();
+    env.put("response", responseData);
+    return env;
+  }
+
+  private static BigDecimal nullSafeBd(BigDecimal value) {
+    return value == null ? BigDecimal.ZERO : value;
   }
 
   FIN_BankStatement newBankStatement(FIN_FinancialAccount account, String fileName) {
