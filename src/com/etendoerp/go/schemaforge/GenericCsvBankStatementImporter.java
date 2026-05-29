@@ -35,6 +35,7 @@ import java.util.Locale;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
@@ -103,10 +104,10 @@ public class GenericCsvBankStatementImporter {
    * @param stream    input stream pointing at the CSV file content (UTF-8); fully consumed by this method
    * @param statement persisted statement the new lines will be linked to
    * @return the number of lines parsed and saved
-   * @throws CsvParseException when a required column is missing, a date or number can't be parsed,
-   *                           or the underlying I/O fails
+   * @throws CsvParseException (unchecked) when a required column is missing, a date or number
+   *                           can't be parsed, or the underlying I/O fails
    */
-  public int loadFile(InputStream stream, FIN_BankStatement statement) throws CsvParseException {
+  public int loadFile(InputStream stream, FIN_BankStatement statement) {
     List<String[]> rows;
     try {
       rows = readRows(stream);
@@ -140,8 +141,7 @@ public class GenericCsvBankStatementImporter {
    * Sonar's cognitive-complexity check.
    */
   private void saveLine(FIN_BankStatement statement, String[] row,
-                        Map<String, Integer> headerIdx, char decimalSep, long lineNo)
-      throws CsvParseException {
+                        Map<String, Integer> headerIdx, char decimalSep, long lineNo) {
     FIN_BankStatementLine line = OBProvider.getInstance().get(FIN_BankStatementLine.class);
     line.setBankStatement(statement);
     line.setClient(statement.getClient());
@@ -170,11 +170,12 @@ public class GenericCsvBankStatementImporter {
   }
 
   /**
-   * Checked exception thrown for any failure during CSV parsing — I/O, missing
-   * columns, malformed dates or amounts. Dedicated type so callers can catch
-   * something narrower than {@code Exception} (Sonar S112).
+   * Runtime exception thrown for any failure during CSV parsing — I/O, missing
+   * columns, malformed dates or amounts. Extends {@link OBException} per
+   * Etendo's standard so callers don't have to declare it and so the framework
+   * picks it up consistently (S112).
    */
-  public static class CsvParseException extends Exception {
+  public static class CsvParseException extends OBException {
     private static final long serialVersionUID = 1L;
     public CsvParseException(String message) { super(message); }
     public CsvParseException(String message, Throwable cause) { super(message, cause); }
@@ -340,7 +341,7 @@ public class GenericCsvBankStatementImporter {
     return null;
   }
 
-  private static BigDecimal parseAmount(String raw, char decimalSep) throws CsvParseException {
+  private static BigDecimal parseAmount(String raw, char decimalSep) {
     if (StringUtils.isBlank(raw)) return BigDecimal.ZERO;
     DecimalFormatSymbols symbols = new DecimalFormatSymbols(Locale.US);
     symbols.setDecimalSeparator(decimalSep);

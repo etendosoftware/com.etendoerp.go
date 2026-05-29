@@ -313,9 +313,12 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       return NeoResponse.createdWithData(result);
 
     } catch (Exception e) {
+      // Log full stack trace server-side; never echo e.getMessage() back —
+      // that can leak DB constraint names or other internal details to the
+      // client.
       log.error("Error creating financial account transaction", e);
       OBDal.getInstance().rollbackAndClose();
-      return NeoResponse.error(500, "Create failed: " + e.getMessage());
+      return NeoResponse.error(500, "Could not create the movement. Please check logs for details.");
     } finally {
       OBContext.restorePreviousMode();
     }
