@@ -18,8 +18,8 @@
 package com.etendoerp.go.schemaforge.email;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -54,11 +54,6 @@ public final class DefaultEmailContractRegistry implements EmailContractRegistry
     return create(loadProviders());
   }
 
-  static DefaultEmailContractRegistry create(EmailContractDataResolver dataResolver) {
-    return create(Arrays.asList(new CoreEmailContractProvider(dataResolver),
-        new SalesDocumentEmailContractProvider()));
-  }
-
   static DefaultEmailContractRegistry create(List<EmailContractProvider> providers) {
     List<EmailContract> providedContracts = new ArrayList<>();
     for (EmailContractProvider provider : providers) {
@@ -77,7 +72,7 @@ public final class DefaultEmailContractRegistry implements EmailContractRegistry
     } catch (Exception e) {
       log.debug("Could not load injected email contract providers: {}", e.getMessage(), e);
     }
-    return Arrays.asList(new CoreEmailContractProvider(), new SalesDocumentEmailContractProvider());
+    return Collections.emptyList();
   }
 
   @Override
