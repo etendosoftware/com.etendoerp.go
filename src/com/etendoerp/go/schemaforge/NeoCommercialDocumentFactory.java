@@ -53,6 +53,26 @@ final class NeoCommercialDocumentFactory {
     return shipment;
   }
 
+  static ShipmentInOut createShipmentReceiptHeader(ShipmentInOut source, DocumentType docType,
+      boolean salesTransaction, String movementType) {
+    ShipmentInOut shipment = OBProvider.getInstance().get(ShipmentInOut.class);
+    shipment.setClient(source.getClient());
+    shipment.setOrganization(source.getOrganization());
+    shipment.setBusinessPartner(source.getBusinessPartner());
+    shipment.setPartnerAddress(source.getPartnerAddress());
+    shipment.setWarehouse(source.getWarehouse());
+    shipment.setMovementDate(new Date());
+    shipment.setAccountingDate(new Date());
+    shipment.setDocumentType(docType);
+    shipment.setDocumentNo("<*>");
+    shipment.setSalesTransaction(salesTransaction);
+    shipment.setSalesOrder(source.getSalesOrder());
+    shipment.setProcessed(false);
+    shipment.setDocumentStatus("DR");
+    shipment.setMovementType(movementType);
+    return shipment;
+  }
+
   static Invoice createInvoiceFromOrderHeader(Order order, DocumentType invoiceDocType,
       boolean salesTransaction) {
     Invoice invoice = OBProvider.getInstance().get(Invoice.class);
