@@ -49,6 +49,8 @@ public class InitialEmailContractsTest {
 
     assertTrue(registry.find("reset-password").isPresent());
     assertTrue(registry.find("new-account").isPresent());
+    assertTrue(registry.find("environment-ready").isPresent());
+    assertTrue(registry.find("password-changed").isPresent());
     assertTrue(registry.find("login-alert").isPresent());
     assertTrue(registry.find("sales-invoice-send").isPresent());
     assertTrue(registry.find("sales-order-send").isPresent());
@@ -94,6 +96,50 @@ public class InitialEmailContractsTest {
     assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
     assertEquals("https://app.example.test/welcome",
         adapter.getLastRequest().getData().getString("link"));
+  }
+
+  @Test
+  public void environmentReadyUsesDistinctWelcomeTemplateAndRecordIdIdempotency()
+      throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    TransactionalEmailService service = service(adapter, safetyStore);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1");
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "client-1");
+    command.put(EmailContractCommandSupport.FIELD_LINK, "https://app.example.test/dashboard");
+
+    NeoResponse response = service.send("environment-ready", command);
+
+    assertSent(response);
+    assertEquals("environment-ready", adapter.getLastRequest().getTemplate());
+    assertEquals("account@example.com", adapter.getLastRequest().getRecipient());
+    assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
+    assertEquals("https://app.example.test/dashboard",
+        adapter.getLastRequest().getData().getString("link"));
+    assertEquals("environment-ready:tenant-1:client-1:v1",
+        safetyStore.getAuditRecords().get(0).getIdempotencyKey());
+  }
+
+  @Test
+  public void passwordChangedUsesAccountRecipientAndNoticePayload() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1");
+    command.put(EmailContractCommandSupport.FIELD_DATE, "2026-05-29T10:00:00Z");
+
+    NeoResponse response = service.send("password-changed", command);
+
+    assertSent(response);
+    assertEquals("password-changed", adapter.getLastRequest().getTemplate());
+    assertEquals("account@example.com", adapter.getLastRequest().getRecipient());
+    assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
+    assertEquals("2026-05-29T10:00:00Z",
+        adapter.getLastRequest().getData().getString("date"));
+    assertFalse(adapter.getLastRequest().getData().has("link"));
   }
 
   @Test
@@ -246,6 +292,12 @@ public class InitialEmailContractsTest {
     return new TransactionalEmailService(
         DefaultEmailContractRegistry.create(fixtureProviders()), adapter,
         new InMemoryEmailSafetyStore());
+  }
+
+  private static TransactionalEmailService service(FakeProviderAdapter adapter,
+      InMemoryEmailSafetyStore safetyStore) {
+    return new TransactionalEmailService(
+        DefaultEmailContractRegistry.create(fixtureProviders()), adapter, safetyStore);
   }
 
   private static List<EmailContractProvider> fixtureProviders() {

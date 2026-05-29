@@ -24,9 +24,8 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
-import java.sql.Connection;
-import java.sql.SQLException;
 import java.util.Base64;
+import java.util.Date;
 import java.util.List;
 import java.util.UUID;
 import java.time.Instant;
@@ -67,6 +66,9 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * Endpoints:
  *   POST /sws/go/register     — Create a new account (public, no auth)
  *   POST /sws/go/login        — Authenticate and get session token (public, no auth)
+ *   POST /sws/go/password-reset/request — Request neutral password reset email (public)
+ *   POST /sws/go/password-reset/confirm — Confirm password reset token (public)
+ *   POST /sws/go/change-password — Change local password (requires session token)
  *   POST /sws/go/onboarding   — Create a new environment (requires session token, streams NDJSON)
  *   GET  /sws/go/me           — Get current account info (requires session token)
  *   GET  /sws/go/environments — List environments for the account (requires session token)
@@ -77,6 +79,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *
  * Database access uses OBDal/OBQuery, including the generated DAL entity for ETGO_Account.
  */
+@SuppressWarnings("java:S1448")
 public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private static final Logger log = LogManager.getLogger(EtendoGoJwtServlet.class);
@@ -89,7 +92,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_STATUS = "status";
   private static final String FIELD_TOKEN = "token";
   private static final String FIELD_MESSAGE = "message";
+  private static final String FIELD_PASSWORD = "password";
   private static final String FIELD_SUCCESS = "success";
+  private static final String FIELD_ACCOUNT = "account";
   private static final String STATUS_SUCCESS = FIELD_SUCCESS;
   private static final String INVALID_JSON_BODY = "Invalid JSON body";
   private static final String INTERNAL_ERROR = "Internal error";
@@ -97,8 +102,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String INVALID_AUTHORIZATION_HEADER =
       "Missing or invalid Authorization header";
   private static final String INVALID_OR_EXPIRED_TOKEN = "Invalid or expired token";
-  private static final String DB_CLIENT_ID = "ad_client_id";
-  private static final String DB_ORG_ID = "ad_org_id";
   private static final String PROGRESS_IN_PROGRESS = "in_progress";
   private static final String PROGRESS_CLIENT = "client";
   private static final String PROGRESS_ERROR = "error";
@@ -109,6 +112,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_ORG_READY = "orgReady";
   private static final String PROGRESS_CUSTOMER = "customer";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
+  private static final long PASSWORD_RESET_TTL_SECONDS = 30 * 60L;
+  private static final String PASSWORD_RESET_NEUTRAL_MESSAGE =
+      "If an account exists for that email, password reset instructions will be sent.";
+  private static final String PASSWORD_RESET_INVALID_MESSAGE =
+      "Invalid or expired password reset token";
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
   OnboardingSequenceGeneratorService onboardingSequenceGeneratorService =
@@ -119,6 +127,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingFiscalDataSetupService();
   OnboardingDefaultCustomerService onboardingDefaultCustomerService =
       new OnboardingDefaultCustomerService();
+  private final TransactionalAuthEmailSender authEmailSender;
+
+  /**
+   * Creates the default servlet wired to the runtime transactional auth email sender.
+   */
+  public EtendoGoJwtServlet() {
+    this(new TransactionalAuthEmailSender());
+  }
+
+  EtendoGoJwtServlet(TransactionalAuthEmailSender authEmailSender) {
+    this.authEmailSender = authEmailSender;
+  }
 
   // --- HTTP method dispatchers ---
 
@@ -143,6 +163,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleRegister(request, response);
     } else if ("/login".equals(path) || "/login/".equals(path)) {
       handleLogin(request, response);
+    } else if ("/password-reset/request".equals(path)
+        || "/password-reset/request/".equals(path)) {
+      handlePasswordResetRequest(request, response);
+    } else if ("/password-reset/confirm".equals(path)
+        || "/password-reset/confirm/".equals(path)) {
+      handlePasswordResetConfirm(request, response);
+    } else if ("/change-password".equals(path) || "/change-password/".equals(path)) {
+      handleChangePassword(request, response);
     } else if ("/onboarding".equals(path) || "/onboarding/".equals(path)) {
       handleOnboarding(request, response);
     } else {
@@ -198,6 +226,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String passwordHash = hashPassword(password);
       String sessionToken = generateToken();
       Account account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, name, sessionToken);
+      sendAuthEmailBestEffort("new-account",
+          () -> authEmailSender.sendNewAccount(request, account));
 
       JSONObject accountJson = new JSONObject();
       accountJson.put("id", account.getId());
@@ -207,7 +237,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
       result.put(FIELD_TOKEN, sessionToken);
-      result.put("account", accountJson);
+      result.put(FIELD_ACCOUNT, accountJson);
 
       writeResponse(response, HttpServletResponse.SC_CREATED, result);
     } catch (RuntimeException e) {
@@ -270,7 +300,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
       result.put(FIELD_TOKEN, sessionToken);
-      result.put("account", accountJson);
+      result.put(FIELD_ACCOUNT, accountJson);
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
@@ -280,6 +310,189 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           "Login failed due to a server error");
     } catch (JSONException e) {
       log.error("JSON error building login response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * POST /sws/go/password-reset/request
+   * Body: { "email": "..." }
+   * Always returns neutral success for syntactically valid requests.
+   */
+  private void handlePasswordResetRequest(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return;
+    }
+
+    String email;
+    try {
+      email = body.getString(FIELD_EMAIL).trim().toLowerCase();
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing required field: email");
+      return;
+    }
+    if (email.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Field email must not be empty");
+      return;
+    }
+
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
+      if (account != null) {
+        String resetToken = generatePasswordResetToken();
+        String resetTokenHash = hashResetToken(resetToken);
+        Date expiresAt = Date.from(Instant.now().plusSeconds(PASSWORD_RESET_TTL_SECONDS));
+        EtendoGoJwtDalHelper.storePasswordResetToken(account, resetTokenHash, expiresAt);
+        sendAuthEmailBestEffort("reset-password",
+            () -> authEmailSender.sendPasswordReset(request, account, resetToken, resetTokenHash));
+      }
+      writePasswordResetNeutralResponse(response);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("password reset request", e, log);
+      log.error("Password reset request failed", e);
+      writePasswordResetNeutralResponse(response);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * POST /sws/go/password-reset/confirm
+   * Body: { "token": "...", "password": "..." }
+   */
+  private void handlePasswordResetConfirm(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return;
+    }
+
+    String token;
+    String password;
+    try {
+      token = body.getString(FIELD_TOKEN).trim();
+      password = body.getString(FIELD_PASSWORD);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Missing required fields: token, password");
+      return;
+    }
+    if (token.isEmpty() || password.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Fields token and password must not be empty");
+      return;
+    }
+
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByResetTokenHash(
+          hashResetToken(token), new Date());
+      if (account == null) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, PASSWORD_RESET_INVALID_MESSAGE);
+        return;
+      }
+      EtendoGoJwtDalHelper.consumePasswordReset(account, hashPassword(password), new Date());
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_MESSAGE, "Password reset successfully");
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("password reset confirm", e, log);
+      log.error("Password reset confirm failed", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error building password reset response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * POST /sws/go/change-password
+   * Header: Authorization: Bearer <session_token>
+   * Body: { "currentPassword": "...", "newPassword": "..." }
+   */
+  private void handleChangePassword(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String token = extractBearerToken(request);
+    if (token == null) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
+      return;
+    }
+
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return;
+    }
+
+    String currentPassword;
+    String newPassword;
+    try {
+      currentPassword = body.getString("currentPassword");
+      newPassword = body.getString("newPassword");
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Missing required fields: currentPassword, newPassword");
+      return;
+    }
+    if (currentPassword.isEmpty() || newPassword.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Fields currentPassword and newPassword must not be empty");
+      return;
+    }
+
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
+      if (account == null) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+      if (!verifyPassword(currentPassword, account.getPasswordHash())) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Current password is invalid");
+        return;
+      }
+      String sessionToken = generateToken();
+      EtendoGoJwtDalHelper.changePassword(account, hashPassword(newPassword), sessionToken,
+          new Date());
+      sendAuthEmailBestEffort("password-changed",
+          () -> authEmailSender.sendPasswordChanged(account));
+
+      JSONObject accountJson = new JSONObject();
+      accountJson.put("id", account.getId());
+      accountJson.put(FIELD_EMAIL, account.getEmail());
+      accountJson.put("name", account.getName());
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_TOKEN, sessionToken);
+      result.put(FIELD_ACCOUNT, accountJson);
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("change password", e, log);
+      log.error("Change password failed", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error building change password response", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
     } finally {
       OBContext.restorePreviousMode();
@@ -403,25 +616,24 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
 
-    Connection conn = OBDal.getInstance().getConnection();
     try {
-      String accountEmail = EtendoGoJwtSupport.requireAccountEmail(conn, token);
+      String accountEmail = EtendoGoJwtSupport.requireAccountEmail(token);
       if (accountEmail == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
 
-      if (!EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(conn, accountEmail, userId)) {
+      if (!EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(accountEmail, userId)) {
         writeError(response, HttpServletResponse.SC_FORBIDDEN,
             "User does not belong to this account");
         return;
       }
 
-        EtendoGoJwtSupport.RoleListData roleListData =
-          EtendoGoJwtSupport.loadRoleListData(conn, userId);
+      EtendoGoJwtSupport.RoleListData roleListData =
+          EtendoGoJwtSupport.loadRoleListData(userId);
       writeEnvironmentLoginResponse(response, userId, roleListData);
 
-    } catch (SQLException e) {
+    } catch (RuntimeException e) {
       log.error("Database error in /login", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
     } catch (JSONException e) {
@@ -455,12 +667,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
     final String accountEmail;
     try {
-      accountEmail = EtendoGoJwtSupport.requireAccountEmail(currentConnection(), token);
+      accountEmail = EtendoGoJwtSupport.requireAccountEmail(token);
       if (accountEmail == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
-    } catch (SQLException e) {
+    } catch (RuntimeException e) {
       log.error("Database error validating token for onboarding", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
       return;
@@ -519,6 +731,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
 
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
+      Account account = findAccountForCommittedOnboarding(token, accountEmail);
+      sendAuthEmailBestEffort("environment-ready",
+          () -> authEmailSender.sendEnvironmentReady(request, account, clientId));
 
       sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
       sendProgress(writer, "finalize", "done", "Environment ready");
@@ -614,22 +829,21 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String adminPassword) throws Exception {
     sendProgress(writer, PROGRESS_CLIENT, PROGRESS_IN_PROGRESS,
         "Creating client: " + requestData.clientName + "...");
-    String clientId = EtendoGoJwtSupport.findClientIdByName(currentConnection(), requestData.clientName);
+    String clientId = EtendoGoJwtSupport.findClientIdByName(requestData.clientName);
     if (clientId != null) {
       return validateExistingClient(writer, requestData.clientName, clientId) ? clientId : null;
     }
 
-    String clientUser = EtendoGoJwtSupport.buildClientUsername(currentConnection(), accountEmail,
-        requestData.clientName);
+    String clientUser = EtendoGoJwtSupport.buildClientUsername(accountEmail, requestData.clientName);
     if (!createClient(vars, currencyId, requestData.clientName, clientUser, adminPassword, writer)) {
       return null;
     }
-    return EtendoGoJwtSupport.findClientIdByName(currentConnection(), requestData.clientName);
+    return EtendoGoJwtSupport.findClientIdByName(requestData.clientName);
   }
 
   private boolean validateExistingClient(PrintWriter writer, String clientName,
-      String clientId) throws SQLException {
-    if (!EtendoGoJwtSupport.hasStarOrganization(currentConnection(), clientId)) {
+      String clientId) {
+    if (!EtendoGoJwtSupport.hasStarOrganization(clientId)) {
       sendProgress(writer, PROGRESS_CLIENT, PROGRESS_ERROR,
           "Client '" + clientName + "' exists but is incomplete. Use a different name.");
       sendFinalResult(writer, false,
@@ -659,7 +873,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private AdminContextData resolveAdminContextData(String clientId,
-      PrintWriter writer) throws SQLException {
+      PrintWriter writer) {
     AdminContextData data = new AdminContextData();
     var adminUserRole = EtendoGoJwtDalHelper.findClientAdminUserRole(clientId);
     if (adminUserRole != null) {
@@ -672,16 +886,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendFinalResult(writer, false, "Admin role not found — client may be incomplete");
       return null;
     }
-    data.starOrgId = EtendoGoJwtSupport.findStarOrgId(OBDal.getInstance().getConnection(), clientId);
+    data.starOrgId = EtendoGoJwtSupport.findStarOrgId(clientId);
     OBContext.setOBContext(data.adminUserId, data.adminRoleId, clientId, data.starOrgId);
     return data;
   }
 
   private Boolean ensureOrganization(PrintWriter writer, String clientName,
-      String clientId, AdminContextData adminContext, String currencyId) throws SQLException {
+      String clientId, AdminContextData adminContext, String currencyId) {
     sendProgress(writer, PROGRESS_ORGANIZATION, PROGRESS_IN_PROGRESS,
         "Creating organization: " + clientName + "...");
-    if (EtendoGoJwtSupport.organizationExists(currentConnection(), clientId)) {
+    if (EtendoGoJwtSupport.organizationExists(clientId)) {
       sendProgress(writer, PROGRESS_ORGANIZATION, "done",
           "Organization already exists, resuming...");
       return Boolean.FALSE;
@@ -926,8 +1140,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return false;
     }
   }
-  private Connection currentConnection() {
-    return OBDal.getInstance().getConnection();
+  private Account findAccountForCommittedOnboarding(String token, String accountEmail) {
+    Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
+    return account != null ? account : EtendoGoJwtDalHelper.findActiveAccountByEmail(accountEmail);
+  }
+
+  private void sendAuthEmailBestEffort(String contractName, Runnable sendAction) {
+    try {
+      sendAction.run();
+    } catch (RuntimeException e) {
+      log.warn("Transactional auth email {} failed without blocking account flow",
+          contractName, e);
+    }
   }
 
 
@@ -937,6 +1161,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private String generateToken() {
     return UUID.randomUUID().toString().replace("-", "").toLowerCase();
+  }
+
+  private String generatePasswordResetToken() {
+    byte[] token = new byte[32];
+    new SecureRandom().nextBytes(token);
+    return Base64.getUrlEncoder().withoutPadding().encodeToString(token);
+  }
+
+  private String hashResetToken(String token) {
+    try {
+      MessageDigest md = MessageDigest.getInstance(HASH_ALGORITHM);
+      byte[] digest = md.digest(token.getBytes(StandardCharsets.UTF_8));
+      return Base64.getEncoder().encodeToString(digest);
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException("SHA-256 not available", e);
+    }
   }
 
   // --- HTTP utilities ---
@@ -967,6 +1207,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
     }
     return new JSONObject(sb.toString());
+  }
+
+  private void writePasswordResetNeutralResponse(HttpServletResponse response)
+      throws IOException {
+    try {
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_MESSAGE, PASSWORD_RESET_NEUTRAL_MESSAGE);
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (JSONException e) {
+      log.error("JSON error building password reset request response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
   }
 
   /**

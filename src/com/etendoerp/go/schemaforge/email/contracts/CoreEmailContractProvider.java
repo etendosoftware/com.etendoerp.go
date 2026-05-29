@@ -35,6 +35,7 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
   private final EmailContractDataResolver contractResolver;
   private static final int RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT = 3;
   private static final int NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT = 2;
+  private static final int ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT = 2;
   private static final int ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS = 900;
 
   /**
@@ -60,6 +61,9 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
             RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
         new AccountLinkEmailContract("new-account", "new-account", contractResolver,
             NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
+        new AccountLinkEmailContract("environment-ready", "environment-ready", contractResolver,
+            ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
+        new AccountNoticeEmailContract("password-changed", "password-changed", contractResolver),
         new LoginAlertEmailContract(contractResolver));
   }
 }

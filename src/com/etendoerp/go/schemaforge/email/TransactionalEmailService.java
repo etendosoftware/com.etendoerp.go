@@ -79,7 +79,8 @@ public class TransactionalEmailService {
    * Creates the default executor with runtime provider configuration.
    */
   public TransactionalEmailService() {
-    this(DefaultEmailContractRegistry.createDefault(), new ApiGatewayEmailProviderAdapter());
+    this(DefaultEmailContractRegistry.createDefault(), new ApiGatewayEmailProviderAdapter(),
+        new DalEmailSafetyStore(), new LogEmailObservabilitySink());
   }
 
   /**
