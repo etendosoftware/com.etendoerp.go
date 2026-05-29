@@ -84,8 +84,24 @@ public class BankStatementsHandler implements NeoHandler {
           + "       bs.importdate,"
           + "       bs.statementdate,"
           + "       bs.processed,"
-          + "       bs.posted"
+          + "       bs.posted,"
+          + "       agg.line_count,"
+          + "       agg.matched_count,"
+          + "       agg.total_amount,"
+          + "       agg.period_from,"
+          + "       agg.period_to"
           + "  FROM fin_bankstatement bs"
+          + "  LEFT JOIN ("
+          + "    SELECT bsl.fin_bankstatement_id,"
+          + "           COUNT(*) AS line_count,"
+          + "           SUM(CASE WHEN bsl.fin_finacc_transaction_id IS NOT NULL THEN 1 ELSE 0 END) AS matched_count,"
+          + "           SUM(COALESCE(bsl.cramount,0) + COALESCE(bsl.dramount,0)) AS total_amount,"
+          + "           MIN(bsl.datetrx) AS period_from,"
+          + "           MAX(bsl.datetrx) AS period_to"
+          + "      FROM fin_bankstatementline bsl"
+          + "     WHERE bsl.isactive = 'Y'"
+          + "     GROUP BY bsl.fin_bankstatement_id"
+          + "  ) agg ON agg.fin_bankstatement_id = bs.fin_bankstatement_id"
           + " WHERE bs.fin_financial_account_id = ?"
           + "   AND bs.isactive = 'Y'"
           + " ORDER BY bs.importdate DESC";
@@ -93,7 +109,7 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String LINES_SQL =
       "SELECT bsl.fin_bankstatementline_id,"
           + "       bsl.line,"
-          + "       bsl.transactiondate,"
+          + "       bsl.datetrx,"
           + "       bsl.description,"
           + "       bsl.referenceno,"
           + "       bsl.bpartnername,"
@@ -210,8 +226,17 @@ public class BankStatementsHandler implements NeoHandler {
       FIN_BankStatement statement = newBankStatement(account, fileName);
       OBDal.getInstance().save(statement);
 
+      StatementFormat format = detectFormat(fileBytes);
+      if (format == StatementFormat.UNKNOWN) {
+        return NeoResponse.error(400,
+            "Could not detect bank statement format. Expected either a Cuaderno 43 file"
+                + " (80-char records starting with '11') or a generic CSV with"
+                + " 'Transaction Date', 'Amount IN', 'Amount OUT' columns.");
+      }
       ByteArrayInputStream stream = new ByteArrayInputStream(fileBytes);
-      int lineCount = parseC43(stream, statement);
+      int lineCount = (format == StatementFormat.GENERIC_CSV)
+          ? parseGenericCsv(stream, statement)
+          : parseC43(stream, statement);
 
       processStatement(statement);
 
@@ -303,6 +328,74 @@ public class BankStatementsHandler implements NeoHandler {
     return (FIN_BankStatementImport) clazz.getDeclaredConstructor().newInstance();
   }
 
+  /**
+   * Parses a generic CSV bank statement file using {@link GenericCsvBankStatementImporter}
+   * — same column layout as the upstream {@code org.openbravo.bankstatement.importer.generic.csv}
+   * module, but ported here so we don't take it as a runtime dependency.
+   */
+  int parseGenericCsv(ByteArrayInputStream stream, FIN_BankStatement statement) throws Exception {
+    return new GenericCsvBankStatementImporter().loadFile(stream, statement);
+  }
+
+  enum StatementFormat { C43, GENERIC_CSV, UNKNOWN }
+
+  /**
+   * Sniffs the first few lines of {@code fileBytes} to decide which parser to
+   * dispatch — neither the file extension nor a user choice is taken into
+   * account.
+   *
+   * <p>Heuristics, in priority order:
+   * <ul>
+   *   <li><b>Cuaderno 43</b>: at least one of the first non-blank lines is
+   *       exactly 80 chars long and starts with one of the record markers
+   *       {@code 11}, {@code 22}, {@code 33}, {@code 99}. The C43 spec
+   *       mandates fixed-width 80-char records, so this is essentially zero
+   *       false-positive against any plain-text or CSV file.</li>
+   *   <li><b>Generic CSV</b>: the first non-blank line contains at least two
+   *       of the known headers (case-insensitive): {@code Transaction Date},
+   *       {@code Amount IN}, {@code Amount OUT}, {@code Reference No.},
+   *       {@code Business Partner Name}, {@code Description}.</li>
+   *   <li>Otherwise {@code UNKNOWN}.</li>
+   * </ul>
+   */
+  static StatementFormat detectFormat(byte[] fileBytes) {
+    if (fileBytes == null || fileBytes.length == 0) return StatementFormat.UNKNOWN;
+    // Only the head of the file is needed; this also caps cost on large uploads.
+    int sampleLen = Math.min(fileBytes.length, 4096);
+    String head = new String(fileBytes, 0, sampleLen, java.nio.charset.StandardCharsets.UTF_8);
+
+    String[] lines = head.split("\\r?\\n", -1);
+    for (String line : lines) {
+      if (StringUtils.isBlank(line)) continue;
+      if (line.length() == 80 && line.length() >= 2) {
+        String code = line.substring(0, 2);
+        if ("11".equals(code) || "22".equals(code) || "33".equals(code) || "99".equals(code)) {
+          return StatementFormat.C43;
+        }
+      }
+      // First non-blank line is interesting for both formats — keep going to
+      // check the CSV header only if no C43 marker is found.
+      break;
+    }
+
+    // CSV header check: look at the first non-blank line again (the file
+    // header) regardless of where it landed in the byte sample.
+    for (String line : lines) {
+      if (StringUtils.isBlank(line)) continue;
+      String lower = line.toLowerCase(java.util.Locale.ROOT);
+      int hits = 0;
+      for (String hdr : new String[] {
+          "transaction date", "amount in", "amount out",
+          "reference no.", "business partner name", "description" }) {
+        if (lower.contains(hdr)) hits++;
+      }
+      if (hits >= 2) return StatementFormat.GENERIC_CSV;
+      break;
+    }
+
+    return StatementFormat.UNKNOWN;
+  }
+
   JSONArray loadStatements(String accountId) throws Exception {
     JSONArray arr = new JSONArray();
     Connection conn = OBDal.getInstance().getConnection();
@@ -310,6 +403,11 @@ public class BankStatementsHandler implements NeoHandler {
       ps.setString(1, accountId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
+          int lineCount = rs.getInt("line_count");
+          int matchedCount = rs.getInt("matched_count");
+          String periodFrom = formatDate(rs.getTimestamp("period_from"));
+          String periodTo = formatDate(rs.getTimestamp("period_to"));
+
           JSONObject row = new JSONObject();
           row.put("id", rs.getString("fin_bankstatement_id"));
           row.put("documentNo", StringUtils.trimToEmpty(rs.getString("documentno")));
@@ -319,11 +417,35 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("transactionDate", formatDate(rs.getTimestamp("statementdate")));
           row.put("processed", StringUtils.trimToEmpty(rs.getString("processed")));
           row.put("posted", StringUtils.trimToEmpty(rs.getString("posted")));
+          row.put("lineCount", lineCount);
+          row.put("matchedCount", matchedCount);
+          row.put("totalAmount", nullSafeBigDecimal(rs.getBigDecimal("total_amount")));
+          row.put("periodFrom", periodFrom);
+          row.put("periodTo", periodTo);
+          row.put("status", deriveStatementStatus(lineCount, matchedCount));
           arr.put(row);
         }
       }
     }
     return arr;
+  }
+
+  /**
+   * Three-state status derived from how many of the statement's lines are
+   * already matched to a financial-account transaction:
+   *   matched == 0           → PENDING
+   *   0 < matched < total    → PARTIAL
+   *   matched == total > 0   → RECONCILED
+   *   total == 0             → PENDING (empty statement)
+   */
+  static String deriveStatementStatus(int lineCount, int matchedCount) {
+    if (lineCount == 0 || matchedCount == 0) return "PENDING";
+    if (matchedCount >= lineCount) return "RECONCILED";
+    return "PARTIAL";
+  }
+
+  static BigDecimal nullSafeBigDecimal(BigDecimal value) {
+    return value == null ? BigDecimal.ZERO : value;
   }
 
   JSONArray loadLines(String statementId) throws Exception {
@@ -338,7 +460,7 @@ public class BankStatementsHandler implements NeoHandler {
           JSONObject row = new JSONObject();
           row.put("id", rs.getString("fin_bankstatementline_id"));
           row.put("lineNo", rs.getLong("line"));
-          row.put("date", formatDate(rs.getTimestamp("transactiondate")));
+          row.put("date", formatDate(rs.getTimestamp("datetrx")));
           row.put("description", StringUtils.trimToEmpty(rs.getString("description")));
           row.put("reference", StringUtils.trimToEmpty(rs.getString("referenceno")));
           row.put("bpartnerName", StringUtils.trimToEmpty(rs.getString("bpartnername")));
@@ -354,9 +476,5 @@ public class BankStatementsHandler implements NeoHandler {
   private String formatDate(Timestamp ts) {
     if (ts == null) return "";
     return ISO_UTC.format(Instant.ofEpochMilli(ts.getTime()));
-  }
-
-  static BigDecimal nullSafeBigDecimal(BigDecimal value) {
-    return value == null ? BigDecimal.ZERO : value;
   }
 }
