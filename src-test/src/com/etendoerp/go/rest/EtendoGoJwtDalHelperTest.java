@@ -234,6 +234,15 @@ class EtendoGoJwtDalHelperTest {
     }
 
     @Test
+    @DisplayName("ignores null reset token state inputs")
+    void ignoresNullPasswordResetTokenStateInputs() {
+      assertNull(EtendoGoJwtDalHelper.capturePasswordResetToken(null));
+
+      EtendoGoJwtDalHelper.restorePasswordResetToken(null, null);
+      EtendoGoJwtDalHelper.restorePasswordResetToken(account, null);
+    }
+
+    @Test
     @DisplayName("finds active account by unconsumed, unexpired reset token hash")
     void findsActiveAccountByResetTokenHash() {
       Date now = new Date();

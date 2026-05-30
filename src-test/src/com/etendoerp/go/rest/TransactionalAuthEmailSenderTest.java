@@ -71,7 +71,7 @@ public class TransactionalAuthEmailSenderTest {
   }
 
   @Test
-  public void sendEnvironmentReadyUsesDashboardLinkAndClientIdIdempotency() throws Exception {
+  public void sendEnvironmentReadyUsesServerLinkAndClientIdIdempotency() throws Exception {
     System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
     TransactionalEmailService emailService = mock(TransactionalEmailService.class);
     TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
@@ -81,8 +81,9 @@ public class TransactionalAuthEmailSenderTest {
         () -> sender.sendEnvironmentReady(mock(HttpServletRequest.class), account, "client-1"),
         "environment-ready");
 
-    assertBaseCommand(command);
-    assertFalse(command.has(EmailContractCommandSupport.FIELD_LINK));
+    assertBaseCommand(command, "client-1");
+    assertEquals("https://app.example.test/dashboard",
+        command.getString(EmailContractCommandSupport.FIELD_LINK));
     assertEquals("client-1", command.getString(EmailContractCommandSupport.FIELD_RECORD_ID));
   }
 
@@ -177,10 +178,15 @@ public class TransactionalAuthEmailSenderTest {
   }
 
   private static void assertBaseCommand(JSONObject command) throws Exception {
+    assertBaseCommand(command, "account-1");
+  }
+
+  private static void assertBaseCommand(JSONObject command, String expectedTenantId)
+      throws Exception {
     assertEquals(EmailContractCommandSupport.VERSION,
         command.getString(EmailContractCommandSupport.FIELD_VERSION));
     assertEquals("account-1", command.getString(EmailContractCommandSupport.FIELD_ACCOUNT_ID));
-    assertEquals("account-1", command.getString(EmailContractCommandSupport.FIELD_TENANT_ID));
+    assertEquals(expectedTenantId, command.getString(EmailContractCommandSupport.FIELD_TENANT_ID));
   }
 
   private static Account account(String id) {

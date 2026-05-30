@@ -155,7 +155,10 @@ final class AccountLinkEmailContract implements EmailContract {
     if (configuredLinkPath == null) {
       return EmailContractCommandSupport.text(command, EmailContractCommandSupport.FIELD_LINK);
     }
-    return PublicUrlResolver.appendPath(PublicUrlResolver.resolveConfiguredAppBaseUrl(),
-        configuredLinkPath);
+    String baseUrl = PublicUrlResolver.resolveConfiguredAppBaseUrl();
+    if (baseUrl == null) {
+      return null;
+    }
+    return PublicUrlResolver.appendPath(baseUrl, configuredLinkPath);
   }
 }

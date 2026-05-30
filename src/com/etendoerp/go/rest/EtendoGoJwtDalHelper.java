@@ -107,12 +107,18 @@ final class EtendoGoJwtDalHelper {
   }
 
   static PasswordResetTokenState capturePasswordResetToken(Account account) {
+    if (account == null) {
+      return null;
+    }
     return new PasswordResetTokenState((String) account.get(PROPERTY_RESET_TOKEN_HASH),
         (Date) account.get(PROPERTY_RESET_TOKEN_EXPIRES),
         (Date) account.get(PROPERTY_RESET_TOKEN_CONSUMED));
   }
 
   static void restorePasswordResetToken(Account account, PasswordResetTokenState tokenState) {
+    if (account == null || tokenState == null) {
+      return;
+    }
     account.set(PROPERTY_RESET_TOKEN_HASH, tokenState.resetTokenHash);
     account.set(PROPERTY_RESET_TOKEN_EXPIRES, tokenState.resetTokenExpires);
     account.set(PROPERTY_RESET_TOKEN_CONSUMED, tokenState.resetTokenConsumed);

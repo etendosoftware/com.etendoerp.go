@@ -62,7 +62,11 @@ class TransactionalAuthEmailSender {
       return false;
     }
     try {
-      JSONObject body = baseCommand(account);
+      JSONObject body = baseCommand(account, clientId);
+      String dashboardLink = EtendoGoAuthLinkBuilder.dashboardLink(request);
+      if (dashboardLink != null) {
+        body.put(EmailContractCommandSupport.FIELD_LINK, dashboardLink);
+      }
       body.put(EmailContractCommandSupport.FIELD_RECORD_ID, clientId);
       return sendBestEffort(CONTRACT_ENVIRONMENT_READY, body);
     } catch (JSONException e) {
@@ -112,10 +116,17 @@ class TransactionalAuthEmailSender {
   }
 
   private JSONObject baseCommand(Account account) throws JSONException {
+    return baseCommand(account, account.getId());
+  }
+
+  private JSONObject baseCommand(Account account, String tenantId) throws JSONException {
     JSONObject body = new JSONObject();
     body.put(EmailContractCommandSupport.FIELD_VERSION, EmailContractCommandSupport.VERSION);
     body.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, account.getId());
-    body.put(EmailContractCommandSupport.FIELD_TENANT_ID, account.getId());
+    // Local account emails can be sent before an environment client exists; use the account id
+    // as the fallback throttle partition to avoid a single global auth-email bucket.
+    body.put(EmailContractCommandSupport.FIELD_TENANT_ID,
+        EmailContractCommandSupport.firstNonBlank(tenantId, account.getId()));
     return body;
   }
 
