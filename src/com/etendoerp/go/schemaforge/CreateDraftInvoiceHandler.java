@@ -196,7 +196,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         OBDal.getInstance().getSession().refresh(invoice);
         ensureDocumentNo(invoice);
         if (SPEC_GOODS_SHIPMENT.equals(specName)) {
-          ensureLineGrossAmounts(invoice);
+          getSupport().ensureLineGrossAmounts(invoice);
           recalculateTotals(invoice);
           OBDal.getInstance().flush();
         }
@@ -625,7 +625,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
     OBDal.getInstance().getSession().refresh(invoice);
     invoice = getSupport().applyOrderDiscountToInvoice(invoice, orderId, totalDiscountService);
-    ensureLineGrossAmounts(invoice);
+    getSupport().ensureLineGrossAmounts(invoice);
 
     return invoice;
   }
@@ -1109,12 +1109,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   private void applyPricesFromOrderLine(InvoiceLine il, OrderLine ol, BigDecimal qty, Invoice invoice) {
     BigDecimal unitPrice = ol.getUnitPrice() != null ? ol.getUnitPrice() : BigDecimal.ZERO;
     BigDecimal rawList  = ol.getListPrice();
+    String productId = ol.getProduct() != null ? ol.getProduct().getId() : null;
+    String priceListId = invoice.getPriceList() != null ? invoice.getPriceList().getId() : null;
     BigDecimal listPrice = (rawList != null && rawList.compareTo(BigDecimal.ZERO) > 0)
         ? rawList
-        : resolveListPriceFromPriceList(
-            ol.getProduct()       != null ? ol.getProduct().getId()       : null,
-            invoice.getPriceList() != null ? invoice.getPriceList().getId() : null,
-            unitPrice);
+        : resolveListPriceFromPriceList(productId, priceListId, unitPrice);
     il.setUnitPrice(unitPrice);
     il.setListPrice(listPrice);
     il.setPriceLimit(ol.getPriceLimit());
@@ -1127,12 +1126,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   private void applyPricesFromInvoiceLine(InvoiceLine il, InvoiceLine sourceIL, BigDecimal qty, Invoice invoice) {
     BigDecimal unitPrice = sourceIL.getUnitPrice() != null ? sourceIL.getUnitPrice() : BigDecimal.ZERO;
     BigDecimal rawList  = sourceIL.getListPrice();
+    String productId = sourceIL.getProduct() != null ? sourceIL.getProduct().getId() : null;
+    String priceListId = invoice.getPriceList() != null ? invoice.getPriceList().getId() : null;
     BigDecimal listPrice = (rawList != null && rawList.compareTo(BigDecimal.ZERO) > 0)
         ? rawList
-        : resolveListPriceFromPriceList(
-            sourceIL.getProduct()  != null ? sourceIL.getProduct().getId()  : null,
-            invoice.getPriceList() != null ? invoice.getPriceList().getId() : null,
-            unitPrice);
+        : resolveListPriceFromPriceList(productId, priceListId, unitPrice);
     il.setUnitPrice(unitPrice);
     il.setListPrice(listPrice);
     if (sourceIL.getPriceLimit() != null) {
@@ -1216,16 +1214,6 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       log.warn("Could not find linked invoice line for shipment line {}: {}", shipmentLineId, e.getMessage());
       return null;
     }
-  }
-
-  /** Delegates to {@link InvoiceFromOrderSupport} — logic shared with the purchase path. */
-  protected void ensureLineGrossAmounts(Invoice invoice) {
-    getSupport().ensureLineGrossAmounts(invoice);
-  }
-
-  /** Delegates to {@link InvoiceFromOrderSupport} — logic shared with the purchase path. */
-  protected BigDecimal calculateLineGross(InvoiceLine il, int precision) {
-    return getSupport().calculateLineGross(il, precision);
   }
 
   /**

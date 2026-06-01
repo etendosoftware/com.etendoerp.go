@@ -48,6 +48,8 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(GoodsShipmentHeaderHandler.class);
   private static final String FIELD_INVOICE_STATUS = "invoiceStatus";
+  private static final String FIELD_DOCUMENT_NO = "documentNo";
+  private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
 
   @Inject
   private CreateDraftInvoiceHandler createDraftInvoiceHandler;
@@ -183,9 +185,9 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
         while (rs.next()) {
           JSONObject order = new JSONObject();
           order.put("id", rs.getString(1));
-          order.put("documentNo", rs.getString(2));
+          order.put(FIELD_DOCUMENT_NO, rs.getString(2));
           order.put("grandTotalAmount", rs.getBigDecimal(3));
-          order.put("documentStatus", rs.getString(4));
+          order.put(FIELD_DOCUMENT_STATUS, rs.getString(4));
           order.put("currency$_identifier", rs.getString(5));
           orders.put(order);
         }
@@ -220,9 +222,9 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
         while (rs.next()) {
           JSONObject inv = new JSONObject();
           inv.put("id", rs.getString(1));
-          inv.put("documentNo", rs.getString(2));
+          inv.put(FIELD_DOCUMENT_NO, rs.getString(2));
           inv.put("grandTotalAmount", rs.getBigDecimal(3));
-          inv.put("documentStatus", rs.getString(4));
+          inv.put(FIELD_DOCUMENT_STATUS, rs.getString(4));
           inv.put("currency$_identifier", rs.getString(5));
           invoices.put(inv);
         }
@@ -251,8 +253,8 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
         while (rs.next()) {
           JSONObject ret = new JSONObject();
           ret.put("id", rs.getString(1));
-          ret.put("documentNo", rs.getString(2));
-          ret.put("documentStatus", rs.getString(3));
+          ret.put(FIELD_DOCUMENT_NO, rs.getString(2));
+          ret.put(FIELD_DOCUMENT_STATUS, rs.getString(3));
           returns.put(ret);
         }
       }
