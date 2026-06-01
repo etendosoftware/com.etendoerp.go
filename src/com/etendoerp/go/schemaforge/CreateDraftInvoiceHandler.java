@@ -418,18 +418,20 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'";
 
     Map<String, BigDecimal> result = new HashMap<>();
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, shipmentId);
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          String lineId = rs.getString(1);
-          BigDecimal movQty = rs.getBigDecimal(2);
-          BigDecimal invQty = rs.getBigDecimal(3);
-          BigDecimal pending = (movQty != null ? movQty : BigDecimal.ZERO)
-              .subtract(invQty != null ? invQty : BigDecimal.ZERO)
-              .max(BigDecimal.ZERO);
-          result.put(lineId, pending);
+    try {
+      Connection conn = OBDal.getInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, shipmentId);
+        try (ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) {
+            String lineId = rs.getString(1);
+            BigDecimal movQty = rs.getBigDecimal(2);
+            BigDecimal invQty = rs.getBigDecimal(3);
+            BigDecimal pending = (movQty != null ? movQty : BigDecimal.ZERO)
+                .subtract(invQty != null ? invQty : BigDecimal.ZERO)
+                .max(BigDecimal.ZERO);
+            result.put(lineId, pending);
+          }
         }
       }
     } catch (Exception e) {
