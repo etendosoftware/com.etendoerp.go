@@ -142,11 +142,11 @@ class Fiscal349BoxesHandler {
     List<TaxRate> taxesPurchase = dao349.get349Taxes(taxReport.getId(), "Purchase");
     List<TaxRate> taxesSales    = dao349.get349Taxes(taxReport.getId(), "Sales");
 
-    Set<Invoice> allPurch  = dao349.get349Invoices(org, taxesPurchase, periods, acctSchema, true);
+    Set<Invoice> allPurch  = dao349.get349Invoices(org, taxesPurchase, periods, acctSchema, true, null);
     Set<Invoice> corrPurch = dao349.getCorrectiveInvoices(allPurch);
     Set<Invoice> purch     = dao349.removeCorrectiveInvoices(allPurch, corrPurch);
 
-    Set<Invoice> allSales  = dao349.get349Invoices(org, taxesSales, periods, acctSchema, false);
+    Set<Invoice> allSales  = dao349.get349Invoices(org, taxesSales, periods, acctSchema, false, null);
     Set<Invoice> corrSales = dao349.getCorrectiveInvoices(allSales);
     Set<Invoice> sales     = dao349.removeCorrectiveInvoices(allSales, corrSales);
 
