@@ -44,6 +44,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.calendar.Period;
@@ -251,12 +252,18 @@ class Fiscal349BoxesHandler {
     // Required: generateLine1 calls inputParams.get("Substitutive").equals("Y") — NPE if absent.
     inputParams.put("Substitutive", "N");
     // Phone and Contact: AEAT3492010Report checks constantParameters first (TaxReport config),
-    // then falls back to inputParams. Accept them as optional query params so callers can supply
-    // them if not pre-configured in the TaxReport.
+    // then falls back to inputParams. Query params override; fall back to AD_OrgInformation /
+    // current user so generation works even without TaxReport pre-configuration.
     String phone   = request.getParameter("phone");
     String contact = request.getParameter("contact");
-    if (phone   != null) inputParams.put("Phone",   phone);
-    if (contact != null) inputParams.put("Contact", contact);
+    if (phone == null || phone.isEmpty()) {
+      phone = resolveOrgPhone(orgId);
+    }
+    if (contact == null || contact.isEmpty()) {
+      contact = OBContext.getOBContext().getUser().getName();
+    }
+    if (phone   != null && !phone.isEmpty())   inputParams.put("Phone",   phone);
+    if (contact != null && !contact.isEmpty()) inputParams.put("Contact", contact);
 
     OBTL_TaxReport_I report = (OBTL_TaxReport_I)
         Class.forName(taxReport.getJavaClassName()).getDeclaredConstructor().newInstance();
@@ -314,6 +321,17 @@ class Fiscal349BoxesHandler {
   }
 
   // ── resolution helpers ────────────────────────────────────────────
+
+  private String resolveOrgPhone(String orgId) {
+    OBCriteria<OrganizationInformation> crit =
+        OBDal.getInstance().createCriteria(OrganizationInformation.class);
+    crit.add(Restrictions.eq(OrganizationInformation.PROPERTY_ORGANIZATION + ".id", orgId));
+    crit.setMaxResults(1);
+    List<OrganizationInformation> list = crit.list();
+    if (list.isEmpty()) return null;
+    String phone = list.get(0).getPhone();
+    return phone != null && !phone.isEmpty() ? phone : list.get(0).getPhone2();
+  }
 
   TaxReport resolveTaxReport349(String orgId, String periodCode) {
     String type = periodCode.startsWith("T") ? "Q" : "M";
