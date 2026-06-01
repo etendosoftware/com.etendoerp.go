@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -36,8 +37,11 @@ import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.ProcessParameter;
+import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -225,6 +229,95 @@ public class NeoProcessServiceTest {
   @Test(expected = NullPointerException.class)
   public void describeProcessNullProcessReturns400() {
     NeoProcessService.describeProcess(null);
+  }
+
+  // ===================== addKeyColumnToContent =====================
+
+  @Test
+  public void addKeyColumnToContentMapsRecordIdUnderKeyColumnName() throws Exception {
+    Column keyCol = mock(Column.class);
+    when(keyCol.isKeyColumn()).thenReturn(true);
+    when(keyCol.getDBColumnName()).thenReturn("A_Asset_ID");
+
+    Table table = mock(Table.class);
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(keyCol));
+
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(table);
+
+    JSONObject content = new JSONObject();
+    NeoProcessService.addKeyColumnToContent(content, tab, "asset-record-1");
+
+    assertEquals("asset-record-1", content.getString("A_Asset_ID"));
+  }
+
+  @Test
+  public void addKeyColumnToContentIgnoresNonKeyColumns() throws Exception {
+    Column nonKeyCol = mock(Column.class);
+    when(nonKeyCol.isKeyColumn()).thenReturn(false);
+    when(nonKeyCol.getDBColumnName()).thenReturn("AD_Org_ID");
+
+    Column keyCol = mock(Column.class);
+    when(keyCol.isKeyColumn()).thenReturn(true);
+    when(keyCol.getDBColumnName()).thenReturn("A_Asset_ID");
+
+    List<Column> cols = new ArrayList<>();
+    cols.add(nonKeyCol);
+    cols.add(keyCol);
+
+    Table table = mock(Table.class);
+    when(table.getADColumnList()).thenReturn(cols);
+
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(table);
+
+    JSONObject content = new JSONObject();
+    NeoProcessService.addKeyColumnToContent(content, tab, "rec-1");
+
+    assertEquals("rec-1", content.getString("A_Asset_ID"));
+    assertFalse(content.has("AD_Org_ID"));
+  }
+
+  @Test
+  public void addKeyColumnToContentStopsAtFirstKeyColumn() throws Exception {
+    Column firstKey = mock(Column.class);
+    when(firstKey.isKeyColumn()).thenReturn(true);
+    when(firstKey.getDBColumnName()).thenReturn("A_Asset_ID");
+
+    Column secondKey = mock(Column.class);
+    when(secondKey.isKeyColumn()).thenReturn(true);
+    when(secondKey.getDBColumnName()).thenReturn("C_Currency_ID");
+
+    List<Column> cols = new ArrayList<>();
+    cols.add(firstKey);
+    cols.add(secondKey);
+
+    Table table = mock(Table.class);
+    when(table.getADColumnList()).thenReturn(cols);
+
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(table);
+
+    JSONObject content = new JSONObject();
+    NeoProcessService.addKeyColumnToContent(content, tab, "rec-1");
+
+    assertEquals("rec-1", content.getString("A_Asset_ID"));
+    assertFalse(content.has("C_Currency_ID"));
+  }
+
+  @Test
+  public void addKeyColumnToContentWithNullTabDoesNothing() throws Exception {
+    JSONObject content = new JSONObject();
+    NeoProcessService.addKeyColumnToContent(content, null, "rec-1");
+    assertEquals(0, content.length());
+  }
+
+  @Test
+  public void addKeyColumnToContentWithNullRecordIdDoesNothing() throws Exception {
+    Tab tab = mock(Tab.class);
+    JSONObject content = new JSONObject();
+    NeoProcessService.addKeyColumnToContent(content, tab, null);
+    assertEquals(0, content.length());
   }
 
   @Test

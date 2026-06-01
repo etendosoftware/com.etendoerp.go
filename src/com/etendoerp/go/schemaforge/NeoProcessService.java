@@ -615,6 +615,13 @@ public class NeoProcessService {
         if (tab != null && tab.getTable() != null) {
           String dalEntityName = tab.getTable().getName();
           content.put("_entityName", dalEntityName);
+
+          // Classic OBUIAPP process handlers read the record id from the table's
+          // key column (e.g. "A_Asset_ID"), not from inpRecordId. Resolve the key
+          // column DB name and expose the record id under it so those handlers work.
+          if (params.has(INP_RECORD_ID)) {
+            addKeyColumnToContent(content, tab, params.getString(INP_RECORD_ID));
+          }
         }
       } catch (Exception e) {
         log.debug("Could not resolve entity name from tab {}", tabId, e);
@@ -636,6 +643,24 @@ public class NeoProcessService {
           handlerInstance, handlerParams, content.toString());
 
       return translateObuiappResult(handlerResult);
+    }
+  }
+
+  /**
+   * Finds the table's key column and adds the recordId to the content JSON under
+   * the column's DB name (e.g. "A_Asset_ID"). Classic OBUIAPP handlers read the
+   * record id this way instead of from inpRecordId.
+   */
+  static void addKeyColumnToContent(JSONObject content, Tab tab,
+      String recordId) throws org.codehaus.jettison.json.JSONException {
+    if (tab == null || tab.getTable() == null || recordId == null) {
+      return;
+    }
+    for (Column col : tab.getTable().getADColumnList()) {
+      if (Boolean.TRUE.equals(col.isKeyColumn())) {
+        content.put(col.getDBColumnName(), recordId);
+        break;
+      }
     }
   }
 
