@@ -115,6 +115,11 @@ public class NeoServlet extends HttpBaseServlet {
       return;
     }
 
+    if ("GET".equals(method) && isDocumentDownloadPath(request.getPathInfo())) {
+      handleDocumentDownload(request, response);
+      return;
+    }
+
     if (!authenticator.authenticateRequest(request, response)) {
       return;
     }
@@ -148,6 +153,28 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error processing NEO request: {}", e.getMessage(), e);
       sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private boolean isDocumentDownloadPath(String pathInfo) {
+    return pathInfo != null && pathInfo.startsWith("/document-download/");
+  }
+
+  private void handleDocumentDownload(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      OBContext.setAdminMode();
+      String token = StringUtils.substringAfter(request.getPathInfo(), "/document-download/");
+      NeoDocumentDownloadService.handle(token, builtInEndpointHandler.getEmailSafetyStore(),
+          response);
+    } catch (Exception e) {
+      log.error("Error processing document download request: {}", e.getMessage(), e);
+      response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+      response.setContentType("text/plain");
+      response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+      response.getWriter().write("Document download failed");
     } finally {
       OBContext.restorePreviousMode();
     }

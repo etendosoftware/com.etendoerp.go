@@ -13,6 +13,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.email.EmailSafetyStore;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 
@@ -47,6 +48,10 @@ class NeoBuiltInEndpointHandler {
     this.discoveryHandler = discoveryHandler;
     this.fiscal303Handler = new Fiscal303BoxesHandler(servlet);
     this.transactionalEmailService = transactionalEmailService;
+  }
+
+  EmailSafetyStore getEmailSafetyStore() {
+    return transactionalEmailService.getSafetyStore();
   }
 
   boolean handle(NeoServlet.NeoPathInfo pathInfo, String method,

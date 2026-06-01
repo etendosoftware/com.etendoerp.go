@@ -128,6 +128,15 @@ public class TransactionalEmailService {
   }
 
   /**
+   * Returns the safety store used for idempotency, throttle, kill switches, and audit.
+   *
+   * @return configured safety store
+   */
+  public EmailSafetyStore getSafetyStore() {
+    return safetyStore;
+  }
+
+  /**
    * Executes a named email contract command.
    *
    * @param contractName stable contract name from the route

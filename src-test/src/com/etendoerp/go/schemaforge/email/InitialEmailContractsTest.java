@@ -305,6 +305,34 @@ public class InitialEmailContractsTest {
   }
 
   @Test
+  public void documentContractGeneratesSignedDownloadLinkWhenConfigured() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "order-invalid-link");
+
+    withDocumentDownloadProperties("https://go.example.test/etendo/sws/neo/document-download",
+        "download-secret", () -> {
+          NeoResponse response = service.send("sales-order-send", command);
+
+          assertSent(response);
+          String downloadLink = adapter.getLastRequest().getData().optString("download_link");
+          assertTrue(downloadLink.startsWith(
+              "https://go.example.test/etendo/sws/neo/document-download/"));
+          String token = downloadLink.substring(downloadLink.lastIndexOf('/') + 1);
+          DocumentDownloadTokenService.Claims claims = DocumentDownloadTokenService.validate(token)
+              .orElse(null);
+          assertEquals("sales-order-send", claims.getContractName());
+          assertEquals("sales-order", claims.getSpecName());
+          assertEquals("order-invalid-link", claims.getRecordId());
+          assertEquals("tenant-1", claims.getClientId());
+          assertEquals("sales-order-send:tenant-1:order-invalid-link:v1",
+              claims.getIdempotencyKey());
+        });
+  }
+
+  @Test
   public void rejectsUnsupportedVersionAsValidationFailure() throws Exception {
     FakeProviderAdapter adapter = new FakeProviderAdapter();
     TransactionalEmailService service = service(adapter);
@@ -427,6 +455,34 @@ public class InitialEmailContractsTest {
     JSONObject data = responseData(response);
     assertEquals(200, response.getHttpStatus());
     assertEquals(TransactionalEmailService.STATUS_SENT, data.getString("status"));
+  }
+
+  private static void withDocumentDownloadProperties(String baseUrl, String secret,
+      ThrowingRunnable runnable) throws Exception {
+    String previousBaseUrl = System.getProperty(
+        DocumentDownloadTokenService.PROP_DOWNLOAD_BASE_URL);
+    String previousSecret = System.getProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET);
+    try {
+      System.setProperty(DocumentDownloadTokenService.PROP_DOWNLOAD_BASE_URL, baseUrl);
+      System.setProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET, secret);
+      runnable.run();
+    } finally {
+      restoreProperty(DocumentDownloadTokenService.PROP_DOWNLOAD_BASE_URL, previousBaseUrl);
+      restoreProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET, previousSecret);
+    }
+  }
+
+  private static void restoreProperty(String name, String value) {
+    if (value == null) {
+      System.clearProperty(name);
+    } else {
+      System.setProperty(name, value);
+    }
+  }
+
+  @FunctionalInterface
+  private interface ThrowingRunnable {
+    void run() throws Exception;
   }
 
   private static JSONObject responseData(NeoResponse response) throws JSONException {

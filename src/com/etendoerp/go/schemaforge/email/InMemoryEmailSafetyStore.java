@@ -115,11 +115,18 @@ public class InMemoryEmailSafetyStore implements EmailSafetyStore {
   @Override
   public synchronized Optional<EmailAuditRecord> findSentByIdempotencyKey(EmailSendContext context,
       String idempotencyKey) {
-    String key = idempotencyIndexKey(context, idempotencyKey);
-    if (key == null) {
+    return findSentAudit(context.getContractName(), context.getTenantId(), idempotencyKey);
+  }
+
+  @Override
+  public synchronized Optional<EmailAuditRecord> findSentAudit(String contractName,
+      String tenantId, String idempotencyKey) {
+    String normalizedKey = StringUtils.trimToNull(idempotencyKey);
+    if (normalizedKey == null) {
       return Optional.empty();
     }
-    return Optional.ofNullable(sentByIdempotencyKey.get(key));
+    return Optional.ofNullable(sentByIdempotencyKey.get(
+        idempotencyIndexKey(contractName, tenantId, normalizedKey)));
   }
 
   @Override
@@ -186,14 +193,6 @@ public class InMemoryEmailSafetyStore implements EmailSafetyStore {
 
   private static String killSwitchKey(String scope, String key) {
     return scope + ":" + key;
-  }
-
-  private static String idempotencyIndexKey(EmailSendContext context, String idempotencyKey) {
-    String normalizedKey = StringUtils.trimToNull(idempotencyKey);
-    if (normalizedKey == null) {
-      return null;
-    }
-    return idempotencyIndexKey(context.getContractName(), context.getTenantId(), normalizedKey);
   }
 
   private static String idempotencyIndexKey(EmailAuditRecord auditRecord) {

@@ -31,17 +31,11 @@ import javax.enterprise.context.ApplicationScoped;
 @ApplicationScoped
 public final class SalesDocumentEmailContractProvider implements EmailContractProvider {
 
-  private static final String DOC_TYPE_SALES_INVOICE = "sales-invoice";
-  private static final String DOC_TYPE_SALES_ORDER = "sales-order";
-  private static final String DOC_TYPE_SALES_QUOTATION = "sales-quotation";
-
   @Override
   public Collection<EmailContract> getContracts() {
     return Arrays.asList(
-        new SalesInvoiceSendEmailContract(
-            new DalInvoiceEmailDocumentResolver(DOC_TYPE_SALES_INVOICE)),
-        new SalesOrderSendEmailContract(new DalOrderEmailDocumentResolver(DOC_TYPE_SALES_ORDER)),
-        new SalesQuotationSendEmailContract(
-            new DalOrderEmailDocumentResolver(DOC_TYPE_SALES_QUOTATION)));
+        new SalesInvoiceSendEmailContract(new DalInvoiceEmailDocumentResolver()),
+        new SalesOrderSendEmailContract(new DalOrderEmailDocumentResolver()),
+        new SalesQuotationSendEmailContract(new DalOrderEmailDocumentResolver()));
   }
 }

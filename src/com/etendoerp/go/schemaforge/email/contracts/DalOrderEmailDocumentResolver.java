@@ -32,10 +32,7 @@ import org.openbravo.model.common.order.Order;
  */
 final class DalOrderEmailDocumentResolver implements EmailDocumentRecordResolver {
 
-  private final String documentType;
-
-  DalOrderEmailDocumentResolver(String documentType) {
-    this.documentType = documentType;
+  DalOrderEmailDocumentResolver() {
   }
 
   @Override
@@ -61,7 +58,7 @@ final class DalOrderEmailDocumentResolver implements EmailDocumentRecordResolver
         order.getDocumentNo(),
         DalEmailContractDataResolver.formatAmount(order.getGrandTotalAmount(),
             order.getCurrency()),
-        DalEmailContractDataResolver.buildDocumentDownloadLink(documentType, order.getId()),
+        null,
         order.getClient().getId()));
   }
 }

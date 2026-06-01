@@ -74,6 +74,10 @@ class NeoPreviewFileService {
     }
   }
 
+  static PreviewFile findPreviewFileForClient(String clientId, String specName, String recordId) {
+    return findByTuple(clientId, specName, recordId);
+  }
+
   static NeoResponse savePreviewFile(String body) {
     try {
       JSONObject req = new JSONObject(body);

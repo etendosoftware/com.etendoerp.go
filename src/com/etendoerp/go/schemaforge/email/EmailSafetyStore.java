@@ -44,6 +44,17 @@ public interface EmailSafetyStore {
       String idempotencyKey);
 
   /**
+   * Finds a previously successful send without requiring the original send context.
+   *
+   * @param contractName email contract name
+   * @param tenantId tenant or client id
+   * @param idempotencyKey resolved idempotency key
+   * @return previous successful send when available
+   */
+  Optional<EmailAuditRecord> findSentAudit(String contractName, String tenantId,
+      String idempotencyKey);
+
+  /**
    * Checks and records throttle counters.
    *
    * @param context resolved send context

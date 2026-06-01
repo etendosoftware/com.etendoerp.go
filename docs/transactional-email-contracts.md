@@ -145,7 +145,14 @@ Document-send contracts generate `download_link` from server configuration:
 
 | Property | Environment Variable | Purpose |
 |----------|----------------------|---------|
-| `etendo.go.email.documentDownloadBaseUrl` | `ETGO_EMAIL_DOCUMENT_DOWNLOAD_BASE_URL` | Base URL used to build document download links as `{base}/{documentType}/{recordId}` |
+| `etendo.go.email.documentDownloadBaseUrl` | `ETGO_EMAIL_DOCUMENT_DOWNLOAD_BASE_URL` | Base URL for signed document download links, normally `/etendo/sws/neo/document-download` |
+| `etendo.go.email.documentDownloadTokenSecret` | `ETGO_EMAIL_DOCUMENT_DOWNLOAD_TOKEN_SECRET` | Server-side HMAC secret used to sign document download tokens |
+| `etendo.go.email.documentDownloadTokenTtlSeconds` | `ETGO_EMAIL_DOCUMENT_DOWNLOAD_TOKEN_TTL_SECONDS` | Optional token lifetime in seconds. Defaults to 7 days and never allows less than 60 seconds |
+
+Document download links are generated as `{base}/{token}`. The token is tied to the email send
+event through the resolved idempotency key. The public download endpoint validates the token and
+requires a successful `SENT` audit record for that same contract/client/idempotency key before it
+serves the cached document file.
 
 ## Provider Configuration
 

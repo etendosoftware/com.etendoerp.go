@@ -474,6 +474,20 @@ Authorization: Bearer {token}
 
 Returns `200 {}` when the row is removed. Returns `404` when no file exists for the tuple. Returns `400` if `specName` or `recordId` is missing.
 
+### 4.8 Document Download Endpoint
+
+Transactional email document links are served by a signed-token endpoint:
+
+```
+GET /sws/neo/document-download/{token}
+```
+
+This endpoint is link-token based because email recipients do not have the browser session that
+created the original preview `blob:` URL. The token is signed server-side and includes the email
+contract, document spec, record id, client id, send idempotency key, and expiration. The endpoint
+serves the cached `ETGO_PREVIEW_FILE` file only after validating the token and finding a successful
+`SENT` email audit record for the same send event.
+
 #### Frontend integration
 
 The React hook `usePreviewAttachment` (`tools/app-shell/src/windows/custom/shared/usePreviewAttachment.js`) wraps all three methods. It is activated only when `storeCondition=true`; when false the hook is a no-op and nothing is fetched or stored.

@@ -101,14 +101,15 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
           TransactionalEmailService.STATUS_VALIDATION_FAILED,
           DOCUMENT_RECORD_NOT_FOUND);
     }
-    if (!EmailContractCommandSupport.isHttpUrl(document.get().getDownloadLink())) {
+    String downloadLink = resolveDownloadLink(command, document.get());
+    if (!EmailContractCommandSupport.isHttpUrl(downloadLink)) {
       return EmailContractResolution.rejected(400,
           TransactionalEmailService.STATUS_VALIDATION_FAILED,
           "Document download link is not configured");
     }
     try {
       return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipient(),
-          template, buildTemplateData(document.get()), null));
+          template, buildTemplateData(document.get(), downloadLink), null));
     } catch (JSONException e) {
       throw new OBException("Could not build document email payload for " + name, e);
     }
@@ -130,7 +131,8 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
         EmailThrottleRule.global(2000, 60));
   }
 
-  private JSONObject buildTemplateData(EmailDocumentRecord document) throws JSONException {
+  private JSONObject buildTemplateData(EmailDocumentRecord document, String downloadLink)
+      throws JSONException {
     JSONObject data = new JSONObject();
     data.put("name", StringUtils.defaultIfBlank(document.getRecipientName(), "Customer"));
     data.put("document_type", documentType);
@@ -141,8 +143,25 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     if (includeAmount) {
       data.put("amount", document.getAmount());
     }
-    data.put("download_link", document.getDownloadLink());
+    data.put("download_link", downloadLink);
     return data;
+  }
+
+  private String resolveDownloadLink(EmailContractCommand command, EmailDocumentRecord document) {
+    String configuredLink = document.getDownloadLink();
+    if (EmailContractCommandSupport.isHttpUrl(configuredLink)) {
+      return configuredLink;
+    }
+    String recordId = EmailContractCommandSupport.text(command,
+        EmailContractCommandSupport.FIELD_RECORD_ID);
+    String idempotencyKey = EmailContractCommandSupport.idempotencyKey(name,
+        document.getClientId(), recordId);
+    return DocumentDownloadTokenService.createDownloadLink(name, inferSpecName(), recordId,
+        document.getClientId(), idempotencyKey).orElse(null);
+  }
+
+  private String inferSpecName() {
+    return StringUtils.removeEnd(name, "-send");
   }
 
   private Optional<EmailDocumentRecord> resolveDocument(EmailContractCommand command) {
