@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
@@ -190,10 +191,41 @@ class Fiscal349BoxesHandler {
           e.getValue().setScale(2, RoundingMode.HALF_UP).toString());
     }
 
+    JSONArray invoicesArr = collectInvoices(purch, sales);
+
     JSONObject root = new JSONObject();
     root.put("operators", operatorsArr);
     root.put("summary",   summary);
+    root.put("invoices",  invoicesArr);
     return root;
+  }
+
+  private JSONArray collectInvoices(Set<Invoice> purch, Set<Invoice> sales) throws Exception {
+    SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+    JSONArray arr = new JSONArray();
+    for (Invoice inv : purch) {
+      arr.put(buildInvoiceRow(inv, "Compra", sdf));
+    }
+    for (Invoice inv : sales) {
+      arr.put(buildInvoiceRow(inv, "Venta", sdf));
+    }
+    return arr;
+  }
+
+  private JSONObject buildInvoiceRow(Invoice inv, String type, SimpleDateFormat sdf)
+      throws Exception {
+    BusinessPartner bp = inv.getBusinessPartner();
+    BigDecimal base = inv.getSummedLineAmounts() != null
+        ? inv.getSummedLineAmounts().abs().setScale(2, RoundingMode.HALF_UP)
+        : BigDecimal.ZERO;
+    JSONObject row = new JSONObject();
+    row.put("ref",    inv.getDocumentNo());
+    row.put("date",   sdf.format(inv.getInvoiceDate()));
+    row.put("type",   type);
+    row.put("party",  bp != null ? bp.getName() : "");
+    row.put("nifIva", bp != null && bp.getTaxID() != null ? bp.getTaxID() : "");
+    row.put("base",   base.toString());
+    return row;
   }
 
   // ── generate ──────────────────────────────────────────────────────
