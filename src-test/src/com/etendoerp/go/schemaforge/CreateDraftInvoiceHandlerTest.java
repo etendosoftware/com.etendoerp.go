@@ -334,63 +334,6 @@ public class CreateDraftInvoiceHandlerTest {
     assertEquals("fb", result.get(0));
   }
 
-  // ── calculateLineGross ────────────────────────────────────────────────────
-
-  @Test
-  public void testCalculateLineGrossWithPositiveGrossPrice() {
-    InvoiceLine il = mock(InvoiceLine.class);
-    when(il.getInvoicedQuantity()).thenReturn(new BigDecimal("2"));
-    when(il.getGrossUnitPrice()).thenReturn(new BigDecimal("10"));
-    assertEquals(new BigDecimal("20.00"),
-        new CreateDraftInvoiceHandler().calculateLineGross(il, PRECISION));
-  }
-
-  @Test
-  public void testCalculateLineGrossWithZeroGrossPriceUsesNetPlusTax() {
-    InvoiceLine il = mock(InvoiceLine.class);
-    when(il.getGrossUnitPrice()).thenReturn(BigDecimal.ZERO);
-    when(il.getLineNetAmount()).thenReturn(new BigDecimal("100"));
-    TaxRate tax = mock(TaxRate.class);
-    when(tax.getRate()).thenReturn(new BigDecimal("21"));
-    when(il.getTax()).thenReturn(tax);
-    // 100 + 100*21/100 = 121.00
-    assertEquals(new BigDecimal("121.00"),
-        new CreateDraftInvoiceHandler().calculateLineGross(il, PRECISION));
-  }
-
-  @Test
-  public void testCalculateLineGrossNullGrossPriceAndNoTax() {
-    InvoiceLine il = mock(InvoiceLine.class);
-    when(il.getGrossUnitPrice()).thenReturn(null);
-    when(il.getLineNetAmount()).thenReturn(new BigDecimal("50"));
-    when(il.getTax()).thenReturn(null);
-    assertEquals(new BigDecimal("50.00"),
-        new CreateDraftInvoiceHandler().calculateLineGross(il, PRECISION));
-  }
-
-  @Test
-  public void testCalculateLineGrossNullTaxRateReturnsNet() {
-    InvoiceLine il = mock(InvoiceLine.class);
-    when(il.getGrossUnitPrice()).thenReturn(null);
-    when(il.getLineNetAmount()).thenReturn(new BigDecimal("80"));
-    TaxRate tax = mock(TaxRate.class);
-    when(tax.getRate()).thenReturn(null);
-    when(il.getTax()).thenReturn(tax);
-    assertEquals(new BigDecimal("80.00"),
-        new CreateDraftInvoiceHandler().calculateLineGross(il, PRECISION));
-  }
-
-  @Test
-  public void testCalculateLineGrossAllNullsReturnZero() {
-    InvoiceLine il = mock(InvoiceLine.class);
-    when(il.getInvoicedQuantity()).thenReturn(null);
-    when(il.getGrossUnitPrice()).thenReturn(null);
-    when(il.getLineNetAmount()).thenReturn(null);
-    when(il.getTax()).thenReturn(null);
-    assertEquals(new BigDecimal("0.00"),
-        new CreateDraftInvoiceHandler().calculateLineGross(il, PRECISION));
-  }
-
   // ── resolvePendingForLine ─────────────────────────────────────────────────
 
   @Test
@@ -903,68 +846,6 @@ public class CreateDraftInvoiceHandlerTest {
     h.resolveARInvoiceDocType(order);
   }
 
-  // ── ensureLineGrossAmounts ────────────────────────────────────────────────
-
-  @Test
-  public void testEnsureGrossAlreadyPositiveSkipsLine() {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      Currency currency = mock(Currency.class);
-      when(currency.getStandardPrecision()).thenReturn(2L);
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(currency);
-      InvoiceLine il = mock(InvoiceLine.class);
-      when(il.getGrossAmount()).thenReturn(new BigDecimal("50.00"));
-      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(il));
-
-      new CreateDraftInvoiceHandler().ensureLineGrossAmounts(invoice);
-      verify(il, never()).setGrossAmount(any());
-    }
-  }
-
-  @Test
-  public void testEnsureGrossNullComputesAndSaves() {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      Currency currency = mock(Currency.class);
-      when(currency.getStandardPrecision()).thenReturn(2L);
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(currency);
-      InvoiceLine il = mock(InvoiceLine.class);
-      when(il.getGrossAmount()).thenReturn(null);
-      when(il.getGrossUnitPrice()).thenReturn(new BigDecimal("10"));
-      when(il.getInvoicedQuantity()).thenReturn(new BigDecimal("3"));
-      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(il));
-
-      new CreateDraftInvoiceHandler().ensureLineGrossAmounts(invoice);
-      verify(il).setGrossAmount(new BigDecimal("30.00"));
-      verify(dal).save(il);
-    }
-  }
-
-  @Test
-  public void testEnsureGrossZeroComputesAndSaves() {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      Currency currency = mock(Currency.class);
-      when(currency.getStandardPrecision()).thenReturn(2L);
-      Invoice invoice = mock(Invoice.class);
-      when(invoice.getCurrency()).thenReturn(currency);
-      InvoiceLine il = mock(InvoiceLine.class);
-      when(il.getGrossAmount()).thenReturn(BigDecimal.ZERO);
-      when(il.getGrossUnitPrice()).thenReturn(null);
-      when(il.getLineNetAmount()).thenReturn(new BigDecimal("100"));
-      when(il.getTax()).thenReturn(null);
-      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(il));
-
-      new CreateDraftInvoiceHandler().ensureLineGrossAmounts(invoice);
-      verify(il).setGrossAmount(new BigDecimal("100.00"));
-    }
-  }
-
   // ── recalculateTotals ─────────────────────────────────────────────────────
 
   @Test
@@ -1291,8 +1172,13 @@ public class CreateDraftInvoiceHandlerTest {
     }
 
     @Override
-    protected void ensureLineGrossAmounts(Invoice invoice) {
-      ensuredGrossAmounts = true;
+    InvoiceFromOrderSupport getSupport() {
+      return new InvoiceFromOrderSupport() {
+        @Override
+        public void ensureLineGrossAmounts(Invoice invoice) {
+          ensuredGrossAmounts = true;
+        }
+      };
     }
 
     @Override
@@ -1333,8 +1219,13 @@ public class CreateDraftInvoiceHandlerTest {
     }
 
     @Override
-    protected void ensureLineGrossAmounts(Invoice invoice) {
-      ensuredGrossInvoice = invoice;
+    InvoiceFromOrderSupport getSupport() {
+      return new InvoiceFromOrderSupport() {
+        @Override
+        public void ensureLineGrossAmounts(Invoice invoice) {
+          ensuredGrossInvoice = invoice;
+        }
+      };
     }
 
     @Override
@@ -2507,7 +2398,7 @@ public class CreateDraftInvoiceHandlerTest {
       JSONArray data = r.getBody().getJSONObject("response").getJSONArray("data");
       assertEquals(2, data.length());
       assertEquals("line-A", data.getJSONObject(0).getString("lineId"));
-      assertEquals(new BigDecimal("3"), data.getJSONObject(0).getBigDecimal("pendingQty"));
+      assertEquals(3.0, data.getJSONObject(0).getDouble("pendingQty"), 0.0);
       assertEquals("line-B", data.getJSONObject(1).getString("lineId"));
     }
   }
