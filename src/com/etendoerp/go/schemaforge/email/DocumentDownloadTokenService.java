@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge.email;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Base64;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
@@ -146,8 +147,15 @@ public final class DocumentDownloadTokenService {
     if (systemValue != null) {
       return systemValue;
     }
+    String lowercasePropertyName = propertyName.toLowerCase(Locale.ROOT);
+    String lowercaseSystemValue = StringUtils.trimToNull(
+        System.getProperty(lowercasePropertyName));
+    if (lowercaseSystemValue != null) {
+      return lowercaseSystemValue;
+    }
     String envValue = StringUtils.trimToNull(System.getenv(envName));
-    return envValue != null ? envValue : readOpenbravoProperty(propertyName);
+    return envValue != null ? envValue : readOpenbravoProperty(propertyName,
+        lowercasePropertyName);
   }
 
   private static long tokenTtlSeconds() {
@@ -171,10 +179,14 @@ public final class DocumentDownloadTokenService {
     return secret;
   }
 
-  private static String readOpenbravoProperty(String propertyName) {
+  private static String readOpenbravoProperty(String propertyName, String lowercasePropertyName) {
     try {
-      return StringUtils.trimToNull(org.openbravo.base.session.OBPropertiesProvider.getInstance()
-          .getOpenbravoProperties().getProperty(propertyName));
+      java.util.Properties properties = org.openbravo.base.session.OBPropertiesProvider
+          .getInstance()
+          .getOpenbravoProperties();
+      String value = StringUtils.trimToNull(properties.getProperty(propertyName));
+      return value != null ? value : StringUtils.trimToNull(
+          properties.getProperty(lowercasePropertyName));
     } catch (Exception e) {
       log.debug("Could not read Openbravo property {}: {}", propertyName, e.getMessage(), e);
       return null;

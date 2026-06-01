@@ -149,6 +149,11 @@ Document-send contracts generate `download_link` from server configuration:
 | `etendo.go.email.documentDownloadTokenSecret` | `ETGO_EMAIL_DOCUMENT_DOWNLOAD_TOKEN_SECRET` | Server-side HMAC secret used to sign document download tokens |
 | `etendo.go.email.documentDownloadTokenTtlSeconds` | `ETGO_EMAIL_DOCUMENT_DOWNLOAD_TOKEN_TTL_SECONDS` | Optional token lifetime in seconds. Defaults to 7 days and never allows less than 60 seconds |
 
+For Openbravo.properties deployments that normalize keys to lowercase, the runtime also accepts
+the lowercase aliases (`etendo.go.email.documentdownloadbaseurl`,
+`etendo.go.email.documentdownloadtokensecret`, and
+`etendo.go.email.documentdownloadtokenttlseconds`).
+
 Document download links are generated as `{base}/{token}`. The token is tied to the email send
 event through the resolved idempotency key and contains the trusted document record id and client
 id resolved by the server-side contract. The public download endpoint treats the signed token as a

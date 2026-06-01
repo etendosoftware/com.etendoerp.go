@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge.email;
 
+import java.util.Locale;
+
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
@@ -201,6 +203,23 @@ public class EmailFrameworkValueObjectsTest {
   }
 
   @Test
+  public void documentDownloadTokenAcceptsLowercaseOpenbravoPropertyNames() {
+    withLowercaseDocumentDownloadProperties(
+        "https://go.example.test/etendo/sws/neo/document-download",
+        "download-secret", "300", () -> {
+          String link = DocumentDownloadTokenService.createDownloadLink("sales-invoice-send",
+              "sales-invoice", "invoice-1", "tenant-1",
+              "sales-invoice-send:tenant-1:invoice-1:v1")
+              .orElseThrow(() -> new AssertionError("Download link should be present"));
+
+          assertTrue(link.startsWith(
+              "https://go.example.test/etendo/sws/neo/document-download/"));
+          String token = link.substring(link.lastIndexOf('/') + 1);
+          assertTrue(DocumentDownloadTokenService.validate(token).isPresent());
+        });
+  }
+
+  @Test
   public void documentDownloadTokenRejectsTamperedOrExpiredTokens() {
     withDocumentDownloadProperties("https://go.example.test/etendo/sws/neo/document-download",
         "download-secret", "300", () -> {
@@ -343,6 +362,29 @@ public class EmailFrameworkValueObjectsTest {
       restoreProperty(DocumentDownloadTokenService.PROP_DOWNLOAD_BASE_URL, previousBaseUrl);
       restoreProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET, previousSecret);
       restoreProperty(DocumentDownloadTokenService.PROP_TOKEN_TTL_SECONDS, previousTtl);
+    }
+  }
+
+  private static void withLowercaseDocumentDownloadProperties(String baseUrl, String secret,
+      String ttlSeconds, Runnable runnable) {
+    String baseUrlProperty = DocumentDownloadTokenService.PROP_DOWNLOAD_BASE_URL.toLowerCase(
+        Locale.ROOT);
+    String secretProperty = DocumentDownloadTokenService.PROP_TOKEN_SECRET.toLowerCase(
+        Locale.ROOT);
+    String ttlProperty = DocumentDownloadTokenService.PROP_TOKEN_TTL_SECONDS.toLowerCase(
+        Locale.ROOT);
+    String previousBaseUrl = System.getProperty(baseUrlProperty);
+    String previousSecret = System.getProperty(secretProperty);
+    String previousTtl = System.getProperty(ttlProperty);
+    try {
+      System.setProperty(baseUrlProperty, baseUrl);
+      System.setProperty(secretProperty, secret);
+      System.setProperty(ttlProperty, ttlSeconds);
+      runnable.run();
+    } finally {
+      restoreProperty(baseUrlProperty, previousBaseUrl);
+      restoreProperty(secretProperty, previousSecret);
+      restoreProperty(ttlProperty, previousTtl);
     }
   }
 
