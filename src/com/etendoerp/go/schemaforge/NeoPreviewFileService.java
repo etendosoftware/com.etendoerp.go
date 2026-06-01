@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.util.UUID;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
@@ -74,6 +75,14 @@ class NeoPreviewFileService {
     }
   }
 
+  static PreviewFile findPreviewFileForClient(String clientId, String specName, String recordId) {
+    if (StringUtils.isBlank(clientId) || StringUtils.isBlank(specName)
+        || StringUtils.isBlank(recordId)) {
+      return null;
+    }
+    return findByTuple(clientId, specName, recordId);
+  }
+
   static NeoResponse savePreviewFile(String body) {
     try {
       JSONObject req = new JSONObject(body);
@@ -83,8 +92,9 @@ class NeoPreviewFileService {
       String mimeType = req.optString(PARAM_MIME_TYPE, null);
       String fileData = req.optString(PARAM_FILE_DATA, null);
 
-      if (isBlank(specName) || isBlank(recordId) || isBlank(fileName)
-          || isBlank(mimeType) || isBlank(fileData)) {
+      if (StringUtils.isBlank(specName) || StringUtils.isBlank(recordId)
+          || StringUtils.isBlank(fileName) || StringUtils.isBlank(mimeType)
+          || StringUtils.isBlank(fileData)) {
         return NeoResponse.error(400,
             "Required fields: specName, recordId, fileName, mimeType, fileData");
       }
@@ -192,7 +202,4 @@ class NeoPreviewFileService {
     return OBContext.getOBContext().getUser().getId();
   }
 
-  private static boolean isBlank(String s) {
-    return s == null || s.isBlank();
-  }
 }
