@@ -21,8 +21,6 @@ import com.etendoerp.go.schemaforge.email.EmailContactRecord;
 import com.etendoerp.go.schemaforge.email.EmailContractDataResolver;
 
 import java.math.BigDecimal;
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
 import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
@@ -38,11 +36,6 @@ import com.etendoerp.go.schemaforge.data.Account;
 final class DalEmailContractDataResolver implements EmailContractDataResolver {
 
   private static final Logger log = LogManager.getLogger(DalEmailContractDataResolver.class);
-
-  private static final String PROP_DOCUMENT_DOWNLOAD_BASE_URL =
-      "etendo.go.email.documentDownloadBaseUrl";
-  private static final String ENV_DOCUMENT_DOWNLOAD_BASE_URL =
-      "ETGO_EMAIL_DOCUMENT_DOWNLOAD_BASE_URL";
 
   @Override
   public Optional<EmailContactRecord> findAccountContact(String accountId) {
@@ -76,38 +69,6 @@ final class DalEmailContractDataResolver implements EmailContractDataResolver {
     String value = amount == null ? "0" : amount.toPlainString();
     String isoCode = currency == null ? null : StringUtils.trimToNull(currency.getISOCode());
     return isoCode == null ? value : value + " " + isoCode;
-  }
-
-  static String buildDocumentDownloadLink(String documentType, String recordId) {
-    String baseUrl = readConfig(PROP_DOCUMENT_DOWNLOAD_BASE_URL, ENV_DOCUMENT_DOWNLOAD_BASE_URL);
-    if (baseUrl == null) {
-      return null;
-    }
-    return StringUtils.removeEnd(baseUrl, "/") + "/" + encode(documentType) + "/"
-        + encode(recordId);
-  }
-
-  private static String readConfig(String propertyName, String envName) {
-    String systemValue = StringUtils.trimToNull(System.getProperty(propertyName));
-    if (systemValue != null) {
-      return systemValue;
-    }
-    String envValue = StringUtils.trimToNull(System.getenv(envName));
-    return envValue != null ? envValue : readOpenbravoProperty(propertyName);
-  }
-
-  private static String readOpenbravoProperty(String propertyName) {
-    try {
-      return StringUtils.trimToNull(org.openbravo.base.session.OBPropertiesProvider.getInstance()
-          .getOpenbravoProperties().getProperty(propertyName));
-    } catch (Exception e) {
-      log.debug("Could not read Openbravo property {}: {}", propertyName, e.getMessage(), e);
-      return null;
-    }
-  }
-
-  private static String encode(String value) {
-    return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20");
   }
 
   static boolean isReadableClient(String clientId) {
