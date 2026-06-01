@@ -329,8 +329,11 @@ class Fiscal349BoxesHandler {
     crit.setMaxResults(1);
     List<OrganizationInformation> list = crit.list();
     if (list.isEmpty()) return null;
-    String phone = list.get(0).getPhone();
-    return phone != null && !phone.isEmpty() ? phone : list.get(0).getPhone2();
+    // OrganizationInformation has no phone directly; try the org's user contact phone
+    org.openbravo.model.ad.access.User contact = list.get(0).getUserContact();
+    if (contact == null) return null;
+    String phone = contact.getPhone();
+    return phone != null && !phone.isEmpty() ? phone : contact.getAlternativePhone();
   }
 
   TaxReport resolveTaxReport349(String orgId, String periodCode) {
