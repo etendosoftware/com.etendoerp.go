@@ -608,24 +608,7 @@ public class NeoProcessService {
     if (params.has(INP_TAB_ID)) {
       String tabId = params.getString(INP_TAB_ID);
       content.put(INP_TAB_ID, tabId);
-
-      // Resolve DAL entity name from tab for SMF Jobs framework
-      try {
-        Tab tab = OBDal.getInstance().get(Tab.class, tabId);
-        if (tab != null && tab.getTable() != null) {
-          String dalEntityName = tab.getTable().getName();
-          content.put("_entityName", dalEntityName);
-
-          // Classic OBUIAPP process handlers read the record id from the table's
-          // key column (e.g. "A_Asset_ID"), not from inpRecordId. Resolve the key
-          // column DB name and expose the record id under it so those handlers work.
-          if (params.has(INP_RECORD_ID)) {
-            addKeyColumnToContent(content, tab, params.getString(INP_RECORD_ID));
-          }
-        }
-      } catch (Exception e) {
-        log.debug("Could not resolve entity name from tab {}", tabId, e);
-      }
+      addTabContextToContent(content, params, tabId);
     }
 
     try (RequestContextScope ignored = pushRequestContextVars()) {
@@ -643,6 +626,32 @@ public class NeoProcessService {
           handlerInstance, handlerParams, content.toString());
 
       return translateObuiappResult(handlerResult);
+    }
+  }
+
+  /**
+   * Resolve the tab's DAL entity name and key-column record id into the content
+   * JSON. Best-effort: failures are logged and swallowed so process execution
+   * proceeds even when the tab metadata cannot be read.
+   */
+  private static void addTabContextToContent(JSONObject content, JSONObject params,
+      String tabId) {
+    try {
+      Tab tab = OBDal.getInstance().get(Tab.class, tabId);
+      if (tab == null || tab.getTable() == null) {
+        return;
+      }
+      // DAL entity name for the SMF Jobs framework.
+      content.put("_entityName", tab.getTable().getName());
+
+      // Classic OBUIAPP process handlers read the record id from the table's
+      // key column (e.g. "A_Asset_ID"), not from inpRecordId. Resolve the key
+      // column DB name and expose the record id under it so those handlers work.
+      if (params.has(INP_RECORD_ID)) {
+        addKeyColumnToContent(content, tab, params.getString(INP_RECORD_ID));
+      }
+    } catch (Exception e) {
+      log.debug("Could not resolve tab context from tab {}", tabId, e);
     }
   }
 
