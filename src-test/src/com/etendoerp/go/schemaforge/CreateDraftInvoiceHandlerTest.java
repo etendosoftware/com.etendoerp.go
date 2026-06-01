@@ -1010,7 +1010,7 @@ public class CreateDraftInvoiceHandlerTest {
   // ── createShipmentInvoiceLine ─────────────────────────────────────────────
 
   @Test
-  public void testCreateShipmentInvoiceLineNoOrderLineZeroPrices() {
+  public void testCreateShipmentInvoiceLineNoOrderLineNoLinkedInvoiceZeroPrices() {
     try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
       OBProvider provider = mock(OBProvider.class);
       providerMock.when(OBProvider::getInstance).thenReturn(provider);
@@ -1024,13 +1024,55 @@ public class CreateDraftInvoiceHandlerTest {
       when(sl.getSalesOrderLine()).thenReturn(null);
 
       Invoice invoice = mock(Invoice.class);
-      InvoiceLine result = new CreateDraftInvoiceHandler()
-          .createShipmentInvoiceLine(invoice, sl, new BigDecimal("3"), 10L);
+      // Override findLinkedInvoiceLine to return null — simulates no source invoice line
+      CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+        @Override
+        protected InvoiceLine findLinkedInvoiceLine(String id) { return null; }
+      };
+      InvoiceLine result = handler.createShipmentInvoiceLine(invoice, sl, new BigDecimal("3"), 10L);
 
       assertEquals(il, result);
       verify(il).setUnitPrice(BigDecimal.ZERO);
       verify(il).setListPrice(BigDecimal.ZERO);
       verify(il).setLineNetAmount(BigDecimal.ZERO);
+    }
+  }
+
+  @Test
+  public void testCreateShipmentInvoiceLineNoOrderLineFallsBackToLinkedInvoicePrices() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      InvoiceLine sourceIL = mock(InvoiceLine.class);
+      when(sourceIL.getUnitPrice()).thenReturn(new BigDecimal("15"));
+      when(sourceIL.getListPrice()).thenReturn(new BigDecimal("18"));
+      when(sourceIL.getPriceLimit()).thenReturn(new BigDecimal("12"));
+      when(sourceIL.getTax()).thenReturn(mock(TaxRate.class));
+      when(sourceIL.getSalesOrderLine()).thenReturn(null);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(mock(Product.class));
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(null);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+
+      CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+        @Override
+        protected InvoiceLine findLinkedInvoiceLine(String id) { return sourceIL; }
+      };
+      handler.createShipmentInvoiceLine(invoice, sl, new BigDecimal("4"), 10L);
+
+      verify(il).setUnitPrice(new BigDecimal("15"));
+      verify(il).setListPrice(new BigDecimal("18"));
+      verify(il).setLineNetAmount(new BigDecimal("60.00")); // 4 * 15
     }
   }
 
@@ -1346,15 +1388,21 @@ public class CreateDraftInvoiceHandlerTest {
   }
 
   /**
-   * Test double that captures generated line numbers while bypassing invoice line creation.
+   * Test double that captures generated line numbers while bypassing invoice line creation
+   * and DB access (pending-qty computation is stubbed to return an empty map).
    */
   private static class AddShipmentLinesHandler extends CreateDraftInvoiceHandler {
     final Map<String, BigDecimal> qtyByShipmentLineId = new HashMap<>();
     final Map<String, Long> lineNoByShipmentLineId = new HashMap<>();
 
     @Override
+    protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId) {
+      return Collections.emptyMap();
+    }
+
+    @Override
     protected BigDecimal resolveShipmentLineQty(ShipmentInOutLine sl, boolean hasOverrides,
-        Map<String, BigDecimal> lineOverrides) {
+        Map<String, BigDecimal> lineOverrides, Map<String, BigDecimal> pendingQtyMap) {
       return qtyByShipmentLineId.get(sl.getId());
     }
 
