@@ -27,7 +27,7 @@ The default payload is intentionally minimal:
 | `name` | Recipient display name from trusted server data |
 | `document_type` | Contract-defined document label |
 | `document_number` | Document number from the trusted record |
-| `download_link` | Server-generated document download URL |
+| `download_link` | Server-generated signed document download URL |
 
 Do not include `amount` by default. Enable it only when a provider template explicitly requires it. Document-specific aliases, such as `invoice_number`, must also be explicit opt-ins.
 
@@ -87,7 +87,9 @@ Rules:
 3. Verify the record belongs to a readable client.
 4. Verify document-family constraints, for example sales transactions only for sales order contracts.
 5. Resolve the recipient from `C_BPartner.EM_Etgo_Email`, falling back to an active contact email.
-6. Generate the document link server-side with `buildDocumentDownloadLink(documentType, recordId)`.
+6. Let `DefaultDocumentSendEmailContract` generate the signed document link server-side from the
+   resolved record metadata and the send idempotency key. Document resolvers should not construct
+   browser `blob:` URLs or unaudited public links.
 
 Do not trust browser-provided recipient, template, or variable values.
 

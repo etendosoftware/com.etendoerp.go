@@ -32,10 +32,7 @@ import org.openbravo.model.common.invoice.Invoice;
  */
 final class DalInvoiceEmailDocumentResolver implements EmailDocumentRecordResolver {
 
-  private final String documentType;
-
-  DalInvoiceEmailDocumentResolver(String documentType) {
-    this.documentType = documentType;
+  DalInvoiceEmailDocumentResolver() {
   }
 
   @Override
@@ -56,11 +53,12 @@ final class DalInvoiceEmailDocumentResolver implements EmailDocumentRecordResolv
           businessPartner);
     }
     String recipientName = businessPartner == null ? null : businessPartner.getName();
-    return Optional.of(new EmailDocumentRecord(recipientName, recipientEmail,
+    return Optional.of(EmailDocumentRecord.withGeneratedDownloadLink(recipientName,
+        recipientEmail,
+        invoice.getId(),
         invoice.getDocumentNo(),
         DalEmailContractDataResolver.formatAmount(invoice.getGrandTotalAmount(),
             invoice.getCurrency()),
-        DalEmailContractDataResolver.buildDocumentDownloadLink(documentType, invoice.getId()),
         invoice.getClient().getId()));
   }
 }
