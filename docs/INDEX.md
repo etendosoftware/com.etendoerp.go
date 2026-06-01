@@ -9,3 +9,5 @@ This directory stores module-specific technical documentation for `com.etendoerp
 - `onboarding-sampledata-packaging.md` — how onboarding sampledata is staged into `WebContent/WEB-INF/classes` for WAR packaging.
 - `package-architecture.md` — current Java package boundaries, selector policy split, OAuth2 support split, and PR-scoped Sonar workflow.
 - `onboarding-flow.md` — the five-step `ensureOnboardingDataset` pipeline (dataset → sequences → orgReady → fiscal → customer), service responsibilities, included-tables rationale, and NDJSON event format.
+- `transactional-email-contracts.md` — runtime endpoint, executor/provider boundary, and server-side provider configuration for transactional email contracts.
+- `document-email-contract-implementation.md` — step-by-step Java guide for adding document-send transactional email contracts.
