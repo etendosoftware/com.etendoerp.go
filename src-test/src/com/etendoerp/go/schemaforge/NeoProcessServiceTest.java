@@ -320,6 +320,108 @@ public class NeoProcessServiceTest {
     assertEquals(0, content.length());
   }
 
+  // ===================== addTabContextToContent =====================
+
+  @Test
+  public void addTabContextToContentSetsEntityNameAndKeyColumn() throws Exception {
+    Column keyCol = mock(Column.class);
+    when(keyCol.isKeyColumn()).thenReturn(true);
+    when(keyCol.getDBColumnName()).thenReturn("A_Asset_ID");
+
+    Table table = mock(Table.class);
+    when(table.getName()).thenReturn("FinancialMgmtAsset");
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(keyCol));
+
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(table);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(Tab.class, "tab-1")).thenReturn(tab);
+
+    JSONObject params = new JSONObject();
+    params.put(NeoProcessService.INP_RECORD_ID, "rec-1");
+    JSONObject content = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      NeoProcessService.addTabContextToContent(content, params, "tab-1");
+    }
+
+    assertEquals("FinancialMgmtAsset", content.getString("_entityName"));
+    assertEquals("rec-1", content.getString("A_Asset_ID"));
+  }
+
+  @Test
+  public void addTabContextToContentSetsEntityNameOnlyWhenNoRecordId() throws Exception {
+    Table table = mock(Table.class);
+    when(table.getName()).thenReturn("FinancialMgmtAsset");
+
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(table);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(Tab.class, "tab-1")).thenReturn(tab);
+
+    JSONObject content = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      NeoProcessService.addTabContextToContent(content, new JSONObject(), "tab-1");
+    }
+
+    assertEquals("FinancialMgmtAsset", content.getString("_entityName"));
+    assertFalse(content.has("A_Asset_ID"));
+  }
+
+  @Test
+  public void addTabContextToContentDoesNothingWhenTabNull() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(Tab.class, "tab-x")).thenReturn(null);
+
+    JSONObject content = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      NeoProcessService.addTabContextToContent(content, new JSONObject(), "tab-x");
+    }
+
+    assertEquals(0, content.length());
+  }
+
+  @Test
+  public void addTabContextToContentDoesNothingWhenTableNull() throws Exception {
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(null);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(Tab.class, "tab-1")).thenReturn(tab);
+
+    JSONObject content = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      NeoProcessService.addTabContextToContent(content, new JSONObject(), "tab-1");
+    }
+
+    assertEquals(0, content.length());
+  }
+
+  @Test
+  public void addTabContextToContentSwallowsExceptions() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(Tab.class, "tab-err")).thenThrow(new RuntimeException("DB down"));
+
+    JSONObject content = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      // Must not throw — failure is logged and swallowed.
+      NeoProcessService.addTabContextToContent(content, new JSONObject(), "tab-err");
+    }
+
+    assertEquals(0, content.length());
+  }
+
   @Test
   public void describeProcessWithParameters() throws Exception {
     Process process = mock(Process.class);

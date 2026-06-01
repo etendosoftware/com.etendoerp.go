@@ -634,7 +634,7 @@ public class NeoProcessService {
    * JSON. Best-effort: failures are logged and swallowed so process execution
    * proceeds even when the tab metadata cannot be read.
    */
-  private static void addTabContextToContent(JSONObject content, JSONObject params,
+  static void addTabContextToContent(JSONObject content, JSONObject params,
       String tabId) {
     try {
       Tab tab = OBDal.getInstance().get(Tab.class, tabId);
