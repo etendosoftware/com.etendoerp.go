@@ -215,8 +215,8 @@ class Fiscal349BoxesHandler {
   private JSONObject buildInvoiceRow(Invoice inv, String type, SimpleDateFormat sdf)
       throws Exception {
     BusinessPartner bp = inv.getBusinessPartner();
-    BigDecimal base = inv.getSummedLineAmounts() != null
-        ? inv.getSummedLineAmounts().abs().setScale(2, RoundingMode.HALF_UP)
+    BigDecimal base = inv.getSummedLineAmount() != null
+        ? inv.getSummedLineAmount().abs().setScale(2, RoundingMode.HALF_UP)
         : BigDecimal.ZERO;
     JSONObject row = new JSONObject();
     row.put("ref",    inv.getDocumentNo());
