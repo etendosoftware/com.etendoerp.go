@@ -150,6 +150,22 @@ final class NeoReturnReceiptService {
 
   private static int createReturnLines(ShipmentInOut returnDoc, ShipmentInOut source,
       JSONArray requestedLines) throws Exception {
+    Map<String, BigDecimal> qtyByLineId = parseReturnQtyMap(requestedLines);
+    long lineNo = 10;
+    int added = 0;
+    for (ShipmentInOutLine sourceLine : source.getMaterialMgmtShipmentInOutLineList()) {
+      BigDecimal returnQty = qtyByLineId.get(sourceLine.getId());
+      if (returnQty == null) {
+        continue;
+      }
+      buildAndSaveReturnLine(returnDoc, sourceLine, returnQty, lineNo);
+      lineNo += 10;
+      added++;
+    }
+    return added;
+  }
+
+  private static Map<String, BigDecimal> parseReturnQtyMap(JSONArray requestedLines) throws Exception {
     Map<String, BigDecimal> qtyByLineId = new HashMap<>();
     for (int i = 0; i < requestedLines.length(); i++) {
       JSONObject req = requestedLines.getJSONObject(i);
@@ -159,46 +175,45 @@ final class NeoReturnReceiptService {
         qtyByLineId.put(lineId, qty);
       }
     }
+    return qtyByLineId;
+  }
 
-    long lineNo = 10;
-    int added = 0;
-    for (ShipmentInOutLine sourceLine : source.getMaterialMgmtShipmentInOutLineList()) {
-      BigDecimal returnQty = qtyByLineId.get(sourceLine.getId());
-      if (returnQty == null) {
-        continue;
-      }
-      ShipmentInOutLine retLine = OBProvider.getInstance().get(ShipmentInOutLine.class);
-      retLine.setClient(returnDoc.getClient());
-      retLine.setOrganization(returnDoc.getOrganization());
-      retLine.setShipmentReceipt(returnDoc);
-      retLine.setLineNo(lineNo);
-      retLine.setProduct(sourceLine.getProduct());
-      retLine.setUOM(sourceLine.getUOM());
-      retLine.setMovementQuantity(returnQty);
-      ProductUOM productUOM = sourceLine.getOrderUOM() != null
-          ? sourceLine.getOrderUOM()
-          : findProductUOM(sourceLine);
-      if (productUOM != null) {
-        BigDecimal sourceMovQty = sourceLine.getMovementQuantity();
-        BigDecimal sourceOrderQty = sourceLine.getOrderQuantity() != null
-            ? sourceLine.getOrderQuantity()
-            : sourceMovQty;
-        BigDecimal proportionalOrderQty = sourceMovQty != null && sourceMovQty.compareTo(BigDecimal.ZERO) != 0
-            ? sourceOrderQty.multiply(returnQty).divide(sourceMovQty, 10, java.math.RoundingMode.HALF_UP)
-            : returnQty;
-        retLine.setOrderQuantity(proportionalOrderQty);
-        retLine.setOrderUOM(productUOM);
-      }
-      Locator bin = sourceLine.getStorageBin();
-      if (bin != null) {
-        retLine.setStorageBin(bin);
-      }
-      retLine.setCanceledInoutLine(sourceLine);
-      OBDal.getInstance().save(retLine);
-      lineNo += 10;
-      added++;
+  private static void buildAndSaveReturnLine(ShipmentInOut returnDoc, ShipmentInOutLine sourceLine,
+      BigDecimal returnQty, long lineNo) {
+    ShipmentInOutLine retLine = OBProvider.getInstance().get(ShipmentInOutLine.class);
+    retLine.setClient(returnDoc.getClient());
+    retLine.setOrganization(returnDoc.getOrganization());
+    retLine.setShipmentReceipt(returnDoc);
+    retLine.setLineNo(lineNo);
+    retLine.setProduct(sourceLine.getProduct());
+    retLine.setUOM(sourceLine.getUOM());
+    retLine.setMovementQuantity(returnQty);
+    applyOrderUOM(retLine, sourceLine, returnQty);
+    Locator bin = sourceLine.getStorageBin();
+    if (bin != null) {
+      retLine.setStorageBin(bin);
     }
-    return added;
+    retLine.setCanceledInoutLine(sourceLine);
+    OBDal.getInstance().save(retLine);
+  }
+
+  private static void applyOrderUOM(ShipmentInOutLine retLine, ShipmentInOutLine sourceLine,
+      BigDecimal returnQty) {
+    ProductUOM productUOM = sourceLine.getOrderUOM() != null
+        ? sourceLine.getOrderUOM()
+        : findProductUOM(sourceLine);
+    if (productUOM == null) {
+      return;
+    }
+    BigDecimal sourceMovQty = sourceLine.getMovementQuantity();
+    BigDecimal sourceOrderQty = sourceLine.getOrderQuantity() != null
+        ? sourceLine.getOrderQuantity()
+        : sourceMovQty;
+    BigDecimal proportionalOrderQty = sourceMovQty != null && sourceMovQty.compareTo(BigDecimal.ZERO) != 0
+        ? sourceOrderQty.multiply(returnQty).divide(sourceMovQty, 10, java.math.RoundingMode.HALF_UP)
+        : returnQty;
+    retLine.setOrderQuantity(proportionalOrderQty);
+    retLine.setOrderUOM(productUOM);
   }
 
   private static ProductUOM findProductUOM(ShipmentInOutLine sourceLine) {
