@@ -186,7 +186,8 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
           JSONObject order = new JSONObject();
           order.put("id", rs.getString(1));
           order.put(FIELD_DOCUMENT_NO, rs.getString(2));
-          order.put("grandTotalAmount", rs.getBigDecimal(3));
+          BigDecimal orderTotal = rs.getBigDecimal(3);
+          order.put("grandTotalAmount", orderTotal != null ? orderTotal : JSONObject.NULL);
           order.put(FIELD_DOCUMENT_STATUS, rs.getString(4));
           order.put("currency$_identifier", rs.getString(5));
           orders.put(order);
@@ -223,7 +224,8 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
           JSONObject inv = new JSONObject();
           inv.put("id", rs.getString(1));
           inv.put(FIELD_DOCUMENT_NO, rs.getString(2));
-          inv.put("grandTotalAmount", rs.getBigDecimal(3));
+          BigDecimal invTotal = rs.getBigDecimal(3);
+          inv.put("grandTotalAmount", invTotal != null ? invTotal : JSONObject.NULL);
           inv.put(FIELD_DOCUMENT_STATUS, rs.getString(4));
           inv.put("currency$_identifier", rs.getString(5));
           invoices.put(inv);

@@ -61,8 +61,9 @@ final class NeoCommercialDocumentFactory {
     shipment.setBusinessPartner(source.getBusinessPartner());
     shipment.setPartnerAddress(source.getPartnerAddress());
     shipment.setWarehouse(source.getWarehouse());
-    shipment.setMovementDate(new Date());
-    shipment.setAccountingDate(new Date());
+    Date now = new Date();
+    shipment.setMovementDate(now);
+    shipment.setAccountingDate(now);
     shipment.setDocumentType(docType);
     shipment.setDocumentNo("<*>");
     shipment.setSalesTransaction(salesTransaction);

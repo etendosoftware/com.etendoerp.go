@@ -65,6 +65,8 @@ public class GoodsShipmentLineHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    // Always clear first — prevents stale data from a previous request on the same thread
+    PENDING_INVOICE_LINE_ID.remove();
     if ("POST".equalsIgnoreCase(context.getHttpMethod())) {
       JSONObject body = context.getRequestBody();
       if (body != null) {

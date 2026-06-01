@@ -154,7 +154,7 @@ final class NeoReturnReceiptService {
     for (int i = 0; i < requestedLines.length(); i++) {
       JSONObject req = requestedLines.getJSONObject(i);
       String lineId = req.getString("lineId");
-      BigDecimal qty = BigDecimal.valueOf(req.optDouble("returnQuantity", 0));
+      BigDecimal qty = new BigDecimal(req.optString("returnQuantity", "0"));
       if (qty.compareTo(BigDecimal.ZERO) > 0) {
         qtyByLineId.put(lineId, qty);
       }
@@ -179,7 +179,14 @@ final class NeoReturnReceiptService {
           ? sourceLine.getOrderUOM()
           : findProductUOM(sourceLine);
       if (productUOM != null) {
-        retLine.setOrderQuantity(sourceLine.getMovementQuantity());
+        BigDecimal sourceMovQty = sourceLine.getMovementQuantity();
+        BigDecimal sourceOrderQty = sourceLine.getOrderQuantity() != null
+            ? sourceLine.getOrderQuantity()
+            : sourceMovQty;
+        BigDecimal proportionalOrderQty = sourceMovQty != null && sourceMovQty.compareTo(BigDecimal.ZERO) != 0
+            ? sourceOrderQty.multiply(returnQty).divide(sourceMovQty, 10, java.math.RoundingMode.HALF_UP)
+            : returnQty;
+        retLine.setOrderQuantity(proportionalOrderQty);
         retLine.setOrderUOM(productUOM);
       }
       Locator bin = sourceLine.getStorageBin();

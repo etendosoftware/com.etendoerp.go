@@ -1172,6 +1172,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         "AND plv.m_pricelist_id = ? " +
         "AND plv.isactive = 'Y' " +
         "AND pp.isactive = 'Y' " +
+        "AND plv.validfrom <= CURRENT_DATE " +
         "ORDER BY plv.validfrom DESC " +
         "LIMIT 1";
     Connection conn = OBDal.getInstance().getConnection();
