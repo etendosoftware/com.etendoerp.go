@@ -36,16 +36,18 @@ import com.etendoerp.go.onboarding.OnboardingStepException;
 /**
  * Creates GL categories, document types, and auto-numbering sequences for the new client.
  *
- * <p>GL categories created: None, AR Invoice, AP Invoice, Material Management (all type D).
+ * <p>GL categories created: None, AR Invoice, AP Invoice, Material Management,
+ * Bank Statement (all type D).
  *
  * <p>Document types and their sequences:
  * <ul>
- *   <li>Standard Order (SOO) — SO/ prefix, starts at 50000</li>
- *   <li>Purchase Order (POO) — PO/ prefix, starts at 800000</li>
- *   <li>AR Invoice (ARI)     — ARI/ prefix, starts at 100000</li>
- *   <li>AP Invoice (API)     — API/ prefix, starts at 200000</li>
- *   <li>MM Shipment (MMS)    — MMS/ prefix, starts at 500000</li>
- *   <li>MM Receipt (MMR)     — MMR/ prefix, starts at 600000</li>
+ *   <li>Standard Order (SOO)      — SO/ prefix, starts at 50000</li>
+ *   <li>Purchase Order (POO)      — PO/ prefix, starts at 800000</li>
+ *   <li>AR Invoice (ARI)          — ARI/ prefix, starts at 100000</li>
+ *   <li>AP Invoice (API)          — API/ prefix, starts at 200000</li>
+ *   <li>MM Shipment (MMS)         — MMS/ prefix, starts at 500000</li>
+ *   <li>MM Receipt (MMR)          — MMR/ prefix, starts at 600000</li>
+ *   <li>Bank Statement File (BSF) — no prefix, starts at 1000000</li>
  * </ul>
  */
 public class CreateDocTypesStep implements OnboardingStep {
@@ -54,10 +56,12 @@ public class CreateDocTypesStep implements OnboardingStep {
   private static final String GL_CATEGORY_AR_INVOICE = "AR Invoice";
   private static final String GL_CATEGORY_AP_INVOICE = "AP Invoice";
   private static final String GL_CATEGORY_MATERIAL = "Material Management";
+  private static final String GL_CATEGORY_BANK_STATEMENT = "Bank Statement";
   private static final String GL_REF_NONE = "NONE";
   private static final String GL_REF_AR = "AR";
   private static final String GL_REF_AP = "AP";
   private static final String GL_REF_MATERIAL = "MATERIAL";
+  private static final String GL_REF_BANK_STATEMENT = "BANK_STATEMENT";
 
   private static final class DocumentTypeDefinition {
     private final String name;
@@ -113,13 +117,15 @@ public class CreateDocTypesStep implements OnboardingStep {
       GLCategory glARInvoice = createGLCategory(client, org, GL_CATEGORY_AR_INVOICE, "D");
       GLCategory glAPInvoice = createGLCategory(client, org, GL_CATEGORY_AP_INVOICE, "D");
       GLCategory glMaterial = createGLCategory(client, org, GL_CATEGORY_MATERIAL, "D");
+      GLCategory glBankStatement = createGLCategory(client, org, GL_CATEGORY_BANK_STATEMENT, "D");
 
       // 2. Create sequences and document types
       for (DocumentTypeSeed seed : buildDocumentTypeSeeds()) {
         Sequence sequence = createSequence(client, org, seed.sequenceName,
             seed.sequencePrefix, seed.sequenceStartNo);
         createDocumentType(client, org, seed.documentType, sequence,
-            resolveGlCategory(seed.glCategoryRef, glNone, glARInvoice, glAPInvoice, glMaterial));
+            resolveGlCategory(seed.glCategoryRef, glNone, glARInvoice, glAPInvoice, glMaterial,
+                glBankStatement));
       }
     } catch (Exception e) {
       throw new OnboardingStepException(e.getMessage(), e);
@@ -139,11 +145,15 @@ public class CreateDocTypesStep implements OnboardingStep {
         new DocumentTypeSeed("MM Shipment", "MMS/", 500000L,
             new DocumentTypeDefinition("MM Shipment", "MMS", true, null), GL_REF_MATERIAL),
         new DocumentTypeSeed("MM Receipt", "MMR/", 600000L,
-            new DocumentTypeDefinition("MM Receipt", "MMR", false, null), GL_REF_MATERIAL));
+            new DocumentTypeDefinition("MM Receipt", "MMR", false, null), GL_REF_MATERIAL),
+        new DocumentTypeSeed("Bank Statement File", "", 1000000L,
+            new DocumentTypeDefinition("Bank Statement File", "BSF", false, null),
+            GL_REF_BANK_STATEMENT));
   }
 
   private GLCategory resolveGlCategory(String glCategoryRef, GLCategory glNone,
-      GLCategory glARInvoice, GLCategory glAPInvoice, GLCategory glMaterial) {
+      GLCategory glARInvoice, GLCategory glAPInvoice, GLCategory glMaterial,
+      GLCategory glBankStatement) {
     switch (glCategoryRef) {
       case GL_REF_AR:
         return glARInvoice;
@@ -151,6 +161,8 @@ public class CreateDocTypesStep implements OnboardingStep {
         return glAPInvoice;
       case GL_REF_MATERIAL:
         return glMaterial;
+      case GL_REF_BANK_STATEMENT:
+        return glBankStatement;
       case GL_REF_NONE:
       default:
         return glNone;
