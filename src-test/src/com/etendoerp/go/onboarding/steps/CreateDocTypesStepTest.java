@@ -58,7 +58,7 @@ import com.etendoerp.go.onboarding.OnboardingStepException;
  * Unit tests for {@link CreateDocTypesStep}.
  *
  * <p>Covers: name(), null-client/org error paths, successful creation of
- * 4 GL categories + 6 sequences + 6 document types, correct number of
+ * 5 GL categories + 7 sequences + 7 document types, correct number of
  * OBDal.save and flush calls, and GL category resolution for each
  * document type.
  */
@@ -157,19 +157,19 @@ class CreateDocTypesStepTest {
       when(obDal.get(Organization.class, "org-1")).thenReturn(org);
 
       // OBProvider returns fresh mocks for each get() call.
-      // Order: 4 GLCategory, then alternating (Sequence, DocumentType) x6
-      stubGlCategoryCreation(4);
-      stubSequenceCreation(6);
-      stubDocTypeCreation(6);
+      // Order: 5 GLCategory, then alternating (Sequence, DocumentType) x7
+      stubGlCategoryCreation(5);
+      stubSequenceCreation(7);
+      stubDocTypeCreation(7);
     }
 
     @Test
-    @DisplayName("successful execute saves 4 GL categories, 6 sequences, and 6 doc types")
+    @DisplayName("successful execute saves 5 GL categories, 7 sequences, and 7 doc types")
     void successfulExecuteSavesAllEntities() throws OnboardingStepException {
       step.execute(buildValidContext());
 
-      // 4 GL categories + 6 sequences + 6 doc types = 16 saves
-      verify(obDal, times(16)).save(any());
+      // 5 GL categories + 7 sequences + 7 doc types = 19 saves
+      verify(obDal, times(19)).save(any());
     }
 
     @Test
@@ -177,12 +177,12 @@ class CreateDocTypesStepTest {
     void flushCalledAfterEachGlCategory() throws OnboardingStepException {
       step.execute(buildValidContext());
 
-      // flush is called once per GL category = 4 times
-      verify(obDal, times(4)).flush();
+      // flush is called once per GL category = 5 times
+      verify(obDal, times(5)).flush();
     }
 
     @Test
-    @DisplayName("4 GL categories are saved with correct names")
+    @DisplayName("5 GL categories are saved with correct names")
     void glCategoriesSavedWithCorrectNames() throws OnboardingStepException {
       step.execute(buildValidContext());
 
@@ -190,6 +190,7 @@ class CreateDocTypesStepTest {
       verify(glCategories.get(1)).setName("AR Invoice");
       verify(glCategories.get(2)).setName("AP Invoice");
       verify(glCategories.get(3)).setName("Material Management");
+      verify(glCategories.get(4)).setName("Bank Statement");
     }
 
     @Test
@@ -214,7 +215,7 @@ class CreateDocTypesStepTest {
     }
 
     @Test
-    @DisplayName("6 sequences are saved with correct prefixes")
+    @DisplayName("7 sequences are saved with correct prefixes")
     void sequencesSavedWithCorrectPrefixes() throws OnboardingStepException {
       step.execute(buildValidContext());
 
@@ -224,10 +225,11 @@ class CreateDocTypesStepTest {
       verify(sequences.get(3)).setPrefix("API/");
       verify(sequences.get(4)).setPrefix("MMS/");
       verify(sequences.get(5)).setPrefix("MMR/");
+      verify(sequences.get(6)).setPrefix("");
     }
 
     @Test
-    @DisplayName("6 sequences are saved with correct start numbers")
+    @DisplayName("7 sequences are saved with correct start numbers")
     void sequencesSavedWithCorrectStartNumbers() throws OnboardingStepException {
       step.execute(buildValidContext());
 
@@ -237,6 +239,7 @@ class CreateDocTypesStepTest {
       verify(sequences.get(3)).setStartingNo(200000L);
       verify(sequences.get(4)).setStartingNo(500000L);
       verify(sequences.get(5)).setStartingNo(600000L);
+      verify(sequences.get(6)).setStartingNo(1000000L);
     }
 
     @Test
@@ -250,7 +253,7 @@ class CreateDocTypesStepTest {
     }
 
     @Test
-    @DisplayName("6 document types are saved with correct names")
+    @DisplayName("7 document types are saved with correct names")
     void docTypesSavedWithCorrectNames() throws OnboardingStepException {
       step.execute(buildValidContext());
 
@@ -260,6 +263,7 @@ class CreateDocTypesStepTest {
       verify(docTypes.get(3)).setName("AP Invoice");
       verify(docTypes.get(4)).setName("MM Shipment");
       verify(docTypes.get(5)).setName("MM Receipt");
+      verify(docTypes.get(6)).setName("Bank Statement File");
     }
 
     @Test
@@ -273,6 +277,7 @@ class CreateDocTypesStepTest {
       verify(docTypes.get(3)).setDocumentCategory("API");
       verify(docTypes.get(4)).setDocumentCategory("MMS");
       verify(docTypes.get(5)).setDocumentCategory("MMR");
+      verify(docTypes.get(6)).setDocumentCategory("BSF");
     }
 
     @Test
@@ -286,15 +291,17 @@ class CreateDocTypesStepTest {
       verify(docTypes.get(3)).setSalesTransaction(false);  // AP Invoice
       verify(docTypes.get(4)).setSalesTransaction(true);   // MM Shipment
       verify(docTypes.get(5)).setSalesTransaction(false);  // MM Receipt
+      verify(docTypes.get(6)).setSalesTransaction(false);  // Bank Statement File
     }
 
     @Test
-    @DisplayName("Standard Order has SO subtype, Purchase Order has null")
+    @DisplayName("Standard Order has SO subtype, Purchase Order and Bank Statement File have null")
     void soSubTypeSetCorrectly() throws OnboardingStepException {
       step.execute(buildValidContext());
 
       verify(docTypes.get(0)).setSOSubType("SO");
       verify(docTypes.get(1)).setSOSubType(null);
+      verify(docTypes.get(6)).setSOSubType(null);  // Bank Statement File
     }
 
     @Test
@@ -313,7 +320,7 @@ class CreateDocTypesStepTest {
     void docTypesLinkedToCorrectSequences() throws OnboardingStepException {
       step.execute(buildValidContext());
 
-      for (int i = 0; i < 6; i++) {
+      for (int i = 0; i < 7; i++) {
         verify(docTypes.get(i)).setDocumentSequence(sequences.get(i));
       }
     }
@@ -356,6 +363,15 @@ class CreateDocTypesStepTest {
       GLCategory glMaterial = glCategories.get(3);
       verify(docTypes.get(4)).setGLCategory(glMaterial);  // MM Shipment -> MATERIAL
       verify(docTypes.get(5)).setGLCategory(glMaterial);  // MM Receipt  -> MATERIAL
+    }
+
+    @Test
+    @DisplayName("Bank Statement File doc type uses GL category Bank Statement")
+    void bankStatementFileUsesGlBankStatement() throws OnboardingStepException {
+      step.execute(buildValidContext());
+
+      GLCategory glBankStatement = glCategories.get(4);
+      verify(docTypes.get(6)).setGLCategory(glBankStatement);  // Bank Statement File -> BANK_STATEMENT
     }
 
     // ─── helpers ─────────────────────────────────────────────────────
