@@ -194,10 +194,15 @@ class Fiscal349BoxesHandler {
 
     JSONArray invoicesArr = collectInvoices(purch, sales);
 
+    String orgNif  = dao349.getOrgTaxID(orgId);
+    String orgName = org != null ? org.getName() : "";
+
     JSONObject root = new JSONObject();
     root.put("operators", operatorsArr);
     root.put("summary",   summary);
     root.put("invoices",  invoicesArr);
+    root.put("orgNif",    orgNif  != null ? orgNif  : "");
+    root.put("orgName",   orgName);
     return root;
   }
 
