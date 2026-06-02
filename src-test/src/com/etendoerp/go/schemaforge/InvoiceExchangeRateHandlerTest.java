@@ -169,6 +169,58 @@ public class InvoiceExchangeRateHandlerTest {
   }
 
   @Test
+  public void testHandleCreateLeavesPairUntouchedWhenBothProvided() throws Exception {
+    // Caller supplied both sides — neither is derived/overwritten.
+    JSONObject body = new JSONObject();
+    body.put("invoice", INVOICE_ID);
+    body.put("rate", "2");
+    body.put("foreignAmount", "200");
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBCurrencyUtils> currencyUtils = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Invoice invoice = invoiceWith(new BigDecimal("100"));
+      when(dal.get(Invoice.class, INVOICE_ID)).thenReturn(invoice);
+      currencyUtils.when(() -> OBCurrencyUtils.getOrgCurrency(ORG_ID)).thenReturn(ORG_CURRENCY_ID);
+
+      assertNull(handler.handle(crudPost(body)));
+
+      assertEquals(0, new BigDecimal(body.optString("rate")).compareTo(new BigDecimal("2")));
+      assertEquals(0, new BigDecimal(body.optString("foreignAmount")).compareTo(new BigDecimal("200")));
+    }
+  }
+
+  @Test
+  public void testHandleCreateIgnoresNonNumericRate() throws Exception {
+    // A non-numeric rate is parsed as null (readDecimal swallows the format error) and skipped.
+    JSONObject body = new JSONObject();
+    body.put("invoice", INVOICE_ID);
+    body.put("rate", "not-a-number");
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBCurrencyUtils> currencyUtils = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Invoice invoice = invoiceWith(new BigDecimal("100"));
+      when(dal.get(Invoice.class, INVOICE_ID)).thenReturn(invoice);
+      currencyUtils.when(() -> OBCurrencyUtils.getOrgCurrency(ORG_ID)).thenReturn(ORG_CURRENCY_ID);
+
+      assertNull(handler.handle(crudPost(body)));
+      assertFalse(body.has("foreignAmount"));
+    }
+  }
+
+  @Test
+  public void testHandleUpdateIgnoresNonNumericRate() throws Exception {
+    // Non-numeric rate → readDecimal returns null → nothing to recompute, no doc load.
+    JSONObject body = new JSONObject();
+    body.put("rate", "abc");
+    assertNull(handler.handle(crudPatch("DOC1", body)));
+    assertFalse(body.has("foreignAmount"));
+  }
+
+  @Test
   public void testHandleZeroGrandTotalLeavesRateAndForeignUntouched() throws Exception {
     JSONObject body = new JSONObject();
     body.put("invoice", INVOICE_ID);
