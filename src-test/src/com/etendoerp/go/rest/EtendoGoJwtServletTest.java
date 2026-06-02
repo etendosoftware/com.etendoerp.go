@@ -43,6 +43,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -322,6 +323,164 @@ public class EtendoGoJwtServletTest {
     assertEquals(400, resp.status);
   }
 
+  // ===================== POST /sso/google =====================
+
+  @Test
+  public void ssoGoogleNewAccountCreatesSsoAccount() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/sso/google");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"credential\":\"id-token\"}")));
+    EtendoGoSsoAssertion assertion = new EtendoGoSsoAssertion("google", "google-sub",
+        "user@gmail.com", "Google User", true);
+    EtendoGoJwtServlet ssoServlet = new EtendoGoJwtServlet(new TransactionalAuthEmailSender(),
+        (request, rawBody) -> assertion);
+
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("acct-1");
+    when(account.getEmail()).thenReturn("user@gmail.com");
+    when(account.getName()).thenReturn("Google User");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
+          "google", "google-sub")).thenReturn(null);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@gmail.com"))
+          .thenReturn(null);
+      dalMock.when(() -> EtendoGoJwtDalHelper.createSsoAccount(eq("user@gmail.com"),
+          eq("Google User"), eq("google"), eq("google-sub"), eq("user@gmail.com"),
+          anyString(), any(Date.class))).thenReturn(account);
+
+      ssoServlet.doPost(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("success", respBody.getString("status"));
+    assertEquals("sso", respBody.getString("authMethod"));
+    assertNotNull(respBody.getString("token"));
+  }
+
+  @Test
+  public void ssoGoogleExistingLocalAccountRequiresAuthoritativeEmail() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/sso/google");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"credential\":\"id-token\"}")));
+    EtendoGoSsoAssertion assertion = new EtendoGoSsoAssertion("google", "google-sub",
+        "user@example.com", "Google User", false);
+    EtendoGoJwtServlet ssoServlet = new EtendoGoJwtServlet(new TransactionalAuthEmailSender(),
+        (request, rawBody) -> assertion);
+
+    Account account = mock(Account.class);
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
+          "google", "google-sub")).thenReturn(null);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@example.com"))
+          .thenReturn(account);
+
+      ssoServlet.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.linkSsoIdentityIfCompatible(
+          any(Account.class), anyString(), anyString(), anyString()), never());
+    }
+
+    assertEquals(409, resp.status);
+  }
+
+  @Test
+  public void ssoGoogleExistingLocalAccountLinksAuthoritativeEmail() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/sso/google");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"credential\":\"id-token\"}")));
+    EtendoGoSsoAssertion assertion = new EtendoGoSsoAssertion("google", "google-sub",
+        "user@gmail.com", "Google User", true);
+    EtendoGoJwtServlet ssoServlet = new EtendoGoJwtServlet(new TransactionalAuthEmailSender(),
+        (request, rawBody) -> assertion);
+
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("acct-1");
+    when(account.getEmail()).thenReturn("user@gmail.com");
+    when(account.getName()).thenReturn("Google User");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
+          "google", "google-sub")).thenReturn(null);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@gmail.com"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.linkSsoIdentityIfCompatible(account,
+          "google", "google-sub", "user@gmail.com")).thenReturn(true);
+
+      ssoServlet.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.updateSsoSession(
+          eq(account), eq("user@gmail.com"), anyString(), any(Date.class)));
+    }
+
+    assertEquals(200, resp.status);
+  }
+
+  @Test
+  public void ssoUnsupportedProviderReturnsNotFound() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/sso/example");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader("{}")));
+
+    servlet.doPost(req, resp.response);
+
+    assertEquals(404, resp.status);
+  }
+
+  @Test
+  public void ssoProviderMismatchReturnsUnauthorized() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/sso/example");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader("{}")));
+    EtendoGoSsoProviderRegistry registry = EtendoGoSsoProviderRegistry.singleProvider("example",
+        (request, rawBody) -> new EtendoGoSsoAssertion("other", "sub", "user@example.com",
+            "User", true));
+    EtendoGoJwtServlet ssoServlet = new EtendoGoJwtServlet(new TransactionalAuthEmailSender(),
+        registry);
+
+    ssoServlet.doPost(req, resp.response);
+
+    assertEquals(401, resp.status);
+  }
+
+  @Test
+  public void ssoVerifierReceivesRawBodyWithLineBreaks() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/sso/google");
+    String rawBody = "{\n  \"credential\":\"id-token\"\n}";
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(rawBody)));
+    AtomicReference<String> receivedBody = new AtomicReference<>();
+    EtendoGoJwtServlet ssoServlet = new EtendoGoJwtServlet(new TransactionalAuthEmailSender(),
+        (request, verifierRawBody) -> {
+          receivedBody.set(verifierRawBody);
+          return new EtendoGoSsoAssertion("google", "google-sub", "user@gmail.com",
+              "Google User", true);
+        });
+
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("acct-1");
+    when(account.getEmail()).thenReturn("user@gmail.com");
+    when(account.getName()).thenReturn("Google User");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
+          "google", "google-sub")).thenReturn(account);
+
+      ssoServlet.doPost(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    assertEquals(rawBody, receivedBody.get());
+  }
+
   // ===================== POST /password-reset/request =====================
 
   @Test
@@ -364,6 +523,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
       dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
           .thenCallRealMethod();
 
@@ -470,6 +630,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
       dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
           .thenCallRealMethod();
 
@@ -502,6 +663,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
       dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
           .thenCallRealMethod();
 
@@ -577,6 +739,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
 
       servlet.doPost(req, resp.response);
     }
@@ -605,6 +768,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
 
       servletWithEmailSender.doPost(req, resp.response);
 

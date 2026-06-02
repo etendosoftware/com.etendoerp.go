@@ -19,6 +19,7 @@ package com.etendoerp.go.rest;
 import java.util.Date;
 import java.util.List;
 
+import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.provider.OBProvider;
@@ -39,6 +40,8 @@ final class EtendoGoJwtDalHelper {
   private static final String SYSTEM_USER_ID = "100";
   private static final String PARAM_EMAIL = "email";
   private static final String PARAM_TOKEN = "token";
+  private static final String PARAM_AUTH_PROVIDER = "authProvider";
+  private static final String PARAM_EXTERNAL_SUBJECT = "externalSubject";
   private static final String PARAM_RESET_TOKEN_HASH = "resetTokenHash";
   private static final String PARAM_ACCOUNT_EMAIL = "accountEmail";
   private static final String PARAM_ACCOUNT_PREFIX = "accountPrefix";
@@ -46,6 +49,7 @@ final class EtendoGoJwtDalHelper {
   private static final String PARAM_CURRENCY_ISO = "currencyIso";
   private static final String PARAM_STAR_VALUE = "starValue";
   private static final String PARAM_SYSTEM_USER_ID = "systemUserId";
+  private static final String ACTIVE_ACCOUNT_FILTER = " and account.active = true";
   private static final String FIELD_CLIENT_ID = "clientId";
   private static final String FIELD_CLIENT_NAME = "clientName";
   private static final String FIELD_ORG_ID = "orgId";
@@ -57,13 +61,17 @@ final class EtendoGoJwtDalHelper {
   private static final String PROPERTY_RESET_TOKEN_CONSUMED = "resetTokenConsumed";
   private static final String PROPERTY_RESET_TOKEN_EXPIRES = "resetTokenExpires";
   private static final String PROPERTY_RESET_TOKEN_HASH = "resetTokenHash";
+  private static final String PROPERTY_AUTH_PROVIDER = "authProvider";
+  private static final String PROPERTY_EXTERNAL_SUBJECT = "externalSubject";
+  private static final String PROPERTY_EXTERNAL_EMAIL = "externalEmail";
+  private static final String PROPERTY_LAST_SSO_LOGIN = "lastSsoLogin";
 
   private EtendoGoJwtDalHelper() {
   }
 
   static Account findActiveAccountByEmail(String email) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where lower(account.email) = :" + PARAM_EMAIL + " and account.active = true");
+        "as account where lower(account.email) = :" + PARAM_EMAIL + ACTIVE_ACCOUNT_FILTER);
     query.setNamedParameter(PARAM_EMAIL, email.toLowerCase());
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
@@ -72,8 +80,20 @@ final class EtendoGoJwtDalHelper {
 
   static Account findActiveAccountByToken(String token) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where account.sessionToken = :" + PARAM_TOKEN + " and account.active = true");
+        "as account where account.sessionToken = :" + PARAM_TOKEN + ACTIVE_ACCOUNT_FILTER);
     query.setNamedParameter(PARAM_TOKEN, token);
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    return query.uniqueResult();
+  }
+
+  static Account findActiveAccountBySsoIdentity(String provider, String subject) {
+    OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
+        "as account where account." + PROPERTY_AUTH_PROVIDER + " = :" + PARAM_AUTH_PROVIDER
+            + " and account." + PROPERTY_EXTERNAL_SUBJECT + " = :" + PARAM_EXTERNAL_SUBJECT
+            + ACTIVE_ACCOUNT_FILTER);
+    query.setNamedParameter(PARAM_AUTH_PROVIDER, provider);
+    query.setNamedParameter(PARAM_EXTERNAL_SUBJECT, subject);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     return query.uniqueResult();
@@ -92,8 +112,53 @@ final class EtendoGoJwtDalHelper {
     return account;
   }
 
+  static Account createSsoAccount(String email, String name, String provider, String subject,
+      String externalEmail, String sessionToken, Date loginAt) {
+    Account account = OBProvider.getInstance().get(Account.class);
+    account.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
+    account.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
+    account.setEmail(email);
+    account.setPasswordHash(null);
+    account.setName(name);
+    account.setSessionToken(sessionToken);
+    account.set(PROPERTY_AUTH_PROVIDER, provider);
+    account.set(PROPERTY_EXTERNAL_SUBJECT, subject);
+    account.set(PROPERTY_EXTERNAL_EMAIL, externalEmail);
+    account.set(PROPERTY_LAST_SSO_LOGIN, loginAt);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+    return account;
+  }
+
   static void updateSessionToken(Account account, String sessionToken) {
     account.setSessionToken(sessionToken);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+  }
+
+  static boolean hasLocalPassword(Account account) {
+    return account != null && StringUtils.isNotBlank(account.getPasswordHash());
+  }
+
+  static boolean linkSsoIdentityIfCompatible(Account account, String provider, String subject,
+      String externalEmail) {
+    String currentProvider = StringUtils.trimToNull((String) account.get(PROPERTY_AUTH_PROVIDER));
+    String currentSubject = StringUtils.trimToNull((String) account.get(PROPERTY_EXTERNAL_SUBJECT));
+    if (currentProvider == null && currentSubject == null) {
+      account.set(PROPERTY_AUTH_PROVIDER, provider);
+      account.set(PROPERTY_EXTERNAL_SUBJECT, subject);
+      account.set(PROPERTY_EXTERNAL_EMAIL, externalEmail);
+      return true;
+    }
+    return StringUtils.equals(provider, currentProvider) && StringUtils.equals(subject,
+        currentSubject);
+  }
+
+  static void updateSsoSession(Account account, String externalEmail, String sessionToken,
+      Date loginAt) {
+    account.setSessionToken(sessionToken);
+    account.set(PROPERTY_EXTERNAL_EMAIL, externalEmail);
+    account.set(PROPERTY_LAST_SSO_LOGIN, loginAt);
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
   }
