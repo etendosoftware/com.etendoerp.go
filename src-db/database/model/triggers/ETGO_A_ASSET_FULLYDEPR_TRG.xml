@@ -18,7 +18,8 @@
 
 BEGIN
 
-    IF AD_isTriggerEnabled()='N' THEN RETURN;
+    IF AD_isTriggerEnabled()='N' THEN
+      IF (TG_OP = 'DELETE') THEN RETURN OLD; ELSE RETURN NEW; END IF;
     END IF;
 
     IF (INSERTING OR UPDATING) THEN
