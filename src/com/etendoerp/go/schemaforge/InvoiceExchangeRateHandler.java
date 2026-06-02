@@ -30,6 +30,7 @@ import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.common.currency.ConversionRateDoc;
 import org.openbravo.model.common.invoice.Invoice;
 
 /**
@@ -39,6 +40,10 @@ import org.openbravo.model.common.invoice.Invoice;
  * <p>On POST, derives the {@code currency} (from) value from the parent invoice's
  * currency. Mirrors classic Etendo behavior where {@code C_Conversion_Rate_Document.C_Currency_ID}
  * is non-editable and auto-populated by callout from the invoice header.
+ *
+ * <p>On PATCH/PUT, recomputes the counterpart of the {@code rate} / {@code foreignAmount} pair
+ * from the parent invoice's grand total, so a manually edited rate keeps the foreign amount in
+ * sync (and vice versa) without relying on a client-side callout.
  *
  * <p>Registered via {@code javaQualifier = "invoiceExchangeRateHandler"} on the
  * {@code exchangeRates} entity of the sales-invoice and purchase-invoice specs.
@@ -61,13 +66,25 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
     if (!NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return null;
     }
-    if (!"POST".equals(context.getHttpMethod())) {
-      return null;
-    }
     JSONObject body = context.getRequestBody();
     if (body == null) {
       return null;
     }
+    String method = context.getHttpMethod();
+    if ("POST".equals(method)) {
+      return handleCreate(body);
+    }
+    if ("PATCH".equals(method) || "PUT".equals(method)) {
+      return handleUpdate(context, body);
+    }
+    return null;
+  }
+
+  /**
+   * POST: resolve the parent invoice from the body, default the {@code currency} / {@code toCurrency}
+   * pair, and derive the missing side of {@code rate} / {@code foreignAmount}.
+   */
+  private NeoResponse handleCreate(JSONObject body) {
     String invoiceId = resolveInvoiceIdFromBody(body);
     if (invoiceId == null || invoiceId.isEmpty()) {
       return null;
@@ -95,6 +112,36 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
       // create an inconsistent document-level exchange rate. OBException rolls back
       // the transaction and surfaces the failure to the caller.
       log.error("Failed to inject derived fields on POST for invoice {}", invoiceId, e);
+      throw new OBException(e);
+    }
+    return null;
+  }
+
+  /**
+   * PATCH/PUT: an inline edit sends only the changed field (e.g. {@code {"rate": 5}}). Recompute the
+   * counterpart from the existing row's parent invoice grand total so the foreign amount stays in
+   * sync with a manually edited rate (and vice versa). No-op unless exactly one side of the pair is
+   * present in the body — if both are supplied the caller is authoritative, and if neither is the
+   * edit does not touch the rate/foreignAmount pair.
+   */
+  private NeoResponse handleUpdate(NeoContext context, JSONObject body) {
+    String recordId = context.getRecordId();
+    if (recordId == null || recordId.isEmpty()) {
+      return null;
+    }
+    boolean ratePresent = body.has(PROPERTY_RATE) && !body.isNull(PROPERTY_RATE);
+    boolean foreignPresent = body.has(PROPERTY_FOREIGN_AMOUNT) && !body.isNull(PROPERTY_FOREIGN_AMOUNT);
+    if (ratePresent == foreignPresent) {
+      return null;
+    }
+    ConversionRateDoc doc = loadConversionRateDoc(recordId);
+    if (doc == null || doc.getInvoice() == null) {
+      return null;
+    }
+    try {
+      computeRateAndForeignAmount(body, doc.getInvoice());
+    } catch (Exception e) {
+      log.error("Failed to recompute derived fields on update for conversion rate doc {}", recordId, e);
       throw new OBException(e);
     }
     return null;
@@ -232,6 +279,18 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
       return OBDal.getInstance().get(Invoice.class, invoiceId);
     } catch (Exception e) {
       log.error("Failed to load parent invoice {}", invoiceId, e);
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private static ConversionRateDoc loadConversionRateDoc(String recordId) {
+    OBContext.setAdminMode(true);
+    try {
+      return OBDal.getInstance().get(ConversionRateDoc.class, recordId);
+    } catch (Exception e) {
+      log.error("Failed to load conversion rate doc {}", recordId, e);
       return null;
     } finally {
       OBContext.restorePreviousMode();

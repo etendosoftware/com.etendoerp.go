@@ -38,6 +38,7 @@ import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.common.currency.ConversionRateDoc;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
@@ -211,6 +212,101 @@ public class InvoiceExchangeRateHandlerTest {
       fail("expected OBException");
     } catch (OBException expected) {
       // expected: derivation failure must roll back the save
+    }
+  }
+
+  // ----- handle() update (PATCH/PUT) -----
+
+  private static NeoContext crudPatch(String recordId, JSONObject body) {
+    return NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PATCH")
+        .recordId(recordId)
+        .requestBody(body)
+        .build();
+  }
+
+  /** Builds a persisted ConversionRateDoc whose parent invoice has the given grand total. */
+  private static ConversionRateDoc docWithInvoiceGrandTotal(BigDecimal grandTotal) {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.getGrandTotalAmount()).thenReturn(grandTotal);
+    ConversionRateDoc doc = mock(ConversionRateDoc.class);
+    when(doc.getInvoice()).thenReturn(invoice);
+    return doc;
+  }
+
+  @Test
+  public void testHandleUpdateRecomputesForeignAmountFromEditedRate() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("rate", "5");
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      ConversionRateDoc doc = docWithInvoiceGrandTotal(new BigDecimal("100"));
+      when(dal.get(ConversionRateDoc.class, "DOC1")).thenReturn(doc);
+
+      assertNull(handler.handle(crudPatch("DOC1", body)));
+
+      assertEquals(0, new BigDecimal(body.optString("foreignAmount")).compareTo(new BigDecimal("500")));
+    }
+  }
+
+  @Test
+  public void testHandleUpdateRecomputesRateFromEditedForeignAmount() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("foreignAmount", "250");
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      ConversionRateDoc doc = docWithInvoiceGrandTotal(new BigDecimal("100"));
+      when(dal.get(ConversionRateDoc.class, "DOC1")).thenReturn(doc);
+
+      assertNull(handler.handle(crudPatch("DOC1", body)));
+
+      assertEquals(0, new BigDecimal(body.optString("rate")).compareTo(new BigDecimal("2.5")));
+    }
+  }
+
+  @Test
+  public void testHandleUpdateIgnoresMissingRecordId() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("rate", "5");
+    assertNull(handler.handle(crudPatch("", body)));
+  }
+
+  @Test
+  public void testHandleUpdateIgnoresWhenBothRateAndForeignPresent() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("rate", "5");
+    body.put("foreignAmount", "999");
+    assertNull(handler.handle(crudPatch("DOC1", body)));
+    // Caller is authoritative: neither value is recomputed.
+    assertEquals("999", body.optString("foreignAmount"));
+  }
+
+  @Test
+  public void testHandleUpdateIgnoresWhenNeitherRateNorForeignPresent() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("comments", "note");
+    assertNull(handler.handle(crudPatch("DOC1", body)));
+    assertFalse(body.has("rate"));
+    assertFalse(body.has("foreignAmount"));
+  }
+
+  @Test
+  public void testHandleUpdateIgnoresDocNotFound() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("rate", "5");
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(ConversionRateDoc.class, "DOC1")).thenReturn(null);
+
+      assertNull(handler.handle(crudPatch("DOC1", body)));
+      assertFalse(body.has("foreignAmount"));
     }
   }
 
