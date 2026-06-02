@@ -19,8 +19,6 @@ package com.etendoerp.go.rest;
 
 import java.time.Instant;
 
-import javax.servlet.http.HttpServletRequest;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
@@ -52,18 +50,18 @@ class TransactionalAuthEmailSender {
     this.emailService = emailService;
   }
 
-  boolean sendNewAccount(HttpServletRequest request, Account account) {
+  boolean sendNewAccount(Account account) {
     return sendAccountLink(CONTRACT_NEW_ACCOUNT, account,
-        EtendoGoAuthLinkBuilder.onboardingLink(request), null);
+        EtendoGoAuthLinkBuilder.onboardingLink(), null);
   }
 
-  boolean sendEnvironmentReady(HttpServletRequest request, Account account, String clientId) {
+  boolean sendEnvironmentReady(Account account, String clientId) {
     if (account == null) {
       return false;
     }
     try {
       JSONObject body = baseCommand(account, clientId);
-      String dashboardLink = EtendoGoAuthLinkBuilder.dashboardLink(request);
+      String dashboardLink = EtendoGoAuthLinkBuilder.dashboardLink();
       if (dashboardLink != null) {
         body.put(EmailContractCommandSupport.FIELD_LINK, dashboardLink);
       }
@@ -75,10 +73,10 @@ class TransactionalAuthEmailSender {
     }
   }
 
-  boolean sendPasswordReset(HttpServletRequest request, Account account, String resetToken,
+  boolean sendPasswordReset(Account account, String resetToken,
       String resetTokenHash) {
     return sendAccountLink(CONTRACT_RESET_PASSWORD, account,
-        EtendoGoAuthLinkBuilder.resetPasswordLink(request, resetToken), resetTokenHash);
+        EtendoGoAuthLinkBuilder.resetPasswordLink(resetToken), resetTokenHash);
   }
 
   boolean sendPasswordChanged(Account account) {

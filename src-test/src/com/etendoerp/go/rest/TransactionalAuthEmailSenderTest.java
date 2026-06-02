@@ -27,8 +27,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import javax.servlet.http.HttpServletRequest;
-
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
 import org.junit.Test;
@@ -61,7 +59,7 @@ public class TransactionalAuthEmailSenderTest {
     Account account = account("account-1");
 
     JSONObject command = sendAndCaptureCommand(emailService,
-        () -> sender.sendNewAccount(mock(HttpServletRequest.class), account),
+        () -> sender.sendNewAccount(account),
         "new-account");
 
     assertBaseCommand(command);
@@ -78,7 +76,7 @@ public class TransactionalAuthEmailSenderTest {
     Account account = account("account-1");
 
     JSONObject command = sendAndCaptureCommand(emailService,
-        () -> sender.sendEnvironmentReady(mock(HttpServletRequest.class), account, "client-1"),
+        () -> sender.sendEnvironmentReady(account, "client-1"),
         "environment-ready");
 
     assertBaseCommand(command, "client-1");
@@ -95,8 +93,7 @@ public class TransactionalAuthEmailSenderTest {
     Account account = account("account-1");
 
     JSONObject command = sendAndCaptureCommand(emailService,
-        () -> sender.sendPasswordReset(mock(HttpServletRequest.class), account,
-            "abc 123+/=", "reset-hash"),
+        () -> sender.sendPasswordReset(account, "abc 123+/=", "reset-hash"),
         "reset-password");
 
     assertBaseCommand(command);
@@ -133,7 +130,7 @@ public class TransactionalAuthEmailSenderTest {
 
     try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoDalHelper> dalHelperMock = mockStatic(EtendoGoDalHelper.class)) {
-      sender.sendNewAccount(mock(HttpServletRequest.class), account("account-1"));
+      sender.sendNewAccount(account("account-1"));
 
       dalHelperMock.verify(() -> EtendoGoDalHelper.rollbackDalChanges(
           eq("transactional auth email"), any(RuntimeException.class), any()));
@@ -146,8 +143,8 @@ public class TransactionalAuthEmailSenderTest {
     TransactionalEmailService emailService = mock(TransactionalEmailService.class);
     TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
 
-    sender.sendNewAccount(mock(HttpServletRequest.class), null);
-    sender.sendPasswordReset(null, account("account-1"), "reset-token", "reset-hash");
+    sender.sendNewAccount(null);
+    sender.sendPasswordReset(account("account-1"), "reset-token", "reset-hash");
     sender.sendPasswordChanged(null);
 
     verify(emailService, never()).send(any(), any());

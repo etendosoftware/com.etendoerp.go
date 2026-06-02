@@ -227,7 +227,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String sessionToken = generateToken();
       Account account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, name, sessionToken);
       sendAuthEmailBestEffort("new-account",
-          () -> authEmailSender.sendNewAccount(request, account));
+          () -> authEmailSender.sendNewAccount(account));
 
       JSONObject accountJson = new JSONObject();
       accountJson.put("id", account.getId());
@@ -348,22 +348,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
       Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
       if (account != null) {
-        EtendoGoJwtDalHelper.PasswordResetTokenState previousTokenState =
-            EtendoGoJwtDalHelper.capturePasswordResetToken(account);
-        String resetToken = generatePasswordResetToken();
-        String resetTokenHash = hashResetToken(resetToken);
-        Date expiresAt = Date.from(Instant.now().plusSeconds(PASSWORD_RESET_TTL_SECONDS));
-        EtendoGoJwtDalHelper.storePasswordResetToken(account, resetTokenHash, expiresAt);
-        boolean emailSent = false;
-        try {
-          emailSent = authEmailSender.sendPasswordReset(request, account, resetToken,
-              resetTokenHash);
-        } catch (RuntimeException e) {
-          log.warn("Auth email reset-password failed after token storage", e);
-        }
-        if (!emailSent) {
-          EtendoGoJwtDalHelper.restorePasswordResetToken(account, previousTokenState);
-        }
+        storeResetTokenAndSendEmail(account);
       }
       writePasswordResetNeutralResponse(response);
     } catch (RuntimeException e) {
@@ -751,7 +736,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
       Account account = findAccountForCommittedOnboarding(token, accountEmail);
       sendAuthEmailBestEffort("environment-ready",
-          () -> authEmailSender.sendEnvironmentReady(request, account, clientId));
+          () -> authEmailSender.sendEnvironmentReady(account, clientId));
 
       sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
       sendProgress(writer, "finalize", "done", "Environment ready");
@@ -1161,6 +1146,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private Account findAccountForCommittedOnboarding(String token, String accountEmail) {
     Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
     return account != null ? account : EtendoGoJwtDalHelper.findActiveAccountByEmail(accountEmail);
+  }
+
+  private void storeResetTokenAndSendEmail(Account account) {
+    EtendoGoJwtDalHelper.PasswordResetTokenState previousTokenState =
+        EtendoGoJwtDalHelper.capturePasswordResetToken(account);
+    String resetToken = generatePasswordResetToken();
+    String resetTokenHash = hashResetToken(resetToken);
+    Date expiresAt = Date.from(Instant.now().plusSeconds(PASSWORD_RESET_TTL_SECONDS));
+    EtendoGoJwtDalHelper.storePasswordResetToken(account, resetTokenHash, expiresAt);
+
+    boolean emailSent = false;
+    try {
+      emailSent = authEmailSender.sendPasswordReset(account, resetToken, resetTokenHash);
+    } catch (RuntimeException e) {
+      log.warn("Auth email reset-password failed after token storage", e);
+    }
+    if (!emailSent) {
+      EtendoGoJwtDalHelper.restorePasswordResetToken(account, previousTokenState);
+    }
   }
 
   private void sendAuthEmailBestEffort(String contractName, Runnable sendAction) {

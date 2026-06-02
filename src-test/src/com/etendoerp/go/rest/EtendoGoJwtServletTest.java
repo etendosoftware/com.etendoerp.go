@@ -178,7 +178,7 @@ public class EtendoGoJwtServletTest {
     JSONObject respBody = new JSONObject(resp.body());
     assertEquals("success", respBody.getString("status"));
     assertNotNull(respBody.getString("token"));
-    verify(emailSender).sendNewAccount(req, account);
+    verify(emailSender).sendNewAccount(account);
   }
 
   @Test
@@ -199,7 +199,7 @@ public class EtendoGoJwtServletTest {
     when(account.getEmail()).thenReturn("new@test.com");
     when(account.getName()).thenReturn("New User");
     doThrow(new RuntimeException("provider unavailable"))
-        .when(emailSender).sendNewAccount(req, account);
+        .when(emailSender).sendNewAccount(account);
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
@@ -311,7 +311,7 @@ public class EtendoGoJwtServletTest {
         "{\"email\":\"user@test.com\"}")));
 
     Account account = mock(Account.class);
-    when(emailSender.sendPasswordReset(eq(req), eq(account), anyString(), anyString()))
+    when(emailSender.sendPasswordReset(eq(account), anyString(), anyString()))
         .thenReturn(true);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
@@ -327,7 +327,7 @@ public class EtendoGoJwtServletTest {
     }
 
     assertEquals(200, resp.status);
-    verify(emailSender).sendPasswordReset(eq(req), eq(account), anyString(), anyString());
+    verify(emailSender).sendPasswordReset(eq(account), anyString(), anyString());
   }
 
   @Test
@@ -341,7 +341,7 @@ public class EtendoGoJwtServletTest {
         "{\"email\":\"user@test.com\"}")));
 
     Account account = mock(Account.class);
-    when(emailSender.sendPasswordReset(eq(req), eq(account), anyString(), anyString()))
+    when(emailSender.sendPasswordReset(eq(account), anyString(), anyString()))
         .thenReturn(false);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
@@ -372,7 +372,7 @@ public class EtendoGoJwtServletTest {
         "{\"email\":\"user@test.com\"}")));
 
     Account account = mock(Account.class);
-    when(emailSender.sendPasswordReset(eq(req), eq(account), anyString(), anyString()))
+    when(emailSender.sendPasswordReset(eq(account), anyString(), anyString()))
         .thenThrow(new RuntimeException("provider unavailable"));
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
