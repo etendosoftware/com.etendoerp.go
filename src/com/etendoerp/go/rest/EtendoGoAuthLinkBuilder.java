@@ -52,7 +52,8 @@ final class EtendoGoAuthLinkBuilder {
     if (onboardingLink == null) {
       return null;
     }
-    return onboardingLink + "?resetToken=" + encode(normalizedToken);
+    String separator = onboardingLink.contains("?") ? "&" : "?";
+    return onboardingLink + separator + "resetToken=" + encode(normalizedToken);
   }
 
   private static String encode(String value) {
