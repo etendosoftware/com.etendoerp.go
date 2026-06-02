@@ -117,8 +117,6 @@ public class AbstractFiscalHandlerTest {
         anyString());
   }
 
-  // ── general catch (Exception) path ───────────────────────────────
-
   /**
    * When OBContext is unavailable (typical in unit tests) the
    * {@code catch (Exception e)} block in {@code handle()} must intercept the
@@ -131,7 +129,6 @@ public class AbstractFiscalHandlerTest {
     when(req.getParameter("year")).thenReturn("2026");
     when(req.getParameter("period")).thenReturn("T1");
 
-    // dispatch() throws a plain RuntimeException → caught by catch (Exception e).
     StubHandler handler = new StubHandler(servlet, false);
     handler.handle("known", "GET", req, resp);
 
