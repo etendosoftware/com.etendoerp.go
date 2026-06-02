@@ -127,14 +127,17 @@ public class TransactionalAuthEmailSenderTest {
     when(emailService.send(eq("new-account"), any(JSONObject.class)))
         .thenThrow(new RuntimeException("provider unavailable"));
     TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
+    OBContext previousContext = mock(OBContext.class);
 
     try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoDalHelper> dalHelperMock = mockStatic(EtendoGoDalHelper.class)) {
+      contextMock.when(OBContext::getOBContext).thenReturn(previousContext);
       sender.sendNewAccount(account("account-1"));
 
       dalHelperMock.verify(() -> EtendoGoDalHelper.rollbackDalChanges(
           eq("transactional auth email"), any(RuntimeException.class), any()));
       contextMock.verify(OBContext::restorePreviousMode);
+      contextMock.verify(() -> OBContext.setOBContext(previousContext));
     }
   }
 
@@ -158,9 +161,11 @@ public class TransactionalAuthEmailSenderTest {
     when(emailService.send(eq(contractName), any(JSONObject.class)))
         .thenReturn(NeoResponse.ok(new JSONObject()));
     ArgumentCaptor<JSONObject> commandCaptor = ArgumentCaptor.forClass(JSONObject.class);
+    OBContext previousContext = mock(OBContext.class);
 
     try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      contextMock.when(OBContext::getOBContext).thenReturn(previousContext);
       obDalMock.when(OBDal::getInstance).thenReturn(obDal);
 
       action.send();
@@ -168,6 +173,7 @@ public class TransactionalAuthEmailSenderTest {
       contextMock.verify(() -> OBContext.setOBContext("0", "0", "0", "0"));
       contextMock.verify(() -> OBContext.setAdminMode(true));
       contextMock.verify(OBContext::restorePreviousMode);
+      contextMock.verify(() -> OBContext.setOBContext(previousContext));
       verify(obDal).flush();
       verify(obDal).commitAndClose();
     }

@@ -137,6 +137,7 @@ class TransactionalAuthEmailSender {
   }
 
   private boolean sendBestEffort(String contractName, JSONObject body) {
+    OBContext previousContext = OBContext.getOBContext();
     try {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
@@ -156,6 +157,7 @@ class TransactionalAuthEmailSender {
       return false;
     } finally {
       OBContext.restorePreviousMode();
+      OBContext.setOBContext(previousContext);
     }
   }
 }
