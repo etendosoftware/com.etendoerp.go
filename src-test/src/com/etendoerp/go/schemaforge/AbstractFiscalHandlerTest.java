@@ -201,7 +201,7 @@ public class AbstractFiscalHandlerTest {
     ServletOutputStream sos = new ServletOutputStream() {
       @Override public void write(int b) { baos.write(b); }
       @Override public boolean isReady() { return true; }
-      @Override public void setWriteListener(WriteListener wl) {}
+      @Override public void setWriteListener(WriteListener wl) { throw new UnsupportedOperationException(); }
     };
     HttpServletResponse resp = mock(HttpServletResponse.class);
     when(resp.getOutputStream()).thenReturn(sos);
