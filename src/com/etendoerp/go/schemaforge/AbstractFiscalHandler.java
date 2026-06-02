@@ -70,9 +70,11 @@ abstract class AbstractFiscalHandler {
           "Unknown " + getModelKey() + " entity: " + entityName);
       return;
     }
-    if (!"GET".equals(method)) {
+    boolean methodOk = "GET".equals(method)
+        || ("POST".equals(method) && allowsPost(entityName));
+    if (!methodOk) {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          "Only GET is supported for /" + getModelKey() + "/" + entityName);
+          "Method not allowed for /" + getModelKey() + "/" + entityName);
       return;
     }
     String yearStr = request.getParameter("year");
@@ -105,6 +107,8 @@ abstract class AbstractFiscalHandler {
   }
 
   protected abstract boolean isKnownEntity(String entityName);
+
+  protected boolean allowsPost(String entityName) { return false; }
 
   protected abstract void dispatch(String entityName, String orgId, int year, String period,
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException;

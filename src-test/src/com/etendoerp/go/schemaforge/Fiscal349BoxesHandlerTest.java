@@ -70,7 +70,7 @@ public class Fiscal349BoxesHandlerTest {
     verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_NOT_FOUND), anyString());
   }
 
-  // ── non-GET method → 405 ─────────────────────────────────────────
+  // ── non-GET method → 405 (except POST generate) ──────────────────
 
   @Test
   public void testPostToOperatorsReturns405() throws IOException {
@@ -78,16 +78,6 @@ public class Fiscal349BoxesHandlerTest {
     HttpServletResponse resp = mock(HttpServletResponse.class);
 
     handler.handle("operators", "POST", req, resp);
-
-    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED), anyString());
-  }
-
-  @Test
-  public void testPostToGenerateReturns405() throws IOException {
-    HttpServletRequest  req  = mock(HttpServletRequest.class);
-    HttpServletResponse resp = mock(HttpServletResponse.class);
-
-    handler.handle("generate", "POST", req, resp);
 
     verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED), anyString());
   }
@@ -116,6 +106,22 @@ public class Fiscal349BoxesHandlerTest {
     handler.handle("operators", "GET", req, resp);
 
     verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+  }
+
+  // ── POST generate is allowed ──────────────────────────────────────
+
+  @Test
+  public void testPostToGenerateIsAllowed() {
+    // POST /fiscal349/generate must NOT return 405 — proceeds to param validation (→ 400).
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    handler.handle("generate", "POST", req, resp);
+
+    org.mockito.Mockito.verify(servlet, org.mockito.Mockito.never())
+        .sendError(org.mockito.ArgumentMatchers.eq(resp),
+            org.mockito.ArgumentMatchers.eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+            org.mockito.ArgumentMatchers.anyString());
   }
 
   // ── invalid year → 400 ───────────────────────────────────────────

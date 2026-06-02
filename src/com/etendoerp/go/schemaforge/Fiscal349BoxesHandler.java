@@ -67,6 +67,11 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
   }
 
   @Override
+  protected boolean allowsPost(String entityName) {
+    return GENERATE.equals(entityName);
+  }
+
+  @Override
   protected void dispatch(String entityName, String orgId, int year, String period,
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
     try {
