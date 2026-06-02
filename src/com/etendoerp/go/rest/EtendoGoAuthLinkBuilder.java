@@ -21,6 +21,8 @@ import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 
+import org.apache.commons.lang3.StringUtils;
+
 import com.etendoerp.go.common.PublicUrlResolver;
 
 final class EtendoGoAuthLinkBuilder {
@@ -42,11 +44,15 @@ final class EtendoGoAuthLinkBuilder {
   }
 
   static String resetPasswordLink(String resetToken) {
+    String normalizedToken = StringUtils.trimToNull(resetToken);
+    if (normalizedToken == null) {
+      return null;
+    }
     String onboardingLink = onboardingLink();
     if (onboardingLink == null) {
       return null;
     }
-    return onboardingLink + "?resetToken=" + encode(resetToken);
+    return onboardingLink + "?resetToken=" + encode(normalizedToken);
   }
 
   private static String encode(String value) {

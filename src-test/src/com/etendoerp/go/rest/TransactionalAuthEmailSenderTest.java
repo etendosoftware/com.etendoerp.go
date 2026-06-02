@@ -145,6 +145,8 @@ public class TransactionalAuthEmailSenderTest {
 
     sender.sendNewAccount(null);
     sender.sendPasswordReset(null, "reset-token", "reset-hash");
+    sender.sendPasswordReset(account("account-1"), null, "reset-hash");
+    sender.sendPasswordReset(account("account-1"), "reset-token", " ");
     sender.sendPasswordChanged(null);
 
     verify(emailService, never()).send(any(), any());

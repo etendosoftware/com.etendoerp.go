@@ -19,6 +19,7 @@ package com.etendoerp.go.rest;
 
 import java.time.Instant;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
@@ -78,7 +79,8 @@ class TransactionalAuthEmailSender {
 
   boolean sendPasswordReset(Account account, String resetToken,
       String resetTokenHash) {
-    if (account == null) {
+    if (account == null || StringUtils.isBlank(resetToken)
+        || StringUtils.isBlank(resetTokenHash)) {
       return false;
     }
     return sendAccountLink(CONTRACT_RESET_PASSWORD, account,
