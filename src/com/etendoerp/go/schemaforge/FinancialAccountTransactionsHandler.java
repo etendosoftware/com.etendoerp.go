@@ -125,6 +125,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           + "       COALESCE(ft.description, fp.description, '') AS description,"
           + "       ft.posted,"
           + "       COALESCE(fp.documentno, '') AS document_no,"
+          + "       ft.fin_payment_id AS payment_id,"
+          + "       fp.isreceipt AS payment_isreceipt,"
           + "       COALESCE(tbp.name, pbp.name, '') AS contact,"
           + "       COALESCE(gl.name, '') AS gl_item,"
           + "       cur.iso_code AS currency_iso,"
@@ -233,6 +235,10 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
           row.put("posted", StringUtils.trimToEmpty(rs.getString("posted")));
           row.put("documentNo", StringUtils.trimToEmpty(rs.getString("document_no")));
+          // Payment link: id + whether it's a received (IN) or made (OUT) payment,
+          // so the UI can navigate to the payment-in / payment-out window.
+          row.put("paymentId", StringUtils.trimToEmpty(rs.getString("payment_id")));
+          row.put("paymentIsReceipt", StringUtils.trimToEmpty(rs.getString("payment_isreceipt")));
           row.put("contact", StringUtils.trimToEmpty(rs.getString("contact")));
           row.put("glItem", StringUtils.trimToEmpty(rs.getString("gl_item")));
           row.put("currencyIso", StringUtils.trimToEmpty(rs.getString("currency_iso")));
