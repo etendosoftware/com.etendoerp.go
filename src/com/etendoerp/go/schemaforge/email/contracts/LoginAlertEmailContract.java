@@ -15,7 +15,20 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge.email;
+package com.etendoerp.go.schemaforge.email.contracts;
+
+import com.etendoerp.go.schemaforge.email.EmailAuthorizationResult;
+import com.etendoerp.go.schemaforge.email.EmailContactRecord;
+import com.etendoerp.go.schemaforge.email.EmailContract;
+import com.etendoerp.go.schemaforge.email.EmailContractCommand;
+import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
+import com.etendoerp.go.schemaforge.email.EmailContractDataResolver;
+import com.etendoerp.go.schemaforge.email.EmailContractResolution;
+import com.etendoerp.go.schemaforge.email.EmailDeliveryPolicy;
+import com.etendoerp.go.schemaforge.email.EmailProviderRequest;
+import com.etendoerp.go.schemaforge.email.EmailRecipientResolution;
+import com.etendoerp.go.schemaforge.email.EmailThrottleRule;
+import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;

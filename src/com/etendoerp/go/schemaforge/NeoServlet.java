@@ -51,6 +51,7 @@ public class NeoServlet extends HttpBaseServlet {
 
   private static final String METHOD_DELETE = "DELETE";
   private static final String METHOD_PATCH = "PATCH";
+  private static final String DOCUMENT_DOWNLOAD_PREFIX = "/document-download/";
   static final String ERR_ENTITY_NOT_FOUND = "Entity not found: ";
   static final String ERR_NO_LINKED_TAB = "Entity has no linked AD_Tab: ";
   public static final String ACTION_REQUEST_BODY_ATTR = "neo.action.requestBody";
@@ -115,6 +116,13 @@ public class NeoServlet extends HttpBaseServlet {
       return;
     }
 
+    // Download links are intentionally unauthenticated: the signed, expiring token carries the
+    // record/client scope and NeoDocumentDownloadService validates it before serving any file.
+    if ("GET".equals(method) && isDocumentDownloadPath(request.getPathInfo())) {
+      handleDocumentDownload(request, response);
+      return;
+    }
+
     if (!authenticator.authenticateRequest(request, response)) {
       return;
     }
@@ -148,6 +156,34 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error processing NEO request: {}", e.getMessage(), e);
       sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private boolean isDocumentDownloadPath(String pathInfo) {
+    return pathInfo != null && pathInfo.startsWith(DOCUMENT_DOWNLOAD_PREFIX);
+  }
+
+  private void handleDocumentDownload(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String token = StringUtils.substringAfter(request.getPathInfo(), DOCUMENT_DOWNLOAD_PREFIX);
+    if (StringUtils.isBlank(token)) {
+      sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing download token");
+      return;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      NeoDocumentDownloadService.handle(token, response);
+    } catch (Exception e) {
+      log.error("Error processing document download request", e);
+      if (!response.isCommitted()) {
+        response.reset();
+        response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+        response.setContentType("text/plain");
+        response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+        response.getWriter().write("Document download failed");
+      }
     } finally {
       OBContext.restorePreviousMode();
     }

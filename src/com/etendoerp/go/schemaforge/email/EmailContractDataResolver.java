@@ -19,7 +19,10 @@ package com.etendoerp.go.schemaforge.email;
 
 import java.util.Optional;
 
-interface EmailContractDataResolver {
+/**
+ * Resolves generic contract data used by built-in email contracts.
+ */
+public interface EmailContractDataResolver {
 
   /**
    * Resolves an Etendo Go account contact by trusted account id.
@@ -36,12 +39,4 @@ interface EmailContractDataResolver {
    * @return user contact when available
    */
   Optional<EmailContactRecord> findUserContact(String userId);
-
-  /**
-   * Resolves a sales invoice document and its recipient data.
-   *
-   * @param invoiceId C_Invoice id
-   * @return invoice email data when available
-   */
-  Optional<EmailDocumentRecord> findSalesInvoice(String invoiceId);
 }
