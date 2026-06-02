@@ -166,13 +166,32 @@ class Fiscal349BoxesHandler {
 
     List<Map<String, Object>> all = new ArrayList<>(purchaseBP);
     all.addAll(salesBP);
+
+    // Batch-load all referenced BPs in a single query to avoid N+1
+    List<String> bpIds = all.stream()
+        .filter(row -> {
+          BigDecimal b = (BigDecimal) row.get("BPTaxBaseAmount");
+          return b != null && b.compareTo(BigDecimal.ZERO) != 0;
+        })
+        .map(row -> (String) row.get("BPId"))
+        .filter(id -> id != null)
+        .distinct()
+        .collect(Collectors.toList());
+    Map<String, BusinessPartner> bpMap = bpIds.isEmpty() ? new HashMap<>() :
+        OBDal.getInstance().getSession()
+            .createQuery("from BusinessPartner where id in :ids", BusinessPartner.class)
+            .setParameterList("ids", bpIds)
+            .list()
+            .stream()
+            .collect(Collectors.toMap(BusinessPartner::getId, bp -> bp));
+
     for (Map<String, Object> row : all) {
       String     bpId = (String)     row.get("BPId");
       BigDecimal base = (BigDecimal) row.get("BPTaxBaseAmount");
       String     key  = (String)     row.get("TaxKey");
       if (base == null || base.compareTo(BigDecimal.ZERO) == 0) continue;
 
-      BusinessPartner bp = OBDal.getInstance().get(BusinessPartner.class, bpId);
+      BusinessPartner bp = bpMap.get(bpId);
       String name = bp != null ? bp.getName() : bpId;
       String nif  = bp != null && bp.getTaxID() != null ? bp.getTaxID() : "";
 
