@@ -38,6 +38,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
@@ -188,6 +189,9 @@ public class FinancialAccountHandler implements NeoHandler {
     account.setCurrency(currency);
     if (StringUtils.isNotBlank(iban)) {
       account.setIBAN(iban);
+      // FIN_FINANCIAL_ACCOUNT_TRG2 rejects a bank account that carries an IBAN
+      // without a country (@COUNTRY_IBAN@). Derive it from the IBAN's ISO prefix.
+      account.setCountry(resolveCountryFromIban(iban));
     }
     if (StringUtils.isNotBlank(swift)) {
       account.setSwiftCode(swift);
@@ -246,7 +250,13 @@ public class FinancialAccountHandler implements NeoHandler {
     // Only touch IBAN / BIC when the caller sent the key, so editing the general
     // data (which omits BIC) does not wipe a stored value.
     if (body.has("iban")) {
-      account.setIBAN(StringUtils.trimToNull(iban));
+      String ibanValue = StringUtils.trimToNull(iban);
+      account.setIBAN(ibanValue);
+      // Keep the country in sync with the IBAN so FIN_FINANCIAL_ACCOUNT_TRG2
+      // (@COUNTRY_IBAN@) accepts the row whenever an IBAN is present.
+      if (ibanValue != null) {
+        account.setCountry(resolveCountryFromIban(ibanValue));
+      }
     }
     if (body.has(FIELD_SWIFT_CODE)) {
       account.setSwiftCode(StringUtils.trimToNull(swift));
@@ -343,6 +353,25 @@ public class FinancialAccountHandler implements NeoHandler {
 
   FIN_FinancialAccount loadAccount(String accountId) {
     return OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+  }
+
+  /**
+   * Resolves the {@link Country} an IBAN belongs to from its first two characters
+   * (the ISO 3166-1 alpha-2 code, e.g. {@code ES} -> Spain). The financial account
+   * trigger requires the country to be set whenever a bank account stores an IBAN.
+   *
+   * @return the matching country, or {@code null} when the IBAN is too short or no
+   *         active country matches the ISO prefix.
+   */
+  Country resolveCountryFromIban(String iban) {
+    if (iban == null || iban.trim().length() < 2) {
+      return null;
+    }
+    String isoCode = iban.trim().substring(0, 2).toUpperCase();
+    OBCriteria<Country> criteria = OBDal.getInstance().createCriteria(Country.class);
+    criteria.add(Restrictions.eq(Country.PROPERTY_ISOCOUNTRYCODE, isoCode));
+    criteria.setMaxResults(1);
+    return (Country) criteria.uniqueResult();
   }
 
   boolean nameExists(String name, String excludeId) {
