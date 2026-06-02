@@ -378,6 +378,8 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
+          .thenCallRealMethod();
 
       servletWithEmailSender.doPost(req, resp.response);
 

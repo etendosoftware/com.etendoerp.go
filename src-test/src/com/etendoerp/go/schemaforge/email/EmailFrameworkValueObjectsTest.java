@@ -268,8 +268,9 @@ public class EmailFrameworkValueObjectsTest {
         new EmailProviderRequest("person@example.com", "fixture-template",
             new JSONObject(), null));
 
+    OBContext systemContext = contextWithClient("0");
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
-      obContextMock.when(OBContext::getOBContext).thenReturn(contextWithClient("0"));
+      obContextMock.when(OBContext::getOBContext).thenReturn(systemContext);
 
       assertEquals("account-tenant", context.getTenantId());
     }
@@ -285,8 +286,9 @@ public class EmailFrameworkValueObjectsTest {
         new EmailProviderRequest("person@example.com", "fixture-template",
             new JSONObject(), null));
 
+    OBContext realClientContext = contextWithClient("client-1");
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
-      obContextMock.when(OBContext::getOBContext).thenReturn(contextWithClient("client-1"));
+      obContextMock.when(OBContext::getOBContext).thenReturn(realClientContext);
 
       assertEquals("client-1", context.getTenantId());
     }
