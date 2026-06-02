@@ -16,7 +16,6 @@
  */
 package com.etendoerp.go.schemaforge;
 
-import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
@@ -32,13 +31,11 @@ import java.util.stream.Collectors;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.ScrollableResults;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
@@ -55,23 +52,15 @@ import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.TaxReportParameter;
 import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxReport_I;
 
-class Fiscal303BoxesHandler {
+class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
-  private static final Logger log = Logger.getLogger(Fiscal303BoxesHandler.class);
-
-  private static final String BOXES           = "boxes";
-  private static final String GENERATE        = "generate";
-  private static final String DECLARATIONS    = "declarations";
-  private static final String MODIFIED        = "modified";
-  private static final String VAT_SALES       = "VAT_SALES";
+  private static final String BOXES        = "boxes";
+  private static final String GENERATE     = "generate";
+  private static final String VAT_SALES    = "VAT_SALES";
   private static final String VAT_PURCHASE    = "VAT_PURCHASE";
   private static final String PURCHASE        = "Purchase";
   private static final String TAX_BASE_AMOUNT = "TaxBaseAmount";
   private static final String TAX_AMOUNT      = "TaxAmount";
-
-  private static final String JSON_CONTENT_TYPE = "application/json;charset=UTF-8";
-  private static final String PERIOD_KEY        = "period";
-  private static final String SINCE_KEY         = "since";
 
   private static final BigDecimal PCT_21   = new BigDecimal("21");
   private static final BigDecimal PCT_10   = new BigDecimal("10");
@@ -85,68 +74,35 @@ class Fiscal303BoxesHandler {
   private static final BigDecimal PCT_0_50 = new BigDecimal("0.50");
   private static final BigDecimal PCT_1_75 = new BigDecimal("1.75");
 
-  private final NeoServlet servlet;
-  private final FiscalDeclCrudHandler declHandler;
-
   Fiscal303BoxesHandler(NeoServlet servlet) {
-    this.servlet = servlet;
-    this.declHandler = new FiscalDeclCrudHandler(servlet);
+    super(servlet);
   }
 
-  void handle(String entityName, String method, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    if (DECLARATIONS.equals(entityName)) {
-      try {
-        declHandler.handleDeclarations(method, request, response);
-      } catch (Exception e) {
-        log.error("Error in /fiscal303/declarations", e);
-        servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-      }
-      return;
-    }
-    if (!BOXES.equals(entityName) && !GENERATE.equals(entityName) && !MODIFIED.equals(entityName)) {
-      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          "Unknown fiscal303 entity: " + entityName);
-      return;
-    }
-    if (!"GET".equals(method)) {
-      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          "Only GET is supported for /fiscal303/" + entityName);
-      return;
-    }
+  @Override
+  protected boolean isKnownEntity(String entityName) {
+    return BOXES.equals(entityName) || GENERATE.equals(entityName) || MODIFIED.equals(entityName);
+  }
 
-    String yearStr = request.getParameter("year");
-    String period  = request.getParameter(PERIOD_KEY);
-    if (yearStr == null || period == null) {
-      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Missing required params: year, period");
-      return;
+  @Override
+  protected void dispatch(String entityName, String orgId, int year, String period,
+      HttpServletRequest request, HttpServletResponse response) throws Exception {
+    if (BOXES.equals(entityName)) {
+      ComputeResult cr = computeBoxes(orgId, year, period);
+      JSONObject result = buildResponse(cr.boxes, cr.sources);
+      response.setContentType(JSON_CT);
+      response.getWriter().write(result.toString());
+    } else if (GENERATE.equals(entityName)) {
+      String tipo = request.getParameter("tipo");
+      handleGenerate(orgId, year, period, tipo, response);
+    } else {
+      long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
+      handleModified(orgId, year, period, new java.util.Date(sinceMs), response);
     }
-    if (MODIFIED.equals(entityName) && request.getParameter(SINCE_KEY) == null) {
-      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Missing required param: since");
-      return;
-    }
+  }
 
-    try {
-      int year = Integer.parseInt(yearStr);
-      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-      if (BOXES.equals(entityName)) {
-        ComputeResult cr = computeBoxes(orgId, year, period);
-        JSONObject result = buildResponse(cr.boxes, cr.sources);
-        response.setContentType(JSON_CONTENT_TYPE);
-        response.getWriter().write(result.toString());
-      } else if (GENERATE.equals(entityName)) {
-        String tipo = request.getParameter("tipo");
-        handleGenerate(orgId, year, period, tipo, response);
-      } else {
-        long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
-        handleModified(orgId, year, period, new java.util.Date(sinceMs), response);
-      }
-    } catch (Exception e) {
-      log.error("Error in /fiscal303/" + entityName, e);
-      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-    }
+  @Override
+  protected String getModelKey() {
+    return "fiscal303";
   }
 
   private void handleGenerate(String orgId, int year, String period, String tipo,
@@ -236,7 +192,7 @@ class Fiscal303BoxesHandler {
     JSONObject out = new JSONObject();
     out.put(MODIFIED, modified);
     out.put("count", count);
-    response.setContentType(JSON_CONTENT_TYPE);
+    response.setContentType(JSON_CT);
     response.getWriter().write(out.toString());
   }
 

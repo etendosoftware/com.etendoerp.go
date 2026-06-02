@@ -16,7 +16,6 @@
  */
 package com.etendoerp.go.schemaforge;
 
-import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
@@ -28,13 +27,13 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
@@ -53,77 +52,39 @@ import org.openbravo.module.aeat349.es.AEAT3492010ReportDao;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxReport_I;
 
-class Fiscal349BoxesHandler {
+class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
-  private static final Logger log = Logger.getLogger(Fiscal349BoxesHandler.class);
-
-  private static final String OPERATORS    = "operators";
-  private static final String GENERATE     = "generate";
-  private static final String DECLARATIONS = "declarations";
-  private static final String MODIFIED     = "modified";
-  private static final String PERIOD_KEY   = "period";
-  private static final String SINCE_KEY    = "since";
-  private static final String JSON_CT      = "application/json;charset=UTF-8";
-
-  private final NeoServlet servlet;
-  private final FiscalDeclCrudHandler declHandler;
+  private static final String OPERATORS = "operators";
+  private static final String GENERATE  = "generate";
 
   Fiscal349BoxesHandler(NeoServlet servlet) {
-    this.servlet = servlet;
-    this.declHandler = new FiscalDeclCrudHandler(servlet);
+    super(servlet);
   }
 
-  void handle(String entityName, String method, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    if (DECLARATIONS.equals(entityName)) {
-      try {
-        declHandler.handleDeclarations(method, request, response);
-      } catch (Exception e) {
-        log.error("Error in /fiscal349/declarations", e);
-        servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-      }
-      return;
+  @Override
+  protected boolean isKnownEntity(String entityName) {
+    return OPERATORS.equals(entityName) || GENERATE.equals(entityName)
+        || MODIFIED.equals(entityName);
+  }
+
+  @Override
+  protected void dispatch(String entityName, String orgId, int year, String period,
+      HttpServletRequest request, HttpServletResponse response) throws Exception {
+    if (OPERATORS.equals(entityName)) {
+      JSONObject result = computeOperators(orgId, year, period);
+      response.setContentType(JSON_CT);
+      response.getWriter().write(result.toString());
+    } else if (GENERATE.equals(entityName)) {
+      handleGenerate(orgId, year, period, request, response);
+    } else {
+      long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
+      handleModified(orgId, year, period, new Date(sinceMs), response);
     }
-    if (!OPERATORS.equals(entityName) && !GENERATE.equals(entityName)
-        && !MODIFIED.equals(entityName)) {
-      servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
-          "Unknown fiscal349 entity: " + entityName);
-      return;
-    }
-    if (!"GET".equals(method)) {
-      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          "Only GET is supported for /fiscal349/" + entityName);
-      return;
-    }
-    String yearStr = request.getParameter("year");
-    String period  = request.getParameter(PERIOD_KEY);
-    if (yearStr == null || period == null) {
-      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Missing required params: year, period");
-      return;
-    }
-    if (MODIFIED.equals(entityName) && request.getParameter(SINCE_KEY) == null) {
-      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Missing required param: since");
-      return;
-    }
-    try {
-      int    year  = Integer.parseInt(yearStr);
-      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-      if (OPERATORS.equals(entityName)) {
-        JSONObject result = computeOperators(orgId, year, period);
-        response.setContentType(JSON_CT);
-        response.getWriter().write(result.toString());
-      } else if (GENERATE.equals(entityName)) {
-        handleGenerate(orgId, year, period, request, response);
-      } else {
-        long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
-        handleModified(orgId, year, period, new Date(sinceMs), response);
-      }
-    } catch (Exception e) {
-      log.error("Error in /fiscal349/" + entityName, e);
-      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-    }
+  }
+
+  @Override
+  protected String getModelKey() {
+    return "fiscal349";
   }
 
   // ── operators ─────────────────────────────────────────────────────
@@ -133,7 +94,7 @@ class Fiscal349BoxesHandler {
     if (org == null) {
       throw new OBException("Organization not found: " + orgId);
     }
-    TaxReport taxReport   = resolveTaxReport349(orgId, period);
+    TaxReport  taxReport  = resolveTaxReport349(orgId, period);
     AcctSchema acctSchema = resolveAcctSchema(org);
     List<Period> periods  = resolvePeriods(orgId, year, period);
 
@@ -147,7 +108,7 @@ class Fiscal349BoxesHandler {
     List<TaxRate> taxesPurchase = dao349.get349Taxes(taxReport.getId(), "Purchase");
     List<TaxRate> taxesSales    = dao349.get349Taxes(taxReport.getId(), "Sales");
 
-    Set<Invoice> allPurch  = dao349.get349Invoices(org, taxesPurchase, periods, acctSchema, true, null);
+    Set<Invoice> allPurch  = dao349.get349Invoices(org, taxesPurchase, periods, acctSchema, true,  null);
     Set<Invoice> corrPurch = dao349.getCorrectiveInvoices(allPurch);
     Set<Invoice> purch     = dao349.removeCorrectiveInvoices(allPurch, corrPurch);
 
@@ -156,76 +117,78 @@ class Fiscal349BoxesHandler {
     Set<Invoice> sales     = dao349.removeCorrectiveInvoices(allSales, corrSales);
 
     Set<Map<String, Object>> purchaseBP =
-        dao349.getTaxBaseAmountPerBusinessPartner(purch, taxesPurchase, true, taxReport);
+        dao349.getTaxBaseAmountPerBusinessPartner(purch, taxesPurchase, true,  taxReport);
     Set<Map<String, Object>> salesBP =
-        dao349.getTaxBaseAmountPerBusinessPartner(sales, taxesSales, false, taxReport);
+        dao349.getTaxBaseAmountPerBusinessPartner(sales, taxesSales,    false, taxReport);
 
-    JSONArray operatorsArr = new JSONArray();
     Map<String, BigDecimal> summaryByKey = new LinkedHashMap<>();
     for (String k : Arrays.asList("E", "S", "A", "I")) summaryByKey.put(k, BigDecimal.ZERO);
 
     List<Map<String, Object>> all = new ArrayList<>(purchaseBP);
     all.addAll(salesBP);
 
-    // Batch-load all referenced BPs in a single query to avoid N+1
-    List<String> bpIds = all.stream()
+    Map<String, BusinessPartner> bpMap        = loadBpMap(all);
+    JSONArray                    operatorsArr = buildOperatorsArray(all, bpMap, summaryByKey);
+
+    JSONObject summary = new JSONObject();
+    for (Map.Entry<String, BigDecimal> e : summaryByKey.entrySet()) {
+      summary.put("total" + e.getKey(), e.getValue().setScale(2, RoundingMode.HALF_UP).toString());
+    }
+
+    String    orgNif      = dao349.getOrgTaxID(orgId);
+    JSONArray invoicesArr = collectInvoices(purch, sales);
+
+    JSONObject root = new JSONObject();
+    root.put(OPERATORS, operatorsArr);
+    root.put("summary",  summary);
+    root.put("invoices", invoicesArr);
+    root.put("orgNif",   orgNif != null ? orgNif : "");
+    root.put("orgName",  org.getName());
+    return root;
+  }
+
+  private Map<String, BusinessPartner> loadBpMap(List<Map<String, Object>> rows) {
+    List<String> bpIds = rows.stream()
         .filter(row -> {
           BigDecimal b = (BigDecimal) row.get("BPTaxBaseAmount");
           return b != null && b.compareTo(BigDecimal.ZERO) != 0;
         })
         .map(row -> (String) row.get("BPId"))
-        .filter(id -> id != null)
+        .filter(Objects::nonNull)
         .distinct()
         .collect(Collectors.toList());
-    Map<String, BusinessPartner> bpMap = bpIds.isEmpty() ? new HashMap<>() :
-        OBDal.getInstance().getSession()
-            .createQuery("from BusinessPartner where id in :ids", BusinessPartner.class)
-            .setParameterList("ids", bpIds)
-            .list()
-            .stream()
-            .collect(Collectors.toMap(BusinessPartner::getId, bp -> bp));
+    if (bpIds.isEmpty()) return new HashMap<>();
+    return OBDal.getInstance().getSession()
+        .createQuery("from BusinessPartner where id in :ids", BusinessPartner.class)
+        .setParameterList("ids", bpIds)
+        .list()
+        .stream()
+        .collect(Collectors.toMap(BusinessPartner::getId, bp -> bp));
+  }
 
-    for (Map<String, Object> row : all) {
+  private JSONArray buildOperatorsArray(List<Map<String, Object>> rows,
+      Map<String, BusinessPartner> bpMap, Map<String, BigDecimal> summaryByKey) throws Exception {
+    JSONArray arr = new JSONArray();
+    for (Map<String, Object> row : rows) {
       String     bpId = (String)     row.get("BPId");
       BigDecimal base = (BigDecimal) row.get("BPTaxBaseAmount");
       String     key  = (String)     row.get("TaxKey");
       if (base == null || base.compareTo(BigDecimal.ZERO) == 0) continue;
-
-      BusinessPartner bp = bpMap.get(bpId);
-      String name = bp != null ? bp.getName() : bpId;
-      String nif  = bp != null && bp.getTaxID() != null ? bp.getTaxID() : "";
-
+      BusinessPartner bp   = bpMap.get(bpId);
+      String          name = bp != null ? bp.getName() : bpId;
+      String          nif  = bp != null && bp.getTaxID() != null ? bp.getTaxID() : "";
       JSONObject op = new JSONObject();
       op.put("bpId", bpId);
       op.put("nif",  nif);
       op.put("name", name);
       op.put("key",  key != null ? key : "");
       op.put("base", base.setScale(2, RoundingMode.HALF_UP).toString());
-      operatorsArr.put(op);
-
+      arr.put(op);
       if (key != null && summaryByKey.containsKey(key)) {
         summaryByKey.put(key, summaryByKey.get(key).add(base));
       }
     }
-
-    JSONObject summary = new JSONObject();
-    for (Map.Entry<String, BigDecimal> e : summaryByKey.entrySet()) {
-      summary.put("total" + e.getKey(),
-          e.getValue().setScale(2, RoundingMode.HALF_UP).toString());
-    }
-
-    JSONArray invoicesArr = collectInvoices(purch, sales);
-
-    String orgNif  = dao349.getOrgTaxID(orgId);
-    String orgName = org != null ? org.getName() : "";
-
-    JSONObject root = new JSONObject();
-    root.put("operators", operatorsArr);
-    root.put("summary",   summary);
-    root.put("invoices",  invoicesArr);
-    root.put("orgNif",    orgNif  != null ? orgNif  : "");
-    root.put("orgName",   orgName);
-    return root;
+    return arr;
   }
 
   private JSONArray collectInvoices(Set<Invoice> purch, Set<Invoice> sales) throws Exception {
@@ -242,8 +205,8 @@ class Fiscal349BoxesHandler {
 
   private JSONObject buildInvoiceRow(Invoice inv, String type, SimpleDateFormat sdf)
       throws Exception {
-    BusinessPartner bp = inv.getBusinessPartner();
-    BigDecimal base = inv.getSummedLineAmount() != null
+    BusinessPartner bp   = inv.getBusinessPartner();
+    BigDecimal      base = inv.getSummedLineAmount() != null
         ? inv.getSummedLineAmount().abs().setScale(2, RoundingMode.HALF_UP)
         : BigDecimal.ZERO;
     JSONObject row = new JSONObject();
@@ -261,9 +224,9 @@ class Fiscal349BoxesHandler {
   private void handleGenerate(String orgId, int year, String period,
       HttpServletRequest request, HttpServletResponse response) throws Exception {
     Organization org      = OBDal.getInstance().get(Organization.class, orgId);
-    TaxReport taxReport   = resolveTaxReport349(orgId, period);
-    AcctSchema acctSchema = resolveAcctSchema(org);
-    List<Period> periods  = resolvePeriods(orgId, year, period);
+    TaxReport    taxReport  = resolveTaxReport349(orgId, period);
+    AcctSchema   acctSchema = resolveAcctSchema(org);
+    List<Period> periods    = resolvePeriods(orgId, year, period);
 
     if (periods.isEmpty()) {
       throw new OBException(
@@ -364,7 +327,7 @@ class Fiscal349BoxesHandler {
   }
 
   TaxReport resolveTaxReport349(String orgId, String periodCode) {
-    String type = periodCode.startsWith("T") ? "Q" : "M";
+    String    type   = periodCode.startsWith("T") ? "Q" : "M";
     TaxReport report = findTaxReport(orgId, "AEAT3492010_" + type);
     if (report == null) report = findTaxReport(orgId, "AEAT349_" + type);
     if (report == null) {
@@ -397,13 +360,15 @@ class Fiscal349BoxesHandler {
 
   @SuppressWarnings("unchecked")
   private List<Period> resolvePeriods(String orgId, int year, String periodCode) {
-    int monthFrom, monthTo;
+    int monthFrom;
+    int monthTo;
     if (periodCode.startsWith("T")) {
       int q = Integer.parseInt(periodCode.substring(1));
       monthFrom = (q - 1) * 3 + 1;
       monthTo   = q * 3;
     } else {
-      monthFrom = monthTo = Integer.parseInt(periodCode);
+      monthFrom = Integer.parseInt(periodCode);
+      monthTo   = monthFrom;
     }
     return OBDal.getInstance().getSession()
         .createQuery(
