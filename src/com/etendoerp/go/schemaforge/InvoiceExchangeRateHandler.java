@@ -118,20 +118,22 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
   }
 
   /**
-   * PATCH/PUT: an inline edit sends only the changed field (e.g. {@code {"rate": 5}}). Recompute the
-   * counterpart from the existing row's parent invoice grand total so the foreign amount stays in
-   * sync with a manually edited rate (and vice versa). No-op unless exactly one side of the pair is
-   * present in the body — if both are supplied the caller is authoritative, and if neither is the
-   * edit does not touch the rate/foreignAmount pair.
+   * PATCH/PUT: the inline editor submits BOTH {@code rate} and {@code foreignAmount}, but only one
+   * of them reflects the user's edit — the other carries the now-stale persisted value. We cannot
+   * tell which side changed from the body alone, so we compare the incoming values against the
+   * persisted row and recompute the counterpart of whichever one actually changed (rate wins if
+   * both changed). The recomputed value overwrites the stale one in the body before it is saved,
+   * mirroring the POST behavior and the classic {@code SE_CalculateExchangeRate} callout.
    */
   private NeoResponse handleUpdate(NeoContext context, JSONObject body) {
     String recordId = context.getRecordId();
     if (recordId == null || recordId.isEmpty()) {
       return null;
     }
-    boolean ratePresent = body.has(PROPERTY_RATE) && !body.isNull(PROPERTY_RATE);
-    boolean foreignPresent = body.has(PROPERTY_FOREIGN_AMOUNT) && !body.isNull(PROPERTY_FOREIGN_AMOUNT);
-    if (ratePresent == foreignPresent) {
+    BigDecimal newRate = readDecimal(body, PROPERTY_RATE);
+    BigDecimal newForeign = readDecimal(body, PROPERTY_FOREIGN_AMOUNT);
+    if (newRate == null && newForeign == null) {
+      // Edit does not touch the rate/foreignAmount pair.
       return null;
     }
     ConversionRateDoc doc = loadConversionRateDoc(recordId);
@@ -139,12 +141,30 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
       return null;
     }
     try {
-      computeRateAndForeignAmount(body, doc.getInvoice());
+      BigDecimal grandTotal = doc.getInvoice().getGrandTotalAmount();
+      if (grandTotal == null || grandTotal.signum() == 0) {
+        return null;
+      }
+      boolean rateChanged = newRate != null && !equalsDecimal(newRate, doc.getRate());
+      boolean foreignChanged = newForeign != null && !equalsDecimal(newForeign, doc.getForeignAmount());
+      if (rateChanged && newRate.signum() != 0) {
+        body.put(PROPERTY_FOREIGN_AMOUNT, grandTotal.multiply(newRate));
+      } else if (foreignChanged && newForeign.signum() != 0) {
+        body.put(PROPERTY_RATE, newForeign.divide(grandTotal, RATE_SCALE, RoundingMode.HALF_UP));
+      }
     } catch (Exception e) {
       log.error("Failed to recompute derived fields on update for conversion rate doc {}", recordId, e);
       throw new OBException(e);
     }
     return null;
+  }
+
+  /** Null-safe, scale-insensitive equality for the rate/foreignAmount change detection. */
+  private static boolean equalsDecimal(BigDecimal a, BigDecimal b) {
+    if (a == null || b == null) {
+      return a == b;
+    }
+    return a.compareTo(b) == 0;
   }
 
   /**

@@ -226,25 +226,66 @@ public class InvoiceExchangeRateHandlerTest {
         .build();
   }
 
-  /** Builds a persisted ConversionRateDoc whose parent invoice has the given grand total. */
-  private static ConversionRateDoc docWithInvoiceGrandTotal(BigDecimal grandTotal) {
+  /**
+   * Builds a persisted ConversionRateDoc with the given grand total and currently-stored
+   * {@code rate} / {@code foreignAmount}, used to drive the change-detection on update.
+   */
+  private static ConversionRateDoc docWith(BigDecimal grandTotal, BigDecimal storedRate,
+      BigDecimal storedForeign) {
     Invoice invoice = mock(Invoice.class);
     when(invoice.getGrandTotalAmount()).thenReturn(grandTotal);
     ConversionRateDoc doc = mock(ConversionRateDoc.class);
     when(doc.getInvoice()).thenReturn(invoice);
+    when(doc.getRate()).thenReturn(storedRate);
+    when(doc.getForeignAmount()).thenReturn(storedForeign);
     return doc;
   }
 
+  private static void stubDocLookup(MockedStatic<OBDal> obDal, ConversionRateDoc doc) {
+    OBDal dal = mock(OBDal.class);
+    obDal.when(OBDal::getInstance).thenReturn(dal);
+    when(dal.get(ConversionRateDoc.class, "DOC1")).thenReturn(doc);
+  }
+
   @Test
-  public void testHandleUpdateRecomputesForeignAmountFromEditedRate() throws Exception {
+  public void testHandleUpdateRecomputesStaleForeignWhenRateChanged() throws Exception {
+    // UI submits both: rate edited 5 -> 3, foreignAmount carries the stale 500 (= 100 * 5).
+    JSONObject body = new JSONObject();
+    body.put("rate", "3");
+    body.put("foreignAmount", 500);
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      stubDocLookup(obDal, docWith(new BigDecimal("100"), new BigDecimal("5"), new BigDecimal("500")));
+
+      assertNull(handler.handle(crudPatch("DOC1", body)));
+
+      assertEquals(0, new BigDecimal(body.optString("foreignAmount")).compareTo(new BigDecimal("300")));
+    }
+  }
+
+  @Test
+  public void testHandleUpdateRecomputesStaleRateWhenForeignChanged() throws Exception {
+    // UI submits both: foreignAmount edited 500 -> 300, rate carries the stale 5.
+    JSONObject body = new JSONObject();
+    body.put("rate", "5");
+    body.put("foreignAmount", 300);
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      stubDocLookup(obDal, docWith(new BigDecimal("100"), new BigDecimal("5"), new BigDecimal("500")));
+
+      assertNull(handler.handle(crudPatch("DOC1", body)));
+
+      assertEquals(0, new BigDecimal(body.optString("rate")).compareTo(new BigDecimal("3")));
+    }
+  }
+
+  @Test
+  public void testHandleUpdateRateOnlyBodyRecomputesForeign() throws Exception {
     JSONObject body = new JSONObject();
     body.put("rate", "5");
     try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
         MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      ConversionRateDoc doc = docWithInvoiceGrandTotal(new BigDecimal("100"));
-      when(dal.get(ConversionRateDoc.class, "DOC1")).thenReturn(doc);
+      stubDocLookup(obDal, docWith(new BigDecimal("100"), new BigDecimal("2"), new BigDecimal("200")));
 
       assertNull(handler.handle(crudPatch("DOC1", body)));
 
@@ -253,19 +294,18 @@ public class InvoiceExchangeRateHandlerTest {
   }
 
   @Test
-  public void testHandleUpdateRecomputesRateFromEditedForeignAmount() throws Exception {
+  public void testHandleUpdateLeavesBodyUntouchedWhenNothingChanged() throws Exception {
     JSONObject body = new JSONObject();
-    body.put("foreignAmount", "250");
+    body.put("rate", "5");
+    body.put("foreignAmount", 500);
     try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
         MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      ConversionRateDoc doc = docWithInvoiceGrandTotal(new BigDecimal("100"));
-      when(dal.get(ConversionRateDoc.class, "DOC1")).thenReturn(doc);
+      stubDocLookup(obDal, docWith(new BigDecimal("100"), new BigDecimal("5"), new BigDecimal("500")));
 
       assertNull(handler.handle(crudPatch("DOC1", body)));
 
-      assertEquals(0, new BigDecimal(body.optString("rate")).compareTo(new BigDecimal("2.5")));
+      assertEquals(0, new BigDecimal(body.optString("rate")).compareTo(new BigDecimal("5")));
+      assertEquals(0, new BigDecimal(body.optString("foreignAmount")).compareTo(new BigDecimal("500")));
     }
   }
 
@@ -277,22 +317,25 @@ public class InvoiceExchangeRateHandlerTest {
   }
 
   @Test
-  public void testHandleUpdateIgnoresWhenBothRateAndForeignPresent() throws Exception {
-    JSONObject body = new JSONObject();
-    body.put("rate", "5");
-    body.put("foreignAmount", "999");
-    assertNull(handler.handle(crudPatch("DOC1", body)));
-    // Caller is authoritative: neither value is recomputed.
-    assertEquals("999", body.optString("foreignAmount"));
-  }
-
-  @Test
-  public void testHandleUpdateIgnoresWhenNeitherRateNorForeignPresent() throws Exception {
+  public void testHandleUpdateIgnoresUnrelatedEdit() throws Exception {
     JSONObject body = new JSONObject();
     body.put("comments", "note");
     assertNull(handler.handle(crudPatch("DOC1", body)));
     assertFalse(body.has("rate"));
     assertFalse(body.has("foreignAmount"));
+  }
+
+  @Test
+  public void testHandleUpdateIgnoresZeroGrandTotal() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("rate", "5");
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      stubDocLookup(obDal, docWith(BigDecimal.ZERO, new BigDecimal("2"), BigDecimal.ZERO));
+
+      assertNull(handler.handle(crudPatch("DOC1", body)));
+      assertFalse(body.has("foreignAmount"));
+    }
   }
 
   @Test
@@ -307,6 +350,54 @@ public class InvoiceExchangeRateHandlerTest {
 
       assertNull(handler.handle(crudPatch("DOC1", body)));
       assertFalse(body.has("foreignAmount"));
+    }
+  }
+
+  @Test
+  public void testHandleUpdateRecomputesWhenStoredRateIsNull() throws Exception {
+    // Stored rate is null (a freshly seeded row) → the incoming rate is treated as a change.
+    JSONObject body = new JSONObject();
+    body.put("rate", "5");
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      stubDocLookup(obDal, docWith(new BigDecimal("100"), null, null));
+
+      assertNull(handler.handle(crudPatch("DOC1", body)));
+
+      assertEquals(0, new BigDecimal(body.optString("foreignAmount")).compareTo(new BigDecimal("500")));
+    }
+  }
+
+  @Test
+  public void testHandleUpdateReturnsNullWhenDocLoadThrows() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("rate", "5");
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(ConversionRateDoc.class, "DOC1")).thenThrow(new RuntimeException("db down"));
+
+      assertNull(handler.handle(crudPatch("DOC1", body)));
+      assertFalse(body.has("foreignAmount"));
+      obCtx.verify(OBContext::restorePreviousMode);
+    }
+  }
+
+  @Test
+  public void testHandleCreateReturnsNullWhenInvoiceLoadThrows() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("invoice", INVOICE_ID);
+    body.put("rate", "5");
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, INVOICE_ID)).thenThrow(new RuntimeException("db down"));
+
+      assertNull(handler.handle(crudPost(body)));
+      assertFalse(body.has("foreignAmount"));
+      obCtx.verify(OBContext::restorePreviousMode);
     }
   }
 
