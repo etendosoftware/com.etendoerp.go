@@ -113,6 +113,7 @@ abstract class AbstractFiscalHandler {
 
   protected abstract boolean isKnownEntity(String entityName);
 
+  @SuppressWarnings("java:S1172")
   protected boolean allowsPost(String entityName) { return false; }
 
   protected abstract void dispatch(String entityName, String orgId, int year, String period,

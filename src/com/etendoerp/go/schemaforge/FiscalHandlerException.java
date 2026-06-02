@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge;
 
 import org.openbravo.base.exception.OBException;
 
+/** Checked exception used to signal errors within fiscal handler dispatch logic. */
 public class FiscalHandlerException extends OBException {
 
   FiscalHandlerException(Throwable cause) {
