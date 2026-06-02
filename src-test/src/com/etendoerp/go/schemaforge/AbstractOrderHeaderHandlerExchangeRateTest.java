@@ -93,6 +93,20 @@ public class AbstractOrderHeaderHandlerExchangeRateTest {
   }
 
   @Test
+  public void testCompleteActionInvoiceNotFoundReturnsNull() throws Exception {
+    NeoContext context = completeActionContext("INV1");
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "INV1")).thenReturn(null);
+
+      assertNull(AbstractOrderHeaderHandler.validateExchangeRateBeforeComplete(context));
+      obCtx.verify(OBContext::restorePreviousMode);
+    }
+  }
+
+  @Test
   public void testCompleteActionWithErrorReturnsBadRequest() throws Exception {
     NeoContext context = completeActionContext("INV1");
     Invoice invoice = mock(Invoice.class);

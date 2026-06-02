@@ -46,6 +46,11 @@ public final class InvoiceExchangeRateValidator {
   }
 
   /**
+   * Checks whether the given invoice can be completed with respect to currency conversion. Returns
+   * a user-facing error message when completion must be blocked — the document currency differs
+   * from the organization currency and no exchange rate is available — or {@code null} when it may
+   * proceed.
+   *
    * @param invoice the invoice about to be completed
    * @return a resolved, user-facing error message when completion must be blocked (currencies
    *         differ and no rate is available), or {@code null} when completion may proceed (same
@@ -67,7 +72,7 @@ public final class InvoiceExchangeRateValidator {
         return null;
       }
       final Currency to = OBDal.getInstance().get(Currency.class, baseCurrencyId);
-      if (hasDocumentRate(invoice) || hasGeneralRate(invoice, from, to)) {
+      if (hasDocumentRate(invoice, from, to) || hasGeneralRate(invoice, from, to)) {
         return null;
       }
       return OBMessageUtils.messageBD("SMFCR_NoRateOnComplete") + " " + from.getISOCode() + " → "
@@ -77,11 +82,20 @@ public final class InvoiceExchangeRateValidator {
     }
   }
 
-  /** True if the invoice has a document-level rate (manual or synced) with a non-zero value. */
-  private static boolean hasDocumentRate(Invoice invoice) {
+  /**
+   * True if the invoice has a document-level rate (manual or synced) for the exact {@code from -> to}
+   * currency pair with a non-zero value. Restricting to the pair prevents a rate for an unrelated
+   * currency from satisfying the check.
+   */
+  private static boolean hasDocumentRate(Invoice invoice, Currency from, Currency to) {
+    if (from == null || to == null) {
+      return false;
+    }
     final OBCriteria<ConversionRateDoc> crit = OBDal.getInstance()
         .createCriteria(ConversionRateDoc.class);
     crit.add(Restrictions.eq(ConversionRateDoc.PROPERTY_INVOICE, invoice));
+    crit.add(Restrictions.eq(ConversionRateDoc.PROPERTY_CURRENCY, from));
+    crit.add(Restrictions.eq(ConversionRateDoc.PROPERTY_TOCURRENCY, to));
     crit.setFilterOnReadableClients(false);
     crit.setFilterOnReadableOrganization(false);
     for (ConversionRateDoc rateDoc : crit.list()) {
@@ -95,7 +109,7 @@ public final class InvoiceExchangeRateValidator {
 
   /** True if a general {@code C_Conversion_Rate} exists for the invoice date (core lookup). */
   private static boolean hasGeneralRate(Invoice invoice, Currency from, Currency to) {
-    if (to == null) {
+    if (to == null || invoice.getInvoiceDate() == null) {
       return false;
     }
     return FinancialUtils.getConversionRate(invoice.getInvoiceDate(), from, to,

@@ -29,6 +29,7 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.invoice.Invoice;
 
 /**
@@ -49,6 +50,7 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
   private static final String PARAM_PARENT_ID = "parentId";
   private static final String PROPERTY_INVOICE = "invoice";
   private static final String PROPERTY_CURRENCY = "currency";
+  private static final String PROPERTY_TO_CURRENCY = "toCurrency";
   private static final String PROPERTY_RATE = "rate";
   private static final String PROPERTY_FOREIGN_AMOUNT = "foreignAmount";
   private static final String FIELD_DEFAULTS = "defaults";
@@ -78,6 +80,14 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
       if ((!body.has(PROPERTY_CURRENCY) || body.isNull(PROPERTY_CURRENCY))
           && invoice.getCurrency() != null) {
         body.put(PROPERTY_CURRENCY, invoice.getCurrency().getId());
+      }
+      // Default the "to" currency to the org functional currency so the document rate is stored as
+      // an invoice-currency -> org-currency pair (the pair the completion validator looks up).
+      if (!body.has(PROPERTY_TO_CURRENCY) || body.isNull(PROPERTY_TO_CURRENCY)) {
+        String orgCurrencyId = resolveOrgCurrencyId(invoice);
+        if (orgCurrencyId != null) {
+          body.put(PROPERTY_TO_CURRENCY, orgCurrencyId);
+        }
       }
       computeRateAndForeignAmount(body, invoice);
     } catch (Exception e) {
@@ -166,6 +176,12 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
       if (!defaults.has(PROPERTY_CURRENCY) || defaults.isNull(PROPERTY_CURRENCY)) {
         defaults.put(PROPERTY_CURRENCY, currencyId);
       }
+      if (!defaults.has(PROPERTY_TO_CURRENCY) || defaults.isNull(PROPERTY_TO_CURRENCY)) {
+        String orgCurrencyId = resolveOrgCurrencyId(loadInvoice(invoiceId));
+        if (orgCurrencyId != null) {
+          defaults.put(PROPERTY_TO_CURRENCY, orgCurrencyId);
+        }
+      }
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Failed to inject currency default for invoice {}", invoiceId, e);
@@ -201,6 +217,13 @@ public class InvoiceExchangeRateHandler implements NeoHandler {
   private static String resolveInvoiceCurrencyId(String invoiceId) {
     Invoice invoice = loadInvoice(invoiceId);
     return (invoice != null && invoice.getCurrency() != null) ? invoice.getCurrency().getId() : null;
+  }
+
+  private static String resolveOrgCurrencyId(Invoice invoice) {
+    if (invoice == null || invoice.getOrganization() == null) {
+      return null;
+    }
+    return OBCurrencyUtils.getOrgCurrency(invoice.getOrganization().getId());
   }
 
   private static Invoice loadInvoice(String invoiceId) {

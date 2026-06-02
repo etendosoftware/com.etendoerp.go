@@ -235,4 +235,49 @@ public class InvoiceExchangeRateValidatorTest {
       assertNotNull(InvoiceExchangeRateValidator.checkRateForCompletion(invoice));
     }
   }
+
+  @Test
+  public void testNullToCurrencyReturnsMessageWithBaseCurrencyIdFallback() {
+    Invoice invoice = invoiceWith("USD", "ORG1", "USD");
+    when(invoice.getInvoiceDate()).thenReturn(new Date());
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBCurrencyUtils> currencyUtils = Mockito.mockStatic(OBCurrencyUtils.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgUtils = Mockito.mockStatic(OBMessageUtils.class)) {
+      currencyUtils.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn("EUR");
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      // The base currency id resolves to no Currency row → 'to' is null; both rate checks must
+      // short-circuit and the message falls back to the raw base currency id.
+      when(dal.get(Currency.class, "EUR")).thenReturn(null);
+      msgUtils.when(() -> OBMessageUtils.messageBD("SMFCR_NoRateOnComplete")).thenReturn(NO_RATE_MSG);
+
+      assertEquals(NO_RATE_MSG + " USD → EUR",
+          InvoiceExchangeRateValidator.checkRateForCompletion(invoice));
+    }
+  }
+
+  @Test
+  public void testNullInvoiceDateSkipsGeneralRateAndReturnsMessage() {
+    Invoice invoice = invoiceWith("USD", "ORG1", "USD");
+    when(invoice.getInvoiceDate()).thenReturn(null);
+    try (MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBCurrencyUtils> currencyUtils = Mockito.mockStatic(OBCurrencyUtils.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgUtils = Mockito.mockStatic(OBMessageUtils.class)) {
+      currencyUtils.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn("EUR");
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Currency to = mock(Currency.class);
+      when(to.getISOCode()).thenReturn("EUR");
+      when(dal.get(Currency.class, "EUR")).thenReturn(to);
+      stubDocRateCriteria(dal, Collections.emptyList());
+      msgUtils.when(() -> OBMessageUtils.messageBD("SMFCR_NoRateOnComplete")).thenReturn(NO_RATE_MSG);
+
+      // FinancialUtils is intentionally NOT mocked: the null-date guard must short-circuit before
+      // FinancialUtils.getConversionRate is ever reached.
+      assertEquals(NO_RATE_MSG + " USD → EUR",
+          InvoiceExchangeRateValidator.checkRateForCompletion(invoice));
+    }
+  }
 }

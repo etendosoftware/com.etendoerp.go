@@ -117,6 +117,9 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     OBContext.setAdminMode(true);
     try {
       Invoice invoice = OBDal.getInstance().get(Invoice.class, recordId);
+      if (invoice == null) {
+        return null;
+      }
       String error = InvoiceExchangeRateValidator.checkRateForCompletion(invoice);
       if (error != null) {
         log.info("Blocking completion of invoice id={} — {}", recordId, error);
