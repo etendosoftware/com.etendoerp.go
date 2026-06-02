@@ -47,7 +47,8 @@ Rejected provider passthrough shape:
 | `EmailRecipientResolution` | Carries the recipient derived from server state or from an explicit support/admin contract |
 | `EmailDeliveryPolicy` | Carries contract-selected idempotency and throttle rules for a send attempt |
 | `EmailSafetyStore` | Checks kill switches, idempotency, throttle counters, and audit capture |
-| `InMemoryEmailSafetyStore` | Default safety-store implementation until a persistent DAL-backed store is configured |
+| `DalEmailSafetyStore` | Runtime DAL-backed safety store for audit, idempotency, throttle counters, and kill switches |
+| `InMemoryEmailSafetyStore` | Test-only process-local implementation for focused executor tests |
 | `EmailProviderAdapter` | Backend-only boundary to the external provider |
 | `ApiGatewayEmailProviderAdapter` | HTTP adapter for API Gateway-style providers |
 | `EmailProviderConfig` | Reads provider configuration from server-side properties or environment variables |
@@ -122,9 +123,23 @@ Rules whose context key is unavailable are skipped, so contracts can share polic
 - throttle counters
 - audit records
 
-Idempotency lookups are scoped by contract and tenant/client in the default store. Contracts should still generate deterministic keys that include the relevant business record and semantic action/version, for example `invoice-send:<invoiceId>:v1`. Document-send contracts must derive the tenant/client part from the trusted resolved document record instead of caller-provided payload fields.
+Idempotency lookups are scoped by contract and tenant/client in the default DAL store. Contracts should still generate deterministic keys that include the relevant business record and semantic action/version, for example `invoice-send:<invoiceId>:v1`. Document-send contracts must derive the tenant/client part from the trusted resolved document record instead of caller-provided payload fields.
 
-The default `InMemoryEmailSafetyStore` is process-local and suitable for executor wiring and tests. Production deployments that require cluster-wide enforcement must replace it with a persistent implementation without changing contract code.
+The runtime default is `DalEmailSafetyStore`, which persists records in `ETGO_EMAIL_SAFETY` through OBDal/OBQuery. Native SQL is not used for auth email audit, throttle, idempotency, or kill-switch behavior. `InMemoryEmailSafetyStore` remains available only for unit tests and local executor harnesses that intentionally avoid DAL.
+
+## Auth Flow Entrypoints
+
+Auth transactional emails are created server-side by the `/sws/go/*` endpoints. Browser clients never call the email provider and never send `to`, `template`, `data`, sender, Reply-To, or provider metadata for these flows.
+
+| Endpoint | Transactional email behavior |
+|----------|------------------------------|
+| `POST /sws/go/register` | Creates the local account, commits it, then sends `new-account` best-effort |
+| `POST /sws/go/password-reset/request` | Returns neutral success for known, unknown, disabled, throttled, or provider-failed cases; known active accounts receive a hashed expiring reset token only when the best-effort `reset-password` email is accepted for delivery |
+| `POST /sws/go/password-reset/confirm` | Accepts one valid unexpired token once, changes the password, clears/consumes reset token fields, and clears the platform session token |
+| `POST /sws/go/change-password` | Requires a valid platform bearer token and current password, changes the password, rotates the platform token, and sends `password-changed` best-effort |
+| `POST /sws/go/onboarding` | Commits onboarding first, then sends `environment-ready` best-effort |
+
+Email delivery failure is audited and must not roll back registration, onboarding completion, or a successful password change. Password reset request responses stay neutral even when delivery fails.
 
 ## Built-In v1 Contracts
 
@@ -132,6 +147,8 @@ The default `InMemoryEmailSafetyStore` is process-local and suitable for executo
 |----------|-------------------|------------------|-------------------------|
 | `reset-password` | `reset-password` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link` |
 | `new-account` | `new-account` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link` |
+| `environment-ready` | `environment-ready` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId` |
+| `password-changed` | `password-changed` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId`; optional `date` |
 | `login-alert` | `login-alert` | `AD_User.email` resolved by `userId` | `version`, `userId`; optional `loginEventId`, `ip`, `date` |
 | `sales-invoice-send` | `invoice` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the invoice business partner | `version`, `recordId` |
 | `sales-order-send` | `document` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the sales order business partner | `version`, `recordId` |
@@ -139,7 +156,17 @@ The default `InMemoryEmailSafetyStore` is process-local and suitable for executo
 
 `custom` and `support-custom-email` are not registered by default. A custom HTML email can only be added later as an explicit support/admin contract with role checks, reason capture, sanitizer, throttle, and audit.
 
-The account-link contracts accept only absolute `http://` or `https://` links. Document-send contracts share the default document payload strategy: `name`, `document_type`, `document_number`, and `download_link`. Optional fields such as `amount`, and document-specific aliases such as `invoice_number`, must be enabled by the explicit contract only when a provider template requires them.
+`login-alert` is registered but not triggered by login. It remains deferred until the SSO and risk-policy model is defined.
+
+Caller-supplied account-link contracts accept only absolute `http://` or `https://` links. The `environment-ready` contract builds the dashboard link from server configuration and does not accept a caller-provided link. Document-send contracts share the default document payload strategy: `name`, `document_type`, `document_number`, and `download_link`. Optional fields such as `amount`, and document-specific aliases such as `invoice_number`, must be enabled by the explicit contract only when a provider template requires them.
+
+Auth account-link contracts generate app links from server configuration:
+
+| Property | Environment Variable | Purpose |
+|----------|----------------------|---------|
+| `etendo.go.app.baseUrl` | `ETGO_APP_BASE_URL` | Base URL used for onboarding, dashboard, and password reset links |
+
+`etgo.app.url` / `ETGO_APP_URL` remain as legacy fallbacks.
 
 Document-send contracts generate `download_link` from server configuration:
 
