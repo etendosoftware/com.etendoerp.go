@@ -88,6 +88,7 @@ public class PublicUrlResolverTest {
   @Test
   public void fallsBackToRequestBaseForAppBaseUrl() {
     HttpServletRequest request = buildLocalRequest();
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "/");
     System.setProperty("etgo.app.url", "/");
 
     assertEquals("http://localhost:8080/etendo_sf2",

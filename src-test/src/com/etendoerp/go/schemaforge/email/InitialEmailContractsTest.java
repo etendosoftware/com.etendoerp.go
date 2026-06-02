@@ -49,6 +49,7 @@ public class InitialEmailContractsTest {
   @After
   public void clearProperties() {
     System.clearProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY);
+    System.clearProperty("etgo.app.url");
   }
 
   @Test
@@ -133,6 +134,8 @@ public class InitialEmailContractsTest {
 
   @Test
   public void environmentReadyRejectsMissingConfiguredAppBaseUrl() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "/");
+    System.setProperty("etgo.app.url", "/");
     FakeProviderAdapter adapter = new FakeProviderAdapter();
     TransactionalEmailService service = service(adapter);
 
