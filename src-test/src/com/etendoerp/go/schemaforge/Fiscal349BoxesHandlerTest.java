@@ -111,7 +111,7 @@ public class Fiscal349BoxesHandlerTest {
   // ── POST generate is allowed ──────────────────────────────────────
 
   @Test
-  public void testPostToGenerateIsAllowed() {
+  public void testPostToGenerateIsAllowed() throws IOException {
     // POST /fiscal349/generate must NOT return 405 — proceeds to param validation (→ 400).
     HttpServletRequest  req  = mock(HttpServletRequest.class);
     HttpServletResponse resp = mock(HttpServletResponse.class);
