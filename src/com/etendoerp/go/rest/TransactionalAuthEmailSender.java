@@ -51,6 +51,9 @@ class TransactionalAuthEmailSender {
   }
 
   boolean sendNewAccount(Account account) {
+    if (account == null) {
+      return false;
+    }
     return sendAccountLink(CONTRACT_NEW_ACCOUNT, account,
         EtendoGoAuthLinkBuilder.onboardingLink(), null);
   }
@@ -75,6 +78,9 @@ class TransactionalAuthEmailSender {
 
   boolean sendPasswordReset(Account account, String resetToken,
       String resetTokenHash) {
+    if (account == null) {
+      return false;
+    }
     return sendAccountLink(CONTRACT_RESET_PASSWORD, account,
         EtendoGoAuthLinkBuilder.resetPasswordLink(resetToken), resetTokenHash);
   }
