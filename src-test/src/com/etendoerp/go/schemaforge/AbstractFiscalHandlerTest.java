@@ -16,19 +16,26 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.util.HashMap;
 
+import javax.servlet.ServletOutputStream;
+import javax.servlet.WriteListener;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.junit.Before;
 import org.junit.Test;
+import org.openbravo.base.exception.OBException;
 
 /**
  * Unit tests for routing logic in {@link AbstractFiscalHandler}.
@@ -152,5 +159,42 @@ public class AbstractFiscalHandlerTest {
 
     verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR),
         anyString());
+  }
+
+  // ── writeGeneratedFile ────────────────────────────────────────────
+
+  @Test
+  public void testWriteGeneratedFileThrowsWhenNoFileKey() {
+    StubHandler handler = new StubHandler(servlet, false);
+    try {
+      handler.writeGeneratedFile(new HashMap<>(), "output.349", mock(HttpServletResponse.class));
+      fail("Expected OBException for missing file content");
+    } catch (OBException e) {
+      // expected
+    } catch (Exception e) {
+      fail("Expected OBException, got: " + e);
+    }
+  }
+
+  @Test
+  public void testWriteGeneratedFileWritesBytes() throws Exception {
+    StubHandler handler = new StubHandler(servlet, false);
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    ServletOutputStream sos = new ServletOutputStream() {
+      @Override public void write(int b) { baos.write(b); }
+      @Override public boolean isReady() { return true; }
+      @Override public void setWriteListener(WriteListener wl) {}
+    };
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(resp.getOutputStream()).thenReturn(sos);
+
+    HashMap<String, Object> result = new HashMap<>();
+    result.put("file", "CONTENT");
+    handler.writeGeneratedFile(result, "out.349", resp);
+
+    assertArrayEquals("CONTENT".getBytes(java.nio.charset.StandardCharsets.ISO_8859_1),
+        baos.toByteArray());
+    verify(resp).setContentType("text/plain");
+    verify(resp).setCharacterEncoding("ISO-8859-1");
   }
 }
