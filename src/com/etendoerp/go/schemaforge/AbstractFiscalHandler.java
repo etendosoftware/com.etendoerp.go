@@ -33,6 +33,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.calendar.Period;
 
@@ -103,6 +104,10 @@ abstract class AbstractFiscalHandler {
     } catch (FiscalHandlerException e) {
       log.error("Error in /" + getModelKey() + "/" + entityName, e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    } catch (Exception e) {
+      log.error("Unexpected error in /" + getModelKey() + "/" + entityName, e);
+      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "An internal error occurred.");
     }
   }
 

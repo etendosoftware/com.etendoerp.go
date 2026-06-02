@@ -16,9 +16,11 @@
  */
 package com.etendoerp.go.schemaforge;
 
-class FiscalHandlerException extends Exception {
+import org.openbravo.base.exception.OBException;
+
+public class FiscalHandlerException extends OBException {
 
   FiscalHandlerException(Throwable cause) {
-    super(cause.getMessage(), cause);
+    super(cause);
   }
 }
