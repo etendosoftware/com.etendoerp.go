@@ -17,21 +17,39 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertArrayEquals;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 
 import javax.servlet.ServletOutputStream;
 import javax.servlet.WriteListener;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+
+import org.hibernate.Session;
+import org.hibernate.query.Query;
+import org.mockito.MockedStatic;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
+import org.openbravo.model.financialmgmt.calendar.Period;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -196,5 +214,160 @@ public class AbstractFiscalHandlerTest {
         baos.toByteArray());
     verify(resp).setContentType("text/plain");
     verify(resp).setCharacterEncoding("ISO-8859-1");
+  }
+
+  // ── handleModified ────────────────────────────────────────────────
+
+  @Test
+  public void testHandleModifiedEmptyPeriodsWritesFalse() throws Exception {
+    StubHandler handler = new StubHandler(servlet, false);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(resp.getWriter()).thenReturn(new PrintWriter(new StringWriter()));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      Session session = mock(Session.class);
+      when(obDal.getSession()).thenReturn(session);
+      @SuppressWarnings("unchecked")
+      Query<Period> q = mock(Query.class);
+      when(session.createQuery(anyString(), eq(Period.class))).thenReturn(q);
+      when(q.setParameter(anyString(), any())).thenReturn(q);
+      when(q.list()).thenReturn(Collections.emptyList());
+
+      handler.handleModified("org1", 2026, "T1", new Date(0), resp);
+    }
+
+    verify(resp).setContentType(anyString());
+  }
+
+  @Test
+  public void testHandleModifiedNullDatesWritesFalse() throws Exception {
+    StubHandler handler = new StubHandler(servlet, false);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(resp.getWriter()).thenReturn(new PrintWriter(new StringWriter()));
+
+    Period period = mock(Period.class);
+    when(period.getStartingDate()).thenReturn(null);
+    when(period.getEndingDate()).thenReturn(null);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      Session session = mock(Session.class);
+      when(obDal.getSession()).thenReturn(session);
+      @SuppressWarnings("unchecked")
+      Query<Period> q = mock(Query.class);
+      when(session.createQuery(anyString(), eq(Period.class))).thenReturn(q);
+      when(q.setParameter(anyString(), any())).thenReturn(q);
+      when(q.list()).thenReturn(Collections.singletonList(period));
+
+      handler.handleModified("org1", 2026, "T1", new Date(0), resp);
+    }
+
+    verify(resp).setContentType(anyString());
+  }
+
+  // ── resolvePeriods ────────────────────────────────────────────────
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolvePeriodsQuarterlyMapsCorrectMonths() {
+    StubHandler handler = new StubHandler(servlet, false);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      Session session = mock(Session.class);
+      when(obDal.getSession()).thenReturn(session);
+      Query<Period> q = mock(Query.class);
+      when(session.createQuery(anyString(), eq(Period.class))).thenReturn(q);
+      when(q.setParameter(anyString(), any())).thenReturn(q);
+      List<Period> expected = Collections.emptyList();
+      when(q.list()).thenReturn(expected);
+
+      List<Period> result = handler.resolvePeriods("org1", 2026, "T2");
+      assertEquals(expected, result);
+      // Verify :from and :to were bound (quarterly T2 → months 4–6)
+      verify(q).setParameter(eq("from"), eq(4L));
+      verify(q).setParameter(eq("to"),   eq(6L));
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolvePeriodsMonthlyBindsSameMonth() {
+    StubHandler handler = new StubHandler(servlet, false);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      Session session = mock(Session.class);
+      when(obDal.getSession()).thenReturn(session);
+      Query<Period> q = mock(Query.class);
+      when(session.createQuery(anyString(), eq(Period.class))).thenReturn(q);
+      when(q.setParameter(anyString(), any())).thenReturn(q);
+      when(q.list()).thenReturn(Collections.emptyList());
+
+      handler.resolvePeriods("org1", 2026, "03");
+      verify(q).setParameter(eq("from"), eq(3L));
+      verify(q).setParameter(eq("to"),   eq(3L));
+    }
+  }
+
+  // ── resolveAcctSchema ─────────────────────────────────────────────
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolveAcctSchemaReturnsFirst() {
+    StubHandler handler = new StubHandler(servlet, false);
+    Organization org = mock(Organization.class);
+    org.openbravo.model.ad.system.Client client =
+        mock(org.openbravo.model.ad.system.Client.class);
+    when(org.getClient()).thenReturn(client);
+    when(client.getId()).thenReturn("client1");
+
+    AcctSchema schema = mock(AcctSchema.class);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBCriteria<AcctSchema> crit = mock(OBCriteria.class);
+      when(obDal.createCriteria(AcctSchema.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.setMaxResults(1)).thenReturn(crit);
+      when(crit.list()).thenReturn(Collections.singletonList(schema));
+
+      AcctSchema result = handler.resolveAcctSchema(org);
+      assertEquals(schema, result);
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolveAcctSchemaThrowsWhenEmpty() {
+    StubHandler handler = new StubHandler(servlet, false);
+    Organization org = mock(Organization.class);
+    org.openbravo.model.ad.system.Client client =
+        mock(org.openbravo.model.ad.system.Client.class);
+    when(org.getClient()).thenReturn(client);
+    when(client.getId()).thenReturn("client1");
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBCriteria<AcctSchema> crit = mock(OBCriteria.class);
+      when(obDal.createCriteria(AcctSchema.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.setMaxResults(1)).thenReturn(crit);
+      when(crit.list()).thenReturn(Collections.emptyList());
+
+      try {
+        handler.resolveAcctSchema(org);
+        fail("Expected OBException for missing AcctSchema");
+      } catch (OBException e) {
+        assertTrue(e.getMessage().contains("client1"));
+      }
+    }
   }
 }
