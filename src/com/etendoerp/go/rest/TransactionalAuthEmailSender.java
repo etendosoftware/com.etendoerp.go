@@ -138,9 +138,11 @@ class TransactionalAuthEmailSender {
 
   private boolean sendBestEffort(String contractName, JSONObject body) {
     OBContext previousContext = OBContext.getOBContext();
+    boolean adminModeSet = false;
     try {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
+      adminModeSet = true;
       NeoResponse response = emailService.send(contractName, body);
       OBDal.getInstance().flush();
       OBDal.getInstance().commitAndClose();
@@ -156,7 +158,9 @@ class TransactionalAuthEmailSender {
           contractName, e);
       return false;
     } finally {
-      OBContext.restorePreviousMode();
+      if (adminModeSet) {
+        OBContext.restorePreviousMode();
+      }
       OBContext.setOBContext(previousContext);
     }
   }
