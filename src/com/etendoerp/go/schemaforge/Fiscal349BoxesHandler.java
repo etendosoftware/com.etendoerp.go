@@ -129,7 +129,10 @@ class Fiscal349BoxesHandler {
   // ── operators ─────────────────────────────────────────────────────
 
   JSONObject computeOperators(String orgId, int year, String period) throws Exception {
-    Organization org      = OBDal.getInstance().get(Organization.class, orgId);
+    Organization org = OBDal.getInstance().get(Organization.class, orgId);
+    if (org == null) {
+      throw new OBException("Organization not found: " + orgId);
+    }
     TaxReport taxReport   = resolveTaxReport349(orgId, period);
     AcctSchema acctSchema = resolveAcctSchema(org);
     List<Period> periods  = resolvePeriods(orgId, year, period);
@@ -226,7 +229,7 @@ class Fiscal349BoxesHandler {
         : BigDecimal.ZERO;
     JSONObject row = new JSONObject();
     row.put("ref",    inv.getDocumentNo());
-    row.put("date",   sdf.format(inv.getInvoiceDate()));
+    row.put("date",   inv.getInvoiceDate() != null ? sdf.format(inv.getInvoiceDate()) : "");
     row.put("type",   type);
     row.put("party",  bp != null ? bp.getName() : "");
     row.put("nifIva", bp != null && bp.getTaxID() != null ? bp.getTaxID() : "");
