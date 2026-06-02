@@ -39,7 +39,7 @@ import org.openbravo.model.financialmgmt.calendar.Period;
 
 abstract class AbstractFiscalHandler {
 
-  private static final Logger log = Logger.getLogger(AbstractFiscalHandler.class);
+  protected static final Logger log = Logger.getLogger(AbstractFiscalHandler.class);
 
   protected static final String DECLARATIONS = "declarations";
   protected static final String MODIFIED     = "modified";
