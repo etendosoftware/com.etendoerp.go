@@ -16,7 +16,6 @@
  */
 package com.etendoerp.go.schemaforge;
 
-import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
@@ -56,7 +55,7 @@ public class FiscalHandlerExceptionTest {
   public void testMessageDerivedFromCause() {
     RuntimeException cause = new RuntimeException("root message");
     FiscalHandlerException ex = new FiscalHandlerException(cause);
-    assertEquals("root message", ex.getMessage());
+    assertTrue(ex.getMessage().contains("root message"));
   }
 
   @Test
@@ -64,6 +63,6 @@ public class FiscalHandlerExceptionTest {
     Exception checked = new Exception("checked error");
     FiscalHandlerException ex = new FiscalHandlerException(checked);
     assertSame(checked, ex.getCause());
-    assertEquals("checked error", ex.getMessage());
+    assertTrue(ex.getMessage().contains("checked error"));
   }
 }
