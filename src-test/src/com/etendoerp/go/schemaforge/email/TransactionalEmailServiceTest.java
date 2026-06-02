@@ -213,6 +213,16 @@ public class TransactionalEmailServiceTest {
   }
 
   @Test
+  public void safetyStoreIgnoresNullContextWhenCheckingDuplicateKeys() {
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+
+    Optional<EmailAuditRecord> result = safetyStore.findSentByIdempotencyKey(null,
+        "duplicate-key");
+
+    assertFalse(result.isPresent());
+  }
+
+  @Test
   public void recordsRedactedObservabilityForSuccessfulSend() throws Exception {
     FakeProviderAdapter adapter = new FakeProviderAdapter(true,
         new EmailProviderResponse(202, "{\"id\":\"provider-id\"}"));

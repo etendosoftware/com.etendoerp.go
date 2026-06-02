@@ -36,17 +36,21 @@ public class EmailFrameworkValueObjectsTest {
   @Test
   public void documentRecordNormalizesBlankFields() {
     EmailDocumentRecord document = new EmailDocumentRecord(" Customer ", " customer@example.com ",
-        " SO-1 ", " 10.00 USD ", " https://app.example.test/doc ", " tenant-1 ");
-    EmailDocumentRecord blankRecord = new EmailDocumentRecord(" ", " ", " ", " ", " ", " ");
+        " record-1 ", " SO-1 ", " 10.00 USD ", " https://app.example.test/doc ",
+        " tenant-1 ");
+    EmailDocumentRecord blankRecord = new EmailDocumentRecord(" ", " ", " ", " ", " ", " ",
+        " ");
 
     assertEquals("Customer", document.getRecipientName());
     assertEquals("customer@example.com", document.getRecipientEmail());
+    assertEquals("record-1", document.getRecordId());
     assertEquals("SO-1", document.getDocumentNumber());
     assertEquals("10.00 USD", document.getAmount());
     assertEquals("https://app.example.test/doc", document.getDownloadLink());
     assertEquals("tenant-1", document.getClientId());
     assertNull(blankRecord.getRecipientName());
     assertNull(blankRecord.getRecipientEmail());
+    assertNull(blankRecord.getRecordId());
     assertNull(blankRecord.getDocumentNumber());
     assertNull(blankRecord.getAmount());
     assertNull(blankRecord.getDownloadLink());
@@ -175,6 +179,45 @@ public class EmailFrameworkValueObjectsTest {
   }
 
   @Test
+  public void documentDownloadTokenCreatesSignedExpiringLinks() {
+    withDocumentDownloadProperties("https://go.example.test/etendo/sws/neo/document-download",
+        "download-secret", "300", () -> {
+          String link = DocumentDownloadTokenService.createDownloadLink("sales-order-send",
+              "sales-order", "order-1", "tenant-1",
+              "sales-order-send:tenant-1:order-1:v1")
+              .orElseThrow(() -> new AssertionError("Download link should be present"));
+
+          assertTrue(link.startsWith(
+              "https://go.example.test/etendo/sws/neo/document-download/"));
+          String token = link.substring(link.lastIndexOf('/') + 1);
+          DocumentDownloadTokenService.Claims claims = DocumentDownloadTokenService.validate(token)
+              .orElseThrow(() -> new AssertionError("Token claims should be valid"));
+          assertEquals("sales-order-send", claims.getContractName());
+          assertEquals("sales-order", claims.getSpecName());
+          assertEquals("order-1", claims.getRecordId());
+          assertEquals("tenant-1", claims.getClientId());
+          assertEquals("sales-order-send:tenant-1:order-1:v1", claims.getIdempotencyKey());
+        });
+  }
+
+  @Test
+  public void documentDownloadTokenRejectsTamperedOrExpiredTokens() {
+    withDocumentDownloadProperties("https://go.example.test/etendo/sws/neo/document-download",
+        "download-secret", "300", () -> {
+          long nowSeconds = System.currentTimeMillis() / 1000L;
+          String token = DocumentDownloadTokenService.createToken("sales-order-send",
+              "sales-order", "order-1", "tenant-1",
+              "sales-order-send:tenant-1:order-1:v1", nowSeconds + 60L);
+          String expired = DocumentDownloadTokenService.createToken("sales-order-send",
+              "sales-order", "order-1", "tenant-1",
+              "sales-order-send:tenant-1:order-1:v1", nowSeconds - 1L);
+
+          assertFalse(DocumentDownloadTokenService.validate(token + "tampered").isPresent());
+          assertFalse(DocumentDownloadTokenService.validate(expired).isPresent());
+        });
+  }
+
+  @Test
   public void sendContextExposesCommandProviderAndRecipientMetadata() throws Exception {
     JSONObject body = new JSONObject();
     body.put(EmailContractCommandSupport.FIELD_TENANT_ID, " tenant-1 ");
@@ -282,6 +325,24 @@ public class EmailFrameworkValueObjectsTest {
       restoreProperty(EmailProviderConfig.PROP_API_KEY, previousApiKey);
       restoreProperty(EmailProviderConfig.PROP_ENABLED, previousEnabled);
       restoreProperty(EmailProviderConfig.PROP_TIMEOUT_MS, previousTimeoutMs);
+    }
+  }
+
+  private static void withDocumentDownloadProperties(String baseUrl, String secret,
+      String ttlSeconds, Runnable runnable) {
+    String previousBaseUrl = System.getProperty(
+        DocumentDownloadTokenService.PROP_DOWNLOAD_BASE_URL);
+    String previousSecret = System.getProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET);
+    String previousTtl = System.getProperty(DocumentDownloadTokenService.PROP_TOKEN_TTL_SECONDS);
+    try {
+      System.setProperty(DocumentDownloadTokenService.PROP_DOWNLOAD_BASE_URL, baseUrl);
+      System.setProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET, secret);
+      System.setProperty(DocumentDownloadTokenService.PROP_TOKEN_TTL_SECONDS, ttlSeconds);
+      runnable.run();
+    } finally {
+      restoreProperty(DocumentDownloadTokenService.PROP_DOWNLOAD_BASE_URL, previousBaseUrl);
+      restoreProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET, previousSecret);
+      restoreProperty(DocumentDownloadTokenService.PROP_TOKEN_TTL_SECONDS, previousTtl);
     }
   }
 

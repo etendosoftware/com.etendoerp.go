@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge.email.contracts;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -54,6 +55,30 @@ public class SalesDocumentEmailContractsTest {
     assertTrue(contracts.stream().anyMatch(SalesInvoiceSendEmailContract.class::isInstance));
     assertTrue(contracts.stream().anyMatch(SalesOrderSendEmailContract.class::isInstance));
     assertTrue(contracts.stream().anyMatch(SalesQuotationSendEmailContract.class::isInstance));
+  }
+
+  @Test
+  public void orderResolverRejectsQuotationAndProposalDocumentSubtypes() {
+    DalOrderEmailDocumentResolver resolver = new DalOrderEmailDocumentResolver(
+        DalOrderEmailDocumentResolver.SalesOrderDocumentFamily.SALES_ORDER);
+
+    assertTrue(resolver.acceptsDocumentSubtype(null));
+    assertTrue(resolver.acceptsDocumentSubtype("SO"));
+    assertTrue(resolver.acceptsDocumentSubtype("WR"));
+    assertFalse(resolver.acceptsDocumentSubtype("OB"));
+    assertFalse(resolver.acceptsDocumentSubtype("ON"));
+  }
+
+  @Test
+  public void quotationResolverOnlyAcceptsQuotationAndProposalDocumentSubtypes() {
+    DalOrderEmailDocumentResolver resolver = new DalOrderEmailDocumentResolver(
+        DalOrderEmailDocumentResolver.SalesOrderDocumentFamily.SALES_QUOTATION);
+
+    assertTrue(resolver.acceptsDocumentSubtype("OB"));
+    assertTrue(resolver.acceptsDocumentSubtype("ON"));
+    assertFalse(resolver.acceptsDocumentSubtype(null));
+    assertFalse(resolver.acceptsDocumentSubtype("SO"));
+    assertFalse(resolver.acceptsDocumentSubtype("WR"));
   }
 
   @Test
