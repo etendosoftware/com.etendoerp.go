@@ -27,6 +27,10 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Date;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import javax.inject.Named;
 
@@ -129,6 +133,15 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           + "       fp.isreceipt AS payment_isreceipt,"
           + "       COALESCE(tbp.name, pbp.name, '') AS contact,"
           + "       COALESCE(gl.name, '') AS gl_item,"
+          + "       COALESCE(dimorg.name, '')  AS dim_organization,"
+          + "       COALESCE(dimbp.name, '')   AS dim_bpartner,"
+          + "       COALESCE(dimproj.name, '') AS dim_project,"
+          + "       COALESCE(dimcc.name, '')   AS dim_costcenter,"
+          + "       COALESCE(dimact.name, '')  AS dim_activity,"
+          + "       COALESCE(dimcamp.name, '') AS dim_campaign,"
+          + "       COALESCE(dimsr.name, '')   AS dim_salesregion,"
+          + "       COALESCE(dimu1.name, '')   AS dim_user1,"
+          + "       COALESCE(dimu2.name, '')   AS dim_user2,"
           + "       cur.iso_code AS currency_iso,"
           + "       (fa.currentbalance"
           + "         - SUM(CASE WHEN ft.trxtype = 'BPD' THEN ft.depositamt ELSE -ft.paymentamt END)"
@@ -143,6 +156,15 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           + "  LEFT JOIN c_bpartner tbp ON tbp.c_bpartner_id = ft.c_bpartner_id"
           + "  LEFT JOIN c_bpartner pbp ON pbp.c_bpartner_id = fp.c_bpartner_id"
           + "  LEFT JOIN c_glitem gl ON gl.c_glitem_id = ft.c_glitem_id"
+          + "  LEFT JOIN ad_org dimorg ON dimorg.ad_org_id = ft.ad_org_id"
+          + "  LEFT JOIN c_bpartner dimbp ON dimbp.c_bpartner_id = ft.c_bpartner_id"
+          + "  LEFT JOIN c_project dimproj ON dimproj.c_project_id = ft.c_project_id"
+          + "  LEFT JOIN c_costcenter dimcc ON dimcc.c_costcenter_id = ft.c_costcenter_id"
+          + "  LEFT JOIN c_activity dimact ON dimact.c_activity_id = ft.c_activity_id"
+          + "  LEFT JOIN c_campaign dimcamp ON dimcamp.c_campaign_id = ft.c_campaign_id"
+          + "  LEFT JOIN c_salesregion dimsr ON dimsr.c_salesregion_id = ft.c_salesregion_id"
+          + "  LEFT JOIN c_elementvalue dimu1 ON dimu1.c_elementvalue_id = ft.user1_id"
+          + "  LEFT JOIN c_elementvalue dimu2 ON dimu2.c_elementvalue_id = ft.user2_id"
           + " WHERE ft.fin_financial_account_id = ?"
           + "   AND ft.isactive = 'Y'"
           + " ORDER BY ft.statementdate DESC, ft.line DESC";
@@ -210,6 +232,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     JSONObject data = new JSONObject();
     data.put("transactions", transactions);
     data.put("totals", totals);
+    data.put("enabledDimensions", loadEnabledDimensions(accountId));
 
     JSONObject responseData = new JSONObject();
     responseData.put("data", data);
@@ -242,9 +265,66 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           row.put("contact", StringUtils.trimToEmpty(rs.getString("contact")));
           row.put("glItem", StringUtils.trimToEmpty(rs.getString("gl_item")));
           row.put("currencyIso", StringUtils.trimToEmpty(rs.getString("currency_iso")));
+          // Accounting dimensions for the expandable "more info" panel. All are
+          // marshalled; the UI shows only the ones enabled in the chart of
+          // accounts (see enabledDimensions in the payload).
+          JSONObject dims = new JSONObject();
+          dims.put("organization", StringUtils.trimToEmpty(rs.getString("dim_organization")));
+          dims.put("bpartner", StringUtils.trimToEmpty(rs.getString("dim_bpartner")));
+          dims.put("project", StringUtils.trimToEmpty(rs.getString("dim_project")));
+          dims.put("costcenter", StringUtils.trimToEmpty(rs.getString("dim_costcenter")));
+          dims.put("activity", StringUtils.trimToEmpty(rs.getString("dim_activity")));
+          dims.put("campaign", StringUtils.trimToEmpty(rs.getString("dim_campaign")));
+          dims.put("salesregion", StringUtils.trimToEmpty(rs.getString("dim_salesregion")));
+          dims.put("user1", StringUtils.trimToEmpty(rs.getString("dim_user1")));
+          dims.put("user2", StringUtils.trimToEmpty(rs.getString("dim_user2")));
+          row.put("dimensions", dims);
           arr.put(row);
         }
       }
+    }
+    return arr;
+  }
+
+  /** Active accounting elements (dimensions) of the client's chart of accounts. */
+  private static final String ENABLED_DIM_SQL =
+      "SELECT DISTINCT e.elementtype"
+          + "  FROM c_acctschema_element e"
+          + "  JOIN c_acctschema s ON s.c_acctschema_id = e.c_acctschema_id"
+          + " WHERE s.isactive = 'Y' AND e.isactive = 'Y'"
+          + "   AND s.ad_client_id = (SELECT ad_client_id FROM fin_financial_account"
+          + "                          WHERE fin_financial_account_id = ?)";
+
+  /** AcctSchema element type → UI dimension key (AC/PR are not navigable dimensions). */
+  private static final Map<String, String> DIM_BY_ELEMENT = Map.of(
+      "OO", "organization", "BP", "bpartner", "PJ", "project",
+      "CC", "costcenter", "AY", "activity", "MC", "campaign",
+      "SR", "salesregion", "U1", "user1", "U2", "user2");
+
+  /** Stable display order for the "more info" dimension panel. */
+  private static final List<String> DIM_ORDER = List.of(
+      "organization", "bpartner", "project", "costcenter",
+      "activity", "campaign", "salesregion", "user1", "user2");
+
+  /**
+   * Returns the dimension keys enabled in the client's chart of accounts, in a
+   * stable display order. The UI renders the "more info" panel from this list.
+   */
+  JSONArray loadEnabledDimensions(String accountId) throws Exception {
+    Set<String> enabled = new HashSet<>();
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(ENABLED_DIM_SQL)) {
+      ps.setString(1, accountId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String key = DIM_BY_ELEMENT.get(StringUtils.trimToEmpty(rs.getString("elementtype")));
+          if (key != null) enabled.add(key);
+        }
+      }
+    }
+    JSONArray arr = new JSONArray();
+    for (String key : DIM_ORDER) {
+      if (enabled.contains(key)) arr.put(key);
     }
     return arr;
   }
