@@ -305,6 +305,68 @@ public class FinancialAccountsPageHandlerTest {
     assertEquals(7, arr.getJSONObject(0).getInt("pendingCount"));
   }
 
+  /**
+   * Verifies that {@code buildAccountsArray()} emits the {@code active} flag for
+   * each row: active accounts serialise {@code true}, archived ones serialise
+   * {@code false}, so the UI can split them into the normal and "inactive"
+   * views. Both rows are always listed regardless of their state.
+   *
+   * @throws Exception
+   *     if the JSON traversal fails
+   */
+  @Test
+  public void testBuildAccountsArrayEmitsActiveFlag() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"),
+        inactiveAccount("acc-2", "Santander Cerrada", "B", new BigDecimal("0.00"), "EUR"));
+
+    JSONArray arr = handler.buildAccountsArray(accounts, Collections.emptyMap());
+
+    assertEquals(2, arr.length());
+    assertTrue("active account serialises active=true", arr.getJSONObject(0).getBoolean("active"));
+    assertFalse("archived account serialises active=false", arr.getJSONObject(1).getBoolean("active"));
+  }
+
+  /**
+   * Verifies that {@code buildSummary()} aggregates only active accounts: the
+   * total balance, the {@code byCurrency} breakdown and the
+   * {@code accountsWithPending} counter must all ignore archived rows even when
+   * those rows carry a balance and a positive pending count. This keeps the
+   * sidebar widgets aligned with the active accounts shown in the default view.
+   *
+   * @throws Exception
+   *     if the JSON traversal fails
+   */
+  @Test
+  public void testBuildSummaryExcludesInactiveAccounts() throws Exception {
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-1", "BBVA", "B", new BigDecimal("1000.00"), "EUR"),
+        inactiveAccount("acc-2", "Santander Cerrada", "B", new BigDecimal("500.00"), "EUR"),
+        inactiveAccount("acc-3", "Citibank Cerrada", "B", new BigDecimal("4000.00"), "USD"));
+
+    Map<String, Integer> pendingByAccount = new HashMap<>();
+    pendingByAccount.put("acc-1", 2);
+    // Archived accounts carry pending lines too, but they must not be counted.
+    pendingByAccount.put("acc-2", 9);
+    pendingByAccount.put("acc-3", 5);
+
+    JSONObject summary = handler.buildSummary(accounts, pendingByAccount);
+
+    // Only the active EUR account contributes to the total.
+    assertEquals(0,
+        new BigDecimal("1000.00").compareTo(new BigDecimal(summary.getString("totalBalance"))));
+
+    // The archived USD account must not create a USD currency entry.
+    JSONArray byCurrency = summary.getJSONArray("byCurrency");
+    assertEquals(1, byCurrency.length());
+    assertEquals("EUR", byCurrency.getJSONObject(0).getString("currencyIso"));
+    assertEquals(0,
+        new BigDecimal("1000.00").compareTo(new BigDecimal(byCurrency.getJSONObject(0).getString("total"))));
+
+    // Only the active account with pending lines is counted.
+    assertEquals(1, summary.getJSONObject("pending").getInt("accountsWithPending"));
+  }
+
   // ── Default afterHandle hooks ────────────────────────────────────────────
 
   /**
@@ -426,6 +488,8 @@ public class FinancialAccountsPageHandlerTest {
     when(rs.getString(6)).thenReturn("EUR", "EUR");
     when(rs.getString(7)).thenReturn("ES12...", "");
     when(rs.getString(8)).thenReturn("Y", "N");
+    // Column 9 (fa.isactive): first row active ("Y"), second archived ("N").
+    when(rs.getString(9)).thenReturn("Y", "N");
 
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
@@ -443,10 +507,13 @@ public class FinancialAccountsPageHandlerTest {
       assertEquals("EUR", first.currency.iso);
       assertTrue("first row is default", first.isDefault);
 
+      assertTrue("first row maps column 9 'Y' to active", first.active);
+
       AccountRow second = rows.get(1);
       assertEquals("acc-2", second.id);
       assertEquals(0, BigDecimal.ZERO.compareTo(second.currentBalance));
       assertFalse("second row is not default", second.isDefault);
+      assertFalse("second row maps column 9 'N' to inactive", second.active);
 
       verify(ps).setString(1, CLIENT_ID);
       verify(ps).setArray(2, orgArray);
@@ -600,6 +667,31 @@ public class FinancialAccountsPageHandlerTest {
     return new AccountRow(id, name, type, balance,
         new Currency(currencyId(currencyIso), currencyIso),
         "ES1200000000000000000001", false);
+  }
+
+  /**
+   * Builds an archived (inactive) {@link AccountRow} fixture. The constructor
+   * signature is unchanged (7 params, always active by default), so the
+   * {@code active} flag is flipped after construction exactly as the loader
+   * does from column 9 of the result set.
+   *
+   * @param id
+   *     unique identifier of the simulated FIN_Financial_Account
+   * @param name
+   *     human-readable name shown in the UI
+   * @param type
+   *     account type code (B = Bank, C = Cash, T = Card)
+   * @param balance
+   *     current balance (must be excluded from the summary totals)
+   * @param currencyIso
+   *     ISO 4217 code used for the currency breakdown
+   * @return a fixture row flagged as archived/inactive
+   */
+  private static AccountRow inactiveAccount(String id, String name, String type, BigDecimal balance,
+      String currencyIso) {
+    AccountRow row = account(id, name, type, balance, currencyIso);
+    row.active = false;
+    return row;
   }
 
   /**

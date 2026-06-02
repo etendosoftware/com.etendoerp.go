@@ -41,8 +41,10 @@ import org.openbravo.dal.service.OBDal;
 
 /**
  * NeoHandler that powers the Cuentas (Financial Accounts) landing page introduced
- * by ETP-4095. Returns the active financial accounts visible to the current user
- * together with the aggregated summary widgets shown in the sidebar.
+ * by ETP-4095. Returns the financial accounts visible to the current user (both
+ * active and archived, each flagged via {@code active}) together with the
+ * aggregated summary widgets shown in the sidebar (computed over active accounts
+ * only). The UI lists archived accounts behind a dedicated "inactive" filter.
  *
  * <p>URL: {@code GET /sws/neo/financial-accounts-page}
  *
@@ -93,11 +95,10 @@ public class FinancialAccountsPageHandler implements NeoHandler {
 
   private static final String ACCOUNTS_SQL =
       "SELECT fa.fin_financial_account_id, fa.name, fa.type, fa.currentbalance, "
-          + "       fa.c_currency_id, cur.iso_code, fa.iban, fa.isdefault "
+          + "       fa.c_currency_id, cur.iso_code, fa.iban, fa.isdefault, fa.isactive "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
-          + " WHERE fa.isactive = 'Y' "
-          + "   AND fa.ad_client_id = ? "
+          + " WHERE fa.ad_client_id = ? "
           + "   AND fa.ad_org_id = ANY (?) "
           + " ORDER BY fa.isdefault DESC, fa.name ASC";
 
@@ -181,14 +182,16 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       ps.setArray(2, conn.createArrayOf("varchar", orgs.toArray(new String[0])));
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          rows.add(new AccountRow(
+          AccountRow row = new AccountRow(
               rs.getString(1),
               StringUtils.trimToEmpty(rs.getString(2)),
               StringUtils.trimToEmpty(rs.getString(3)),
               nullSafeBigDecimal(rs.getBigDecimal(4)),
               new Currency(rs.getString(5), StringUtils.trimToEmpty(rs.getString(6))),
               StringUtils.trimToEmpty(rs.getString(7)),
-              "Y".equals(rs.getString(8))));
+              "Y".equals(rs.getString(8)));
+          row.active = "Y".equals(rs.getString(9));
+          rows.add(row);
         }
       }
     }
@@ -227,6 +230,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("currencyIso", account.currency.iso);
       json.put("iban", account.iban);
       json.put("isDefault", account.isDefault);
+      json.put("active", account.active);
       json.put("pendingCount", pendingByAccount.getOrDefault(account.id, 0));
       arr.put(json);
     }
@@ -242,6 +246,11 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     int accountsWithPending = 0;
 
     for (AccountRow account : accounts) {
+      // Sidebar widgets aggregate only active accounts; archived ones are
+      // listed apart (via the "inactive" filter) and must not skew the totals.
+      if (!account.active) {
+        continue;
+      }
       total = total.add(account.currentBalance);
       byCurrency.merge(account.currency.iso, account.currentBalance, BigDecimal::add);
       if (pendingByAccount.getOrDefault(account.id, 0) > 0) {
@@ -297,6 +306,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     final Currency currency;
     final String iban;
     final boolean isDefault;
+    /** Whether the account is active; archived accounts have {@code false}. Set by the loader. */
+    boolean active = true;
 
     AccountRow(String id, String name, String type, BigDecimal currentBalance,
         Currency currency, String iban, boolean isDefault) {
