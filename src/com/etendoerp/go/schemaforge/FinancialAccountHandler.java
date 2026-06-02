@@ -369,7 +369,13 @@ public class FinancialAccountHandler implements NeoHandler {
     }
     String isoCode = iban.trim().substring(0, 2).toUpperCase();
     OBCriteria<Country> criteria = OBDal.getInstance().createCriteria(Country.class);
+    // Countries are standard master data (usually Client 0 / Org 0); disable the
+    // readable client/org filters so the lookup is not empty in a specific
+    // client/org context, and only consider active records.
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
     criteria.add(Restrictions.eq(Country.PROPERTY_ISOCOUNTRYCODE, isoCode));
+    criteria.add(Restrictions.eq(Country.PROPERTY_ACTIVE, true));
     criteria.setMaxResults(1);
     return (Country) criteria.uniqueResult();
   }

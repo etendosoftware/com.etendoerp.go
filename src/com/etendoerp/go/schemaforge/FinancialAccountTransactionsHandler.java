@@ -113,6 +113,17 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String FIELD_TRX_TYPE = "trxType";
   private static final String FIELD_DESCRIPTION = "description";
 
+  /** Accounting-dimension UI keys, reused across marshalling, mapping and ordering. */
+  private static final String DIM_ORGANIZATION = "organization";
+  private static final String DIM_BPARTNER = "bpartner";
+  private static final String DIM_PROJECT = "project";
+  private static final String DIM_COSTCENTER = "costcenter";
+  private static final String DIM_ACTIVITY = "activity";
+  private static final String DIM_CAMPAIGN = "campaign";
+  private static final String DIM_SALESREGION = "salesregion";
+  private static final String DIM_USER1 = "user1";
+  private static final String DIM_USER2 = "user2";
+
   /** Rolling window for inflow/outflow KPIs, in days. */
   private static final int KPI_WINDOW_DAYS = 30;
 
@@ -269,15 +280,15 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           // marshalled; the UI shows only the ones enabled in the chart of
           // accounts (see enabledDimensions in the payload).
           JSONObject dims = new JSONObject();
-          dims.put("organization", StringUtils.trimToEmpty(rs.getString("dim_organization")));
-          dims.put("bpartner", StringUtils.trimToEmpty(rs.getString("dim_bpartner")));
-          dims.put("project", StringUtils.trimToEmpty(rs.getString("dim_project")));
-          dims.put("costcenter", StringUtils.trimToEmpty(rs.getString("dim_costcenter")));
-          dims.put("activity", StringUtils.trimToEmpty(rs.getString("dim_activity")));
-          dims.put("campaign", StringUtils.trimToEmpty(rs.getString("dim_campaign")));
-          dims.put("salesregion", StringUtils.trimToEmpty(rs.getString("dim_salesregion")));
-          dims.put("user1", StringUtils.trimToEmpty(rs.getString("dim_user1")));
-          dims.put("user2", StringUtils.trimToEmpty(rs.getString("dim_user2")));
+          dims.put(DIM_ORGANIZATION, StringUtils.trimToEmpty(rs.getString("dim_organization")));
+          dims.put(DIM_BPARTNER, StringUtils.trimToEmpty(rs.getString("dim_bpartner")));
+          dims.put(DIM_PROJECT, StringUtils.trimToEmpty(rs.getString("dim_project")));
+          dims.put(DIM_COSTCENTER, StringUtils.trimToEmpty(rs.getString("dim_costcenter")));
+          dims.put(DIM_ACTIVITY, StringUtils.trimToEmpty(rs.getString("dim_activity")));
+          dims.put(DIM_CAMPAIGN, StringUtils.trimToEmpty(rs.getString("dim_campaign")));
+          dims.put(DIM_SALESREGION, StringUtils.trimToEmpty(rs.getString("dim_salesregion")));
+          dims.put(DIM_USER1, StringUtils.trimToEmpty(rs.getString("dim_user1")));
+          dims.put(DIM_USER2, StringUtils.trimToEmpty(rs.getString("dim_user2")));
           row.put("dimensions", dims);
           arr.put(row);
         }
@@ -297,14 +308,14 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
 
   /** AcctSchema element type → UI dimension key (AC/PR are not navigable dimensions). */
   private static final Map<String, String> DIM_BY_ELEMENT = Map.of(
-      "OO", "organization", "BP", "bpartner", "PJ", "project",
-      "CC", "costcenter", "AY", "activity", "MC", "campaign",
-      "SR", "salesregion", "U1", "user1", "U2", "user2");
+      "OO", DIM_ORGANIZATION, "BP", DIM_BPARTNER, "PJ", DIM_PROJECT,
+      "CC", DIM_COSTCENTER, "AY", DIM_ACTIVITY, "MC", DIM_CAMPAIGN,
+      "SR", DIM_SALESREGION, "U1", DIM_USER1, "U2", DIM_USER2);
 
   /** Stable display order for the "more info" dimension panel. */
   private static final List<String> DIM_ORDER = List.of(
-      "organization", "bpartner", "project", "costcenter",
-      "activity", "campaign", "salesregion", "user1", "user2");
+      DIM_ORGANIZATION, DIM_BPARTNER, DIM_PROJECT, DIM_COSTCENTER,
+      DIM_ACTIVITY, DIM_CAMPAIGN, DIM_SALESREGION, DIM_USER1, DIM_USER2);
 
   /**
    * Returns the dimension keys enabled in the client's chart of accounts, in a
