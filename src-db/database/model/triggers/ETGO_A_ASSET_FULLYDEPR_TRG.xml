@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+  <database name="TRIGGER ETGO_A_ASSET_FULLYDEPR_TRG">
+    <trigger name="ETGO_A_ASSET_FULLYDEPR_TRG" table="A_ASSET" fires="before" insert="true" update="true" delete="false" foreach="row">
+      <body><![CDATA[
+
+/*************************************************************************
+* Maintains A_ASSET.ISFULLYDEPRECIATED as a reliable derived flag so it
+* can be filtered from the list view. The Etendo core never updates this
+* boolean, so it is recomputed here on every insert/update of the asset
+* row regardless of what writes DEPRECIATEDVALUE (core process, trigger
+* or direct SQL). BEFORE row => sets :new directly, no recursion.
+*
+* fully depreciated = AMORTIZATIONVALUEAMT > 0
+*                     AND DEPRECIATEDVALUE >= AMORTIZATIONVALUEAMT
+* The > 0 guard avoids flagging assets without a depreciation plan
+* (where 0 >= 0 would wrongly be true).
+************************************************************************/
+
+BEGIN
+
+    IF AD_isTriggerEnabled()='N' THEN RETURN;
+    END IF;
+
+    IF (INSERTING OR UPDATING) THEN
+      IF (COALESCE(:new.AMORTIZATIONVALUEAMT, 0) > 0
+          AND COALESCE(:new.DEPRECIATEDVALUE, 0) >= :new.AMORTIZATIONVALUEAMT) THEN
+        :new.ISFULLYDEPRECIATED := 'Y';
+      ELSE
+        :new.ISFULLYDEPRECIATED := 'N';
+      END IF;
+    END IF;
+
+END ETGO_A_ASSET_FULLYDEPR_TRG
+]]></body>
+    </trigger>
+  </database>
