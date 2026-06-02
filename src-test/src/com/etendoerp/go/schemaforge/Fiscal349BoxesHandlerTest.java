@@ -118,6 +118,20 @@ public class Fiscal349BoxesHandlerTest {
     verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
   }
 
+  // ── invalid year → 400 ───────────────────────────────────────────
+
+  @Test
+  public void testInvalidYearReturns400() throws IOException {
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("year")).thenReturn("notANumber");
+    when(req.getParameter("period")).thenReturn("T1");
+
+    handler.handle("operators", "GET", req, resp);
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+  }
+
   // ── modified without since → 400 ─────────────────────────────────
 
   @Test

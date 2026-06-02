@@ -87,8 +87,15 @@ abstract class AbstractFiscalHandler {
           "Missing required param: since");
       return;
     }
+    int year;
     try {
-      int    year  = Integer.parseInt(yearStr);
+      year = Integer.parseInt(yearStr);
+    } catch (NumberFormatException e) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Invalid year: " + yearStr);
+      return;
+    }
+    try {
       String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
       dispatch(entityName, orgId, year, period, request, response);
     } catch (FiscalHandlerException e) {
