@@ -23,6 +23,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
@@ -104,7 +105,13 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String ACTION_CREATE = "create";
   private static final String ACTION_BP_LOOKUP = "bpartner-lookup";
   private static final String ACTION_GL_LOOKUP = "glitem-lookup";
+  private static final String ACTION_DIM_VALUES = "dimension-values";
+  private static final String ACTION_OUTSTANDING = "outstanding-invoices";
   private static final int LOOKUP_LIMIT = 25;
+  /** Document base type of finacc transactions — used to resolve header dimensions. */
+  private static final String DOCBASETYPE_FAT = "FAT";
+  /** AD reference backing FIN_Finacc_Transaction.Trxtype (core list: BPD/BPW/BF). */
+  private static final String TRXTYPE_REFERENCE_ID = "4EFC9773F30B4ACE97D225BD13CFF8CB";
   private static final DateTimeFormatter ISO_UTC = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
       .withZone(ZoneOffset.UTC);
 
@@ -210,6 +217,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     if (METHOD_GET.equals(method)) {
       if (ACTION_BP_LOOKUP.equals(action)) return handleBpartnerLookup(context);
       if (ACTION_GL_LOOKUP.equals(action)) return handleGlItemLookup(context);
+      if (ACTION_DIM_VALUES.equals(action)) return handleDimensionValues(context);
+      if (ACTION_OUTSTANDING.equals(action)) return handleOutstandingInvoices(context);
       return handleList(context);
     }
     if (METHOD_POST.equals(method) && ACTION_CREATE.equals(action)) {
@@ -244,6 +253,16 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     data.put("transactions", transactions);
     data.put("totals", totals);
     data.put("enabledDimensions", loadEnabledDimensions(accountId));
+    // Dimensions to show in the New Movement header — mirrors Classic's finacc
+    // transaction form (ad_client_acctdimension, docbasetype FAT, show_in_header).
+    data.put("headerDimensions", loadHeaderDimensions(accountId));
+    // Transaction types (BPD/BPW/BF) from the AD reference list — not hardcoded.
+    data.put("trxTypes", loadTrxTypes());
+    // Payment methods configured for this financial account (FIN_Finacc_PaymentMethod).
+    data.put("paymentMethods", loadPaymentMethods(accountId));
+    // The account's organization — used by the New Movement wizard to default
+    // the Organization dimension to the current context.
+    data.put("accountOrgId", loadAccountOrgId(accountId));
 
     JSONObject responseData = new JSONObject();
     responseData.put("data", data);
@@ -321,7 +340,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * Returns the dimension keys enabled in the client's chart of accounts, in a
    * stable display order. The UI renders the "more info" panel from this list.
    */
-  JSONArray loadEnabledDimensions(String accountId) throws Exception {
+  /** Navigable accounting dimensions active in the client's chart of accounts. */
+  Set<String> loadActiveDimensionSet(String accountId) throws Exception {
     Set<String> enabled = new HashSet<>();
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(ENABLED_DIM_SQL)) {
@@ -333,11 +353,123 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
         }
       }
     }
+    return enabled;
+  }
+
+  JSONArray loadEnabledDimensions(String accountId) throws Exception {
+    Set<String> enabled = loadActiveDimensionSet(accountId);
     JSONArray arr = new JSONArray();
     for (String key : DIM_ORDER) {
       if (enabled.contains(key)) arr.put(key);
     }
     return arr;
+  }
+
+  /**
+   * Dimensions explicitly hidden from the finacc transaction header (docbasetype
+   * FAT) via {@code ad_client_acctdimension.show_in_header = 'N'}. Header
+   * dimensions default to visible when there is no override row (matching
+   * Classic), so we compute the header set as "active dimensions minus the ones
+   * explicitly hidden here" rather than only the rows flagged to show.
+   */
+  private static final String HEADER_DIM_HIDDEN_SQL =
+      "SELECT DISTINCT d.dimension"
+          + "  FROM ad_client_acctdimension d"
+          + " WHERE d.isactive = 'Y' AND d.show_in_header = 'N' AND d.docbasetype = ?"
+          + "   AND d.ad_client_id = (SELECT ad_client_id FROM fin_financial_account"
+          + "                          WHERE fin_financial_account_id = ?)";
+
+  JSONArray loadHeaderDimensions(String accountId) throws Exception {
+    Set<String> active = loadActiveDimensionSet(accountId);
+    Set<String> hidden = new HashSet<>();
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(HEADER_DIM_HIDDEN_SQL)) {
+      ps.setString(1, DOCBASETYPE_FAT);
+      ps.setString(2, accountId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String key = DIM_BY_ELEMENT.get(StringUtils.trimToEmpty(rs.getString("dimension")));
+          if (key != null) hidden.add(key);
+        }
+      }
+    }
+    JSONArray arr = new JSONArray();
+    for (String key : DIM_ORDER) {
+      if (active.contains(key) && !hidden.contains(key)) {
+        arr.put(key);
+      }
+    }
+    return arr;
+  }
+
+  /** Active transaction types (BPD/BPW/BF) from the AD reference list, localized. */
+  private static final String TRXTYPE_SQL =
+      "SELECT l.value, COALESCE(t.name, l.name) AS label"
+          + "  FROM ad_ref_list l"
+          + "  LEFT JOIN ad_ref_list_trl t ON t.ad_ref_list_id = l.ad_ref_list_id AND t.ad_language = ?"
+          + " WHERE l.ad_reference_id = ? AND l.isactive = 'Y'"
+          + " ORDER BY l.value";
+
+  JSONArray loadTrxTypes() throws Exception {
+    String lang = OBContext.getOBContext().getLanguage().getLanguage();
+    JSONArray arr = new JSONArray();
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(TRXTYPE_SQL)) {
+      ps.setString(1, lang);
+      ps.setString(2, TRXTYPE_REFERENCE_ID);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONObject o = new JSONObject();
+          o.put("value", StringUtils.trimToEmpty(rs.getString("value")));
+          o.put("label", StringUtils.trimToEmpty(rs.getString("label")));
+          arr.put(o);
+        }
+      }
+    }
+    return arr;
+  }
+
+  /**
+   * Payment methods configured for the financial account, with their allowed
+   * directions (payin/payout). The UI uses this to filter by Cobro/Pago.
+   */
+  JSONArray loadPaymentMethods(String accountId) throws Exception {
+    JSONArray arr = new JSONArray();
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(
+        "SELECT pm.fin_paymentmethod_id AS id, pm.name,"
+            + "       fpm.payin_allow, fpm.payout_allow, fpm.isdefault"
+            + "  FROM fin_finacc_paymentmethod fpm"
+            + "  JOIN fin_paymentmethod pm ON pm.fin_paymentmethod_id = fpm.fin_paymentmethod_id"
+            + " WHERE fpm.fin_financial_account_id = ?"
+            + "   AND fpm.isactive = 'Y' AND pm.isactive = 'Y'"
+            + " ORDER BY fpm.isdefault DESC, pm.name ASC")) {
+      ps.setString(1, accountId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONObject o = new JSONObject();
+          o.put("id", StringUtils.trimToEmpty(rs.getString("id")));
+          o.put("name", StringUtils.trimToEmpty(rs.getString("name")));
+          o.put("payinAllow", "Y".equals(rs.getString("payin_allow")));
+          o.put("payoutAllow", "Y".equals(rs.getString("payout_allow")));
+          o.put("isDefault", "Y".equals(rs.getString("isdefault")));
+          arr.put(o);
+        }
+      }
+    }
+    return arr;
+  }
+
+  /** The organization that owns the financial account (movement default context). */
+  String loadAccountOrgId(String accountId) throws Exception {
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(
+        "SELECT ad_org_id FROM fin_financial_account WHERE fin_financial_account_id = ?")) {
+      ps.setString(1, accountId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? StringUtils.trimToEmpty(rs.getString(1)) : "";
+      }
+    }
   }
 
   JSONObject loadTotals(String accountId) throws Exception {
@@ -529,14 +661,20 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   }
 
   /**
-   * Handles {@code GET ?action=bpartner-lookup&q=...} — fuzzy search over
-   * {@code c_bpartner.name}, scoped to the current client + system records.
+   * Handles {@code GET ?action=bpartner-lookup&q=...&role=customer|vendor} —
+   * fuzzy search over {@code c_bpartner.name}, scoped to the current client +
+   * system records. When {@code role=customer} only customers are returned;
+   * when {@code role=vendor} only vendors; otherwise all active bpartners.
    */
   private NeoResponse handleBpartnerLookup(NeoContext context) {
     String q = context.getQueryParams() != null ? context.getQueryParams().get("q") : "";
+    String role = context.getQueryParams() != null ? context.getQueryParams().getOrDefault("role", "") : "";
+    String roleFilter = "customer".equals(role) ? " AND iscustomer='Y'"
+        : "vendor".equals(role) ? " AND isvendor='Y'" : "";
     return runLookup(
         "SELECT c_bpartner_id AS id, name FROM c_bpartner"
             + " WHERE isactive='Y' AND ad_client_id IN (?, ?)"
+            + roleFilter
             + "   AND LOWER(name) LIKE ?"
             + " ORDER BY name ASC"
             + " LIMIT " + LOOKUP_LIMIT,
@@ -552,6 +690,164 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
             + " ORDER BY name ASC"
             + " LIMIT " + LOOKUP_LIMIT,
         q, "glItems");
+  }
+
+  /** Dimension key → {table, id column} for the dimension-values lookup. */
+  private static final Map<String, String[]> DIM_VALUE_TABLE = Map.of(
+      DIM_ORGANIZATION, new String[] { "ad_org", "ad_org_id" },
+      DIM_BPARTNER, new String[] { "c_bpartner", "c_bpartner_id" },
+      DIM_PROJECT, new String[] { "c_project", "c_project_id" },
+      DIM_COSTCENTER, new String[] { "c_costcenter", "c_costcenter_id" },
+      DIM_ACTIVITY, new String[] { "c_activity", "c_activity_id" },
+      DIM_CAMPAIGN, new String[] { "c_campaign", "c_campaign_id" },
+      DIM_SALESREGION, new String[] { "c_salesregion", "c_salesregion_id" },
+      DIM_USER1, new String[] { "user1", "user1_id" },
+      DIM_USER2, new String[] { "user2", "user2_id" });
+
+  /**
+   * Handles {@code GET ?action=dimension-values&dimension=<key>&q=...} — returns
+   * the selectable values for an accounting dimension (organizations, projects,
+   * cost centers, …), scoped to the current client + system records. The table
+   * and id column come from a fixed whitelist, never from user input.
+   */
+  private NeoResponse handleDimensionValues(NeoContext context) {
+    String dim = context.getQueryParams() != null ? context.getQueryParams().get("dimension") : null;
+    String[] meta = dim != null ? DIM_VALUE_TABLE.get(dim) : null;
+    if (meta == null) {
+      return NeoResponse.error(400, "Unknown or unsupported dimension: " + dim);
+    }
+    String q = context.getQueryParams() != null ? context.getQueryParams().get("q") : "";
+    String sql = "SELECT " + meta[1] + " AS id, name FROM " + meta[0]
+        + " WHERE isactive = 'Y' AND " + meta[1] + " <> '0' AND ad_client_id IN (?, ?)"
+        + "   AND LOWER(name) LIKE ?"
+        + " ORDER BY name ASC"
+        + " LIMIT 200";
+    return runLookup(sql, q, "values");
+  }
+
+  /** Date formatter for invoice/due dates returned to the UI (matches the
+   * client-side dd/MM/yyyy parser used by the invoice filters). */
+  private static final DateTimeFormatter DMY = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+
+  /**
+   * Outstanding (unpaid) invoice payment-schedule details for a business
+   * partner. The {@code amount} of a {@code FIN_Payment_ScheduleDetail} whose
+   * {@code fin_payment_detail_id} is NULL is the amount still pending payment;
+   * those rows are exactly what Classic's "Add Payment" grid shows. We expose
+   * the same triplet of amounts: invoiced ({@code c_invoice.grandtotal}),
+   * expected ({@code fin_payment_schedule.amount}) and outstanding
+   * ({@code fin_payment_scheduledetail.amount}).
+   */
+  private static final String OUTSTANDING_INVOICES_SQL =
+      "SELECT psd.fin_payment_scheduledetail_id AS id,"
+          + "       i.documentno AS doc_no,"
+          + "       COALESCE(i.description, '') AS descr,"
+          + "       bp.name AS bpartner,"
+          + "       i.dateinvoiced AS invoice_date,"
+          + "       ps.duedate AS due_date,"
+          + "       COALESCE(pm.name, '') AS payment_method,"
+          + "       COALESCE(proj.name, '') AS project,"
+          + "       COALESCE(o.documentno, '') AS order_no,"
+          + "       cur.iso_code AS currency_iso,"
+          + "       i.grandtotal AS invoiced_amount,"
+          + "       ps.amount AS expected_amount,"
+          + "       psd.amount AS outstanding_amount"
+          + "  FROM fin_payment_scheduledetail psd"
+          + "  JOIN fin_payment_schedule ps ON ps.fin_payment_schedule_id = psd.fin_payment_schedule_invoice"
+          + "  JOIN c_invoice i ON i.c_invoice_id = ps.c_invoice_id"
+          + "  JOIN c_bpartner bp ON bp.c_bpartner_id = i.c_bpartner_id"
+          + "  JOIN c_currency cur ON cur.c_currency_id = i.c_currency_id"
+          + "  LEFT JOIN fin_paymentmethod pm ON pm.fin_paymentmethod_id = COALESCE(ps.fin_paymentmethod_id, i.fin_paymentmethod_id)"
+          + "  LEFT JOIN c_project proj ON proj.c_project_id = i.c_project_id"
+          + "  LEFT JOIN c_order o ON o.c_order_id = i.c_order_id"
+          + " WHERE psd.fin_payment_detail_id IS NULL"
+          + "   AND psd.isactive = 'Y'"
+          + "   AND i.docstatus = 'CO'"
+          + "   AND i.issotrx = ?"
+          + "   AND i.ad_client_id IN (?, ?)";
+
+  /** Optional clause: scope to a single business partner when one is given. */
+  private static final String OUTSTANDING_INVOICES_BP_CLAUSE = "   AND i.c_bpartner_id = ?";
+  private static final String OUTSTANDING_INVOICES_TAIL =
+      " ORDER BY ps.duedate ASC, i.documentno ASC LIMIT 500";
+
+  /**
+   * Handles {@code GET ?action=outstanding-invoices&bpartnerId=...&doc=in|out} —
+   * returns the unpaid invoices scoped by direction ({@code doc=in} → sales /
+   * cobro, {@code doc=out} → purchase / pago). When {@code bpartnerId} is blank
+   * the invoices of ALL business partners are returned (so the user can allocate
+   * a payment to any contact); when given, they are scoped to that partner.
+   */
+  private NeoResponse handleOutstandingInvoices(NeoContext context) {
+    Map<String, String> qp = context.getQueryParams();
+    String bpartnerId = qp != null ? qp.get("bpartnerId") : null;
+    boolean hasBp = StringUtils.isNotBlank(bpartnerId);
+    String doc = qp != null ? qp.getOrDefault("doc", "in") : "in";
+    String isSotrx = "out".equals(doc) ? "N" : "Y";
+    String sql = OUTSTANDING_INVOICES_SQL
+        + (hasBp ? OUTSTANDING_INVOICES_BP_CLAUSE : "")
+        + OUTSTANDING_INVOICES_TAIL;
+    try {
+      OBContext.setAdminMode(true);
+      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+      LocalDate today = LocalDate.now();
+      JSONArray arr = new JSONArray();
+      try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
+        ps.setString(1, isSotrx);
+        ps.setString(2, "0");
+        ps.setString(3, clientId);
+        if (hasBp) ps.setString(4, bpartnerId);
+        try (ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) {
+            arr.put(marshalOutstandingInvoice(rs, today));
+          }
+        }
+      }
+      JSONObject data = new JSONObject();
+      data.put("invoices", arr);
+      JSONObject responseData = new JSONObject();
+      responseData.put("data", data);
+      JSONObject envelope = new JSONObject();
+      envelope.put("response", responseData);
+      return NeoResponse.ok(envelope);
+    } catch (Exception e) {
+      log.error("Outstanding invoices lookup failed for bpartner {}", bpartnerId, e);
+      return NeoResponse.error(500, "Outstanding invoices lookup failed");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** Maps one outstanding-invoice row to the JSON shape the payment UI expects. */
+  private JSONObject marshalOutstandingInvoice(ResultSet rs, LocalDate today) throws Exception {
+    java.sql.Date invoiceDate = rs.getDate("invoice_date");
+    java.sql.Date dueDate = rs.getDate("due_date");
+    JSONObject row = new JSONObject();
+    row.put("id", rs.getString("id"));
+    row.put("no", StringUtils.trimToEmpty(rs.getString("doc_no")));
+    row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString("descr")));
+    row.put("bp", StringUtils.trimToEmpty(rs.getString("bpartner")));
+    row.put("fecha", formatDmy(invoiceDate));
+    row.put("venc", formatDmy(dueDate));
+    row.put("dias", daysUntil(dueDate, today));
+    row.put("metodo", StringUtils.trimToEmpty(rs.getString("payment_method")));
+    row.put("proyecto", StringUtils.trimToEmpty(rs.getString("project")));
+    row.put("orderNo", StringUtils.trimToEmpty(rs.getString("order_no")));
+    row.put("cc", "");
+    row.put("mon", StringUtils.trimToEmpty(rs.getString("currency_iso")));
+    row.put("total", nullSafeBigDecimal(rs.getBigDecimal("invoiced_amount")));
+    row.put("expected", nullSafeBigDecimal(rs.getBigDecimal("expected_amount")));
+    row.put("pend", nullSafeBigDecimal(rs.getBigDecimal("outstanding_amount")));
+    return row;
+  }
+
+  private static String formatDmy(java.sql.Date d) {
+    return d == null ? "" : DMY.format(d.toLocalDate());
+  }
+
+  /** Signed days from today to the due date: negative = overdue, 0 = due today. */
+  private static int daysUntil(java.sql.Date dueDate, LocalDate today) {
+    return dueDate == null ? 0 : (int) ChronoUnit.DAYS.between(today, dueDate.toLocalDate());
   }
 
   private NeoResponse runLookup(String sql, String q, String resultKey) {
