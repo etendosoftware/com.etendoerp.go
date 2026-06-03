@@ -79,12 +79,18 @@ class TransactionalAuthEmailSender {
 
   boolean sendPasswordReset(Account account, String resetToken,
       String resetTokenHash) {
+    return sendPasswordReset(account, resetToken, resetTokenHash,
+        EtendoGoAuthLinkBuilder.resetPasswordLink(resetToken));
+  }
+
+  boolean sendPasswordReset(Account account, String resetToken,
+      String resetTokenHash, String resetLink) {
     if (account == null || StringUtils.isBlank(resetToken)
         || StringUtils.isBlank(resetTokenHash)) {
       return false;
     }
     return sendAccountLink(CONTRACT_RESET_PASSWORD, account,
-        EtendoGoAuthLinkBuilder.resetPasswordLink(resetToken), resetTokenHash);
+        resetLink, resetTokenHash);
   }
 
   boolean sendPasswordChanged(Account account) {

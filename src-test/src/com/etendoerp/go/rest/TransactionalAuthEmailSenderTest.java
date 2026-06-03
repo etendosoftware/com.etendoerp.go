@@ -103,6 +103,23 @@ public class TransactionalAuthEmailSenderTest {
   }
 
   @Test
+  public void sendPasswordResetUsesProvidedLink() throws Exception {
+    TransactionalEmailService emailService = mock(TransactionalEmailService.class);
+    TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
+    Account account = account("account-1");
+
+    JSONObject command = sendAndCaptureCommand(emailService,
+        () -> sender.sendPasswordReset(account, "reset-token", "reset-hash",
+            "https://go.experimental.etendo.cloud/onboarding?resetToken=reset-token"),
+        "reset-password");
+
+    assertBaseCommand(command);
+    assertEquals("https://go.experimental.etendo.cloud/onboarding?resetToken=reset-token",
+        command.getString(EmailContractCommandSupport.FIELD_LINK));
+    assertEquals("reset-hash", command.getString(EmailContractCommandSupport.FIELD_RECORD_ID));
+  }
+
+  @Test
   public void sendPasswordChangedBuildsNoticeWithoutProviderPayloadFields() throws Exception {
     TransactionalEmailService emailService = mock(TransactionalEmailService.class);
     TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);

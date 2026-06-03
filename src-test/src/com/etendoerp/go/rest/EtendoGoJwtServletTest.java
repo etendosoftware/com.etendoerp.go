@@ -23,6 +23,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -48,12 +49,14 @@ import javax.servlet.http.HttpServletResponse;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.data.Account;
 
 /**
@@ -309,12 +312,16 @@ public class EtendoGoJwtServletTest {
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
         "{\"email\":\"user@test.com\"}")));
+    mockPublicRequestUrl(req);
 
     Account account = mock(Account.class);
-    when(emailSender.sendPasswordReset(eq(account), anyString(), anyString()))
+    when(emailSender.sendPasswordReset(eq(account), anyString(), anyString(), anyString()))
         .thenReturn(true);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<PublicUrlResolver> publicUrlMock =
+             mockStatic(PublicUrlResolver.class, CALLS_REAL_METHODS)) {
+      publicUrlMock.when(PublicUrlResolver::resolveConfiguredAppBaseUrl).thenReturn(null);
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
           .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
@@ -327,7 +334,11 @@ public class EtendoGoJwtServletTest {
     }
 
     assertEquals(200, resp.status);
-    verify(emailSender).sendPasswordReset(eq(account), anyString(), anyString());
+    ArgumentCaptor<String> resetLinkCaptor = ArgumentCaptor.forClass(String.class);
+    verify(emailSender).sendPasswordReset(eq(account), anyString(), anyString(),
+        resetLinkCaptor.capture());
+    assertTrue(resetLinkCaptor.getValue(), resetLinkCaptor.getValue().startsWith(
+        "https://go.experimental.etendo.cloud/onboarding?resetToken="));
   }
 
   @Test
@@ -339,9 +350,10 @@ public class EtendoGoJwtServletTest {
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
         "{\"email\":\"user@test.com\"}")));
+    mockPublicRequestUrl(req);
 
     Account account = mock(Account.class);
-    when(emailSender.sendPasswordReset(eq(account), anyString(), anyString()))
+    when(emailSender.sendPasswordReset(eq(account), anyString(), anyString(), anyString()))
         .thenReturn(false);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
@@ -370,9 +382,10 @@ public class EtendoGoJwtServletTest {
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
         "{\"email\":\"user@test.com\"}")));
+    mockPublicRequestUrl(req);
 
     Account account = mock(Account.class);
-    when(emailSender.sendPasswordReset(eq(account), anyString(), anyString()))
+    when(emailSender.sendPasswordReset(eq(account), anyString(), anyString(), anyString()))
         .thenThrow(new RuntimeException("provider unavailable"));
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
@@ -711,6 +724,13 @@ public class EtendoGoJwtServletTest {
     HttpServletRequest request = mock(HttpServletRequest.class);
     when(request.getPathInfo()).thenReturn(pathInfo);
     return request;
+  }
+
+  private static void mockPublicRequestUrl(HttpServletRequest request) {
+    when(request.getScheme()).thenReturn("https");
+    when(request.getServerName()).thenReturn("go.experimental.etendo.cloud");
+    when(request.getServerPort()).thenReturn(443);
+    when(request.getContextPath()).thenReturn("/etendo");
   }
 
   private static ResponseCapture mockResponse() throws Exception {

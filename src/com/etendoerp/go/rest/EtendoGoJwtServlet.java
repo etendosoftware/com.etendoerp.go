@@ -50,6 +50,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
+import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingDefaultCustomerService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
@@ -348,7 +349,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
       Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
       if (account != null) {
-        storeResetTokenAndSendEmail(account);
+        storeResetTokenAndSendEmail(account, resolvePasswordResetAppBaseUrl(request));
       }
       writePasswordResetNeutralResponse(response);
     } catch (RuntimeException e) {
@@ -1148,7 +1149,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return account != null ? account : EtendoGoJwtDalHelper.findActiveAccountByEmail(accountEmail);
   }
 
-  private void storeResetTokenAndSendEmail(Account account) {
+  private void storeResetTokenAndSendEmail(Account account, String appBaseUrl) {
     EtendoGoJwtDalHelper.PasswordResetTokenState previousTokenState =
         EtendoGoJwtDalHelper.capturePasswordResetToken(account);
     String resetToken = generatePasswordResetToken();
@@ -1158,13 +1159,30 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
     boolean emailSent = false;
     try {
-      emailSent = authEmailSender.sendPasswordReset(account, resetToken, resetTokenHash);
+      emailSent = authEmailSender.sendPasswordReset(account, resetToken, resetTokenHash,
+          EtendoGoAuthLinkBuilder.resetPasswordLink(resetToken, appBaseUrl));
     } catch (RuntimeException e) {
       log.warn("Auth email reset-password failed after token storage", e);
     }
     if (!emailSent) {
       EtendoGoJwtDalHelper.restorePasswordResetToken(account, previousTokenState);
     }
+  }
+
+  private String resolvePasswordResetAppBaseUrl(HttpServletRequest request) {
+    String configured = PublicUrlResolver.resolveConfiguredAppBaseUrl();
+    if (configured != null) {
+      return configured;
+    }
+    String scheme = request.getScheme();
+    String host = request.getServerName();
+    if (scheme == null || host == null) {
+      return null;
+    }
+    int port = request.getServerPort();
+    boolean defaultPort = ("http".equals(scheme) && port == 80)
+        || ("https".equals(scheme) && port == 443);
+    return scheme + "://" + host + (defaultPort ? "" : ":" + port);
   }
 
   private void sendAuthEmailBestEffort(String contractName, Runnable sendAction) {
