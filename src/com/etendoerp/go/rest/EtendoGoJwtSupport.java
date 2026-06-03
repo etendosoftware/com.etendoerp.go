@@ -17,17 +17,18 @@
 
 package com.etendoerp.go.rest;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.query.NativeQuery;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
-import org.openbravo.model.ad.access.Role;
-import org.openbravo.model.ad.access.RoleOrganization;
 import org.openbravo.model.ad.access.User;
-import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
@@ -37,6 +38,16 @@ final class EtendoGoJwtSupport {
 
   private static final String STAR_ORG_VALUE = "*";
   private static final String SYSTEM_ORG_ID = "0";
+  private static final String SQL_FIND_ROLE_LIST_BY_USER =
+      "SELECT r.ad_role_id AS role_id, r.name AS role_name, "
+          + "o.ad_org_id AS org_id, o.name AS org_name "
+          + "FROM ad_user_roles ur "
+          + "JOIN ad_role r ON ur.ad_role_id = r.ad_role_id "
+          + "LEFT JOIN ad_role_orgaccess roa ON r.ad_role_id = roa.ad_role_id "
+          + "AND roa.isactive = 'Y' "
+          + "LEFT JOIN ad_org o ON roa.ad_org_id = o.ad_org_id AND o.isactive = 'Y' "
+          + "WHERE ur.ad_user_id = ? AND ur.isactive = 'Y' AND r.isactive = 'Y' "
+          + "ORDER BY r.created, o.name";
 
   private EtendoGoJwtSupport() {
   }
@@ -60,28 +71,54 @@ final class EtendoGoJwtSupport {
   }
 
   static RoleListData loadRoleListData(String userId) throws JSONException {
+    try {
+      return buildRoleListData(loadRoleRows(userId));
+    } catch (OBException e) {
+      throw e;
+    } catch (RuntimeException e) {
+      throw new OBException("Error loading role list data for user: " + userId, e);
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private static List<Object[]> loadRoleRows(String userId) {
+    NativeQuery<Object[]> query = OBDal.getInstance()
+        .getSession()
+        .createNativeQuery(SQL_FIND_ROLE_LIST_BY_USER);
+    query.setParameter(1, userId);
+    return query.list();
+  }
+
+  private static RoleListData buildRoleListData(List<Object[]> rows) throws JSONException {
     RoleListData data = new RoleListData();
     data.roleArray = new JSONArray();
-    OBQuery<UserRoles> query = OBDal.getInstance().createQuery(UserRoles.class,
-        "as userRole where userRole.userContact.id = :userId"
-            + " and userRole.active = true"
-            + " and userRole.role.active = true"
-            + " order by userRole.role.creationDate");
-    query.setNamedParameter("userId", userId);
-    query.setFilterOnReadableClients(false);
-    query.setFilterOnReadableOrganization(false);
 
-    for (UserRoles userRole : query.list()) {
-      Role role = userRole.getRole();
-      if (role == null) {
-        continue;
+    Map<String, JSONObject> rolesById = new LinkedHashMap<>();
+    for (Object[] row : rows) {
+      String roleId = stringValue(row[0]);
+      JSONObject roleObj = rolesById.get(roleId);
+      if (roleObj == null) {
+        roleObj = buildRoleJson(roleId, stringValue(row[1]));
+        rolesById.put(roleId, roleObj);
+        if (data.firstRoleId == null) {
+          data.firstRoleId = roleId;
+        }
       }
-      if (data.firstRoleId == null) {
-        data.firstRoleId = role.getId();
+
+      String orgId = stringValue(row[2]);
+      if (orgId != null) {
+        roleObj.getJSONArray("orgList").put(buildOrganizationJson(orgId, stringValue(row[3])));
       }
-      data.roleArray.put(buildRoleJson(role));
+    }
+
+    for (JSONObject roleObj : rolesById.values()) {
+      data.roleArray.put(roleObj);
     }
     return data;
+  }
+
+  private static String stringValue(Object value) {
+    return value == null ? null : String.valueOf(value);
   }
 
   static String findClientIdByName(String clientName) {
@@ -125,36 +162,19 @@ final class EtendoGoJwtSupport {
     return query.uniqueResult() != null;
   }
 
-  private static JSONObject buildRoleJson(Role role) throws JSONException {
+  private static JSONObject buildRoleJson(String roleId, String roleName) throws JSONException {
     JSONObject roleObj = new JSONObject();
-    roleObj.put("id", role.getId());
-    roleObj.put("name", role.getName());
-    roleObj.put("orgList", loadOrganizationsForRole(role.getId()));
+    roleObj.put("id", roleId);
+    roleObj.put("name", roleName);
+    roleObj.put("orgList", new JSONArray());
     return roleObj;
   }
 
-  private static JSONArray loadOrganizationsForRole(String roleId) throws JSONException {
-    JSONArray orgArray = new JSONArray();
-    OBQuery<RoleOrganization> query = OBDal.getInstance().createQuery(RoleOrganization.class,
-        "as roleOrganization where roleOrganization.role.id = :roleId"
-            + " and roleOrganization.active = true"
-            + " and roleOrganization.organization.active = true"
-            + " order by roleOrganization.organization.name");
-    query.setNamedParameter("roleId", roleId);
-    query.setFilterOnReadableClients(false);
-    query.setFilterOnReadableOrganization(false);
-
-    for (RoleOrganization roleOrganization : query.list()) {
-      Organization organization = roleOrganization.getOrganization();
-      if (organization == null) {
-        continue;
-      }
-      JSONObject orgObj = new JSONObject();
-      orgObj.put("id", organization.getId());
-      orgObj.put("name", organization.getName());
-      orgArray.put(orgObj);
-    }
-    return orgArray;
+  private static JSONObject buildOrganizationJson(String orgId, String orgName) throws JSONException {
+    JSONObject orgObj = new JSONObject();
+    orgObj.put("id", orgId);
+    orgObj.put("name", orgName);
+    return orgObj;
   }
 
   private static User findActiveUserByUsername(String username) {
