@@ -285,9 +285,7 @@ public class Fiscal303BoxesHandlerTest {
   }
 
   /**
-   * A GET request to an entity name other than {@code "boxes"} must be rejected
-   * with 405. The Fiscal303 handler owns only the {@code /fiscal303/boxes}
-   * sub-path; anything else falls outside its contract.
+   * A GET request to an unknown entity name must be rejected with 404.
    */
   @Test
   public void testHandleRejectsUnknownEntityName() throws IOException {
@@ -295,7 +293,7 @@ public class Fiscal303BoxesHandlerTest {
     HttpServletResponse res = mock(HttpServletResponse.class);
     Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
     h.handle("invoices", "GET", mock(HttpServletRequest.class), res);
-    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED), anyString());
+    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_NOT_FOUND), anyString());
   }
 
   /**
