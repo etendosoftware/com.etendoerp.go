@@ -54,6 +54,7 @@ import org.openbravo.model.financialmgmt.calendar.Period;
 import org.junit.Before;
 import org.junit.Test;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
 
 /**
  * Unit tests for routing logic in {@link AbstractFiscalHandler}.
@@ -77,7 +78,7 @@ public class AbstractFiscalHandlerTest {
 
     @Override
     protected boolean isKnownEntity(String entityName) {
-      return "known".equals(entityName);
+      return "known".equals(entityName) || MODIFIED.equals(entityName);
     }
 
     @Override
@@ -313,6 +314,150 @@ public class AbstractFiscalHandlerTest {
       verify(q).setParameter(eq("from"), eq(3L));
       verify(q).setParameter(eq("to"),   eq(3L));
     }
+  }
+
+  // ── handle() routing — missing/invalid params ─────────────────────
+
+  @Test
+  public void testUnknownEntityReturns404() throws IOException {
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+
+    new StubHandler(servlet, false).handle("unknown-entity", "GET", req, resp);
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_NOT_FOUND), anyString());
+  }
+
+  @Test
+  public void testMissingYearReturns400() throws IOException {
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("year")).thenReturn(null);
+    when(req.getParameter(PERIOD_KEY)).thenReturn("T1");
+
+    new StubHandler(servlet, false).handle("known", "GET", req, resp);
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+  }
+
+  @Test
+  public void testInvalidYearStringReturns400() throws IOException {
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("year")).thenReturn("notanumber");
+    when(req.getParameter(PERIOD_KEY)).thenReturn("T1");
+
+    new StubHandler(servlet, false).handle("known", "GET", req, resp);
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+  }
+
+  @Test
+  public void testMissingSinceForModifiedReturns400() throws IOException {
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("year")).thenReturn("2026");
+    when(req.getParameter(PERIOD_KEY)).thenReturn("T1");
+    when(req.getParameter(SINCE_KEY)).thenReturn(null);
+
+    new StubHandler(servlet, false).handle(MODIFIED, "GET", req, resp);
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+  }
+
+  // ── dispatch() reachable when OBContext is mocked ─────────────────
+
+  /**
+   * When OBContext is successfully mocked, {@code dispatch()} is actually reached.
+   * The stub throws {@link FiscalHandlerException}, which the base class must catch
+   * and translate to a 500 (covers the {@code catch(FiscalHandlerException)} branch,
+   * L104-L106 in {@link AbstractFiscalHandler#handle}).
+   */
+  @Test
+  public void testDispatchFiscalExceptionWithOBContextMocked() throws IOException {
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("year")).thenReturn("2026");
+    when(req.getParameter(PERIOD_KEY)).thenReturn("T1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      OBContext ctx = mock(OBContext.class);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+      Organization org = mock(Organization.class);
+      when(ctx.getCurrentOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org1");
+
+      new StubHandler(servlet, true).handle("known", "GET", req, resp);
+    }
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR),
+        anyString());
+  }
+
+  /**
+   * Same setup but the stub throws a plain {@link RuntimeException} from dispatch(),
+   * exercising the {@code catch(Exception)} branch (L107-L111).
+   */
+  @Test
+  public void testDispatchRuntimeExceptionWithOBContextMocked() throws IOException {
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("year")).thenReturn("2026");
+    when(req.getParameter(PERIOD_KEY)).thenReturn("T1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      OBContext ctx = mock(OBContext.class);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+      Organization org = mock(Organization.class);
+      when(ctx.getCurrentOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org1");
+
+      new StubHandler(servlet, false).handle("known", "GET", req, resp);
+    }
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR),
+        anyString());
+  }
+
+  // ── handleModified — count query path ────────────────────────────
+
+  /**
+   * When periods are resolved and their dates are non-null, {@code handleModified}
+   * runs the Invoice count query. This test exercises that path (L134-L148).
+   */
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  @Test
+  public void testHandleModifiedCountQueryWithResults() throws Exception {
+    StubHandler handler = new StubHandler(servlet, false);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(resp.getWriter()).thenReturn(new PrintWriter(new StringWriter()));
+
+    Period period = mock(Period.class);
+    when(period.getStartingDate()).thenReturn(new Date(0));
+    when(period.getEndingDate()).thenReturn(new Date(86400000L));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      Session session = mock(Session.class);
+      when(obDal.getSession()).thenReturn(session);
+
+      // Period typed query (resolvePeriods)
+      Query<Period> periodQ = mock(Query.class);
+      when(session.createQuery(anyString(), eq(Period.class))).thenReturn(periodQ);
+      when(periodQ.setParameter(anyString(), any())).thenReturn(periodQ);
+      when(periodQ.list()).thenReturn(Collections.singletonList(period));
+
+      // Count query — raw (no type parameter)
+      Query countQ = mock(Query.class);
+      when(session.createQuery(anyString())).thenReturn(countQ);
+      when(countQ.setParameter(anyString(), any())).thenReturn(countQ);
+      when(countQ.uniqueResult()).thenReturn(3L);
+
+      handler.handleModified("org1", 2026, "T1", new Date(0), resp);
+    }
+
+    verify(resp).setContentType(anyString());
   }
 
   // ── resolveAcctSchema ─────────────────────────────────────────────
