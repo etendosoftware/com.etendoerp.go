@@ -31,6 +31,8 @@ BEGIN
       END IF;
     END IF;
 
+    IF (TG_OP = 'DELETE') THEN RETURN OLD; ELSE RETURN NEW; END IF;
+
 END ETGO_A_ASSET_FULLYDEPR_TRG
 ]]></body>
     </trigger>
