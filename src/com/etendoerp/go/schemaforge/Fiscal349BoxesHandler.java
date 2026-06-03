@@ -157,7 +157,8 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     return root;
   }
 
-  private Map<String, BusinessPartner> loadBpMap(List<Map<String, Object>> rows) {
+  // Package-private for unit testing of the pure data→JSON transformation logic.
+  Map<String, BusinessPartner> loadBpMap(List<Map<String, Object>> rows) {
     List<String> bpIds = rows.stream()
         .filter(row -> {
           BigDecimal b = (BigDecimal) row.get("BPTaxBaseAmount");
@@ -176,7 +177,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
         .collect(Collectors.toMap(BusinessPartner::getId, bp -> bp));
   }
 
-  private JSONArray buildOperatorsArray(List<Map<String, Object>> rows,
+  JSONArray buildOperatorsArray(List<Map<String, Object>> rows,
       Map<String, BusinessPartner> bpMap, Map<String, BigDecimal> summaryByKey) throws Exception {
     JSONArray arr = new JSONArray();
     for (Map<String, Object> row : rows) {
@@ -201,7 +202,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     return arr;
   }
 
-  private JSONArray collectInvoices(Set<Invoice> purch, Set<Invoice> sales) throws Exception {
+  JSONArray collectInvoices(Set<Invoice> purch, Set<Invoice> sales) throws Exception {
     SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
     JSONArray arr = new JSONArray();
     for (Invoice inv : purch) {
@@ -213,7 +214,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     return arr;
   }
 
-  private JSONObject buildInvoiceRow(Invoice inv, String type, SimpleDateFormat sdf)
+  JSONObject buildInvoiceRow(Invoice inv, String type, SimpleDateFormat sdf)
       throws Exception {
     BusinessPartner bp   = inv.getBusinessPartner();
     BigDecimal      base = inv.getSummedLineAmount() != null
