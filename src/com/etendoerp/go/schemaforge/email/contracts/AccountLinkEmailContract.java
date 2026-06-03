@@ -48,20 +48,29 @@ final class AccountLinkEmailContract implements EmailContract {
   private final int recipientThrottleLimit;
   private final int throttleWindowSeconds;
   private final String configuredLinkPath;
+  private final AccountLinkCustomContent customContent;
 
   AccountLinkEmailContract(String name, String template, EmailContractDataResolver dataResolver,
       int recipientThrottleLimit, int throttleWindowSeconds) {
-    this(name, template, dataResolver, recipientThrottleLimit, throttleWindowSeconds, null);
+    this(name, template, dataResolver, recipientThrottleLimit, throttleWindowSeconds, null, null);
   }
 
   AccountLinkEmailContract(String name, String template, EmailContractDataResolver dataResolver,
       int recipientThrottleLimit, int throttleWindowSeconds, String configuredLinkPath) {
+    this(name, template, dataResolver, recipientThrottleLimit, throttleWindowSeconds,
+        configuredLinkPath, null);
+  }
+
+  AccountLinkEmailContract(String name, String template, EmailContractDataResolver dataResolver,
+      int recipientThrottleLimit, int throttleWindowSeconds, String configuredLinkPath,
+      AccountLinkCustomContent customContent) {
     this.name = name;
     this.template = template;
     this.dataResolver = dataResolver;
     this.recipientThrottleLimit = recipientThrottleLimit;
     this.throttleWindowSeconds = throttleWindowSeconds;
     this.configuredLinkPath = configuredLinkPath;
+    this.customContent = customContent;
   }
 
   @Override
@@ -121,6 +130,14 @@ final class AccountLinkEmailContract implements EmailContract {
       JSONObject data = new JSONObject();
       data.put("name", StringUtils.defaultIfBlank(contact.get().getName(), "User"));
       data.put("link", link);
+      String language = EmailContractCommandSupport.text(command,
+          EmailContractCommandSupport.FIELD_LANGUAGE);
+      if (language != null) {
+        data.put("language", language);
+      }
+      if (customContent != null) {
+        customContent.apply(data, language, link);
+      }
       return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipient(),
           template, data, null));
     } catch (JSONException e) {
@@ -160,5 +177,9 @@ final class AccountLinkEmailContract implements EmailContract {
       return null;
     }
     return PublicUrlResolver.appendPath(baseUrl, configuredLinkPath);
+  }
+
+  interface AccountLinkCustomContent {
+    void apply(JSONObject data, String language, String link) throws JSONException;
   }
 }

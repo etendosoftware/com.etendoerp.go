@@ -133,7 +133,7 @@ Auth transactional emails are created server-side by the `/sws/go/*` endpoints. 
 
 | Endpoint | Transactional email behavior |
 |----------|------------------------------|
-| `POST /sws/go/register` | Creates the local account, commits it, then sends `new-account` best-effort |
+| `POST /sws/go/register` | Creates the local account, commits it, then sends `new-account` best-effort with the selected UI language when provided |
 | `POST /sws/go/password-reset/request` | Returns neutral success for known, unknown, disabled, throttled, or provider-failed cases; known active accounts receive a hashed expiring reset token only when the best-effort `reset-password` email is accepted for delivery |
 | `POST /sws/go/password-reset/confirm` | Accepts one valid unexpired token once, changes the password, clears/consumes reset token fields, and clears the platform session token |
 | `POST /sws/go/change-password` | Requires a valid platform bearer token and current password, changes the password, rotates the platform token, and sends `password-changed` best-effort |
@@ -146,19 +146,25 @@ Email delivery failure is audited and must not roll back registration, onboardin
 | Contract | Provider template | Recipient source | Required command fields |
 |----------|-------------------|------------------|-------------------------|
 | `reset-password` | `reset-password` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link` |
-| `new-account` | `new-account` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link` |
-| `environment-ready` | `environment-ready` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId` |
-| `password-changed` | `password-changed` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId`; optional `date` |
+| `new-account` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `link`; optional `language` |
+| `environment-ready` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId` |
+| `password-changed` | `custom` | `ETGO_Account.email` resolved by `accountId` | `version`, `accountId`, `recordId`; optional `date` |
 | `login-alert` | `login-alert` | `AD_User.email` resolved by `userId` | `version`, `userId`; optional `loginEventId`, `ip`, `date` |
 | `sales-invoice-send` | `invoice` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the invoice business partner | `version`, `recordId` |
 | `sales-order-send` | `document` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the sales order business partner | `version`, `recordId` |
 | `sales-quotation-send` | `document` | `C_BPartner.EM_Etgo_Email`, falling back to active contact email, resolved from the sales quotation business partner | `version`, `recordId` |
 
-`custom` and `support-custom-email` are not registered by default. A custom HTML email can only be added later as an explicit support/admin contract with role checks, reason capture, sanitizer, throttle, and audit.
+`custom` and `support-custom-email` are not registered as public contracts by default. Some closed auth contracts use the provider's `custom` template because the current provider allowlist exposes `custom`, `reset-password`, `login-alert`, and `invoice`. Those contracts still generate fixed `subject` and `body` values server-side and never accept arbitrary provider payloads from the browser. A generic custom HTML email can only be added later as an explicit support/admin contract with role checks, reason capture, sanitizer, throttle, and audit.
 
 `login-alert` is registered but not triggered by login. It remains deferred until the SSO and risk-policy model is defined.
 
 Caller-supplied account-link contracts accept only absolute `http://` or `https://` links. The `environment-ready` contract builds the dashboard link from server configuration and does not accept a caller-provided link. Document-send contracts share the default document payload strategy: `name`, `document_type`, `document_number`, and `download_link`. Optional fields such as `amount`, and document-specific aliases such as `invoice_number`, must be enabled by the explicit contract only when a provider template requires them.
+
+The `new-account` contract includes the selected registration language in provider
+template data as `language` when the registration request provides it. The
+frontend sends the active onboarding locale (`es_ES` or `en_US`) and the backend
+forwards only that allowlisted field; browser clients still cannot send generic
+provider payloads.
 
 Auth account-link contracts generate app links from server configuration:
 

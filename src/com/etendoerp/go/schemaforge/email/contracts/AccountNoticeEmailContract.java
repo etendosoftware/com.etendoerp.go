@@ -44,12 +44,19 @@ final class AccountNoticeEmailContract implements EmailContract {
   private final String name;
   private final String template;
   private final EmailContractDataResolver dataResolver;
+  private final AccountNoticeCustomContent customContent;
 
   AccountNoticeEmailContract(String name, String template,
       EmailContractDataResolver dataResolver) {
+    this(name, template, dataResolver, null);
+  }
+
+  AccountNoticeEmailContract(String name, String template,
+      EmailContractDataResolver dataResolver, AccountNoticeCustomContent customContent) {
     this.name = name;
     this.template = template;
     this.dataResolver = dataResolver;
+    this.customContent = customContent;
   }
 
   @Override
@@ -96,6 +103,9 @@ final class AccountNoticeEmailContract implements EmailContract {
       if (date != null) {
         data.put("date", date);
       }
+      if (customContent != null) {
+        customContent.apply(data);
+      }
       return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipient(),
           template, data, null));
     } catch (JSONException e) {
@@ -124,5 +134,9 @@ final class AccountNoticeEmailContract implements EmailContract {
   private Optional<EmailContactRecord> resolveAccount(EmailContractCommand command) {
     return dataResolver.findAccountContact(EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_ACCOUNT_ID));
+  }
+
+  interface AccountNoticeCustomContent {
+    void apply(JSONObject data) throws JSONException;
   }
 }

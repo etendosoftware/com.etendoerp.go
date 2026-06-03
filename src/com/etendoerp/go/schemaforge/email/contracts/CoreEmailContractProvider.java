@@ -33,6 +33,7 @@ import javax.enterprise.context.ApplicationScoped;
 public final class CoreEmailContractProvider implements EmailContractProvider {
 
   private final EmailContractDataResolver contractResolver;
+  private static final String PROVIDER_TEMPLATE_CUSTOM = "custom";
   private static final int RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT = 3;
   private static final int NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT = 2;
   private static final int ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT = 2;
@@ -60,12 +61,41 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
     return Arrays.asList(
         new AccountLinkEmailContract("reset-password", "reset-password", contractResolver,
             RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
-        new AccountLinkEmailContract("new-account", "new-account", contractResolver,
-            NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
-        new AccountLinkEmailContract("environment-ready", "environment-ready", contractResolver,
+        new AccountLinkEmailContract("new-account", PROVIDER_TEMPLATE_CUSTOM, contractResolver,
+            NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
+            CoreEmailContractProvider::newAccountContent),
+        new AccountLinkEmailContract("environment-ready", PROVIDER_TEMPLATE_CUSTOM, contractResolver,
             ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS,
-            DASHBOARD_LINK_PATH),
-        new AccountNoticeEmailContract("password-changed", "password-changed", contractResolver),
+            DASHBOARD_LINK_PATH, CoreEmailContractProvider::environmentReadyContent),
+        new AccountNoticeEmailContract("password-changed", PROVIDER_TEMPLATE_CUSTOM,
+            contractResolver, CoreEmailContractProvider::passwordChangedContent),
         new LoginAlertEmailContract(contractResolver));
+  }
+
+  private static void newAccountContent(org.codehaus.jettison.json.JSONObject data,
+      String language, String link) throws org.codehaus.jettison.json.JSONException {
+    if ("es_ES".equals(language)) {
+      data.put("subject", "Bienvenido a Etendo Go");
+      data.put("body", "Tu cuenta de Etendo Go fue creada correctamente. "
+          + "Abre este enlace para continuar: " + link);
+      return;
+    }
+    data.put("subject", "Welcome to Etendo Go");
+    data.put("body", "Your Etendo Go account was created successfully. "
+        + "Open this link to continue: " + link);
+  }
+
+  private static void environmentReadyContent(org.codehaus.jettison.json.JSONObject data,
+      String language, String link) throws org.codehaus.jettison.json.JSONException {
+    data.put("subject", "Your Etendo Go environment is ready");
+    data.put("body", "Your Etendo Go environment is ready. "
+        + "Open this link to access your dashboard: " + link);
+  }
+
+  private static void passwordChangedContent(org.codehaus.jettison.json.JSONObject data)
+      throws org.codehaus.jettison.json.JSONException {
+    data.put("subject", "Your Etendo Go password was changed");
+    data.put("body", "Your Etendo Go password was changed successfully. "
+        + "If you did not make this change, contact support.");
   }
 }

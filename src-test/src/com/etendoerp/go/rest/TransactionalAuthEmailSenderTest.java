@@ -69,6 +69,36 @@ public class TransactionalAuthEmailSenderTest {
   }
 
   @Test
+  public void sendNewAccountIncludesSelectedLanguage() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test/");
+    TransactionalEmailService emailService = mock(TransactionalEmailService.class);
+    TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
+    Account account = account("account-1");
+
+    JSONObject command = sendAndCaptureCommand(emailService,
+        () -> sender.sendNewAccount(account, "es_ES"),
+        "new-account");
+
+    assertBaseCommand(command);
+    assertEquals("es_ES", command.getString(EmailContractCommandSupport.FIELD_LANGUAGE));
+  }
+
+  @Test
+  public void sendNewAccountOmitsBlankLanguage() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test/");
+    TransactionalEmailService emailService = mock(TransactionalEmailService.class);
+    TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
+    Account account = account("account-1");
+
+    JSONObject command = sendAndCaptureCommand(emailService,
+        () -> sender.sendNewAccount(account, "  "),
+        "new-account");
+
+    assertBaseCommand(command);
+    assertFalse(command.has(EmailContractCommandSupport.FIELD_LANGUAGE));
+  }
+
+  @Test
   public void sendEnvironmentReadyUsesServerLinkAndClientIdIdempotency() throws Exception {
     System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
     TransactionalEmailService emailService = mock(TransactionalEmailService.class);
@@ -100,6 +130,7 @@ public class TransactionalAuthEmailSenderTest {
     assertEquals("https://app.example.test/onboarding?resetToken=abc+123%2B%2F%3D",
         command.getString(EmailContractCommandSupport.FIELD_LINK));
     assertEquals("reset-hash", command.getString(EmailContractCommandSupport.FIELD_RECORD_ID));
+    assertFalse(command.has(EmailContractCommandSupport.FIELD_LANGUAGE));
   }
 
   @Test

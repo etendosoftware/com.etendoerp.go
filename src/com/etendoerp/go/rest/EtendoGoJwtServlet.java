@@ -183,7 +183,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /**
    * POST /sws/go/register
-   * Body: { "email": "...", "password": "...", "name": "..." }
+   * Body: { "email": "...", "password": "...", "name": "...", "language": "es_ES" }
    * Returns 201 with session token on success, 400 if email is taken.
    */
   private void handleRegister(HttpServletRequest request, HttpServletResponse response)
@@ -199,10 +199,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String email;
     String password;
     String name;
+    String language;
     try {
       email = body.getString(FIELD_EMAIL).trim().toLowerCase();
       password = body.getString("password");
       name = body.getString("name").trim();
+      language = body.optString("language", "").trim();
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Missing required fields: email, password, name");
@@ -228,7 +230,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String sessionToken = generateToken();
       Account account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, name, sessionToken);
       sendAuthEmailBestEffort("new-account",
-          () -> authEmailSender.sendNewAccount(account));
+          () -> authEmailSender.sendNewAccount(account, language));
 
       JSONObject accountJson = new JSONObject();
       accountJson.put("id", account.getId());

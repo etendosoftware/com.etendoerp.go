@@ -101,11 +101,48 @@ public class InitialEmailContractsTest {
     NeoResponse response = service.send("new-account", command);
 
     assertSent(response);
-    assertEquals("new-account", adapter.getLastRequest().getTemplate());
+    assertEquals("custom", adapter.getLastRequest().getTemplate());
     assertEquals("account@example.com", adapter.getLastRequest().getRecipient());
     assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
     assertEquals("https://app.example.test/welcome",
         adapter.getLastRequest().getData().getString("link"));
+    assertEquals("Welcome to Etendo Go",
+        adapter.getLastRequest().getData().getString("subject"));
+    assertTrue(adapter.getLastRequest().getData().getString("body")
+        .contains("https://app.example.test/welcome"));
+  }
+
+  @Test
+  public void newAccountPassesSelectedLanguageToProviderTemplateData() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1");
+    command.put(EmailContractCommandSupport.FIELD_LINK, "https://app.example.test/welcome");
+    command.put(EmailContractCommandSupport.FIELD_LANGUAGE, "es_ES");
+
+    NeoResponse response = service.send("new-account", command);
+
+    assertSent(response);
+    assertEquals("es_ES", adapter.getLastRequest().getData().getString("language"));
+    assertEquals("Bienvenido a Etendo Go",
+        adapter.getLastRequest().getData().getString("subject"));
+  }
+
+  @Test
+  public void newAccountOmitsLanguageWhenCommandDoesNotProvideIt() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1");
+    command.put(EmailContractCommandSupport.FIELD_LINK, "https://app.example.test/welcome");
+
+    NeoResponse response = service.send("new-account", command);
+
+    assertSent(response);
+    assertFalse(adapter.getLastRequest().getData().has("language"));
   }
 
   @Test
@@ -123,11 +160,13 @@ public class InitialEmailContractsTest {
     NeoResponse response = service.send("environment-ready", command);
 
     assertSent(response);
-    assertEquals("environment-ready", adapter.getLastRequest().getTemplate());
+    assertEquals("custom", adapter.getLastRequest().getTemplate());
     assertEquals("account@example.com", adapter.getLastRequest().getRecipient());
     assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
     assertEquals("https://app.example.test/dashboard",
         adapter.getLastRequest().getData().getString("link"));
+    assertEquals("Your Etendo Go environment is ready",
+        adapter.getLastRequest().getData().getString("subject"));
     assertEquals("environment-ready:tenant-1:client-1:v1",
         safetyStore.getAuditRecords().get(0).getIdempotencyKey());
   }
@@ -165,11 +204,13 @@ public class InitialEmailContractsTest {
     NeoResponse response = service.send("password-changed", command);
 
     assertSent(response);
-    assertEquals("password-changed", adapter.getLastRequest().getTemplate());
+    assertEquals("custom", adapter.getLastRequest().getTemplate());
     assertEquals("account@example.com", adapter.getLastRequest().getRecipient());
     assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
     assertEquals("2026-05-29T10:00:00Z",
         adapter.getLastRequest().getData().getString("date"));
+    assertEquals("Your Etendo Go password was changed",
+        adapter.getLastRequest().getData().getString("subject"));
     assertFalse(adapter.getLastRequest().getData().has("link"));
   }
 
