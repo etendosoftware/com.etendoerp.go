@@ -979,7 +979,7 @@ public class NeoProcessService {
    * Returns the classname of the default implementation with action = 'P' (Process),
    * or null if none found.
    */
-  private static String resolveModelImplementationClass(
+  protected static String resolveModelImplementationClass(
       org.openbravo.model.ad.ui.Process process) {
     try {
       List<ModelImplementation> impls = process.getADModelImplementationList();
@@ -1007,7 +1007,7 @@ public class NeoProcessService {
   /**
    * Translate a classic process result (typically OBError) to a NeoResponse.
    */
-  private static NeoResponse translateClassicResult(Object bundleResult,
+  protected static NeoResponse translateClassicResult(Object bundleResult,
       Process process) throws JSONException {
 
     JSONObject result = new JSONObject();

@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -39,9 +40,13 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.model.ad.domain.ModelImplementation;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.ProcessParameter;
 import org.openbravo.model.ad.ui.Tab;
+
+import com.etendoerp.go.schemaforge.NeoResponse;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -484,5 +489,110 @@ public class NeoProcessServiceTest {
       assertEquals("C_BPartner_ID", paramsArray.getJSONObject(0).getString("dbColumnName"));
       assertTrue(paramsArray.getJSONObject(0).getBoolean("mandatory"));
     }
+  }
+
+  // ===================== resolveModelImplementationClass =====================
+
+  @Test
+  public void resolveModelImplementationClassReturnsDefaultImpl() {
+    ModelImplementation impl = mock(ModelImplementation.class);
+    when(impl.isDefault()).thenReturn(true);
+    when(impl.getAction()).thenReturn("P");
+    when(impl.getJavaClassName()).thenReturn("com.example.MyProcess");
+
+    Process process = mock(Process.class);
+    when(process.getADModelImplementationList()).thenReturn(Collections.singletonList(impl));
+
+    String result = NeoProcessService.resolveModelImplementationClass(process);
+    assertEquals("com.example.MyProcess", result);
+  }
+
+  @Test
+  public void resolveModelImplementationClassFallsBackToFirstNonDefault() {
+    ModelImplementation nonDefault = mock(ModelImplementation.class);
+    when(nonDefault.isDefault()).thenReturn(false);
+    when(nonDefault.getAction()).thenReturn("P");
+    when(nonDefault.getJavaClassName()).thenReturn("com.example.Fallback");
+
+    Process process = mock(Process.class);
+    when(process.getADModelImplementationList()).thenReturn(Collections.singletonList(nonDefault));
+
+    String result = NeoProcessService.resolveModelImplementationClass(process);
+    assertEquals("com.example.Fallback", result);
+  }
+
+  @Test
+  public void resolveModelImplementationClassReturnsNullWhenNoMatch() {
+    ModelImplementation impl = mock(ModelImplementation.class);
+    when(impl.isDefault()).thenReturn(true);
+    when(impl.getAction()).thenReturn("X"); // not "P"
+    when(impl.getJavaClassName()).thenReturn("com.example.Other");
+
+    Process process = mock(Process.class);
+    when(process.getADModelImplementationList()).thenReturn(Collections.singletonList(impl));
+
+    String result = NeoProcessService.resolveModelImplementationClass(process);
+    assertNull(result);
+  }
+
+  @Test
+  public void resolveModelImplementationClassReturnsNullOnException() {
+    Process process = mock(Process.class);
+    when(process.getName()).thenReturn("TestProcess");
+    when(process.getADModelImplementationList()).thenThrow(new RuntimeException("DB error"));
+
+    String result = NeoProcessService.resolveModelImplementationClass(process);
+    assertNull(result);
+  }
+
+  // ===================== translateClassicResult =====================
+
+  @Test
+  public void translateClassicResultWithOBErrorSuccess() throws Exception {
+    OBError error = new OBError();
+    error.setType("Success");
+    error.setTitle("OK");
+    error.setMessage("Done");
+
+    Process process = mock(Process.class);
+    NeoResponse resp = NeoProcessService.translateClassicResult(error, process);
+
+    assertEquals(200, resp.getHttpStatus());
+    assertEquals("success", resp.getBody().getString("status"));
+    assertEquals("Done", resp.getBody().getString("message"));
+  }
+
+  @Test
+  public void translateClassicResultWithOBErrorReturns400() throws Exception {
+    OBError error = new OBError();
+    error.setType("Error");
+    error.setTitle("Fail");
+    error.setMessage("Something went wrong");
+
+    Process process = mock(Process.class);
+    NeoResponse resp = NeoProcessService.translateClassicResult(error, process);
+
+    assertEquals(400, resp.getHttpStatus());
+    assertEquals("error", resp.getBody().getString("status"));
+  }
+
+  @Test
+  public void translateClassicResultWithNullBundleUsesProcessName() throws Exception {
+    Process process = mock(Process.class);
+    when(process.getName()).thenReturn("MyProcess");
+
+    NeoResponse resp = NeoProcessService.translateClassicResult(null, process);
+
+    assertEquals(200, resp.getHttpStatus());
+    assertTrue(resp.getBody().getString("message").contains("MyProcess"));
+  }
+
+  @Test
+  public void translateClassicResultWithNonOBErrorObject() throws Exception {
+    Process process = mock(Process.class);
+    NeoResponse resp = NeoProcessService.translateClassicResult("custom result", process);
+
+    assertEquals(200, resp.getHttpStatus());
+    assertEquals("custom result", resp.getBody().getString("message"));
   }
 }
