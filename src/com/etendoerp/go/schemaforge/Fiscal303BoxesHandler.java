@@ -16,7 +16,6 @@
  */
 package com.etendoerp.go.schemaforge;
 
-import java.io.IOException;
 import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
@@ -26,17 +25,16 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.ScrollableResults;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
@@ -51,13 +49,13 @@ import org.openbravo.module.aeat303.es.report.v2014.AEAT303Report2014Dao;
 import org.openbravo.module.aeat303.es.util.AEAT303CalculationsHelper;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.TaxReportParameter;
+import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxReport_I;
 
-class Fiscal303BoxesHandler {
+class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
-  private static final Logger log = Logger.getLogger(Fiscal303BoxesHandler.class);
-
-  private static final String BOXES           = "boxes";
-  private static final String VAT_SALES       = "VAT_SALES";
+  private static final String BOXES        = "boxes";
+  private static final String GENERATE     = "generate";
+  private static final String VAT_SALES    = "VAT_SALES";
   private static final String VAT_PURCHASE    = "VAT_PURCHASE";
   private static final String PURCHASE        = "Purchase";
   private static final String TAX_BASE_AMOUNT = "TaxBaseAmount";
@@ -75,38 +73,95 @@ class Fiscal303BoxesHandler {
   private static final BigDecimal PCT_0_50 = new BigDecimal("0.50");
   private static final BigDecimal PCT_1_75 = new BigDecimal("1.75");
 
-  private final NeoServlet servlet;
-
   Fiscal303BoxesHandler(NeoServlet servlet) {
-    this.servlet = servlet;
+    super(servlet);
   }
 
-  void handle(String entityName, String method, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    if (!"GET".equals(method) || !BOXES.equals(entityName)) {
-      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          "Only GET /fiscal303/boxes is supported");
-      return;
-    }
-    try {
-      String yearStr = request.getParameter("year");
-      String period  = request.getParameter("period");
-      if (yearStr == null || period == null) {
-        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Missing required params: year, period");
-        return;
-      }
-      int year = Integer.parseInt(yearStr);
-      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+  @Override
+  protected boolean isKnownEntity(String entityName) {
+    return BOXES.equals(entityName) || GENERATE.equals(entityName) || MODIFIED.equals(entityName);
+  }
 
-      ComputeResult cr = computeBoxes(orgId, year, period);
-      JSONObject result = buildResponse(cr.boxes, cr.sources);
-      response.setContentType("application/json;charset=UTF-8");
-      response.getWriter().write(result.toString());
+  @Override
+  protected void dispatch(String entityName, String orgId, int year, String period,
+      HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
+    try {
+      if (BOXES.equals(entityName)) {
+        ComputeResult cr = computeBoxes(orgId, year, period);
+        JSONObject result = buildResponse(cr.boxes, cr.sources);
+        response.setContentType(JSON_CT);
+        response.getWriter().write(result.toString());
+      } else if (GENERATE.equals(entityName)) {
+        String tipo = request.getParameter("tipo");
+        handleGenerate(orgId, year, period, tipo, response);
+      } else {
+        long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
+        handleModified(orgId, year, period, new java.util.Date(sinceMs), response);
+      }
+    } catch (FiscalHandlerException e) {
+      throw e;
     } catch (Exception e) {
-      log.error("Error computing 303 boxes", e);
-      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      throw new FiscalHandlerException(e);
     }
+  }
+
+  @Override
+  protected String getModelKey() {
+    return "fiscal303";
+  }
+
+  private void handleGenerate(String orgId, int year, String period, String tipo,
+      HttpServletResponse response) throws Exception {
+    Organization org = OBDal.getInstance().get(Organization.class, orgId);
+
+    boolean quarterly = period.startsWith("T");
+    String valueKey = quarterly ? "AEAT303_Q_" + year : "AEAT303_M_" + year;
+
+    TaxReport taxReport   = resolveTaxReport(orgId, valueKey);
+    AcctSchema acctSchema = resolveAcctSchema(org);
+    List<Period> periods  = resolvePeriods(orgId, year, period);
+
+    if (periods.isEmpty()) {
+      throw new OBException(
+          "No fiscal periods found for org=" + orgId + " year=" + year + " period=" + period);
+    }
+
+    String yearId    = periods.get(0).getYear().getId();
+    String periodIds = periods.stream().map(Period::getId).collect(Collectors.joining(","));
+    String reportId  = taxReport.getId();
+    String acctId    = acctSchema.getId();
+    String className = taxReport.getJavaClassName();
+
+    Map<String, String> inputParams = new HashMap<>();
+    String filename = "303_" + period + "_" + year;
+    inputParams.put("FileName", filename);
+    // Declaration type required by AEAT303_Utility.getCheckedInputParameter.
+    // Frontend sends AEAT letter codes directly: C, I, V, U, G. Default N (zero result).
+    inputParams.put("Declaration_" + resolveDeclType(tipo), "Y");
+    // Box 65: percentage attributable to the State (always 100 for Modelo 303).
+    inputParams.put("ToPublicTreasury", "100");
+
+    OBTL_TaxReport_I report = (OBTL_TaxReport_I)
+        Class.forName(className).getDeclaredConstructor().newInstance();
+
+    HashMap<String, Object> result =
+        report.generateElectronicFile(orgId, reportId, acctId, yearId, periodIds, inputParams);
+    writeGeneratedFile(result, filename + ".txt", response);
+  }
+
+  // ── Package-private helpers (tested directly) ─────────────────────────────
+
+  /**
+   * Maps a frontend AEAT letter code to the declaration type used by
+   * {@code AEAT303_Utility.getCheckedInputParameter}. Accepted codes: C, I, V, U, G.
+   * Anything else (null, empty, unknown alias) falls back to "N" (zero result).
+   */
+  static String resolveDeclType(String tipo) {
+    if ("C".equals(tipo) || "I".equals(tipo) || "V".equals(tipo)
+        || "U".equals(tipo) || "G".equals(tipo)) {
+      return tipo;
+    }
+    return "N";
   }
 
   // ── Internal ─────────────────────────────────────────────────────
@@ -170,24 +225,7 @@ class Fiscal303BoxesHandler {
     fillPurchaseBoxes(b, helper, dao303, taxReport, rateToBoxes);
     fillAdditionalInfoBoxes(b, helper, dao303, taxReport, rateToBoxes);
 
-    int[] accruedBoxes   = { 3, 6, 9, 11, 13, 15, 18, 21, 24, 152, 158, 167 };
-    int[] deductibleBoxes = { 29, 31, 33, 35, 37, 39, 41, 42, 43, 44 };
-    BigDecimal accrued    = sumBoxes(b, accruedBoxes);
-    BigDecimal deductible = sumBoxes(b, deductibleBoxes);
-    b.put(27, round(accrued));
-    b.put(45, round(deductible));
-    b.put(46, round(accrued.subtract(deductible)));
-
-    // resultado_final — standard company (100 % Estado, no pending credits, no complementary)
-    BigDecimal r46 = b.getOrDefault(46, BigDecimal.ZERO);
-    b.put(66, r46);   // amount attributable to Estado (box 65 % × box 46)
-    b.put(69, r46);   // result before final adjustments (assumes boxes 64/76/77/78/68/108 = 0)
-    b.put(71, r46);   // final declaration result (assumes boxes 70/109 = 0)
-    // volume of operations — intracom and export mirrors
-    BigDecimal r59 = b.getOrDefault(59, BigDecimal.ZERO);
-    BigDecimal r60 = b.getOrDefault(60, BigDecimal.ZERO);
-    if (r59.compareTo(BigDecimal.ZERO) > 0) b.put(93, r59);
-    if (r60.compareTo(BigDecimal.ZERO) > 0) b.put(94, r60);
+    computeSummaryBoxes(b);
 
     List<Map<String, Object>> sources = collectSources(org, periods, dao303, rateToBoxes);
 
@@ -281,6 +319,23 @@ class Fiscal303BoxesHandler {
     BigDecimal base = (BigDecimal) row.get("base");
     BigDecimal vat  = (BigDecimal) row.get("vat");
     row.put("total", round(base.add(vat)));
+  }
+
+  // Package-private for unit testing — injects pre-built helper and dao,
+  // skips DB lookups and source collection.
+  @SuppressWarnings("java:S1172")
+  ComputeResult computeBoxes(Organization org, TaxReport taxReport,
+      List<Period> periods, AEAT303CalculationsHelper helper,
+      AEAT303Report2014Dao dao303) {
+    Map<Integer, BigDecimal> b = new HashMap<>();
+    Map<String, List<Integer>> rateToBoxes = new HashMap<>();
+
+    fillSalesBoxes(b, helper, dao303, taxReport, rateToBoxes);
+    fillPurchaseBoxes(b, helper, dao303, taxReport, rateToBoxes);
+    fillAdditionalInfoBoxes(b, helper, dao303, taxReport, rateToBoxes);
+    computeSummaryBoxes(b);
+
+    return new ComputeResult(b, Collections.emptyList());
   }
 
   private void fillSalesBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
@@ -397,6 +452,27 @@ class Fiscal303BoxesHandler {
         new BoxGroupConfig("Difference", "ExportsAndOperations", "All", "All", "All", 60, 0), rateToBoxes);
   }
 
+  // resultado_final — standard company (100 % Estado, no pending credits, no complementary)
+  private void computeSummaryBoxes(Map<Integer, BigDecimal> b) {
+    int[] accruedBoxes    = { 3, 6, 9, 11, 13, 15, 18, 21, 24, 152, 158, 167 };
+    int[] deductibleBoxes = { 29, 31, 33, 35, 37, 39, 41, 42, 43, 44 };
+    BigDecimal accrued    = sumBoxes(b, accruedBoxes);
+    BigDecimal deductible = sumBoxes(b, deductibleBoxes);
+    b.put(27, round(accrued));
+    b.put(45, round(deductible));
+    b.put(46, round(accrued.subtract(deductible)));
+
+    BigDecimal r46 = b.getOrDefault(46, BigDecimal.ZERO);
+    b.put(66, r46);   // amount attributable to Estado (box 65 % × box 46)
+    b.put(69, r46);   // result before final adjustments (assumes boxes 64/76/77/78/68/108 = 0)
+    b.put(71, r46);   // final declaration result (assumes boxes 70/109 = 0)
+
+    BigDecimal r59 = b.getOrDefault(59, BigDecimal.ZERO);
+    BigDecimal r60 = b.getOrDefault(60, BigDecimal.ZERO);
+    if (r59.compareTo(BigDecimal.ZERO) > 0) b.put(93, r59);
+    if (r60.compareTo(BigDecimal.ZERO) > 0) b.put(94, r60);
+  }
+
   // ── Resolution helpers ───────────────────────────────────────────
 
   private TaxReport resolveTaxReport(String orgId, String valueKey) {
@@ -410,44 +486,6 @@ class Fiscal303BoxesHandler {
           "No TaxReport found for org=" + orgId + " searchKey=" + valueKey);
     }
     return list.get(0);
-  }
-
-  private AcctSchema resolveAcctSchema(Organization org) {
-    OBCriteria<AcctSchema> crit = OBDal.getInstance().createCriteria(AcctSchema.class);
-    crit.add(Restrictions.eq(AcctSchema.PROPERTY_CLIENT + ".id", org.getClient().getId()));
-    crit.add(Restrictions.eq(AcctSchema.PROPERTY_ACTIVE, true));
-    crit.setMaxResults(1);
-    List<AcctSchema> list = crit.list();
-    if (list.isEmpty()) {
-      throw new OBException("No AcctSchema found for client=" + org.getClient().getId());
-    }
-    return list.get(0);
-  }
-
-  @SuppressWarnings("unchecked")
-  private List<Period> resolvePeriods(String orgId, int year, String periodCode) {
-    int monthFrom;
-    int monthTo;
-    if (periodCode.startsWith("T")) {
-      int q = Integer.parseInt(periodCode.substring(1));
-      monthFrom = (q - 1) * 3 + 1;
-      monthTo   = q * 3;
-    } else {
-      monthFrom = monthTo = Integer.parseInt(periodCode);
-    }
-    return OBDal.getInstance().getSession()
-        .createQuery(
-            "from FinancialMgmtPeriod p "
-            + "where p.organization.id = :orgId "
-            + "  and p.year.fiscalYear = :year "
-            + "  and p.periodNo between :from and :to "
-            + "order by p.periodNo",
-            Period.class)
-        .setParameter("orgId", orgId)
-        .setParameter("year", String.valueOf(year))
-        .setParameter("from", (long) monthFrom)
-        .setParameter("to",   (long) monthTo)
-        .list();
   }
 
   // ── Utility ──────────────────────────────────────────────────────

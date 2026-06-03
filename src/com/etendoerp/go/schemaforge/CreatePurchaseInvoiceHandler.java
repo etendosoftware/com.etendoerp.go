@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import javax.inject.Inject;
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
@@ -60,6 +61,12 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   private static final String ACTION_NAME = "createPurchaseInvoice";
   private static final String SPEC_PURCHASE_ORDER = "purchase-order";
   private static final String SPEC_GOODS_RECEIPT = "goods-receipt";
+
+  @Inject
+  InvoiceFromOrderSupport invoiceFromOrderSupport;
+
+  @Inject
+  TotalDiscountService totalDiscountService;
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -151,6 +158,10 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     OBDal.getInstance().flush();
   }
 
+  InvoiceFromOrderSupport getSupport() {
+    return invoiceFromOrderSupport != null ? invoiceFromOrderSupport : new InvoiceFromOrderSupport();
+  }
+
   protected Invoice createFromOrder(String orderId) {
     Order order = OBDal.getInstance().get(Order.class, orderId);
     if (order == null) {
@@ -180,6 +191,11 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     OBDal.getInstance().flush();
 
     InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
+
+    OBDal.getInstance().flush();
+    OBDal.getInstance().getSession().refresh(invoice);
+    invoice = getSupport().applyOrderDiscountToInvoice(invoice, orderId, totalDiscountService);
+    getSupport().ensureLineGrossAmounts(invoice);
 
     return invoice;
   }
