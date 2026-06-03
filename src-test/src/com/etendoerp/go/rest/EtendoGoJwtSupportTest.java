@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -29,12 +30,14 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.Arrays;
 import java.util.Collections;
-import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
+import org.hibernate.query.NativeQuery;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -46,12 +49,10 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
-import org.openbravo.model.ad.access.Role;
-import org.openbravo.model.ad.access.RoleOrganization;
 import org.openbravo.model.ad.access.User;
-import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
@@ -161,37 +162,29 @@ class EtendoGoJwtSupportTest {
   @DisplayName("loadRoleListData")
   class LoadRoleListData {
 
-    @Mock private OBQuery<UserRoles> userRoleQuery;
-    @Mock private OBQuery<RoleOrganization> roleOrganizationQuery;
+    @Mock private Session session;
+    @Mock private NativeQuery<Object[]> query;
 
     @Test
     @DisplayName("returns empty roleArray when user has no roles")
     void emptyRoles() throws JSONException {
-      when(obDal.createQuery(eq(UserRoles.class), anyString())).thenReturn(userRoleQuery);
-      when(userRoleQuery.list()).thenReturn(Collections.emptyList());
+      mockRoleListQuery(Collections.emptyList());
 
       EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
 
       assertNotNull(data.roleArray);
       assertEquals(0, data.roleArray.length());
       assertNull(data.firstRoleId);
-      verify(userRoleQuery).setNamedParameter("userId", "user-id");
-      verify(userRoleQuery).setFilterOnReadableClients(false);
-      verify(userRoleQuery).setFilterOnReadableOrganization(false);
+      verify(query).setParameter(1, "user-id");
     }
 
     @Test
-    @DisplayName("loads roles and organizations through DAL")
+    @DisplayName("loads roles and organizations through one native SQL query")
     void loadsRolesAndOrganizations() throws JSONException {
-      UserRoles firstUserRole = userRole("role-1", "Admin");
-      UserRoles secondUserRole = userRole("role-2", "User");
-      RoleOrganization firstOrg = roleOrganization("org-1", "Main Org");
-
-      when(obDal.createQuery(eq(UserRoles.class), anyString())).thenReturn(userRoleQuery);
-      when(obDal.createQuery(eq(RoleOrganization.class), anyString()))
-          .thenReturn(roleOrganizationQuery);
-      when(userRoleQuery.list()).thenReturn(List.of(firstUserRole, secondUserRole));
-      when(roleOrganizationQuery.list()).thenReturn(List.of(firstOrg), Collections.emptyList());
+      mockRoleListQuery(Arrays.asList(
+          new Object[]{ "role-1", "Admin", "org-1", "Main Org" },
+          new Object[]{ "role-1", "Admin", "org-2", "Second Org" },
+          new Object[]{ "role-2", "User", null, null }));
 
       EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
 
@@ -201,10 +194,36 @@ class EtendoGoJwtSupportTest {
       assertEquals("role-1", firstRole.getString("id"));
       assertEquals("Admin", firstRole.getString("name"));
       JSONArray orgList = firstRole.getJSONArray("orgList");
-      assertEquals(1, orgList.length());
+      assertEquals(2, orgList.length());
       assertEquals("org-1", orgList.getJSONObject(0).getString("id"));
       assertEquals("Main Org", orgList.getJSONObject(0).getString("name"));
+      assertEquals("org-2", orgList.getJSONObject(1).getString("id"));
+      assertEquals("Second Org", orgList.getJSONObject(1).getString("name"));
       assertEquals(0, data.roleArray.getJSONObject(1).getJSONArray("orgList").length());
+      verify(session, times(1)).createNativeQuery(anyString());
+      verify(query).setParameter(1, "user-id");
+      verify(query).list();
+    }
+
+    @Test
+    @DisplayName("wraps native SQL failures in OBException")
+    void wrapsSqlFailures() {
+      when(obDal.getSession()).thenReturn(session);
+      when(session.createNativeQuery(anyString())).thenReturn(query);
+      when(query.setParameter(1, "user-id")).thenReturn(query);
+      when(query.list()).thenThrow(new RuntimeException("db-error"));
+
+      OBException exception = assertThrows(OBException.class,
+          () -> EtendoGoJwtSupport.loadRoleListData("user-id"));
+
+      assertTrue(exception.getMessage().contains("Error loading role list data for user: user-id"));
+    }
+
+    private void mockRoleListQuery(java.util.List<Object[]> rows) {
+      when(obDal.getSession()).thenReturn(session);
+      when(session.createNativeQuery(anyString())).thenReturn(query);
+      when(query.setParameter(1, "user-id")).thenReturn(query);
+      when(query.list()).thenReturn(rows);
     }
   }
 
@@ -317,21 +336,4 @@ class EtendoGoJwtSupportTest {
     return user;
   }
 
-  private static UserRoles userRole(String roleId, String roleName) {
-    UserRoles userRole = mock(UserRoles.class);
-    Role role = mock(Role.class);
-    when(role.getId()).thenReturn(roleId);
-    when(role.getName()).thenReturn(roleName);
-    when(userRole.getRole()).thenReturn(role);
-    return userRole;
-  }
-
-  private static RoleOrganization roleOrganization(String orgId, String orgName) {
-    RoleOrganization roleOrganization = mock(RoleOrganization.class);
-    Organization organization = mock(Organization.class);
-    when(organization.getId()).thenReturn(orgId);
-    when(organization.getName()).thenReturn(orgName);
-    when(roleOrganization.getOrganization()).thenReturn(organization);
-    return roleOrganization;
-  }
 }

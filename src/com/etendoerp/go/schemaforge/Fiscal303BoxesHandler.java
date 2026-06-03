@@ -16,9 +16,7 @@
  */
 package com.etendoerp.go.schemaforge;
 
-import java.io.IOException;
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -32,13 +30,11 @@ import java.util.stream.Collectors;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.ScrollableResults;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
@@ -55,23 +51,15 @@ import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.TaxReportParameter;
 import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxReport_I;
 
-class Fiscal303BoxesHandler {
+class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
-  private static final Logger log = Logger.getLogger(Fiscal303BoxesHandler.class);
-
-  private static final String BOXES           = "boxes";
-  private static final String GENERATE        = "generate";
-  private static final String DECLARATIONS    = "declarations";
-  private static final String MODIFIED        = "modified";
-  private static final String VAT_SALES       = "VAT_SALES";
+  private static final String BOXES        = "boxes";
+  private static final String GENERATE     = "generate";
+  private static final String VAT_SALES    = "VAT_SALES";
   private static final String VAT_PURCHASE    = "VAT_PURCHASE";
   private static final String PURCHASE        = "Purchase";
   private static final String TAX_BASE_AMOUNT = "TaxBaseAmount";
   private static final String TAX_AMOUNT      = "TaxAmount";
-
-  private static final String JSON_CONTENT_TYPE = "application/json;charset=UTF-8";
-  private static final String PERIOD_KEY        = "period";
-  private static final String SINCE_KEY         = "since";
 
   private static final BigDecimal PCT_21   = new BigDecimal("21");
   private static final BigDecimal PCT_10   = new BigDecimal("10");
@@ -85,56 +73,23 @@ class Fiscal303BoxesHandler {
   private static final BigDecimal PCT_0_50 = new BigDecimal("0.50");
   private static final BigDecimal PCT_1_75 = new BigDecimal("1.75");
 
-  private final NeoServlet servlet;
-  private final FiscalDeclCrudHandler declHandler;
-
   Fiscal303BoxesHandler(NeoServlet servlet) {
-    this.servlet = servlet;
-    this.declHandler = new FiscalDeclCrudHandler(servlet);
+    super(servlet);
   }
 
-  void handle(String entityName, String method, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    if (DECLARATIONS.equals(entityName)) {
-      try {
-        declHandler.handleDeclarations(method, request, response);
-      } catch (Exception e) {
-        log.error("Error in /fiscal303/declarations", e);
-        servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-      }
-      return;
-    }
-    if (!BOXES.equals(entityName) && !GENERATE.equals(entityName) && !MODIFIED.equals(entityName)) {
-      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          "Unknown fiscal303 entity: " + entityName);
-      return;
-    }
-    if (!"GET".equals(method)) {
-      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          "Only GET is supported for /fiscal303/" + entityName);
-      return;
-    }
+  @Override
+  protected boolean isKnownEntity(String entityName) {
+    return BOXES.equals(entityName) || GENERATE.equals(entityName) || MODIFIED.equals(entityName);
+  }
 
-    String yearStr = request.getParameter("year");
-    String period  = request.getParameter(PERIOD_KEY);
-    if (yearStr == null || period == null) {
-      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Missing required params: year, period");
-      return;
-    }
-    if (MODIFIED.equals(entityName) && request.getParameter(SINCE_KEY) == null) {
-      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Missing required param: since");
-      return;
-    }
-
+  @Override
+  protected void dispatch(String entityName, String orgId, int year, String period,
+      HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
     try {
-      int year = Integer.parseInt(yearStr);
-      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
       if (BOXES.equals(entityName)) {
         ComputeResult cr = computeBoxes(orgId, year, period);
         JSONObject result = buildResponse(cr.boxes, cr.sources);
-        response.setContentType(JSON_CONTENT_TYPE);
+        response.setContentType(JSON_CT);
         response.getWriter().write(result.toString());
       } else if (GENERATE.equals(entityName)) {
         String tipo = request.getParameter("tipo");
@@ -143,10 +98,16 @@ class Fiscal303BoxesHandler {
         long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
         handleModified(orgId, year, period, new java.util.Date(sinceMs), response);
       }
+    } catch (FiscalHandlerException e) {
+      throw e;
     } catch (Exception e) {
-      log.error("Error in /fiscal303/" + entityName, e);
-      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      throw new FiscalHandlerException(e);
     }
+  }
+
+  @Override
+  protected String getModelKey() {
+    return "fiscal303";
   }
 
   private void handleGenerate(String orgId, int year, String period, String tipo,
@@ -185,59 +146,7 @@ class Fiscal303BoxesHandler {
 
     HashMap<String, Object> result =
         report.generateElectronicFile(orgId, reportId, acctId, yearId, periodIds, inputParams);
-
-    Object fileContent = result.get("file");
-    if (fileContent == null) {
-      throw new OBException("generateElectronicFile returned no file content");
-    }
-
-    byte[] bytes = fileContent.toString().getBytes(StandardCharsets.ISO_8859_1);
-    response.setContentType("text/plain");
-    response.setCharacterEncoding("ISO-8859-1");
-    response.setHeader("Content-Disposition", "attachment; filename=\"" + filename + ".txt\"");
-    response.setContentLength(bytes.length);
-    response.getOutputStream().write(bytes);
-    response.flushBuffer();
-  }
-
-  private void handleModified(String orgId, int year, String period, java.util.Date since,
-      HttpServletResponse response) throws Exception {
-    List<Period> periods = resolvePeriods(orgId, year, period);
-    if (periods.isEmpty()) {
-      writeModifiedJson(response, false, 0);
-      return;
-    }
-
-    java.util.Date fromDate = periods.get(0).getStartingDate();
-    java.util.Date toDate   = periods.get(periods.size() - 1).getEndingDate();
-    if (fromDate == null || toDate == null) {
-      writeModifiedJson(response, false, 0);
-      return;
-    }
-
-    Long count = (Long) OBDal.getInstance().getSession()
-        .createQuery(
-            "select count(i.id) from Invoice i "
-            + "where i.organization.id = :orgId "
-            + "  and i.invoiceDate between :fromDate and :toDate "
-            + "  and i.updated > :since")
-        .setParameter("orgId",    orgId)
-        .setParameter("fromDate", fromDate)
-        .setParameter("toDate",   toDate)
-        .setParameter(SINCE_KEY,  since)
-        .uniqueResult();
-
-    boolean modified = count != null && count > 0;
-    writeModifiedJson(response, modified, count == null ? 0 : count.intValue());
-  }
-
-  private void writeModifiedJson(HttpServletResponse response, boolean modified, int count)
-      throws Exception {
-    JSONObject out = new JSONObject();
-    out.put(MODIFIED, modified);
-    out.put("count", count);
-    response.setContentType(JSON_CONTENT_TYPE);
-    response.getWriter().write(out.toString());
+    writeGeneratedFile(result, filename + ".txt", response);
   }
 
   // ── Package-private helpers (tested directly) ─────────────────────────────
@@ -577,44 +486,6 @@ class Fiscal303BoxesHandler {
           "No TaxReport found for org=" + orgId + " searchKey=" + valueKey);
     }
     return list.get(0);
-  }
-
-  private AcctSchema resolveAcctSchema(Organization org) {
-    OBCriteria<AcctSchema> crit = OBDal.getInstance().createCriteria(AcctSchema.class);
-    crit.add(Restrictions.eq(AcctSchema.PROPERTY_CLIENT + ".id", org.getClient().getId()));
-    crit.add(Restrictions.eq(AcctSchema.PROPERTY_ACTIVE, true));
-    crit.setMaxResults(1);
-    List<AcctSchema> list = crit.list();
-    if (list.isEmpty()) {
-      throw new OBException("No AcctSchema found for client=" + org.getClient().getId());
-    }
-    return list.get(0);
-  }
-
-  @SuppressWarnings("unchecked")
-  private List<Period> resolvePeriods(String orgId, int year, String periodCode) {
-    int monthFrom;
-    int monthTo;
-    if (periodCode.startsWith("T")) {
-      int q = Integer.parseInt(periodCode.substring(1));
-      monthFrom = (q - 1) * 3 + 1;
-      monthTo   = q * 3;
-    } else {
-      monthFrom = monthTo = Integer.parseInt(periodCode);
-    }
-    return OBDal.getInstance().getSession()
-        .createQuery(
-            "from FinancialMgmtPeriod p "
-            + "where p.organization.id = :orgId "
-            + "  and p.year.fiscalYear = :year "
-            + "  and p.periodNo between :from and :to "
-            + "order by p.periodNo",
-            Period.class)
-        .setParameter("orgId", orgId)
-        .setParameter("year", String.valueOf(year))
-        .setParameter("from", (long) monthFrom)
-        .setParameter("to",   (long) monthTo)
-        .list();
   }
 
   // ── Utility ──────────────────────────────────────────────────────
