@@ -23,10 +23,16 @@ import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.ad.system.Client;
 
 /**
  * Unit tests for transactional email framework value objects.
@@ -230,14 +236,6 @@ public class EmailFrameworkValueObjectsTest {
         new EmailProviderRequest(" Person@Example.COM ", " fixture-template ",
             new JSONObject(), null));
 
-    assertEquals("fixture-contract", context.getContractName());
-    assertEquals("tenant-1", context.getTenantId());
-    assertEquals("user-1", context.getUserId());
-    assertEquals("record-1", context.getRecordId());
-    assertEquals("fixture-template", context.getTemplate());
-    assertEquals("Person@Example.COM", context.getRecipientAddress());
-    assertEquals("example.com", context.getRecipientDomain());
-
     JSONObject clientOnlyBody = new JSONObject();
     clientOnlyBody.put(EmailContractCommandSupport.FIELD_CLIENT_ID, " client-2 ");
     EmailSendContext clientOnlyContext = new EmailSendContext(
@@ -245,8 +243,55 @@ public class EmailFrameworkValueObjectsTest {
         EmailRecipientResolution.serverResolved("person@example.com"),
         new EmailProviderRequest("no-domain", "fixture-template", new JSONObject(), null));
 
-    assertEquals("client-2", clientOnlyContext.getTenantId());
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(null);
+
+      assertEquals("fixture-contract", context.getContractName());
+      assertEquals("tenant-1", context.getTenantId());
+      assertEquals("user-1", context.getUserId());
+      assertEquals("record-1", context.getRecordId());
+      assertEquals("fixture-template", context.getTemplate());
+      assertEquals("Person@Example.COM", context.getRecipientAddress());
+      assertEquals("example.com", context.getRecipientDomain());
+      assertEquals("client-2", clientOnlyContext.getTenantId());
+    }
     assertNull(clientOnlyContext.getRecipientDomain());
+  }
+
+  @Test
+  public void sendContextUsesCommandTenantWhenSystemContextIsActive() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put(EmailContractCommandSupport.FIELD_TENANT_ID, "account-tenant");
+    EmailSendContext context = new EmailSendContext(
+        new EmailContractCommand("fixture-contract", body),
+        EmailRecipientResolution.serverResolved("person@example.com"),
+        new EmailProviderRequest("person@example.com", "fixture-template",
+            new JSONObject(), null));
+
+    OBContext systemContext = contextWithClient("0");
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(systemContext);
+
+      assertEquals("account-tenant", context.getTenantId());
+    }
+  }
+
+  @Test
+  public void sendContextPrefersRealContextClientOverCommandTenant() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put(EmailContractCommandSupport.FIELD_TENANT_ID, "command-tenant");
+    EmailSendContext context = new EmailSendContext(
+        new EmailContractCommand("fixture-contract", body),
+        EmailRecipientResolution.serverResolved("person@example.com"),
+        new EmailProviderRequest("person@example.com", "fixture-template",
+            new JSONObject(), null));
+
+    OBContext realClientContext = contextWithClient("client-1");
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(realClientContext);
+
+      assertEquals("client-1", context.getTenantId());
+    }
   }
 
   @Test
@@ -361,6 +406,14 @@ public class EmailFrameworkValueObjectsTest {
     } catch (NullPointerException expected) {
       assertTrue(expected.getMessage().length() > 0);
     }
+  }
+
+  private static OBContext contextWithClient(String clientId) {
+    OBContext context = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(clientId);
+    when(context.getCurrentClient()).thenReturn(client);
+    return context;
   }
 
   private static void assertOBException(Runnable runnable) {
