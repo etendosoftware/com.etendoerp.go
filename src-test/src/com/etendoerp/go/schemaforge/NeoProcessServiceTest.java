@@ -320,6 +320,31 @@ public class NeoProcessServiceTest {
     assertEquals(0, content.length());
   }
 
+  @Test
+  public void addKeyColumnToContentWithNullTableDoesNothing() throws Exception {
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(null);
+    JSONObject content = new JSONObject();
+    NeoProcessService.addKeyColumnToContent(content, tab, "rec-1");
+    assertEquals(0, content.length());
+  }
+
+  @Test
+  public void addKeyColumnToContentWithNoKeyColumnDoesNothing() throws Exception {
+    Column nonKeyCol = mock(Column.class);
+    when(nonKeyCol.isKeyColumn()).thenReturn(false);
+
+    Table table = mock(Table.class);
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(nonKeyCol));
+
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(table);
+
+    JSONObject content = new JSONObject();
+    NeoProcessService.addKeyColumnToContent(content, tab, "rec-1");
+    assertEquals(0, content.length());
+  }
+
   // ===================== addTabContextToContent =====================
 
   @Test
