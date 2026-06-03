@@ -392,52 +392,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    */
   @SuppressWarnings("java:S2077")
   protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId) {
-    String sql =
-        "SELECT sil.m_inoutline_id, " +
-        "  ABS(sil.movementqty) AS movement_qty, " +
-        "  COALESCE(GREATEST(" +
-        "    COALESCE(msi_qty.qtymatched, 0), " +
-        "    COALESCE(direct_qty.qtyinvoiced, 0) " +
-        "  ), 0) AS invoiced_qty " +
-        "FROM m_inoutline sil " +
-        "LEFT JOIN (" +
-        "  SELECT msi.m_inoutline_id, SUM(ABS(msi.qty)) AS qtymatched " +
-        "  FROM m_matchsi msi " +
-        "  JOIN c_invoiceline il ON il.c_invoiceline_id = msi.c_invoiceline_id " +
-        "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id " +
-        "  WHERE i.docstatus NOT IN ('VO','CL','DR') AND i.isactive = 'Y' " +
-        "  GROUP BY msi.m_inoutline_id " +
-        ") msi_qty ON msi_qty.m_inoutline_id = sil.m_inoutline_id " +
-        "LEFT JOIN (" +
-        "  SELECT il2.m_inoutline_id, SUM(ABS(il2.qtyinvoiced)) AS qtyinvoiced " +
-        "  FROM c_invoiceline il2 " +
-        "  JOIN c_invoice i2 ON i2.c_invoice_id = il2.c_invoice_id " +
-        "  WHERE i2.docstatus NOT IN ('VO','CL','DR') AND i2.isactive = 'Y' " +
-        "  GROUP BY il2.m_inoutline_id " +
-        ") direct_qty ON direct_qty.m_inoutline_id = sil.m_inoutline_id " +
-        "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'";
-
-    Map<String, BigDecimal> result = new HashMap<>();
-    try {
-      Connection conn = OBDal.getInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, shipmentId);
-        try (ResultSet rs = ps.executeQuery()) {
-          while (rs.next()) {
-            String lineId = rs.getString(1);
-            BigDecimal movQty = rs.getBigDecimal(2);
-            BigDecimal invQty = rs.getBigDecimal(3);
-            BigDecimal pending = (movQty != null ? movQty : BigDecimal.ZERO)
-                .subtract(invQty != null ? invQty : BigDecimal.ZERO)
-                .max(BigDecimal.ZERO);
-            result.put(lineId, pending);
-          }
-        }
-      }
-    } catch (Exception e) {
-      log.error("DB error computing pending qty per line for shipment {}", shipmentId, e);
-    }
-    return result;
+    return NeoInvoiceSupport.computePendingQtyPerLine(shipmentId);
   }
 
   /**

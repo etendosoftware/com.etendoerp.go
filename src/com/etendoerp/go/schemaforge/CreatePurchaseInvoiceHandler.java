@@ -40,12 +40,16 @@ import org.openbravo.common.actionhandler.createlinesfromprocess.CreateInvoiceLi
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import org.openbravo.model.financialmgmt.payment.PaymentTerm;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
+import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.service.db.DalConnectionProvider;
 
 /**
@@ -276,6 +280,12 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       throw new OBException("Goods receipt not found: " + receiptId);
     }
 
+    // Explicit overrides from the request take precedence; missing lines fall back to pending qty.
+    Map<String, BigDecimal> qtyOverrides = parseLineOverrides(body);
+    if (qtyOverrides.isEmpty()) {
+      qtyOverrides = NeoInvoiceSupport.computePendingQtyPerLine(receipt.getId());
+    }
+
     Order linkedOrder = receipt.getSalesOrder();
     if (linkedOrder == null) {
       // When the receipt was created via NEO import-from-PO, C_Order_ID may not be
@@ -283,11 +293,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       linkedOrder = deriveOrderFromLines(receipt);
     }
     if (linkedOrder == null) {
-      throw new OBException(
-          "This goods receipt has no linked purchase order. Create the invoice from the purchase order instead.");
+      return createFromReceiptNoPo(receipt, qtyOverrides);
     }
-
-    Map<String, BigDecimal> qtyOverrides = parseLineOverrides(body);
     JSONArray selectedLines = buildSelectedLinesFromReceipt(receipt, qtyOverrides, linkedOrder);
     if (selectedLines.length() == 0) {
       throw new OBException("No lines with a linked purchase order to invoice in this goods receipt");
@@ -388,6 +395,77 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       log.warn("Failed to add receipt line {} to selectedLines: {}", rl.getId(), e.getMessage());
       return null;
     }
+  }
+
+  /**
+   * Creates a draft AP Invoice from a goods receipt with no linked purchase order.
+   * Follows the same pattern as {@code InvoiceGeneratorFromGoodsShipment} but for AP:
+   * doc type API, salesTransaction=false, and purchase defaults from the business partner.
+   * Prices are resolved by {@link CreateInvoiceLinesFromProcess} from the product's
+   * entry in the invoice price list.
+   */
+  protected Invoice createFromReceiptNoPo(ShipmentInOut receipt,
+      Map<String, BigDecimal> qtyOverrides) {
+    BusinessPartner bp = receipt.getBusinessPartner();
+    if (bp == null) {
+      throw new OBException("Goods receipt has no business partner");
+    }
+    PriceList priceList = bp.getPurchasePricelist();
+    if (priceList == null) {
+      throw new OBException(
+          "Business partner '" + bp.getName() + "' has no purchase price list configured");
+    }
+    PaymentTerm paymentTerms = bp.getPOPaymentTerms();
+    FIN_PaymentMethod paymentMethod = bp.getPOPaymentMethod();
+
+    DocumentType docType = findAPInvoiceDocType(receipt.getClient().getId());
+    if (docType == null) {
+      throw new OBException("No AP Invoice document type found");
+    }
+
+    JSONArray selectedLines = new JSONArray();
+    for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
+      if (!rl.isActive() || rl.getProduct() == null || rl.getUOM() == null) {
+        continue;
+      }
+      BigDecimal qty = qtyOverrides.containsKey(rl.getId())
+          ? qtyOverrides.get(rl.getId())
+          : rl.getMovementQuantity();
+      if (qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) {
+        continue;
+      }
+      try {
+        JSONObject entry = new JSONObject();
+        entry.put("id", rl.getId());
+        entry.put("orderedQuantity", qty.toPlainString());
+        selectedLines.put(entry);
+      } catch (Exception e) {
+        log.warn("Failed to add receipt line {} to invoice lines: {}", rl.getId(), e.getMessage());
+      }
+    }
+    if (selectedLines.length() == 0) {
+      throw new OBException("No invoiceable lines found in this goods receipt");
+    }
+
+    for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
+      OBDal.getInstance().getSession().evict(rl);
+    }
+    OBDal.getInstance().getSession().evict(receipt);
+
+    Invoice invoice = NeoCommercialDocumentFactory.createInvoiceFromReceiptHeader(
+        receipt, docType, priceList, paymentTerms, paymentMethod);
+    OBDal.getInstance().save(invoice);
+    OBDal.getInstance().flush();
+
+    CreateInvoiceLinesFromProcess proc =
+        WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class);
+    proc.createInvoiceLinesFromDocumentLines(selectedLines, invoice, ShipmentInOutLine.class);
+
+    OBDal.getInstance().flush();
+    OBDal.getInstance().getSession().refresh(invoice);
+    ensureDocumentNo(invoice);
+
+    return invoice;
   }
 
   private Order deriveOrderFromLines(ShipmentInOut receipt) {
