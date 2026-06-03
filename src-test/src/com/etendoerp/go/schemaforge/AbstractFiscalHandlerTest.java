@@ -51,6 +51,10 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.calendar.Period;
 
+import static com.etendoerp.go.schemaforge.AbstractFiscalHandler.MODIFIED;
+import static com.etendoerp.go.schemaforge.AbstractFiscalHandler.PERIOD_KEY;
+import static com.etendoerp.go.schemaforge.AbstractFiscalHandler.SINCE_KEY;
+
 import org.junit.Before;
 import org.junit.Test;
 import org.openbravo.base.exception.OBException;
@@ -153,7 +157,7 @@ public class AbstractFiscalHandlerTest {
     HttpServletRequest  req  = mock(HttpServletRequest.class);
     HttpServletResponse resp = mock(HttpServletResponse.class);
     when(req.getParameter("year")).thenReturn("2026");
-    when(req.getParameter("period")).thenReturn("T1");
+    when(req.getParameter(PERIOD_KEY)).thenReturn("T1");
 
     StubHandler handler = new StubHandler(servlet, false);
     handler.handle("known", "GET", req, resp);
@@ -171,7 +175,7 @@ public class AbstractFiscalHandlerTest {
     HttpServletRequest  req  = mock(HttpServletRequest.class);
     HttpServletResponse resp = mock(HttpServletResponse.class);
     when(req.getParameter("year")).thenReturn("2026");
-    when(req.getParameter("period")).thenReturn("T1");
+    when(req.getParameter(PERIOD_KEY)).thenReturn("T1");
 
     StubHandler handler = new StubHandler(servlet, true);
     handler.handle("known", "GET", req, resp);
