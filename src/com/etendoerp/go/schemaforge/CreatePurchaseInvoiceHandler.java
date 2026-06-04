@@ -65,6 +65,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   private static final String ACTION_NAME = "createPurchaseInvoice";
   private static final String SPEC_PURCHASE_ORDER = "purchase-order";
   private static final String SPEC_GOODS_RECEIPT = "goods-receipt";
+  private static final String FIELD_ORDERED_QUANTITY = "orderedQuantity";
 
   @Inject
   InvoiceFromOrderSupport invoiceFromOrderSupport;
@@ -212,7 +213,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       try {
         JSONObject entry = new JSONObject();
         entry.put("id", ol.getId());
-        entry.put("orderedQuantity", pending.toPlainString());
+        entry.put(FIELD_ORDERED_QUANTITY, pending.toPlainString());
         selectedLines.put(entry);
       } catch (Exception e) {
         log.warn("Failed to add line {}: {}", ol.getId(), e.getMessage());
@@ -389,7 +390,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     try {
       JSONObject entry = new JSONObject();
       entry.put("id", ol.getId());
-      entry.put("orderedQuantity", qty.toPlainString());
+      entry.put(FIELD_ORDERED_QUANTITY, qty.toPlainString());
       return entry;
     } catch (Exception e) {
       log.warn("Failed to add receipt line {} to selectedLines: {}", rl.getId(), e.getMessage());
@@ -425,22 +426,9 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
     JSONArray selectedLines = new JSONArray();
     for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
-      if (!rl.isActive() || rl.getProduct() == null || rl.getUOM() == null) {
-        continue;
-      }
-      BigDecimal qty = qtyOverrides.containsKey(rl.getId())
-          ? qtyOverrides.get(rl.getId())
-          : rl.getMovementQuantity();
-      if (qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) {
-        continue;
-      }
-      try {
-        JSONObject entry = new JSONObject();
-        entry.put("id", rl.getId());
-        entry.put("orderedQuantity", qty.toPlainString());
+      JSONObject entry = buildNoPoLineEntry(rl, qtyOverrides);
+      if (entry != null) {
         selectedLines.put(entry);
-      } catch (Exception e) {
-        log.warn("Failed to add receipt line {} to invoice lines: {}", rl.getId(), e.getMessage());
       }
     }
     if (selectedLines.length() == 0) {
@@ -466,6 +454,27 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     ensureDocumentNo(invoice);
 
     return invoice;
+  }
+
+  private JSONObject buildNoPoLineEntry(ShipmentInOutLine rl, Map<String, BigDecimal> qtyOverrides) {
+    if (!rl.isActive() || rl.getProduct() == null || rl.getUOM() == null) {
+      return null;
+    }
+    BigDecimal qty = qtyOverrides.containsKey(rl.getId())
+        ? qtyOverrides.get(rl.getId())
+        : rl.getMovementQuantity();
+    if (qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) {
+      return null;
+    }
+    try {
+      JSONObject entry = new JSONObject();
+      entry.put("id", rl.getId());
+      entry.put(FIELD_ORDERED_QUANTITY, qty.toPlainString());
+      return entry;
+    } catch (Exception e) {
+      log.warn("Failed to add receipt line {} to invoice lines: {}", rl.getId(), e.getMessage());
+      return null;
+    }
   }
 
   private Order deriveOrderFromLines(ShipmentInOut receipt) {

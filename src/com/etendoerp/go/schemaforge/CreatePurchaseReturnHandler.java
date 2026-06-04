@@ -149,7 +149,7 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
     for (ShipmentInOutLine originalLine : original.getMaterialMgmtShipmentInOutLineList()) {
       BigDecimal returnQty = resolveReturnQty(originalLine, lineQtyMap);
       if (returnQty != null) {
-        addReturnLine(original, originalLine, returnReceipt, returnQty, currentUser, lineNo);
+        addReturnLine(originalLine, returnReceipt, returnQty, currentUser, lineNo);
         lineNo += 10L;
       }
     }
@@ -164,20 +164,11 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
     return (qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) ? null : qty;
   }
 
-  private void addReturnLine(ShipmentInOut original, ShipmentInOutLine originalLine,
+  private void addReturnLine(ShipmentInOutLine originalLine,
       ShipmentInOut returnReceipt, BigDecimal returnQty, User currentUser, long lineNo) {
-    ShipmentInOutLine returnLine = OBProvider.getInstance().get(ShipmentInOutLine.class);
-    returnLine.setClient(original.getClient());
-    returnLine.setOrganization(original.getOrganization());
-    returnLine.setShipmentReceipt(returnReceipt);
-    returnLine.setLineNo(lineNo);
-    returnLine.setProduct(originalLine.getProduct());
-    returnLine.setUOM(originalLine.getUOM());
-    if (originalLine.getStorageBin() != null) {
-      returnLine.setStorageBin(originalLine.getStorageBin());
-    }
+    ShipmentInOutLine returnLine = NeoReturnReceiptService.createReturnLineShell(
+        returnReceipt, originalLine, lineNo);
     returnLine.setMovementQuantity(returnQty.negate());
-    returnLine.setCanceledInoutLine(originalLine);
     returnLine.setCreatedBy(currentUser);
     returnLine.setUpdatedBy(currentUser);
     returnLine.setCreationDate(new Date());

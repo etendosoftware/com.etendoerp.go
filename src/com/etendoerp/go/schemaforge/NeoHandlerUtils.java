@@ -74,7 +74,7 @@ final class NeoHandlerUtils {
     if (docTypeId != null && !docTypeId.isEmpty()) {
       try {
         CSResponse cs = DocumentNoData.nextDocType(conn, docTypeId, clientId, "Y");
-        if (cs != null && StringUtils.isNotBlank(cs.razon)) {
+        if (cs != null && "1".equals(cs.exito) && StringUtils.isNotBlank(cs.razon)) {
           return cs.razon;
         }
       } catch (Exception ex) {

@@ -18,6 +18,8 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -55,7 +57,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
-import org.openbravo.model.common.product.Product;
+import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
@@ -320,5 +322,113 @@ public class CreatePurchaseInvoiceHandlerTest {
 
     assertEquals(1, result.length());
     assertEquals("ol-1", result.getJSONObject(0).getString("id"));
+  }
+
+  // ─── handle() dispatch guards ─────────────────────────────────────────────
+
+  @Test
+  public void handle_nonActionEndpoint_returnsNull() {
+    assertNull(new CreatePurchaseInvoiceHandler().handle(NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .fieldName("createPurchaseInvoice")
+        .specName("purchase-order")
+        .build()));
+  }
+
+  @Test
+  public void handle_wrongActionName_returnsNull() {
+    assertNull(new CreatePurchaseInvoiceHandler().handle(NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .httpMethod("POST")
+        .fieldName("otherAction")
+        .specName("purchase-order")
+        .build()));
+  }
+
+  @Test
+  public void handle_getMethod_returnsNull() {
+    assertNull(new CreatePurchaseInvoiceHandler().handle(NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .httpMethod("GET")
+        .fieldName("createPurchaseInvoice")
+        .specName("purchase-order")
+        .build()));
+  }
+
+  @Test
+  public void handle_unknownSpec_returnsNull() {
+    assertNull(new CreatePurchaseInvoiceHandler().handle(NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .httpMethod("POST")
+        .fieldName("createPurchaseInvoice")
+        .specName("sales-order")
+        .build()));
+  }
+
+  @Test
+  public void handle_blankRecordId_returns400() {
+    NeoResponse r = new CreatePurchaseInvoiceHandler().handle(NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .httpMethod("POST")
+        .fieldName("createPurchaseInvoice")
+        .specName("purchase-order")
+        .recordId("")
+        .build());
+    assertNotNull(r);
+    assertEquals(400, r.getHttpStatus());
+  }
+
+  // ─── buildSelectedLines (also covers getPendingQuantity logic) ────────────
+
+  @Test
+  public void buildSelectedLines_skipsInactiveLine() {
+    OrderLine inactive = mock(OrderLine.class);
+    when(inactive.isActive()).thenReturn(false);
+    Order order = mock(Order.class);
+    when(order.getOrderLineList()).thenReturn(Collections.singletonList(inactive));
+
+    assertEquals(0, new CreatePurchaseInvoiceHandler().buildSelectedLines(order).length());
+  }
+
+  @Test
+  public void buildSelectedLines_skipsLineWithNullProduct() {
+    OrderLine line = mock(OrderLine.class);
+    when(line.isActive()).thenReturn(true);
+    when(line.getProduct()).thenReturn(null);
+    Order order = mock(Order.class);
+    when(order.getOrderLineList()).thenReturn(Collections.singletonList(line));
+
+    assertEquals(0, new CreatePurchaseInvoiceHandler().buildSelectedLines(order).length());
+  }
+
+  @Test
+  public void buildSelectedLines_skipsFullyInvoicedLine() {
+    OrderLine line = mock(OrderLine.class);
+    when(line.isActive()).thenReturn(true);
+    when(line.getProduct()).thenReturn(mock(Product.class));
+    when(line.getOrderedQuantity()).thenReturn(BigDecimal.valueOf(3));
+    when(line.getInvoicedQuantity()).thenReturn(BigDecimal.valueOf(3));
+    Order order = mock(Order.class);
+    when(order.getOrderLineList()).thenReturn(Collections.singletonList(line));
+
+    assertEquals(0, new CreatePurchaseInvoiceHandler().buildSelectedLines(order).length());
+  }
+
+  @Test
+  public void buildSelectedLines_includesPendingLine() throws JSONException {
+    OrderLine line = mock(OrderLine.class);
+    when(line.isActive()).thenReturn(true);
+    when(line.getProduct()).thenReturn(mock(Product.class));
+    when(line.getId()).thenReturn("ol-pending");
+    when(line.getOrderedQuantity()).thenReturn(BigDecimal.valueOf(5));
+    when(line.getInvoicedQuantity()).thenReturn(BigDecimal.valueOf(2));
+    Order order = mock(Order.class);
+    when(order.getOrderLineList()).thenReturn(Collections.singletonList(line));
+
+    JSONArray result = new CreatePurchaseInvoiceHandler().buildSelectedLines(order);
+    assertEquals(1, result.length());
+    assertEquals("ol-pending", result.getJSONObject(0).getString("id"));
+    assertEquals("3", result.getJSONObject(0).getString("orderedQuantity"));
   }
 }

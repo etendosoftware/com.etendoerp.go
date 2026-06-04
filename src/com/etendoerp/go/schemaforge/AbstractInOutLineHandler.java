@@ -101,6 +101,9 @@ public abstract class AbstractInOutLineHandler implements NeoHandler {
       if (dataArr == null) {
         return null;
       }
+      if (context.getPreviousResult() == null) {
+        return null;
+      }
       JSONObject body = context.getPreviousResult().getBody();
       List<String> lineIds = NeoHandlerUtils.collectIds(dataArr);
       Map<String, LineData> dataMap = fetchLineData(lineIds);
@@ -122,7 +125,7 @@ public abstract class AbstractInOutLineHandler implements NeoHandler {
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching inout lines", e);
-      return null;
+      throw new org.openbravo.base.exception.OBException(e);
     }
   }
 

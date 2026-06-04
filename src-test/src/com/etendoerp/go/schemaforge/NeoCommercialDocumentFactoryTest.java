@@ -17,20 +17,27 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertSame;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+import java.math.BigDecimal;
 
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import org.openbravo.model.financialmgmt.payment.PaymentTerm;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.pricing.pricelist.PriceList;
 
 /**
  * Unit tests for the second {@code createShipmentReceiptHeader} overload in
@@ -195,6 +202,106 @@ public class NeoCommercialDocumentFactoryTest {
       verify(newShipment).setProcessed(false);
       verify(newShipment).setDocumentStatus("DR");
       verify(newShipment).setDocumentNo("<*>");
+    }
+  }
+
+  // ── createShipmentReceiptHeader(Order, ...) ──────────────────────────────
+
+  @Test
+  public void testCreateShipmentReceiptHeaderFromOrderSetsAllFields() {
+    try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      ShipmentInOut newShipment = mock(ShipmentInOut.class);
+      when(provider.get(ShipmentInOut.class)).thenReturn(newShipment);
+
+      Order order = mock(Order.class);
+      DocumentType docType = mock(DocumentType.class);
+
+      ShipmentInOut result = NeoCommercialDocumentFactory.createShipmentReceiptHeader(
+          order, docType, false, "V+");
+
+      assertSame(newShipment, result);
+      verify(newShipment).setClient(order.getClient());
+      verify(newShipment).setOrganization(order.getOrganization());
+      verify(newShipment).setBusinessPartner(order.getBusinessPartner());
+      verify(newShipment).setWarehouse(order.getWarehouse());
+      verify(newShipment).setDocumentType(docType);
+      verify(newShipment).setDocumentNo("<*>");
+      verify(newShipment).setSalesTransaction(false);
+      verify(newShipment).setMovementType("V+");
+      verify(newShipment).setDocumentStatus("DR");
+      verify(newShipment).setProcessed(false);
+      verify(newShipment).setSalesOrder(order);
+    }
+  }
+
+  // ── createInvoiceFromOrderHeader ────────────────────────────────────────
+
+  @Test
+  public void testCreateInvoiceFromOrderHeaderSetsAllFields() {
+    try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      Invoice invoice = mock(Invoice.class);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      Order order = mock(Order.class);
+      DocumentType docType = mock(DocumentType.class);
+
+      Invoice result = NeoCommercialDocumentFactory.createInvoiceFromOrderHeader(
+          order, docType, false);
+
+      assertSame(invoice, result);
+      verify(invoice).setDocumentType(docType);
+      verify(invoice).setTransactionDocument(docType);
+      verify(invoice).setDocumentStatus("DR");
+      verify(invoice).setDocumentAction("CO");
+      verify(invoice).setSalesTransaction(false);
+      verify(invoice).setDocumentNo("<*>");
+      verify(invoice).setSalesOrder(order);
+      verify(invoice).setSummedLineAmount(BigDecimal.ZERO);
+      verify(invoice).setGrandTotalAmount(BigDecimal.ZERO);
+      verify(invoice).setWithholdingamount(BigDecimal.ZERO);
+      verify(invoice).setClient(order.getClient());
+      verify(invoice).setOrganization(order.getOrganization());
+    }
+  }
+
+  // ── createInvoiceFromReceiptHeader ──────────────────────────────────────
+
+  @Test
+  public void testCreateInvoiceFromReceiptHeaderSetsAllFields() {
+    try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      Invoice invoice = mock(Invoice.class);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      ShipmentInOut receipt = mock(ShipmentInOut.class);
+      DocumentType docType = mock(DocumentType.class);
+      PriceList priceList = mock(PriceList.class);
+      Currency currency = mock(Currency.class);
+      when(priceList.getCurrency()).thenReturn(currency);
+      PaymentTerm paymentTerm = mock(PaymentTerm.class);
+      FIN_PaymentMethod paymentMethod = mock(FIN_PaymentMethod.class);
+
+      Invoice result = NeoCommercialDocumentFactory.createInvoiceFromReceiptHeader(
+          receipt, docType, priceList, paymentTerm, paymentMethod);
+
+      assertSame(invoice, result);
+      verify(invoice).setDocumentType(docType);
+      verify(invoice).setTransactionDocument(docType);
+      verify(invoice).setDocumentStatus("DR");
+      verify(invoice).setDocumentAction("CO");
+      verify(invoice).setSalesTransaction(false);
+      verify(invoice).setPriceList(priceList);
+      verify(invoice).setCurrency(currency);
+      verify(invoice).setPaymentTerms(paymentTerm);
+      verify(invoice).setPaymentMethod(paymentMethod);
+      verify(invoice).setDocumentNo("<*>");
+      verify(invoice).setSummedLineAmount(BigDecimal.ZERO);
+      verify(invoice).setGrandTotalAmount(BigDecimal.ZERO);
     }
   }
 }

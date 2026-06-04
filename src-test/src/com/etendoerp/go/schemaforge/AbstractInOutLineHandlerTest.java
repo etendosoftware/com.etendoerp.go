@@ -20,7 +20,10 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -241,18 +244,14 @@ public class AbstractInOutLineHandlerTest {
   }
 
   /**
-   * afterHandle() GET returns null when getConnection() throws — fetchLineData
-   * catches the exception internally, returns an empty map, and afterHandle still
-   * reaches NeoResponse.ok(body). But when the outer try block itself catches an
-   * exception, it returns null. When fetchLineData returns an empty map gracefully,
-   * the enrichment loop is a no-op and NeoResponse.ok(body) is returned.
+   * afterHandle() GET returns null when getConnection() throws.
    *
-   * <p>This test verifies the documented contract: DB error in fetchLineData is
-   * swallowed, and the outer catch returns null only if a separate exception escapes.
-   * Here getConnection() throws, so fetchLineData returns empty and ok() is returned.
+   * <p>{@code getConnection()} is called BEFORE the try-with-resources in
+   * {@code fetchLineData}, so the exception propagates up to {@code afterHandle}'s
+   * outer catch block, which returns null.
    */
   @Test
-  public void afterHandle_get_dbErrorInFetch_returnsOkWithOriginalBody() throws Exception {
+  public void afterHandle_get_dbErrorInFetch_returnsNull() throws Exception {
     GoodsReceiptLineHandler handler = new GoodsReceiptLineHandler();
 
     JSONObject line = new JSONObject().put("id", "line-x");
@@ -269,14 +268,101 @@ public class AbstractInOutLineHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      // Trigger fetchLineData's internal catch by throwing from getConnection()
       when(dal.getConnection()).thenThrow(new RuntimeException("DB unavailable"));
 
-      // fetchLineData catches the exception and returns empty map → enrichment is a
-      // no-op → NeoResponse.ok(body) is returned (not null)
+      // Exception from getConnection() propagates to afterHandle's outer catch → null
       NeoResponse result = handler.afterHandle(ctx);
-      assertNotNull("DB error in fetchLineData must not propagate — ok response expected", result);
-      assertNotNull(result.getBody());
+      assertNull(result);
+    }
+  }
+
+  // ── Group D — linkInvoiceLineIfPresent (POST afterHandle with invoiceLineId) ──
+
+  /**
+   * When handle() captures an invoiceLineId and afterHandle() POST runs with a
+   * previousResult that contains the new line ID, the handler must execute an
+   * UPDATE on c_invoiceline to set the back-reference. Verifies that the native
+   * query is executed with the correct parameters.
+   */
+  @Test
+  public void afterHandle_post_withInvoiceLineIdAndValidResponse_executesUpdate() throws Exception {
+    GoodsReceiptLineHandler handler = new GoodsReceiptLineHandler();
+
+    // Arm the ThreadLocal via handle()
+    JSONObject reqBody = new JSONObject().put("invoiceLineId", "inv-line-abc");
+    handler.handle(NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD)
+        .requestBody(reqBody)
+        .build());
+
+    // Build a previousResult with response.data[0].id = new-line-id
+    JSONObject newLineObj = new JSONObject().put("id", "new-line-id");
+    JSONObject responseWrapper = new JSONObject()
+        .put("data", new JSONArray().put(newLineObj));
+    JSONObject prevBody = new JSONObject().put("response", responseWrapper);
+    NeoContext afterCtx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD)
+        .previousResult(new NeoResponse(201, prevBody))
+        .build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      @SuppressWarnings("rawtypes")
+      org.hibernate.query.NativeQuery nq = mock(org.hibernate.query.NativeQuery.class);
+      when(session.createNativeQuery(Mockito.anyString())).thenReturn(nq);
+      when(nq.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(nq);
+      when(nq.executeUpdate()).thenReturn(1);
+
+      NeoResponse result = handler.afterHandle(afterCtx);
+
+      assertNull("POST afterHandle must return null", result);
+      org.mockito.ArgumentCaptor<String> sqlCaptor =
+          org.mockito.ArgumentCaptor.forClass(String.class);
+      Mockito.verify(session).createNativeQuery(sqlCaptor.capture());
+      assertTrue("SQL must UPDATE c_invoiceline",
+          sqlCaptor.getValue().contains("UPDATE c_invoiceline"));
+      Mockito.verify(nq).setParameter("lineId", "new-line-id");
+      Mockito.verify(nq).setParameter("invLineId", "inv-line-abc");
+    }
+  }
+
+  /**
+   * linkInvoiceLineIfPresent with an empty id in the response data must exit early
+   * without triggering a DB update.
+   */
+  @Test
+  public void afterHandle_post_withEmptyNewLineId_skipsUpdate() throws Exception {
+    GoodsReceiptLineHandler handler = new GoodsReceiptLineHandler();
+
+    handler.handle(NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD)
+        .requestBody(new JSONObject().put("invoiceLineId", "inv-line-xyz"))
+        .build());
+
+    JSONObject newLineObj = new JSONObject().put("id", "");
+    JSONObject prevBody = new JSONObject()
+        .put("response", new JSONObject().put("data", new JSONArray().put(newLineObj)));
+    NeoContext afterCtx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD)
+        .previousResult(new NeoResponse(201, prevBody))
+        .build();
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      handler.afterHandle(afterCtx);
+
+      Mockito.verify(dal, Mockito.never()).getSession();
     }
   }
 }
