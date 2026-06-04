@@ -39,6 +39,7 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
   private static final int ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT = 2;
   private static final int ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS = 900;
   private static final String DASHBOARD_LINK_PATH = "dashboard";
+  private static final String FIELD_SUBJECT = "subject";
 
   /**
    * Creates the provider with the default DAL-backed contact resolver.
@@ -75,26 +76,26 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
   private static void newAccountContent(org.codehaus.jettison.json.JSONObject data,
       String language, String link) throws org.codehaus.jettison.json.JSONException {
     if ("es_ES".equals(language)) {
-      data.put("subject", "Bienvenido a Etendo Go");
+      data.put(FIELD_SUBJECT, "Bienvenido a Etendo Go");
       data.put("body", "Tu cuenta de Etendo Go fue creada correctamente. "
           + "Abre este enlace para continuar: " + link);
       return;
     }
-    data.put("subject", "Welcome to Etendo Go");
+    data.put(FIELD_SUBJECT, "Welcome to Etendo Go");
     data.put("body", "Your Etendo Go account was created successfully. "
         + "Open this link to continue: " + link);
   }
 
   private static void environmentReadyContent(org.codehaus.jettison.json.JSONObject data,
       String language, String link) throws org.codehaus.jettison.json.JSONException {
-    data.put("subject", "Your Etendo Go environment is ready");
+    data.put(FIELD_SUBJECT, "Your Etendo Go environment is ready");
     data.put("body", "Your Etendo Go environment is ready. "
         + "Open this link to access your dashboard: " + link);
   }
 
   private static void passwordChangedContent(org.codehaus.jettison.json.JSONObject data)
       throws org.codehaus.jettison.json.JSONException {
-    data.put("subject", "Your Etendo Go password was changed");
+    data.put(FIELD_SUBJECT, "Your Etendo Go password was changed");
     data.put("body", "Your Etendo Go password was changed successfully. "
         + "If you did not make this change, contact support.");
   }
