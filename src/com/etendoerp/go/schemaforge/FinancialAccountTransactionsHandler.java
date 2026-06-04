@@ -103,6 +103,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String PARAM_ACCOUNT_ID = "FIN_Financial_Account_ID";
   private static final String PARAM_ACTION = "action";
   private static final String ACTION_CREATE = "create";
+  private static final String ACTION_CREATE_PAYMENT = "create-payment";
   private static final String ACTION_BP_LOOKUP = "bpartner-lookup";
   private static final String ACTION_GL_LOOKUP = "glitem-lookup";
   private static final String ACTION_DIM_VALUES = "dimension-values";
@@ -223,6 +224,9 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     }
     if (METHOD_POST.equals(method) && ACTION_CREATE.equals(action)) {
       return handleCreate(context);
+    }
+    if (METHOD_POST.equals(method) && ACTION_CREATE_PAYMENT.equals(action)) {
+      return handleCreatePayment(context);
     }
     return NeoResponse.error(405, "Method not allowed.");
   }
@@ -548,6 +552,30 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       log.error("Error creating financial account transaction", e);
       OBDal.getInstance().rollbackAndClose();
       return NeoResponse.error(500, "Could not create the movement. Please check logs for details.");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Handles {@code POST ?action=create-payment} — creates and processes a FIN_Payment
+   * replicating Classic's "Add Payment" (the processing auto-creates the finacc transaction).
+   * Delegates the business logic to {@link AddPaymentService}.
+   */
+  private NeoResponse handleCreatePayment(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) return NeoResponse.error(400, "Request body is required");
+    try {
+      OBContext.setAdminMode(true);
+      return AddPaymentService.doAddPayment(body);
+    } catch (org.openbravo.base.exception.OBException e) {
+      log.warn("Add payment failed: {}", e.getMessage());
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(400, e.getMessage());
+    } catch (Exception e) {
+      log.error("Error creating payment", e);
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(500, "Could not register the payment. Please check logs for details.");
     } finally {
       OBContext.restorePreviousMode();
     }
