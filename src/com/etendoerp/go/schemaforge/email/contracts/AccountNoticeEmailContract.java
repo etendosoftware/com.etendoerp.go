@@ -136,12 +136,17 @@ final class AccountNoticeEmailContract implements EmailContract {
         EmailContractCommandSupport.FIELD_ACCOUNT_ID));
   }
 
+  /**
+   * Functional interface to add custom content to the account notice email payload.
+   */
   interface AccountNoticeCustomContent {
     /**
      * Adds custom notice content to the provider payload.
      *
-     * @param data provider payload to populate
-     * @throws JSONException when the payload cannot be populated
+     * @param data
+     *     provider payload to populate
+     * @throws JSONException
+     *     when the payload cannot be populated
      */
     void apply(JSONObject data) throws JSONException;
   }

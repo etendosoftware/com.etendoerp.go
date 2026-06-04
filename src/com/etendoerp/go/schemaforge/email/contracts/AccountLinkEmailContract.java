@@ -179,14 +179,21 @@ final class AccountLinkEmailContract implements EmailContract {
     return PublicUrlResolver.appendPath(baseUrl, configuredLinkPath);
   }
 
+  /**
+   * Functional interface to add custom content to the account link email payload.
+   */
   interface AccountLinkCustomContent {
     /**
      * Adds localized custom content to the provider payload for an account link email.
      *
-     * @param data provider payload to populate
-     * @param language recipient language code
-     * @param link account action link
-     * @throws JSONException when the payload cannot be populated
+     * @param data
+     *     provider payload to populate
+     * @param language
+     *     recipient language code
+     * @param link
+     *     account action link
+     * @throws JSONException
+     *     when the payload cannot be populated
      */
     void apply(JSONObject data, String language, String link) throws JSONException;
   }
