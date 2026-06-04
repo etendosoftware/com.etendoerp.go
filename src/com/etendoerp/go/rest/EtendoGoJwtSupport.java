@@ -17,174 +17,187 @@
 
 package com.etendoerp.go.rest;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.query.NativeQuery;
+import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.enterprise.Organization;
+
+import com.etendoerp.go.schemaforge.data.Account;
 
 final class EtendoGoJwtSupport {
 
-  private static final String FIELD_EMAIL = "email";
-  private static final String DB_CLIENT_ID = "ad_client_id";
-  private static final String DB_ORG_ID = "ad_org_id";
-
-  private static final String SQL_FIND_ACCOUNT_BY_TOKEN =
-      "SELECT etgo_account_id, email, name, session_token, created "
-      + "FROM etgo_account WHERE session_token = ? AND isactive = 'Y'";
-
-  private static final String SQL_FIND_USERNAME_BY_AD_USER_ID =
-      "SELECT username FROM ad_user WHERE ad_user_id = ? AND isactive = 'Y'";
-
+  private static final String STAR_ORG_VALUE = "*";
+  private static final String SYSTEM_ORG_ID = "0";
   private static final String SQL_FIND_ROLE_LIST_BY_USER =
-      "SELECT r.ad_role_id, r.name AS role_name "
-      + "FROM ad_user_roles ur "
-      + "JOIN ad_role r ON ur.ad_role_id = r.ad_role_id "
-      + "WHERE ur.ad_user_id = ? AND ur.isactive = 'Y' AND r.isactive = 'Y' "
-      + "ORDER BY r.created";
-
-  private static final String SQL_FIND_ORGS_BY_ROLE =
-      "SELECT o.ad_org_id, o.name AS org_name "
-      + "FROM ad_role_orgaccess roa "
-      + "JOIN ad_org o ON roa.ad_org_id = o.ad_org_id "
-      + "WHERE roa.ad_role_id = ? AND roa.isactive = 'Y' AND o.isactive = 'Y' "
-      + "ORDER BY o.name";
-
-  private static final String SQL_FIND_CLIENT_BY_NAME =
-      "SELECT ad_client_id FROM ad_client WHERE name = ?";
-
-  private static final String SQL_FIND_STAR_ORG =
-      "SELECT ad_org_id FROM ad_org WHERE ad_client_id = ? AND value = '*'";
-
-  private static final String SQL_FIND_AD_USER_BY_USERNAME =
-      "SELECT ad_user_id FROM ad_user WHERE username = ?";
-
-  private static final String SQL_FIND_ORG_BY_CLIENT =
-      "SELECT ad_org_id, name FROM ad_org WHERE ad_client_id = ? AND value != '*'";
+      "SELECT r.ad_role_id AS role_id, r.name AS role_name, "
+          + "o.ad_org_id AS org_id, o.name AS org_name "
+          + "FROM ad_user_roles ur "
+          + "JOIN ad_role r ON ur.ad_role_id = r.ad_role_id "
+          + "LEFT JOIN ad_role_orgaccess roa ON r.ad_role_id = roa.ad_role_id "
+          + "AND roa.isactive = 'Y' "
+          + "LEFT JOIN ad_org o ON roa.ad_org_id = o.ad_org_id AND o.isactive = 'Y' "
+          + "WHERE ur.ad_user_id = :userId AND ur.isactive = 'Y' AND r.isactive = 'Y' "
+          + "ORDER BY r.created, o.name";
 
   private EtendoGoJwtSupport() {
   }
 
-  static String requireAccountEmail(Connection conn, String token) throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_ACCOUNT_BY_TOKEN)) {
-      ps.setString(1, token);
-      try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() ? rs.getString(FIELD_EMAIL) : null;
-      }
+  static String requireAccountEmail(String token) {
+    Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
+    return account == null ? null : account.getEmail();
+  }
+
+  static boolean isEnvironmentUserOwnedByAccount(String accountEmail, String userId) {
+    if (accountEmail == null || userId == null) {
+      return false;
+    }
+    User user = OBDal.getInstance().get(User.class, userId);
+    if (user == null || !Boolean.TRUE.equals(user.isActive())) {
+      return false;
+    }
+    String username = user.getUsername();
+    return accountEmail.equals(username)
+        || (username != null && username.startsWith(accountEmail + "+"));
+  }
+
+  static RoleListData loadRoleListData(String userId) throws JSONException {
+    try {
+      return buildRoleListData(loadRoleRows(userId));
+    } catch (OBException e) {
+      throw e;
+    } catch (RuntimeException e) {
+      throw new OBException("Error loading role list data for user: " + userId, e);
     }
   }
 
-  static boolean isEnvironmentUserOwnedByAccount(Connection conn, String accountEmail,
-      String userId) throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_USERNAME_BY_AD_USER_ID)) {
-      ps.setString(1, userId);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (!rs.next()) {
-          return false;
-        }
-        String username = rs.getString("username");
-        return accountEmail != null && (accountEmail.equals(username)
-            || (username != null && username.startsWith(accountEmail + "+")));
-      }
-    }
+  @SuppressWarnings("unchecked")
+  private static List<Object[]> loadRoleRows(String userId) {
+    NativeQuery<Object[]> query = OBDal.getInstance()
+        .getSession()
+        .createNativeQuery(SQL_FIND_ROLE_LIST_BY_USER);
+    query.setParameter("userId", userId);
+    return query.list();
   }
 
-  static RoleListData loadRoleListData(Connection conn, String userId)
-      throws SQLException, JSONException {
+  private static RoleListData buildRoleListData(List<Object[]> rows) throws JSONException {
     RoleListData data = new RoleListData();
     data.roleArray = new JSONArray();
-    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_ROLE_LIST_BY_USER)) {
-      ps.setString(1, userId);
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          String roleId = rs.getString("ad_role_id");
-          if (data.firstRoleId == null) {
-            data.firstRoleId = roleId;
-          }
-          data.roleArray.put(buildRoleJson(conn, roleId, rs.getString("role_name")));
+
+    Map<String, JSONObject> rolesById = new LinkedHashMap<>();
+    for (Object[] row : rows) {
+      String roleId = stringValue(row[0]);
+      JSONObject roleObj = rolesById.get(roleId);
+      if (roleObj == null) {
+        roleObj = buildRoleJson(roleId, stringValue(row[1]));
+        rolesById.put(roleId, roleObj);
+        if (data.firstRoleId == null) {
+          data.firstRoleId = roleId;
         }
       }
+
+      String orgId = stringValue(row[2]);
+      if (orgId != null) {
+        roleObj.getJSONArray("orgList").put(buildOrganizationJson(orgId, stringValue(row[3])));
+      }
+    }
+
+    for (JSONObject roleObj : rolesById.values()) {
+      data.roleArray.put(roleObj);
     }
     return data;
   }
 
-  static String findClientIdByName(Connection conn, String clientName) throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_CLIENT_BY_NAME)) {
-      ps.setString(1, clientName);
-      try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() ? rs.getString(DB_CLIENT_ID) : null;
-      }
-    }
+  private static String stringValue(Object value) {
+    return value == null ? null : String.valueOf(value);
   }
 
-  static boolean hasStarOrganization(Connection conn, String clientId) throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_STAR_ORG)) {
-      ps.setString(1, clientId);
-      try (ResultSet rs = ps.executeQuery()) {
-        return rs.next();
-      }
-    }
+  static String findClientIdByName(String clientName) {
+    OBQuery<Client> query = OBDal.getInstance().createQuery(Client.class,
+        "as client where client.name = :clientName and client.active = true");
+    query.setNamedParameter("clientName", clientName);
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    query.setMaxResult(1);
+    Client client = query.uniqueResult();
+    return client == null ? null : client.getId();
   }
 
-  static String buildClientUsername(Connection conn, String accountEmail, String clientName)
-      throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_AD_USER_BY_USERNAME)) {
-      ps.setString(1, accountEmail);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (!rs.next()) {
-          return accountEmail;
-        }
-      }
+  static boolean hasStarOrganization(String clientId) {
+    return findStarOrganization(clientId) != null;
+  }
+
+  static String buildClientUsername(String accountEmail, String clientName) {
+    if (findActiveUserByUsername(accountEmail) == null) {
+      return accountEmail;
     }
     String safeClientName = (clientName != null) ? clientName.toLowerCase().replaceAll("[^a-z0-9]", "") : "";
     return accountEmail + "+" + safeClientName;
   }
 
-  static String findStarOrgId(Connection conn, String clientId) throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_STAR_ORG)) {
-      ps.setString(1, clientId);
-      try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() ? rs.getString(DB_ORG_ID) : "0";
-      }
-    }
+  static String findStarOrgId(String clientId) {
+    Organization organization = findStarOrganization(clientId);
+    return organization == null ? SYSTEM_ORG_ID : organization.getId();
   }
 
-  static boolean organizationExists(Connection conn, String clientId) throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_ORG_BY_CLIENT)) {
-      ps.setString(1, clientId);
-      try (ResultSet rs = ps.executeQuery()) {
-        return rs.next();
-      }
-    }
+  static boolean organizationExists(String clientId) {
+    OBQuery<Organization> query = OBDal.getInstance().createQuery(Organization.class,
+        "as organization where organization.client.id = :clientId"
+            + " and organization.searchKey <> :starOrgValue"
+            + " and organization.active = true");
+    query.setNamedParameter("clientId", clientId);
+    query.setNamedParameter("starOrgValue", STAR_ORG_VALUE);
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    query.setMaxResult(1);
+    return query.uniqueResult() != null;
   }
 
-  private static JSONObject buildRoleJson(Connection conn, String roleId, String roleName)
-      throws SQLException, JSONException {
+  private static JSONObject buildRoleJson(String roleId, String roleName) throws JSONException {
     JSONObject roleObj = new JSONObject();
     roleObj.put("id", roleId);
     roleObj.put("name", roleName);
-    roleObj.put("orgList", loadOrganizationsForRole(conn, roleId));
+    roleObj.put("orgList", new JSONArray());
     return roleObj;
   }
 
-  private static JSONArray loadOrganizationsForRole(Connection conn, String roleId)
-      throws SQLException, JSONException {
-    JSONArray orgArray = new JSONArray();
-    try (PreparedStatement ps = conn.prepareStatement(SQL_FIND_ORGS_BY_ROLE)) {
-      ps.setString(1, roleId);
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          JSONObject orgObj = new JSONObject();
-          orgObj.put("id", rs.getString(DB_ORG_ID));
-          orgObj.put("name", rs.getString("org_name"));
-          orgArray.put(orgObj);
-        }
-      }
-    }
-    return orgArray;
+  private static JSONObject buildOrganizationJson(String orgId, String orgName) throws JSONException {
+    JSONObject orgObj = new JSONObject();
+    orgObj.put("id", orgId);
+    orgObj.put("name", orgName);
+    return orgObj;
+  }
+
+  private static User findActiveUserByUsername(String username) {
+    OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
+        "as user where user.username = :username and user.active = true");
+    query.setNamedParameter("username", username);
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    query.setMaxResult(1);
+    return query.uniqueResult();
+  }
+
+  private static Organization findStarOrganization(String clientId) {
+    OBQuery<Organization> query = OBDal.getInstance().createQuery(Organization.class,
+        "as organization where organization.client.id = :clientId"
+            + " and organization.searchKey = :starOrgValue"
+            + " and organization.active = true");
+    query.setNamedParameter("clientId", clientId);
+    query.setNamedParameter("starOrgValue", STAR_ORG_VALUE);
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    query.setMaxResult(1);
+    return query.uniqueResult();
   }
 
   static final class RoleListData {

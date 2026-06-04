@@ -31,8 +31,10 @@ import java.util.Optional;
 
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
 import org.junit.Test;
 
+import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.email.contracts.CoreEmailContractProvider;
 import com.etendoerp.go.schemaforge.email.contracts.SalesInvoiceSendEmailContract;
@@ -44,6 +46,12 @@ import com.etendoerp.go.schemaforge.email.contracts.SalesQuotationSendEmailContr
  */
 public class InitialEmailContractsTest {
 
+  @After
+  public void clearProperties() {
+    System.clearProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY);
+    System.clearProperty("etgo.app.url");
+  }
+
   @Test
   public void registersInitialContractsButNotCustomPayloads() {
     DefaultEmailContractRegistry registry = DefaultEmailContractRegistry.create(
@@ -51,6 +59,8 @@ public class InitialEmailContractsTest {
 
     assertTrue(registry.find("reset-password").isPresent());
     assertTrue(registry.find("new-account").isPresent());
+    assertTrue(registry.find("environment-ready").isPresent());
+    assertTrue(registry.find("password-changed").isPresent());
     assertTrue(registry.find("login-alert").isPresent());
     assertTrue(registry.find("sales-invoice-send").isPresent());
     assertTrue(registry.find("sales-order-send").isPresent());
@@ -96,6 +106,71 @@ public class InitialEmailContractsTest {
     assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
     assertEquals("https://app.example.test/welcome",
         adapter.getLastRequest().getData().getString("link"));
+  }
+
+  @Test
+  public void environmentReadyUsesDistinctWelcomeTemplateAndRecordIdIdempotency()
+      throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    TransactionalEmailService service = service(adapter, safetyStore);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1");
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "client-1");
+
+    NeoResponse response = service.send("environment-ready", command);
+
+    assertSent(response);
+    assertEquals("environment-ready", adapter.getLastRequest().getTemplate());
+    assertEquals("account@example.com", adapter.getLastRequest().getRecipient());
+    assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
+    assertEquals("https://app.example.test/dashboard",
+        adapter.getLastRequest().getData().getString("link"));
+    assertEquals("environment-ready:tenant-1:client-1:v1",
+        safetyStore.getAuditRecords().get(0).getIdempotencyKey());
+  }
+
+  @Test
+  public void environmentReadyRejectsMissingConfiguredAppBaseUrl() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "/");
+    System.setProperty("etgo.app.url", "/");
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1");
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "client-1");
+
+    NeoResponse response = service.send("environment-ready", command);
+
+    JSONObject data = responseData(response);
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
+    assertEquals("Configured app base URL is required for this email contract",
+        data.getString("message"));
+    assertEquals(0, adapter.getSendCount());
+  }
+
+  @Test
+  public void passwordChangedUsesAccountRecipientAndNoticePayload() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1");
+    command.put(EmailContractCommandSupport.FIELD_DATE, "2026-05-29T10:00:00Z");
+
+    NeoResponse response = service.send("password-changed", command);
+
+    assertSent(response);
+    assertEquals("password-changed", adapter.getLastRequest().getTemplate());
+    assertEquals("account@example.com", adapter.getLastRequest().getRecipient());
+    assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
+    assertEquals("2026-05-29T10:00:00Z",
+        adapter.getLastRequest().getData().getString("date"));
+    assertFalse(adapter.getLastRequest().getData().has("link"));
   }
 
   @Test
@@ -438,6 +513,12 @@ public class InitialEmailContractsTest {
     return new TransactionalEmailService(
         DefaultEmailContractRegistry.create(fixtureProviders()), adapter,
         new InMemoryEmailSafetyStore());
+  }
+
+  private static TransactionalEmailService service(FakeProviderAdapter adapter,
+      InMemoryEmailSafetyStore safetyStore) {
+    return new TransactionalEmailService(
+        DefaultEmailContractRegistry.create(fixtureProviders()), adapter, safetyStore);
   }
 
   private static List<EmailContractProvider> fixtureProviders() {

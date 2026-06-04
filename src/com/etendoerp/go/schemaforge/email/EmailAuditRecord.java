@@ -58,6 +58,23 @@ public final class EmailAuditRecord {
     this.createdAtMillis = System.currentTimeMillis();
   }
 
+  private EmailAuditRecord(Snapshot snapshot) {
+    this.contractName = snapshot.contractName;
+    this.idempotencyKey = snapshot.idempotencyKey;
+    this.tenantId = snapshot.tenantId;
+    this.userId = snapshot.userId;
+    this.recordId = snapshot.recordId;
+    this.template = snapshot.template;
+    this.recipient = snapshot.recipient;
+    this.recipientDomain = snapshot.recipientDomain;
+    this.httpStatus = snapshot.httpStatus;
+    this.status = snapshot.status;
+    this.message = snapshot.message;
+    this.providerStatus = snapshot.providerStatus;
+    this.duplicate = snapshot.duplicate;
+    this.createdAtMillis = snapshot.createdAtMillis;
+  }
+
   /**
    * Creates an audit record from the resolved send context.
    *
@@ -75,6 +92,28 @@ public final class EmailAuditRecord {
     Check.isNotNull(context, "EmailSendContext cannot be null");
     return new EmailAuditRecord(context, idempotencyKey, httpStatus, status, message,
         providerStatus, duplicate);
+  }
+
+  static EmailAuditRecord persisted(Snapshot snapshot) {
+    Check.isNotNull(snapshot, "Email audit snapshot cannot be null");
+    return new EmailAuditRecord(snapshot);
+  }
+
+  static final class Snapshot {
+    String contractName;
+    String idempotencyKey;
+    String tenantId;
+    String userId;
+    String recordId;
+    String template;
+    String recipient;
+    String recipientDomain;
+    int httpStatus;
+    String status;
+    String message;
+    Integer providerStatus;
+    boolean duplicate;
+    long createdAtMillis;
   }
 
   /**

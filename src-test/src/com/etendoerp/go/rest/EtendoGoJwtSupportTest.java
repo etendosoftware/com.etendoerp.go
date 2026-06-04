@@ -20,27 +20,43 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
+import java.util.Arrays;
+import java.util.Collections;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
+import org.hibernate.query.NativeQuery;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.enterprise.Organization;
+
+import com.etendoerp.go.schemaforge.data.Account;
 
 /**
  * Unit tests for {@link EtendoGoJwtSupport}.
@@ -49,49 +65,54 @@ import org.mockito.quality.Strictness;
 @MockitoSettings(strictness = Strictness.LENIENT)
 class EtendoGoJwtSupportTest {
 
-  @Mock private Connection conn;
-  @Mock private PreparedStatement ps;
-  @Mock private ResultSet rs;
+  @Mock private OBDal obDal;
+
+  private MockedStatic<OBDal> obDalMock;
 
   @BeforeEach
-  void setUp() throws SQLException {
-    when(conn.prepareStatement(anyString())).thenReturn(ps);
-    when(ps.executeQuery()).thenReturn(rs);
+  void setUp() {
+    obDalMock = mockStatic(OBDal.class);
+    obDalMock.when(OBDal::getInstance).thenReturn(obDal);
   }
 
-  // ---------------------------------------------------------------------------
-  // requireAccountEmail
-  // ---------------------------------------------------------------------------
+  @AfterEach
+  void tearDown() {
+    if (obDalMock != null) {
+      obDalMock.close();
+    }
+  }
 
   @Nested
   @DisplayName("requireAccountEmail")
   class RequireAccountEmail {
 
     @Test
-    @DisplayName("returns email when account found")
-    void returnsEmailWhenFound() throws SQLException {
-      when(rs.next()).thenReturn(true);
-      when(rs.getString("email")).thenReturn("user@example.com");
+    @DisplayName("returns email when account found by token")
+    void returnsEmailWhenFound() {
+      Account account = mock(Account.class);
+      when(account.getEmail()).thenReturn("user@example.com");
 
-      String result = EtendoGoJwtSupport.requireAccountEmail(conn, "valid-token");
+      try (MockedStatic<EtendoGoJwtDalHelper> dalHelper = mockStatic(
+          EtendoGoJwtDalHelper.class)) {
+        dalHelper.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+            .thenReturn(account);
 
-      assertEquals("user@example.com", result);
+        assertEquals("user@example.com", EtendoGoJwtSupport.requireAccountEmail("valid-token"));
+      }
     }
 
     @Test
     @DisplayName("returns null when no account matches token")
-    void returnsNullWhenNotFound() throws SQLException {
-      when(rs.next()).thenReturn(false);
+    void returnsNullWhenNotFound() {
+      try (MockedStatic<EtendoGoJwtDalHelper> dalHelper = mockStatic(
+          EtendoGoJwtDalHelper.class)) {
+        dalHelper.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("invalid-token"))
+            .thenReturn(null);
 
-      String result = EtendoGoJwtSupport.requireAccountEmail(conn, "invalid-token");
-
-      assertNull(result);
+        assertNull(EtendoGoJwtSupport.requireAccountEmail("invalid-token"));
+      }
     }
   }
-
-  // ---------------------------------------------------------------------------
-  // isEnvironmentUserOwnedByAccount
-  // ---------------------------------------------------------------------------
 
   @Nested
   @DisplayName("isEnvironmentUserOwnedByAccount")
@@ -99,303 +120,187 @@ class EtendoGoJwtSupportTest {
 
     @Test
     @DisplayName("returns true for exact email match")
-    void exactMatch() throws SQLException {
-      when(rs.next()).thenReturn(true);
-      when(rs.getString("username")).thenReturn("user@example.com");
+    void exactMatch() {
+      mockUser("user-id", true, "user@example.com");
 
       assertTrue(EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(
-          conn, "user@example.com", "user-id"));
+          "user@example.com", "user-id"));
     }
 
     @Test
-    @DisplayName("returns true for prefix match (email+clientname)")
-    void prefixMatch() throws SQLException {
-      when(rs.next()).thenReturn(true);
-      when(rs.getString("username")).thenReturn("user@example.com+myclient");
+    @DisplayName("returns true for prefix match")
+    void prefixMatch() {
+      mockUser("user-id", true, "user@example.com+myclient");
 
       assertTrue(EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(
-          conn, "user@example.com", "user-id"));
+          "user@example.com", "user-id"));
     }
 
     @Test
-    @DisplayName("returns false when username does not match")
-    void noMatch() throws SQLException {
-      when(rs.next()).thenReturn(true);
-      when(rs.getString("username")).thenReturn("other@example.com");
+    @DisplayName("returns false when user is missing or inactive")
+    void missingOrInactiveUser() {
+      when(obDal.get(User.class, "missing")).thenReturn(null);
+      mockUser("inactive", false, "user@example.com");
 
       assertFalse(EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(
-          conn, "user@example.com", "user-id"));
+          "user@example.com", "missing"));
+      assertFalse(EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(
+          "user@example.com", "inactive"));
     }
 
     @Test
-    @DisplayName("returns false when no ad_user row found")
-    void noUserRow() throws SQLException {
-      when(rs.next()).thenReturn(false);
+    @DisplayName("returns false when username does not match account")
+    void noMatch() {
+      mockUser("user-id", true, "other@example.com");
 
       assertFalse(EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(
-          conn, "user@example.com", "user-id"));
-    }
-
-    @Test
-    @DisplayName("returns false when accountEmail is null")
-    void nullAccountEmail() throws SQLException {
-      when(rs.next()).thenReturn(true);
-      when(rs.getString("username")).thenReturn("user@example.com");
-
-      assertFalse(EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(
-          conn, null, "user-id"));
+          "user@example.com", "user-id"));
     }
   }
-
-  // ---------------------------------------------------------------------------
-  // loadRoleListData
-  // ---------------------------------------------------------------------------
 
   @Nested
   @DisplayName("loadRoleListData")
   class LoadRoleListData {
 
+    @Mock private Session session;
+    @Mock private NativeQuery<Object[]> query;
+
     @Test
     @DisplayName("returns empty roleArray when user has no roles")
-    void emptyRoles() throws SQLException, JSONException {
-      when(rs.next()).thenReturn(false);
+    void emptyRoles() throws JSONException {
+      mockRoleListQuery(Collections.emptyList());
 
-      EtendoGoJwtSupport.RoleListData data =
-          EtendoGoJwtSupport.loadRoleListData(conn, "user-id");
+      EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
 
       assertNotNull(data.roleArray);
       assertEquals(0, data.roleArray.length());
       assertNull(data.firstRoleId);
+      verify(query).setParameter("userId", "user-id");
     }
 
     @Test
-    @DisplayName("loads multiple roles with organisations and sets firstRoleId")
-    void multipleRolesWithOrgs() throws SQLException, JSONException {
-      // We need separate mocks for the role query and each org sub-query
-      PreparedStatement psRoles = ps;
-      ResultSet rsRoles = rs;
+    @DisplayName("loads roles and organizations through one native SQL query")
+    void loadsRolesAndOrganizations() throws JSONException {
+      mockRoleListQuery(Arrays.asList(
+          new Object[]{ "role-1", "Admin", "org-1", "Main Org" },
+          new Object[]{ "role-1", "Admin", "org-2", "Second Org" },
+          new Object[]{ "role-2", "User", null, null }));
 
-      PreparedStatement psOrg1 = org.mockito.Mockito.mock(PreparedStatement.class);
-      ResultSet rsOrg1 = org.mockito.Mockito.mock(ResultSet.class);
-
-      PreparedStatement psOrg2 = org.mockito.Mockito.mock(PreparedStatement.class);
-      ResultSet rsOrg2 = org.mockito.Mockito.mock(ResultSet.class);
-
-      // Role query returns two roles
-      when(rsRoles.next()).thenReturn(true, true, false);
-      when(rsRoles.getString("ad_role_id")).thenReturn("role-1", "role-2");
-      when(rsRoles.getString("role_name")).thenReturn("Admin", "User");
-
-      // Wire org queries: conn.prepareStatement returns different PS per call
-      // First call returns psRoles (the role query), second and third return org PS
-      when(conn.prepareStatement(anyString()))
-          .thenReturn(psRoles, psOrg1, psOrg2);
-
-      // Org query for role-1: one org
-      when(psOrg1.executeQuery()).thenReturn(rsOrg1);
-      when(rsOrg1.next()).thenReturn(true, false);
-      when(rsOrg1.getString("ad_org_id")).thenReturn("org-1");
-      when(rsOrg1.getString("org_name")).thenReturn("Main Org");
-
-      // Org query for role-2: no orgs
-      when(psOrg2.executeQuery()).thenReturn(rsOrg2);
-      when(rsOrg2.next()).thenReturn(false);
-
-      EtendoGoJwtSupport.RoleListData data =
-          EtendoGoJwtSupport.loadRoleListData(conn, "user-id");
+      EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
 
       assertEquals("role-1", data.firstRoleId);
       assertEquals(2, data.roleArray.length());
-
       JSONObject firstRole = data.roleArray.getJSONObject(0);
       assertEquals("role-1", firstRole.getString("id"));
       assertEquals("Admin", firstRole.getString("name"));
       JSONArray orgList = firstRole.getJSONArray("orgList");
-      assertEquals(1, orgList.length());
+      assertEquals(2, orgList.length());
       assertEquals("org-1", orgList.getJSONObject(0).getString("id"));
       assertEquals("Main Org", orgList.getJSONObject(0).getString("name"));
-
-      JSONObject secondRole = data.roleArray.getJSONObject(1);
-      assertEquals("role-2", secondRole.getString("id"));
-      assertEquals("User", secondRole.getString("name"));
-      assertEquals(0, secondRole.getJSONArray("orgList").length());
+      assertEquals("org-2", orgList.getJSONObject(1).getString("id"));
+      assertEquals("Second Org", orgList.getJSONObject(1).getString("name"));
+      assertEquals(0, data.roleArray.getJSONObject(1).getJSONArray("orgList").length());
+      verify(session, times(1)).createNativeQuery(anyString());
+      verify(query).setParameter("userId", "user-id");
+      verify(query).list();
     }
 
     @Test
-    @DisplayName("firstRoleId is set to the first role encountered")
-    void firstRoleIdSetCorrectly() throws SQLException, JSONException {
-      PreparedStatement psOrg = org.mockito.Mockito.mock(PreparedStatement.class);
-      ResultSet rsOrg = org.mockito.Mockito.mock(ResultSet.class);
+    @DisplayName("wraps native SQL failures in OBException")
+    void wrapsSqlFailures() {
+      when(obDal.getSession()).thenReturn(session);
+      when(session.createNativeQuery(anyString())).thenReturn(query);
+      when(query.setParameter("userId", "user-id")).thenReturn(query);
+      when(query.list()).thenThrow(new RuntimeException("db-error"));
 
-      when(rs.next()).thenReturn(true, false);
-      when(rs.getString("ad_role_id")).thenReturn("only-role");
-      when(rs.getString("role_name")).thenReturn("Single");
+      OBException exception = assertThrows(OBException.class,
+          () -> EtendoGoJwtSupport.loadRoleListData("user-id"));
 
-      when(conn.prepareStatement(anyString())).thenReturn(ps, psOrg);
-      when(psOrg.executeQuery()).thenReturn(rsOrg);
-      when(rsOrg.next()).thenReturn(false);
+      assertTrue(exception.getMessage().contains("Error loading role list data for user: user-id"));
+    }
 
-      EtendoGoJwtSupport.RoleListData data =
-          EtendoGoJwtSupport.loadRoleListData(conn, "user-id");
-
-      assertEquals("only-role", data.firstRoleId);
-      assertEquals(1, data.roleArray.length());
+    private void mockRoleListQuery(java.util.List<Object[]> rows) {
+      when(obDal.getSession()).thenReturn(session);
+      when(session.createNativeQuery(anyString())).thenReturn(query);
+      when(query.setParameter("userId", "user-id")).thenReturn(query);
+      when(query.list()).thenReturn(rows);
     }
   }
-
-  // ---------------------------------------------------------------------------
-  // findClientIdByName
-  // ---------------------------------------------------------------------------
 
   @Nested
-  @DisplayName("findClientIdByName")
-  class FindClientIdByName {
+  @DisplayName("client and organization lookup")
+  class ClientAndOrganizationLookup {
+
+    @Mock private OBQuery<Client> clientQuery;
+    @Mock private OBQuery<Organization> organizationQuery;
 
     @Test
-    @DisplayName("returns client id when found")
-    void found() throws SQLException {
-      when(rs.next()).thenReturn(true);
-      when(rs.getString("ad_client_id")).thenReturn("client-123");
+    @DisplayName("findClientIdByName returns client id when found")
+    void findClientByName() {
+      Client client = mock(Client.class);
+      when(client.getId()).thenReturn("client-123");
+      when(obDal.createQuery(eq(Client.class), anyString())).thenReturn(clientQuery);
+      when(clientQuery.uniqueResult()).thenReturn(client);
 
-      assertEquals("client-123",
-          EtendoGoJwtSupport.findClientIdByName(conn, "My Client"));
+      assertEquals("client-123", EtendoGoJwtSupport.findClientIdByName("My Client"));
+      verify(clientQuery).setNamedParameter("clientName", "My Client");
+      verify(clientQuery).setFilterOnReadableClients(false);
+      verify(clientQuery).setFilterOnReadableOrganization(false);
+      verify(clientQuery).setMaxResult(1);
     }
 
     @Test
-    @DisplayName("returns null when client not found")
-    void notFound() throws SQLException {
-      when(rs.next()).thenReturn(false);
+    @DisplayName("star organization helpers use DAL queries")
+    void starOrganizationHelpers() {
+      Organization star = mock(Organization.class);
+      when(star.getId()).thenReturn("star-org-id");
+      when(obDal.createQuery(eq(Organization.class), anyString())).thenReturn(organizationQuery);
+      when(organizationQuery.uniqueResult()).thenReturn(star).thenReturn(null);
 
-      assertNull(EtendoGoJwtSupport.findClientIdByName(conn, "Missing"));
+      assertTrue(EtendoGoJwtSupport.hasStarOrganization("client-1"));
+      assertEquals("0", EtendoGoJwtSupport.findStarOrgId("client-1"));
+      verify(organizationQuery, times(2)).setNamedParameter("clientId", "client-1");
+      verify(organizationQuery, times(2)).setNamedParameter("starOrgValue", "*");
+    }
+
+    @Test
+    @DisplayName("organizationExists returns whether a non-star organization exists")
+    void organizationExists() {
+      Organization organization = mock(Organization.class);
+      when(obDal.createQuery(eq(Organization.class), anyString())).thenReturn(organizationQuery);
+      when(organizationQuery.uniqueResult()).thenReturn(organization).thenReturn(null);
+
+      assertTrue(EtendoGoJwtSupport.organizationExists("client-1"));
+      assertFalse(EtendoGoJwtSupport.organizationExists("client-1"));
     }
   }
-
-  // ---------------------------------------------------------------------------
-  // hasStarOrganization
-  // ---------------------------------------------------------------------------
-
-  @Nested
-  @DisplayName("hasStarOrganization")
-  class HasStarOrganization {
-
-    @Test
-    @DisplayName("returns true when star org exists")
-    void exists() throws SQLException {
-      when(rs.next()).thenReturn(true);
-
-      assertTrue(EtendoGoJwtSupport.hasStarOrganization(conn, "client-1"));
-    }
-
-    @Test
-    @DisplayName("returns false when no star org")
-    void notExists() throws SQLException {
-      when(rs.next()).thenReturn(false);
-
-      assertFalse(EtendoGoJwtSupport.hasStarOrganization(conn, "client-1"));
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // buildClientUsername
-  // ---------------------------------------------------------------------------
 
   @Nested
   @DisplayName("buildClientUsername")
   class BuildClientUsername {
 
+    @Mock private OBQuery<User> userQuery;
+
     @Test
-    @DisplayName("returns plain email when no existing ad_user")
-    void noExistingUser() throws SQLException {
-      when(rs.next()).thenReturn(false);
+    @DisplayName("returns plain email when no active AD user exists")
+    void noExistingUser() {
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
+      when(userQuery.uniqueResult()).thenReturn(null);
 
       assertEquals("user@test.com",
-          EtendoGoJwtSupport.buildClientUsername(conn, "user@test.com", "Acme Corp"));
+          EtendoGoJwtSupport.buildClientUsername("user@test.com", "Acme Corp"));
     }
 
     @Test
-    @DisplayName("returns email+safeClientName when user already exists")
-    void existingUser() throws SQLException {
-      when(rs.next()).thenReturn(true);
-
-      assertEquals("user@test.com+acmecorp",
-          EtendoGoJwtSupport.buildClientUsername(conn, "user@test.com", "Acme Corp"));
-    }
-
-    @Test
-    @DisplayName("sanitizes client name removing non-alphanumeric chars")
-    void sanitizesClientName() throws SQLException {
-      when(rs.next()).thenReturn(true);
+    @DisplayName("returns email plus sanitized client name when user exists")
+    void existingUser() {
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
+      when(userQuery.uniqueResult()).thenReturn(mock(User.class));
 
       assertEquals("user@test.com+my123company",
-          EtendoGoJwtSupport.buildClientUsername(conn, "user@test.com", "My-123 Company!"));
-    }
-
-    @Test
-    @DisplayName("handles null client name")
-    void nullClientName() throws SQLException {
-      when(rs.next()).thenReturn(true);
-
-      assertEquals("user@test.com+",
-          EtendoGoJwtSupport.buildClientUsername(conn, "user@test.com", null));
+          EtendoGoJwtSupport.buildClientUsername("user@test.com", "My-123 Company!"));
     }
   }
-
-  // ---------------------------------------------------------------------------
-  // findStarOrgId
-  // ---------------------------------------------------------------------------
-
-  @Nested
-  @DisplayName("findStarOrgId")
-  class FindStarOrgId {
-
-    @Test
-    @DisplayName("returns org id when star org found")
-    void found() throws SQLException {
-      when(rs.next()).thenReturn(true);
-      when(rs.getString("ad_org_id")).thenReturn("star-org-id");
-
-      assertEquals("star-org-id",
-          EtendoGoJwtSupport.findStarOrgId(conn, "client-1"));
-    }
-
-    @Test
-    @DisplayName("returns default '0' when no star org")
-    void notFound() throws SQLException {
-      when(rs.next()).thenReturn(false);
-
-      assertEquals("0",
-          EtendoGoJwtSupport.findStarOrgId(conn, "client-1"));
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // organizationExists
-  // ---------------------------------------------------------------------------
-
-  @Nested
-  @DisplayName("organizationExists")
-  class OrganizationExists {
-
-    @Test
-    @DisplayName("returns true when non-star org exists")
-    void exists() throws SQLException {
-      when(rs.next()).thenReturn(true);
-
-      assertTrue(EtendoGoJwtSupport.organizationExists(conn, "client-1"));
-    }
-
-    @Test
-    @DisplayName("returns false when no non-star org")
-    void notExists() throws SQLException {
-      when(rs.next()).thenReturn(false);
-
-      assertFalse(EtendoGoJwtSupport.organizationExists(conn, "client-1"));
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // RoleListData inner class
-  // ---------------------------------------------------------------------------
 
   @Nested
   @DisplayName("RoleListData")
@@ -422,4 +327,13 @@ class EtendoGoJwtSupportTest {
       assertEquals(0, data.roleArray.length());
     }
   }
+
+  private User mockUser(String userId, boolean active, String username) {
+    User user = mock(User.class);
+    when(user.isActive()).thenReturn(active);
+    when(user.getUsername()).thenReturn(username);
+    when(obDal.get(User.class, userId)).thenReturn(user);
+    return user;
+  }
+
 }

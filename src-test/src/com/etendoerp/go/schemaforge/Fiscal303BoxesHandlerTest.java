@@ -42,6 +42,7 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.junit.Test;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
@@ -55,7 +56,6 @@ import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.BoxGroupConfig;
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.ComputeResult;
-import com.etendoerp.go.schemaforge.data.FiscalDecl;
 
 /**
  * Unit tests for {@link Fiscal303BoxesHandler}.
@@ -285,9 +285,7 @@ public class Fiscal303BoxesHandlerTest {
   }
 
   /**
-   * A GET request to an entity name other than {@code "boxes"} must be rejected
-   * with 405. The Fiscal303 handler owns only the {@code /fiscal303/boxes}
-   * sub-path; anything else falls outside its contract.
+   * A GET request to an unknown entity name must be rejected with 404.
    */
   @Test
   public void testHandleRejectsUnknownEntityName() throws IOException {
@@ -295,7 +293,7 @@ public class Fiscal303BoxesHandlerTest {
     HttpServletResponse res = mock(HttpServletResponse.class);
     Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
     h.handle("invoices", "GET", mock(HttpServletRequest.class), res);
-    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED), anyString());
+    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_NOT_FOUND), anyString());
   }
 
   /**
@@ -1111,22 +1109,21 @@ public class Fiscal303BoxesHandlerTest {
   }
 
   /**
-   * {@code declToJson} must use DEFAULT_STATUS ("draft") when
-   * {@link FiscalDecl#getDeclarationStatus()} returns null, so that GET
-   * serialization is never locale-specific.
+   * {@code declToJson} must use DEFAULT_STATUS ("draft") when the declaration status is null,
+   * so that GET serialization is never locale-specific.
    */
   @Test
   public void testDeclToJson_nullStatusFallsBackToDraft() throws Exception {
-    FiscalDecl decl = mock(FiscalDecl.class);
+    BaseOBObject decl = mock(BaseOBObject.class);
     when(decl.getId()).thenReturn("test-id");
-    when(decl.getFiscalModel()).thenReturn("303");
-    when(decl.getFiscalYear()).thenReturn(2026L);
-    when(decl.getPeriod()).thenReturn("T1");
-    when(decl.getDeclarationType()).thenReturn("O");
-    when(decl.getDeclarationStatus()).thenReturn(null);  // null → must fall back to DEFAULT_STATUS
-    when(decl.getDeclarationFileName()).thenReturn(null);
-    when(decl.isFileExternal()).thenReturn(false);
-    when(decl.getUpdated()).thenReturn(null);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn("303");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_TYPE)).thenReturn("O");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn(null);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_FILE_NAME)).thenReturn(null);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FILE_EXTERNAL)).thenReturn(false);
+    when(decl.get("updated")).thenReturn(null);
 
     JSONObject json = declHandler.declToJson(decl);
     assertEquals("draft", json.getString("status"));
@@ -1138,16 +1135,16 @@ public class Fiscal303BoxesHandlerTest {
    */
   @Test
   public void testDeclToJson_explicitStatusIsPreserved() throws Exception {
-    FiscalDecl decl = mock(FiscalDecl.class);
+    BaseOBObject decl = mock(BaseOBObject.class);
     when(decl.getId()).thenReturn("test-id");
-    when(decl.getFiscalModel()).thenReturn("303");
-    when(decl.getFiscalYear()).thenReturn(2026L);
-    when(decl.getPeriod()).thenReturn("T1");
-    when(decl.getDeclarationType()).thenReturn("O");
-    when(decl.getDeclarationStatus()).thenReturn("submitted");
-    when(decl.getDeclarationFileName()).thenReturn(null);
-    when(decl.isFileExternal()).thenReturn(false);
-    when(decl.getUpdated()).thenReturn(null);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn("303");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_TYPE)).thenReturn("O");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_FILE_NAME)).thenReturn(null);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FILE_EXTERNAL)).thenReturn(false);
+    when(decl.get("updated")).thenReturn(null);
 
     JSONObject json = declHandler.declToJson(decl);
     assertEquals("submitted", json.getString("status"));
