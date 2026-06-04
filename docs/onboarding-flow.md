@@ -6,6 +6,10 @@ The `POST /sws/go/onboarding` endpoint streams NDJSON progress events while
 setting up a newly registered client. The core method is
 `EtendoGoJwtServlet.ensureOnboardingDataset`, which runs five steps in order.
 Each step either completes or emits an `{"status":"error"}` event and aborts.
+After all steps complete, the endpoint commits the DAL transaction and then sends
+the `environment-ready` transactional email best-effort. Email delivery failure
+is audited by the transactional email safety store and does not roll back the
+already committed environment.
 
 ## Step Sequence
 
@@ -86,3 +90,18 @@ On error:
 ```
 
 The final event always carries `"success": true|false`.
+
+## Transactional Email Behavior
+
+The onboarding flow participates in the local-account transactional auth email
+model:
+
+- `/sws/go/register` sends `new-account` after the account commit.
+- `/sws/go/onboarding` sends `environment-ready` only after onboarding commits.
+- Both emails use server-generated links based on `etendo.go.app.baseUrl` or
+  `ETGO_APP_BASE_URL`.
+- Email verification is intentionally out of scope for local accounts; onboarding
+  and login are not blocked by an email verification state because SSO is the
+  next authentication step.
+- `login-alert` remains a registered contract but is not triggered until the SSO
+  and risk-policy model is defined.

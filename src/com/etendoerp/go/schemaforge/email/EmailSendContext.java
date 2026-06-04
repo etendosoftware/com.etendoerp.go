@@ -29,6 +29,8 @@ import org.openbravo.dal.core.OBContext;
  */
 public final class EmailSendContext {
 
+  private static final String SYSTEM_CLIENT_ID = "0";
+
   private final EmailContractCommand command;
   private final EmailRecipientResolution recipient;
   private final EmailProviderRequest providerRequest;
@@ -91,9 +93,17 @@ public final class EmailSendContext {
    */
   public String getTenantId() {
     String contextClientId = currentContextClientId();
-    if (contextClientId != null) {
+    if (contextClientId != null && !SYSTEM_CLIENT_ID.equals(contextClientId)) {
       return contextClientId;
     }
+    String commandTenantId = commandTenantId();
+    if (commandTenantId != null) {
+      return commandTenantId;
+    }
+    return contextClientId;
+  }
+
+  private String commandTenantId() {
     JSONObject body = command.getBody();
     if (body == null) {
       return null;

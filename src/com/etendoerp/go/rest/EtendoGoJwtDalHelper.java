@@ -16,6 +16,7 @@
  */
 package com.etendoerp.go.rest;
 
+import java.util.Date;
 import java.util.List;
 
 import org.codehaus.jettison.json.JSONException;
@@ -38,6 +39,7 @@ final class EtendoGoJwtDalHelper {
   private static final String SYSTEM_USER_ID = "100";
   private static final String PARAM_EMAIL = "email";
   private static final String PARAM_TOKEN = "token";
+  private static final String PARAM_RESET_TOKEN_HASH = "resetTokenHash";
   private static final String PARAM_ACCOUNT_EMAIL = "accountEmail";
   private static final String PARAM_ACCOUNT_PREFIX = "accountPrefix";
   private static final String PARAM_CLIENT_ID = "clientId";
@@ -51,6 +53,10 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_ADMIN_USER_ID = "adminUserId";
   private static final String FIELD_ADMIN_USER = "adminUser";
   private static final String FIELD_ADMIN_USER_NAME = "adminUserName";
+  private static final String PROPERTY_PASSWORD_CHANGED = "passwordChanged";
+  private static final String PROPERTY_RESET_TOKEN_CONSUMED = "resetTokenConsumed";
+  private static final String PROPERTY_RESET_TOKEN_EXPIRES = "resetTokenExpires";
+  private static final String PROPERTY_RESET_TOKEN_HASH = "resetTokenHash";
 
   private EtendoGoJwtDalHelper() {
   }
@@ -88,6 +94,71 @@ final class EtendoGoJwtDalHelper {
 
   static void updateSessionToken(Account account, String sessionToken) {
     account.setSessionToken(sessionToken);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+  }
+
+  static void storePasswordResetToken(Account account, String resetTokenHash, Date expiresAt) {
+    account.set(PROPERTY_RESET_TOKEN_HASH, resetTokenHash);
+    account.set(PROPERTY_RESET_TOKEN_EXPIRES, expiresAt);
+    account.set(PROPERTY_RESET_TOKEN_CONSUMED, null);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+  }
+
+  static PasswordResetTokenState capturePasswordResetToken(Account account) {
+    if (account == null) {
+      return null;
+    }
+    return new PasswordResetTokenState((String) account.get(PROPERTY_RESET_TOKEN_HASH),
+        (Date) account.get(PROPERTY_RESET_TOKEN_EXPIRES),
+        (Date) account.get(PROPERTY_RESET_TOKEN_CONSUMED));
+  }
+
+  static void restorePasswordResetToken(Account account, PasswordResetTokenState tokenState) {
+    if (account == null || tokenState == null) {
+      return;
+    }
+    account.set(PROPERTY_RESET_TOKEN_HASH, tokenState.resetTokenHash);
+    account.set(PROPERTY_RESET_TOKEN_EXPIRES, tokenState.resetTokenExpires);
+    account.set(PROPERTY_RESET_TOKEN_CONSUMED, tokenState.resetTokenConsumed);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+  }
+
+  static Account findActiveAccountByResetTokenHash(String resetTokenHash, Date now) {
+    OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
+        "as account where account." + PROPERTY_RESET_TOKEN_HASH + " = :"
+            + PARAM_RESET_TOKEN_HASH
+            + " and account." + PROPERTY_RESET_TOKEN_EXPIRES + " > :now"
+            + " and account." + PROPERTY_RESET_TOKEN_CONSUMED + " is null"
+            + " and account.active = true");
+    query.setNamedParameter(PARAM_RESET_TOKEN_HASH, resetTokenHash);
+    query.setNamedParameter("now", now);
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    return query.uniqueResult();
+  }
+
+  static void consumePasswordReset(Account account, String passwordHash, Date changedAt) {
+    account.setPasswordHash(passwordHash);
+    account.setSessionToken(null);
+    account.set(PROPERTY_RESET_TOKEN_HASH, null);
+    account.set(PROPERTY_RESET_TOKEN_EXPIRES, null);
+    account.set(PROPERTY_RESET_TOKEN_CONSUMED, changedAt);
+    account.set(PROPERTY_PASSWORD_CHANGED, changedAt);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+  }
+
+  static void changePassword(Account account, String passwordHash, String sessionToken,
+      Date changedAt) {
+    account.setPasswordHash(passwordHash);
+    account.setSessionToken(sessionToken);
+    account.set(PROPERTY_RESET_TOKEN_HASH, null);
+    account.set(PROPERTY_RESET_TOKEN_EXPIRES, null);
+    account.set(PROPERTY_RESET_TOKEN_CONSUMED, changedAt);
+    account.set(PROPERTY_PASSWORD_CHANGED, changedAt);
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
   }
@@ -170,5 +241,18 @@ final class EtendoGoJwtDalHelper {
   private static void flushAndCommitDalChanges() {
     OBDal.getInstance().flush();
     OBDal.getInstance().commitAndClose();
+  }
+
+  static final class PasswordResetTokenState {
+    private final String resetTokenHash;
+    private final Date resetTokenExpires;
+    private final Date resetTokenConsumed;
+
+    private PasswordResetTokenState(String resetTokenHash, Date resetTokenExpires,
+        Date resetTokenConsumed) {
+      this.resetTokenHash = resetTokenHash;
+      this.resetTokenExpires = resetTokenExpires;
+      this.resetTokenConsumed = resetTokenConsumed;
+    }
   }
 }
