@@ -128,6 +128,8 @@ public class InitialEmailContractsTest {
     assertEquals("es_ES", adapter.getLastRequest().getData().getString("language"));
     assertEquals("Bienvenido a Etendo Go",
         adapter.getLastRequest().getData().getString("subject"));
+    assertTrue(adapter.getLastRequest().getData().getString("body")
+        .contains("Tu cuenta de Etendo Go fue creada correctamente"));
   }
 
   @Test
@@ -167,6 +169,8 @@ public class InitialEmailContractsTest {
         adapter.getLastRequest().getData().getString("link"));
     assertEquals("Your Etendo Go environment is ready",
         adapter.getLastRequest().getData().getString("subject"));
+    assertTrue(adapter.getLastRequest().getData().getString("body")
+        .contains("https://app.example.test/dashboard"));
     assertEquals("environment-ready:tenant-1:client-1:v1",
         safetyStore.getAuditRecords().get(0).getIdempotencyKey());
   }
@@ -211,6 +215,8 @@ public class InitialEmailContractsTest {
         adapter.getLastRequest().getData().getString("date"));
     assertEquals("Your Etendo Go password was changed",
         adapter.getLastRequest().getData().getString("subject"));
+    assertTrue(adapter.getLastRequest().getData().getString("body")
+        .contains("contact support"));
     assertFalse(adapter.getLastRequest().getData().has("link"));
   }
 
