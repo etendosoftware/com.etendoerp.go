@@ -118,6 +118,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
 
   /** JSON keys reused across rows and totals — extracted to satisfy Sonar S1192. */
   private static final String KEY_BALANCE = "balance";
+  private static final String KEY_RESPONSE = "response";
   private static final String FIELD_TRX_TYPE = "trxType";
   private static final String FIELD_DESCRIPTION = "description";
 
@@ -271,7 +272,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     JSONObject responseData = new JSONObject();
     responseData.put("data", data);
     JSONObject envelope = new JSONObject();
-    envelope.put("response", responseData);
+    envelope.put(KEY_RESPONSE, responseData);
     return NeoResponse.ok(envelope);
   }
 
@@ -688,6 +689,17 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     return 10L;
   }
 
+  /** SQL fragment restricting bpartners by role (customer / vendor / any). */
+  private static String bpartnerRoleFilter(String role) {
+    if ("customer".equals(role)) {
+      return " AND iscustomer='Y'";
+    }
+    if ("vendor".equals(role)) {
+      return " AND isvendor='Y'";
+    }
+    return "";
+  }
+
   /**
    * Handles {@code GET ?action=bpartner-lookup&q=...&role=customer|vendor} —
    * fuzzy search over {@code c_bpartner.name}, scoped to the current client +
@@ -697,12 +709,10 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private NeoResponse handleBpartnerLookup(NeoContext context) {
     String q = context.getQueryParams() != null ? context.getQueryParams().get("q") : "";
     String role = context.getQueryParams() != null ? context.getQueryParams().getOrDefault("role", "") : "";
-    String roleFilter = "customer".equals(role) ? " AND iscustomer='Y'"
-        : "vendor".equals(role) ? " AND isvendor='Y'" : "";
     return runLookup(
         "SELECT c_bpartner_id AS id, name FROM c_bpartner"
             + " WHERE isactive='Y' AND ad_client_id IN (?, ?)"
-            + roleFilter
+            + bpartnerRoleFilter(role)
             + "   AND LOWER(name) LIKE ?"
             + " ORDER BY name ASC"
             + " LIMIT " + LOOKUP_LIMIT,
@@ -729,8 +739,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       DIM_ACTIVITY, new String[] { "c_activity", "c_activity_id" },
       DIM_CAMPAIGN, new String[] { "c_campaign", "c_campaign_id" },
       DIM_SALESREGION, new String[] { "c_salesregion", "c_salesregion_id" },
-      DIM_USER1, new String[] { "user1", "user1_id" },
-      DIM_USER2, new String[] { "user2", "user2_id" });
+      DIM_USER1, new String[] { DIM_USER1, "user1_id" },
+      DIM_USER2, new String[] { DIM_USER2, "user2_id" });
 
   /**
    * Handles {@code GET ?action=dimension-values&dimension=<key>&q=...} — returns
@@ -836,7 +846,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       JSONObject responseData = new JSONObject();
       responseData.put("data", data);
       JSONObject envelope = new JSONObject();
-      envelope.put("response", responseData);
+      envelope.put(KEY_RESPONSE, responseData);
       return NeoResponse.ok(envelope);
     } catch (Exception e) {
       log.error("Outstanding invoices lookup failed for bpartner {}", bpartnerId, e);
@@ -854,12 +864,12 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     row.put("id", rs.getString("id"));
     row.put("no", StringUtils.trimToEmpty(rs.getString("doc_no")));
     row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString("descr")));
-    row.put("bp", StringUtils.trimToEmpty(rs.getString("bpartner")));
+    row.put("bp", StringUtils.trimToEmpty(rs.getString(DIM_BPARTNER)));
     row.put("fecha", formatDmy(invoiceDate));
     row.put("venc", formatDmy(dueDate));
     row.put("dias", daysUntil(dueDate, today));
     row.put("metodo", StringUtils.trimToEmpty(rs.getString("payment_method")));
-    row.put("proyecto", StringUtils.trimToEmpty(rs.getString("project")));
+    row.put("proyecto", StringUtils.trimToEmpty(rs.getString(DIM_PROJECT)));
     row.put("orderNo", StringUtils.trimToEmpty(rs.getString("order_no")));
     row.put("cc", "");
     row.put("mon", StringUtils.trimToEmpty(rs.getString("currency_iso")));
@@ -902,7 +912,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       JSONObject responseData = new JSONObject();
       responseData.put("data", data);
       JSONObject envelope = new JSONObject();
-      envelope.put("response", responseData);
+      envelope.put(KEY_RESPONSE, responseData);
       return NeoResponse.ok(envelope);
     } catch (Exception e) {
       log.error("Lookup failed for query '{}'", q, e);

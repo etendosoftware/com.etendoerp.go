@@ -23,8 +23,6 @@ import java.util.Date;
 import java.util.Iterator;
 import java.util.List;
 
-import javax.servlet.http.HttpServletResponse;
-
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -95,64 +93,22 @@ final class AddPaymentService {
    * </pre>
    */
   static NeoResponse doAddPayment(JSONObject body) throws Exception {
-    // ── Parse + validate primitives ─────────────────────────────────────────
-    String accountId = body.optString("FIN_Financial_Account_ID", null);
-    if (StringUtils.isBlank(accountId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Missing FIN_Financial_Account_ID");
-    }
-    String bpartnerId = body.optString("bpartnerId", null);
-    if (StringUtils.isBlank(bpartnerId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "A contact (bpartnerId) is required to register a payment");
-    }
     boolean isReceipt = body.optBoolean("isReceipt", true);
+    BigDecimal amount = parseAmountStrict(body.optString("amount", ""));
+    Date paymentDate = parsePaymentDate(body.optString("paymentDate", ""));
 
-    BigDecimal amount;
-    try {
-      amount = new BigDecimal(body.optString("amount", ""));
-    } catch (NumberFormatException e) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Invalid amount: " + body.optString("amount", ""));
-    }
-    if (amount.signum() <= 0) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Amount must be greater than 0");
-    }
-
-    Date paymentDate;
-    try {
-      paymentDate = JsonUtils.createDateFormat().parse(body.optString("paymentDate", ""));
-    } catch (ParseException e) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Invalid paymentDate: " + body.optString("paymentDate", ""));
-    }
-
-    // ── Resolve entities ────────────────────────────────────────────────────
-    FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
-    if (account == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Financial account not found");
-    }
-    BusinessPartner bp = OBDal.getInstance().get(BusinessPartner.class, bpartnerId);
-    if (bp == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Contact not found");
-    }
+    FIN_FinancialAccount account = require(
+        OBDal.getInstance().get(FIN_FinancialAccount.class, body.optString("FIN_Financial_Account_ID", null)),
+        "Financial account not found");
+    BusinessPartner bp = require(
+        OBDal.getInstance().get(BusinessPartner.class, body.optString("bpartnerId", null)),
+        "A contact (bpartnerId) is required to register a payment");
     Currency currency = account.getCurrency();
+    Organization org = resolveOrg(account, body.optString("organizationId", null));
 
-    Organization org = account.getOrganization();
-    String organizationId = body.optString("organizationId", null);
-    if (StringUtils.isNotBlank(organizationId)) {
-      Organization movementOrg = OBDal.getInstance().get(Organization.class, organizationId);
-      if (movementOrg != null) {
-        org = movementOrg;
-      }
-    }
-
-    FIN_PaymentMethod paymentMethod = resolvePaymentMethod(account,
-        body.optString("paymentMethodId", null), isReceipt);
-    if (paymentMethod == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "No valid payment method for this financial account");
-    }
+    FIN_PaymentMethod paymentMethod = require(
+        resolvePaymentMethod(account, body.optString("paymentMethodId", null), isReceipt),
+        "No valid payment method for this financial account");
 
     DocumentType docType = FIN_Utility.getDocumentType(org, isReceipt ? "ARR" : "APP");
     if (docType == null) {
@@ -180,15 +136,27 @@ final class AddPaymentService {
     OBDal.getInstance().save(payment);
     OBDal.getInstance().flush();
 
-    // ── Link selected invoices (with optional write-off) ────────────────────
+    // ── Link selected invoices + G/L lines ──────────────────────────────────
     linkInvoices(payment, body.optJSONObject("selectedInvoices"), body.optJSONObject("writeoffs"));
-
-    // ── Add G/L item lines ──────────────────────────────────────────────────
     addGlItems(payment, body.optJSONArray("glItems"), isReceipt);
 
-    // ── Over-payment: register the leftover as a generated-credit detail ─────
-    BigDecimal assigned = assignedAmount(payment);
-    BigDecimal leftover = amount.subtract(assigned);
+    // ── Process (auto-creates the transaction) + optional refund ────────────
+    FIN_Payment refundPayment = processAndRefund(payment, amount,
+        body.optString("overpaymentAction", null), org, vars, conn, dao);
+
+    return buildResponse(payment, refundPayment);
+  }
+
+  /**
+   * Registers the over-payment as a generated-credit detail, processes the
+   * payment with action {@code "P"} (which auto-creates the bank transaction),
+   * and — when the over-payment action is a refund — creates and processes the
+   * refund payment. Returns the refund payment, or {@code null} when none.
+   */
+  private static FIN_Payment processAndRefund(FIN_Payment payment, BigDecimal amount,
+      String overpaymentAction, Organization org, VariablesSecureApp vars,
+      DalConnectionProvider conn, AdvPaymentMngtDao dao) throws Exception {
+    BigDecimal leftover = amount.subtract(assignedAmount(payment));
     boolean overpaid = leftover.signum() > 0;
     if (overpaid) {
       FIN_PaymentScheduleDetail creditPsd = dao.getNewPaymentScheduleDetail(org, leftover);
@@ -196,27 +164,28 @@ final class AddPaymentService {
     }
     OBDal.getInstance().flush();
 
-    // ── Process (creates the FIN_FinaccTransaction, posts, generates credit) ─
-    OBError result = FIN_AddPayment.processPayment(vars, conn, "P", payment, "");
+    failOnError(FIN_AddPayment.processPayment(vars, conn, "P", payment, ""));
     OBDal.getInstance().flush();
+
+    if (!overpaid || !"refund".equals(overpaymentAction)) {
+      return null;
+    }
+    FIN_Payment refundPayment = FIN_AddPayment.createRefundPayment(conn, vars, payment,
+        leftover.negate(), null);
+    failOnError(FIN_AddPayment.processPayment(vars, conn, "P", refundPayment, "",
+        "(" + payment.getId() + ")"));
+    OBDal.getInstance().flush();
+    return refundPayment;
+  }
+
+  private static void failOnError(OBError result) {
     if ("Error".equalsIgnoreCase(result.getType())) {
       throw new OBException(result.getMessage());
     }
+  }
 
-    // ── Refund the over-payment when requested ──────────────────────────────
-    boolean doRefund = overpaid && "refund".equals(body.optString("overpaymentAction", null));
-    FIN_Payment refundPayment = null;
-    if (doRefund) {
-      refundPayment = FIN_AddPayment.createRefundPayment(conn, vars, payment, leftover.negate(), null);
-      OBError refundResult = FIN_AddPayment.processPayment(vars, conn, "P", refundPayment, "",
-          "(" + payment.getId() + ")");
-      OBDal.getInstance().flush();
-      if ("Error".equalsIgnoreCase(refundResult.getType())) {
-        throw new OBException(refundResult.getMessage());
-      }
-    }
-
-    // ── Response ────────────────────────────────────────────────────────────
+  private static NeoResponse buildResponse(FIN_Payment payment, FIN_Payment refundPayment)
+      throws Exception {
     JSONObject data = new JSONObject();
     data.put("id", payment.getId());
     data.put("documentNo", payment.getDocumentNo());
@@ -229,6 +198,48 @@ final class AddPaymentService {
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────────────
+
+  /** Parses a strictly-positive amount, throwing OBException (→ HTTP 400) when invalid. */
+  private static BigDecimal parseAmountStrict(String raw) {
+    BigDecimal amount;
+    try {
+      amount = new BigDecimal(raw);
+    } catch (NumberFormatException e) {
+      throw new OBException("Invalid amount: " + raw);
+    }
+    if (amount.signum() <= 0) {
+      throw new OBException("Amount must be greater than 0");
+    }
+    return amount;
+  }
+
+  /** Parses the payment date (yyyy-MM-dd), throwing OBException (→ HTTP 400) when invalid. */
+  private static Date parsePaymentDate(String raw) {
+    try {
+      return JsonUtils.createDateFormat().parse(raw);
+    } catch (ParseException e) {
+      throw new OBException("Invalid paymentDate: " + raw);
+    }
+  }
+
+  /** Returns the entity, or throws OBException (→ HTTP 400) with the message when null. */
+  private static <T> T require(T entity, String message) {
+    if (entity == null) {
+      throw new OBException(message);
+    }
+    return entity;
+  }
+
+  /** The movement organization when provided and valid, otherwise the account's. */
+  private static Organization resolveOrg(FIN_FinancialAccount account, String organizationId) {
+    if (StringUtils.isNotBlank(organizationId)) {
+      Organization movementOrg = OBDal.getInstance().get(Organization.class, organizationId);
+      if (movementOrg != null) {
+        return movementOrg;
+      }
+    }
+    return account.getOrganization();
+  }
 
   /** Sum of the payment's current detail amounts (mirrors Classic's assignedAmount). */
   private static BigDecimal assignedAmount(FIN_Payment payment) {
@@ -248,13 +259,8 @@ final class AddPaymentService {
     Iterator<?> keys = selectedInvoices.keys();
     while (keys.hasNext()) {
       String psdId = (String) keys.next();
-      BigDecimal amt;
-      try {
-        amt = new BigDecimal(selectedInvoices.optString(psdId, "0"));
-      } catch (NumberFormatException e) {
-        continue;
-      }
-      if (amt.signum() == 0) {
+      BigDecimal amt = parseAmountOrNull(selectedInvoices.optString(psdId, "0"));
+      if (amt == null || amt.signum() == 0) {
         continue;
       }
       FIN_PaymentScheduleDetail psd = OBDal.getInstance().get(FIN_PaymentScheduleDetail.class, psdId);
@@ -263,6 +269,15 @@ final class AddPaymentService {
       }
       boolean isWriteoff = writeoffs != null && writeoffs.optBoolean(psdId, false);
       FIN_AddPayment.updatePaymentDetail(psd, payment, amt, isWriteoff);
+    }
+  }
+
+  /** Parses a decimal, returning null instead of throwing on malformed input. */
+  private static BigDecimal parseAmountOrNull(String raw) {
+    try {
+      return new BigDecimal(raw);
+    } catch (NumberFormatException e) {
+      return null;
     }
   }
 
@@ -275,13 +290,10 @@ final class AddPaymentService {
     for (int i = 0; i < glItems.length(); i++) {
       JSONObject line = glItems.getJSONObject(i);
       String glItemId = line.optString("glItemId", null);
-      if (StringUtils.isBlank(glItemId)) {
-        continue;
-      }
       BigDecimal received = new BigDecimal(line.optString("receivedIn", "0"));
       BigDecimal paid = new BigDecimal(line.optString("paidOut", "0"));
       BigDecimal glAmount = isReceipt ? received.subtract(paid) : paid.subtract(received);
-      if (glAmount.signum() == 0) {
+      if (StringUtils.isBlank(glItemId) || glAmount.signum() == 0) {
         continue;
       }
       GLItem glItem = OBDal.getInstance().get(GLItem.class, glItemId);
