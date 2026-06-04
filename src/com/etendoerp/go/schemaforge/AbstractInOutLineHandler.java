@@ -125,7 +125,7 @@ public abstract class AbstractInOutLineHandler implements NeoHandler {
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching inout lines", e);
-      throw new org.openbravo.base.exception.OBException(e);
+      return null;
     }
   }
 
