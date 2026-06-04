@@ -175,7 +175,7 @@ class EtendoGoJwtSupportTest {
       assertNotNull(data.roleArray);
       assertEquals(0, data.roleArray.length());
       assertNull(data.firstRoleId);
-      verify(query).setParameter(1, "user-id");
+      verify(query).setParameter("userId", "user-id");
     }
 
     @Test
@@ -201,7 +201,7 @@ class EtendoGoJwtSupportTest {
       assertEquals("Second Org", orgList.getJSONObject(1).getString("name"));
       assertEquals(0, data.roleArray.getJSONObject(1).getJSONArray("orgList").length());
       verify(session, times(1)).createNativeQuery(anyString());
-      verify(query).setParameter(1, "user-id");
+      verify(query).setParameter("userId", "user-id");
       verify(query).list();
     }
 
@@ -210,7 +210,7 @@ class EtendoGoJwtSupportTest {
     void wrapsSqlFailures() {
       when(obDal.getSession()).thenReturn(session);
       when(session.createNativeQuery(anyString())).thenReturn(query);
-      when(query.setParameter(1, "user-id")).thenReturn(query);
+      when(query.setParameter("userId", "user-id")).thenReturn(query);
       when(query.list()).thenThrow(new RuntimeException("db-error"));
 
       OBException exception = assertThrows(OBException.class,
@@ -222,7 +222,7 @@ class EtendoGoJwtSupportTest {
     private void mockRoleListQuery(java.util.List<Object[]> rows) {
       when(obDal.getSession()).thenReturn(session);
       when(session.createNativeQuery(anyString())).thenReturn(query);
-      when(query.setParameter(1, "user-id")).thenReturn(query);
+      when(query.setParameter("userId", "user-id")).thenReturn(query);
       when(query.list()).thenReturn(rows);
     }
   }

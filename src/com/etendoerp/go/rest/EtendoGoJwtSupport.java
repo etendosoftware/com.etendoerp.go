@@ -46,7 +46,7 @@ final class EtendoGoJwtSupport {
           + "LEFT JOIN ad_role_orgaccess roa ON r.ad_role_id = roa.ad_role_id "
           + "AND roa.isactive = 'Y' "
           + "LEFT JOIN ad_org o ON roa.ad_org_id = o.ad_org_id AND o.isactive = 'Y' "
-          + "WHERE ur.ad_user_id = ? AND ur.isactive = 'Y' AND r.isactive = 'Y' "
+          + "WHERE ur.ad_user_id = :userId AND ur.isactive = 'Y' AND r.isactive = 'Y' "
           + "ORDER BY r.created, o.name";
 
   private EtendoGoJwtSupport() {
@@ -85,7 +85,7 @@ final class EtendoGoJwtSupport {
     NativeQuery<Object[]> query = OBDal.getInstance()
         .getSession()
         .createNativeQuery(SQL_FIND_ROLE_LIST_BY_USER);
-    query.setParameter(1, userId);
+    query.setParameter("userId", userId);
     return query.list();
   }
 
