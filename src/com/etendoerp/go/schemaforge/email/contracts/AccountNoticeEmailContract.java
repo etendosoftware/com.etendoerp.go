@@ -143,10 +143,8 @@ final class AccountNoticeEmailContract implements EmailContract {
     /**
      * Adds custom notice content to the provider payload.
      *
-     * @param data
-     *     provider payload to populate
-     * @throws JSONException
-     *     when the payload cannot be populated
+     * @param data provider payload to populate
+     * @throws JSONException when the payload cannot be populated
      */
     void apply(JSONObject data) throws JSONException;
   }
