@@ -90,11 +90,10 @@ class TransactionalAuthEmailSender {
   boolean sendPasswordReset(Account account, String resetToken,
       String resetTokenHash, String resetLink) {
     if (account == null || StringUtils.isBlank(resetToken)
-        || StringUtils.isBlank(resetTokenHash)) {
+        || StringUtils.isBlank(resetTokenHash) || StringUtils.isBlank(resetLink)) {
       return false;
     }
-    return sendAccountLink(CONTRACT_RESET_PASSWORD, account,
-        resetLink, resetTokenHash, null);
+    return sendAccountLink(CONTRACT_RESET_PASSWORD, account, resetLink, resetTokenHash);
   }
 
   boolean sendPasswordChanged(Account account) {

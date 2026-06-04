@@ -174,10 +174,10 @@ Auth account-link contracts generate app links from server configuration:
 
 `etgo.app.url` / `ETGO_APP_URL` remain as legacy fallbacks.
 
-Password reset requests fall back to the incoming public request origin when no
-app base URL is configured. This fallback intentionally ignores the servlet
-context path so deployments mounted under `/etendo` still generate frontend
-links under `/onboarding?resetToken=...`.
+Password reset links require a configured app base URL. The reset request
+endpoint never builds token-bearing email links from the incoming request
+`Host`; if no app base URL is configured, it keeps the neutral response,
+restores the previous reset token state, and skips the email send.
 
 Document-send contracts generate `download_link` from server configuration:
 

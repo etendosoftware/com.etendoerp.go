@@ -351,7 +351,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
       Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
       if (account != null) {
-        storeResetTokenAndSendEmail(account, resolvePasswordResetAppBaseUrl(request));
+        storeResetTokenAndSendEmail(account, PublicUrlResolver.resolveConfiguredAppBaseUrl());
       }
       writePasswordResetNeutralResponse(response);
     } catch (RuntimeException e) {
@@ -1160,31 +1160,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     EtendoGoJwtDalHelper.storePasswordResetToken(account, resetTokenHash, expiresAt);
 
     boolean emailSent = false;
-    try {
-      emailSent = authEmailSender.sendPasswordReset(account, resetToken, resetTokenHash,
-          EtendoGoAuthLinkBuilder.resetPasswordLink(resetToken, appBaseUrl));
-    } catch (RuntimeException e) {
-      log.warn("Auth email reset-password failed after token storage", e);
+    String resetLink = EtendoGoAuthLinkBuilder.resetPasswordLink(resetToken, appBaseUrl);
+    if (resetLink == null) {
+      log.warn("Auth email reset-password skipped because the public app base URL is not configured");
+    } else {
+      try {
+        emailSent = authEmailSender.sendPasswordReset(account, resetToken, resetTokenHash,
+            resetLink);
+      } catch (RuntimeException e) {
+        log.warn("Auth email reset-password failed after token storage", e);
+      }
     }
     if (!emailSent) {
       EtendoGoJwtDalHelper.restorePasswordResetToken(account, previousTokenState);
     }
-  }
-
-  private String resolvePasswordResetAppBaseUrl(HttpServletRequest request) {
-    String configured = PublicUrlResolver.resolveConfiguredAppBaseUrl();
-    if (configured != null) {
-      return configured;
-    }
-    String scheme = request.getScheme();
-    String host = request.getServerName();
-    if (scheme == null || host == null) {
-      return null;
-    }
-    int port = request.getServerPort();
-    boolean defaultPort = ("http".equals(scheme) && port == 80)
-        || ("https".equals(scheme) && port == 443);
-    return scheme + "://" + host + (defaultPort ? "" : ":" + port);
   }
 
   private void sendAuthEmailBestEffort(String contractName, Runnable sendAction) {

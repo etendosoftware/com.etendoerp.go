@@ -28,6 +28,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -48,6 +49,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
@@ -65,6 +67,11 @@ import com.etendoerp.go.schemaforge.data.Account;
 public class EtendoGoJwtServletTest {
 
   private final EtendoGoJwtServlet servlet = new EtendoGoJwtServlet();
+
+  @After
+  public void clearProperties() {
+    System.clearProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY);
+  }
 
   // ===================== doGet routing =====================
 
@@ -339,6 +346,7 @@ public class EtendoGoJwtServletTest {
 
   @Test
   public void passwordResetRequestKnownEmailStoresTokenAndSendsEmail() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = mockRequest("/password-reset/request");
     TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
@@ -346,16 +354,12 @@ public class EtendoGoJwtServletTest {
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
         "{\"email\":\"user@test.com\"}")));
-    mockPublicRequestUrl(req);
 
     Account account = mock(Account.class);
     when(emailSender.sendPasswordReset(eq(account), anyString(), anyString(), anyString()))
         .thenReturn(true);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
-         MockedStatic<PublicUrlResolver> publicUrlMock =
-             mockStatic(PublicUrlResolver.class, CALLS_REAL_METHODS)) {
-      publicUrlMock.when(PublicUrlResolver::resolveConfiguredAppBaseUrl).thenReturn(null);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
           .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
@@ -371,8 +375,10 @@ public class EtendoGoJwtServletTest {
     ArgumentCaptor<String> resetLinkCaptor = ArgumentCaptor.forClass(String.class);
     verify(emailSender).sendPasswordReset(eq(account), anyString(), anyString(),
         resetLinkCaptor.capture());
-    assertTrue(resetLinkCaptor.getValue(), resetLinkCaptor.getValue().startsWith(
-        "https://go.experimental.etendo.cloud/onboarding?resetToken="));
+    String resetLink = resetLinkCaptor.getValue();
+    assertNotNull("The reset link should not be null", resetLink);
+    assertTrue("Reset link does not use the configured app URL: " + resetLink,
+        resetLink.startsWith("https://app.example.test/onboarding?resetToken="));
   }
 
   @Test
@@ -397,20 +403,20 @@ public class EtendoGoJwtServletTest {
           .thenCallRealMethod();
 
       servletWithEmailSender.doPost(req, resp.response);
-    } finally {
-      System.clearProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY);
     }
 
     assertEquals(200, resp.status);
     ArgumentCaptor<String> resetLinkCaptor = ArgumentCaptor.forClass(String.class);
     verify(emailSender).sendPasswordReset(eq(account), anyString(), anyString(),
         resetLinkCaptor.capture());
-    assertTrue(resetLinkCaptor.getValue(), resetLinkCaptor.getValue().startsWith(
-        "https://app.example.test/onboarding?resetToken="));
+    String resetLink = resetLinkCaptor.getValue();
+    assertNotNull("The reset link should not be null", resetLink);
+    assertTrue("Reset link does not use the configured app URL: " + resetLink,
+        resetLink.startsWith("https://app.example.test/onboarding?resetToken="));
   }
 
   @Test
-  public void passwordResetRequestIncludesNonDefaultRequestPortInFallbackLink()
+  public void passwordResetRequestDoesNotUseRequestHostWhenAppBaseUrlIsMissing()
       throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = mockRequest("/password-reset/request");
@@ -420,12 +426,10 @@ public class EtendoGoJwtServletTest {
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
         "{\"email\":\"user@test.com\"}")));
     when(req.getScheme()).thenReturn("http");
-    when(req.getServerName()).thenReturn("localhost");
+    when(req.getServerName()).thenReturn("attacker.example.test");
     when(req.getServerPort()).thenReturn(8080);
 
     Account account = mock(Account.class);
-    when(emailSender.sendPasswordReset(eq(account), anyString(), anyString(), anyString()))
-        .thenReturn(true);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
          MockedStatic<PublicUrlResolver> publicUrlMock =
@@ -437,18 +441,20 @@ public class EtendoGoJwtServletTest {
           .thenCallRealMethod();
 
       servletWithEmailSender.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.storePasswordResetToken(
+          eq(account), anyString(), any(Date.class)));
+      dalMock.verify(() -> EtendoGoJwtDalHelper.restorePasswordResetToken(
+          eq(account), any(EtendoGoJwtDalHelper.PasswordResetTokenState.class)));
     }
 
     assertEquals(200, resp.status);
-    ArgumentCaptor<String> resetLinkCaptor = ArgumentCaptor.forClass(String.class);
-    verify(emailSender).sendPasswordReset(eq(account), anyString(), anyString(),
-        resetLinkCaptor.capture());
-    assertTrue(resetLinkCaptor.getValue(), resetLinkCaptor.getValue().startsWith(
-        "http://localhost:8080/onboarding?resetToken="));
+    verify(emailSender, never()).sendPasswordReset(eq(account), anyString(), anyString(), any());
   }
 
   @Test
   public void passwordResetRequestEmailFailureStillReturnsNeutralSuccess() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = mockRequest("/password-reset/request");
     TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
@@ -456,7 +462,6 @@ public class EtendoGoJwtServletTest {
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
         "{\"email\":\"user@test.com\"}")));
-    mockPublicRequestUrl(req);
 
     Account account = mock(Account.class);
     when(emailSender.sendPasswordReset(eq(account), anyString(), anyString(), anyString()))
@@ -481,6 +486,7 @@ public class EtendoGoJwtServletTest {
 
   @Test
   public void passwordResetRequestProviderExceptionRestoresPreviousToken() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = mockRequest("/password-reset/request");
     TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
@@ -488,7 +494,6 @@ public class EtendoGoJwtServletTest {
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
         "{\"email\":\"user@test.com\"}")));
-    mockPublicRequestUrl(req);
 
     Account account = mock(Account.class);
     when(emailSender.sendPasswordReset(eq(account), anyString(), anyString(), anyString()))
@@ -830,13 +835,6 @@ public class EtendoGoJwtServletTest {
     HttpServletRequest request = mock(HttpServletRequest.class);
     when(request.getPathInfo()).thenReturn(pathInfo);
     return request;
-  }
-
-  private static void mockPublicRequestUrl(HttpServletRequest request) {
-    when(request.getScheme()).thenReturn("https");
-    when(request.getServerName()).thenReturn("go.experimental.etendo.cloud");
-    when(request.getServerPort()).thenReturn(443);
-    when(request.getContextPath()).thenReturn("/etendo");
   }
 
   private static ResponseCapture mockResponse() throws Exception {
