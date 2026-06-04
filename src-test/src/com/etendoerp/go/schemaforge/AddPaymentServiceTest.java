@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -133,8 +134,12 @@ class AddPaymentServiceTest {
     when(refundPayment.getId()).thenReturn("refund-1");
     when(refundPayment.getDocumentNo()).thenReturn("REF-1");
     when(okResult.getType()).thenReturn("Success");
+    // Build collaborators that stub internally BEFORE the surrounding when(),
+    // so their nested stubbing does not interleave with an open stubbing.
+    List<FIN_PaymentDetail> defaultDetails = details("18.03");
+    OBCriteria<FinAccPaymentMethod> validCrit = validMethodCriteria();
     // Default: the linked details sum to 18.03 (exact-payment scenario).
-    when(payment.getFINPaymentDetailList()).thenReturn(details("18.03"));
+    when(payment.getFINPaymentDetailList()).thenReturn(defaultDetails);
 
     obDalMock = mockStatic(OBDal.class);
     dal = mock(OBDal.class);
@@ -145,7 +150,7 @@ class AddPaymentServiceTest {
     when(dal.get(eq(FIN_PaymentScheduleDetail.class), anyString()))
         .thenReturn(mock(FIN_PaymentScheduleDetail.class));
     when(dal.get(eq(GLItem.class), anyString())).thenReturn(mock(GLItem.class));
-    when(dal.createCriteria(eq(FinAccPaymentMethod.class))).thenReturn(validMethodCriteria());
+    when(dal.createCriteria(eq(FinAccPaymentMethod.class))).thenReturn(validCrit);
 
     obContextMock = mockStatic(OBContext.class);
     obContextMock.when(OBContext::getOBContext).thenReturn(mock(OBContext.class));
@@ -187,14 +192,24 @@ class AddPaymentServiceTest {
 
   @AfterEach
   void tearDown() {
-    daoConstruction.close();
-    connConstruction.close();
-    requestContextMock.close();
-    neoDefaultsMock.close();
-    finAddPaymentMock.close();
-    finUtilityMock.close();
-    obContextMock.close();
-    obDalMock.close();
+    closeQuietly(daoConstruction);
+    closeQuietly(connConstruction);
+    closeQuietly(requestContextMock);
+    closeQuietly(neoDefaultsMock);
+    closeQuietly(finAddPaymentMock);
+    closeQuietly(finUtilityMock);
+    closeQuietly(obContextMock);
+    closeQuietly(obDalMock);
+  }
+
+  private static void closeQuietly(AutoCloseable closeable) {
+    if (closeable != null) {
+      try {
+        closeable.close();
+      } catch (Exception ignored) {
+        // best-effort cleanup
+      }
+    }
   }
 
   // ── Happy paths ───────────────────────────────────────────────────────────
@@ -334,8 +349,8 @@ class AddPaymentServiceTest {
   void paymentMethodFallback() throws Exception {
     FinAccPaymentMethod fapm = mock(FinAccPaymentMethod.class);
     when(fapm.getPaymentMethod()).thenReturn(method);
-    when(dal.createCriteria(eq(FinAccPaymentMethod.class)))
-        .thenReturn(criteriaReturning(Collections.singletonList(fapm)));
+    OBCriteria<FinAccPaymentMethod> crit = criteriaReturning(Collections.singletonList(fapm));
+    when(dal.createCriteria(eq(FinAccPaymentMethod.class))).thenReturn(crit);
     JSONObject body = baseBody("18.03").put("paymentMethodId", "")
         .put("selectedInvoices", new JSONObject().put(PSD_ID, 18.03));
 
@@ -388,8 +403,8 @@ class AddPaymentServiceTest {
   @DisplayName("No valid payment method is rejected")
   void paymentMethodMissing() {
     when(dal.get(eq(FIN_PaymentMethod.class), anyString())).thenReturn(null);
-    when(dal.createCriteria(eq(FinAccPaymentMethod.class)))
-        .thenReturn(criteriaReturning(Collections.emptyList()));
+    OBCriteria<FinAccPaymentMethod> emptyCrit = criteriaReturning(Collections.emptyList());
+    when(dal.createCriteria(eq(FinAccPaymentMethod.class))).thenReturn(emptyCrit);
     OBException ex = assertThrows(OBException.class,
         () -> AddPaymentService.doAddPayment(baseBody("18.03")));
     assertTrue(ex.getMessage().contains("payment method"));
@@ -443,8 +458,8 @@ class AddPaymentServiceTest {
     JSONObject body = baseBody("10.00"); // assigned 0, leftover 10 → credit, no action → stays credit
     NeoResponse response = AddPaymentService.doAddPayment(body);
     assertEquals(201, response.getHttpStatus());
-    assertNull("no refund payment", response.getBody().getJSONObject("response")
-        .getJSONObject("data").opt("refundPaymentId"));
+    assertNull(response.getBody().getJSONObject("response")
+        .getJSONObject("data").opt("refundPaymentId"), "no refund payment");
     finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(any(), any(), eq("P"), eq(payment), eq("")),
         times(1));
   }
@@ -484,7 +499,7 @@ class AddPaymentServiceTest {
   private OBCriteria<FinAccPaymentMethod> criteriaReturning(List<FinAccPaymentMethod> result) {
     OBCriteria<FinAccPaymentMethod> crit = mock(OBCriteria.class);
     when(crit.add(any())).thenReturn(crit);
-    when(crit.setMaxResults(org.mockito.ArgumentMatchers.anyInt())).thenReturn(crit);
+    when(crit.setMaxResults(anyInt())).thenReturn(crit);
     when(crit.list()).thenReturn(result);
     return crit;
   }
