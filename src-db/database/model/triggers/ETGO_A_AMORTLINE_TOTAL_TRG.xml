@@ -4,37 +4,46 @@
       <body><![CDATA[
 
 /*************************************************************************
-* Keeps A_AMORTIZATION.TOTALAMOUNT in sync with the sum of its lines.
-* Fires after any insert, update or delete on A_AMORTIZATIONLINE so that
-* the header total is always accurate — even when lines are edited on a
-* reactivated document without going through the confirm process.
+* Keeps A_AMORTIZATION.TOTALAMORTIZATION in sync with its lines using
+* delta updates — avoids re-summing the full table on every row change,
+* which would cause a mutating-table error in Oracle and performance
+* degradation on bulk operations.
 *
-* Uses the parent id from :new (insert/update) or :old (delete).
+* INSERT:  add :new amount to parent total
+* UPDATE:  subtract :old, add :new (handles parent reassignment too)
+* DELETE:  subtract :old amount from parent total
 ************************************************************************/
 
 BEGIN
 
-    IF AD_isTriggerEnabled()='N' THEN RETURN; END IF;
-
-    IF (INSERTING OR UPDATING) THEN
-      UPDATE A_AMORTIZATION
-      SET TOTALAMORTIZATION = (
-        SELECT COALESCE(SUM(AMORTIZATIONAMT), 0)
-        FROM A_AMORTIZATIONLINE
-        WHERE A_AMORTIZATION_ID = :new.A_AMORTIZATION_ID
-      )
-      WHERE A_AMORTIZATION_ID = :new.A_AMORTIZATION_ID;
+    IF AD_isTriggerEnabled()='N' THEN
+      IF (TG_OP = 'DELETE') THEN RETURN OLD; ELSE RETURN NEW; END IF;
     END IF;
 
-    IF (DELETING) THEN
+    IF (INSERTING) THEN
       UPDATE A_AMORTIZATION
-      SET TOTALAMORTIZATION = (
-        SELECT COALESCE(SUM(AMORTIZATIONAMT), 0)
-        FROM A_AMORTIZATIONLINE
-        WHERE A_AMORTIZATION_ID = :old.A_AMORTIZATION_ID
-      )
+      SET TOTALAMORTIZATION = TOTALAMORTIZATION + COALESCE(:new.AMORTIZATIONAMT, 0)
+      WHERE A_AMORTIZATION_ID = :new.A_AMORTIZATION_ID;
+    ELSIF (UPDATING) THEN
+      IF (:old.A_AMORTIZATION_ID = :new.A_AMORTIZATION_ID) THEN
+        UPDATE A_AMORTIZATION
+        SET TOTALAMORTIZATION = TOTALAMORTIZATION - COALESCE(:old.AMORTIZATIONAMT, 0) + COALESCE(:new.AMORTIZATIONAMT, 0)
+        WHERE A_AMORTIZATION_ID = :new.A_AMORTIZATION_ID;
+      ELSE
+        UPDATE A_AMORTIZATION
+        SET TOTALAMORTIZATION = TOTALAMORTIZATION - COALESCE(:old.AMORTIZATIONAMT, 0)
+        WHERE A_AMORTIZATION_ID = :old.A_AMORTIZATION_ID;
+        UPDATE A_AMORTIZATION
+        SET TOTALAMORTIZATION = TOTALAMORTIZATION + COALESCE(:new.AMORTIZATIONAMT, 0)
+        WHERE A_AMORTIZATION_ID = :new.A_AMORTIZATION_ID;
+      END IF;
+    ELSIF (DELETING) THEN
+      UPDATE A_AMORTIZATION
+      SET TOTALAMORTIZATION = TOTALAMORTIZATION - COALESCE(:old.AMORTIZATIONAMT, 0)
       WHERE A_AMORTIZATION_ID = :old.A_AMORTIZATION_ID;
     END IF;
+
+    IF (TG_OP = 'DELETE') THEN RETURN OLD; ELSE RETURN NEW; END IF;
 
 END ETGO_A_AMORTLINE_TOTAL_TRG
 ]]></body>
