@@ -21,6 +21,7 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +33,7 @@ import javax.inject.Named;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -49,6 +51,17 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(GoodsShipmentHeaderHandler.class);
   private static final String FIELD_INVOICE_STATUS = "invoiceStatus";
+  private static final String CAN_RETURN_SQL =
+      "SELECT 1 FROM m_inoutline sil" +
+      " WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'" +
+      "   AND ABS(sil.movementqty) > (" +
+      "     SELECT COALESCE(SUM(ABS(rl.movementqty)), 0)" +
+      "     FROM m_inoutline rl" +
+      "     JOIN m_inout r ON r.m_inout_id = rl.m_inout_id" +
+      "     WHERE rl.canceled_inoutline_id = sil.m_inoutline_id" +
+      "       AND rl.isactive = 'Y' AND r.isactive = 'Y'" +
+      "       AND r.docstatus <> 'VO'" +
+      "   )";
   private static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
 
@@ -275,27 +288,14 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
    */
   @SuppressWarnings("java:S2077")
   private void enrichCanCreateReturn(JSONObject shipmentRec, String shipmentId) {
-    String sql =
-        "SELECT EXISTS (" +
-        "  SELECT 1 FROM m_inoutline sil" +
-        "  WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'" +
-        "    AND ABS(sil.movementqty) > (" +
-        "      SELECT COALESCE(SUM(ABS(rl.movementqty)), 0)" +
-        "      FROM m_inoutline rl" +
-        "      JOIN m_inout r ON r.m_inout_id = rl.m_inout_id" +
-        "      WHERE rl.canceled_inoutline_id = sil.m_inoutline_id" +
-        "        AND rl.isactive = 'Y' AND r.isactive = 'Y'" +
-        "        AND r.docstatus <> 'VO'" +
-        "    )" +
-        ")";
     Connection conn = OBDal.getReadOnlyInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    try (PreparedStatement ps = conn.prepareStatement(CAN_RETURN_SQL)) {
       ps.setString(1, shipmentId);
       try (ResultSet rs = ps.executeQuery()) {
-        boolean canReturn = rs.next() && rs.getBoolean(1);
+        boolean canReturn = rs.next();
         shipmentRec.put("canCreateReturn", canReturn);
       }
-    } catch (Exception e) {
+    } catch (SQLException | JSONException e) {
       log.warn("Could not compute canCreateReturn for shipment {}: {}", shipmentId, e.getMessage());
     }
   }
