@@ -21,6 +21,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -40,12 +41,15 @@ import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
@@ -70,7 +74,10 @@ import org.openbravo.dal.service.OBDal;
  *       and the static {@code nullSafeBigDecimal} contract.</li>
  * </ul>
  */
-@RunWith(MockitoJUnitRunner.class)
+// Silent runner: clearMocks() (below) wipes the inline mock maker registry after
+// each test to keep the shared test-worker heap flat; the strict runner would
+// then fail its post-run mock inspection with NotAMockException, so use Silent.
+@RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountTransactionsHandlerTest {
 
   private static final String ACCOUNT_ID = "ACC-001";
@@ -92,6 +99,35 @@ public class FinancialAccountTransactionsHandlerTest {
   @Before
   public void setUp() {
     handler = new FinancialAccountTransactionsHandler();
+  }
+
+  /**
+   * Releases the references the Mockito inline mock maker retains for every mock
+   * created in a test. Without this, they survive until GC and accumulate across
+   * the whole module suite (single test JVM), pushing the fork past its heap
+   * limit. Clearing them after each test keeps the heap flat without dropping a
+   * test or touching the build config.
+   */
+  @After
+  public void clearMocks() {
+    Mockito.framework().clearInlineMocks();
+  }
+
+  /**
+   * Stubs {@code OBContext.getOBContext().getLanguage().getLanguage()} on the
+   * given static mock so {@code buildPayload → loadTrxTypes} can read the
+   * current language without a real OB security context. Required by every test
+   * that reaches {@code buildPayload} (the happy path and the direct envelope
+   * test); without it {@code getOBContext()} returns {@code null} and
+   * {@code loadTrxTypes} throws an NPE.
+   */
+  private static void stubContextLanguage(MockedStatic<OBContext> obContextMock) {
+    OBContext obCtx = mock(OBContext.class);
+    org.openbravo.model.ad.system.Language language =
+        mock(org.openbravo.model.ad.system.Language.class);
+    when(language.getLanguage()).thenReturn("en_US");
+    when(obCtx.getLanguage()).thenReturn(language);
+    obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
   }
 
   // ── handle() routing ─────────────────────────────────────────────────────
@@ -186,7 +222,11 @@ public class FinancialAccountTransactionsHandlerTest {
 
     ResultSet rsTotals = mock(ResultSet.class);
     when(psTotals.executeQuery()).thenReturn(rsTotals);
-    when(rsTotals.next()).thenReturn(true);
+    // Returns true once for the single-row totals read, then false. buildPayload
+    // reuses this statement and result set for the dimension, trxType and
+    // payment-method loaders; their row loops must see a terminating false,
+    // otherwise the test would loop forever.
+    when(rsTotals.next()).thenReturn(true, false);
     when(rsTotals.getBigDecimal("currentbalance")).thenReturn(new BigDecimal("211841.01"));
     when(rsTotals.getString("iso_code")).thenReturn("EUR");
     when(rsTotals.getBigDecimal("inflows_30d")).thenReturn(new BigDecimal("47820.00"));
@@ -197,6 +237,7 @@ public class FinancialAccountTransactionsHandlerTest {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.getConnection()).thenReturn(conn);
+      stubContextLanguage(obContextMock);
 
       NeoResponse response = handler.handle(ctx);
 
@@ -501,10 +542,12 @@ public class FinancialAccountTransactionsHandlerTest {
     when(psTotals.executeQuery()).thenReturn(rsTotals);
     when(rsTotals.next()).thenReturn(false);
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.getConnection()).thenReturn(conn);
+      stubContextLanguage(obContextMock);
 
       NeoResponse response = handler.buildPayload(ACCOUNT_ID);
 
@@ -952,5 +995,245 @@ public class FinancialAccountTransactionsHandlerTest {
 
       return handler.handle(ctx);
     }
+  }
+
+  // ── create-payment routing ───────────────────────────────────────────────
+
+  /** Builds a POST {@code ?action=create-payment} context with the given body. */
+  private static NeoContext createPaymentCtx(JSONObject body) {
+    Map<String, String> params = new HashMap<>();
+    params.put("action", "create-payment");
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getQueryParams()).thenReturn(params);
+    when(ctx.getRequestBody()).thenReturn(body);
+    return ctx;
+  }
+
+  /**
+   * Verifies that {@code POST ?action=create-payment} delegates to
+   * {@link AddPaymentService} and returns its response, wrapping the call in the
+   * admin-mode lifecycle.
+   */
+  @Test
+  public void testCreatePaymentDelegatesToService() throws Exception {
+    NeoContext ctx = createPaymentCtx(new JSONObject());
+    NeoResponse expected = NeoResponse.ok(new JSONObject());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<AddPaymentService> svc = mockStatic(AddPaymentService.class)) {
+      svc.when(() -> AddPaymentService.doAddPayment(any())).thenReturn(expected);
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertSame(expected, response);
+      obContextMock.verify(() -> OBContext.setAdminMode(true));
+      obContextMock.verify(OBContext::restorePreviousMode);
+    }
+  }
+
+  /**
+   * Verifies that {@code create-payment} returns 400 when the request has no
+   * body, short-circuiting before touching the admin-mode lifecycle.
+   */
+  @Test
+  public void testCreatePaymentNullBodyReturnsBadRequest() {
+    NeoResponse response = handler.handle(createPaymentCtx(null));
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  /**
+   * Verifies that a business {@link OBException} from the service maps to 400,
+   * rolls the transaction back and restores the admin mode.
+   */
+  @Test
+  public void testCreatePaymentMapsBusinessExceptionToBadRequest() throws Exception {
+    NeoContext ctx = createPaymentCtx(new JSONObject());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<AddPaymentService> svc = mockStatic(AddPaymentService.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      svc.when(() -> AddPaymentService.doAddPayment(any()))
+          .thenThrow(new OBException("Contact not found"));
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+      obContextMock.verify(OBContext::restorePreviousMode);
+    }
+  }
+
+  /**
+   * Verifies that an unexpected error from the service maps to 500 and still
+   * restores the admin mode in the finally block.
+   */
+  @Test
+  public void testCreatePaymentMapsUnexpectedErrorToServerError() throws Exception {
+    NeoContext ctx = createPaymentCtx(new JSONObject());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<AddPaymentService> svc = mockStatic(AddPaymentService.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      svc.when(() -> AddPaymentService.doAddPayment(any()))
+          .thenThrow(new RuntimeException("boom"));
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(500, response.getHttpStatus());
+      obContextMock.verify(OBContext::restorePreviousMode);
+    }
+  }
+
+  // ── outstanding-invoices ─────────────────────────────────────────────────
+
+  /**
+   * Verifies that {@code GET ?action=outstanding-invoices} maps a result-set row
+   * into the invoice JSON shape the payment UI consumes (no, bp, metodo, order
+   * no., dd/MM/yyyy dates), scopes by direction (issotrx 'Y' for {@code doc=in})
+   * and binds the business partner when provided.
+   */
+  @Test
+  public void testOutstandingInvoicesMapsRowAndBindsBpartner() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("action", "outstanding-invoices");
+    params.put("bpartnerId", "BP-1");
+    params.put("doc", "in");
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getQueryParams()).thenReturn(params);
+
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, false);
+    when(rs.getString("id")).thenReturn("psd-1");
+    when(rs.getString("doc_no")).thenReturn("10000014");
+    when(rs.getString("descr")).thenReturn("Pedido");
+    when(rs.getString("bpartner")).thenReturn("Juan Perez");
+    when(rs.getString("payment_method")).thenReturn("Efectivo");
+    when(rs.getString("project")).thenReturn("General");
+    when(rs.getString("order_no")).thenReturn("1000326");
+    when(rs.getString("currency_iso")).thenReturn("EUR");
+    when(rs.getDate("invoice_date")).thenReturn(java.sql.Date.valueOf("2026-04-16"));
+    when(rs.getDate("due_date")).thenReturn(java.sql.Date.valueOf("2026-05-16"));
+    when(rs.getBigDecimal("invoiced_amount")).thenReturn(new BigDecimal("1355.20"));
+    when(rs.getBigDecimal("expected_amount")).thenReturn(new BigDecimal("1355.20"));
+    when(rs.getBigDecimal("outstanding_amount")).thenReturn(new BigDecimal("355.20"));
+
+    OBContext realCtx = mock(OBContext.class);
+    org.openbravo.model.ad.system.Client client = mock(org.openbravo.model.ad.system.Client.class);
+    when(client.getId()).thenReturn("client-1");
+    when(realCtx.getCurrentClient()).thenReturn(client);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(realCtx);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(200, response.getHttpStatus());
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      JSONArray invoices = data.getJSONArray("invoices");
+      assertEquals(1, invoices.length());
+      JSONObject row = invoices.getJSONObject(0);
+      assertEquals("psd-1", row.getString("id"));
+      assertEquals("10000014", row.getString("no"));
+      assertEquals("Juan Perez", row.getString("bp"));
+      assertEquals("Efectivo", row.getString("metodo"));
+      assertEquals("1000326", row.getString("orderNo"));
+      assertEquals("16/04/2026", row.getString("fecha"));
+
+      verify(ps).setString(1, "Y");          // doc=in → issotrx 'Y'
+      verify(ps).setString(2, "0");          // system client
+      verify(ps).setString(3, "client-1");
+      verify(ps).setString(4, "BP-1");       // bpartner clause appended
+    }
+  }
+
+  /**
+   * Verifies that {@code outstanding-invoices} without a bpartner returns 400
+   * is NOT enforced — a blank partner returns ALL contacts (doc=out → issotrx
+   * 'N') and does not bind a fourth parameter.
+   */
+  @Test
+  public void testOutstandingInvoicesAllContactsForPayments() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("action", "outstanding-invoices");
+    params.put("doc", "out");
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getQueryParams()).thenReturn(params);
+
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    OBContext realCtx = mock(OBContext.class);
+    org.openbravo.model.ad.system.Client client = mock(org.openbravo.model.ad.system.Client.class);
+    when(client.getId()).thenReturn("client-1");
+    when(realCtx.getCurrentClient()).thenReturn(client);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(realCtx);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(200, response.getHttpStatus());
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals(0, data.getJSONArray("invoices").length());
+      verify(ps).setString(1, "N"); // doc=out → issotrx 'N'
+    }
+  }
+
+  // ── bpartner-lookup role filter ──────────────────────────────────────────
+
+  /** Verifies the customer role branch of the bpartner lookup runs and returns rows. */
+  @Test
+  public void testBpartnerLookupCustomerRole() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("action", "bpartner-lookup");
+    params.put("q", "ju");
+    params.put("role", "customer");
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getQueryParams()).thenReturn(params);
+
+    NeoResponse response = runLookupWithStubs(ctx, "bp-1", "Juan");
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    assertEquals(1, data.getJSONArray("bpartners").length());
+  }
+
+  /** Verifies the vendor role branch of the bpartner lookup runs and returns rows. */
+  @Test
+  public void testBpartnerLookupVendorRole() throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("action", "bpartner-lookup");
+    params.put("q", "pro");
+    params.put("role", "vendor");
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getQueryParams()).thenReturn(params);
+
+    NeoResponse response = runLookupWithStubs(ctx, "bp-2", "Proveedor");
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    assertEquals(1, data.getJSONArray("bpartners").length());
   }
 }
