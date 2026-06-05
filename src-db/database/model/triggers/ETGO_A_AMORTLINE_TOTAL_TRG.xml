@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+  <database name="TRIGGER ETGO_A_AMORTLINE_TOTAL_TRG">
+    <trigger name="ETGO_A_AMORTLINE_TOTAL_TRG" table="A_AMORTIZATIONLINE" fires="after" insert="true" update="true" delete="true" foreach="row">
+      <body><![CDATA[
+
+/*************************************************************************
+* Keeps A_AMORTIZATION.TOTALAMORTIZATION in sync with its lines using
+* delta updates — avoids re-summing the full table on every row change,
+* which would cause a mutating-table error in Oracle and performance
+* degradation on bulk operations.
+*
+* INSERT:  add :new amount to parent total
+* UPDATE:  subtract :old, add :new (handles parent reassignment too)
+* DELETE:  subtract :old amount from parent total
+************************************************************************/
+
+BEGIN
+
+    IF AD_isTriggerEnabled()='N' THEN RETURN; END IF;
+
+    IF (INSERTING) THEN
+      UPDATE A_AMORTIZATION
+      SET TOTALAMORTIZATION = COALESCE(TOTALAMORTIZATION, 0) + COALESCE(:new.AMORTIZATIONAMT, 0)
+      WHERE A_AMORTIZATION_ID = :new.A_AMORTIZATION_ID;
+    ELSIF (UPDATING) THEN
+      IF (:old.A_AMORTIZATION_ID = :new.A_AMORTIZATION_ID) THEN
+        UPDATE A_AMORTIZATION
+        SET TOTALAMORTIZATION = COALESCE(TOTALAMORTIZATION, 0) - COALESCE(:old.AMORTIZATIONAMT, 0) + COALESCE(:new.AMORTIZATIONAMT, 0)
+        WHERE A_AMORTIZATION_ID = :new.A_AMORTIZATION_ID;
+      ELSE
+        UPDATE A_AMORTIZATION
+        SET TOTALAMORTIZATION = COALESCE(TOTALAMORTIZATION, 0) - COALESCE(:old.AMORTIZATIONAMT, 0)
+        WHERE A_AMORTIZATION_ID = :old.A_AMORTIZATION_ID;
+        UPDATE A_AMORTIZATION
+        SET TOTALAMORTIZATION = COALESCE(TOTALAMORTIZATION, 0) + COALESCE(:new.AMORTIZATIONAMT, 0)
+        WHERE A_AMORTIZATION_ID = :new.A_AMORTIZATION_ID;
+      END IF;
+    ELSIF (DELETING) THEN
+      UPDATE A_AMORTIZATION
+      SET TOTALAMORTIZATION = COALESCE(TOTALAMORTIZATION, 0) - COALESCE(:old.AMORTIZATIONAMT, 0)
+      WHERE A_AMORTIZATION_ID = :old.A_AMORTIZATION_ID;
+    END IF;
+
+END ETGO_A_AMORTLINE_TOTAL_TRG
+]]></body>
+    </trigger>
+  </database>

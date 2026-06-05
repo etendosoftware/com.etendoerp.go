@@ -92,9 +92,9 @@ public class SalesInvoiceHeaderHandler implements NeoHandler {
   }
 
   /**
-   * Adjusts grandTotalAmount and outstandingAmount in GET responses for draft invoices that have
-   * an etgoTotalDiscount set. Confirmed invoices already have the discount reflected in the DB via
-   * negative lines created by TotalDiscountService at completion time.
+   * Adjusts grandTotalAmount / outstandingAmount for draft invoices with a total discount, and
+   * injects {@code tbaiSyncEstado} (latest sync status from {@code tbai_syncinvoice}) into every
+   * record so the frontend can display it without a separate inSet GET request to the TBAI spec.
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
@@ -122,9 +122,10 @@ public class SalesInvoiceHeaderHandler implements NeoHandler {
           enrichSourceInvoice(rec, context.getRecordId());
         }
       }
+      TbaiSyncStatusInjector.inject(data);
       return NeoResponse.ok(body);
     } catch (Exception e) {
-      log.error("Error adjusting grandTotalAmount for total discount", e);
+      log.error("Error post-processing sales invoice GET response", e);
       return null;
     }
   }

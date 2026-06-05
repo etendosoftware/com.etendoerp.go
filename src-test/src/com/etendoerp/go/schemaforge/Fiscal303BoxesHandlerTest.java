@@ -42,6 +42,7 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.junit.Test;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
@@ -50,6 +51,8 @@ import org.openbravo.module.aeat303.es.report.v2014.AEAT303Report2014Dao;
 import org.openbravo.module.aeat303.es.util.AEAT303CalculationsHelper;
 import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.TaxReportParameter;
+
+import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.BoxGroupConfig;
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.ComputeResult;
@@ -74,10 +77,12 @@ import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.ComputeResult;
 public class Fiscal303BoxesHandlerTest {
 
   private Fiscal303BoxesHandler handler;
+  private FiscalDeclCrudHandler declHandler;
 
   @org.junit.Before
   public void setUp() {
     handler = new Fiscal303BoxesHandler(null);
+    declHandler = new FiscalDeclCrudHandler(null);
   }
 
   // ── BoxGroupConfig ────────────────────────────────────────────────────────
@@ -280,9 +285,7 @@ public class Fiscal303BoxesHandlerTest {
   }
 
   /**
-   * A GET request to an entity name other than {@code "boxes"} must be rejected
-   * with 405. The Fiscal303 handler owns only the {@code /fiscal303/boxes}
-   * sub-path; anything else falls outside its contract.
+   * A GET request to an unknown entity name must be rejected with 404.
    */
   @Test
   public void testHandleRejectsUnknownEntityName() throws IOException {
@@ -290,7 +293,7 @@ public class Fiscal303BoxesHandlerTest {
     HttpServletResponse res = mock(HttpServletResponse.class);
     Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
     h.handle("invoices", "GET", mock(HttpServletRequest.class), res);
-    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED), anyString());
+    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_NOT_FOUND), anyString());
   }
 
   /**
@@ -1058,6 +1061,93 @@ public class Fiscal303BoxesHandlerTest {
     Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
     h.handle("modified", "GET", req, res);
     verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+  }
+
+  // ── resolveDeclType — AEAT letter code contract ────────────────────────────
+
+  /** Each accepted AEAT code must be returned unchanged. */
+  @Test
+  public void testResolveDeclType_acceptedCodes() {
+    for (String code : new String[]{"I", "C", "V", "U", "G"}) {
+      assertEquals("Expected " + code + " to pass through unchanged",
+          code, Fiscal303BoxesHandler.resolveDeclType(code));
+    }
+  }
+
+  /** Null tipo must fall back to "N". */
+  @Test
+  public void testResolveDeclType_nullFallsBackToN() {
+    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType(null));
+  }
+
+  /** Empty string must fall back to "N". */
+  @Test
+  public void testResolveDeclType_emptyFallsBackToN() {
+    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType(""));
+  }
+
+  /** Unknown code (old Spanish alias) must fall back to "N". */
+  @Test
+  public void testResolveDeclType_unknownAliasFallsBackToN() {
+    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("ingresar"));
+    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("compensar"));
+    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("devolver"));
+  }
+
+  /** "N" itself must be treated as an unknown code and return "N" via the fallback path. */
+  @Test
+  public void testResolveDeclType_literalNReturnedAsDefault() {
+    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("N"));
+  }
+
+  // ── DEFAULT_STATUS contract ────────────────────────────────────────────────
+
+  /** The hard-coded default status must be the locale-neutral English value "draft". */
+  @Test
+  public void testDefaultStatusIsDraft() {
+    assertEquals("draft", FiscalDeclCrudHandler.DEFAULT_STATUS);
+  }
+
+  /**
+   * {@code declToJson} must use DEFAULT_STATUS ("draft") when the declaration status is null,
+   * so that GET serialization is never locale-specific.
+   */
+  @Test
+  public void testDeclToJson_nullStatusFallsBackToDraft() throws Exception {
+    BaseOBObject decl = mock(BaseOBObject.class);
+    when(decl.getId()).thenReturn("test-id");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn("303");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_TYPE)).thenReturn("O");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn(null);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_FILE_NAME)).thenReturn(null);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FILE_EXTERNAL)).thenReturn(false);
+    when(decl.get("updated")).thenReturn(null);
+
+    JSONObject json = declHandler.declToJson(decl);
+    assertEquals("draft", json.getString("status"));
+  }
+
+  /**
+   * {@code declToJson} must preserve an explicit "submitted" status without
+   * overwriting it with the default.
+   */
+  @Test
+  public void testDeclToJson_explicitStatusIsPreserved() throws Exception {
+    BaseOBObject decl = mock(BaseOBObject.class);
+    when(decl.getId()).thenReturn("test-id");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn("303");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_TYPE)).thenReturn("O");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_FILE_NAME)).thenReturn(null);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FILE_EXTERNAL)).thenReturn(false);
+    when(decl.get("updated")).thenReturn(null);
+
+    JSONObject json = declHandler.declToJson(decl);
+    assertEquals("submitted", json.getString("status"));
   }
 
   private static void assertBd(String expected, BigDecimal actual) {

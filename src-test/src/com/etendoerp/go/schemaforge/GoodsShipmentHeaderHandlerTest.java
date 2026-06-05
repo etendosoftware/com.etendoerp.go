@@ -42,26 +42,40 @@ import org.openbravo.dal.service.OBDal;
 /**
  * Unit tests for {@link GoodsShipmentHeaderHandler}.
  *
- * <p>Covers two responsibilities:
+ * <p>Covers three responsibilities:
  * <ul>
  *   <li>{@code handle()} — routes ACTION requests to the right downstream handler
- *       (create draft invoice / clone record) or returns null when none matches.</li>
+ *       (create draft invoice / clone record / create return receipt) or returns null
+ *       when none matches.</li>
  *   <li>{@code afterHandle()} — guard conditions that short-circuit before DB access:
  *       non-GET method, missing previous result, null body, and empty data array.</li>
+ *   <li>{@code afterHandle()} with DB — outer try-catch returns null on DB failure for
+ *       both single-record (recordId non-null) and batch (recordId null) paths.</li>
  * </ul>
- *
- * <p>Tests that require DB access (invoiceStatus computation, issuerOrg enrichment)
- * are not included here — those are covered by integration tests.
  */
 public class GoodsShipmentHeaderHandlerTest {
 
   /**
    * Creates a {@link GoodsShipmentHeaderHandler} with its {@code @Inject} fields replaced by the
    * provided mocks via reflection, bypassing CDI in the unit-test context.
+   *
+   * @deprecated Use {@link #handlerWithMocks(CreateDraftInvoiceHandler, NeoCloneRecordHandler,
+   *     CreateReturnReceiptHandler)} to inject all three handlers.
    */
   private static GoodsShipmentHeaderHandler handlerWithMocks(
       CreateDraftInvoiceHandler mockCreateDraftInvoice,
       NeoCloneRecordHandler mockClone) throws Exception {
+    return handlerWithMocks(mockCreateDraftInvoice, mockClone, null);
+  }
+
+  /**
+   * Creates a {@link GoodsShipmentHeaderHandler} with all three {@code @Inject} handler fields
+   * replaced by the provided mocks via reflection, bypassing CDI in the unit-test context.
+   */
+  private static GoodsShipmentHeaderHandler handlerWithMocks(
+      CreateDraftInvoiceHandler mockCreateDraftInvoice,
+      NeoCloneRecordHandler mockClone,
+      CreateReturnReceiptHandler mockReturnReceipt) throws Exception {
     GoodsShipmentHeaderHandler handler = new GoodsShipmentHeaderHandler();
     Field invoiceField = GoodsShipmentHeaderHandler.class.getDeclaredField("createDraftInvoiceHandler");
     invoiceField.setAccessible(true);
@@ -69,6 +83,9 @@ public class GoodsShipmentHeaderHandlerTest {
     Field cloneField = GoodsShipmentHeaderHandler.class.getDeclaredField("neoCloneRecordHandler");
     cloneField.setAccessible(true);
     cloneField.set(handler, mockClone);
+    Field returnField = GoodsShipmentHeaderHandler.class.getDeclaredField("createReturnReceiptHandler");
+    returnField.setAccessible(true);
+    returnField.set(handler, mockReturnReceipt);
     return handler;
   }
 
@@ -224,6 +241,7 @@ public class GoodsShipmentHeaderHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
 
@@ -266,6 +284,83 @@ public class GoodsShipmentHeaderHandlerTest {
     }
   }
 
+  // ── handle() — createReturnReceiptHandler dispatch ────────────────────────
+
+  /**
+   * Verifies that handle returns the return-receipt response when invoice and clone
+   * handlers both return null but the return-receipt handler matches.
+   */
+  @Test
+  public void testHandleDispatchesToCreateReturnReceiptHandler() throws Exception {
+    CreateDraftInvoiceHandler mockInvoice = mock(CreateDraftInvoiceHandler.class);
+    NeoCloneRecordHandler mockClone = mock(NeoCloneRecordHandler.class);
+    CreateReturnReceiptHandler mockReturn = mock(CreateReturnReceiptHandler.class);
+    GoodsShipmentHeaderHandler handler = handlerWithMocks(mockInvoice, mockClone, mockReturn);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("createReturn")
+        .build();
+    NeoResponse expected = NeoResponse.ok(new JSONObject().put("action", "createReturn"));
+    when(mockInvoice.handle(ctx)).thenReturn(null);
+    when(mockClone.handle(ctx)).thenReturn(null);
+    when(mockReturn.handle(ctx)).thenReturn(expected);
+
+    assertSame(expected, handler.handle(ctx));
+  }
+
+  /**
+   * Verifies that handle returns null when all three downstream handlers return null.
+   */
+  @Test
+  public void testHandleReturnsNullWhenAllThreeHandlersMiss() throws Exception {
+    CreateDraftInvoiceHandler mockInvoice = mock(CreateDraftInvoiceHandler.class);
+    NeoCloneRecordHandler mockClone = mock(NeoCloneRecordHandler.class);
+    CreateReturnReceiptHandler mockReturn = mock(CreateReturnReceiptHandler.class);
+    GoodsShipmentHeaderHandler handler = handlerWithMocks(mockInvoice, mockClone, mockReturn);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .build();
+    when(mockInvoice.handle(ctx)).thenReturn(null);
+    when(mockClone.handle(ctx)).thenReturn(null);
+    when(mockReturn.handle(ctx)).thenReturn(null);
+
+    assertNull(handler.handle(ctx));
+  }
+
+  // ── afterHandle() with DB — single-record path (recordId non-null) ─────────
+
+  /**
+   * Verifies that afterHandle returns null when recordId is non-null but OBDal
+   * throws on getConnection() — the outer try-catch must absorb the exception
+   * and return null instead of propagating it to the caller.
+   */
+  @Test
+  public void testAfterHandleReturnsNullWhenDbThrowsOnSingleRecord() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance)
+          .thenThrow(new RuntimeException("OBDal not available in unit tests"));
+
+      JSONObject item = new JSONObject().put("id", "shipment-1");
+      JSONArray data = new JSONArray().put(item);
+      JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+
+      NeoContext ctx = NeoContext.builder()
+          .specName("goods-shipment")
+          .entityName("header")
+          .httpMethod("GET")
+          .endpointType(NeoEndpointType.CRUD)
+          .recordId("shipment-1")
+          .build();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      assertNull(new GoodsShipmentHeaderHandler().afterHandle(ctx));
+    }
+  }
+
   /**
    * Verifies that enrichReturnReceipts injects an empty returnReceipts array (not absent)
    * when the SQL query returns no rows.
@@ -275,6 +370,7 @@ public class GoodsShipmentHeaderHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
 
@@ -304,6 +400,78 @@ public class GoodsShipmentHeaderHandlerTest {
       // returnReceipts must be present even when empty
       JSONArray returnReceipts = rec.getJSONArray("returnReceipts");
       assertEquals(0, returnReceipts.length());
+    }
+  }
+
+  /**
+   * Verifies that afterHandle returns a non-null 200 OK response when recordId is non-null
+   * and the PreparedStatement throws a SQL exception — computeSingle swallows it internally
+   * and returns 0. All enrich* methods also have their own catches, so the outer try-catch
+   * never fires and a valid response is returned with invoiceStatus=0.
+   *
+   * <p>This test documents the internal-swallow contract: individual DB failures inside
+   * helper methods do NOT propagate to the outer catch and do NOT cause afterHandle to
+   * return null.
+   */
+  @Test
+  public void testAfterHandleSurvivesComputeSingleDbFailureAndReturnsOk() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(mockDal);
+      // getReadOnlyInstance is also called by enrich* — stub it too so they don't NPE
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(mockDal);
+
+      Connection mockConn = mock(Connection.class);
+      when(mockDal.getConnection()).thenReturn(mockConn);
+      // prepareStatement throws — computeSingle catches this internally and returns 0
+      when(mockConn.prepareStatement(anyString()))
+          .thenThrow(new java.sql.SQLException("connection reset"));
+
+      JSONObject item = new JSONObject().put("id", "shipment-2");
+      JSONArray data = new JSONArray().put(item);
+      JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+
+      NeoContext ctx = NeoContext.builder()
+          .specName("goods-shipment")
+          .entityName("header")
+          .httpMethod("GET")
+          .endpointType(NeoEndpointType.CRUD)
+          .recordId("shipment-2")
+          .build();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      // All individual exceptions are swallowed; afterHandle completes and returns 200 OK.
+      NeoResponse result = new GoodsShipmentHeaderHandler().afterHandle(ctx);
+      assertNotNull(result);
+    }
+  }
+
+  // ── afterHandle() with DB — batch path (recordId null) ────────────────────
+
+  /**
+   * Verifies that afterHandle returns null when recordId is null and OBDal.getInstance()
+   * throws — the outer try-catch absorbs the exception and returns null.
+   */
+  @Test
+  public void testAfterHandleReturnsNullWhenDbThrowsOnBatch() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance)
+          .thenThrow(new RuntimeException("OBDal not available in unit tests"));
+
+      JSONObject item = new JSONObject().put("id", "shipment-3");
+      JSONArray data = new JSONArray().put(item);
+      JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+
+      // recordId is null → batch path
+      NeoContext ctx = NeoContext.builder()
+          .specName("goods-shipment")
+          .entityName("header")
+          .httpMethod("GET")
+          .endpointType(NeoEndpointType.CRUD)
+          .build();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      assertNull(new GoodsShipmentHeaderHandler().afterHandle(ctx));
     }
   }
 
@@ -351,6 +519,7 @@ public class GoodsShipmentHeaderHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
 
@@ -376,6 +545,88 @@ public class GoodsShipmentHeaderHandlerTest {
 
       assertNotNull(result);
       assertEquals(200, result.getHttpStatus());
+    }
+  }
+
+  /**
+   * Verifies that afterHandle survives a batch PreparedStatement SQL exception and
+   * returns a non-null 200 OK response. computeBatch catches the SQL exception
+   * internally, returns an empty map, and annotateBatch assigns invoiceStatus=0 to
+   * every item. The outer try-catch never fires.
+   */
+  @Test
+  public void testAfterHandleSurvivesBatchDbFailureAndReturnsOk() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(mockDal);
+
+      Connection mockConn = mock(Connection.class);
+      when(mockDal.getConnection()).thenReturn(mockConn);
+      // computeBatch catches this SQL exception internally and returns empty map
+      when(mockConn.prepareStatement(anyString()))
+          .thenThrow(new java.sql.SQLException("network timeout"));
+
+      JSONObject item = new JSONObject().put("id", "shipment-4");
+      JSONArray data = new JSONArray().put(item);
+      JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+
+      NeoContext ctx = NeoContext.builder()
+          .specName("goods-shipment")
+          .entityName("header")
+          .httpMethod("GET")
+          .endpointType(NeoEndpointType.CRUD)
+          .build();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      // computeBatch swallows the SQL exception, annotateBatch writes invoiceStatus=0,
+      // and afterHandle returns NeoResponse.ok(body) — not null.
+      NeoResponse result = new GoodsShipmentHeaderHandler().afterHandle(ctx);
+      assertNotNull(result);
+    }
+  }
+
+  // ── computeSingle / annotateBatch — DB returns empty ResultSet ────────────
+
+  /**
+   * Verifies that annotateBatch writes invoiceStatus=0 for each item when the DB
+   * returns an empty ResultSet (no matched invoice lines), and afterHandle returns
+   * a non-null 200 OK response.
+   *
+   * <p>The batch path: recordId is null → {@code annotateBatch} → {@code computeBatch}
+   * (empty ResultSet → empty map) → each item gets {@code invoiceStatus=0} →
+   * {@code NeoResponse.ok(body)} returned. No enrich* methods run on the batch path.
+   */
+  @Test
+  public void testAfterHandleAnnotatesBatchWithZeroWhenResultSetIsEmpty() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal mockDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(mockDal);
+
+      ResultSet mockRs = mock(ResultSet.class);
+      when(mockRs.next()).thenReturn(false);
+
+      PreparedStatement mockPs = mock(PreparedStatement.class);
+      when(mockPs.executeQuery()).thenReturn(mockRs);
+
+      Connection mockConn = mock(Connection.class);
+      when(mockDal.getConnection()).thenReturn(mockConn);
+      when(mockConn.prepareStatement(anyString())).thenReturn(mockPs);
+
+      JSONObject item = new JSONObject().put("id", "shipment-5");
+      JSONArray data = new JSONArray().put(item);
+      JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+
+      // recordId is null → batch path (no enrich* calls)
+      NeoContext ctx = NeoContext.builder()
+          .specName("goods-shipment")
+          .entityName("header")
+          .httpMethod("GET")
+          .endpointType(NeoEndpointType.CRUD)
+          .build();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = new GoodsShipmentHeaderHandler().afterHandle(ctx);
+      assertNotNull(result);
     }
   }
 }

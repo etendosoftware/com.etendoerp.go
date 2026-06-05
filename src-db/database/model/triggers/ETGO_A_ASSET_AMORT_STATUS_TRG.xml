@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+  <database name="TRIGGER ETGO_A_ASSET_AMORT_STATUS_TRG">
+    <trigger name="ETGO_A_ASSET_AMORT_STATUS_TRG" table="A_ASSET" fires="before" insert="true" update="true" delete="false" foreach="row">
+      <body><![CDATA[
+
+/*************************************************************************
+* Maintains EM_ETGO_AMORTIZATION_STATUS as a DB-backed depreciation
+* percentage (0–100) on every insert/update of the asset row. Used by
+* the simplified UI to render the progress bar without frontend math.
+*
+* status = LEAST(ROUND((DEPRECIATEDVALUE + DEPRECIATEDPREVIOUSAMT) / AMORTIZATIONVALUEAMT * 100), 100)
+* DEPRECIATEDPREVIOUSAMT is added because DEPRECIATEDVALUE only tracks what the
+* plan has processed — previously depreciated amounts are stored separately.
+* Returns 0 when AMORTIZATIONVALUEAMT is null or zero (no plan defined).
+* BEFORE row trigger => sets :new directly, no recursion.
+************************************************************************/
+
+BEGIN
+
+    IF AD_isTriggerEnabled()='N' THEN
+      IF (DELETING) THEN RETURN OLD; ELSE RETURN NEW; END IF;
+    END IF;
+
+    IF (INSERTING OR UPDATING) THEN
+      :new.EM_ETGO_AMORTIZATION_STATUS :=
+        CASE
+          WHEN COALESCE(:new.AMORTIZATIONVALUEAMT, 0) = 0 THEN 0
+          ELSE LEAST(ROUND((COALESCE(:new.DEPRECIATEDVALUE, 0) + COALESCE(:new.DEPRECIATEDPREVIOUSAMT, 0)) / :new.AMORTIZATIONVALUEAMT * 100), 100)
+        END;
+    END IF;
+
+    IF (DELETING) THEN RETURN OLD; ELSE RETURN NEW; END IF;
+
+END ETGO_A_ASSET_AMORT_STATUS_TRG
+]]></body>
+    </trigger>
+  </database>

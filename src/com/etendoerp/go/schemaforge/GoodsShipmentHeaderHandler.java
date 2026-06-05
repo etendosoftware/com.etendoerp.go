@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -48,6 +49,8 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(GoodsShipmentHeaderHandler.class);
   private static final String FIELD_INVOICE_STATUS = "invoiceStatus";
+  private static final String FIELD_DOCUMENT_NO = "documentNo";
+  private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
 
   @Inject
   private CreateDraftInvoiceHandler createDraftInvoiceHandler;
@@ -76,6 +79,8 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
         JSONObject shipmentRec = dataArr.getJSONObject(0);
         shipmentRec.put(FIELD_INVOICE_STATUS, computeSingle(context.getRecordId()));
         enrichIssuerOrg(shipmentRec, context.getRecordId());
+        enrichLinkedOrder(shipmentRec, context.getRecordId());
+        enrichLinkedInvoices(shipmentRec, context.getRecordId());
         enrichReturnReceipts(shipmentRec, context.getRecordId());
       } else {
         annotateBatch(dataArr);
@@ -159,6 +164,109 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
     }
   }
 
+  @SuppressWarnings("java:S2077")
+  private void enrichLinkedOrder(JSONObject shipmentRec, String shipmentId) {
+    // Union: orders linked via header C_Order_ID + orders linked via imported lines
+    String sql =
+        "SELECT DISTINCT co.c_order_id, co.documentno, co.grandtotal, co.docstatus, cur.iso_code " +
+        "FROM c_order co " +
+        "LEFT JOIN c_currency cur ON cur.c_currency_id = co.c_currency_id " +
+        "WHERE co.isactive = 'Y' AND co.c_order_id IN (" +
+        "  SELECT io.c_order_id FROM m_inout io WHERE io.m_inout_id = ? AND io.c_order_id IS NOT NULL" +
+        "  UNION" +
+        "  SELECT ol.c_order_id FROM m_inoutline il JOIN c_orderline ol ON ol.c_orderline_id = il.c_orderline_id" +
+        "  WHERE il.m_inout_id = ? AND il.isactive = 'Y'" +
+        ")";
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, shipmentId);
+      ps.setString(2, shipmentId);
+      JSONArray orders = new JSONArray();
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONObject order = new JSONObject();
+          order.put("id", rs.getString(1));
+          order.put(FIELD_DOCUMENT_NO, rs.getString(2));
+          BigDecimal orderTotal = rs.getBigDecimal(3);
+          order.put("grandTotalAmount", orderTotal != null ? orderTotal : JSONObject.NULL);
+          order.put(FIELD_DOCUMENT_STATUS, rs.getString(4));
+          order.put("currency$_identifier", rs.getString(5));
+          orders.put(order);
+        }
+      }
+      shipmentRec.put("linkedOrders", orders);
+    } catch (Exception e) {
+      log.warn("Could not enrich linked orders for shipment {}: {}", shipmentId, e.getMessage());
+    }
+  }
+
+  @SuppressWarnings("java:S2077")
+  private void enrichLinkedInvoices(JSONObject shipmentRec, String shipmentId) {
+    // Covers both flows with a single scan:
+    // - invoice created FROM this shipment: c_invoiceline.m_inoutline_id = shipment line
+    // - shipment created FROM invoice (via order): shared c_orderline_id
+    String sql =
+        "SELECT DISTINCT i.c_invoice_id, i.documentno, i.grandtotal, i.docstatus, cur.iso_code " +
+        "FROM m_inoutline sil " +
+        "JOIN c_invoiceline il ON (" +
+        "  il.m_inoutline_id = sil.m_inoutline_id " +
+        "  OR (sil.c_orderline_id IS NOT NULL AND il.c_orderline_id = sil.c_orderline_id)" +
+        ") " +
+        "JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id " +
+        "LEFT JOIN c_currency cur ON cur.c_currency_id = i.c_currency_id " +
+        "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y' " +
+        "  AND i.isactive = 'Y' AND i.docstatus NOT IN ('VO', 'CL')";
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, shipmentId);
+      JSONArray invoices = new JSONArray();
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONObject inv = new JSONObject();
+          inv.put("id", rs.getString(1));
+          inv.put(FIELD_DOCUMENT_NO, rs.getString(2));
+          BigDecimal invTotal = rs.getBigDecimal(3);
+          inv.put("grandTotalAmount", invTotal != null ? invTotal : JSONObject.NULL);
+          inv.put(FIELD_DOCUMENT_STATUS, rs.getString(4));
+          inv.put("currency$_identifier", rs.getString(5));
+          invoices.put(inv);
+        }
+      }
+      shipmentRec.put("linkedInvoices", invoices);
+    } catch (Exception e) {
+      log.warn("Could not enrich linked invoices for shipment {}: {}", shipmentId, e.getMessage());
+    }
+  }
+
+  @SuppressWarnings("java:S2077")
+  private void enrichReturnReceipts(JSONObject shipmentRec, String shipmentId) {
+    String sql =
+        "SELECT DISTINCT rio.m_inout_id, rio.documentno, rio.docstatus " +
+        "FROM m_inoutline ril " +
+        "JOIN m_inout rio ON rio.m_inout_id = ril.m_inout_id " +
+        "WHERE ril.canceled_inoutline_id IN (" +
+        "  SELECT sil.m_inoutline_id FROM m_inoutline sil " +
+        "  WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'" +
+        ") AND ril.isactive = 'Y' AND rio.isactive = 'Y'";
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, shipmentId);
+      JSONArray returns = new JSONArray();
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONObject ret = new JSONObject();
+          ret.put("id", rs.getString(1));
+          ret.put(FIELD_DOCUMENT_NO, rs.getString(2));
+          ret.put(FIELD_DOCUMENT_STATUS, rs.getString(3));
+          returns.put(ret);
+        }
+      }
+      shipmentRec.put("returnReceipts", returns);
+    } catch (Exception e) {
+      log.warn("Could not enrich return receipts for shipment {}: {}", shipmentId, e.getMessage());
+    }
+  }
+
   private static String buildInvoiceStatusSql(String whereClause) {
     return
       "SELECT iol.m_inout_id, " +
@@ -190,30 +298,4 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       "GROUP BY iol.m_inout_id";
   }
 
-  @SuppressWarnings("java:S2077")
-  private void enrichReturnReceipts(JSONObject shipmentRec, String shipmentId) {
-    String sql =
-        "SELECT DISTINCT ret.M_InOut_ID, ret.DocumentNo, ret.DocStatus " +
-        "FROM M_InOutLine src " +
-        "JOIN M_InOutLine ret_line ON ret_line.Canceled_Inoutline_ID = src.M_InOutLine_ID " +
-        "JOIN M_InOut ret ON ret.M_InOut_ID = ret_line.M_InOut_ID " +
-        "WHERE src.M_InOut_ID = ? AND ret.DocStatus != 'VO'";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, shipmentId);
-      JSONArray arr = new JSONArray();
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          JSONObject row = new JSONObject();
-          row.put("id", rs.getString(1));
-          row.put("documentNo", rs.getString(2));
-          row.put("documentStatus", rs.getString(3));
-          arr.put(row);
-        }
-      }
-      shipmentRec.put("returnReceipts", arr);
-    } catch (Exception e) {
-      log.warn("Could not enrich returnReceipts for shipment {}: {}", shipmentId, e.getMessage());
-    }
-  }
 }

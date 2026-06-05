@@ -17,7 +17,9 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -36,8 +38,15 @@ import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.model.ad.domain.ModelImplementation;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.ProcessParameter;
+import org.openbravo.model.ad.ui.Tab;
+
+import com.etendoerp.go.schemaforge.NeoResponse;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -227,6 +236,222 @@ public class NeoProcessServiceTest {
     NeoProcessService.describeProcess(null);
   }
 
+  // ===================== addKeyColumnToContent =====================
+
+  @Test
+  public void addKeyColumnToContentMapsRecordIdUnderKeyColumnName() throws Exception {
+    Column keyCol = mock(Column.class);
+    when(keyCol.isKeyColumn()).thenReturn(true);
+    when(keyCol.getDBColumnName()).thenReturn("A_Asset_ID");
+
+    Table table = mock(Table.class);
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(keyCol));
+
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(table);
+
+    JSONObject content = new JSONObject();
+    NeoProcessService.addKeyColumnToContent(content, tab, "asset-record-1");
+
+    assertEquals("asset-record-1", content.getString("A_Asset_ID"));
+  }
+
+  @Test
+  public void addKeyColumnToContentIgnoresNonKeyColumns() throws Exception {
+    Column nonKeyCol = mock(Column.class);
+    when(nonKeyCol.isKeyColumn()).thenReturn(false);
+    when(nonKeyCol.getDBColumnName()).thenReturn("AD_Org_ID");
+
+    Column keyCol = mock(Column.class);
+    when(keyCol.isKeyColumn()).thenReturn(true);
+    when(keyCol.getDBColumnName()).thenReturn("A_Asset_ID");
+
+    List<Column> cols = new ArrayList<>();
+    cols.add(nonKeyCol);
+    cols.add(keyCol);
+
+    Table table = mock(Table.class);
+    when(table.getADColumnList()).thenReturn(cols);
+
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(table);
+
+    JSONObject content = new JSONObject();
+    NeoProcessService.addKeyColumnToContent(content, tab, "rec-1");
+
+    assertEquals("rec-1", content.getString("A_Asset_ID"));
+    assertFalse(content.has("AD_Org_ID"));
+  }
+
+  @Test
+  public void addKeyColumnToContentStopsAtFirstKeyColumn() throws Exception {
+    Column firstKey = mock(Column.class);
+    when(firstKey.isKeyColumn()).thenReturn(true);
+    when(firstKey.getDBColumnName()).thenReturn("A_Asset_ID");
+
+    Column secondKey = mock(Column.class);
+    when(secondKey.isKeyColumn()).thenReturn(true);
+    when(secondKey.getDBColumnName()).thenReturn("C_Currency_ID");
+
+    List<Column> cols = new ArrayList<>();
+    cols.add(firstKey);
+    cols.add(secondKey);
+
+    Table table = mock(Table.class);
+    when(table.getADColumnList()).thenReturn(cols);
+
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(table);
+
+    JSONObject content = new JSONObject();
+    NeoProcessService.addKeyColumnToContent(content, tab, "rec-1");
+
+    assertEquals("rec-1", content.getString("A_Asset_ID"));
+    assertFalse(content.has("C_Currency_ID"));
+  }
+
+  @Test
+  public void addKeyColumnToContentWithNullTabDoesNothing() throws Exception {
+    JSONObject content = new JSONObject();
+    NeoProcessService.addKeyColumnToContent(content, null, "rec-1");
+    assertEquals(0, content.length());
+  }
+
+  @Test
+  public void addKeyColumnToContentWithNullRecordIdDoesNothing() throws Exception {
+    Tab tab = mock(Tab.class);
+    JSONObject content = new JSONObject();
+    NeoProcessService.addKeyColumnToContent(content, tab, null);
+    assertEquals(0, content.length());
+  }
+
+  @Test
+  public void addKeyColumnToContentWithNullTableDoesNothing() throws Exception {
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(null);
+    JSONObject content = new JSONObject();
+    NeoProcessService.addKeyColumnToContent(content, tab, "rec-1");
+    assertEquals(0, content.length());
+  }
+
+  @Test
+  public void addKeyColumnToContentWithNoKeyColumnDoesNothing() throws Exception {
+    Column nonKeyCol = mock(Column.class);
+    when(nonKeyCol.isKeyColumn()).thenReturn(false);
+
+    Table table = mock(Table.class);
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(nonKeyCol));
+
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(table);
+
+    JSONObject content = new JSONObject();
+    NeoProcessService.addKeyColumnToContent(content, tab, "rec-1");
+    assertEquals(0, content.length());
+  }
+
+  // ===================== addTabContextToContent =====================
+
+  @Test
+  public void addTabContextToContentSetsEntityNameAndKeyColumn() throws Exception {
+    Column keyCol = mock(Column.class);
+    when(keyCol.isKeyColumn()).thenReturn(true);
+    when(keyCol.getDBColumnName()).thenReturn("A_Asset_ID");
+
+    Table table = mock(Table.class);
+    when(table.getName()).thenReturn("FinancialMgmtAsset");
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(keyCol));
+
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(table);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(Tab.class, "tab-1")).thenReturn(tab);
+
+    JSONObject params = new JSONObject();
+    params.put(NeoProcessService.INP_RECORD_ID, "rec-1");
+    JSONObject content = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      NeoProcessService.addTabContextToContent(content, params, "tab-1");
+    }
+
+    assertEquals("FinancialMgmtAsset", content.getString("_entityName"));
+    assertEquals("rec-1", content.getString("A_Asset_ID"));
+  }
+
+  @Test
+  public void addTabContextToContentSetsEntityNameOnlyWhenNoRecordId() throws Exception {
+    Table table = mock(Table.class);
+    when(table.getName()).thenReturn("FinancialMgmtAsset");
+
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(table);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(Tab.class, "tab-1")).thenReturn(tab);
+
+    JSONObject content = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      NeoProcessService.addTabContextToContent(content, new JSONObject(), "tab-1");
+    }
+
+    assertEquals("FinancialMgmtAsset", content.getString("_entityName"));
+    assertFalse(content.has("A_Asset_ID"));
+  }
+
+  @Test
+  public void addTabContextToContentDoesNothingWhenTabNull() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(Tab.class, "tab-x")).thenReturn(null);
+
+    JSONObject content = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      NeoProcessService.addTabContextToContent(content, new JSONObject(), "tab-x");
+    }
+
+    assertEquals(0, content.length());
+  }
+
+  @Test
+  public void addTabContextToContentDoesNothingWhenTableNull() throws Exception {
+    Tab tab = mock(Tab.class);
+    when(tab.getTable()).thenReturn(null);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(Tab.class, "tab-1")).thenReturn(tab);
+
+    JSONObject content = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      NeoProcessService.addTabContextToContent(content, new JSONObject(), "tab-1");
+    }
+
+    assertEquals(0, content.length());
+  }
+
+  @Test
+  public void addTabContextToContentSwallowsExceptions() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(Tab.class, "tab-err")).thenThrow(new RuntimeException("DB down"));
+
+    JSONObject content = new JSONObject();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      // Must not throw — failure is logged and swallowed.
+      NeoProcessService.addTabContextToContent(content, new JSONObject(), "tab-err");
+    }
+
+    assertEquals(0, content.length());
+  }
+
   @Test
   public void describeProcessWithParameters() throws Exception {
     Process process = mock(Process.class);
@@ -264,5 +489,110 @@ public class NeoProcessServiceTest {
       assertEquals("C_BPartner_ID", paramsArray.getJSONObject(0).getString("dbColumnName"));
       assertTrue(paramsArray.getJSONObject(0).getBoolean("mandatory"));
     }
+  }
+
+  // ===================== resolveModelImplementationClass =====================
+
+  @Test
+  public void resolveModelImplementationClassReturnsDefaultImpl() {
+    ModelImplementation impl = mock(ModelImplementation.class);
+    when(impl.isDefault()).thenReturn(true);
+    when(impl.getAction()).thenReturn("P");
+    when(impl.getJavaClassName()).thenReturn("com.example.MyProcess");
+
+    Process process = mock(Process.class);
+    when(process.getADModelImplementationList()).thenReturn(Collections.singletonList(impl));
+
+    String result = NeoProcessService.resolveModelImplementationClass(process);
+    assertEquals("com.example.MyProcess", result);
+  }
+
+  @Test
+  public void resolveModelImplementationClassFallsBackToFirstNonDefault() {
+    ModelImplementation nonDefault = mock(ModelImplementation.class);
+    when(nonDefault.isDefault()).thenReturn(false);
+    when(nonDefault.getAction()).thenReturn("P");
+    when(nonDefault.getJavaClassName()).thenReturn("com.example.Fallback");
+
+    Process process = mock(Process.class);
+    when(process.getADModelImplementationList()).thenReturn(Collections.singletonList(nonDefault));
+
+    String result = NeoProcessService.resolveModelImplementationClass(process);
+    assertEquals("com.example.Fallback", result);
+  }
+
+  @Test
+  public void resolveModelImplementationClassReturnsNullWhenNoMatch() {
+    ModelImplementation impl = mock(ModelImplementation.class);
+    when(impl.isDefault()).thenReturn(true);
+    when(impl.getAction()).thenReturn("X"); // not "P"
+    when(impl.getJavaClassName()).thenReturn("com.example.Other");
+
+    Process process = mock(Process.class);
+    when(process.getADModelImplementationList()).thenReturn(Collections.singletonList(impl));
+
+    String result = NeoProcessService.resolveModelImplementationClass(process);
+    assertNull(result);
+  }
+
+  @Test
+  public void resolveModelImplementationClassReturnsNullOnException() {
+    Process process = mock(Process.class);
+    when(process.getName()).thenReturn("TestProcess");
+    when(process.getADModelImplementationList()).thenThrow(new RuntimeException("DB error"));
+
+    String result = NeoProcessService.resolveModelImplementationClass(process);
+    assertNull(result);
+  }
+
+  // ===================== translateClassicResult =====================
+
+  @Test
+  public void translateClassicResultWithOBErrorSuccess() throws Exception {
+    OBError error = new OBError();
+    error.setType("Success");
+    error.setTitle("OK");
+    error.setMessage("Done");
+
+    Process process = mock(Process.class);
+    NeoResponse resp = NeoProcessService.translateClassicResult(error, process);
+
+    assertEquals(200, resp.getHttpStatus());
+    assertEquals("success", resp.getBody().getString("status"));
+    assertEquals("Done", resp.getBody().getString("message"));
+  }
+
+  @Test
+  public void translateClassicResultWithOBErrorReturns400() throws Exception {
+    OBError error = new OBError();
+    error.setType("Error");
+    error.setTitle("Fail");
+    error.setMessage("Something went wrong");
+
+    Process process = mock(Process.class);
+    NeoResponse resp = NeoProcessService.translateClassicResult(error, process);
+
+    assertEquals(400, resp.getHttpStatus());
+    assertEquals("error", resp.getBody().getString("status"));
+  }
+
+  @Test
+  public void translateClassicResultWithNullBundleUsesProcessName() throws Exception {
+    Process process = mock(Process.class);
+    when(process.getName()).thenReturn("MyProcess");
+
+    NeoResponse resp = NeoProcessService.translateClassicResult(null, process);
+
+    assertEquals(200, resp.getHttpStatus());
+    assertTrue(resp.getBody().getString("message").contains("MyProcess"));
+  }
+
+  @Test
+  public void translateClassicResultWithNonOBErrorObject() throws Exception {
+    Process process = mock(Process.class);
+    NeoResponse resp = NeoProcessService.translateClassicResult("custom result", process);
+
+    assertEquals(200, resp.getHttpStatus());
+    assertEquals("custom result", resp.getBody().getString("message"));
   }
 }
