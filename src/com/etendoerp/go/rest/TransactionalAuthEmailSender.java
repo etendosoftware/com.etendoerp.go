@@ -64,11 +64,19 @@ class TransactionalAuthEmailSender {
   }
 
   boolean sendEnvironmentReady(Account account, String clientId) {
+    return sendEnvironmentReady(account, clientId, null);
+  }
+
+  boolean sendEnvironmentReady(Account account, String clientId, String language) {
     if (account == null) {
       return false;
     }
     try {
       JSONObject body = baseCommand(account, clientId);
+      String normalizedLanguage = StringUtils.trimToNull(language);
+      if (normalizedLanguage != null) {
+        body.put(EmailContractCommandSupport.FIELD_LANGUAGE, normalizedLanguage);
+      }
       String dashboardLink = EtendoGoAuthLinkBuilder.dashboardLink();
       if (dashboardLink != null) {
         body.put(EmailContractCommandSupport.FIELD_LINK, dashboardLink);
@@ -81,27 +89,27 @@ class TransactionalAuthEmailSender {
     }
   }
 
-  boolean sendPasswordReset(Account account, String resetToken,
-      String resetTokenHash) {
-    return sendPasswordReset(account, resetToken, resetTokenHash,
-        EtendoGoAuthLinkBuilder.resetPasswordLink(resetToken));
-  }
-
-  boolean sendPasswordReset(Account account, String resetToken,
-      String resetTokenHash, String resetLink) {
-    if (account == null || StringUtils.isBlank(resetToken)
-        || StringUtils.isBlank(resetTokenHash) || StringUtils.isBlank(resetLink)) {
+  boolean sendPasswordReset(Account account, String resetTokenHash, String resetLink) {
+    if (account == null || StringUtils.isBlank(resetTokenHash) || StringUtils.isBlank(resetLink)) {
       return false;
     }
     return sendAccountLink(CONTRACT_RESET_PASSWORD, account, resetLink, resetTokenHash);
   }
 
   boolean sendPasswordChanged(Account account) {
+    return sendPasswordChanged(account, null);
+  }
+
+  boolean sendPasswordChanged(Account account, String language) {
     if (account == null) {
       return false;
     }
     try {
       JSONObject body = baseCommand(account);
+      String normalizedLanguage = StringUtils.trimToNull(language);
+      if (normalizedLanguage != null) {
+        body.put(EmailContractCommandSupport.FIELD_LANGUAGE, normalizedLanguage);
+      }
       body.put(EmailContractCommandSupport.FIELD_DATE, Instant.now().toString());
       body.put(EmailContractCommandSupport.FIELD_RECORD_ID,
           account.getId() + ":" + java.util.UUID.randomUUID());

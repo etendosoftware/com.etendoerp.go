@@ -103,8 +103,13 @@ final class AccountNoticeEmailContract implements EmailContract {
       if (date != null) {
         data.put("date", date);
       }
+      String language = EmailContractCommandSupport.text(command,
+          EmailContractCommandSupport.FIELD_LANGUAGE);
+      if (language != null) {
+        data.put("language", language);
+      }
       if (customContent != null) {
-        customContent.apply(data);
+        customContent.apply(data, language);
       }
       return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipient(),
           template, data, null));
@@ -146,9 +151,11 @@ final class AccountNoticeEmailContract implements EmailContract {
      *
      * @param data
      *     provider payload to populate
+     * @param language
+     *     recipient language code
      * @throws JSONException
      *     when the payload cannot be populated
      */
-    void apply(JSONObject data) throws JSONException;
+    void apply(JSONObject data, String language) throws JSONException;
   }
 }

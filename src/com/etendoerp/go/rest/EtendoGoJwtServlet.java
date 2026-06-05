@@ -33,6 +33,7 @@ import java.time.Instant;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
@@ -229,8 +230,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String passwordHash = hashPassword(password);
       String sessionToken = generateToken();
       Account account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, name, sessionToken);
+      String normalizedLanguage = StringUtils.trimToNull(language);
       sendAuthEmailBestEffort("new-account",
-          () -> authEmailSender.sendNewAccount(account, language));
+          () -> authEmailSender.sendNewAccount(account, normalizedLanguage));
 
       JSONObject accountJson = new JSONObject();
       accountJson.put("id", account.getId());
@@ -739,7 +741,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
       Account account = findAccountForCommittedOnboarding(token, accountEmail);
       sendAuthEmailBestEffort("environment-ready",
-          () -> authEmailSender.sendEnvironmentReady(account, clientId));
+          () -> authEmailSender.sendEnvironmentReady(account, clientId,
+              StringUtils.trimToNull(onboardingRequest.language)));
 
       sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
       sendProgress(writer, "finalize", "done", "Environment ready");
@@ -1165,8 +1168,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       log.warn("Auth email reset-password skipped because the public app base URL is not configured");
     } else {
       try {
-        emailSent = authEmailSender.sendPasswordReset(account, resetToken, resetTokenHash,
-            resetLink);
+        emailSent = authEmailSender.sendPasswordReset(account, resetTokenHash, resetLink);
       } catch (RuntimeException e) {
         log.warn("Auth email reset-password failed after token storage", e);
       }

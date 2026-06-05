@@ -197,6 +197,27 @@ public class InitialEmailContractsTest {
   }
 
   @Test
+  public void environmentReadyUsesSelectedLanguageForCustomContent() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1");
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "client-1");
+    command.put(EmailContractCommandSupport.FIELD_LANGUAGE, "es_ES");
+
+    NeoResponse response = service.send("environment-ready", command);
+
+    assertSent(response);
+    assertEquals("es_ES", adapter.getLastRequest().getData().getString("language"));
+    assertEquals("Tu entorno de Etendo Go está listo",
+        adapter.getLastRequest().getData().getString("subject"));
+    assertTrue(adapter.getLastRequest().getData().getString("body")
+        .contains("Abre este enlace para acceder a tu panel"));
+  }
+
+  @Test
   public void passwordChangedUsesAccountRecipientAndNoticePayload() throws Exception {
     FakeProviderAdapter adapter = new FakeProviderAdapter();
     TransactionalEmailService service = service(adapter);
@@ -218,6 +239,26 @@ public class InitialEmailContractsTest {
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("contact support"));
     assertFalse(adapter.getLastRequest().getData().has("link"));
+  }
+
+  @Test
+  public void passwordChangedUsesSelectedLanguageForCustomContent() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1");
+    command.put(EmailContractCommandSupport.FIELD_DATE, "2026-05-29T10:00:00Z");
+    command.put(EmailContractCommandSupport.FIELD_LANGUAGE, "es_ES");
+
+    NeoResponse response = service.send("password-changed", command);
+
+    assertSent(response);
+    assertEquals("es_ES", adapter.getLastRequest().getData().getString("language"));
+    assertEquals("Tu contraseña de Etendo Go fue modificada",
+        adapter.getLastRequest().getData().getString("subject"));
+    assertTrue(adapter.getLastRequest().getData().getString("body")
+        .contains("contacta a soporte"));
   }
 
   @Test

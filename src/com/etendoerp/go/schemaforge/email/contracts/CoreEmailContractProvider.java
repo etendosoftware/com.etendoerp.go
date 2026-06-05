@@ -89,13 +89,26 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
 
   private static void environmentReadyContent(org.codehaus.jettison.json.JSONObject data,
       String language, String link) throws org.codehaus.jettison.json.JSONException {
+    if ("es_ES".equals(language)) {
+      data.put(FIELD_SUBJECT, "Tu entorno de Etendo Go está listo");
+      data.put(FIELD_BODY, "Tu entorno de Etendo Go está listo. "
+          + "Abre este enlace para acceder a tu panel: " + link);
+      return;
+    }
     data.put(FIELD_SUBJECT, "Your Etendo Go environment is ready");
     data.put(FIELD_BODY, "Your Etendo Go environment is ready. "
         + "Open this link to access your dashboard: " + link);
   }
 
-  private static void passwordChangedContent(org.codehaus.jettison.json.JSONObject data)
+  private static void passwordChangedContent(org.codehaus.jettison.json.JSONObject data,
+      String language)
       throws org.codehaus.jettison.json.JSONException {
+    if ("es_ES".equals(language)) {
+      data.put(FIELD_SUBJECT, "Tu contraseña de Etendo Go fue modificada");
+      data.put(FIELD_BODY, "Tu contraseña de Etendo Go fue modificada correctamente. "
+          + "Si no realizaste este cambio, contacta a soporte.");
+      return;
+    }
     data.put(FIELD_SUBJECT, "Your Etendo Go password was changed");
     data.put(FIELD_BODY, "Your Etendo Go password was changed successfully. "
         + "If you did not make this change, contact support.");

@@ -99,6 +99,21 @@ public class TransactionalAuthEmailSenderTest {
   }
 
   @Test
+  public void sendNewAccountOmitsNullLanguage() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test/");
+    TransactionalEmailService emailService = mock(TransactionalEmailService.class);
+    TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
+    Account account = account("account-1");
+
+    JSONObject command = sendAndCaptureCommand(emailService,
+        () -> sender.sendNewAccount(account, null),
+        "new-account");
+
+    assertBaseCommand(command);
+    assertFalse(command.has(EmailContractCommandSupport.FIELD_LANGUAGE));
+  }
+
+  @Test
   public void sendEnvironmentReadyUsesServerLinkAndClientIdIdempotency() throws Exception {
     System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
     TransactionalEmailService emailService = mock(TransactionalEmailService.class);
@@ -116,14 +131,37 @@ public class TransactionalAuthEmailSenderTest {
   }
 
   @Test
-  public void sendPasswordResetBuildsEncodedResetLinkAndHashIdempotency() throws Exception {
+  public void sendEnvironmentReadyIncludesSelectedLanguage() throws Exception {
     System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
     TransactionalEmailService emailService = mock(TransactionalEmailService.class);
     TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
     Account account = account("account-1");
 
     JSONObject command = sendAndCaptureCommand(emailService,
-        () -> sender.sendPasswordReset(account, "abc 123+/=", "reset-hash"),
+        () -> sender.sendEnvironmentReady(account, "client-1", "es_ES"),
+        "environment-ready");
+
+    assertBaseCommand(command, "client-1");
+    assertEquals("es_ES", command.getString(EmailContractCommandSupport.FIELD_LANGUAGE));
+  }
+
+  @Test
+  public void resetPasswordLinkBuilderEncodesToken() {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test");
+
+    assertEquals("https://app.example.test/onboarding?resetToken=abc+123%2B%2F%3D",
+        EtendoGoAuthLinkBuilder.resetPasswordLink("abc 123+/="));
+  }
+
+  @Test
+  public void sendPasswordResetUsesProvidedLinkAndHashIdempotency() throws Exception {
+    TransactionalEmailService emailService = mock(TransactionalEmailService.class);
+    TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
+    Account account = account("account-1");
+
+    JSONObject command = sendAndCaptureCommand(emailService,
+        () -> sender.sendPasswordReset(account, "reset-hash",
+            "https://app.example.test/onboarding?resetToken=abc+123%2B%2F%3D"),
         "reset-password");
 
     assertBaseCommand(command);
@@ -140,7 +178,7 @@ public class TransactionalAuthEmailSenderTest {
     Account account = account("account-1");
 
     JSONObject command = sendAndCaptureCommand(emailService,
-        () -> sender.sendPasswordReset(account, "reset-token", "reset-hash",
+        () -> sender.sendPasswordReset(account, "reset-hash",
             "https://go.experimental.etendo.cloud/onboarding?resetToken=reset-token"),
         "reset-password");
 
@@ -166,6 +204,19 @@ public class TransactionalAuthEmailSenderTest {
     assertFalse(command.has("data"));
     assertFalse(command.getString(EmailContractCommandSupport.FIELD_RECORD_ID).isEmpty());
     assertFalse(command.getString(EmailContractCommandSupport.FIELD_DATE).isEmpty());
+  }
+
+  @Test
+  public void sendPasswordChangedIncludesSelectedLanguage() throws Exception {
+    TransactionalEmailService emailService = mock(TransactionalEmailService.class);
+    TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
+    Account account = account("account-1");
+
+    JSONObject command = sendAndCaptureCommand(emailService,
+        () -> sender.sendPasswordChanged(account, "es_ES"), "password-changed");
+
+    assertBaseCommand(command);
+    assertEquals("es_ES", command.getString(EmailContractCommandSupport.FIELD_LANGUAGE));
   }
 
   @Test
@@ -195,10 +246,10 @@ public class TransactionalAuthEmailSenderTest {
     TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
 
     sender.sendNewAccount(null);
-    sender.sendPasswordReset(null, "reset-token", "reset-hash");
-    sender.sendPasswordReset(account("account-1"), null, "reset-hash");
-    sender.sendPasswordReset(account("account-1"), "reset-token", " ");
-    sender.sendPasswordReset(account("account-1"), "reset-token", "reset-hash", null);
+    sender.sendPasswordReset(null, "reset-hash", "https://app.example.test/reset");
+    sender.sendPasswordReset(account("account-1"), null, "https://app.example.test/reset");
+    sender.sendPasswordReset(account("account-1"), "reset-hash", null);
+    sender.sendPasswordReset(account("account-1"), "reset-hash", " ");
     sender.sendPasswordChanged(null);
 
     verify(emailService, never()).send(any(), any());
