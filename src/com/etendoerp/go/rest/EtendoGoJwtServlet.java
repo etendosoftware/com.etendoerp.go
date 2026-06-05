@@ -33,6 +33,7 @@ import java.time.Instant;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
@@ -50,6 +51,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
+import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingDefaultCustomerService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
@@ -182,7 +184,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /**
    * POST /sws/go/register
-   * Body: { "email": "...", "password": "...", "name": "..." }
+   * Body: { "email": "...", "password": "...", "name": "...", "language": "es_ES" }
    * Returns 201 with session token on success, 400 if email is taken.
    */
   private void handleRegister(HttpServletRequest request, HttpServletResponse response)
@@ -198,10 +200,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String email;
     String password;
     String name;
+    String language;
     try {
       email = body.getString(FIELD_EMAIL).trim().toLowerCase();
       password = body.getString("password");
       name = body.getString("name").trim();
+      language = body.optString("language", "").trim();
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Missing required fields: email, password, name");
@@ -226,8 +230,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String passwordHash = hashPassword(password);
       String sessionToken = generateToken();
       Account account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, name, sessionToken);
+      String normalizedLanguage = StringUtils.trimToNull(language);
       sendAuthEmailBestEffort("new-account",
-          () -> authEmailSender.sendNewAccount(account));
+          () -> authEmailSender.sendNewAccount(account, normalizedLanguage));
 
       JSONObject accountJson = new JSONObject();
       accountJson.put("id", account.getId());
@@ -348,7 +353,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setAdminMode(true);
       Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
       if (account != null) {
-        storeResetTokenAndSendEmail(account);
+        storeResetTokenAndSendEmail(account, PublicUrlResolver.resolveConfiguredAppBaseUrl());
       }
       writePasswordResetNeutralResponse(response);
     } catch (RuntimeException e) {
@@ -735,8 +740,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
       Account account = findAccountForCommittedOnboarding(token, accountEmail);
+      String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
       sendAuthEmailBestEffort("environment-ready",
-          () -> authEmailSender.sendEnvironmentReady(account, clientId));
+          () -> authEmailSender.sendEnvironmentReady(account, clientId, normalizedLanguage));
 
       sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
       sendProgress(writer, "finalize", "done", "Environment ready");
@@ -1148,7 +1154,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return account != null ? account : EtendoGoJwtDalHelper.findActiveAccountByEmail(accountEmail);
   }
 
-  private void storeResetTokenAndSendEmail(Account account) {
+  private void storeResetTokenAndSendEmail(Account account, String appBaseUrl) {
     EtendoGoJwtDalHelper.PasswordResetTokenState previousTokenState =
         EtendoGoJwtDalHelper.capturePasswordResetToken(account);
     String resetToken = generatePasswordResetToken();
@@ -1157,10 +1163,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     EtendoGoJwtDalHelper.storePasswordResetToken(account, resetTokenHash, expiresAt);
 
     boolean emailSent = false;
-    try {
-      emailSent = authEmailSender.sendPasswordReset(account, resetToken, resetTokenHash);
-    } catch (RuntimeException e) {
-      log.warn("Auth email reset-password failed after token storage", e);
+    String resetLink = EtendoGoAuthLinkBuilder.resetPasswordLink(resetToken, appBaseUrl);
+    if (resetLink == null) {
+      log.warn("Auth email reset-password skipped because the public app base URL is not configured");
+    } else {
+      try {
+        emailSent = authEmailSender.sendPasswordReset(account, resetTokenHash, resetLink);
+      } catch (RuntimeException e) {
+        log.warn("Auth email reset-password failed after token storage", e);
+      }
     }
     if (!emailSent) {
       EtendoGoJwtDalHelper.restorePasswordResetToken(account, previousTokenState);

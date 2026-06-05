@@ -52,19 +52,28 @@ class TransactionalAuthEmailSender {
   }
 
   boolean sendNewAccount(Account account) {
+    return sendNewAccount(account, null);
+  }
+
+  boolean sendNewAccount(Account account, String language) {
     if (account == null) {
       return false;
     }
     return sendAccountLink(CONTRACT_NEW_ACCOUNT, account,
-        EtendoGoAuthLinkBuilder.onboardingLink(), null);
+        EtendoGoAuthLinkBuilder.onboardingLink(), null, language);
   }
 
   boolean sendEnvironmentReady(Account account, String clientId) {
+    return sendEnvironmentReady(account, clientId, null);
+  }
+
+  boolean sendEnvironmentReady(Account account, String clientId, String language) {
     if (account == null) {
       return false;
     }
     try {
       JSONObject body = baseCommand(account, clientId);
+      addLanguageField(body, language);
       String dashboardLink = EtendoGoAuthLinkBuilder.dashboardLink();
       if (dashboardLink != null) {
         body.put(EmailContractCommandSupport.FIELD_LINK, dashboardLink);
@@ -77,22 +86,24 @@ class TransactionalAuthEmailSender {
     }
   }
 
-  boolean sendPasswordReset(Account account, String resetToken,
-      String resetTokenHash) {
-    if (account == null || StringUtils.isBlank(resetToken)
-        || StringUtils.isBlank(resetTokenHash)) {
+  boolean sendPasswordReset(Account account, String resetTokenHash, String resetLink) {
+    if (account == null || StringUtils.isBlank(resetTokenHash) || StringUtils.isBlank(resetLink)) {
       return false;
     }
-    return sendAccountLink(CONTRACT_RESET_PASSWORD, account,
-        EtendoGoAuthLinkBuilder.resetPasswordLink(resetToken), resetTokenHash);
+    return sendAccountLink(CONTRACT_RESET_PASSWORD, account, resetLink, resetTokenHash);
   }
 
   boolean sendPasswordChanged(Account account) {
+    return sendPasswordChanged(account, null);
+  }
+
+  boolean sendPasswordChanged(Account account, String language) {
     if (account == null) {
       return false;
     }
     try {
       JSONObject body = baseCommand(account);
+      addLanguageField(body, language);
       body.put(EmailContractCommandSupport.FIELD_DATE, Instant.now().toString());
       body.put(EmailContractCommandSupport.FIELD_RECORD_ID,
           account.getId() + ":" + java.util.UUID.randomUUID());
@@ -105,12 +116,18 @@ class TransactionalAuthEmailSender {
 
   private boolean sendAccountLink(String contractName, Account account, String link,
       String recordId) {
+    return sendAccountLink(contractName, account, link, recordId, null);
+  }
+
+  private boolean sendAccountLink(String contractName, Account account, String link,
+      String recordId, String language) {
     if (account == null || link == null) {
       return false;
     }
     try {
       JSONObject body = baseCommand(account);
       body.put(EmailContractCommandSupport.FIELD_LINK, link);
+      addLanguageField(body, language);
       if (recordId != null) {
         body.put(EmailContractCommandSupport.FIELD_RECORD_ID, recordId);
       }
@@ -118,6 +135,13 @@ class TransactionalAuthEmailSender {
     } catch (JSONException e) {
       log.warn("Could not build {} email command", contractName, e);
       return false;
+    }
+  }
+
+  private static void addLanguageField(JSONObject body, String language) throws JSONException {
+    String normalizedLanguage = StringUtils.trimToNull(language);
+    if (normalizedLanguage != null) {
+      body.put(EmailContractCommandSupport.FIELD_LANGUAGE, normalizedLanguage);
     }
   }
 

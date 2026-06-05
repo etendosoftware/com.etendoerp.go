@@ -23,10 +23,12 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -47,13 +49,16 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.data.Account;
 
 /**
@@ -61,7 +66,14 @@ import com.etendoerp.go.schemaforge.data.Account;
  */
 public class EtendoGoJwtServletTest {
 
+  private static final String TEST_APP_BASE_URL = "https://app.example.test";
+
   private final EtendoGoJwtServlet servlet = new EtendoGoJwtServlet();
+
+  @After
+  public void clearProperties() {
+    System.clearProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY);
+  }
 
   // ===================== doGet routing =====================
 
@@ -178,7 +190,41 @@ public class EtendoGoJwtServletTest {
     JSONObject respBody = new JSONObject(resp.body());
     assertEquals("success", respBody.getString("status"));
     assertNotNull(respBody.getString("token"));
-    verify(emailSender).sendNewAccount(account);
+    verify(emailSender).sendNewAccount(account, null);
+  }
+
+  @Test
+  public void registerSuccessPassesSelectedLanguageToWelcomeEmail() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/register");
+    TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
+    EtendoGoJwtServlet servletWithEmailSender = new EtendoGoJwtServlet(emailSender);
+    when(req.getContentType()).thenReturn("application/json");
+    JSONObject body = new JSONObject();
+    body.put("email", "localized@test.com");
+    body.put("password", "pass123");
+    body.put("name", "Localized User");
+    body.put("language", " es_ES ");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
+
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("acct-1");
+    when(account.getEmail()).thenReturn("localized@test.com");
+    when(account.getName()).thenReturn("Localized User");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("localized@test.com"))
+          .thenReturn(null);
+      dalMock.when(() -> EtendoGoJwtDalHelper.createAccount(
+          anyString(), anyString(), anyString(), anyString()))
+          .thenReturn(account);
+
+      servletWithEmailSender.doPost(req, resp.response);
+    }
+
+    assertEquals(201, resp.status);
+    verify(emailSender).sendNewAccount(account, "es_ES");
   }
 
   @Test
@@ -199,7 +245,7 @@ public class EtendoGoJwtServletTest {
     when(account.getEmail()).thenReturn("new@test.com");
     when(account.getName()).thenReturn("New User");
     doThrow(new RuntimeException("provider unavailable"))
-        .when(emailSender).sendNewAccount(account);
+        .when(emailSender).sendNewAccount(account, null);
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
@@ -302,6 +348,7 @@ public class EtendoGoJwtServletTest {
 
   @Test
   public void passwordResetRequestKnownEmailStoresTokenAndSendsEmail() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, TEST_APP_BASE_URL);
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = mockRequest("/password-reset/request");
     TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
@@ -327,11 +374,87 @@ public class EtendoGoJwtServletTest {
     }
 
     assertEquals(200, resp.status);
-    verify(emailSender).sendPasswordReset(eq(account), anyString(), anyString());
+    ArgumentCaptor<String> resetLinkCaptor = ArgumentCaptor.forClass(String.class);
+    verify(emailSender).sendPasswordReset(eq(account), anyString(), resetLinkCaptor.capture());
+    String resetLink = resetLinkCaptor.getValue();
+    assertNotNull("The reset link should not be null", resetLink);
+    assertTrue("Reset link does not use the configured app URL: " + resetLink,
+        resetLink.startsWith(TEST_APP_BASE_URL + "/onboarding?resetToken="));
+  }
+
+  @Test
+  public void passwordResetRequestUsesConfiguredAppBaseUrlWhenAvailable() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, TEST_APP_BASE_URL);
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/password-reset/request");
+    TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
+    EtendoGoJwtServlet servletWithEmailSender = new EtendoGoJwtServlet(emailSender);
+    when(req.getContentType()).thenReturn("application/json");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"email\":\"user@test.com\"}")));
+
+    Account account = mock(Account.class);
+    when(emailSender.sendPasswordReset(eq(account), anyString(), anyString()))
+        .thenReturn(true);
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
+          .thenCallRealMethod();
+
+      servletWithEmailSender.doPost(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    ArgumentCaptor<String> resetLinkCaptor = ArgumentCaptor.forClass(String.class);
+    verify(emailSender).sendPasswordReset(eq(account), anyString(), resetLinkCaptor.capture());
+    String resetLink = resetLinkCaptor.getValue();
+    assertNotNull("The reset link should not be null", resetLink);
+    assertTrue("Reset link does not use the configured app URL: " + resetLink,
+        resetLink.startsWith(TEST_APP_BASE_URL + "/onboarding?resetToken="));
+  }
+
+  @Test
+  public void passwordResetRequestDoesNotUseRequestHostWhenAppBaseUrlIsMissing()
+      throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/password-reset/request");
+    TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
+    EtendoGoJwtServlet servletWithEmailSender = new EtendoGoJwtServlet(emailSender);
+    when(req.getContentType()).thenReturn("application/json");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"email\":\"user@test.com\"}")));
+    when(req.getScheme()).thenReturn("http");
+    when(req.getServerName()).thenReturn("attacker.example.test");
+    when(req.getServerPort()).thenReturn(8080);
+
+    Account account = mock(Account.class);
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<PublicUrlResolver> publicUrlMock =
+             mockStatic(PublicUrlResolver.class, CALLS_REAL_METHODS)) {
+      publicUrlMock.when(PublicUrlResolver::resolveConfiguredAppBaseUrl).thenReturn(null);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
+          .thenCallRealMethod();
+
+      servletWithEmailSender.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.storePasswordResetToken(
+          eq(account), anyString(), any(Date.class)));
+      dalMock.verify(() -> EtendoGoJwtDalHelper.restorePasswordResetToken(
+          eq(account), any(EtendoGoJwtDalHelper.PasswordResetTokenState.class)));
+    }
+
+    assertEquals(200, resp.status);
+    verify(emailSender, never()).sendPasswordReset(eq(account), anyString(), any());
   }
 
   @Test
   public void passwordResetRequestEmailFailureStillReturnsNeutralSuccess() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, TEST_APP_BASE_URL);
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = mockRequest("/password-reset/request");
     TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
@@ -363,6 +486,7 @@ public class EtendoGoJwtServletTest {
 
   @Test
   public void passwordResetRequestProviderExceptionRestoresPreviousToken() throws Exception {
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, TEST_APP_BASE_URL);
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = mockRequest("/password-reset/request");
     TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
