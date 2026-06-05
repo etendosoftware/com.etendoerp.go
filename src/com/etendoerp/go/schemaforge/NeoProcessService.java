@@ -38,6 +38,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.structure.BaseOBObject;
@@ -843,7 +844,8 @@ public class NeoProcessService {
     if (resultCode == 0L) {
       // Error
       String cleanMsg = errorMsg != null
-          ? errorMsg.replaceFirst("@ERROR=", "") : "Process failed";
+          ? OBMessageUtils.parseTranslation(errorMsg.replaceFirst("@ERROR=", ""))
+          : "Process failed";
       result.put(STATUS, ERROR);
       result.put(MESSAGE, cleanMsg);
       return new NeoResponse(400, result);
@@ -925,7 +927,7 @@ public class NeoProcessService {
       String text = message.optString("text", "");
 
       result.put(STATUS, severity);
-      result.put(MESSAGE, text);
+      result.put(MESSAGE, OBMessageUtils.parseTranslation(text));
 
       if (ERROR.equals(severity)) {
         return new NeoResponse(400, result);
@@ -937,7 +939,8 @@ public class NeoProcessService {
     JSONObject actionError = extractProcessViewError(handlerResult);
     if (actionError != null) {
       result.put(STATUS, ERROR);
-      result.put(MESSAGE, actionError.optString("msgText", "Process failed"));
+      result.put(MESSAGE,
+          OBMessageUtils.parseTranslation(actionError.optString("msgText", "Process failed")));
       return new NeoResponse(400, result);
     }
 
@@ -1016,7 +1019,8 @@ public class NeoProcessService {
       OBError error = (OBError) bundleResult;
       result.put(STATUS, error.getType().toLowerCase());
       result.put("title", StringUtils.defaultString(error.getTitle()));
-      result.put(MESSAGE, StringUtils.defaultString(error.getMessage()));
+      result.put(MESSAGE,
+          OBMessageUtils.parseTranslation(StringUtils.defaultString(error.getMessage())));
 
       if (ERROR.equalsIgnoreCase(error.getType())) {
         return new NeoResponse(400, result);
