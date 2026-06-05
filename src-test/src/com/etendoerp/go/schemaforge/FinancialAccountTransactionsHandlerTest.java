@@ -113,6 +113,23 @@ public class FinancialAccountTransactionsHandlerTest {
     Mockito.framework().clearInlineMocks();
   }
 
+  /**
+   * Stubs {@code OBContext.getOBContext().getLanguage().getLanguage()} on the
+   * given static mock so {@code buildPayload → loadTrxTypes} can read the
+   * current language without a real OB security context. Required by every test
+   * that reaches {@code buildPayload} (the happy path and the direct envelope
+   * test); without it {@code getOBContext()} returns {@code null} and
+   * {@code loadTrxTypes} throws an NPE.
+   */
+  private static void stubContextLanguage(MockedStatic<OBContext> obContextMock) {
+    OBContext obCtx = mock(OBContext.class);
+    org.openbravo.model.ad.system.Language language =
+        mock(org.openbravo.model.ad.system.Language.class);
+    when(language.getLanguage()).thenReturn("en_US");
+    when(obCtx.getLanguage()).thenReturn(language);
+    obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+  }
+
   // ── handle() routing ─────────────────────────────────────────────────────
 
   /**
@@ -205,7 +222,11 @@ public class FinancialAccountTransactionsHandlerTest {
 
     ResultSet rsTotals = mock(ResultSet.class);
     when(psTotals.executeQuery()).thenReturn(rsTotals);
-    when(rsTotals.next()).thenReturn(true);
+    // true once for loadTotals' single-row read, then false: buildPayload reuses
+    // this statement/result-set for the dimension, trxType and payment-method
+    // loaders, whose while(rs.next()) loops must terminate (a bare thenReturn(true)
+    // returns true forever and hangs the test).
+    when(rsTotals.next()).thenReturn(true, false);
     when(rsTotals.getBigDecimal("currentbalance")).thenReturn(new BigDecimal("211841.01"));
     when(rsTotals.getString("iso_code")).thenReturn("EUR");
     when(rsTotals.getBigDecimal("inflows_30d")).thenReturn(new BigDecimal("47820.00"));
@@ -216,6 +237,7 @@ public class FinancialAccountTransactionsHandlerTest {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.getConnection()).thenReturn(conn);
+      stubContextLanguage(obContextMock);
 
       NeoResponse response = handler.handle(ctx);
 
@@ -520,10 +542,12 @@ public class FinancialAccountTransactionsHandlerTest {
     when(psTotals.executeQuery()).thenReturn(rsTotals);
     when(rsTotals.next()).thenReturn(false);
 
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.getConnection()).thenReturn(conn);
+      stubContextLanguage(obContextMock);
 
       NeoResponse response = handler.buildPayload(ACCOUNT_ID);
 
