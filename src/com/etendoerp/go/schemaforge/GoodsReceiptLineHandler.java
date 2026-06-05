@@ -9,7 +9,7 @@
  * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
  * implied. See the License for the specific language governing rights
  * and limitations under the License.
- * All portions are Copyright © 2021–2026 FUTIT SERVICES, S.L
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
  * All Rights Reserved.
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
@@ -20,9 +20,9 @@ package com.etendoerp.go.schemaforge;
 import javax.inject.Named;
 
 /**
- * NeoHandler for the Goods Shipment line entity.
+ * NeoHandler for the Goods Receipt line entity.
  * Delegates all logic to {@link AbstractInOutLineHandler}.
  */
-@Named("goodsShipmentLineHandler")
-public class GoodsShipmentLineHandler extends AbstractInOutLineHandler {
+@Named("goodsReceiptLineHandler")
+public class GoodsReceiptLineHandler extends AbstractInOutLineHandler {
 }
