@@ -564,7 +564,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
     if (receiptIds.isEmpty()) return result;
     String placeholders = receiptIds.stream().map(id -> "?").collect(Collectors.joining(","));
     String sql =
-        "SELECT DISTINCT l.M_InOut_ID, src.M_InOut_ID, src.DocumentNo " +
+        "SELECT DISTINCT l.M_InOut_ID, src.M_InOut_ID, src.DocumentNo, src.DocStatus " +
         "FROM M_InOutLine l " +
         "JOIN M_InOutLine orig ON orig.M_InOutLine_ID = l.Canceled_Inoutline_ID " +
         "JOIN M_InOut src ON src.M_InOut_ID = orig.M_InOut_ID " +
@@ -590,6 +590,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       JSONObject ship = new JSONObject();
       ship.put("id", rs.getString(2));
       ship.put(FIELD_DOCUMENT_NO, rs.getString(3));
+      ship.put(FIELD_DOCUMENT_STATUS, rs.getString(4));
       result.computeIfAbsent(receiptId, k -> new ArrayList<>()).add(ship);
     } catch (Exception je) {
       log.warn("Error building sourceShipment JSON: {}", je.getMessage());
@@ -602,10 +603,12 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
     if (receiptIds.isEmpty()) return result;
     String placeholders = receiptIds.stream().map(id -> "?").collect(Collectors.joining(","));
     String sql =
-        "SELECT DISTINCT l.M_InOut_ID, i.C_Invoice_ID, i.DocumentNo " +
+        "SELECT DISTINCT l.M_InOut_ID, i.C_Invoice_ID, i.DocumentNo, i.DocStatus, " +
+        "  i.GrandTotal, cur.ISO_Code " +
         "FROM M_InOutLine l " +
         "JOIN C_InvoiceLine il ON il.M_InOutLine_ID = l.M_InOutLine_ID " +
         "JOIN C_Invoice i ON i.C_Invoice_ID = il.C_Invoice_ID " +
+        "LEFT JOIN C_Currency cur ON cur.C_Currency_ID = i.C_Currency_ID " +
         "WHERE l.M_InOut_ID IN (" + placeholders + ") " +
         "  AND i.DocStatus != 'VO'";
     Connection conn = OBDal.getInstance().getConnection();
@@ -628,6 +631,11 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       JSONObject inv = new JSONObject();
       inv.put("id", rs.getString(2));
       inv.put(FIELD_DOCUMENT_NO, rs.getString(3));
+      inv.put(FIELD_DOCUMENT_STATUS, rs.getString(4));
+      BigDecimal total = rs.getBigDecimal(5);
+      inv.put("grandTotalAmount", total != null ? total : JSONObject.NULL);
+      String iso = rs.getString(6);
+      inv.put("currency$_identifier", iso != null ? iso : JSONObject.NULL);
       result.computeIfAbsent(receiptId, k -> new ArrayList<>()).add(inv);
     } catch (Exception je) {
       log.warn("Error building returnInvoice JSON: {}", je.getMessage());
