@@ -179,14 +179,16 @@ public abstract class AbstractInOutLineHandler implements NeoHandler {
         + "LEFT JOIN c_invoiceline src_il ON src_il.m_inoutline_id = il.m_inoutline_id "
         + "LEFT JOIN m_product p ON p.m_product_id = il.m_product_id "
         + "WHERE il.m_inoutline_id IN (" + placeholders + ")";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      for (int i = 0; i < lineIds.size(); i++) {
-        ps.setString(i + 1, lineIds.get(i));
-      }
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          result.put(rs.getString(1), new LineData(rs.getBigDecimal(2), rs.getString(3), rs.getBigDecimal(4)));
+    try {
+      Connection conn = OBDal.getInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        for (int i = 0; i < lineIds.size(); i++) {
+          ps.setString(i + 1, lineIds.get(i));
+        }
+        try (ResultSet rs = ps.executeQuery()) {
+          while (rs.next()) {
+            result.put(rs.getString(1), new LineData(rs.getBigDecimal(2), rs.getString(3), rs.getBigDecimal(4)));
+          }
         }
       }
     } catch (Exception e) {

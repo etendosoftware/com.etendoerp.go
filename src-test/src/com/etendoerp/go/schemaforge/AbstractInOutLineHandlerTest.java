@@ -244,14 +244,14 @@ public class AbstractInOutLineHandlerTest {
   }
 
   /**
-   * afterHandle() GET returns null when getConnection() throws.
+   * afterHandle() GET returns ok with the original body when getConnection() throws.
    *
-   * <p>{@code getConnection()} is called BEFORE the try-with-resources in
-   * {@code fetchLineData}, so the exception propagates up to {@code afterHandle}'s
-   * outer catch block, which returns null.
+   * <p>{@code getConnection()} is called inside the try-catch in {@code fetchLineData},
+   * so the exception is caught there and an empty map is returned. {@code afterHandle}
+   * then returns the original response body without enrichment (graceful degradation).
    */
   @Test
-  public void afterHandle_get_dbErrorInFetch_returnsNull() throws Exception {
+  public void afterHandle_get_dbErrorInFetch_returnsOkWithOriginalBody() throws Exception {
     GoodsReceiptLineHandler handler = new GoodsReceiptLineHandler();
 
     JSONObject line = new JSONObject().put("id", "line-x");
@@ -270,9 +270,10 @@ public class AbstractInOutLineHandlerTest {
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.getConnection()).thenThrow(new RuntimeException("DB unavailable"));
 
-      // Exception from getConnection() propagates to afterHandle's outer catch → null
+      // Exception caught inside fetchLineData → empty map → afterHandle returns ok
       NeoResponse result = handler.afterHandle(ctx);
-      assertNull(result);
+      assertNotNull("DB error in fetchLineData must not prevent a response", result);
+      assertNotNull(result.getBody());
     }
   }
 

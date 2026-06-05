@@ -80,13 +80,14 @@ final class NeoInvoiceSupport {
         ps.setString(1, inOutId);
         try (ResultSet rs = ps.executeQuery()) {
           while (rs.next()) {
+            String lineId = rs.getString(1);
             BigDecimal movQty = rs.getBigDecimal(2);
             BigDecimal invQty = rs.getBigDecimal(3);
             BigDecimal pending = (movQty != null ? movQty : BigDecimal.ZERO)
                 .subtract(invQty != null ? invQty : BigDecimal.ZERO)
                 .max(BigDecimal.ZERO);
             if (pending.compareTo(BigDecimal.ZERO) > 0) {
-              result.put(rs.getString(1), pending);
+              result.put(lineId, pending);
             }
           }
         }
