@@ -47,14 +47,18 @@ import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
+import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
@@ -67,7 +71,10 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * stubbed via {@code spy(handler)} + {@code doReturn} so the tests run
  * fully offline.
  */
-@RunWith(MockitoJUnitRunner.class)
+// Silent runner: clearMocks() (below) wipes the inline mock maker registry after
+// each test to keep the shared test-worker heap flat; the strict runner would
+// then fail its post-run mock inspection with NotAMockException, so use Silent.
+@RunWith(MockitoJUnitRunner.Silent.class)
 public class BankStatementsHandlerTest {
 
   private BankStatementsHandler handler;
@@ -75,6 +82,17 @@ public class BankStatementsHandlerTest {
   @Before
   public void setUp() {
     handler = spy(new BankStatementsHandler());
+  }
+
+  /**
+   * Releases the references the Mockito inline mock maker retains for every mock
+   * created in a test. Without this they survive until GC and accumulate across
+   * the whole module suite (single test JVM), pushing the fork past its heap
+   * limit. Clearing them after each test keeps the heap flat.
+   */
+  @After
+  public void clearMocks() {
+    Mockito.framework().clearInlineMocks();
   }
 
   // ── handle() routing ───────────────────────────────────────────────────
@@ -603,6 +621,206 @@ public class BankStatementsHandlerTest {
     when(ctx.getRequestBody()).thenReturn(body);
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       return h.handle(postCtx(ctx, "import"));
+    }
+  }
+
+  // ── ?action=create (manual statement) ──────────────────────────────────
+
+  /**
+   * Invokes the private static {@code validateCreateBody} via reflection — it
+   * only reads the JSON body, so this covers every 400 branch without the
+   * {@code mockStatic(OBContext)} that going through {@code handle()} would
+   * otherwise force just to get past admin mode.
+   */
+  private static NeoResponse invokeValidateCreate(JSONObject body) throws Exception {
+    java.lang.reflect.Method m =
+        BankStatementsHandler.class.getDeclaredMethod("validateCreateBody", JSONObject.class);
+    m.setAccessible(true);
+    return (NeoResponse) m.invoke(null, body);
+  }
+
+  private static JSONObject createLine(String date, String desc, String cp, Object in, Object out)
+      throws Exception {
+    JSONObject l = new JSONObject();
+    l.put("date", date);
+    l.put("description", desc);
+    l.put("bpartnerName", cp);
+    l.put("in", in);
+    l.put("out", out);
+    return l;
+  }
+
+  @Test
+  public void handleCreateNullBodyReturns400() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(null);
+    NeoResponse r = handler.handle(postCtx(ctx, "create"));
+    assertEquals(400, r.getHttpStatus());
+  }
+
+  @Test
+  public void validateCreateBodyRejectsMissingAccount() throws Exception {
+    NeoResponse r = invokeValidateCreate(new JSONObject());
+    assertEquals(400, r.getHttpStatus());
+    assertTrue(r.getBody().getJSONObject("error").getString("message")
+        .contains("FIN_Financial_Account_ID"));
+  }
+
+  @Test
+  public void validateCreateBodyRejectsMissingName() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    NeoResponse r = invokeValidateCreate(body);
+    assertEquals(400, r.getHttpStatus());
+    assertTrue(r.getBody().getJSONObject("error").getString("message").contains("name"));
+  }
+
+  @Test
+  public void validateCreateBodyRejectsEmptyLines() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    body.put("lines", new JSONArray());
+    NeoResponse r = invokeValidateCreate(body);
+    assertEquals(400, r.getHttpStatus());
+    assertTrue(r.getBody().getJSONObject("error").getString("message").contains("line"));
+  }
+
+  @Test
+  public void validateCreateBodyAcceptsValidBody() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    JSONArray lines = new JSONArray();
+    lines.put(createLine("2026-06-02T00:00:00Z", "Transferencia", "Acme", 3500.0, 0));
+    body.put("lines", lines);
+    assertNull(invokeValidateCreate(body));
+  }
+
+  @Test
+  public void handleCreateHappyPathPersistsLinesAndProcesses() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    body.put("transactionDate", "2026-06-04T00:00:00Z");
+    body.put("importDate", "2026-06-04T00:00:00Z");
+    JSONArray lines = new JSONArray();
+    JSONObject rich = new JSONObject();
+    rich.put("date", "2026-06-02T00:00:00Z");
+    rich.put("reference", "REF-1");
+    rich.put("bpartnerName", "Acme");
+    rich.put("bpartnerId", "bp-1");
+    rich.put("glItemId", "gl-1");
+    rich.put("description", "Transferencia");
+    rich.put("in", 3500.0);
+    rich.put("out", 0);
+    lines.put(rich);
+    lines.put(createLine("", "", "", 0, 0)); // blank trailing row → skipped
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    when(statement.getId()).thenReturn("stmt-new");
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    org.openbravo.model.common.businesspartner.BusinessPartner bp =
+        mock(org.openbravo.model.common.businesspartner.BusinessPartner.class);
+    org.openbravo.model.financialmgmt.gl.GLItem gl =
+        mock(org.openbravo.model.financialmgmt.gl.GLItem.class);
+
+    // Stub the DB-bound seams so only createLines runs for real.
+    doReturn(statement).when(handler)
+        .newManualBankStatement(any(), any());
+    doNothing().when(handler).processStatement(any());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+      when(dal.get(eq(org.openbravo.model.common.businesspartner.BusinessPartner.class), eq("bp-1")))
+          .thenReturn(bp);
+      when(dal.get(eq(org.openbravo.model.financialmgmt.gl.GLItem.class), eq("gl-1"))).thenReturn(gl);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(line);
+
+      NeoResponse response = handler.handle(postCtx(ctx, "create"));
+
+      assertEquals(201, response.getHttpStatus());
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals("stmt-new", data.getString("id"));
+      assertEquals(1, data.getInt("lineCount"));
+      verify(handler).processStatement(statement);
+      verify(dal).save(line); // the single non-blank line was persisted
+      // Classic line fields are mapped: reference, counterparty name + FK, GL item, description.
+      verify(line).setReferenceNo("REF-1");
+      verify(line).setBpartnername("Acme");
+      verify(line).setBusinessPartner(bp);
+      verify(line).setGLItem(gl);
+      verify(line).setDescription("Transferencia");
+    }
+  }
+
+  @Test
+  public void handleCreateSaveAsDraftSkipsProcessing() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Borrador");
+    body.put("process", false); // "save as draft"
+    JSONArray lines = new JSONArray();
+    lines.put(createLine("2026-06-02T00:00:00Z", "X", "Y", 10, 0));
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    when(statement.getId()).thenReturn("stmt-draft");
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+
+    doReturn(statement).when(handler).newManualBankStatement(any(), any());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(line);
+
+      NeoResponse response = handler.handle(postCtx(ctx, "create"));
+
+      assertEquals(201, response.getHttpStatus());
+      verify(dal).save(line);
+      // Draft → the statement is persisted but NOT processed.
+      verify(handler, never()).processStatement(any());
+    }
+  }
+
+  @Test
+  public void handleCreateReturns400WhenAccountNotFound() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "ghost");
+    body.put("name", "Extracto manual");
+    JSONArray lines = new JSONArray();
+    lines.put(createLine("2026-06-02T00:00:00Z", "X", "Y", 10, 0));
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("ghost"))).thenReturn(null);
+
+      NeoResponse response = handler.handle(postCtx(ctx, "create"));
+      assertEquals(400, response.getHttpStatus());
     }
   }
 }

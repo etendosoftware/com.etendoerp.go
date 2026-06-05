@@ -43,8 +43,11 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
+import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
@@ -68,6 +71,7 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String ACTION_LINES = "lines";
   private static final String ACTION_IMPORT = "import";
   private static final String ACTION_PREVIEW = "preview";
+  private static final String ACTION_CREATE = "create";
   private static final String PARAM_ACCOUNT_ID = "FIN_Financial_Account_ID";
   private static final String PARAM_STATEMENT_ID = "statementId";
   private static final String PARAM_ACTION = "action";
@@ -85,6 +89,18 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String FIELD_CRAMOUNT = "cramount";
   private static final String FIELD_DRAMOUNT = "dramount";
   private static final String FIELD_CONTENT_BASE64 = "contentBase64";
+  private static final String FIELD_NAME = "name";
+  private static final String FIELD_NOTES = "notes";
+  private static final String FIELD_LINES = "lines";
+  private static final String FIELD_BPARTNER_NAME = "bpartnerName";
+  private static final String FIELD_BPARTNER_ID = "bpartnerId";
+  private static final String FIELD_GLITEM_ID = "glItemId";
+  private static final String FIELD_REFERENCE = "reference";
+  private static final String FIELD_PROCESS = "process";
+  private static final String FIELD_PROCESSED = "processed";
+  private static final String FIELD_TRANSACTION_DATE = "transactionDate";
+  private static final String FIELD_IMPORT_DATE = "importDate";
+  private static final String DEFAULT_REFERENCE = "**";
   private static final String MSG_MISSING_FIELD = "Missing required field: ";
 
   /**
@@ -231,6 +247,7 @@ public class BankStatementsHandler implements NeoHandler {
     if (METHOD_POST.equals(method)) {
       if (ACTION_IMPORT.equals(action))  return handleImport(context);
       if (ACTION_PREVIEW.equals(action)) return handlePreview(context);
+      if (ACTION_CREATE.equals(action))  return handleCreate(context);
     }
     return NeoResponse.error(405, "Method not allowed.");
   }
@@ -310,6 +327,221 @@ public class BankStatementsHandler implements NeoHandler {
       OBDal.getInstance().rollbackAndClose();
       return NeoResponse.error(500, "Import failed: " + e.getMessage());
     }
+  }
+
+  /**
+   * Handles {@code POST ?action=create} — creates a bank statement by hand
+   * (header + lines) without a file, for accounts that receive statements
+   * outside the supported file formats. Mirrors the file-import path: it builds
+   * the {@link FIN_BankStatement}, one {@link FIN_BankStatementLine} per
+   * non-blank line, then runs {@link #processStatement} so the lines become
+   * available for reconciliation exactly like an imported statement.
+   *
+   * <p>Body shape:
+   * <pre>
+   * {
+   *   "FIN_Financial_Account_ID": "...",
+   *   "name": "Extracto BBVA · junio 2026",
+   *   "transactionDate": "2026-06-04T00:00:00Z",
+   *   "importDate":      "2026-06-04T00:00:00Z",
+   *   "lines": [
+   *     { "date": "2026-06-02T00:00:00Z", "description": "...",
+   *       "bpartnerName": "...", "in": 3500.00, "out": 0 }
+   *   ]
+   * }
+   * </pre>
+   */
+  private NeoResponse handleCreate(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) return NeoResponse.error(400, "Request body is required");
+    try (AdminMode ignored = new AdminMode()) {
+      NeoResponse validation = validateCreateBody(body);
+      if (validation != null) return validation;
+
+      String accountId = body.optString(PARAM_ACCOUNT_ID, null);
+      FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+      if (account == null) {
+        return NeoResponse.error(400, "Financial account not found: " + accountId);
+      }
+
+      String name = body.optString(FIELD_NAME, null);
+      FIN_BankStatement statement = newManualBankStatement(account, body);
+      OBDal.getInstance().save(statement);
+
+      int lineCount = createLines(statement, body.optJSONArray(FIELD_LINES));
+      // "Save and process" runs the statement like an import so its lines become
+      // reconcilable; "Save as draft" (process=false) just persists it.
+      boolean process = body.optBoolean(FIELD_PROCESS, true);
+      if (process) {
+        processStatement(statement);
+      }
+      OBDal.getInstance().flush();
+
+      JSONObject result = new JSONObject();
+      result.put("id", statement.getId());
+      result.put(FIELD_NAME, name);
+      result.put(FIELD_LINE_COUNT, lineCount);
+      result.put(FIELD_PROCESSED, process);
+      return NeoResponse.createdWithData(result);
+
+    } catch (OBException e) {
+      log.warn("Manual statement validation failed: {}", e.getMessage());
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(400, e.getMessage());
+    } catch (Exception e) {
+      // Never echo e.getMessage() — it can leak DB constraint names. Log the
+      // full trace server-side and return a generic message to the client.
+      log.error("Error creating manual bank statement", e);
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(500, "Could not create the statement. Please check logs for details.");
+    }
+  }
+
+  /**
+   * Validates the {@code ?action=create} body. Returns {@code null} when valid,
+   * or the appropriate 400 {@link NeoResponse}. Extracted so {@link #handleCreate}
+   * stays under Sonar's cognitive-complexity threshold.
+   */
+  private static NeoResponse validateCreateBody(JSONObject body) {
+    if (StringUtils.isBlank(body.optString(PARAM_ACCOUNT_ID, null))) {
+      return NeoResponse.error(400, MSG_MISSING_FIELD + PARAM_ACCOUNT_ID);
+    }
+    if (StringUtils.isBlank(body.optString(FIELD_NAME, null))) {
+      return NeoResponse.error(400, MSG_MISSING_FIELD + FIELD_NAME);
+    }
+    JSONArray lines = body.optJSONArray(FIELD_LINES);
+    if (lines == null || lines.length() == 0) {
+      return NeoResponse.error(400, "At least one line is required");
+    }
+    return null;
+  }
+
+  /**
+   * Builds a {@link FIN_BankStatement} for the manual-create flow from the
+   * request body. Same header fields as Classic's manual statement: name,
+   * import/transaction dates, file name and notes (all but name optional). The
+   * document type is always the account's BSF type.
+   */
+  FIN_BankStatement newManualBankStatement(FIN_FinancialAccount account, JSONObject body) {
+    FIN_BankStatement statement = OBProvider.getInstance().get(FIN_BankStatement.class);
+    statement.setClient(account.getClient());
+    statement.setOrganization(account.getOrganization());
+    statement.setActive(true);
+    statement.setAccount(account);
+    statement.setName(body.optString(FIELD_NAME, null));
+    statement.setImportdate(parseIsoDate(body.optString(FIELD_IMPORT_DATE, null), new Date()));
+    statement.setTransactionDate(parseIsoDate(body.optString(FIELD_TRANSACTION_DATE, null), new Date()));
+    String fileName = body.optString(FIELD_FILE_NAME, null);
+    if (StringUtils.isNotBlank(fileName)) statement.setFileName(truncate(fileName, 60));
+    String notes = body.optString(FIELD_NOTES, null);
+    if (StringUtils.isNotBlank(notes)) statement.setNotes(truncate(notes, 2000));
+    statement.setProcessed(false);
+    statement.setPosted("N");
+    statement.setDocumentType(resolveBsfDocType(account));
+    return statement;
+  }
+
+  /**
+   * Creates and persists one {@link FIN_BankStatementLine} per non-blank entry
+   * in {@code lines}, numbering them 10, 20, 30… Fully-blank rows (no date, no
+   * description, no counterparty and zero amounts) are skipped. Throws when no
+   * usable line remains so the caller can map it to a 400.
+   *
+   * @return the number of lines actually created
+   */
+  private int createLines(FIN_BankStatement statement, JSONArray lines) throws Exception {
+    int count = 0;
+    long lineNo = 10L;
+    for (int i = 0; i < lines.length(); i++) {
+      JSONObject l = lines.getJSONObject(i);
+      if (isBlankLine(l)) continue;
+      FIN_BankStatementLine line = OBProvider.getInstance().get(FIN_BankStatementLine.class);
+      line.setBankStatement(statement);
+      line.setClient(statement.getClient());
+      line.setOrganization(statement.getOrganization());
+      line.setLineNo(lineNo);
+      line.setTransactionDate(parseIsoDate(l.optString("date", null), statement.getTransactionDate()));
+      line.setCramount(parseAmount(l.optString("in", null)));
+      line.setDramount(parseAmount(l.optString("out", null)));
+
+      String bpName = l.optString(FIELD_BPARTNER_NAME, null);
+      if (StringUtils.isNotBlank(bpName)) line.setBpartnername(truncate(bpName, 60));
+      String desc = l.optString(FIELD_DESCRIPTION, null);
+      if (StringUtils.isNotBlank(desc)) line.setDescription(truncate(desc, 2000));
+      String ref = l.optString(FIELD_REFERENCE, null);
+      line.setReferenceNo(StringUtils.isBlank(ref) ? DEFAULT_REFERENCE : truncate(ref, 30));
+
+      resolveLineReferences(line, l);
+
+      OBDal.getInstance().save(line);
+      lineNo += 10L;
+      count++;
+    }
+    if (count == 0) {
+      throw new OBException("At least one non-empty line is required");
+    }
+    return count;
+  }
+
+  /**
+   * Resolves and attaches the optional FK references of a line — the business
+   * partner ({@code bpartnerId}) and the G/L item ({@code glItemId}). Missing or
+   * unresolvable ids are silently skipped, mirroring Classic where both are
+   * optional on a bank-statement line. Extracted from {@link #createLines} to
+   * keep its loop body under Sonar's cognitive-complexity threshold.
+   */
+  private void resolveLineReferences(FIN_BankStatementLine line, JSONObject l) {
+    String bpId = l.optString(FIELD_BPARTNER_ID, null);
+    if (StringUtils.isNotBlank(bpId)) {
+      BusinessPartner bp = OBDal.getInstance().get(BusinessPartner.class, bpId);
+      if (bp != null) line.setBusinessPartner(bp);
+    }
+    String glId = l.optString(FIELD_GLITEM_ID, null);
+    if (StringUtils.isNotBlank(glId)) {
+      GLItem gl = OBDal.getInstance().get(GLItem.class, glId);
+      if (gl != null) line.setGLItem(gl);
+    }
+  }
+
+  /**
+   * A line is blank when it carries no description, counterparty, reference or
+   * FK and both amounts are zero — such rows come from the trailing empty row of
+   * the editable grid and must not be persisted. The transaction date is
+   * ignored on purpose: the UI pre-fills it with today, so a row with only that
+   * default date still counts as empty.
+   */
+  private static boolean isBlankLine(JSONObject l) {
+    return StringUtils.isBlank(l.optString(FIELD_DESCRIPTION, null))
+        && StringUtils.isBlank(l.optString(FIELD_BPARTNER_NAME, null))
+        && StringUtils.isBlank(l.optString(FIELD_BPARTNER_ID, null))
+        && StringUtils.isBlank(l.optString(FIELD_GLITEM_ID, null))
+        && StringUtils.isBlank(l.optString(FIELD_REFERENCE, null))
+        && parseAmount(l.optString("in", null)).signum() == 0
+        && parseAmount(l.optString("out", null)).signum() == 0;
+  }
+
+  /** Parses an ISO-8601 instant (e.g. {@code 2026-06-04T00:00:00Z}); falls back on blank/invalid. */
+  private static Date parseIsoDate(String iso, Date fallback) {
+    if (StringUtils.isBlank(iso)) return fallback;
+    try {
+      return Date.from(Instant.parse(iso));
+    } catch (Exception e) {
+      return fallback;
+    }
+  }
+
+  /** Parses a plain decimal string into a non-null {@link BigDecimal} ({@code ZERO} on blank/invalid). */
+  private static BigDecimal parseAmount(String raw) {
+    if (StringUtils.isBlank(raw)) return BigDecimal.ZERO;
+    try {
+      return new BigDecimal(raw.trim());
+    } catch (NumberFormatException e) {
+      return BigDecimal.ZERO;
+    }
+  }
+
+  private static String truncate(String s, int max) {
+    return s.length() > max ? s.substring(0, max) : s;
   }
 
   /**
