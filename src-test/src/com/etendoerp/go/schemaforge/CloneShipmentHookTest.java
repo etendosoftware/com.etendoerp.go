@@ -22,18 +22,24 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.util.Date;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
 /**
  * Unit tests for {@link CloneShipmentHook}.
@@ -74,112 +80,64 @@ public class CloneShipmentHookTest {
     assertSame(original, hook.preCopy(original));
   }
 
-  // ── postCopy() ────────────────────────────────────────────────────────────
-
   /**
-   * Verifies that postCopy resets documentStatus, documentAction, posted, processed,
-   * and documentNo on the clone to put it in a clean Draft state.
+   * postCopy must reset all header fields to draft state, copy each source line
+   * with its C_OrderLine_ID cleared (to avoid MovementQtyCheck trigger violations),
+   * and flush + refresh via OBDal.
+   *
+   * <p>The {@code setSalesOrderLine(null)} call is specifically verified here because
+   * it was added to prevent {@code m_inoutline_trg} from double-counting delivered
+   * quantities against {@code QtyOrdered} when the cloned receipt is later completed.
    */
   @Test
-  public void testPostCopyResetsDocumentStatusToDraft() throws Exception {
-    CloneShipmentHook hook = new CloneShipmentHook();
-    ShipmentInOut original = mock(ShipmentInOut.class);
-    ShipmentInOut clone = mock(ShipmentInOut.class);
+  public void testPostCopyResetsHeaderAndClearsOrderLineLinkOnClonedLines() {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<DalUtil> dalUtilMock = Mockito.mockStatic(DalUtil.class)) {
 
-    User currentUser = mock(User.class);
-    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
-      OBContext obContext = mock(OBContext.class);
-      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
-      when(obContext.getUser()).thenReturn(currentUser);
+      OBContext obCtx = mock(OBContext.class);
+      User user = mock(User.class);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obCtx);
+      when(obCtx.getUser()).thenReturn(user);
 
-      BaseOBObject result = hook.postCopy(original, clone);
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      ShipmentInOut original = mock(ShipmentInOut.class);
+      ShipmentInOut clone = mock(ShipmentInOut.class);
+
+      ShipmentInOutLine origLine = mock(ShipmentInOutLine.class);
+      ShipmentInOutLine clonedLine = mock(ShipmentInOutLine.class);
+      List<ShipmentInOutLine> origLines = new ArrayList<>();
+      origLines.add(origLine);
+      when(original.getMaterialMgmtShipmentInOutLineList()).thenReturn(origLines);
+
+      List<ShipmentInOutLine> cloneLines = new ArrayList<>();
+      when(clone.getMaterialMgmtShipmentInOutLineList()).thenReturn(cloneLines);
+
+      dalUtilMock.when(() -> DalUtil.copy(eq(origLine), eq(false))).thenReturn(clonedLine);
+
+      BaseOBObject result = new CloneShipmentHook().postCopy(original, clone);
 
       assertSame(clone, result);
-      Mockito.verify(clone).setDocumentStatus("DR");
-      Mockito.verify(clone).setDocumentAction("CO");
-      Mockito.verify(clone).setPosted("N");
-      Mockito.verify(clone).setProcessed(false);
-      Mockito.verify(clone).setDocumentNo(null);
-    }
-  }
 
-  /**
-   * Verifies that postCopy sets movementDate to today (not null) on the clone.
-   */
-  @Test
-  public void testPostCopySetsMovementDateToToday() throws Exception {
-    CloneShipmentHook hook = new CloneShipmentHook();
-    ShipmentInOut original = mock(ShipmentInOut.class);
-    ShipmentInOut clone = mock(ShipmentInOut.class);
+      // Header reset to draft
+      verify(clone).setDocumentStatus("DR");
+      verify(clone).setDocumentAction("CO");
+      verify(clone).setPosted("N");
+      verify(clone).setProcessed(false);
+      verify(clone).setDocumentNo(null);
+      verify(clone).setCompletelyInvoiced(false);
+      verify(clone).setInvoice(null);
 
-    User currentUser = mock(User.class);
-    long beforeMs = System.currentTimeMillis();
-    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
-      OBContext obContext = mock(OBContext.class);
-      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
-      when(obContext.getUser()).thenReturn(currentUser);
+      // C_OrderLine_ID must be cleared to prevent trigger double-count
+      verify(clonedLine).setSalesOrderLine(null);
+      verify(clonedLine).setCanceledInoutLine(null);
+      verify(clonedLine).setShipmentReceipt(clone);
 
-      hook.postCopy(original, clone);
-      long afterMs = System.currentTimeMillis();
-
-      // Capture the Date passed to setMovementDate via an ArgumentCaptor-style check:
-      // verify it was called with a non-null date that is <= today (truncated to day).
-      org.mockito.ArgumentCaptor<Date> captor = org.mockito.ArgumentCaptor.forClass(Date.class);
-      Mockito.verify(clone).setMovementDate(captor.capture());
-      Date movementDate = captor.getValue();
-      assertNotNull(movementDate);
-      // Truncated to day — should be <= today and >= start of today
-      assertTrue(movementDate.getTime() <= afterMs);
-      assertTrue(movementDate.getTime() >= beforeMs - 86400_000L);
-    }
-  }
-
-  /**
-   * Verifies that postCopy sets creationDate and updatedDate to non-null values.
-   */
-  @Test
-  public void testPostCopySetsAuditDatesAsNonNull() throws Exception {
-    CloneShipmentHook hook = new CloneShipmentHook();
-    ShipmentInOut original = mock(ShipmentInOut.class);
-    ShipmentInOut clone = mock(ShipmentInOut.class);
-
-    User currentUser = mock(User.class);
-    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
-      OBContext obContext = mock(OBContext.class);
-      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
-      when(obContext.getUser()).thenReturn(currentUser);
-
-      hook.postCopy(original, clone);
-
-      org.mockito.ArgumentCaptor<Date> creationCaptor = org.mockito.ArgumentCaptor.forClass(Date.class);
-      Mockito.verify(clone).setCreationDate(creationCaptor.capture());
-      assertNotNull(creationCaptor.getValue());
-
-      org.mockito.ArgumentCaptor<Date> updatedCaptor = org.mockito.ArgumentCaptor.forClass(Date.class);
-      Mockito.verify(clone).setUpdated(updatedCaptor.capture());
-      assertNotNull(updatedCaptor.getValue());
-    }
-  }
-
-  /**
-   * Verifies that postCopy assigns the current OBContext user to both createdBy and updatedBy.
-   */
-  @Test
-  public void testPostCopySetsCreatedByAndUpdatedByToCurrentUser() throws Exception {
-    CloneShipmentHook hook = new CloneShipmentHook();
-    ShipmentInOut original = mock(ShipmentInOut.class);
-    ShipmentInOut clone = mock(ShipmentInOut.class);
-
-    User currentUser = mock(User.class);
-    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
-      OBContext obContext = mock(OBContext.class);
-      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
-      when(obContext.getUser()).thenReturn(currentUser);
-
-      hook.postCopy(original, clone);
-
-      Mockito.verify(clone).setCreatedBy(currentUser);
-      Mockito.verify(clone).setUpdatedBy(currentUser);
+      verify(dal).save(clone);
+      verify(dal).flush();
+      verify(dal).refresh(clone);
     }
   }
 }

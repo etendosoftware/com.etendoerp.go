@@ -65,13 +65,27 @@ public class CloneShipmentHook extends CloneRecordHook {
     clone.setProcessed(false);
     clone.setDocumentNo(null);
     clone.setMovementDate(today);
+    clone.setCompletelyInvoiced(false);
+    clone.setInvoice(null);
     clone.setCreationDate(new Date());
     clone.setUpdated(new Date());
     clone.setCreatedBy(currentUser);
     clone.setUpdatedBy(currentUser);
 
-    for (ShipmentInOutLine line : clone.getMaterialMgmtShipmentInOutLineList()) {
-      line.setCanceledInoutLine(null);
+    for (ShipmentInOutLine line : original.getMaterialMgmtShipmentInOutLineList()) {
+      ShipmentInOutLine clonedLine = (ShipmentInOutLine) DalUtil.copy(line, false);
+      clonedLine.setCanceledInoutLine(null);
+      // m_inoutline_trg enforces MovementQtyCheck: total delivered for an order line cannot
+      // exceed QtyOrdered. Preserving C_OrderLine_ID on a new line would double-count the
+      // delivered quantity and fail the trigger. Invoice creation falls back to product matching
+      // against the header's C_Order_ID link (CreatePurchaseInvoiceHandler.buildSelectedLinesFromReceipt).
+      clonedLine.setSalesOrderLine(null);
+      clonedLine.setCreationDate(new Date());
+      clonedLine.setUpdated(new Date());
+      clonedLine.setCreatedBy(currentUser);
+      clonedLine.setUpdatedBy(currentUser);
+      clonedLine.setShipmentReceipt(clone);
+      clone.getMaterialMgmtShipmentInOutLineList().add(clonedLine);
     }
 
     return clone;

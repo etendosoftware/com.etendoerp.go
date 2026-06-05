@@ -20,8 +20,13 @@ package com.etendoerp.go.schemaforge;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.erpCommon.utility.CSResponse;
+import org.openbravo.erpCommon.utility.DocumentNoData;
+import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * Shared helpers for {@link NeoHandler} implementations.
@@ -51,6 +56,40 @@ final class NeoHandlerUtils {
     }
     JSONArray dataArr = responseWrapper.optJSONArray("data");
     return (dataArr == null || dataArr.length() == 0) ? null : dataArr;
+  }
+
+  /**
+   * Fetches the next document number for an M_InOut (or similar) record.
+   *
+   * <p>Tries the doctype-based sequence first, then falls back to the table-level sequence.
+   * Returns {@code null} when no sequence resolves.
+   *
+   * @param docTypeId   document type ID, or empty/null to skip doctype lookup
+   * @param clientId    client ID for the sequence namespace
+   * @param tableDbName DB table name used as key {@code "DocumentNo_<tableDbName>"}
+   * @param log         caller's logger for debug messages
+   */
+  static String fetchDocumentNo(String docTypeId, String clientId, String tableDbName, Logger log) {
+    DalConnectionProvider conn = new DalConnectionProvider(false);
+    if (docTypeId != null && !docTypeId.isEmpty()) {
+      try {
+        CSResponse cs = DocumentNoData.nextDocType(conn, docTypeId, clientId, "Y");
+        if (cs != null && "1".equals(cs.exito) && StringUtils.isNotBlank(cs.razon)) {
+          return cs.razon;
+        }
+      } catch (Exception ex) {
+        log.debug("nextDocType failed for doctype {}: {}", docTypeId, ex.getMessage());
+      }
+    }
+    try {
+      CSResponse cs = DocumentNoData.nextDoc(conn, "DocumentNo_" + tableDbName, clientId, "Y");
+      if (cs != null && StringUtils.isNotBlank(cs.razon)) {
+        return cs.razon;
+      }
+    } catch (Exception ex) {
+      log.debug("nextDoc fallback failed for table {}: {}", tableDbName, ex.getMessage());
+    }
+    return null;
   }
 
   /**
