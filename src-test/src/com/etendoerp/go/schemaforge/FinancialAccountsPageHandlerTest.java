@@ -86,7 +86,11 @@ import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.Currency;
  *   <li>{@code buildPayload()} envelope shape matches the contract the UI hook consumes.</li>
  * </ul>
  */
-@RunWith(MockitoJUnitRunner.class)
+// Silent runner: the strict runner inspects mocks/spies after the class runs to
+// report unnecessary stubbings, but clearMocks() (below) wipes the inline mock
+// maker registry after each test, so that inspection would fail with
+// NotAMockException. Silent skips it while keeping @Mock injection.
+@RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountsPageHandlerTest {
 
   private static final String CLIENT_ID = "23C59575B9CF467C9620760EB255B389";
