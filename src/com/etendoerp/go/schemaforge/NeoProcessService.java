@@ -844,7 +844,7 @@ public class NeoProcessService {
     if (resultCode == 0L) {
       // Error
       String cleanMsg = errorMsg != null
-          ? OBMessageUtils.parseTranslation(errorMsg.replaceFirst("@ERROR=", ""))
+          ? safeParseTranslation(errorMsg.replaceFirst("@ERROR=", ""))
           : "Process failed";
       result.put(STATUS, ERROR);
       result.put(MESSAGE, cleanMsg);
@@ -927,7 +927,7 @@ public class NeoProcessService {
       String text = message.optString("text", "");
 
       result.put(STATUS, severity);
-      result.put(MESSAGE, OBMessageUtils.parseTranslation(text));
+      result.put(MESSAGE, safeParseTranslation(text));
 
       if (ERROR.equals(severity)) {
         return new NeoResponse(400, result);
@@ -940,7 +940,7 @@ public class NeoProcessService {
     if (actionError != null) {
       result.put(STATUS, ERROR);
       result.put(MESSAGE,
-          OBMessageUtils.parseTranslation(actionError.optString("msgText", "Process failed")));
+          safeParseTranslation(actionError.optString("msgText", "Process failed")));
       return new NeoResponse(400, result);
     }
 
@@ -1020,7 +1020,7 @@ public class NeoProcessService {
       result.put(STATUS, error.getType().toLowerCase());
       result.put("title", StringUtils.defaultString(error.getTitle()));
       result.put(MESSAGE,
-          OBMessageUtils.parseTranslation(StringUtils.defaultString(error.getMessage())));
+          safeParseTranslation(StringUtils.defaultString(error.getMessage())));
 
       if (ERROR.equalsIgnoreCase(error.getType())) {
         return new NeoResponse(400, result);
@@ -1038,5 +1038,19 @@ public class NeoProcessService {
     }
 
     return NeoResponse.ok(result);
+  }
+
+  /**
+   * Resolves {@code @Key@} AD_Message tokens in {@code text} using the current
+   * {@link org.openbravo.dal.core.OBContext} language. Falls back to returning
+   * the original {@code text} unchanged when no OBContext is available (e.g. in
+   * unit tests that call these methods without a live Etendo application context).
+   */
+  private static String safeParseTranslation(String text) {
+    try {
+      return OBMessageUtils.parseTranslation(text);
+    } catch (Exception e) {
+      return text;
+    }
   }
 }
