@@ -82,6 +82,7 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
         enrichLinkedOrder(shipmentRec, context.getRecordId());
         enrichLinkedInvoices(shipmentRec, context.getRecordId());
         enrichReturnReceipts(shipmentRec, context.getRecordId());
+        enrichCanCreateReturn(shipmentRec, context.getRecordId());
       } else {
         annotateBatch(dataArr);
       }
@@ -264,6 +265,38 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       shipmentRec.put("returnReceipts", returns);
     } catch (Exception e) {
       log.warn("Could not enrich return receipts for shipment {}: {}", shipmentId, e.getMessage());
+    }
+  }
+
+  /**
+   * Sets {@code canCreateReturn=true} when at least one shipment line still has
+   * returnable quantity (original qty > sum of non-voided return receipt qty).
+   * Voided returns (docstatus='VO') are excluded so they don't block new returns.
+   */
+  @SuppressWarnings("java:S2077")
+  private void enrichCanCreateReturn(JSONObject shipmentRec, String shipmentId) {
+    String sql =
+        "SELECT EXISTS (" +
+        "  SELECT 1 FROM m_inoutline sil" +
+        "  WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'" +
+        "    AND ABS(sil.movementqty) > (" +
+        "      SELECT COALESCE(SUM(ABS(rl.movementqty)), 0)" +
+        "      FROM m_inoutline rl" +
+        "      JOIN m_inout r ON r.m_inout_id = rl.m_inout_id" +
+        "      WHERE rl.canceled_inoutline_id = sil.m_inoutline_id" +
+        "        AND rl.isactive = 'Y' AND r.isactive = 'Y'" +
+        "        AND r.docstatus <> 'VO'" +
+        "    )" +
+        ")";
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, shipmentId);
+      try (ResultSet rs = ps.executeQuery()) {
+        boolean canReturn = rs.next() && rs.getBoolean(1);
+        shipmentRec.put("canCreateReturn", canReturn);
+      }
+    } catch (Exception e) {
+      log.warn("Could not compute canCreateReturn for shipment {}: {}", shipmentId, e.getMessage());
     }
   }
 
