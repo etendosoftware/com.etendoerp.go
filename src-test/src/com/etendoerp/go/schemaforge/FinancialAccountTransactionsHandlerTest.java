@@ -222,10 +222,10 @@ public class FinancialAccountTransactionsHandlerTest {
 
     ResultSet rsTotals = mock(ResultSet.class);
     when(psTotals.executeQuery()).thenReturn(rsTotals);
-    // true once for loadTotals' single-row read, then false: buildPayload reuses
-    // this statement/result-set for the dimension, trxType and payment-method
-    // loaders, whose while(rs.next()) loops must terminate (a bare thenReturn(true)
-    // returns true forever and hangs the test).
+    // Returns true once for the single-row totals read, then false. buildPayload
+    // reuses this statement and result set for the dimension, trxType and
+    // payment-method loaders; their row loops must see a terminating false,
+    // otherwise the test would loop forever.
     when(rsTotals.next()).thenReturn(true, false);
     when(rsTotals.getBigDecimal("currentbalance")).thenReturn(new BigDecimal("211841.01"));
     when(rsTotals.getString("iso_code")).thenReturn("EUR");
