@@ -72,8 +72,7 @@ public class CloneShipmentHook extends CloneRecordHook {
     clone.setCreatedBy(currentUser);
     clone.setUpdatedBy(currentUser);
 
-    for (ShipmentInOutLine line : original.getMaterialMgmtShipmentInOutLineList()) {
-      ShipmentInOutLine clonedLine = (ShipmentInOutLine) DalUtil.copy(line, false);
+    for (ShipmentInOutLine clonedLine : clone.getMaterialMgmtShipmentInOutLineList()) {
       clonedLine.setCanceledInoutLine(null);
       // m_inoutline_trg enforces MovementQtyCheck: total delivered for an order line cannot
       // exceed QtyOrdered. Preserving C_OrderLine_ID on a new line would double-count the
@@ -84,8 +83,6 @@ public class CloneShipmentHook extends CloneRecordHook {
       clonedLine.setUpdated(new Date());
       clonedLine.setCreatedBy(currentUser);
       clonedLine.setUpdatedBy(currentUser);
-      clonedLine.setShipmentReceipt(clone);
-      clone.getMaterialMgmtShipmentInOutLineList().add(clonedLine);
     }
 
     return clone;

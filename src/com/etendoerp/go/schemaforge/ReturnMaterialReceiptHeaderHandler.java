@@ -358,7 +358,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
         OBDal.getInstance().getSession().refresh(invoice);
 
         createDraftInvoiceHandler.ensureDocumentNo(invoice);
-        createDraftInvoiceHandler.ensureLineGrossAmounts(invoice);
+        createDraftInvoiceHandler.getSupport().ensureLineGrossAmounts(invoice);
         createDraftInvoiceHandler.recalculateTotals(invoice);
         OBDal.getInstance().flush();
 
