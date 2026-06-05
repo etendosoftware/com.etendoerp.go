@@ -39,6 +39,7 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
   private static final int ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT = 2;
   private static final int ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS = 900;
   private static final String DASHBOARD_LINK_PATH = "dashboard";
+  private static final String LANGUAGE_SPANISH = "es_ES";
   private static final String FIELD_SUBJECT = "subject";
   private static final String FIELD_BODY = "body";
 
@@ -76,7 +77,7 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
 
   private static void newAccountContent(org.codehaus.jettison.json.JSONObject data,
       String language, String link) throws org.codehaus.jettison.json.JSONException {
-    if ("es_ES".equals(language)) {
+    if (LANGUAGE_SPANISH.equals(language)) {
       data.put(FIELD_SUBJECT, "Bienvenido a Etendo Go");
       data.put(FIELD_BODY, "Tu cuenta de Etendo Go fue creada correctamente. "
           + "Abre este enlace para continuar: " + link);
@@ -89,7 +90,7 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
 
   private static void environmentReadyContent(org.codehaus.jettison.json.JSONObject data,
       String language, String link) throws org.codehaus.jettison.json.JSONException {
-    if ("es_ES".equals(language)) {
+    if (LANGUAGE_SPANISH.equals(language)) {
       data.put(FIELD_SUBJECT, "Tu entorno de Etendo Go está listo");
       data.put(FIELD_BODY, "Tu entorno de Etendo Go está listo. "
           + "Abre este enlace para acceder a tu panel: " + link);
@@ -103,7 +104,7 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
   private static void passwordChangedContent(org.codehaus.jettison.json.JSONObject data,
       String language)
       throws org.codehaus.jettison.json.JSONException {
-    if ("es_ES".equals(language)) {
+    if (LANGUAGE_SPANISH.equals(language)) {
       data.put(FIELD_SUBJECT, "Tu contraseña de Etendo Go fue modificada");
       data.put(FIELD_BODY, "Tu contraseña de Etendo Go fue modificada correctamente. "
           + "Si no realizaste este cambio, contacta a soporte.");
