@@ -740,9 +740,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
       Account account = findAccountForCommittedOnboarding(token, accountEmail);
+      String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
       sendAuthEmailBestEffort("environment-ready",
-          () -> authEmailSender.sendEnvironmentReady(account, clientId,
-              StringUtils.trimToNull(onboardingRequest.language)));
+          () -> authEmailSender.sendEnvironmentReady(account, clientId, normalizedLanguage));
 
       sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
       sendProgress(writer, "finalize", "done", "Environment ready");

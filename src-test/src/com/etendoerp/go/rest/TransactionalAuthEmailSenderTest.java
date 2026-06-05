@@ -46,6 +46,8 @@ import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
  */
 public class TransactionalAuthEmailSenderTest {
 
+  private static final String TEST_APP_BASE_URL = "https://app.example.test";
+
   @After
   public void clearProperties() {
     System.clearProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY);
@@ -53,7 +55,7 @@ public class TransactionalAuthEmailSenderTest {
 
   @Test
   public void sendNewAccountBuildsServerSideWelcomeCommand() throws Exception {
-    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test/");
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, TEST_APP_BASE_URL);
     TransactionalEmailService emailService = mock(TransactionalEmailService.class);
     TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
     Account account = account("account-1");
@@ -70,7 +72,7 @@ public class TransactionalAuthEmailSenderTest {
 
   @Test
   public void sendNewAccountIncludesSelectedLanguage() throws Exception {
-    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test/");
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, TEST_APP_BASE_URL);
     TransactionalEmailService emailService = mock(TransactionalEmailService.class);
     TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
     Account account = account("account-1");
@@ -85,7 +87,7 @@ public class TransactionalAuthEmailSenderTest {
 
   @Test
   public void sendNewAccountOmitsBlankLanguage() throws Exception {
-    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test/");
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, TEST_APP_BASE_URL);
     TransactionalEmailService emailService = mock(TransactionalEmailService.class);
     TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
     Account account = account("account-1");
@@ -100,7 +102,7 @@ public class TransactionalAuthEmailSenderTest {
 
   @Test
   public void sendNewAccountOmitsNullLanguage() throws Exception {
-    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "https://app.example.test/");
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, TEST_APP_BASE_URL);
     TransactionalEmailService emailService = mock(TransactionalEmailService.class);
     TransactionalAuthEmailSender sender = new TransactionalAuthEmailSender(emailService);
     Account account = account("account-1");

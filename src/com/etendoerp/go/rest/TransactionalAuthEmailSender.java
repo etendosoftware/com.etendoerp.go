@@ -73,10 +73,7 @@ class TransactionalAuthEmailSender {
     }
     try {
       JSONObject body = baseCommand(account, clientId);
-      String normalizedLanguage = StringUtils.trimToNull(language);
-      if (normalizedLanguage != null) {
-        body.put(EmailContractCommandSupport.FIELD_LANGUAGE, normalizedLanguage);
-      }
+      addLanguageField(body, language);
       String dashboardLink = EtendoGoAuthLinkBuilder.dashboardLink();
       if (dashboardLink != null) {
         body.put(EmailContractCommandSupport.FIELD_LINK, dashboardLink);
@@ -106,10 +103,7 @@ class TransactionalAuthEmailSender {
     }
     try {
       JSONObject body = baseCommand(account);
-      String normalizedLanguage = StringUtils.trimToNull(language);
-      if (normalizedLanguage != null) {
-        body.put(EmailContractCommandSupport.FIELD_LANGUAGE, normalizedLanguage);
-      }
+      addLanguageField(body, language);
       body.put(EmailContractCommandSupport.FIELD_DATE, Instant.now().toString());
       body.put(EmailContractCommandSupport.FIELD_RECORD_ID,
           account.getId() + ":" + java.util.UUID.randomUUID());
@@ -133,10 +127,7 @@ class TransactionalAuthEmailSender {
     try {
       JSONObject body = baseCommand(account);
       body.put(EmailContractCommandSupport.FIELD_LINK, link);
-      String normalizedLanguage = StringUtils.trimToNull(language);
-      if (normalizedLanguage != null) {
-        body.put(EmailContractCommandSupport.FIELD_LANGUAGE, normalizedLanguage);
-      }
+      addLanguageField(body, language);
       if (recordId != null) {
         body.put(EmailContractCommandSupport.FIELD_RECORD_ID, recordId);
       }
@@ -144,6 +135,13 @@ class TransactionalAuthEmailSender {
     } catch (JSONException e) {
       log.warn("Could not build {} email command", contractName, e);
       return false;
+    }
+  }
+
+  private static void addLanguageField(JSONObject body, String language) throws JSONException {
+    String normalizedLanguage = StringUtils.trimToNull(language);
+    if (normalizedLanguage != null) {
+      body.put(EmailContractCommandSupport.FIELD_LANGUAGE, normalizedLanguage);
     }
   }
 
