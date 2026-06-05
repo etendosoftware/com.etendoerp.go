@@ -44,11 +44,15 @@ final class EtendoGoAuthLinkBuilder {
   }
 
   static String resetPasswordLink(String resetToken) {
+    return resetPasswordLink(resetToken, PublicUrlResolver.resolveConfiguredAppBaseUrl());
+  }
+
+  static String resetPasswordLink(String resetToken, String appBaseUrl) {
     String normalizedToken = StringUtils.trimToNull(resetToken);
     if (normalizedToken == null) {
       return null;
     }
-    String onboardingLink = onboardingLink();
+    String onboardingLink = PublicUrlResolver.appendPath(appBaseUrl, ONBOARDING_PATH);
     if (onboardingLink == null) {
       return null;
     }

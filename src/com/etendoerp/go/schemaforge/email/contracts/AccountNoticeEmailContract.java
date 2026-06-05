@@ -44,12 +44,19 @@ final class AccountNoticeEmailContract implements EmailContract {
   private final String name;
   private final String template;
   private final EmailContractDataResolver dataResolver;
+  private final AccountNoticeCustomContent customContent;
 
   AccountNoticeEmailContract(String name, String template,
       EmailContractDataResolver dataResolver) {
+    this(name, template, dataResolver, null);
+  }
+
+  AccountNoticeEmailContract(String name, String template,
+      EmailContractDataResolver dataResolver, AccountNoticeCustomContent customContent) {
     this.name = name;
     this.template = template;
     this.dataResolver = dataResolver;
+    this.customContent = customContent;
   }
 
   @Override
@@ -96,6 +103,14 @@ final class AccountNoticeEmailContract implements EmailContract {
       if (date != null) {
         data.put("date", date);
       }
+      String language = EmailContractCommandSupport.text(command,
+          EmailContractCommandSupport.FIELD_LANGUAGE);
+      if (language != null) {
+        data.put("language", language);
+      }
+      if (customContent != null) {
+        customContent.apply(data, language);
+      }
       return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipient(),
           template, data, null));
     } catch (JSONException e) {
@@ -124,5 +139,23 @@ final class AccountNoticeEmailContract implements EmailContract {
   private Optional<EmailContactRecord> resolveAccount(EmailContractCommand command) {
     return dataResolver.findAccountContact(EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_ACCOUNT_ID));
+  }
+
+  /**
+   * Functional interface to add custom content to the account notice email payload.
+   */
+  @FunctionalInterface
+  interface AccountNoticeCustomContent {
+    /**
+     * Adds custom notice content to the provider payload.
+     *
+     * @param data
+     *     provider payload to populate
+     * @param language
+     *     recipient language code
+     * @throws JSONException
+     *     when the payload cannot be populated
+     */
+    void apply(JSONObject data, String language) throws JSONException;
   }
 }
