@@ -21,6 +21,7 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,6 +33,7 @@ import javax.inject.Named;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -49,6 +51,17 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(GoodsShipmentHeaderHandler.class);
   private static final String FIELD_INVOICE_STATUS = "invoiceStatus";
+  private static final String CAN_RETURN_SQL =
+      "SELECT 1 FROM m_inoutline sil" +
+      " WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'" +
+      "   AND ABS(sil.movementqty) > (" +
+      "     SELECT COALESCE(SUM(ABS(rl.movementqty)), 0)" +
+      "     FROM m_inoutline rl" +
+      "     JOIN m_inout r ON r.m_inout_id = rl.m_inout_id" +
+      "     WHERE rl.canceled_inoutline_id = sil.m_inoutline_id" +
+      "       AND rl.isactive = 'Y' AND r.isactive = 'Y'" +
+      "       AND r.docstatus <> 'VO'" +
+      "   )";
   private static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
 
@@ -82,6 +95,7 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
         enrichLinkedOrder(shipmentRec, context.getRecordId());
         enrichLinkedInvoices(shipmentRec, context.getRecordId());
         enrichReturnReceipts(shipmentRec, context.getRecordId());
+        enrichCanCreateReturn(shipmentRec, context.getRecordId());
       } else {
         annotateBatch(dataArr);
       }
@@ -264,6 +278,25 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       shipmentRec.put("returnReceipts", returns);
     } catch (Exception e) {
       log.warn("Could not enrich return receipts for shipment {}: {}", shipmentId, e.getMessage());
+    }
+  }
+
+  /**
+   * Sets {@code canCreateReturn=true} when at least one shipment line still has
+   * returnable quantity (original qty > sum of non-voided return receipt qty).
+   * Voided returns (docstatus='VO') are excluded so they don't block new returns.
+   */
+  @SuppressWarnings("java:S2077")
+  private void enrichCanCreateReturn(JSONObject shipmentRec, String shipmentId) {
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(CAN_RETURN_SQL)) {
+      ps.setString(1, shipmentId);
+      try (ResultSet rs = ps.executeQuery()) {
+        boolean canReturn = rs.next();
+        shipmentRec.put("canCreateReturn", canReturn);
+      }
+    } catch (SQLException | JSONException e) {
+      log.warn("Could not compute canCreateReturn for shipment {}: {}", shipmentId, e.getMessage());
     }
   }
 
