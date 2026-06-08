@@ -489,6 +489,17 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       unitPrice = resolvePriceFromPriceList(productId, priceListId, "pricestd", BigDecimal.ZERO);
       listPrice = resolvePriceFromPriceList(productId, priceListId, "pricelist", unitPrice);
     }
+    // C_Tax_ID is mandatory (check constraint c_invoiceline_check2).
+    // The HQL projection may return null for the tax even when the source invoice line has one,
+    // so fall back to the originating order line's tax.
+    if (tax == null && origLine != null && origLine.getSalesOrderLine() != null) {
+      tax = origLine.getSalesOrderLine().getTax();
+    }
+    if (tax == null) {
+      throw new OBException("Cannot determine tax rate for product '"
+          + (retLine.getProduct() != null ? retLine.getProduct().getName() : "unknown")
+          + "'. Ensure the originating order has a tax rate assigned.");
+    }
     InvoiceLine il = OBProvider.getInstance().get(InvoiceLine.class);
     il.setOrganization(retLine.getOrganization());
     il.setInvoice(invoice);
@@ -500,9 +511,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
     il.setUnitPrice(unitPrice);
     il.setListPrice(listPrice);
     il.setLineNetAmount(qty.multiply(unitPrice).setScale(precision, RoundingMode.HALF_UP));
-    if (tax != null) {
-      il.setTax(tax);
-    }
+    il.setTax(tax);
     OBDal.getInstance().save(il);
   }
 
