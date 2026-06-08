@@ -42,6 +42,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -56,6 +57,7 @@ import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
@@ -789,6 +791,205 @@ public class BankStatementsHandlerTest {
 
       NeoResponse response = handler.handle(postCtx(ctx, "create"));
       assertEquals(400, response.getHttpStatus());
+    }
+  }
+
+  // ── ?action=process / update / delete (draft row actions) ──────────────
+
+  /** A draft (unprocessed) statement mock. */
+  private static FIN_BankStatement draftStatement(String id) {
+    FIN_BankStatement s = mock(FIN_BankStatement.class);
+    when(s.getId()).thenReturn(id);
+    when(s.isProcessed()).thenReturn(false);
+    return s;
+  }
+
+  private static JSONObject idBody(String id) throws Exception {
+    JSONObject b = new JSONObject();
+    if (id != null) b.put("id", id);
+    return b;
+  }
+
+  @Test
+  public void handleProcessNullBodyReturns400() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(null);
+    assertEquals(400, handler.handle(postCtx(ctx, "process")).getHttpStatus());
+  }
+
+  @Test
+  public void handleProcessMissingIdReturns400() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody(null));
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      assertEquals(400, handler.handle(postCtx(ctx, "process")).getHttpStatus());
+    }
+  }
+
+  @Test
+  public void handleProcessStatementNotFoundReturns400() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("ghost"));
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("ghost"))).thenReturn(null);
+      assertEquals(400, handler.handle(postCtx(ctx, "process")).getHttpStatus());
+    }
+  }
+
+  @Test
+  public void handleProcessRejectsAlreadyProcessed() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement processed = mock(FIN_BankStatement.class);
+    when(processed.isProcessed()).thenReturn(true);
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(processed);
+      NeoResponse r = handler.handle(postCtx(ctx, "process"));
+      assertEquals(400, r.getHttpStatus());
+      verify(handler, never()).processStatement(any());
+    }
+  }
+
+  @Test
+  public void handleProcessHappyPathProcessesDraft() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement draft = draftStatement("st-1");
+    doNothing().when(handler).processStatement(draft);
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "process"));
+      assertEquals(200, r.getHttpStatus());
+      verify(handler).processStatement(draft);
+      JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data")
+          .getJSONObject("statement");
+      assertEquals("st-1", data.getString("id"));
+    }
+  }
+
+  @Test
+  public void handleUpdateNullBodyReturns400() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(null);
+    assertEquals(400, handler.handle(postCtx(ctx, "update")).getHttpStatus());
+  }
+
+  @Test
+  public void handleUpdateRejectsBlankName() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = idBody("st-1");
+    body.put("lines", new JSONArray());
+    when(ctx.getRequestBody()).thenReturn(body);
+    FIN_BankStatement draft = draftStatement("st-1");
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+      NeoResponse r = handler.handle(postCtx(ctx, "update"));
+      assertEquals(400, r.getHttpStatus());
+      assertTrue(r.getBody().getJSONObject("error").getString("message").contains("name"));
+    }
+  }
+
+  @Test
+  public void handleUpdateHappyPathReplacesLinesAndProcesses() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = idBody("st-1");
+    body.put("name", "Editado");
+    body.put("transactionDate", "2026-06-04T00:00:00Z");
+    body.put("process", true);
+    JSONArray lines = new JSONArray();
+    lines.put(createLine("2026-06-02T00:00:00Z", "X", "Y", 10, 0));
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_BankStatement draft = draftStatement("st-1");
+    when(draft.getName()).thenReturn("Editado");
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
+    doNothing().when(handler).processStatement(draft);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.list()).thenReturn(Collections.emptyList());
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(line);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "update"));
+      assertEquals(200, r.getHttpStatus());
+      verify(dal).save(line);
+      verify(handler).processStatement(draft);
+      JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data")
+          .getJSONObject("statement");
+      assertEquals(1, data.getInt("lineCount"));
+    }
+  }
+
+  @Test
+  public void handleDeleteNullBodyReturns400() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(null);
+    assertEquals(400, handler.handle(postCtx(ctx, "delete")).getHttpStatus());
+  }
+
+  @Test
+  public void handleDeleteRejectsAlreadyProcessed() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement processed = mock(FIN_BankStatement.class);
+    when(processed.isProcessed()).thenReturn(true);
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(processed);
+      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+      assertEquals(400, r.getHttpStatus());
+      verify(dal, never()).remove(any());
+    }
+  }
+
+  @Test
+  public void handleDeleteHappyPathRemovesDraftAndLines() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement draft = draftStatement("st-1");
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.list()).thenReturn(Collections.singletonList(line));
+
+      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+      assertEquals(200, r.getHttpStatus());
+      verify(dal).remove(line);     // the line is removed first
+      verify(dal).remove(draft);    // then the statement
     }
   }
 }

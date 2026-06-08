@@ -75,6 +75,9 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String ACTION_IMPORT = "import";
   private static final String ACTION_PREVIEW = "preview";
   private static final String ACTION_CREATE = "create";
+  private static final String ACTION_PROCESS = "process";
+  private static final String ACTION_UPDATE = "update";
+  private static final String ACTION_DELETE = "delete";
   private static final String PARAM_ACCOUNT_ID = "FIN_Financial_Account_ID";
   private static final String PARAM_STATEMENT_ID = "statementId";
   private static final String PARAM_ACTION = "action";
@@ -103,9 +106,13 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String FIELD_PROCESSED = "processed";
   private static final String FIELD_TRANSACTION_DATE = "transactionDate";
   private static final String FIELD_IMPORT_DATE = "importDate";
+  private static final String FIELD_ID = "id";
   private static final String DEFAULT_REFERENCE = "**";
   private static final String MSG_MISSING_FIELD = "Missing required field: ";
   private static final String MSG_BODY_REQUIRED = "Request body is required";
+  private static final String MSG_STATEMENT_NOT_FOUND = "Bank statement not found: ";
+  private static final String MSG_NOT_DRAFT = "Only draft (unprocessed) statements can be modified";
+  private static final String MSG_LINE_REQUIRED = "At least one line is required";
 
   /**
    * AutoCloseable wrapper around {@link OBContext#setAdminMode}. Lets us drop
@@ -195,6 +202,7 @@ public class BankStatementsHandler implements NeoHandler {
           + "       bs.documentno,"
           + "       bs.name,"
           + "       bs.filename,"
+          + "       bs.notes,"
           + "       bs.importdate,"
           + "       bs.statementdate,"
           + "       bs.processed,"
@@ -227,10 +235,16 @@ public class BankStatementsHandler implements NeoHandler {
           + "       bsl.description,"
           + "       bsl.referenceno,"
           + "       bsl.bpartnername,"
+          + "       bsl.c_bpartner_id,"
+          + "       bp.name AS bpartner_fk_name,"
+          + "       bsl.c_glitem_id,"
+          + "       gl.name AS glitem_name,"
           + "       bsl.cramount,"
           + "       bsl.dramount,"
           + "       bsl.fin_finacc_transaction_id"
           + "  FROM fin_bankstatementline bsl"
+          + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = bsl.c_bpartner_id"
+          + "  LEFT JOIN c_glitem gl ON gl.c_glitem_id = bsl.c_glitem_id"
           + " WHERE bsl.fin_bankstatement_id = ?"
           + "   AND bsl.isactive = 'Y'"
           + " ORDER BY bsl.line ASC";
@@ -249,6 +263,9 @@ public class BankStatementsHandler implements NeoHandler {
       if (ACTION_IMPORT.equals(action))  return handleImport(context);
       if (ACTION_PREVIEW.equals(action)) return handlePreview(context);
       if (ACTION_CREATE.equals(action))  return handleCreate(context);
+      if (ACTION_PROCESS.equals(action)) return handleProcess(context);
+      if (ACTION_UPDATE.equals(action))  return handleUpdate(context);
+      if (ACTION_DELETE.equals(action))  return handleDelete(context);
     }
     return NeoResponse.error(405, "Method not allowed.");
   }
@@ -399,6 +416,143 @@ public class BankStatementsHandler implements NeoHandler {
   }
 
   /**
+   * {@code ?action=process} — runs a draft statement so its lines become
+   * reconcilable, mirroring "Save and process" on the create flow. Only drafts
+   * (unprocessed) can be processed. Body: {@code { "id": "..." }}.
+   */
+  private NeoResponse handleProcess(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
+    try (AdminMode ignored = new AdminMode()) {
+      FIN_BankStatement statement = requireDraft(body.optString(FIELD_ID, null));
+      processStatement(statement);
+      OBDal.getInstance().flush();
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_ID, statement.getId());
+      result.put(FIELD_PROCESSED, true);
+      return NeoResponse.ok(wrapInEnvelope("statement", result));
+    } catch (OBException e) {
+      log.warn("Process statement failed: {}", e.getMessage());
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(400, e.getMessage());
+    } catch (Exception e) {
+      log.error("Error processing bank statement", e);
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(500, "Could not process the statement. Please check logs for details.");
+    }
+  }
+
+  /**
+   * {@code ?action=update} — edits a draft statement's header and replaces all
+   * its lines with the ones in the body. Same body shape as create plus the
+   * {@code "id"} of the statement to edit. Only drafts can be edited; passing
+   * {@code "process": true} also runs it after saving.
+   */
+  private NeoResponse handleUpdate(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
+    try (AdminMode ignored = new AdminMode()) {
+      FIN_BankStatement statement = requireDraft(body.optString(FIELD_ID, null));
+      if (StringUtils.isBlank(body.optString(FIELD_NAME, null))) {
+        return NeoResponse.error(400, MSG_MISSING_FIELD + FIELD_NAME);
+      }
+      JSONArray bodyLines = body.optJSONArray(FIELD_LINES);
+      if (bodyLines == null || bodyLines.length() == 0) {
+        return NeoResponse.error(400, MSG_LINE_REQUIRED);
+      }
+
+      applyEditableHeader(statement, body);
+      OBDal.getInstance().save(statement);
+
+      deleteLines(statement);
+      int lineCount = createLines(statement, bodyLines);
+
+      boolean process = body.optBoolean(FIELD_PROCESS, false);
+      if (process) {
+        processStatement(statement);
+      }
+      OBDal.getInstance().flush();
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_ID, statement.getId());
+      result.put(FIELD_NAME, statement.getName());
+      result.put(FIELD_LINE_COUNT, lineCount);
+      result.put(FIELD_PROCESSED, process);
+      return NeoResponse.ok(wrapInEnvelope("statement", result));
+    } catch (OBException e) {
+      log.warn("Update statement failed: {}", e.getMessage());
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(400, e.getMessage());
+    } catch (Exception e) {
+      log.error("Error updating bank statement", e);
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(500, "Could not update the statement. Please check logs for details.");
+    }
+  }
+
+  /**
+   * {@code ?action=delete} — permanently removes a draft statement and its
+   * lines. Only drafts can be deleted; processed statements are protected.
+   * Body: {@code { "id": "..." }}.
+   */
+  private NeoResponse handleDelete(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
+    try (AdminMode ignored = new AdminMode()) {
+      FIN_BankStatement statement = requireDraft(body.optString(FIELD_ID, null));
+      String id = statement.getId();
+      deleteLines(statement);
+      OBDal.getInstance().remove(statement);
+      OBDal.getInstance().flush();
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_ID, id);
+      return NeoResponse.ok(wrapInEnvelope("statement", result));
+    } catch (OBException e) {
+      log.warn("Delete statement failed: {}", e.getMessage());
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(400, e.getMessage());
+    } catch (Exception e) {
+      log.error("Error deleting bank statement", e);
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(500, "Could not delete the statement. Please check logs for details.");
+    }
+  }
+
+  /**
+   * Loads a statement by id and guards that it is an editable draft. Throws
+   * {@link OBException} (mapped to 400 by the callers) when the id is blank, the
+   * statement does not exist, or it has already been processed. Centralises the
+   * checks shared by the process, update and delete actions.
+   */
+  private FIN_BankStatement requireDraft(String id) {
+    if (StringUtils.isBlank(id)) {
+      throw new OBException(MSG_MISSING_FIELD + FIELD_ID);
+    }
+    FIN_BankStatement statement = OBDal.getInstance().get(FIN_BankStatement.class, id);
+    if (statement == null) {
+      throw new OBException(MSG_STATEMENT_NOT_FOUND + id);
+    }
+    if (Boolean.TRUE.equals(statement.isProcessed())) {
+      throw new OBException(MSG_NOT_DRAFT);
+    }
+    return statement;
+  }
+
+  /** Removes every line of {@code statement} so {@link #createLines} can rebuild them. */
+  private void deleteLines(FIN_BankStatement statement) {
+    OBCriteria<FIN_BankStatementLine> crit =
+        OBDal.getInstance().createCriteria(FIN_BankStatementLine.class);
+    crit.add(org.hibernate.criterion.Restrictions.eq(
+        FIN_BankStatementLine.PROPERTY_BANKSTATEMENT, statement));
+    for (FIN_BankStatementLine line : crit.list()) {
+      OBDal.getInstance().remove(line);
+    }
+    OBDal.getInstance().flush();
+  }
+
+  /**
    * Validates the {@code ?action=create} body. Returns {@code null} when valid,
    * or the appropriate 400 {@link NeoResponse}. Extracted so {@link #handleCreate}
    * stays under Sonar's cognitive-complexity threshold.
@@ -412,7 +566,7 @@ public class BankStatementsHandler implements NeoHandler {
     }
     JSONArray lines = body.optJSONArray(FIELD_LINES);
     if (lines == null || lines.length() == 0) {
-      return NeoResponse.error(400, "At least one line is required");
+      return NeoResponse.error(400, MSG_LINE_REQUIRED);
     }
     return null;
   }
@@ -429,17 +583,27 @@ public class BankStatementsHandler implements NeoHandler {
     statement.setOrganization(account.getOrganization());
     statement.setActive(true);
     statement.setAccount(account);
-    statement.setName(body.optString(FIELD_NAME, null));
-    statement.setImportdate(parseIsoDate(body.optString(FIELD_IMPORT_DATE, null), new Date()));
-    statement.setTransactionDate(parseIsoDate(body.optString(FIELD_TRANSACTION_DATE, null), new Date()));
-    String fileName = body.optString(FIELD_FILE_NAME, null);
-    if (StringUtils.isNotBlank(fileName)) statement.setFileName(truncate(fileName, 60));
-    String notes = body.optString(FIELD_NOTES, null);
-    if (StringUtils.isNotBlank(notes)) statement.setNotes(truncate(notes, 2000));
+    applyEditableHeader(statement, body);
     statement.setProcessed(false);
     statement.setPosted("N");
     statement.setDocumentType(resolveBsfDocType(account));
     return statement;
+  }
+
+  /**
+   * Applies the user-editable header fields (name, import/transaction dates,
+   * file name and notes) from the request body onto a statement. Shared by the
+   * manual create and update flows so both treat the header identically. Blank
+   * file name / notes clear the field, mirroring an edit that removed them.
+   */
+  private void applyEditableHeader(FIN_BankStatement statement, JSONObject body) {
+    statement.setName(body.optString(FIELD_NAME, null));
+    statement.setImportdate(parseIsoDate(body.optString(FIELD_IMPORT_DATE, null), new Date()));
+    statement.setTransactionDate(parseIsoDate(body.optString(FIELD_TRANSACTION_DATE, null), new Date()));
+    String fileName = body.optString(FIELD_FILE_NAME, null);
+    statement.setFileName(StringUtils.isNotBlank(fileName) ? truncate(fileName, 60) : null);
+    String notes = body.optString(FIELD_NOTES, null);
+    statement.setNotes(StringUtils.isNotBlank(notes) ? truncate(notes, 2000) : null);
   }
 
   /**
@@ -857,8 +1021,10 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("documentNo", StringUtils.trimToEmpty(rs.getString("documentno")));
           row.put("name", StringUtils.trimToEmpty(rs.getString("name")));
           row.put(FIELD_FILE_NAME, StringUtils.trimToEmpty(rs.getString("filename")));
+          row.put(FIELD_NOTES, StringUtils.trimToEmpty(rs.getString("notes")));
           row.put("importDate", formatDate(rs.getTimestamp("importdate")));
           row.put("transactionDate", formatDate(rs.getTimestamp("statementdate")));
+          boolean processed = "Y".equalsIgnoreCase(rs.getString("processed"));
           row.put("processed", StringUtils.trimToEmpty(rs.getString("processed")));
           row.put("posted", StringUtils.trimToEmpty(rs.getString("posted")));
           row.put(FIELD_LINE_COUNT, lineCount);
@@ -866,7 +1032,7 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("totalAmount", nullSafeBigDecimal(rs.getBigDecimal("total_amount")));
           row.put("periodFrom", periodFrom);
           row.put("periodTo", periodTo);
-          row.put("status", deriveStatementStatus(lineCount, matchedCount));
+          row.put("status", deriveStatementStatus(processed, lineCount, matchedCount));
           arr.put(row);
         }
       }
@@ -891,6 +1057,12 @@ public class BankStatementsHandler implements NeoHandler {
           row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
           row.put("reference", StringUtils.trimToEmpty(rs.getString("referenceno")));
           row.put("bpartnerName", StringUtils.trimToEmpty(rs.getString("bpartnername")));
+          row.put(FIELD_BPARTNER_ID, StringUtils.trimToEmpty(rs.getString("c_bpartner_id")));
+          row.put("bpartnerFkName", StringUtils.trimToEmpty(rs.getString("bpartner_fk_name")));
+          row.put(FIELD_GLITEM_ID, StringUtils.trimToEmpty(rs.getString("c_glitem_id")));
+          row.put("glItemName", StringUtils.trimToEmpty(rs.getString("glitem_name")));
+          row.put("in", credit);
+          row.put("out", debit);
           row.put("amount", credit.subtract(debit));
           row.put("matched", rs.getString("fin_finacc_transaction_id") != null);
           arr.put(row);

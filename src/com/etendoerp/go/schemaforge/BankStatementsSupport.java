@@ -59,6 +59,22 @@ public final class BankStatementsSupport {
   }
 
   /**
+   * Status that also accounts for whether the statement has been processed.
+   * An unprocessed statement is a draft regardless of its matching state;
+   * once processed, the matching-based status applies.
+   *
+   * @param processed    whether the statement's Processed flag is set
+   * @param lineCount    total number of lines in the statement
+   * @param matchedCount number of those lines already matched to a transaction
+   * @return {@code "DRAFT"} when not processed, otherwise one of
+   *         {@code "PENDING"}, {@code "PARTIAL"} or {@code "RECONCILED"}
+   */
+  public static String deriveStatementStatus(boolean processed, int lineCount, int matchedCount) {
+    if (!processed) return "DRAFT";
+    return deriveStatementStatus(lineCount, matchedCount);
+  }
+
+  /**
    * Returns {@link BigDecimal#ZERO} for {@code null}, otherwise the value as-is.
    *
    * @param value the amount to normalise (may be {@code null})

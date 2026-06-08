@@ -55,6 +55,20 @@ public class BankStatementsSupportTest {
     assertEquals("RECONCILED", BankStatementsSupport.deriveStatementStatus(10, 10));
   }
 
+  @Test
+  public void deriveStatementStatusReturnsDraftWhenNotProcessed() {
+    // Unprocessed statements are drafts regardless of matching state.
+    assertEquals("DRAFT", BankStatementsSupport.deriveStatementStatus(false, 0, 0));
+    assertEquals("DRAFT", BankStatementsSupport.deriveStatementStatus(false, 10, 10));
+  }
+
+  @Test
+  public void deriveStatementStatusWithProcessedDelegatesToMatchingState() {
+    assertEquals("PENDING", BankStatementsSupport.deriveStatementStatus(true, 10, 0));
+    assertEquals("PARTIAL", BankStatementsSupport.deriveStatementStatus(true, 10, 4));
+    assertEquals("RECONCILED", BankStatementsSupport.deriveStatementStatus(true, 10, 10));
+  }
+
   // ── nullSafeBigDecimal ───────────────────────────────────────────────────
 
   @Test
