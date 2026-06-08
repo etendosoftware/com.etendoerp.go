@@ -81,6 +81,10 @@ public class SalesInvoiceHeaderHandler implements NeoHandler {
    */
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse rateError = AbstractOrderHeaderHandler.validateExchangeRateBeforeComplete(context);
+    if (rateError != null) {
+      return rateError;
+    }
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
     return NeoHeaderActionRouter.dispatch(context, cloneRecordHandler, registerPaymentHandler, siiSendHandler,
         tbaiXmlgeneratorHandler);

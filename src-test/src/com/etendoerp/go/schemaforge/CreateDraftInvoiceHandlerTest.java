@@ -2490,9 +2490,10 @@ public class CreateDraftInvoiceHandlerTest {
 
       Map<String, BigDecimal> result = new CreateDraftInvoiceHandler()
           .computePendingQtyPerLine("ship-Z");
-      assertEquals(2, result.size());
+      assertEquals(1, result.size());
       assertEquals(0, new BigDecimal("3").compareTo(result.get("line-1")));
-      assertEquals(0, BigDecimal.ZERO.compareTo(result.get("line-2")));
+      assertFalse("line-2 with zero pending (clamped from negative) must not be in map",
+          result.containsKey("line-2"));
     }
   }
 
@@ -2515,7 +2516,8 @@ public class CreateDraftInvoiceHandlerTest {
 
       Map<String, BigDecimal> result = new CreateDraftInvoiceHandler()
           .computePendingQtyPerLine("ship-null");
-      assertEquals(0, BigDecimal.ZERO.compareTo(result.get("line-null")));
+      assertFalse("null movQty treated as zero: pending = max(0-2,0) = 0, line must not be in map",
+          result.containsKey("line-null"));
     }
   }
 
