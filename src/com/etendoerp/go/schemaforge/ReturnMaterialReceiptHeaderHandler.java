@@ -475,7 +475,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
     TaxRate tax = null;
     ShipmentInOutLine origLine = retLine.getCanceledInoutLine();
     if (origLine != null) {
-      Object[] prices = findPricesAndTaxForShipmentLine(origLine.getId());
+      Object[] prices = findPricesAndTaxForShipmentLine(origLine);
       if (prices != null) {
         unitPrice = prices[0] != null ? (BigDecimal) prices[0] : BigDecimal.ZERO;
         listPrice = prices[1] != null ? (BigDecimal) prices[1] : BigDecimal.ZERO;
@@ -506,16 +506,32 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
     OBDal.getInstance().save(il);
   }
 
-  private Object[] findPricesAndTaxForShipmentLine(String origShipmentLineId) {
+  private Object[] findPricesAndTaxForShipmentLine(ShipmentInOutLine origLine) {
+    // First attempt: invoice was created from the shipment (goodsShipmentLine is set)
     String hql = "SELECT il.unitPrice, il.listPrice, il.tax FROM InvoiceLine il " +
         "WHERE il.goodsShipmentLine.id = :lineId AND il.invoice.documentStatus != 'VO' " +
         "ORDER BY il.invoice.invoiceDate DESC";
     List<Object[]> rows = OBDal.getInstance().getSession()
         .createQuery(hql, Object[].class)
-        .setParameter("lineId", origShipmentLineId)
+        .setParameter("lineId", origLine.getId())
         .setMaxResults(1)
         .list();
-    return rows.isEmpty() ? null : rows.get(0);
+    if (!rows.isEmpty()) return rows.get(0);
+
+    // Second attempt: invoice was created from the sales order (goodsShipmentLine is null)
+    if (origLine.getSalesOrderLine() != null) {
+      String hqlByOrder = "SELECT il.unitPrice, il.listPrice, il.tax FROM InvoiceLine il " +
+          "WHERE il.salesOrderLine.id = :orderLineId AND il.invoice.documentStatus != 'VO' " +
+          "ORDER BY il.invoice.invoiceDate DESC";
+      rows = OBDal.getInstance().getSession()
+          .createQuery(hqlByOrder, Object[].class)
+          .setParameter("orderLineId", origLine.getSalesOrderLine().getId())
+          .setMaxResults(1)
+          .list();
+      if (!rows.isEmpty()) return rows.get(0);
+    }
+
+    return null;
   }
 
   @SuppressWarnings("java:S2077")
