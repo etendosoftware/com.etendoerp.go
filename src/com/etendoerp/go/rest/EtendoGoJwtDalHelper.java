@@ -57,14 +57,14 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_ADMIN_USER_ID = "adminUserId";
   private static final String FIELD_ADMIN_USER = "adminUser";
   private static final String FIELD_ADMIN_USER_NAME = "adminUserName";
-  private static final String PROPERTY_PASSWORD_CHANGED = "passwordChanged";
-  private static final String PROPERTY_RESET_TOKEN_CONSUMED = "resetTokenConsumed";
-  private static final String PROPERTY_RESET_TOKEN_EXPIRES = "resetTokenExpires";
-  private static final String PROPERTY_RESET_TOKEN_HASH = "resetTokenHash";
-  private static final String PROPERTY_AUTH_PROVIDER = "authProvider";
-  private static final String PROPERTY_EXTERNAL_SUBJECT = "externalSubject";
-  private static final String PROPERTY_EXTERNAL_EMAIL = "externalEmail";
-  private static final String PROPERTY_LAST_SSO_LOGIN = "lastSsoLogin";
+  private static final String PROPERTY_PASSWORD_CHANGED = Account.PROPERTY_PASSWORDCHANGED;
+  private static final String PROPERTY_RESET_TOKEN_CONSUMED = Account.PROPERTY_RESETTOKENCONSUMED;
+  private static final String PROPERTY_RESET_TOKEN_EXPIRES = Account.PROPERTY_RESETTOKENEXPIRES;
+  private static final String PROPERTY_RESET_TOKEN_HASH = Account.PROPERTY_RESETTOKENHASH;
+  private static final String PROPERTY_AUTH_PROVIDER = Account.PROPERTY_AUTHPROVIDER;
+  private static final String PROPERTY_EXTERNAL_SUBJECT = Account.PROPERTY_EXTERNALSUBJECT;
+  private static final String PROPERTY_EXTERNAL_EMAIL = Account.PROPERTY_EXTERNALEMAIL;
+  private static final String PROPERTY_LAST_SSO_LOGIN = Account.PROPERTY_LASTSSOLOGIN;
 
   private EtendoGoJwtDalHelper() {
   }

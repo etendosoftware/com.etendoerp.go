@@ -223,7 +223,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String language;
     try {
       email = body.getString(FIELD_EMAIL).trim().toLowerCase();
-      password = body.getString("password");
+      password = body.getString(FIELD_PASSWORD);
       name = body.getString("name").trim();
       language = body.optString("language", "").trim();
     } catch (JSONException e) {
@@ -297,7 +297,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String password;
     try {
       email = body.getString(FIELD_EMAIL).trim().toLowerCase();
-      password = body.getString("password");
+      password = body.getString(FIELD_PASSWORD);
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Missing required fields: email, password");
@@ -784,21 +784,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
 
-    final String accountEmail;
-    try {
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-      accountEmail = EtendoGoJwtSupport.requireAccountEmail(token);
-      if (accountEmail == null) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
-        return;
-      }
-    } catch (RuntimeException e) {
-      log.error("Database error validating token for onboarding", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    String accountEmail = resolveOnboardingAccountEmail(token, response);
+    if (accountEmail == null) {
       return;
-    } finally {
-      OBContext.restorePreviousMode();
     }
 
     OnboardingRequestData onboardingRequest = parseOnboardingRequest(request, response);
@@ -873,6 +861,27 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.restorePreviousMode();
       writer.flush();
     }
+  }
+
+  private String resolveOnboardingAccountEmail(String token, HttpServletResponse response)
+      throws IOException {
+    String accountEmail = null;
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      String resolvedEmail = EtendoGoJwtSupport.requireAccountEmail(token);
+      if (resolvedEmail == null) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+      } else {
+        accountEmail = resolvedEmail;
+      }
+    } catch (RuntimeException e) {
+      log.error("Database error validating token for onboarding", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    return accountEmail;
   }
 
   private void writeEnvironmentLoginResponse(HttpServletResponse response, String userId,
