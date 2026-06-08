@@ -178,22 +178,27 @@ final class NeoReturnReceiptService {
     return qtyByLineId;
   }
 
+  static ShipmentInOutLine createReturnLineShell(ShipmentInOut returnDoc,
+      ShipmentInOutLine sourceLine, long lineNo) {
+    ShipmentInOutLine line = OBProvider.getInstance().get(ShipmentInOutLine.class);
+    line.setClient(returnDoc.getClient());
+    line.setOrganization(returnDoc.getOrganization());
+    line.setShipmentReceipt(returnDoc);
+    line.setLineNo(lineNo);
+    line.setProduct(sourceLine.getProduct());
+    line.setUOM(sourceLine.getUOM());
+    if (sourceLine.getStorageBin() != null) {
+      line.setStorageBin(sourceLine.getStorageBin());
+    }
+    line.setCanceledInoutLine(sourceLine);
+    return line;
+  }
+
   private static void buildAndSaveReturnLine(ShipmentInOut returnDoc, ShipmentInOutLine sourceLine,
       BigDecimal returnQty, long lineNo) {
-    ShipmentInOutLine retLine = OBProvider.getInstance().get(ShipmentInOutLine.class);
-    retLine.setClient(returnDoc.getClient());
-    retLine.setOrganization(returnDoc.getOrganization());
-    retLine.setShipmentReceipt(returnDoc);
-    retLine.setLineNo(lineNo);
-    retLine.setProduct(sourceLine.getProduct());
-    retLine.setUOM(sourceLine.getUOM());
+    ShipmentInOutLine retLine = createReturnLineShell(returnDoc, sourceLine, lineNo);
     retLine.setMovementQuantity(returnQty);
     applyOrderUOM(retLine, sourceLine, returnQty);
-    Locator bin = sourceLine.getStorageBin();
-    if (bin != null) {
-      retLine.setStorageBin(bin);
-    }
-    retLine.setCanceledInoutLine(sourceLine);
     OBDal.getInstance().save(retLine);
   }
 
