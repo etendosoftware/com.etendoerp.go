@@ -67,6 +67,7 @@ public class CloneShipmentHook extends CloneRecordHook {
     clone.setPosted("N");
     clone.setProcessed(false);
     clone.setDocumentNo(null);
+    clone.setSalesOrder(null);
     clone.setMovementDate(today);
     clone.setCompletelyInvoiced(false);
     clone.setInvoice(null);
