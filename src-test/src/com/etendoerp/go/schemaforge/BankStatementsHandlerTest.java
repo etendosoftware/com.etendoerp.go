@@ -405,39 +405,39 @@ public class BankStatementsHandlerTest {
 
   @Test
   public void detectFormatReturnsUnknownForNullOrEmpty() {
-    assertEquals(BankStatementsHandler.StatementFormat.UNKNOWN,
-        BankStatementsHandler.detectFormat(null));
-    assertEquals(BankStatementsHandler.StatementFormat.UNKNOWN,
-        BankStatementsHandler.detectFormat(new byte[0]));
+    assertEquals(BankStatementFormatDetector.StatementFormat.UNKNOWN,
+        BankStatementFormatDetector.detectFormat(null));
+    assertEquals(BankStatementFormatDetector.StatementFormat.UNKNOWN,
+        BankStatementFormatDetector.detectFormat(new byte[0]));
   }
 
   @Test
   public void detectFormatRecognisesC43() {
     byte[] c43 = c43LineEighty().getBytes(StandardCharsets.UTF_8);
-    assertEquals(BankStatementsHandler.StatementFormat.C43,
-        BankStatementsHandler.detectFormat(c43));
+    assertEquals(BankStatementFormatDetector.StatementFormat.C43,
+        BankStatementFormatDetector.detectFormat(c43));
   }
 
   @Test
   public void detectFormatRecognisesCsv() {
     byte[] csv = csvHeaderAndOneRow().getBytes(StandardCharsets.UTF_8);
-    assertEquals(BankStatementsHandler.StatementFormat.GENERIC_CSV,
-        BankStatementsHandler.detectFormat(csv));
+    assertEquals(BankStatementFormatDetector.StatementFormat.GENERIC_CSV,
+        BankStatementFormatDetector.detectFormat(csv));
   }
 
   @Test
   public void detectFormatReturnsUnknownForArbitraryText() {
     byte[] text = "Hello world\nsecond line".getBytes(StandardCharsets.UTF_8);
-    assertEquals(BankStatementsHandler.StatementFormat.UNKNOWN,
-        BankStatementsHandler.detectFormat(text));
+    assertEquals(BankStatementFormatDetector.StatementFormat.UNKNOWN,
+        BankStatementFormatDetector.detectFormat(text));
   }
 
   @Test
   public void detectFormatReturnsUnknownForOnlyOneCsvHeaderToken() {
     // Single token isn't enough — needs at least 2 matches.
     byte[] text = "transaction date,foo,bar".getBytes(StandardCharsets.UTF_8);
-    assertEquals(BankStatementsHandler.StatementFormat.UNKNOWN,
-        BankStatementsHandler.detectFormat(text));
+    assertEquals(BankStatementFormatDetector.StatementFormat.UNKNOWN,
+        BankStatementFormatDetector.detectFormat(text));
   }
 
   // deriveStatementStatus() and nullSafeBigDecimal() moved to BankStatementsSupport

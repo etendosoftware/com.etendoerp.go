@@ -17,12 +17,15 @@
 
 package com.etendoerp.go.schemaforge;
 
+import static com.etendoerp.go.schemaforge.BankStatementFormatDetector.detectFormat;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.deriveStatementStatus;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.formatDate;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.nullSafeBigDecimal;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseAmount;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseIsoDate;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.truncate;
+
+import com.etendoerp.go.schemaforge.BankStatementFormatDetector.StatementFormat;
 
 import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
@@ -89,6 +92,7 @@ public class BankStatementsHandler implements NeoHandler {
   // duplicating string literals — flagged by Sonar S1192).
   private static final String JSON_RESPONSE = "response";
   private static final String JSON_DATA = "data";
+  private static final String KEY_STATEMENT = "statement";
   private static final String FIELD_FILE_NAME = "fileName";
   private static final String FIELD_LINE_COUNT = "lineCount";
   private static final String FIELD_DESCRIPTION = "description";
@@ -260,13 +264,19 @@ public class BankStatementsHandler implements NeoHandler {
       return ACTION_LINES.equals(action) ? handleGetLines(context) : handleList(context);
     }
     if (METHOD_POST.equals(method)) {
-      if (ACTION_IMPORT.equals(action))  return handleImport(context);
-      if (ACTION_PREVIEW.equals(action)) return handlePreview(context);
-      if (ACTION_CREATE.equals(action))  return handleCreate(context);
-      if (ACTION_PROCESS.equals(action)) return handleProcess(context);
-      if (ACTION_UPDATE.equals(action))  return handleUpdate(context);
-      if (ACTION_DELETE.equals(action))  return handleDelete(context);
+      return handlePost(action, context);
     }
+    return NeoResponse.error(405, "Method not allowed.");
+  }
+
+  /** Routes the POST {@code action} values to their handlers. */
+  private NeoResponse handlePost(String action, NeoContext context) {
+    if (ACTION_IMPORT.equals(action))  return handleImport(context);
+    if (ACTION_PREVIEW.equals(action)) return handlePreview(context);
+    if (ACTION_CREATE.equals(action))  return handleCreate(context);
+    if (ACTION_PROCESS.equals(action)) return handleProcess(context);
+    if (ACTION_UPDATE.equals(action))  return handleUpdate(context);
+    if (ACTION_DELETE.equals(action))  return handleDelete(context);
     return NeoResponse.error(405, "Method not allowed.");
   }
 
@@ -431,7 +441,7 @@ public class BankStatementsHandler implements NeoHandler {
       JSONObject result = new JSONObject();
       result.put(FIELD_ID, statement.getId());
       result.put(FIELD_PROCESSED, true);
-      return NeoResponse.ok(wrapInEnvelope("statement", result));
+      return NeoResponse.ok(wrapInEnvelope(KEY_STATEMENT, result));
     } catch (OBException e) {
       log.warn("Process statement failed: {}", e.getMessage());
       OBDal.getInstance().rollbackAndClose();
@@ -479,7 +489,7 @@ public class BankStatementsHandler implements NeoHandler {
       result.put(FIELD_NAME, statement.getName());
       result.put(FIELD_LINE_COUNT, lineCount);
       result.put(FIELD_PROCESSED, process);
-      return NeoResponse.ok(wrapInEnvelope("statement", result));
+      return NeoResponse.ok(wrapInEnvelope(KEY_STATEMENT, result));
     } catch (OBException e) {
       log.warn("Update statement failed: {}", e.getMessage());
       OBDal.getInstance().rollbackAndClose();
@@ -508,7 +518,7 @@ public class BankStatementsHandler implements NeoHandler {
 
       JSONObject result = new JSONObject();
       result.put(FIELD_ID, id);
-      return NeoResponse.ok(wrapInEnvelope("statement", result));
+      return NeoResponse.ok(wrapInEnvelope(KEY_STATEMENT, result));
     } catch (OBException e) {
       log.warn("Delete statement failed: {}", e.getMessage());
       OBDal.getInstance().rollbackAndClose();
@@ -946,63 +956,6 @@ public class BankStatementsHandler implements NeoHandler {
     return new GenericCsvBankStatementImporter().loadFile(stream, statement);
   }
 
-  enum StatementFormat { C43, GENERIC_CSV, UNKNOWN }
-
-  /** Record markers that identify a Cuaderno 43 line by its first two chars. */
-  private static final java.util.Set<String> C43_CODES =
-      java.util.Set.of("11", "22", "33", "99");
-
-  /** Known header tokens used to recognise the generic CSV format. */
-  private static final String[] CSV_HEADER_TOKENS = {
-      "transaction date", "amount in", "amount out",
-      "reference no.", "business partner name", FIELD_DESCRIPTION
-  };
-
-  /**
-   * Sniffs the first non-blank line of {@code fileBytes} to decide which parser
-   * to dispatch — neither the file extension nor a user choice is consulted.
-   *
-   * <p>Heuristics, in priority order:
-   * <ul>
-   *   <li><b>Cuaderno 43</b>: the line is exactly 80 chars and starts with
-   *       one of {@code 11}, {@code 22}, {@code 33}, {@code 99}.</li>
-   *   <li><b>Generic CSV</b>: the line contains at least two of the known
-   *       header tokens (case-insensitive).</li>
-   *   <li>Otherwise {@code UNKNOWN}.</li>
-   * </ul>
-   */
-  static StatementFormat detectFormat(byte[] fileBytes) {
-    if (fileBytes == null || fileBytes.length == 0) return StatementFormat.UNKNOWN;
-    // Only the head of the file is needed; caps cost on large uploads too.
-    int sampleLen = Math.min(fileBytes.length, 4096);
-    String head = new String(fileBytes, 0, sampleLen, java.nio.charset.StandardCharsets.UTF_8);
-    String firstLine = firstNonBlankLine(head);
-    if (firstLine == null) return StatementFormat.UNKNOWN;
-    if (looksLikeC43Record(firstLine)) return StatementFormat.C43;
-    if (looksLikeCsvHeader(firstLine)) return StatementFormat.GENERIC_CSV;
-    return StatementFormat.UNKNOWN;
-  }
-
-  private static String firstNonBlankLine(String text) {
-    for (String line : text.split("\\r?\\n", -1)) {
-      if (StringUtils.isNotBlank(line)) return line;
-    }
-    return null;
-  }
-
-  private static boolean looksLikeC43Record(String line) {
-    return line.length() == 80 && C43_CODES.contains(line.substring(0, 2));
-  }
-
-  private static boolean looksLikeCsvHeader(String line) {
-    String lower = line.toLowerCase(java.util.Locale.ROOT);
-    int hits = 0;
-    for (String token : CSV_HEADER_TOKENS) {
-      if (lower.contains(token)) hits++;
-    }
-    return hits >= 2;
-  }
-
   JSONArray loadStatements(String accountId) throws Exception {
     JSONArray arr = new JSONArray();
     // Connection is managed by the DAL's Hibernate Session; don't close it.
@@ -1021,11 +974,11 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("documentNo", StringUtils.trimToEmpty(rs.getString("documentno")));
           row.put("name", StringUtils.trimToEmpty(rs.getString("name")));
           row.put(FIELD_FILE_NAME, StringUtils.trimToEmpty(rs.getString("filename")));
-          row.put(FIELD_NOTES, StringUtils.trimToEmpty(rs.getString("notes")));
+          row.put(FIELD_NOTES, StringUtils.trimToEmpty(rs.getString(FIELD_NOTES)));
           row.put("importDate", formatDate(rs.getTimestamp("importdate")));
           row.put("transactionDate", formatDate(rs.getTimestamp("statementdate")));
-          boolean processed = "Y".equalsIgnoreCase(rs.getString("processed"));
-          row.put("processed", StringUtils.trimToEmpty(rs.getString("processed")));
+          boolean processed = "Y".equalsIgnoreCase(rs.getString(FIELD_PROCESSED));
+          row.put(FIELD_PROCESSED, StringUtils.trimToEmpty(rs.getString(FIELD_PROCESSED)));
           row.put("posted", StringUtils.trimToEmpty(rs.getString("posted")));
           row.put(FIELD_LINE_COUNT, lineCount);
           row.put("matchedCount", matchedCount);
