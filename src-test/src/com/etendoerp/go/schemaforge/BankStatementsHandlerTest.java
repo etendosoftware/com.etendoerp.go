@@ -438,40 +438,8 @@ public class BankStatementsHandlerTest {
         BankStatementsHandler.detectFormat(text));
   }
 
-  // ── deriveStatementStatus() ───────────────────────────────────────────
-
-  @Test
-  public void deriveStatementStatusReturnsPendingForEmptyStatement() {
-    assertEquals("PENDING", BankStatementsHandler.deriveStatementStatus(0, 0));
-  }
-
-  @Test
-  public void deriveStatementStatusReturnsPendingWhenNoMatches() {
-    assertEquals("PENDING", BankStatementsHandler.deriveStatementStatus(10, 0));
-  }
-
-  @Test
-  public void deriveStatementStatusReturnsPartialWhenSomeMatched() {
-    assertEquals("PARTIAL", BankStatementsHandler.deriveStatementStatus(10, 4));
-  }
-
-  @Test
-  public void deriveStatementStatusReturnsReconciledWhenAllMatched() {
-    assertEquals("RECONCILED", BankStatementsHandler.deriveStatementStatus(10, 10));
-  }
-
-  // ── nullSafeBigDecimal ────────────────────────────────────────────────
-
-  @Test
-  public void nullSafeBigDecimalReturnsZeroForNull() {
-    assertEquals(0, BigDecimal.ZERO.compareTo(BankStatementsHandler.nullSafeBigDecimal(null)));
-  }
-
-  @Test
-  public void nullSafeBigDecimalReturnsValueWhenNotNull() {
-    BigDecimal v = new BigDecimal("12.34");
-    assertEquals(v, BankStatementsHandler.nullSafeBigDecimal(v));
-  }
+  // deriveStatementStatus() and nullSafeBigDecimal() moved to BankStatementsSupport
+  // (see BankStatementsSupportTest).
 
   // ── loadStatements / loadLines SQL marshalling ────────────────────────
 

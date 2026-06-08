@@ -17,15 +17,18 @@
 
 package com.etendoerp.go.schemaforge;
 
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.deriveStatementStatus;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.formatDate;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.nullSafeBigDecimal;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseAmount;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseIsoDate;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.truncate;
+
 import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.sql.Timestamp;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.Base64;
 import java.util.Date;
 import java.util.List;
@@ -102,6 +105,7 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String FIELD_IMPORT_DATE = "importDate";
   private static final String DEFAULT_REFERENCE = "**";
   private static final String MSG_MISSING_FIELD = "Missing required field: ";
+  private static final String MSG_BODY_REQUIRED = "Request body is required";
 
   /**
    * AutoCloseable wrapper around {@link OBContext#setAdminMode}. Lets us drop
@@ -185,9 +189,6 @@ public class BankStatementsHandler implements NeoHandler {
     u.format = format;
     return u;
   }
-
-  private static final DateTimeFormatter ISO_UTC =
-      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
 
   private static final String STATEMENTS_SQL =
       "SELECT bs.fin_bankstatement_id,"
@@ -300,7 +301,7 @@ public class BankStatementsHandler implements NeoHandler {
   private NeoResponse handleImport(NeoContext context) {
     JSONObject body = context.getRequestBody();
     if (body == null) {
-      return NeoResponse.error(400, "Request body is required");
+      return NeoResponse.error(400, MSG_BODY_REQUIRED);
     }
     try (AdminMode ignored = new AdminMode()) {
       UploadInput in = parseUploadInput(body, true);
@@ -353,7 +354,7 @@ public class BankStatementsHandler implements NeoHandler {
    */
   private NeoResponse handleCreate(NeoContext context) {
     JSONObject body = context.getRequestBody();
-    if (body == null) return NeoResponse.error(400, "Request body is required");
+    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try (AdminMode ignored = new AdminMode()) {
       NeoResponse validation = validateCreateBody(body);
       if (validation != null) return validation;
@@ -520,30 +521,6 @@ public class BankStatementsHandler implements NeoHandler {
         && parseAmount(l.optString("out", null)).signum() == 0;
   }
 
-  /** Parses an ISO-8601 instant (e.g. {@code 2026-06-04T00:00:00Z}); falls back on blank/invalid. */
-  private static Date parseIsoDate(String iso, Date fallback) {
-    if (StringUtils.isBlank(iso)) return fallback;
-    try {
-      return Date.from(Instant.parse(iso));
-    } catch (Exception e) {
-      return fallback;
-    }
-  }
-
-  /** Parses a plain decimal string into a non-null {@link BigDecimal} ({@code ZERO} on blank/invalid). */
-  private static BigDecimal parseAmount(String raw) {
-    if (StringUtils.isBlank(raw)) return BigDecimal.ZERO;
-    try {
-      return new BigDecimal(raw.trim());
-    } catch (NumberFormatException e) {
-      return BigDecimal.ZERO;
-    }
-  }
-
-  private static String truncate(String s, int max) {
-    return s.length() > max ? s.substring(0, max) : s;
-  }
-
   /**
    * Dispatches to the right parser by {@link StatementFormat} and returns the
    * line count. Centralises the CSV/C43 branching so both endpoints stay free
@@ -587,7 +564,7 @@ public class BankStatementsHandler implements NeoHandler {
    */
   private NeoResponse handlePreview(NeoContext context) {
     JSONObject body = context.getRequestBody();
-    if (body == null) return NeoResponse.error(400, "Request body is required");
+    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try (AdminMode ignored = new AdminMode()) {
       UploadInput in = parseUploadInput(body, false);
       if (in.error != null) return in.error;
@@ -897,24 +874,6 @@ public class BankStatementsHandler implements NeoHandler {
     return arr;
   }
 
-  /**
-   * Three-state status derived from how many of the statement's lines are
-   * already matched to a financial-account transaction:
-   *   matched == 0           → PENDING
-   *   0 < matched < total    → PARTIAL
-   *   matched == total > 0   → RECONCILED
-   *   total == 0             → PENDING (empty statement)
-   */
-  static String deriveStatementStatus(int lineCount, int matchedCount) {
-    if (lineCount == 0 || matchedCount == 0) return "PENDING";
-    if (matchedCount >= lineCount) return "RECONCILED";
-    return "PARTIAL";
-  }
-
-  static BigDecimal nullSafeBigDecimal(BigDecimal value) {
-    return value == null ? BigDecimal.ZERO : value;
-  }
-
   JSONArray loadLines(String statementId) throws Exception {
     JSONArray arr = new JSONArray();
     // Connection is managed by the DAL's Hibernate Session; don't close it.
@@ -939,10 +898,5 @@ public class BankStatementsHandler implements NeoHandler {
       }
     }
     return arr;
-  }
-
-  private String formatDate(Timestamp ts) {
-    if (ts == null) return "";
-    return ISO_UTC.format(Instant.ofEpochMilli(ts.getTime()));
   }
 }
