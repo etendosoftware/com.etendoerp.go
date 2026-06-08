@@ -71,6 +71,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
   private static final String FIELD_SOURCE_SHIPMENT_DOC_NO = "sourceShipmentDocNo";
   private static final String FIELD_SOURCE_SHIPMENTS = "sourceShipments";
   private static final String FIELD_DOCUMENT_NO = "documentNo";
+  private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   private static final String KEY_RESPONSE = "response";
   private static final String ACTION_IMPORT_LINES = "importShipmentLines";
   private static final String ACTION_AVAILABLE_SHIPMENTS = "availableShipments";
