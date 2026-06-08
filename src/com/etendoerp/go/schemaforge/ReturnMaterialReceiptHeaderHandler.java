@@ -384,6 +384,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
     List<DocumentType> candidates = OBDal.getInstance().createCriteria(DocumentType.class)
         .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, "ARI_RM"))
         .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, true))
+        .add(Restrictions.eq(DocumentType.PROPERTY_RETURN, true))
         .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true))
         .addOrderBy(DocumentType.PROPERTY_DEFAULT, false)
         .list();
@@ -480,6 +481,13 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
         tax = (TaxRate) prices[2];
       }
     }
+    if (unitPrice.compareTo(BigDecimal.ZERO) == 0 && retLine.getProduct() != null
+        && invoice.getPriceList() != null) {
+      String productId = retLine.getProduct().getId();
+      String priceListId = invoice.getPriceList().getId();
+      unitPrice = resolvePriceFromPriceList(productId, priceListId, "pricestd", BigDecimal.ZERO);
+      listPrice = resolvePriceFromPriceList(productId, priceListId, "pricelist", unitPrice);
+    }
     InvoiceLine il = OBProvider.getInstance().get(InvoiceLine.class);
     il.setOrganization(retLine.getOrganization());
     il.setInvoice(invoice);
@@ -507,6 +515,37 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
         .setMaxResults(1)
         .list();
     return rows.isEmpty() ? null : rows.get(0);
+  }
+
+  @SuppressWarnings("java:S2077")
+  private BigDecimal resolvePriceFromPriceList(String productId, String priceListId,
+      String priceColumn, BigDecimal fallback) {
+    String sql =
+        "SELECT pp." + priceColumn + " " +
+        "FROM m_productprice pp " +
+        "JOIN m_pricelist_version plv ON plv.m_pricelist_version_id = pp.m_pricelist_version_id " +
+        "WHERE pp.m_product_id = ? " +
+        "AND plv.m_pricelist_id = ? " +
+        "AND plv.isactive = 'Y' " +
+        "AND pp.isactive = 'Y' " +
+        "AND plv.validfrom <= CURRENT_DATE " +
+        "ORDER BY plv.validfrom DESC " +
+        "LIMIT 1";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, productId);
+      ps.setString(2, priceListId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          BigDecimal price = rs.getBigDecimal(1);
+          return (price != null && price.compareTo(BigDecimal.ZERO) > 0) ? price : fallback;
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve {} for product {} from price list {}: {}",
+          priceColumn, productId, priceListId, e.getMessage());
+    }
+    return fallback;
   }
 
   @Override
