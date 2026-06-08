@@ -59,8 +59,9 @@ import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
  * </ul>
  *
  * <p>Create body: {@code { "name", "currencyId", "type"?, "iban"?, "swiftCode"? }}.
- * {@code type} is {@code 'B'} (Bank, default) or {@code 'C'} (Cash); {@code iban}/{@code swiftCode}
- * are optional and only used for bank accounts. PSD2 / "Con conexión" wiring is out of scope (T3).
+ * {@code type} is {@code 'B'} (Bank, default), {@code 'C'} (Cash) or {@code 'CA'} (Card, from the PSD2 module);
+ * {@code iban}/{@code swiftCode} are optional and only used for bank accounts. PSD2 /
+ * "Con conexión" wiring is out of scope (T3).
  */
 @Named("financial-account")
 public class FinancialAccountHandler implements NeoHandler {
@@ -78,6 +79,7 @@ public class FinancialAccountHandler implements NeoHandler {
 
   private static final String TYPE_BANK = "B";
   private static final String TYPE_CASH = "C";
+  private static final String TYPE_CARD = "CA";
   private static final int NAME_MAX_LENGTH = 60;
   private static final int IBAN_MAX_LENGTH = 34;
   private static final int SWIFT_MAX_LENGTH = 20;
@@ -344,7 +346,9 @@ public class FinancialAccountHandler implements NeoHandler {
   }
 
   String normalizeType(String type) {
-    return TYPE_CASH.equals(type) ? TYPE_CASH : TYPE_BANK;
+    if (TYPE_CASH.equals(type)) return TYPE_CASH;
+    if (TYPE_CARD.equals(type)) return TYPE_CARD;
+    return TYPE_BANK;
   }
 
   Currency loadCurrency(String currencyId) {
