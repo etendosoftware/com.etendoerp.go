@@ -18,7 +18,7 @@ package com.etendoerp.go.rest;
 
 import javax.servlet.http.HttpServletRequest;
 
-interface EtendoGoSsoAssertionVerifier {
+public interface EtendoGoSsoAssertionVerifier {
 
   /**
    * Verifies a provider-specific SSO request and returns the trusted account assertion.

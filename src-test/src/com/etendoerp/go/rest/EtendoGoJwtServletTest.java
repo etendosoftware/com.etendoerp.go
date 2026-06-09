@@ -560,6 +560,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
       dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
           .thenCallRealMethod();
 
@@ -597,6 +598,7 @@ public class EtendoGoJwtServletTest {
       publicUrlMock.when(PublicUrlResolver::resolveConfiguredAppBaseUrl).thenReturn(null);
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
       dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
           .thenCallRealMethod();
 
