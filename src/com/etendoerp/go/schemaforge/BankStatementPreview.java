@@ -20,7 +20,9 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.exception.OBException;
 
 import com.etendoerp.go.schemaforge.BankStatementFormatDetector.StatementFormat;
 
@@ -50,21 +52,27 @@ public final class BankStatementPreview {
    * @param lineCount the canonical line count (SQL row count)
    * @param lines     the parsed lines as returned by the preview reader
    * @return the preview payload object
+   * @throws OBException if building the JSON payload fails (wraps the underlying
+   *     {@link JSONException})
    */
   public static JSONObject buildPayload(StatementFormat format, String fileName,
-      int lineCount, JSONArray lines) throws Exception {
-    Totals totals = aggregate(lines);
+      int lineCount, JSONArray lines) {
+    try {
+      Totals totals = aggregate(lines);
 
-    JSONObject result = new JSONObject();
-    result.put("format", format.name());
-    result.put("fileName", fileName);
-    result.put("lineCount", lineCount);
-    result.put("totalIn", totals.totalIn);
-    result.put("totalOut", totals.totalOut);
-    result.put("periodFrom", totals.periodFrom);
-    result.put("periodTo", totals.periodTo);
-    result.put("lines", lines);
-    return result;
+      JSONObject result = new JSONObject();
+      result.put("format", format.name());
+      result.put("fileName", fileName);
+      result.put("lineCount", lineCount);
+      result.put("totalIn", totals.totalIn);
+      result.put("totalOut", totals.totalOut);
+      result.put("periodFrom", totals.periodFrom);
+      result.put("periodTo", totals.periodTo);
+      result.put("lines", lines);
+      return result;
+    } catch (JSONException e) {
+      throw new OBException("Error building bank statement preview payload", e);
+    }
   }
 
   /** Aggregation result computed from the parsed lines: totals + period. */
@@ -79,8 +87,11 @@ public final class BankStatementPreview {
    * Walks the parsed lines once, accumulating totalIn / totalOut and the min/max
    * transaction date.
    */
-  private static Totals aggregate(JSONArray lines) throws Exception {
+  private static Totals aggregate(JSONArray lines) throws JSONException {
     Totals t = new Totals();
+    if (lines == null) {
+      return t;
+    }
     for (int i = 0; i < lines.length(); i++) {
       JSONObject row = lines.getJSONObject(i);
       t.totalIn = t.totalIn.add(amountFrom(row, KEY_CRAMOUNT));
@@ -90,7 +101,7 @@ public final class BankStatementPreview {
     return t;
   }
 
-  private static BigDecimal amountFrom(JSONObject row, String key) throws Exception {
+  private static BigDecimal amountFrom(JSONObject row, String key) throws JSONException {
     if (!row.has(key) || row.isNull(key)) return BigDecimal.ZERO;
     return new BigDecimal(row.getString(key));
   }
