@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# .githooks/pre-push
+# Run local JUnit tests and SonarQube checks before pushing.
+set -e
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+MODULE_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+CORE_DIR="$(cd -- "$MODULE_DIR/../.." && pwd)"
+
+echo "==> Running pre-push checks..."
+
+# Fail fast: Check for uncommitted or untracked changes in the module repository
+cd "$MODULE_DIR"
+if [ -n "$(git status --porcelain)" ]; then
+  echo "❌ ERROR: You have uncommitted or untracked changes in the module repository."
+  echo "   Please commit or stash them before pushing, or use 'git push --no-verify' to bypass."
+  echo "   Uncommitted files:"
+  git status --porcelain
+  exit 1
+fi
+
+# Resolve base branch dynamically
+BASE_REF=""
+for branch in "origin/epic/ETP-3504" "origin/develop" "origin/main"; do
+  if git rev-parse --verify --quiet "$branch" >/dev/null; then
+    BASE_REF="$branch"
+    break
+  fi
+done
+
+# Pipeline runner helper
+run_step() {
+  local step_num="$1"
+  local step_name="$2"
+  local run_dir="$3"
+  local log_file="$4"
+  local cmd="$5"
+
+  echo -n "==> [$step_num/2] $step_name... "
+  
+  mkdir -p "$(dirname "$MODULE_DIR/$log_file")"
+
+  set +e
+  (cd "$run_dir" && eval "$cmd") > "$MODULE_DIR/$log_file" 2>&1
+  local exit_status=$?
+  set -e
+
+  if [ $exit_status -eq 0 ]; then
+    echo "SUCCESS ✅"
+  else
+    echo "FAILED ❌"
+    echo ""
+    echo "========================================================================="
+    echo "❌ ERROR: Step '$step_name' failed with exit code $exit_status."
+    echo "👉 Log file: $MODULE_DIR/$log_file"
+    echo "========================================================================="
+    echo "Showing last 25 lines of log:"
+    echo "-------------------------------------------------------------------------"
+    tail -n 25 "$MODULE_DIR/$log_file"
+    echo "-------------------------------------------------------------------------"
+    echo ""
+    exit 1
+  fi
+}
+
+# 1. Run JUnit / Gradle tests
+run_step "1" "Running JUnit/Gradle tests" "$CORE_DIR" "tmp/pre-push/junit-tests.log" "./gradlew test --tests \"com.etendoerp.go.*\""
+
+# 2. Run SonarQube Quality Gate
+if [ -n "$BASE_REF" ]; then
+  SONAR_CMD="./run-sonar.sh --base-ref \"$BASE_REF\""
+else
+  SONAR_CMD="./run-sonar.sh --all-issues"
+fi
+run_step "2" "Running SonarQube analysis" "$MODULE_DIR" "tmp/pre-push/sonar-analysis.log" "$SONAR_CMD"
+
+echo ""
+echo "=========================================="
+echo "🎉 Pre-push checks passed successfully!"
+echo "=========================================="
+exit 0

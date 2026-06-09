@@ -119,7 +119,16 @@ from pathlib import Path
 report_dir = sys.argv[1].rstrip('/')
 status_file = Path(sys.argv[2])
 filtered_file = Path(sys.argv[3])
-ignore_paths = {'.scannerwork', '.env', report_dir}
+ignore_paths = {
+    '.scannerwork',
+    '.env',
+    'coverage',
+    report_dir,
+    'domain-boundary-report.json',
+    'domain-boundary-report.md',
+    'review-report.json',
+    'review-report.md'
+}
 
 with status_file.open() as src, filtered_file.open('w') as out:
     for raw in src:
@@ -330,7 +339,7 @@ def group_by_file(issues):
 def write_issue_reports(name, issues, write_files=False):
     with open(f"{report_dir}/sonar-issues{name}.json", "w") as f:
         json.dump({"total": len(issues), "issues": issues}, f, indent=2)
-    print(f"    Saved: {report_dir}/sonar-issues{name}.json ({len(issues)} issues)")
+    print(f"    Saved: {report_dir}/sonar-issues{name}.json ({len(issues)} {'issue' if len(issues) == 1 else 'issues'})")
 
     by_file = group_by_file(issues)
     report = {
@@ -339,7 +348,7 @@ def write_issue_reports(name, issues, write_files=False):
     }
     with open(f"{report_dir}/sonar-issues-by-file{name}.json", "w") as f:
         json.dump(report, f, indent=2)
-    print(f"    Saved: {report_dir}/sonar-issues-by-file{name}.json ({len(report)} files)")
+    print(f"    Saved: {report_dir}/sonar-issues-by-file{name}.json ({len(report)} {'file' if len(report) == 1 else 'files'})")
 
     if write_files:
         for filepath, items in by_file.items():
@@ -350,7 +359,7 @@ def write_issue_reports(name, issues, write_files=False):
                     "count": len(items),
                     "issues": sorted(items, key=lambda x: x.get("line") or 0)
                 }, f, indent=2)
-        print(f"    Saved: {len(by_file)} individual file reports in {files_with_issues_dir}/")
+        print(f"    Saved: {len(by_file)} {'individual file report' if len(by_file) == 1 else 'individual file reports'} in {files_with_issues_dir}/")
 
 # Issues (paginated, saved to files)
 prefix = project + ":"
@@ -382,6 +391,15 @@ print("=== SONAR ANALYSIS SUMMARY ===")
 if qg:
     status = qg.get("projectStatus", {}).get("status", "UNKNOWN")
     print(f"Quality Gate: {status}")
+    conditions = qg.get("projectStatus", {}).get("conditions", [])
+    failed_conditions = [c for c in conditions if c.get("status") == "ERROR"]
+    if failed_conditions:
+        print("  Failing Conditions:")
+        for c in failed_conditions:
+            metric = c["metricKey"].replace("_", " ").title()
+            val = c.get("actualValue", "N/A")
+            thresh = c.get("errorThreshold", "N/A")
+            print(f"    - {metric}: {val} (threshold: < {thresh})")
     print()
 
 if measures:
@@ -449,8 +467,8 @@ filtered_issues = [
     json.dumps(filtered_by_file, indent=2)
  )
 
-print(f"    Saved: {report_dir}/sonar-issues-pr-only.json ({len(filtered_issues)} issues)")
-print(f"    Saved: {report_dir}/sonar-issues-by-file-pr-only.json ({len(filtered_by_file)} files)")
+print(f"    Saved: {report_dir}/sonar-issues-pr-only.json ({len(filtered_issues)} {'issue' if len(filtered_issues) == 1 else 'issues'})")
+print(f"    Saved: {report_dir}/sonar-issues-by-file-pr-only.json ({len(filtered_by_file)} {'file' if len(filtered_by_file) == 1 else 'files'})")
 PYEOF
 
   echo "PR-only reports saved in: $REPORT_DIR/"

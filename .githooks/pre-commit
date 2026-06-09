@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# .githooks/pre-commit
+# Runs JUnit tests before commit to prevent committing broken code.
+set -e
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+MODULE_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+CORE_DIR="$(cd -- "$MODULE_DIR/../.." && pwd)"
+
+echo "==> Running pre-commit checks..."
+
+cd "$CORE_DIR"
+./gradlew test --tests "com.etendoerp.go.*"
+
+echo "==> Pre-commit checks passed successfully!"
+exit 0
