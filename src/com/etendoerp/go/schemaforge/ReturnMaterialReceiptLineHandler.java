@@ -61,11 +61,12 @@ public class ReturnMaterialReceiptLineHandler implements NeoHandler {
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     try {
+      NeoResponse previousResult = context.getPreviousResult();
       JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
-      if (dataArr == null) {
+      if (dataArr == null || previousResult == null) {
         return null;
       }
-      JSONObject body = context.getPreviousResult().getBody();
+      JSONObject body = previousResult.getBody();
       List<String> lineIds = NeoHandlerUtils.collectIds(dataArr);
       Map<String, LineData> lineDataMap = fetchLineData(lineIds);
       for (int i = 0; i < dataArr.length(); i++) {
@@ -84,7 +85,7 @@ public class ReturnMaterialReceiptLineHandler implements NeoHandler {
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching return-material-receipt lines", e);
-      return null;
+      return context.getPreviousResult();
     }
   }
 
