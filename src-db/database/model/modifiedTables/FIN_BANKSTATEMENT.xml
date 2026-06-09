@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE FIN_BANKSTATEMENT">
+    <table name="FIN_BANKSTATEMENT" primaryKey="FIN_BANKSTATEMENT_KEY">
+      <column name="EM_ETGO_LINE_COUNT" primaryKey="false" required="false" type="DECIMAL" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EM_ETGO_MATCHED_COUNT" primaryKey="false" required="false" type="DECIMAL" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EM_ETGO_TOTAL_IN" primaryKey="false" required="false" type="DECIMAL" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EM_ETGO_TOTAL_OUT" primaryKey="false" required="false" type="DECIMAL" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EM_ETGO_STATUS" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+    </table>
+  </database>
