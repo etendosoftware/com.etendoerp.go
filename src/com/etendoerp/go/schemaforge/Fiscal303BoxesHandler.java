@@ -119,7 +119,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     String valueKey = quarterly ? "AEAT303_Q_" + year : "AEAT303_M_" + year;
 
     TaxReport taxReport   = resolveTaxReport(orgId, valueKey);
-    AcctSchema acctSchema = resolveAcctSchema(org);
+    AcctSchema acctSchema = resolveAcctSchema();
     List<Period> periods  = resolvePeriods(orgId, year, period);
 
     if (periods.isEmpty()) {
@@ -206,7 +206,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
         : "AEAT303_M_" + year;
     TaxReport taxReport = resolveTaxReport(orgId, valueKey);
 
-    AcctSchema acctSchema = resolveAcctSchema(org);
+    AcctSchema acctSchema = resolveAcctSchema();
 
     List<Period> periods = resolvePeriods(orgId, year, period);
     if (periods.isEmpty()) {

@@ -105,7 +105,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       throw new OBException("Organization not found: " + orgId);
     }
     TaxReport  taxReport  = resolveTaxReport349(orgId, period);
-    AcctSchema acctSchema = resolveAcctSchema(org);
+    AcctSchema acctSchema = resolveAcctSchema();
     List<Period> periods  = resolvePeriods(orgId, year, period);
 
     if (periods.isEmpty()) {

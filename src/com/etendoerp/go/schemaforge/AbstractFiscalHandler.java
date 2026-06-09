@@ -172,14 +172,15 @@ abstract class AbstractFiscalHandler {
     response.flushBuffer();
   }
 
-  protected AcctSchema resolveAcctSchema(Organization org) {
+  protected AcctSchema resolveAcctSchema() {
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
     OBCriteria<AcctSchema> crit = OBDal.getInstance().createCriteria(AcctSchema.class);
-    crit.add(Restrictions.eq(AcctSchema.PROPERTY_CLIENT + ".id", org.getClient().getId()));
+    crit.add(Restrictions.eq(AcctSchema.PROPERTY_CLIENT + ".id", clientId));
     crit.add(Restrictions.eq(AcctSchema.PROPERTY_ACTIVE, true));
     crit.setMaxResults(1);
     List<AcctSchema> list = crit.list();
     if (list.isEmpty()) {
-      throw new OBException("No AcctSchema found for client=" + org.getClient().getId());
+      throw new OBException("No AcctSchema found for client=" + clientId);
     }
     return list.get(0);
   }
