@@ -29,11 +29,13 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.data.FiscalDecl;
+
 class FiscalDeclCrudHandler {
 
   static final String DEFAULT_STATUS = "draft";
 
-  static final String ENTITY_FISCAL_DECL = "FiscalDecl";
+  static final String ENTITY_FISCAL_DECL = FiscalDecl.ENTITY_NAME;
   static final String PROPERTY_FISCAL_MODEL = "fiscalModel";
   static final String PROPERTY_FISCAL_YEAR = "fiscalYear";
   static final String PROPERTY_PERIOD = "period";
