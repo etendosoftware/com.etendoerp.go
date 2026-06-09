@@ -28,6 +28,98 @@ for branch in "origin/epic/ETP-3504" "origin/develop" "origin/main"; do
   fi
 done
 
+# ----------------------------------------------------------------------------
+# Live progress helpers
+# ----------------------------------------------------------------------------
+# Detect interactive terminal: only animate when stdout is a TTY (skip in CI).
+if [ -t 1 ]; then IS_TTY=1; else IS_TTY=0; fi
+
+SPIN_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+
+# Per-step duration cache (used as ETA baseline across runs). Under tmp/ → gitignored.
+DURATIONS_FILE="$MODULE_DIR/tmp/pre-push/durations"
+LAST_DURATION=0
+
+# Look up the last recorded duration (seconds) for a step key, or 0.
+prev_duration() {
+  local val=""
+  [ -f "$DURATIONS_FILE" ] && val="$(grep "^${1}=" "$DURATIONS_FILE" 2>/dev/null | tail -n1 | cut -d= -f2)"
+  [[ "$val" =~ ^[0-9]+$ ]] && echo "$val" || echo 0
+}
+
+# Persist the duration (seconds) for a step key.
+save_duration() {
+  local key="$1" dur="$2"
+  mkdir -p "$(dirname "$DURATIONS_FILE")"
+  if [ -f "$DURATIONS_FILE" ]; then
+    grep -v "^${key}=" "$DURATIONS_FILE" > "$DURATIONS_FILE.tmp" 2>/dev/null || true
+    mv "$DURATIONS_FILE.tmp" "$DURATIONS_FILE"
+  fi
+  echo "${key}=${dur}" >> "$DURATIONS_FILE"
+}
+
+# Animate a spinner + ETA + last log line while $1 (pid) is alive.
+monitor_progress() {
+  local pid="$1" key="$2" log="$3"
+  local start=$SECONDS i=0
+  local baseline; baseline="$(prev_duration "$key")"
+  local cols; cols="$(tput cols 2>/dev/null || echo 80)"
+
+  while kill -0 "$pid" 2>/dev/null; do
+    local elapsed=$(( SECONDS - start ))
+    local frame="${SPIN_FRAMES[$(( i % ${#SPIN_FRAMES[@]} ))]}"
+    i=$(( i + 1 ))
+
+    # Progress / ETA section.
+    local prog
+    if [ "$baseline" -gt 0 ]; then
+      local pct=$(( elapsed * 100 / baseline ))
+      [ "$pct" -gt 99 ] && pct=99
+      local remaining=$(( baseline - elapsed ))
+      [ "$remaining" -lt 0 ] && remaining=0
+      local filled=$(( pct / 10 )) bar="" c=0
+      while [ "$c" -lt 10 ]; do
+        if [ "$c" -lt "$filled" ]; then bar="${bar}█"; else bar="${bar}░"; fi
+        c=$(( c + 1 ))
+      done
+      prog="[${bar}] ${pct}% · ${elapsed}s elapsed · ~${remaining}s left"
+    else
+      prog="${elapsed}s elapsed (no baseline yet)"
+    fi
+
+    # Activity = last non-empty log line (strip CR and ANSI color codes).
+    local activity=""
+    if [ -s "$log" ]; then
+      activity="$(grep -v '^[[:space:]]*$' "$log" 2>/dev/null | tail -n1 | tr -d '\r' | sed $'s/\033\\[[0-9;]*m//g')"
+    fi
+
+    local line="   ${frame} ${prog}   ${activity}"
+    printf '\r\033[K%s' "${line:0:$(( cols - 1 ))}"
+    sleep 0.2
+  done
+  printf '\r\033[K'
+}
+
+# Run a command (string, eval'd) in a dir, streaming live progress.
+# Sets LAST_DURATION. Records duration on success. Returns the command's exit status.
+exec_with_progress() {
+  local key="$1" run_dir="$2" abs_log="$3" cmd="$4"
+  mkdir -p "$(dirname "$abs_log")"
+
+  local start=$SECONDS
+  set +e
+  ( cd "$run_dir" && eval "$cmd" ) > "$abs_log" 2>&1 &
+  local pid=$!
+  [ "$IS_TTY" = "1" ] && monitor_progress "$pid" "$key" "$abs_log"
+  wait "$pid"
+  local st=$?
+  set -e
+
+  LAST_DURATION=$(( SECONDS - start ))
+  [ $st -eq 0 ] && save_duration "$key" "$LAST_DURATION"
+  return $st
+}
+
 # Pipeline runner helper
 run_step() {
   local step_num="$1"
@@ -35,28 +127,25 @@ run_step() {
   local run_dir="$3"
   local log_file="$4"
   local cmd="$5"
+  local abs_log="$MODULE_DIR/$log_file"
 
-  echo -n "==> [$step_num/2] $step_name... "
-  
-  mkdir -p "$(dirname "$MODULE_DIR/$log_file")"
+  echo "==> [$step_num/2] $step_name..."
 
-  set +e
-  (cd "$run_dir" && eval "$cmd") > "$MODULE_DIR/$log_file" 2>&1
+  exec_with_progress "step-${step_num}" "$run_dir" "$abs_log" "$cmd"
   local exit_status=$?
-  set -e
 
   if [ $exit_status -eq 0 ]; then
-    echo "SUCCESS ✅"
+    echo "==> [$step_num/2] $step_name... SUCCESS ✅ (${LAST_DURATION}s)"
   else
-    echo "FAILED ❌"
+    echo "==> [$step_num/2] $step_name... FAILED ❌ (${LAST_DURATION}s)"
     echo ""
     echo "========================================================================="
     echo "❌ ERROR: Step '$step_name' failed with exit code $exit_status."
-    echo "👉 Log file: $MODULE_DIR/$log_file"
+    echo "👉 Log file: $abs_log"
     echo "========================================================================="
     echo "Showing last 25 lines of log:"
     echo "-------------------------------------------------------------------------"
-    tail -n 25 "$MODULE_DIR/$log_file"
+    tail -n 25 "$abs_log"
     echo "-------------------------------------------------------------------------"
     echo ""
     exit 1
