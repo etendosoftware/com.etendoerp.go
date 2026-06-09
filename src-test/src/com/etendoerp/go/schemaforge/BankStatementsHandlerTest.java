@@ -80,10 +80,15 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 public class BankStatementsHandlerTest {
 
   private BankStatementsHandler handler;
+  private MockedStatic<BankStatementAggregates> aggMock;
 
   @Before
   public void setUp() {
     handler = spy(new BankStatementsHandler());
+    // The write flows call BankStatementAggregates.recompute(), which hits OBDal /
+    // ModelProvider. Stub it globally (no-op) so happy-path tests don't have to
+    // wire the aggregate model; dedicated BankStatementAggregatesTest covers it.
+    aggMock = mockStatic(BankStatementAggregates.class);
   }
 
   /**
@@ -94,6 +99,9 @@ public class BankStatementsHandlerTest {
    */
   @After
   public void clearMocks() {
+    if (aggMock != null) {
+      aggMock.close();
+    }
     Mockito.framework().clearInlineMocks();
   }
 
@@ -874,6 +882,107 @@ public class BankStatementsHandlerTest {
       JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data")
           .getJSONObject("statement");
       assertEquals("st-1", data.getString("id"));
+    }
+  }
+
+  // ── ?action=reactivate (processed → draft) ─────────────────────────────
+
+  /** A processed statement mock. */
+  private static FIN_BankStatement processedStatement(String id) {
+    FIN_BankStatement s = mock(FIN_BankStatement.class);
+    when(s.getId()).thenReturn(id);
+    when(s.isProcessed()).thenReturn(true);
+    return s;
+  }
+
+  @Test
+  public void handleReactivateNullBodyReturns400() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(null);
+    assertEquals(400, handler.handle(postCtx(ctx, "reactivate")).getHttpStatus());
+  }
+
+  @Test
+  public void handleReactivateMissingIdReturns400() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody(null));
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
+      assertEquals(400, handler.handle(postCtx(ctx, "reactivate")).getHttpStatus());
+    }
+  }
+
+  @Test
+  public void handleReactivateRejectsDraft() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement draft = draftStatement("st-1");
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+      NeoResponse r = handler.handle(postCtx(ctx, "reactivate"));
+      assertEquals(400, r.getHttpStatus());
+      verify(handler, never()).reactivateStatement(any());
+    }
+  }
+
+  @Test
+  public void handleReactivateRejectsPosted() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement processed = processedStatement("st-1");
+    when(processed.getPosted()).thenReturn("Y");
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(processed);
+      NeoResponse r = handler.handle(postCtx(ctx, "reactivate"));
+      assertEquals(400, r.getHttpStatus());
+      verify(handler, never()).reactivateStatement(any());
+    }
+  }
+
+  @Test
+  public void handleReactivateRejectsReconciledLines() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement processed = processedStatement("st-1");
+    when(processed.getPosted()).thenReturn("N");
+    doReturn(true).when(handler).hasReconciledLines(processed);
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(processed);
+      NeoResponse r = handler.handle(postCtx(ctx, "reactivate"));
+      assertEquals(400, r.getHttpStatus());
+      verify(handler, never()).reactivateStatement(any());
+    }
+  }
+
+  @Test
+  public void handleReactivateHappyPathReturnsToDraft() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement processed = processedStatement("st-1");
+    when(processed.getPosted()).thenReturn("N");
+    doReturn(false).when(handler).hasReconciledLines(processed);
+    doNothing().when(handler).reactivateStatement(processed);
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(processed);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "reactivate"));
+      assertEquals(200, r.getHttpStatus());
+      verify(handler).reactivateStatement(processed);
+      JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data")
+          .getJSONObject("statement");
+      assertEquals("st-1", data.getString("id"));
+      assertEquals(false, data.getBoolean("processed"));
     }
   }
 
