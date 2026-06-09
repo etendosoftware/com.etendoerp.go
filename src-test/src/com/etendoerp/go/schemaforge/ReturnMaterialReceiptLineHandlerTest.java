@@ -21,6 +21,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -285,6 +286,29 @@ public class ReturnMaterialReceiptLineHandlerTest {
         .getJSONObject("response").getJSONArray("data").getJSONObject(0);
     assertFalse(rec.has("orderQuantity"));
     assertFalse(rec.has("productCode"));
+  }
+
+  /**
+   * Verifies that when an unexpected exception escapes fetchLineData (e.g. getConnection throws
+   * before the inner try/catch), afterHandle returns the original previousResult unchanged.
+   */
+  @Test
+  public void testAfterHandleReturnsOriginalResponseOnUnexpectedException() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("unexpected DB error"));
+
+      JSONObject body = lineBody("line-x");
+      NeoContext ctx = getCtx();
+      NeoResponse original = NeoResponse.ok(body);
+      ctx.setPreviousResult(original);
+
+      NeoResponse result = HANDLER.afterHandle(ctx);
+
+      assertNotNull(result);
+      assertSame(original, result);
+    }
   }
 
   /**
