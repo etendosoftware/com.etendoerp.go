@@ -18,6 +18,10 @@ package com.etendoerp.go.rest;
 
 import javax.servlet.http.HttpServletRequest;
 
+/**
+ * Verifier interface for SSO assertions in the Etendo Go module.
+ * SSO providers must implement this interface to perform validation.
+ */
 public interface EtendoGoSsoAssertionVerifier {
 
   /**
