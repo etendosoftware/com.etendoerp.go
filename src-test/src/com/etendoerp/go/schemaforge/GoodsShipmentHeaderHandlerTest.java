@@ -245,12 +245,25 @@ public class GoodsShipmentHeaderHandlerTest {
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
 
-      // First prepareStatement call is for computeSingle (invoiceStatus),
-      // second is for enrichReturnReceipts. Mock both.
+      // prepareStatement call order: computeSingle → enrichLinkedOrder →
+      // enrichLinkedInvoices → enrichReturnReceipts → enrichCanCreateReturn
       PreparedStatement psSingle = mock(PreparedStatement.class);
+      PreparedStatement psLinkedOrder = mock(PreparedStatement.class);
+      PreparedStatement psLinkedInvoices = mock(PreparedStatement.class);
       PreparedStatement psReturn = mock(PreparedStatement.class);
+
+      ResultSet rsLinkedOrder = mock(ResultSet.class);
+      when(psLinkedOrder.executeQuery()).thenReturn(rsLinkedOrder);
+      when(rsLinkedOrder.next()).thenReturn(false);
+
+      ResultSet rsLinkedInvoices = mock(ResultSet.class);
+      when(psLinkedInvoices.executeQuery()).thenReturn(rsLinkedInvoices);
+      when(rsLinkedInvoices.next()).thenReturn(false);
+
       when(conn.prepareStatement(anyString()))
           .thenReturn(psSingle)
+          .thenReturn(psLinkedOrder)
+          .thenReturn(psLinkedInvoices)
           .thenReturn(psReturn);
 
       // computeSingle result — returns 0 rows so invoiceStatus = 0

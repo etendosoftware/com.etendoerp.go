@@ -22,7 +22,6 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -34,9 +33,7 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.structure.BaseOBObject;
-import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
@@ -91,31 +88,21 @@ public class CloneShipmentHookTest {
    */
   @Test
   public void testPostCopyResetsHeaderAndClearsOrderLineLinkOnClonedLines() {
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<DalUtil> dalUtilMock = Mockito.mockStatic(DalUtil.class)) {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
 
       OBContext obCtx = mock(OBContext.class);
       User user = mock(User.class);
       ctxMock.when(OBContext::getOBContext).thenReturn(obCtx);
       when(obCtx.getUser()).thenReturn(user);
 
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-
       ShipmentInOut original = mock(ShipmentInOut.class);
       ShipmentInOut clone = mock(ShipmentInOut.class);
 
-      ShipmentInOutLine origLine = mock(ShipmentInOutLine.class);
       ShipmentInOutLine clonedLine = mock(ShipmentInOutLine.class);
-      List<ShipmentInOutLine> origLines = new ArrayList<>();
-      origLines.add(origLine);
-      when(original.getMaterialMgmtShipmentInOutLineList()).thenReturn(origLines);
-
+      // shouldCopyChildren=true means DalUtil already populated clone's line list before postCopy runs
       List<ShipmentInOutLine> cloneLines = new ArrayList<>();
+      cloneLines.add(clonedLine);
       when(clone.getMaterialMgmtShipmentInOutLineList()).thenReturn(cloneLines);
-
-      dalUtilMock.when(() -> DalUtil.copy(eq(origLine), eq(false))).thenReturn(clonedLine);
 
       BaseOBObject result = new CloneShipmentHook().postCopy(original, clone);
 
@@ -133,11 +120,6 @@ public class CloneShipmentHookTest {
       // C_OrderLine_ID must be cleared to prevent trigger double-count
       verify(clonedLine).setSalesOrderLine(null);
       verify(clonedLine).setCanceledInoutLine(null);
-      verify(clonedLine).setShipmentReceipt(clone);
-
-      verify(dal).save(clone);
-      verify(dal).flush();
-      verify(dal).refresh(clone);
     }
   }
 }
