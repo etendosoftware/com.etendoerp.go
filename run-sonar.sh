@@ -9,6 +9,7 @@ REPORT_DIR="sonar-reports"
 BASE_REF=""
 CHANGED_ONLY="true"
 ALLOW_DIRTY="false"
+FAIL_ON_GATE="false"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 CLASSIC_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 
@@ -36,6 +37,13 @@ while [[ $# -gt 0 ]]; do
       ;;
     --all-issues)
       CHANGED_ONLY="false"
+      shift
+      ;;
+    --fail-on-gate)
+      # Exit non-zero when the SonarQube Quality Gate is in ERROR (mirrors the
+      # server-side gate CI enforces on the PR). Used by the pre-push hook to
+      # block pushes that would fail the gate (e.g. new issues > 0).
+      FAIL_ON_GATE="true"
       shift
       ;;
     *)
@@ -474,4 +482,124 @@ PYEOF
   echo "PR-only reports saved in: $REPORT_DIR/"
 else
   echo "Full-project reports saved in: $REPORT_DIR/"
+fi
+
+# ── Quality Gate enforcement (opt-in via --fail-on-gate) ────────────
+# Mirrors the server-side Quality Gate that CI enforces on the PR. When the
+# gate is in ERROR, exit non-zero so callers (e.g. the pre-push hook) can block.
+if [[ "$FAIL_ON_GATE" == "true" ]]; then
+  QG_FILE="$REPORT_DIR/sonar-quality-gate.json"
+  PR_ISSUES_FILE="$REPORT_DIR/sonar-issues-pr-only.json"
+  if [[ ! -f "$QG_FILE" ]]; then
+    echo "ERROR: --fail-on-gate set but $QG_FILE not found (analysis may have failed)."
+    exit 1
+  fi
+
+  GATE_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'this branch')"
+  HANDOFF_FILE="$REPORT_DIR/sonar-handoff-prompt.md"
+
+  REPORT_DIR="$REPORT_DIR" QG_FILE="$QG_FILE" PR_ISSUES_FILE="$PR_ISSUES_FILE" \
+  CHANGED_ONLY="$CHANGED_ONLY" HANDOFF_FILE="$HANDOFF_FILE" \
+  GATE_BRANCH="$GATE_BRANCH" CORE_DIR="$CLASSIC_ROOT" PROJECT_KEY="$PROJECT_KEY" \
+  python3 - <<'PYEOF'
+import json, os, sys
+
+qg = json.load(open(os.environ["QG_FILE"]))
+status = qg.get("projectStatus", {}).get("status", "UNKNOWN")
+handoff_file = os.environ["HANDOFF_FILE"]
+pr_mode = os.environ.get("CHANGED_ONLY") == "true"
+
+# Clean up any stale handoff from a previous run.
+try:
+    os.remove(handoff_file)
+except FileNotFoundError:
+    pass
+
+# Failing Quality Gate conditions, keeping the raw metric key.
+failing = []  # (metric_key, human_description)
+for c in qg.get("projectStatus", {}).get("conditions", []):
+    if c.get("status") == "ERROR":
+        m = c["metricKey"]
+        failing.append((m, f"{m.replace('_',' ').title()}: {c.get('actualValue')} "
+                           f"(threshold: {c.get('comparator','')} {c.get('errorThreshold')})"))
+
+# New issues restricted to THIS PR's diff (what CI's PR gate actually counts).
+issues = []
+pr_file = os.environ.get("PR_ISSUES_FILE", "")
+if pr_mode and os.path.isfile(pr_file):
+    for i in json.load(open(pr_file)).get("issues", []):
+        issues.append({
+            "comp": i.get("component", "").split(":", 1)[-1],
+            "line": i.get("line", "?"),
+            "rule": i.get("rule", ""),
+            "sev": i.get("severity", ""),
+            "msg": (i.get("message", "") or "").replace("\n", " "),
+        })
+
+# ── Decide whether to block, mirroring CI's PR gate ──
+# CI counts "new issues" over the PR diff only. Branch-mode `new_violations` may
+# also count new code OUTSIDE this PR's diff, which CI ignores. So:
+#   - the new_violations condition blocks only if PR-diff issues > 0;
+#   - any OTHER failing condition (coverage/duplication/ratings on new code) blocks.
+other_failing = [d for (m, d) in failing if m != "new_violations"]
+block = bool(issues) or bool(other_failing)
+
+if not block:
+    if status == "ERROR":
+        print("\n⚠️  Quality Gate is ERROR in branch mode, but no new issues fall inside")
+        print("   this PR's diff — CI's PR gate would PASS. Not blocking the push.")
+        for (m, d) in failing:
+            print(f"     (branch-mode, ignored) {d}")
+    else:
+        print(f"\n✅ Quality Gate: {status} — no blocking conditions.")
+    sys.exit(0)
+
+branch = os.environ.get("GATE_BRANCH", "this branch")
+core_dir = os.environ.get("CORE_DIR", "<core_dir>")
+
+# ── Build a copy-pasteable handoff prompt (delimited by ---) ──
+lines = []
+lines.append("---")
+lines.append("HANDOFF PROMPT — copy everything between the --- lines and give it to a coding agent")
+lines.append("---")
+lines.append("")
+lines.append("You are fixing SonarQube Quality Gate violations that are BLOCKING a `git push`")
+lines.append(f"on the `com.etendoerp.go` module (branch: {branch}). The pre-push hook blocked the")
+lines.append("push because CI's SonarQube Quality Gate would fail.")
+lines.append("")
+lines.append("SCOPE — fix ONLY the issues listed below. Make minimal, behavior-preserving edits")
+lines.append("that satisfy each Sonar rule. Do NOT weaken tests or reduce coverage. Each Sonar rule")
+lines.append("key is given so you can look it up.")
+lines.append("")
+if other_failing:
+    lines.append("Failing Quality Gate condition(s):")
+    for d in other_failing:
+        lines.append(f"  - {d}")
+    lines.append("")
+if issues:
+    lines.append(f"New issues in this PR ({len(issues)}) — file:line — rule [severity] — message:")
+    for n, i in enumerate(issues, 1):
+        lines.append(f"  {n}. {i['comp']}:{i['line']} — {i['rule']} [{i['sev']}]")
+        lines.append(f"     {i['msg']}")
+    lines.append("")
+lines.append("After fixing, verify locally and re-push:")
+lines.append(f"  cd {core_dir}")
+lines.append('  ./gradlew test --tests "com.etendoerp.go.*"')
+lines.append("  git push        # the pre-push hook re-checks the Quality Gate")
+lines.append("")
+lines.append("---")
+lines.append("END HANDOFF")
+lines.append("---")
+handoff = "\n".join(lines)
+
+# Write the handoff file (the pre-push hook prints this to the console).
+with open(handoff_file, "w") as fh:
+    fh.write(handoff + "\n")
+
+# Also echo it (captured to the step log) plus a short header.
+print("\n❌ QUALITY GATE FAILED — this push would fail CI's SonarQube gate.")
+print(handoff)
+print("\n  Bypass with 'git push --no-verify' (WIP only).")
+sys.exit(1)
+PYEOF
 fi

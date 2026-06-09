@@ -221,10 +221,10 @@ public class NeoListIdentifierHelperTest {
         () -> NeoSelectorService.getListLabels("docstatus-ref-list-id")).thenReturn(labels);
 
     // Build a response JSON with a single record having docType = "CO"
-    JSONObject record = new JSONObject();
-    record.put("docType", "CO");
+    JSONObject recordJson = new JSONObject();
+    recordJson.put("docType", "CO");
     JSONArray dataArray = new JSONArray();
-    dataArray.put(record);
+    dataArray.put(recordJson);
     JSONObject response = buildResponseJson(dataArray);
 
     NeoListIdentifierHelper.enrichListIdentifiers(response, sfEntity);
@@ -284,10 +284,10 @@ public class NeoListIdentifierHelperTest {
         () -> NeoSelectorService.getListLabels("status-list-ref"))
         .thenReturn(Collections.emptyMap());
 
-    JSONObject record = new JSONObject();
-    record.put("status", "UNKNOWN_STATUS");
+    JSONObject recordJson = new JSONObject();
+    recordJson.put("status", "UNKNOWN_STATUS");
     JSONArray dataArray = new JSONArray();
-    dataArray.put(record);
+    dataArray.put(recordJson);
     JSONObject response = buildResponseJson(dataArray);
 
     NeoListIdentifierHelper.enrichListIdentifiers(response, sfEntity);
@@ -344,10 +344,10 @@ public class NeoListIdentifierHelperTest {
         () -> NeoSelectorService.getListLabels("17")).thenReturn(labels);
 
     // Single record, not inside array
-    JSONObject record = new JSONObject();
-    record.put("priority", "H");
+    JSONObject recordJson = new JSONObject();
+    recordJson.put("priority", "H");
     JSONObject inner = new JSONObject();
-    inner.put("data", record); // note: single object, not array
+    inner.put("data", recordJson); // note: single object, not array
     JSONObject response = new JSONObject();
     response.put("response", inner);
 
@@ -386,10 +386,10 @@ public class NeoListIdentifierHelperTest {
     when(criteria.setFilterOnReadableOrganization(anyBoolean())).thenReturn(criteria);
     when(criteria.list()).thenReturn(Collections.singletonList(sfField));
 
-    JSONObject record = new JSONObject();
-    record.put("someField", "A");
+    JSONObject recordJson = new JSONObject();
+    recordJson.put("someField", "A");
     JSONArray dataArray = new JSONArray();
-    dataArray.put(record);
+    dataArray.put(recordJson);
     JSONObject response = buildResponseJson(dataArray);
 
     NeoListIdentifierHelper.enrichListIdentifiers(response, sfEntity);
@@ -432,10 +432,10 @@ public class NeoListIdentifierHelperTest {
     when(criteria.setFilterOnReadableOrganization(anyBoolean())).thenReturn(criteria);
     when(criteria.list()).thenReturn(Collections.singletonList(sfField));
 
-    JSONObject record = new JSONObject();
-    record.put("businessPartner", "bp-id-123");
+    JSONObject recordJson = new JSONObject();
+    recordJson.put("businessPartner", "bp-id-123");
     JSONArray dataArray = new JSONArray();
-    dataArray.put(record);
+    dataArray.put(recordJson);
     JSONObject response = buildResponseJson(dataArray);
 
     NeoListIdentifierHelper.enrichListIdentifiers(response, sfEntity);

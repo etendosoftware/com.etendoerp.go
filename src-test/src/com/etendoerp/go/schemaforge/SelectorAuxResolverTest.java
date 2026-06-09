@@ -824,16 +824,14 @@ public class SelectorAuxResolverTest {
 
   // ── executeAuxHqlQuery ────────────────────────────────────────────────────
 
-  /** Helper: creates a raw-typed Hibernate Query mock with standard stub chain. */
+  /** Helper: stubs {@code session.createQuery(...)} with a standard raw-typed mock chain. */
   @SuppressWarnings({ "unchecked", "rawtypes" })
-  private org.hibernate.query.Query<?> setupQueryMock(
-      org.hibernate.Session session, List<?> resultList) {
+  private void setupQueryMock(org.hibernate.Session session, List<?> resultList) {
     org.hibernate.query.Query query = mock(org.hibernate.query.Query.class);
     when(session.createQuery(anyString())).thenReturn(query);
     doReturn(query).when(query).setParameter(anyString(), any());
     doReturn(query).when(query).setMaxResults(anyInt());
     doReturn(resultList).when(query).list();
-    return query;
   }
 
   @Test

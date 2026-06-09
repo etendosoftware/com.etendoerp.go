@@ -68,6 +68,25 @@ class OAuth2AuthorizationCodeSupportTest {
     return data;
   }
 
+  // ── direct test ─────────────────────────────────────────────────────────────
+  // A top-level @Test (in addition to the @Nested groups below) so the suite class
+  // itself carries an executable test, exercising validateAuthorizationCode end to end.
+
+  @Test
+  @DisplayName("expired authorization code is rejected with the 'expired' message")
+  void expiredCodeReturnsExpiredError() throws Exception {
+    String verifier = "outer-level-verifier-abcdefghij";
+    String redirectUri = "https://myapp.example.com/oauth/callback";
+    OAuth2Servlet.AuthCodeData data = validCodeData(verifier, redirectUri);
+    data.expiresAt = System.currentTimeMillis() - 1_000; // already expired
+
+    String error = OAuth2AuthorizationCodeSupport.validateAuthorizationCode(
+        data, verifier, redirectUri);
+
+    assertNotNull(error, "Expected a non-null error for an expired code");
+    assertEquals("Authorization code expired", error);
+  }
+
   // ── null codeData ──────────────────────────────────────────────────────────
 
   @Nested

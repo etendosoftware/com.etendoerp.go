@@ -102,19 +102,6 @@ public class TotalDiscountServiceTest {
 
   // ── helpers ───────────────────────────────────────────────────────────────
 
-  /**
-   * Builds a fully-stubbed JDBC chain: Connection → PreparedStatement → ResultSet.
-   * The returned {@link PreparedStatement} can be further configured per test.
-   */
-  private PreparedStatement stubConnection(Connection conn) throws Exception {
-    PreparedStatement ps = mock(PreparedStatement.class);
-    ResultSet rs = mock(ResultSet.class);
-    when(conn.prepareStatement(anyString())).thenReturn(ps);
-    when(ps.executeQuery()).thenReturn(rs);
-    when(rs.next()).thenReturn(false); // default: no rows
-    return ps;
-  }
-
   /** Builds a mock Invoice with the bare minimum non-null fields. */
   private Invoice mockInvoice(String id) {
     Invoice inv = mock(Invoice.class);
