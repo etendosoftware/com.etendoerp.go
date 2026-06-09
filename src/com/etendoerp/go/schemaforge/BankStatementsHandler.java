@@ -214,6 +214,8 @@ public class BankStatementsHandler implements NeoHandler {
           + "       agg.line_count,"
           + "       agg.matched_count,"
           + "       agg.total_amount,"
+          + "       agg.total_in,"
+          + "       agg.total_out,"
           + "       agg.period_from,"
           + "       agg.period_to"
           + "  FROM fin_bankstatement bs"
@@ -222,6 +224,8 @@ public class BankStatementsHandler implements NeoHandler {
           + "           COUNT(*) AS line_count,"
           + "           SUM(CASE WHEN bsl.fin_finacc_transaction_id IS NOT NULL THEN 1 ELSE 0 END) AS matched_count,"
           + "           SUM(COALESCE(bsl.cramount,0) + COALESCE(bsl.dramount,0)) AS total_amount,"
+          + "           SUM(COALESCE(bsl.cramount,0)) AS total_in,"
+          + "           SUM(COALESCE(bsl.dramount,0)) AS total_out,"
           + "           MIN(bsl.datetrx) AS period_from,"
           + "           MAX(bsl.datetrx) AS period_to"
           + "      FROM fin_bankstatementline bsl"
@@ -983,6 +987,8 @@ public class BankStatementsHandler implements NeoHandler {
           row.put(FIELD_LINE_COUNT, lineCount);
           row.put("matchedCount", matchedCount);
           row.put("totalAmount", nullSafeBigDecimal(rs.getBigDecimal("total_amount")));
+          row.put("totalIn", nullSafeBigDecimal(rs.getBigDecimal("total_in")));
+          row.put("totalOut", nullSafeBigDecimal(rs.getBigDecimal("total_out")));
           row.put("periodFrom", periodFrom);
           row.put("periodTo", periodTo);
           row.put("status", deriveStatementStatus(processed, lineCount, matchedCount));
