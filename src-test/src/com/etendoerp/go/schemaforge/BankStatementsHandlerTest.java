@@ -469,8 +469,8 @@ public class BankStatementsHandlerTest {
     when(rs.getTimestamp(anyString())).thenReturn(new Timestamp(0));
     when(rs.getString("processed")).thenReturn("Y");
     when(rs.getString("posted")).thenReturn("N");
-    when(rs.getInt("line_count")).thenReturn(7);
-    when(rs.getInt("matched_count")).thenReturn(7);
+    when(rs.getInt("em_etgo_line_count")).thenReturn(7);
+    when(rs.getInt("em_etgo_matched_count")).thenReturn(7);
     when(rs.getBigDecimal("total_amount")).thenReturn(new BigDecimal("12345.67"));
 
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
