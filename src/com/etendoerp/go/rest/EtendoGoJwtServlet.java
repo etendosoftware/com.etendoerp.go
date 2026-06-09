@@ -203,7 +203,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String language;
     try {
       email = body.getString(FIELD_EMAIL).trim().toLowerCase();
-      password = body.getString("password");
+      password = body.getString(FIELD_PASSWORD);
       name = body.getString("name").trim();
       language = body.optString("language", "").trim();
     } catch (JSONException e) {
@@ -277,7 +277,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String password;
     try {
       email = body.getString(FIELD_EMAIL).trim().toLowerCase();
-      password = body.getString("password");
+      password = body.getString(FIELD_PASSWORD);
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Missing required fields: email, password");
