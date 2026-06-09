@@ -254,10 +254,26 @@ public class BankStatementsHandler implements NeoHandler {
           + "       gl.name AS glitem_name,"
           + "       bsl.cramount,"
           + "       bsl.dramount,"
-          + "       bsl.fin_finacc_transaction_id"
+          + "       bsl.fin_finacc_transaction_id,"
+          // Linked financial-account transaction (1:1 today; the frontend models it
+          // as a txns[] array so a future 1:N only changes this query). Same field
+          // mapping as FinancialAccountTransactionsHandler.TRANSACTIONS_SQL.
+          + "       COALESCE(fp.documentno, '') AS txn_documentno,"
+          + "       ft.statementdate            AS txn_date,"
+          + "       COALESCE(tbp.name, pbp.name, '') AS txn_contact,"
+          + "       COALESCE(ft.description, fp.description, '') AS txn_description,"
+          + "       ft.trxtype                  AS txn_trxtype,"
+          + "       ft.status                   AS txn_status,"
+          + "       CASE WHEN ft.trxtype = 'BPD' THEN ft.depositamt ELSE -ft.paymentamt END AS txn_amount,"
+          + "       ft.fin_payment_id           AS txn_payment_id,"
+          + "       fp.isreceipt                AS txn_payment_isreceipt"
           + "  FROM fin_bankstatementline bsl"
           + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = bsl.c_bpartner_id"
           + "  LEFT JOIN c_glitem gl ON gl.c_glitem_id = bsl.c_glitem_id"
+          + "  LEFT JOIN fin_finacc_transaction ft ON ft.fin_finacc_transaction_id = bsl.fin_finacc_transaction_id"
+          + "  LEFT JOIN fin_payment fp ON fp.fin_payment_id = ft.fin_payment_id"
+          + "  LEFT JOIN c_bpartner tbp ON tbp.c_bpartner_id = ft.c_bpartner_id"
+          + "  LEFT JOIN c_bpartner pbp ON pbp.c_bpartner_id = fp.c_bpartner_id"
           + " WHERE bsl.fin_bankstatement_id = ?"
           + "   AND bsl.isactive = 'Y'"
           + " ORDER BY bsl.line ASC";
@@ -1117,11 +1133,40 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("in", credit);
           row.put("out", debit);
           row.put("amount", credit.subtract(debit));
-          row.put("matched", rs.getString("fin_finacc_transaction_id") != null);
+          boolean matched = rs.getString("fin_finacc_transaction_id") != null;
+          row.put("matched", matched);
+          row.put("txns", buildLineTxns(rs, matched));
           arr.put(row);
         }
       }
     }
     return arr;
+  }
+
+  /**
+   * Builds the {@code txns[]} array for a statement line from the joined
+   * transaction columns of {@link #LINES_SQL}. The relationship is 1:1 today, so
+   * the array has 0 or 1 element; the shape is kept array-based so a future 1:N
+   * reconciliation only changes the query, not the contract. Amounts/types mirror
+   * the Movimientos tab; {@code trxType} and {@code posted} are emitted raw and
+   * labelled in the frontend.
+   */
+  private static JSONArray buildLineTxns(ResultSet rs, boolean matched) throws Exception {
+    JSONArray txns = new JSONArray();
+    if (!matched) {
+      return txns;
+    }
+    JSONObject t = new JSONObject();
+    t.put("documentNo", StringUtils.trimToEmpty(rs.getString("txn_documentno")));
+    t.put("date", formatDate(rs.getTimestamp("txn_date")));
+    t.put("contact", StringUtils.trimToEmpty(rs.getString("txn_contact")));
+    t.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString("txn_description")));
+    t.put("trxType", StringUtils.trimToEmpty(rs.getString("txn_trxtype")));
+    t.put("paymentStatus", StringUtils.trimToEmpty(rs.getString("txn_status")));
+    t.put("amount", nullSafeBigDecimal(rs.getBigDecimal("txn_amount")));
+    t.put("paymentId", StringUtils.trimToEmpty(rs.getString("txn_payment_id")));
+    t.put("paymentIsReceipt", StringUtils.trimToEmpty(rs.getString("txn_payment_isreceipt")));
+    txns.put(t);
+    return txns;
   }
 }
