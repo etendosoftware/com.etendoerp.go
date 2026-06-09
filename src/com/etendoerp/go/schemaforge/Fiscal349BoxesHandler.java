@@ -236,7 +236,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       HttpServletRequest request, HttpServletResponse response) throws Exception {
     Organization org      = OBDal.getInstance().get(Organization.class, orgId);
     TaxReport    taxReport  = resolveTaxReport349(orgId, period);
-    AcctSchema   acctSchema = resolveAcctSchema(org);
+    AcctSchema   acctSchema = resolveAcctSchema();
     List<Period> periods    = resolvePeriods(orgId, year, period);
 
     if (periods.isEmpty()) {
