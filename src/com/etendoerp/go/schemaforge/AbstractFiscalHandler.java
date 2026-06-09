@@ -99,7 +99,7 @@ abstract class AbstractFiscalHandler {
       return;
     }
     try {
-      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+      String orgId = resolveEffectiveOrg();
       dispatch(entityName, orgId, year, period, request, response);
     } catch (FiscalHandlerException e) {
       log.error("Error in /" + getModelKey() + "/" + entityName, e);
@@ -170,6 +170,27 @@ abstract class AbstractFiscalHandler {
     response.setContentLength(bytes.length);
     response.getOutputStream().write(bytes);
     response.flushBuffer();
+  }
+
+  protected String resolveEffectiveOrg() {
+    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+    if (!"0".equals(orgId)) {
+      return orgId;
+    }
+    // Session org is * — find the non-summary leaf org for the current client.
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    List<Organization> orgs = OBDal.getInstance().getSession()
+        .createQuery(
+            "from Organization where client.id = :clientId and isSummary = 'N' "
+            + "and id != '0' order by name",
+            Organization.class)
+        .setParameter("clientId", clientId)
+        .setMaxResults(1)
+        .list();
+    if (orgs.isEmpty()) {
+      throw new OBException("No leaf organization found for client=" + clientId);
+    }
+    return orgs.get(0).getId();
   }
 
   protected AcctSchema resolveAcctSchema() {
