@@ -95,7 +95,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
 
   private static final String ACCOUNTS_SQL =
       "SELECT fa.fin_financial_account_id, fa.name, fa.type, fa.currentbalance, "
-          + "       fa.c_currency_id, cur.iso_code, fa.iban, fa.isdefault, fa.isactive "
+          + "       fa.c_currency_id, cur.iso_code, fa.iban, fa.isdefault, fa.isactive, "
+          + "       fa.em_psd2_masked_pan "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
           + " WHERE fa.ad_client_id = ? "
@@ -191,6 +192,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
               StringUtils.trimToEmpty(rs.getString(7)),
               "Y".equals(rs.getString(8)));
           row.active = "Y".equals(rs.getString(9));
+          row.maskedPan = StringUtils.trimToEmpty(rs.getString(10));
           rows.add(row);
         }
       }
@@ -229,6 +231,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("currencyId", account.currency.id);
       json.put("currencyIso", account.currency.iso);
       json.put("iban", account.iban);
+      json.put("maskedPan", account.maskedPan);
       json.put("isDefault", account.isDefault);
       json.put("active", account.active);
       json.put("pendingCount", pendingByAccount.getOrDefault(account.id, 0));
@@ -308,6 +311,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     final boolean isDefault;
     /** Whether the account is active; archived accounts have {@code false}. Set by the loader. */
     boolean active = true;
+    /** PSD2 masked card number (column {@code EM_PSD2_Masked_Pan}); blank for non-card accounts. Set by the loader. */
+    String maskedPan = "";
 
     AccountRow(String id, String name, String type, BigDecimal currentBalance,
         Currency currency, String iban, boolean isDefault) {

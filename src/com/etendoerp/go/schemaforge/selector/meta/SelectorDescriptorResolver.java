@@ -124,6 +124,10 @@ public final class SelectorDescriptorResolver {
     if (entity.hasProperty(PROP_SEARCH_KEY)) {
       return PROP_SEARCH_KEY;
     }
+    // Accounting combination — no name/searchKey; use the combination string (e.g. "7810-0000-000")
+    if (entity.hasProperty("combination")) {
+      return "combination";
+    }
     return "id";
   }
 
