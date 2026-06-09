@@ -114,7 +114,7 @@ class BankStatementAggregatesTest {
   void recomputeDraftStatementIsDraftRegardlessOfMatching() {
     FIN_BankStatement st = mock(FIN_BankStatement.class);
     when(st.isProcessed()).thenReturn(Boolean.FALSE);
-    stubLineQuery(st, Arrays.asList(
+    stubLineQuery(Arrays.asList(
         line("100.00", "0", true),
         line("0", "40.00", false)));
 
@@ -132,7 +132,7 @@ class BankStatementAggregatesTest {
   void recomputeProcessedPartialWhenSomeMatched() {
     FIN_BankStatement st = mock(FIN_BankStatement.class);
     when(st.isProcessed()).thenReturn(Boolean.TRUE);
-    stubLineQuery(st, Arrays.asList(
+    stubLineQuery(Arrays.asList(
         line("100.00", "0", true),
         line("0", "40.00", false)));
 
@@ -146,7 +146,7 @@ class BankStatementAggregatesTest {
   void recomputeProcessedReconciledWhenAllMatched() {
     FIN_BankStatement st = mock(FIN_BankStatement.class);
     when(st.isProcessed()).thenReturn(Boolean.TRUE);
-    stubLineQuery(st, Arrays.asList(
+    stubLineQuery(Arrays.asList(
         line("100.00", "0", true),
         line("0", "40.00", true)));
 
@@ -160,7 +160,7 @@ class BankStatementAggregatesTest {
   void recomputeProcessedPendingWhenNoneMatched() {
     FIN_BankStatement st = mock(FIN_BankStatement.class);
     when(st.isProcessed()).thenReturn(Boolean.TRUE);
-    stubLineQuery(st, Collections.singletonList(line("0", "40.00", false)));
+    stubLineQuery(Collections.singletonList(line("0", "40.00", false)));
 
     BankStatementAggregates.recompute(st);
 
@@ -172,7 +172,7 @@ class BankStatementAggregatesTest {
     when(bsEntity.getPropertyByColumnName(BankStatementAggregates.COL_STATUS)).thenReturn(null);
     FIN_BankStatement st = mock(FIN_BankStatement.class);
     when(st.isProcessed()).thenReturn(Boolean.TRUE);
-    stubLineQuery(st, Collections.singletonList(line("10.00", "0", true)));
+    stubLineQuery(Collections.singletonList(line("10.00", "0", true)));
 
     BankStatementAggregates.recompute(st);
 
@@ -187,7 +187,7 @@ class BankStatementAggregatesTest {
     FIN_BankStatement parent = mock(FIN_BankStatement.class);
     when(parent.isProcessed()).thenReturn(Boolean.TRUE);
     // One other already-persisted, matched line (100 in).
-    stubLineQuery(parent, Collections.singletonList(line("100.00", "0", true)));
+    stubLineQuery(Collections.singletonList(line("100.00", "0", true)));
 
     FIN_BankStatementLine inFlight = mock(FIN_BankStatementLine.class);
     when(inFlight.getId()).thenReturn("new-line");
@@ -209,7 +209,7 @@ class BankStatementAggregatesTest {
     FIN_BankStatement parent = mock(FIN_BankStatement.class);
     when(parent.isProcessed()).thenReturn(Boolean.TRUE);
     // The remaining (other) line is matched; the deleted one is not folded in.
-    stubLineQuery(parent, Collections.singletonList(line("100.00", "0", true)));
+    stubLineQuery(Collections.singletonList(line("100.00", "0", true)));
 
     FIN_BankStatementLine deleted = mock(FIN_BankStatementLine.class);
     when(deleted.getId()).thenReturn("gone");
@@ -239,7 +239,7 @@ class BankStatementAggregatesTest {
 
   /** Stubs the active-lines criteria so {@code list()} returns {@code lines}. */
   @SuppressWarnings("unchecked")
-  private void stubLineQuery(FIN_BankStatement st, List<FIN_BankStatementLine> lines) {
+  private void stubLineQuery(List<FIN_BankStatementLine> lines) {
     OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
     when(obDal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
     when(crit.list()).thenReturn(lines);

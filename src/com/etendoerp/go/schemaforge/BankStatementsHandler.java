@@ -912,7 +912,7 @@ public class BankStatementsHandler implements NeoHandler {
 
       // Use the SQL row count as the canonical lineCount — that's the only
       // value guaranteed to match what the user will actually see in step 2.
-      JSONObject result = buildPreviewPayload(in.format, in.fileName, lines.length(), lines);
+      JSONObject result = BankStatementPreview.buildPayload(in.format, in.fileName, lines.length(), lines);
 
       // Drop everything we parsed — preview is read-only. rollbackAndClose
       // discards both the statement and the cascaded lines from the DB.
@@ -965,62 +965,6 @@ public class BankStatementsHandler implements NeoHandler {
       }
     }
     return arr;
-  }
-
-  /**
-   * Builds the envelope JSON returned by {@code handlePreview}. Aggregates
-   * totals (abonos / cargos) and the period (min/max transaction date) over
-   * the {@code lines} array supplied by {@link #readLinesForPreview}.
-   */
-  private JSONObject buildPreviewPayload(StatementFormat format, String fileName,
-                                         int lineCount, JSONArray lines) throws Exception {
-    PreviewTotals totals = aggregatePreviewTotals(lines);
-
-    JSONObject result = new JSONObject();
-    result.put("format", format.name());
-    result.put(FIELD_FILE_NAME, fileName);
-    result.put(FIELD_LINE_COUNT, lineCount);
-    result.put("totalIn", totals.totalIn);
-    result.put("totalOut", totals.totalOut);
-    result.put("periodFrom", totals.periodFrom);
-    result.put("periodTo", totals.periodTo);
-    result.put(ACTION_LINES, lines);
-    return result;
-  }
-
-  /** Aggregation result computed from the parsed lines: totals + period. */
-  private static final class PreviewTotals {
-    BigDecimal totalIn = BigDecimal.ZERO;
-    BigDecimal totalOut = BigDecimal.ZERO;
-    String periodFrom = "";
-    String periodTo = "";
-  }
-
-  /**
-   * Walks the parsed lines once, accumulating totalIn / totalOut and the
-   * min/max transaction date. Extracted from {@link #buildPreviewPayload} so
-   * the parent method stays under Sonar's cognitive-complexity threshold.
-   */
-  private static PreviewTotals aggregatePreviewTotals(JSONArray lines) throws Exception {
-    PreviewTotals t = new PreviewTotals();
-    for (int i = 0; i < lines.length(); i++) {
-      JSONObject row = lines.getJSONObject(i);
-      t.totalIn = t.totalIn.add(amountFrom(row, FIELD_CRAMOUNT));
-      t.totalOut = t.totalOut.add(amountFrom(row, FIELD_DRAMOUNT));
-      updatePeriod(t, row.optString("date", ""));
-    }
-    return t;
-  }
-
-  private static BigDecimal amountFrom(JSONObject row, String key) throws Exception {
-    if (!row.has(key) || row.isNull(key)) return BigDecimal.ZERO;
-    return new BigDecimal(row.getString(key));
-  }
-
-  private static void updatePeriod(PreviewTotals t, String date) {
-    if (date.isEmpty()) return;
-    if (t.periodFrom.isEmpty() || date.compareTo(t.periodFrom) < 0) t.periodFrom = date;
-    if (t.periodTo.isEmpty()   || date.compareTo(t.periodTo)   > 0) t.periodTo = date;
   }
 
   FIN_BankStatement newBankStatement(FIN_FinancialAccount account, String fileName) {

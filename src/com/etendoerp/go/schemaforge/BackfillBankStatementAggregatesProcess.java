@@ -19,6 +19,8 @@ package com.etendoerp.go.schemaforge;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.hibernate.ScrollMode;
+import org.hibernate.ScrollableResults;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -57,14 +59,24 @@ public class BackfillBankStatementAggregatesProcess extends DalBaseProcess {
       crit.setFilterOnReadableOrganization(false);
       crit.addOrderBy(FIN_BankStatement.PROPERTY_ID, true);
 
-      for (FIN_BankStatement st : crit.list()) {
-        BankStatementAggregates.recompute(st);
-        processed++;
-        if (processed % BATCH_SIZE == 0) {
-          OBDal.getInstance().flush();
-          OBDal.getInstance().getSession().clear();
-          log.debug("Backfilled {} bank statements so far", processed);
+      // Scroll forward-only instead of list(): the table can grow large, and we
+      // flush + clear the session every BATCH_SIZE rows. With list() the cleared
+      // session would detach the remaining rows, risking a LazyInitializationException
+      // inside recompute(); scrolling keeps only the current row attached.
+      ScrollableResults scroll = crit.scroll(ScrollMode.FORWARD_ONLY);
+      try {
+        while (scroll.next()) {
+          FIN_BankStatement st = (FIN_BankStatement) scroll.get(0);
+          BankStatementAggregates.recompute(st);
+          processed++;
+          if (processed % BATCH_SIZE == 0) {
+            OBDal.getInstance().flush();
+            OBDal.getInstance().getSession().clear();
+            log.debug("Backfilled {} bank statements so far", processed);
+          }
         }
+      } finally {
+        scroll.close();
       }
       OBDal.getInstance().flush();
 
