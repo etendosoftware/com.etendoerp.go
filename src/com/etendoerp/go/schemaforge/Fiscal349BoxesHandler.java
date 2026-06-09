@@ -303,7 +303,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
   private TaxReport findTaxReport(String orgId, String searchKey) {
     OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
-    crit.add(Restrictions.eq(TaxReport.PROPERTY_ORGANIZATION + ".id", orgId));
+    crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
     crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, searchKey));
     crit.setMaxResults(1);
     List<TaxReport> list = crit.list();

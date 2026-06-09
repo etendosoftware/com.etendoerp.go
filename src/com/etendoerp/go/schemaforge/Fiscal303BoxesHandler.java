@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -477,7 +478,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
   private TaxReport resolveTaxReport(String orgId, String valueKey) {
     OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
-    crit.add(Restrictions.eq(TaxReport.PROPERTY_ORGANIZATION + ".id", orgId));
+    crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
     crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, valueKey));
     crit.setMaxResults(1);
     List<TaxReport> list = crit.list();
