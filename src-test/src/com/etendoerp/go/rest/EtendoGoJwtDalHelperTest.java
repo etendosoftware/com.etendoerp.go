@@ -29,6 +29,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 
 import org.codehaus.jettison.json.JSONObject;
@@ -183,6 +184,112 @@ class EtendoGoJwtDalHelperTest {
       EtendoGoJwtDalHelper.updateSessionToken(account, "new-token");
 
       verify(account).setSessionToken("new-token");
+      verify(obDal).save(account);
+      verify(obDal).flush();
+      verify(obDal).commitAndClose();
+    }
+  }
+
+  @Nested
+  @DisplayName("password reset and change")
+  class PasswordResetAndChange {
+
+    @Mock private Account account;
+    @Mock private OBQuery<Account> query;
+
+    @Test
+    @DisplayName("stores reset token hash with expiry and clears consumed timestamp")
+    void storesPasswordResetToken() {
+      Date expiresAt = new Date();
+
+      EtendoGoJwtDalHelper.storePasswordResetToken(account, "hash-1", expiresAt);
+
+      verify(account).set("resetTokenHash", "hash-1");
+      verify(account).set("resetTokenExpires", expiresAt);
+      verify(account).set("resetTokenConsumed", null);
+      verify(obDal).save(account);
+      verify(obDal).flush();
+      verify(obDal).commitAndClose();
+    }
+
+    @Test
+    @DisplayName("captures and restores previous reset token state")
+    void capturesAndRestoresPasswordResetToken() {
+      Date expiresAt = new Date();
+      Date consumedAt = new Date(expiresAt.getTime() - 1_000);
+      when(account.get("resetTokenHash")).thenReturn("previous-hash");
+      when(account.get("resetTokenExpires")).thenReturn(expiresAt);
+      when(account.get("resetTokenConsumed")).thenReturn(consumedAt);
+
+      EtendoGoJwtDalHelper.PasswordResetTokenState tokenState =
+          EtendoGoJwtDalHelper.capturePasswordResetToken(account);
+      EtendoGoJwtDalHelper.restorePasswordResetToken(account, tokenState);
+
+      verify(account).set("resetTokenHash", "previous-hash");
+      verify(account).set("resetTokenExpires", expiresAt);
+      verify(account).set("resetTokenConsumed", consumedAt);
+      verify(obDal).save(account);
+      verify(obDal).flush();
+      verify(obDal).commitAndClose();
+    }
+
+    @Test
+    @DisplayName("ignores null reset token state inputs")
+    void ignoresNullPasswordResetTokenStateInputs() {
+      assertNull(EtendoGoJwtDalHelper.capturePasswordResetToken(null));
+
+      EtendoGoJwtDalHelper.restorePasswordResetToken(null, null);
+      EtendoGoJwtDalHelper.restorePasswordResetToken(account, null);
+    }
+
+    @Test
+    @DisplayName("finds active account by unconsumed, unexpired reset token hash")
+    void findsActiveAccountByResetTokenHash() {
+      Date now = new Date();
+      Account expected = mock(Account.class);
+      when(obDal.createQuery(eq(Account.class), anyString())).thenReturn(query);
+      when(query.uniqueResult()).thenReturn(expected);
+
+      Account result = EtendoGoJwtDalHelper.findActiveAccountByResetTokenHash("hash-1", now);
+
+      assertEquals(expected, result);
+      verify(query).setNamedParameter("resetTokenHash", "hash-1");
+      verify(query).setNamedParameter("now", now);
+      verify(query).setFilterOnReadableClients(false);
+      verify(query).setFilterOnReadableOrganization(false);
+    }
+
+    @Test
+    @DisplayName("consumes reset token, changes password, and clears session")
+    void consumesPasswordReset() {
+      Date changedAt = new Date();
+
+      EtendoGoJwtDalHelper.consumePasswordReset(account, "new-hash", changedAt);
+
+      verify(account).setPasswordHash("new-hash");
+      verify(account).setSessionToken(null);
+      verify(account).set("resetTokenHash", null);
+      verify(account).set("resetTokenExpires", null);
+      verify(account).set("resetTokenConsumed", changedAt);
+      verify(account).set("passwordChanged", changedAt);
+      verify(obDal).save(account);
+      verify(obDal).flush();
+      verify(obDal).commitAndClose();
+    }
+
+    @Test
+    @DisplayName("changes password and rotates session token")
+    void changesPasswordAndRotatesToken() {
+      Date changedAt = new Date();
+
+      EtendoGoJwtDalHelper.changePassword(account, "new-hash", "new-token", changedAt);
+
+      verify(account).setPasswordHash("new-hash");
+      verify(account).setSessionToken("new-token");
+      verify(account).set("resetTokenHash", null);
+      verify(account).set("resetTokenExpires", null);
+      verify(account).set("resetTokenConsumed", changedAt);
+      verify(account).set("passwordChanged", changedAt);
       verify(obDal).save(account);
       verify(obDal).flush();
       verify(obDal).commitAndClose();

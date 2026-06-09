@@ -33,6 +33,7 @@ public final class EmailContractCommandSupport {
   public static final String FIELD_DATE = "date";
   public static final String FIELD_IDEMPOTENCY_KEY = "idempotencyKey";
   public static final String FIELD_IP = "ip";
+  public static final String FIELD_LANGUAGE = "language";
   public static final String FIELD_LINK = "link";
   public static final String FIELD_LOGIN_EVENT_ID = "loginEventId";
   public static final String FIELD_RECORD_ID = "recordId";

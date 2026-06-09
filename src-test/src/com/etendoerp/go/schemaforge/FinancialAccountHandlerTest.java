@@ -43,6 +43,7 @@ import org.junit.runner.RunWith;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
@@ -436,10 +437,12 @@ public class FinancialAccountHandlerTest {
         .put("name", "BBVA")
         .put("iban", "ES9121000418450200051332");
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    Country spain = mock(Country.class);
     when(account.getId()).thenReturn(ACC_ID);
     when(account.getName()).thenReturn("BBVA");
     doReturn(account).when(handler).loadAccount(ACC_ID);
     doReturn(false).when(handler).nameExists("BBVA", ACC_ID);
+    doReturn(spain).when(handler).resolveCountryFromIban("ES9121000418450200051332");
 
     try (org.mockito.MockedStatic<org.openbravo.dal.service.OBDal> obDalMock =
         org.mockito.Mockito.mockStatic(org.openbravo.dal.service.OBDal.class)) {
@@ -449,6 +452,7 @@ public class FinancialAccountHandlerTest {
       handler.update(ACC_ID, body);
 
       verify(account).setIBAN("ES9121000418450200051332");
+      verify(account).setCountry(spain);
     }
   }
 
@@ -699,13 +703,14 @@ public class FinancialAccountHandlerTest {
   // ── normalizeType() ──────────────────────────────────────────────────────
 
   /**
-   * {@code normalizeType} keeps {@code C} as Cash and coerces everything else
-   * (including {@code T}, unknown, and the default) to {@code B} Bank.
+   * {@code normalizeType} keeps {@code C} (Cash) and {@code CA} (Card, PSD2 module)
+   * as-is and coerces everything else (unknown, legacy {@code T}, the default) to {@code B} Bank.
    */
   @Test
   public void testNormalizeType() {
     assertEquals("C", handler.normalizeType("C"));
     assertEquals("B", handler.normalizeType("B"));
+    assertEquals("CA", handler.normalizeType("CA"));
     assertEquals("B", handler.normalizeType("T"));
     assertEquals("B", handler.normalizeType("anything"));
     assertEquals("B", handler.normalizeType(""));

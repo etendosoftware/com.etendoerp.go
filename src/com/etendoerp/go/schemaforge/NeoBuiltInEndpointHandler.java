@@ -35,6 +35,7 @@ class NeoBuiltInEndpointHandler {
   private final NeoServlet servlet;
   private final NeoDiscoveryHandler discoveryHandler;
   private final Fiscal303BoxesHandler fiscal303Handler;
+  private final Fiscal349BoxesHandler fiscal349Handler;
   private final TransactionalEmailService transactionalEmailService;
 
   NeoBuiltInEndpointHandler(NeoServlet servlet, NeoDiscoveryHandler discoveryHandler) {
@@ -46,6 +47,7 @@ class NeoBuiltInEndpointHandler {
     this.servlet = servlet;
     this.discoveryHandler = discoveryHandler;
     this.fiscal303Handler = new Fiscal303BoxesHandler(servlet);
+    this.fiscal349Handler = new Fiscal349BoxesHandler(servlet);
     this.transactionalEmailService = transactionalEmailService;
   }
 
@@ -79,6 +81,10 @@ class NeoBuiltInEndpointHandler {
     }
     if ("fiscal303".equals(pathInfo.specName)) {
       fiscal303Handler.handle(pathInfo.entityName, method, request, response);
+      return true;
+    }
+    if ("fiscal349".equals(pathInfo.specName)) {
+      fiscal349Handler.handle(pathInfo.entityName, method, request, response);
       return true;
     }
     if ("email-contracts".equals(pathInfo.specName)) {

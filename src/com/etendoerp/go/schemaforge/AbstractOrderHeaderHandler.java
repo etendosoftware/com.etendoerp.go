@@ -26,11 +26,15 @@ import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import javax.servlet.http.HttpServletResponse;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.invoice.Invoice;
 
 /**
  * Shared base for order-type header handlers (Sales Order, Purchase Order).
@@ -91,6 +95,42 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       service.recalculate(recordId, isInvoice);
     } catch (Exception e) {
       log.error("Error recalculating total discount before complete for {} id={}", docType, recordId, e);
+    }
+  }
+
+  /**
+   * Blocks invoice completion when no exchange rate is available (see
+   * {@link InvoiceExchangeRateValidator}). Call at the top of {@code handle()} in invoice header
+   * subclasses; a non-null return short-circuits the Complete action. No-op for other endpoints.
+   *
+   * @param context the current NeoContext
+   * @return a {@link NeoResponse} error to block completion, or {@code null} to proceed
+   */
+  static NeoResponse validateExchangeRateBeforeComplete(NeoContext context) {
+    if (!isCompleteAction(context)) {
+      return null;
+    }
+    String recordId = context.getRecordId();
+    if (recordId == null || recordId.isEmpty()) {
+      return null;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      Invoice invoice = OBDal.getInstance().get(Invoice.class, recordId);
+      if (invoice == null) {
+        return null;
+      }
+      String error = InvoiceExchangeRateValidator.checkRateForCompletion(invoice);
+      if (error != null) {
+        log.info("Blocking completion of invoice id={} — {}", recordId, error);
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, error);
+      }
+      return null;
+    } catch (Exception e) {
+      log.error("Error validating exchange rate before complete for invoice id={}", recordId, e);
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 

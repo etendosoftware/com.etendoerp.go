@@ -23,10 +23,10 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.FiscalDecl;
@@ -35,6 +35,20 @@ class FiscalDeclCrudHandler {
 
   static final String DEFAULT_STATUS = "draft";
 
+  static final String ENTITY_FISCAL_DECL = FiscalDecl.ENTITY_NAME;
+  static final String PROPERTY_FISCAL_MODEL = "fiscalModel";
+  static final String PROPERTY_FISCAL_YEAR = "fiscalYear";
+  static final String PROPERTY_PERIOD = "period";
+  static final String PROPERTY_DECLARATION_TYPE = "declarationType";
+  static final String PROPERTY_DECLARATION_STATUS = "declarationStatus";
+  static final String PROPERTY_DECLARATION_FILE_NAME = "declarationFileName";
+  static final String PROPERTY_FILE_EXTERNAL = "fileExternal";
+
+  private static final String PROPERTY_CLIENT = "client";
+  private static final String PROPERTY_ORGANIZATION = "organization";
+  private static final String PROPERTY_CREATED_BY = "createdBy";
+  private static final String PROPERTY_UPDATED = "updated";
+  private static final String PROPERTY_UPDATED_BY = "updatedBy";
   private static final String JSON_CONTENT_TYPE = "application/json;charset=UTF-8";
   private static final String PERIOD_KEY        = "period";
   private static final String STATUS_KEY        = "status";
@@ -68,14 +82,13 @@ class FiscalDeclCrudHandler {
 
   private void handleDeclGet(String clientId, String orgId, HttpServletResponse response)
       throws Exception {
-    OBCriteria<FiscalDecl> crit = OBDal.getInstance().createCriteria(FiscalDecl.class);
-    crit.add(Restrictions.eq("client.id", clientId));
-    crit.add(Restrictions.eq("organization.id", orgId));
-    crit.addOrderBy(FiscalDecl.PROPERTY_FISCALYEAR, false);
-    crit.addOrderBy(FiscalDecl.PROPERTY_PERIOD, false);
-    crit.addOrderBy(FiscalDecl.PROPERTY_FISCALMODEL, true);
+    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL,
+        "client.id = :clientId and organization.id = :orgId "
+            + "order by fiscalYear desc, period desc, fiscalModel asc");
+    query.setNamedParameter("clientId", clientId);
+    query.setNamedParameter("orgId", orgId);
     JSONArray arr = new JSONArray();
-    for (FiscalDecl decl : crit.list()) arr.put(declToJson(decl));
+    for (BaseOBObject decl : query.list()) arr.put(declToJson(decl));
     JSONObject out = new JSONObject();
     out.put("data", arr);
     response.getWriter().write(out.toString());
@@ -90,16 +103,16 @@ class FiscalDeclCrudHandler {
     String declType = "com".equals(body.optString("type")) ? "C" : "O";
     String status   = body.has(STATUS_KEY) ? body.getString(STATUS_KEY) : DEFAULT_STATUS;
 
-    FiscalDecl decl = OBProvider.getInstance().get(FiscalDecl.class);
-    decl.setClient(OBContext.getOBContext().getCurrentClient());
-    decl.setOrganization(OBContext.getOBContext().getCurrentOrganization());
-    decl.setCreatedBy(OBContext.getOBContext().getUser());
-    decl.setUpdatedBy(OBContext.getOBContext().getUser());
-    decl.setFiscalModel(model);
-    decl.setFiscalYear(year);
-    decl.setPeriod(period);
-    decl.setDeclarationType(declType);
-    decl.setDeclarationStatus(status);
+    BaseOBObject decl = (BaseOBObject) OBProvider.getInstance().get(ENTITY_FISCAL_DECL);
+    decl.set(PROPERTY_CLIENT, OBContext.getOBContext().getCurrentClient());
+    decl.set(PROPERTY_ORGANIZATION, OBContext.getOBContext().getCurrentOrganization());
+    decl.set(PROPERTY_CREATED_BY, OBContext.getOBContext().getUser());
+    decl.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
+    decl.set(PROPERTY_FISCAL_MODEL, model);
+    decl.set(PROPERTY_FISCAL_YEAR, year);
+    decl.set(PROPERTY_PERIOD, period);
+    decl.set(PROPERTY_DECLARATION_TYPE, declType);
+    decl.set(PROPERTY_DECLARATION_STATUS, status);
     OBDal.getInstance().save(decl);
     JSONObject created = declToJson(decl);
     OBDal.getInstance().commitAndClose();
@@ -125,17 +138,17 @@ class FiscalDeclCrudHandler {
     String  fileName     = hasFileName && !body.isNull(FILE_NAME_KEY)
         ? body.getString(FILE_NAME_KEY) : null;
 
-    FiscalDecl decl = OBDal.getInstance().get(FiscalDecl.class, id);
-    if (decl == null || !clientId.equals(decl.getClient().getId())
-        || !orgId.equals(decl.getOrganization().getId())) {
+    BaseOBObject decl = OBDal.getInstance().get(ENTITY_FISCAL_DECL, id);
+    if (decl == null || !clientId.equals(getRelatedId(decl, PROPERTY_CLIENT))
+        || !orgId.equals(getRelatedId(decl, PROPERTY_ORGANIZATION))) {
       servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
           "Declaration not found: " + id);
       return;
     }
-    if (hasStatus)   decl.setDeclarationStatus(status);
-    if (hasFileExt)  decl.setFileExternal(fileExternal);
-    if (hasFileName) decl.setDeclarationFileName(fileName);
-    decl.setUpdatedBy(OBContext.getOBContext().getUser());
+    if (hasStatus)   decl.set(PROPERTY_DECLARATION_STATUS, status);
+    if (hasFileExt)  decl.set(PROPERTY_FILE_EXTERNAL, fileExternal);
+    if (hasFileName) decl.set(PROPERTY_DECLARATION_FILE_NAME, fileName);
+    decl.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
     OBDal.getInstance().commitAndClose();
     response.getWriter().write("{\"ok\":true}");
   }
@@ -148,9 +161,9 @@ class FiscalDeclCrudHandler {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing param: id");
       return;
     }
-    FiscalDecl decl = OBDal.getInstance().get(FiscalDecl.class, id);
-    if (decl == null || !clientId.equals(decl.getClient().getId())
-        || !orgId.equals(decl.getOrganization().getId())) {
+    BaseOBObject decl = OBDal.getInstance().get(ENTITY_FISCAL_DECL, id);
+    if (decl == null || !clientId.equals(getRelatedId(decl, PROPERTY_CLIENT))
+        || !orgId.equals(getRelatedId(decl, PROPERTY_ORGANIZATION))) {
       servlet.sendError(response, HttpServletResponse.SC_NOT_FOUND,
           "Declaration not found: " + id);
       return;
@@ -160,22 +173,41 @@ class FiscalDeclCrudHandler {
     response.getWriter().write("{\"ok\":true}");
   }
 
-  JSONObject declToJson(FiscalDecl decl) throws Exception {
+  JSONObject declToJson(BaseOBObject decl) throws Exception {
     JSONObject o = new JSONObject();
     o.put("id",           decl.getId() != null ? decl.getId() : "");
-    o.put("model",        decl.getFiscalModel() != null ? decl.getFiscalModel() : "");
-    o.put("year",         decl.getFiscalYear() != null ? decl.getFiscalYear().intValue() : 0);
-    o.put(PERIOD_KEY,     decl.getPeriod() != null ? decl.getPeriod() : "");
-    String dt = decl.getDeclarationType();
+    o.put("model",        asString(decl.get(PROPERTY_FISCAL_MODEL)));
+    o.put("year",         asInt(decl.get(PROPERTY_FISCAL_YEAR)));
+    o.put(PERIOD_KEY,     asString(decl.get(PROPERTY_PERIOD)));
+    String dt = asString(decl.get(PROPERTY_DECLARATION_TYPE));
     String dtNormalized = dt != null ? dt.trim() : "";
     o.put("type",         "C".equals(dtNormalized) ? "com" : "ord");
-    o.put(STATUS_KEY,     decl.getDeclarationStatus() != null
-        ? decl.getDeclarationStatus() : DEFAULT_STATUS);
-    o.put(FILE_NAME_KEY,  decl.getDeclarationFileName() != null
-        ? decl.getDeclarationFileName() : JSONObject.NULL);
-    o.put(FILE_EXTERNAL_KEY, Boolean.TRUE.equals(decl.isFileExternal()));
-    o.put("updatedAt",    decl.getUpdated() != null ? decl.getUpdated().getTime() : 0L);
+    String status = asString(decl.get(PROPERTY_DECLARATION_STATUS));
+    Object fileName = decl.get(PROPERTY_DECLARATION_FILE_NAME);
+    Object updated = decl.get(PROPERTY_UPDATED);
+    o.put(STATUS_KEY,     !status.isEmpty() ? status : DEFAULT_STATUS);
+    o.put(FILE_NAME_KEY,  fileName != null ? fileName : JSONObject.NULL);
+    o.put(FILE_EXTERNAL_KEY, Boolean.TRUE.equals(decl.get(PROPERTY_FILE_EXTERNAL)));
+    o.put("updatedAt",    updated instanceof java.util.Date
+        ? ((java.util.Date) updated).getTime() : 0L);
     return o;
+  }
+
+  private static String getRelatedId(BaseOBObject decl, String property) {
+    Object related = decl.get(property);
+    return related instanceof BaseOBObject && ((BaseOBObject) related).getId() != null
+        ? String.valueOf(((BaseOBObject) related).getId()) : "";
+  }
+
+  private static String asString(Object value) {
+    return value != null ? String.valueOf(value) : "";
+  }
+
+  private static int asInt(Object value) {
+    if (value instanceof Number) {
+      return ((Number) value).intValue();
+    }
+    return 0;
   }
 
   private JSONObject readJsonBody(HttpServletRequest request) throws Exception {

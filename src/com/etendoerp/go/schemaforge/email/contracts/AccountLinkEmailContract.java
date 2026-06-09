@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.email.contracts;
 
+import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.email.EmailAuthorizationResult;
 import com.etendoerp.go.schemaforge.email.EmailContactRecord;
 import com.etendoerp.go.schemaforge.email.EmailContract;
@@ -46,14 +47,30 @@ final class AccountLinkEmailContract implements EmailContract {
   private final EmailContractDataResolver dataResolver;
   private final int recipientThrottleLimit;
   private final int throttleWindowSeconds;
+  private final String configuredLinkPath;
+  private final AccountLinkCustomContent customContent;
 
   AccountLinkEmailContract(String name, String template, EmailContractDataResolver dataResolver,
       int recipientThrottleLimit, int throttleWindowSeconds) {
+    this(name, template, dataResolver, recipientThrottleLimit, throttleWindowSeconds, null, null);
+  }
+
+  AccountLinkEmailContract(String name, String template, EmailContractDataResolver dataResolver,
+      int recipientThrottleLimit, int throttleWindowSeconds, String configuredLinkPath) {
+    this(name, template, dataResolver, recipientThrottleLimit, throttleWindowSeconds,
+        configuredLinkPath, null);
+  }
+
+  AccountLinkEmailContract(String name, String template, EmailContractDataResolver dataResolver,
+      int recipientThrottleLimit, int throttleWindowSeconds, String configuredLinkPath,
+      AccountLinkCustomContent customContent) {
     this.name = name;
     this.template = template;
     this.dataResolver = dataResolver;
     this.recipientThrottleLimit = recipientThrottleLimit;
     this.throttleWindowSeconds = throttleWindowSeconds;
+    this.configuredLinkPath = configuredLinkPath;
+    this.customContent = customContent;
   }
 
   @Override
@@ -63,8 +80,12 @@ final class AccountLinkEmailContract implements EmailContract {
 
   @Override
   public EmailAuthorizationResult authorize(EmailContractCommand command) {
-    EmailAuthorizationResult validation = EmailContractCommandSupport.validateCommand(command,
-        EmailContractCommandSupport.FIELD_ACCOUNT_ID, EmailContractCommandSupport.FIELD_LINK);
+    EmailAuthorizationResult validation = configuredLinkPath == null
+        ? EmailContractCommandSupport.validateCommand(command,
+            EmailContractCommandSupport.FIELD_ACCOUNT_ID,
+            EmailContractCommandSupport.FIELD_LINK)
+        : EmailContractCommandSupport.validateCommand(command,
+            EmailContractCommandSupport.FIELD_ACCOUNT_ID);
     if (!validation.isAllowed()) {
       return validation;
     }
@@ -88,7 +109,12 @@ final class AccountLinkEmailContract implements EmailContract {
   @Override
   public EmailContractResolution resolve(EmailContractCommand command,
       EmailRecipientResolution recipient) {
-    String link = EmailContractCommandSupport.text(command, EmailContractCommandSupport.FIELD_LINK);
+    String link = resolveLink(command);
+    if (configuredLinkPath != null && link == null) {
+      return EmailContractResolution.rejected(400,
+          TransactionalEmailService.STATUS_VALIDATION_FAILED,
+          "Configured app base URL is required for this email contract");
+    }
     if (!EmailContractCommandSupport.isHttpUrl(link)) {
       return EmailContractResolution.rejected(400,
           TransactionalEmailService.STATUS_VALIDATION_FAILED,
@@ -104,6 +130,14 @@ final class AccountLinkEmailContract implements EmailContract {
       JSONObject data = new JSONObject();
       data.put("name", StringUtils.defaultIfBlank(contact.get().getName(), "User"));
       data.put("link", link);
+      String language = EmailContractCommandSupport.text(command,
+          EmailContractCommandSupport.FIELD_LANGUAGE);
+      if (language != null) {
+        data.put("language", language);
+      }
+      if (customContent != null) {
+        customContent.apply(data, language, link);
+      }
       return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipient(),
           template, data, null));
     } catch (JSONException e) {
@@ -116,10 +150,13 @@ final class AccountLinkEmailContract implements EmailContract {
       EmailRecipientResolution recipient, EmailProviderRequest providerRequest) {
     String accountId = EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_ACCOUNT_ID);
+    String recordId = EmailContractCommandSupport.firstNonBlank(
+        EmailContractCommandSupport.text(command, EmailContractCommandSupport.FIELD_RECORD_ID),
+        accountId);
     String tenantId = EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_TENANT_ID);
     return EmailContractCommandSupport.deliveryPolicy(
-        EmailContractCommandSupport.idempotencyKey(name, tenantId, accountId),
+        EmailContractCommandSupport.idempotencyKey(name, tenantId, recordId),
         EmailThrottleRule.perTenant(30, 900),
         EmailThrottleRule.perRecipient(recipientThrottleLimit, throttleWindowSeconds),
         EmailThrottleRule.perDomain(60, 900),
@@ -129,5 +166,36 @@ final class AccountLinkEmailContract implements EmailContract {
   private Optional<EmailContactRecord> resolveAccount(EmailContractCommand command) {
     return dataResolver.findAccountContact(EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_ACCOUNT_ID));
+  }
+
+  private String resolveLink(EmailContractCommand command) {
+    if (configuredLinkPath == null) {
+      return EmailContractCommandSupport.text(command, EmailContractCommandSupport.FIELD_LINK);
+    }
+    String baseUrl = PublicUrlResolver.resolveConfiguredAppBaseUrl();
+    if (baseUrl == null) {
+      return null;
+    }
+    return PublicUrlResolver.appendPath(baseUrl, configuredLinkPath);
+  }
+
+  /**
+   * Functional interface to add custom content to the account link email payload.
+   */
+  @FunctionalInterface
+  interface AccountLinkCustomContent {
+    /**
+     * Adds localized custom content to the provider payload for an account link email.
+     *
+     * @param data
+     *     provider payload to populate
+     * @param language
+     *     recipient language code
+     * @param link
+     *     account action link
+     * @throws JSONException
+     *     when the payload cannot be populated
+     */
+    void apply(JSONObject data, String language, String link) throws JSONException;
   }
 }
