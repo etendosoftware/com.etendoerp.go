@@ -94,6 +94,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
   private static final String TYPE_BOOLEAN = "boolean";
   /** OpenAPI type name for object fields. */
   private static final String TYPE_OBJECT = "object";
+  public static final String SLASH = "/";
 
   @Override
   public boolean isValid(String tag) {
@@ -297,8 +298,8 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
   private void addCrudPaths(OpenAPI openAPI, String specName, String entityName,
       SFEntity entity) {
 
-    String listPath = BASE_PATH + specName + "/" + entityName;
-    String itemPath = BASE_PATH + specName + "/" + entityName + "/{id}";
+    String listPath = BASE_PATH + specName + SLASH + entityName;
+    String itemPath = BASE_PATH + specName + SLASH + entityName + "/{id}";
 
     boolean isGet = Boolean.TRUE.equals(entity.isGet());
     boolean isPost = Boolean.TRUE.equals(entity.isPost());
@@ -344,7 +345,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     }
 
     // Item path (GET by ID, PUT, PATCH, DELETE)
-    if (isGetById || isPut || isPatch || isDelete) {
+    if (isItemPath(isGetById, isPut, isPatch, isDelete)) {
       PathItem itemItem = getOrCreatePathItem(openAPI, itemPath);
 
       Parameter idParam = new Parameter()
@@ -413,12 +414,16 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     }
   }
 
+  private static boolean isItemPath(boolean isGetById, boolean isPut, boolean isPatch, boolean isDelete) {
+    return isGetById || isPut || isPatch || isDelete;
+  }
+
   /**
    * Add selector paths for an entity (list selectors and query selector values).
    */
   private void addSelectorPaths(OpenAPI openAPI, String specName, String entityName) {
     // GET /sws/neo/{specName}/{entityName}/selectors
-    String selectorListPath = BASE_PATH + specName + "/" + entityName + "/selectors";
+    String selectorListPath = BASE_PATH + specName + SLASH + entityName + "/selectors";
     PathItem selectorListItem = getOrCreatePathItem(openAPI, selectorListPath);
 
     Operation listSelectorsOp = createOperation(
@@ -433,7 +438,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     openAPI.getPaths().addPathItem(selectorListPath, selectorListItem);
 
     // GET /sws/neo/{specName}/{entityName}/selectors/{columnName}
-    String selectorQueryPath = BASE_PATH + specName + "/" + entityName
+    String selectorQueryPath = BASE_PATH + specName + SLASH + entityName
         + "/selectors/{columnName}";
     PathItem selectorQueryItem = getOrCreatePathItem(openAPI, selectorQueryPath);
 
@@ -469,7 +474,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
    */
   private void addActionPaths(OpenAPI openAPI, String specName, String entityName) {
     // GET /sws/neo/{specName}/{entityName}/{id}/action
-    String actionListPath = BASE_PATH + specName + "/" + entityName + "/{id}/action";
+    String actionListPath = BASE_PATH + specName + SLASH + entityName + "/{id}/action";
     PathItem actionListItem = getOrCreatePathItem(openAPI, actionListPath);
 
     Parameter idParam = new Parameter()
@@ -492,7 +497,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
     openAPI.getPaths().addPathItem(actionListPath, actionListItem);
 
     // POST /sws/neo/{specName}/{entityName}/{id}/action/{columnName}
-    String actionExecPath = BASE_PATH + specName + "/" + entityName
+    String actionExecPath = BASE_PATH + specName + SLASH + entityName
         + "/{id}/action/{columnName}";
     PathItem actionExecItem = getOrCreatePathItem(openAPI, actionExecPath);
 
@@ -614,7 +619,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
    * Called from addWindowPaths() alongside addSelectorPaths() and addActionPaths().
    */
   private void addEvaluateDisplayPaths(OpenAPI openAPI, String specName, String entityName) {
-    String path = BASE_PATH + specName + "/" + entityName + "/evaluate-display";
+    String path = BASE_PATH + specName + SLASH + entityName + "/evaluate-display";
     PathItem pathItem = getOrCreatePathItem(openAPI, path);
 
     // Request body schema
@@ -675,7 +680,7 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
    * Called from addWindowPaths() alongside other sub-path registrations.
    */
   private void addDefaultsPaths(OpenAPI openAPI, String specName, String entityName) {
-    String path = BASE_PATH + specName + "/" + entityName + "/defaults";
+    String path = BASE_PATH + specName + SLASH + entityName + "/defaults";
     PathItem pathItem = getOrCreatePathItem(openAPI, path);
 
     // Response schema
