@@ -69,7 +69,7 @@ public class EtendoGoGoogleIdentityVerifierTest {
   public void missingConfigurationReturnsServiceUnavailable() throws Exception {
     EtendoGoGoogleIdentityVerifier verifier = new EtendoGoGoogleIdentityVerifier(
         new EtendoGoGoogleIdentityVerifier.GoogleIdentityConfiguration(
-            Collections.emptyList(), null),
+            Collections.emptyList()),
         (credential, configuration) -> null);
     HttpServletRequest request = request("application/json");
 
@@ -116,11 +116,13 @@ public class EtendoGoGoogleIdentityVerifierTest {
   }
 
   @Test
-  public void thirdPartyEmailIsNotAuthoritativeWithoutHostedDomain() {
-    EtendoGoSsoAssertion assertion = new EtendoGoSsoAssertion("google", "sub-789",
-        "user@example.com", "User", false);
+  public void verifiedEmailIsAuthoritative() {
+    assertTrue(EtendoGoGoogleIdentityVerifier.isAuthoritativeEmail(true));
+  }
 
-    assertFalse(assertion.isEmailAuthoritative());
+  @Test
+  public void unverifiedEmailIsNotAuthoritative() {
+    assertFalse(EtendoGoGoogleIdentityVerifier.isAuthoritativeEmail(false));
   }
 
   private static EtendoGoGoogleIdentityVerifier verifierReturning(
@@ -131,7 +133,7 @@ public class EtendoGoGoogleIdentityVerifierTest {
 
   private static EtendoGoGoogleIdentityVerifier.GoogleIdentityConfiguration configured() {
     return new EtendoGoGoogleIdentityVerifier.GoogleIdentityConfiguration(
-        Collections.singletonList("client-id.apps.googleusercontent.com"), null);
+        Collections.singletonList("client-id.apps.googleusercontent.com"));
   }
 
   private static HttpServletRequest requestWithCookie(String csrfToken, String contentType) {

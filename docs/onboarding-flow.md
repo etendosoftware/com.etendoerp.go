@@ -132,11 +132,9 @@ Configuration:
 | Property | Environment variable | Description |
 | --- | --- | --- |
 | `etendo.go.sso.google.clientId` | `ETGO_GOOGLE_CLIENT_ID` | Required Google Web OAuth client ID. Multiple IDs can be comma-separated. |
-| `etendo.go.sso.google.hostedDomain` | `ETGO_GOOGLE_HOSTED_DOMAIN` | Optional Google Workspace hosted-domain restriction. |
 
 SSO-only accounts are created without a local password hash. Existing local
 accounts are auto-linked by email only when the provider-specific verifier marks
-that email as authoritative. The Google implementation does this for `@gmail.com`
-addresses or verified Google Workspace `hd` claims; other matching emails
-require an explicit linking flow. No email verification fields or login gates
-are added.
+that email as authoritative. The Google implementation does this for any email
+verified by Google (where the `email_verified` claim is `true`). No email
+verification fields or login gates are added.

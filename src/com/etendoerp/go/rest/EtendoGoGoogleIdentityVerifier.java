@@ -53,8 +53,6 @@ final class EtendoGoGoogleIdentityVerifier implements EtendoGoSsoAssertionVerifi
 
   static final String CLIENT_ID_PROPERTY = "etendo.go.sso.google.clientId";
   static final String CLIENT_ID_ENV = "ETGO_GOOGLE_CLIENT_ID";
-  static final String HOSTED_DOMAIN_PROPERTY = "etendo.go.sso.google.hostedDomain";
-  static final String HOSTED_DOMAIN_ENV = "ETGO_GOOGLE_HOSTED_DOMAIN";
   static final String CSRF_COOKIE = "g_csrf_token";
   static final String FIELD_CREDENTIAL = "credential";
   static final String FIELD_CSRF_TOKEN = "g_csrf_token";
@@ -200,8 +198,8 @@ final class EtendoGoGoogleIdentityVerifier implements EtendoGoSsoAssertionVerifi
     return MessageDigest.isEqual(expectedBytes, receivedBytes);
   }
 
-  private static String normalizeHostedDomain(String hostedDomain) {
-    return StringUtils.lowerCase(StringUtils.trimToNull(hostedDomain), Locale.ROOT);
+  static boolean isAuthoritativeEmail(boolean emailVerified) {
+    return emailVerified;
   }
 
   private static EtendoGoSsoAssertionException unauthorized(String message) {
@@ -268,22 +266,10 @@ final class EtendoGoGoogleIdentityVerifier implements EtendoGoSsoAssertionVerifi
       if (subject == null || email == null) {
         throw unauthorized("Invalid Google credential claims");
       }
-      String hostedDomain = normalizeHostedDomain(payload.getHostedDomain());
-      if (StringUtils.isNotBlank(configuration.hostedDomain)
-          && !configuration.hostedDomain.equals(hostedDomain)) {
-        throw unauthorized("Invalid Google hosted domain");
-      }
       boolean emailVerified = Boolean.TRUE.equals(payload.getEmailVerified());
       String name = fallbackName((String) payload.get("name"), email);
       return new EtendoGoSsoAssertion(EtendoGoSsoProviderRegistry.GOOGLE_PROVIDER, subject,
-          email, name, isAuthoritativeEmail(email, emailVerified, hostedDomain));
-    }
-
-    private static boolean isAuthoritativeEmail(String email, boolean emailVerified,
-        String hostedDomain) {
-      return emailVerified && (StringUtils.endsWithIgnoreCase(email, "@gmail.com")
-          || StringUtils.endsWithIgnoreCase(email, "@googlemail.com")
-          || StringUtils.isNotBlank(hostedDomain));
+          email, name, isAuthoritativeEmail(emailVerified));
     }
 
     private static String normalizeEmail(String email) {
@@ -302,11 +288,9 @@ final class EtendoGoGoogleIdentityVerifier implements EtendoGoSsoAssertionVerifi
 
   static final class GoogleIdentityConfiguration {
     private final List<String> clientIds;
-    private final String hostedDomain;
 
-    GoogleIdentityConfiguration(List<String> clientIds, String hostedDomain) {
+    GoogleIdentityConfiguration(List<String> clientIds) {
       this.clientIds = Collections.unmodifiableList(normalizeClientIds(clientIds));
-      this.hostedDomain = normalizeHostedDomain(hostedDomain);
     }
 
     private boolean isConfigured() {
@@ -315,8 +299,7 @@ final class EtendoGoGoogleIdentityVerifier implements EtendoGoSsoAssertionVerifi
 
     private static GoogleIdentityConfiguration fromRuntime() {
       return new GoogleIdentityConfiguration(
-          parseCsv(resolveConfiguredValue(CLIENT_ID_PROPERTY, CLIENT_ID_ENV)),
-          resolveConfiguredValue(HOSTED_DOMAIN_PROPERTY, HOSTED_DOMAIN_ENV));
+          parseCsv(resolveConfiguredValue(CLIENT_ID_PROPERTY, CLIENT_ID_ENV)));
     }
 
     private static List<String> parseCsv(String value) {
