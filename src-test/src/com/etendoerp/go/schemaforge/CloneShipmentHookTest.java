@@ -17,9 +17,11 @@
 
 package com.etendoerp.go.schemaforge;
 
-import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -31,9 +33,7 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.structure.BaseOBObject;
-import org.openbravo.dal.core.DalUtil;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
@@ -41,30 +41,27 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 /**
  * Unit tests for {@link CloneShipmentHook}.
  *
- * <p>Covers the two lifecycle methods that can be tested without CDI or DB access:
+ * <p>Covers:
  * <ul>
- *   <li>{@code shouldCopyChildren()} — must always return false so the hook manages
- *       line copying itself instead of delegating to the framework's generic copy.</li>
- *   <li>{@code preCopy()} — must return the original record unchanged so the framework
- *       proceeds with the unmodified source before {@code postCopy} resets the clone.</li>
+ *   <li>{@code shouldCopyChildren()} — must always return true so the framework copies
+ *       lines via DalUtil.copy; the hook no longer manages line copying manually.</li>
+ *   <li>{@code preCopy()} — must return the original record unchanged.</li>
+ *   <li>{@code postCopy()} — must reset header state fields to draft on the clone.</li>
  * </ul>
- *
- * <p>{@code postCopy()} requires {@link org.openbravo.dal.core.OBContext} and
- * {@link org.openbravo.dal.service.OBDal} and is covered by integration tests only.
  */
 public class CloneShipmentHookTest {
 
   // ── shouldCopyChildren() ──────────────────────────────────────────────────
 
   /**
-   * Verifies that shouldCopyChildren always returns false regardless of the uiCopyChildren flag,
-   * so the hook manages line copying in postCopy and avoids the framework's generic child copy.
+   * Verifies that shouldCopyChildren always returns true regardless of the uiCopyChildren flag,
+   * so the framework (DalUtil.copy) handles line copying and the hook only resets header state.
    */
   @Test
-  public void testShouldCopyChildrenReturnsFalse() {
+  public void testShouldCopyChildrenReturnsTrue() {
     CloneShipmentHook hook = new CloneShipmentHook();
-    assertFalse(hook.shouldCopyChildren(true));
-    assertFalse(hook.shouldCopyChildren(false));
+    assertTrue(hook.shouldCopyChildren(true));
+    assertTrue(hook.shouldCopyChildren(false));
   }
 
   // ── preCopy() ─────────────────────────────────────────────────────────────
@@ -91,31 +88,21 @@ public class CloneShipmentHookTest {
    */
   @Test
   public void testPostCopyResetsHeaderAndClearsOrderLineLinkOnClonedLines() {
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<DalUtil> dalUtilMock = Mockito.mockStatic(DalUtil.class)) {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
 
       OBContext obCtx = mock(OBContext.class);
       User user = mock(User.class);
       ctxMock.when(OBContext::getOBContext).thenReturn(obCtx);
       when(obCtx.getUser()).thenReturn(user);
 
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-
       ShipmentInOut original = mock(ShipmentInOut.class);
       ShipmentInOut clone = mock(ShipmentInOut.class);
 
-      ShipmentInOutLine origLine = mock(ShipmentInOutLine.class);
       ShipmentInOutLine clonedLine = mock(ShipmentInOutLine.class);
-      List<ShipmentInOutLine> origLines = new ArrayList<>();
-      origLines.add(origLine);
-      when(original.getMaterialMgmtShipmentInOutLineList()).thenReturn(origLines);
-
+      // shouldCopyChildren=true means DalUtil already populated clone's line list before postCopy runs
       List<ShipmentInOutLine> cloneLines = new ArrayList<>();
+      cloneLines.add(clonedLine);
       when(clone.getMaterialMgmtShipmentInOutLineList()).thenReturn(cloneLines);
-
-      dalUtilMock.when(() -> DalUtil.copy(eq(origLine), eq(false))).thenReturn(clonedLine);
 
       BaseOBObject result = new CloneShipmentHook().postCopy(original, clone);
 
@@ -133,11 +120,6 @@ public class CloneShipmentHookTest {
       // C_OrderLine_ID must be cleared to prevent trigger double-count
       verify(clonedLine).setSalesOrderLine(null);
       verify(clonedLine).setCanceledInoutLine(null);
-      verify(clonedLine).setShipmentReceipt(clone);
-
-      verify(dal).save(clone);
-      verify(dal).flush();
-      verify(dal).refresh(clone);
     }
   }
 }

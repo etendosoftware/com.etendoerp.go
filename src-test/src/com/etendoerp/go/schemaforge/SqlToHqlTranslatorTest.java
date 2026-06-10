@@ -25,6 +25,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Modifier;
+
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -36,6 +39,16 @@ import org.junit.jupiter.params.provider.NullSource;
  * Unit tests for {@link SqlToHqlTranslator}.
  */
 class SqlToHqlTranslatorTest {
+
+  @Test
+  @DisplayName("Utility class hides its constructor")
+  void utilityClassHidesConstructor() throws ReflectiveOperationException {
+    Constructor<SqlToHqlTranslator> constructor = SqlToHqlTranslator.class.getDeclaredConstructor();
+    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
+    constructor.setAccessible(true);
+    constructor.newInstance();
+  }
+
 
   // -------------------------------------------------------------------------
   // splitTopLevelAnd

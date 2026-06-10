@@ -24,6 +24,7 @@ import java.util.Map;
 
 import javax.inject.Named;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -33,16 +34,17 @@ import org.openbravo.model.financialmgmt.accounting.AccountingFact;
 
 /**
  * NeoHandler that serves Fact_Acct (accounting entries) for a parent document.
- *
+ * <p>
  * Intercepts GET list requests for the "accounting" entity. Because Fact_Acct
  * uses a generic Record_ID + AD_Table_ID pattern instead of a direct FK to the
  * parent document, NEO's default parent-child filtering (via
  * ApplicationUtils.getParentProperty) returns null and produces empty results.
- *
+ * <p>
  * This handler queries AccountingFact directly using:
- *   recordID = parentId  (from queryParams)
- *   table.id = adTableId (318 for C_Invoice, 319 for M_InOut)
+ * recordID = parentId  (from queryParams)
+ * table.id = adTableId (318 for C_Invoice, 319 for M_InOut)
  */
+
 /**
  * NeoHandler that provides accounting entry data (AccountingFact/FactAcct) for the frontend.
  * Intercepts list requests for supported document types where the standard parent-link (via
@@ -61,19 +63,15 @@ public class FactAcctHandler implements NeoHandler {
   /** AD_Table_ID for each supported document type (spec name → table ID). */
   private static final Map<String, String> TABLE_ID_BY_SPEC = Map.of(
       "purchase-invoice", "318",
-      "goods-receipt",    "319"
+      "goods-receipt", "319"
   );
 
   @Override
   public NeoResponse handle(NeoContext context) {
     // Only intercept CRUD GET list requests (no recordId = list)
-    if (!NeoEndpointType.CRUD.equals(context.getEndpointType())) {
-      return null;
-    }
-    if (!"GET".equals(context.getHttpMethod())) {
-      return null;
-    }
-    if (context.getRecordId() != null) {
+    if (!NeoEndpointType.CRUD.equals(context.getEndpointType())
+        || !"GET".equals(context.getHttpMethod())
+        || context.getRecordId() != null) {
       return null;
     }
 
@@ -81,7 +79,7 @@ public class FactAcctHandler implements NeoHandler {
         ? context.getQueryParams().get("parentId")
         : null;
 
-    if (parentId == null || parentId.isEmpty()) {
+    if (StringUtils.isEmpty(parentId)) {
       return emptyResponse();
     }
 
@@ -121,16 +119,16 @@ public class FactAcctHandler implements NeoHandler {
         }
 
         // Posting type
-        row.put("postingType", af.getPostingType() != null ? af.getPostingType() : "");
+        row.put("postingType", nullToEmpty(af.getPostingType()));
 
         // Debit / Credit amounts
         BigDecimal debit = af.getDebit();
         BigDecimal credit = af.getCredit();
-        row.put("debit", debit != null ? debit : BigDecimal.ZERO);
-        row.put("credit", credit != null ? credit : BigDecimal.ZERO);
+        row.put("debit", nullToZero(debit));
+        row.put("credit", nullToZero(credit));
 
         // Description
-        row.put("description", af.getDescription() != null ? af.getDescription() : "");
+        row.put("description", nullToEmpty(af.getDescription()));
 
         data.put(row);
       }
@@ -148,6 +146,16 @@ public class FactAcctHandler implements NeoHandler {
       log.error("[FactAcctHandler] Error fetching accounting entries for parentId={}", parentId, e);
       return NeoResponse.error(500, "Error fetching accounting entries: " + e.getMessage());
     }
+  }
+
+  /** Returns the given string, or an empty string when it is {@code null}. */
+  private static String nullToEmpty(String value) {
+    return value != null ? value : "";
+  }
+
+  /** Returns the given amount, or {@link BigDecimal#ZERO} when it is {@code null}. */
+  private static BigDecimal nullToZero(BigDecimal amount) {
+    return amount != null ? amount : BigDecimal.ZERO;
   }
 
   private NeoResponse emptyResponse() {

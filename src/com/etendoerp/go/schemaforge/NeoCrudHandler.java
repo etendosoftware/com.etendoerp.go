@@ -849,16 +849,7 @@ class NeoCrudHandler {
     predicates.add("e." + resolvedProperty + " IS NOT NULL");
 
     String tabWhere = adTab.getHqlwhereclause();
-    if (StringUtils.isNotBlank(tabWhere)) {
-      if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = resolveTabWhereTokens(adTab, tabWhere, parentId);
-      }
-      if (!tabWhere.contains("@")) {
-        // Skip when unresolved @session_tokens@ remain — OBQuery can't bind
-        // them and the list fetch relies on DefaultJsonDataService to resolve.
-        predicates.add("(" + tabWhere + ")");
-      }
-    }
+    addTabWherePredicate(adTab, tabWhere, parentId, predicates);
     if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
       String parentFilter = resolveParentFilter(adTab, parentId);
       if (StringUtils.isNotBlank(parentFilter)) {
@@ -905,6 +896,19 @@ class NeoCrudHandler {
           dalEntityName, resolvedProperty, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Failed to compute distinct values");
+    }
+  }
+
+  private void addTabWherePredicate(Tab adTab, String tabWhere, String parentId, List<String> predicates) {
+    if (StringUtils.isNotBlank(tabWhere)) {
+      if (parentId != null && tabWhere.contains("@")) {
+        tabWhere = resolveTabWhereTokens(adTab, tabWhere, parentId);
+      }
+      if (!tabWhere.contains("@")) {
+        // Skip when unresolved @session_tokens@ remain — OBQuery can't bind
+        // them and the list fetch relies on DefaultJsonDataService to resolve.
+        predicates.add("(" + tabWhere + ")");
+      }
     }
   }
 

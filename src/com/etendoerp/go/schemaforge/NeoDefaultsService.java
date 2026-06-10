@@ -1,8 +1,5 @@
 package com.etendoerp.go.schemaforge;
 
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -17,8 +14,11 @@ import java.util.Set;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
+import org.jspecify.annotations.NonNull;
+import org.jspecify.annotations.Nullable;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
@@ -90,8 +90,6 @@ public class NeoDefaultsService {
     try {
       OBContext.setAdminMode();
       try {
-        JSONObject defaults = new JSONObject();
-        JSONArray unresolvedFields = new JSONArray();
         JSONArray sequenceFields = new JSONArray();
 
         // Build a VariablesSecureApp bridge from OBContext for Etendo utility methods.
@@ -118,7 +116,11 @@ public class NeoDefaultsService {
         // Sequence fields are deferred so that when we compute DocumentNo in pass 2 we can
         // pass the already-resolved C_DocTypeTarget_ID / C_DocType_ID values to
         // Utility.getDocumentNo — exactly as FormInitializationComponent does.
+        JSONArray unresolvedFields = new JSONArray();
+
         List<SFField> sequenceSFFields = new ArrayList<>();
+        JSONObject defaults = new JSONObject();
+
         for (SFField sfField : fields) {
           Column adColumn = sfField.getADColumn();
           if (adColumn == null) {
@@ -131,7 +133,6 @@ public class NeoDefaultsService {
 
           String dbColumnName = adColumn.getDBColumnName();
           String propertyName = NeoDefaultsCascadeHelper.resolvePropertyName(dalEntity, dbColumnName);
-
           try {
             // ETGO_SF_FIELD.defaultvalue overrides the AD_Column default when set.
             // This allows per-window default expressions (e.g. "@#Date@" for date fields)
@@ -149,14 +150,7 @@ public class NeoDefaultsService {
             // in a hidden/readonly field, so preselecting "the first row of the referenced
             // table" is always wrong for them (e.g. self-referential FKs like
             // Replacedorder_ID would silently mark every new document as a replacement).
-            if (resolvedValue == null && !Boolean.TRUE.equals(sfField.isReadOnly())) {
-              resolvedValue = resolveFirstComboOption(adColumn, ctx);
-            }
-            if (resolvedValue != null) {
-              defaults.put(propertyName, resolvedValue);
-              // For FK fields, also inject $_identifier so selectors display the label, not the ID
-              tryInjectIdentifier(defaults, dalEntity, propertyName, resolvedValue);
-            }
+            applyDefaultWithComboFallback(ctx, sfField, resolvedValue, adColumn, defaults, propertyName, dalEntity);
           } catch (Exception e) {
             log.debug("Could not resolve default for column {}: {}",
                 dbColumnName, e.getMessage());
@@ -180,12 +174,7 @@ public class NeoDefaultsService {
 
           try {
             String preview;
-            if (Boolean.TRUE.equals(SequenceUtils.isSequence(adColumn))) {
-              preview = resolveTransactionalSequencePreview(adColumn);
-            } else {
-              preview = resolveSequencePreviewWithDocType(
-                  adColumn, vars, conn, windowId, docTypeTargetId, docTypeId);
-            }
+            preview = resolveSequencePreviewForColumn(adColumn, vars, conn, windowId, docTypeTargetId, docTypeId);
             if (preview != null) {
               defaults.put(propertyName, preview);
               sequenceFields.put(propertyName);
@@ -199,22 +188,7 @@ public class NeoDefaultsService {
 
         // Keep cascade enabled for /defaults to preserve the compatibility behavior chosen
         // for this merge: dependent defaults should still be derived during form bootstrap.
-        Tab adTab = ctx.getAdTab();
-        Set<String> seqFieldSet = new HashSet<>();
-        for (int i = 0; i < sequenceFields.length(); i++) {
-          seqFieldSet.add(sequenceFields.getString(i));
-        }
-        if (adTab != null) {
-          NeoDefaultsCascadeHelper.executeCalloutCascade(ctx, adTab, defaults, seqFieldSet);
-        }
-
-        // Re-apply C_DocTypeTarget_ID from the tab's HQL subtype filter (e.g. sOSubType LIKE 'OB'
-        // for Quotation tabs) before the generic FK fallback runs. Without this, the fallback picks
-        // the first alphabetically available doctype (Standard Order) instead of the correct one.
-        // Mirrors NeoCrudHandler.executePostCalloutCascade on the create path.
-        if (adTab != null) {
-          DocTypeResolver.reapplyDocTypeFromTabFilter(defaults, adTab, ctx);
-        }
+        Tab adTab = applyCascadeAndResolveTab(ctx, sequenceFields, defaults);
 
         // ETP-3894: FK preselection is intentionally disabled. Mandatory FKs without an
         // explicit AD_Column default / ETGO_SF_FIELD default / session value / parent value
@@ -228,26 +202,14 @@ public class NeoDefaultsService {
         // the agent needs to see in the /defaults response even though they are not
         // exposed in the UI. Without this, the agent may omit them on create and hit
         // NOT NULL or MISSING_REQUIRED_FIELDS errors.
-        Set<String> sfFieldColumns = new HashSet<>();
-        if (fields != null) {
-          for (SFField sfField : fields) {
-            if (sfField == null) {
-              continue;
-            }
-            Column adColumn = sfField.getADColumn();
-            String dbColumnName = adColumn != null ? adColumn.getDBColumnName() : null;
-            if (dbColumnName != null) {
-              sfFieldColumns.add(dbColumnName.toUpperCase(Locale.ROOT));
-            }
-          }
-        }
+        Set<String> sfFieldColumns = getSfFieldColumns(fields);
         NeoHiddenMandatoryDefaultsResolver.resolve(
             new NeoHiddenMandatoryDefaultsResolver.Request(defaults, dalEntity, adTab)
                 .withParentValues(NeoParentValuesLoader.load(adTab, parentId))
                 .withDefaultResolver((column, parentValues) -> {
                   Object resolved = resolveFieldDefault(new FieldDefaultRequest(column, parentId,
                       vars, conn, windowId, ctx).withParentValues(parentValues));
-                  return resolved != null ? resolved : resolveFirstComboOption(column, ctx);
+                  return resolveOrFirstComboOption(ctx, column, resolved);
                 })
                 .withIdentifierInjector(NeoDefaultsService::tryInjectIdentifier)
                 .withSfFieldColumns(sfFieldColumns));
@@ -270,6 +232,72 @@ public class NeoDefaultsService {
       log.error("Error resolving defaults: {}", e.getMessage(), e);
       return NeoResponse.error(500, "Failed to resolve defaults: " + e.getMessage());
     }
+  }
+
+  private static @Nullable String resolveSequencePreviewForColumn(Column adColumn, VariablesSecureApp vars,
+      DalConnectionProvider conn, String windowId, String docTypeTargetId, String docTypeId) {
+    String preview;
+    if (Boolean.TRUE.equals(SequenceUtils.isSequence(adColumn))) {
+      preview = resolveTransactionalSequencePreview(adColumn);
+    } else {
+      preview = resolveSequencePreviewWithDocType(
+          adColumn, vars, conn, windowId, docTypeTargetId, docTypeId);
+    }
+    return preview;
+  }
+
+  private static @Nullable Object resolveOrFirstComboOption(NeoContext ctx, Column column, Object resolved) {
+    return resolved != null ? resolved : resolveFirstComboOption(column, ctx);
+  }
+
+  private static void applyDefaultWithComboFallback(NeoContext ctx, SFField sfField, Object resolvedValue,
+      Column adColumn, JSONObject defaults, String propertyName, Entity dalEntity) throws JSONException {
+    if (resolvedValue == null && !Boolean.TRUE.equals(sfField.isReadOnly())) {
+      resolvedValue = resolveFirstComboOption(adColumn, ctx);
+    }
+    if (resolvedValue != null) {
+      defaults.put(propertyName, resolvedValue);
+      // For FK fields, also inject $_identifier so selectors display the label, not the ID
+      tryInjectIdentifier(defaults, dalEntity, propertyName, resolvedValue);
+    }
+  }
+
+  private static @NonNull Set<String> getSfFieldColumns(List<SFField> fields) {
+    Set<String> sfFieldColumns = new HashSet<>();
+    if (fields != null) {
+      for (SFField sfField : fields) {
+        if (sfField == null) {
+          continue;
+        }
+        Column adColumn = sfField.getADColumn();
+        String dbColumnName = adColumn != null ? adColumn.getDBColumnName() : null;
+        if (dbColumnName != null) {
+          sfFieldColumns.add(dbColumnName.toUpperCase(Locale.ROOT));
+        }
+      }
+    }
+    return sfFieldColumns;
+  }
+
+  private static @Nullable Tab applyCascadeAndResolveTab(NeoContext ctx, JSONArray sequenceFields,
+      JSONObject defaults) throws JSONException {
+    Tab adTab = ctx.getAdTab();
+    Set<String> seqFieldSet = new HashSet<>();
+    for (int i = 0; i < sequenceFields.length(); i++) {
+      seqFieldSet.add(sequenceFields.getString(i));
+    }
+    if (adTab != null) {
+      NeoDefaultsCascadeHelper.executeCalloutCascade(ctx, adTab, defaults, seqFieldSet);
+    }
+
+    // Re-apply C_DocTypeTarget_ID from the tab's HQL subtype filter (e.g. sOSubType LIKE 'OB'
+    // for Quotation tabs) before the generic FK fallback runs. Without this, the fallback picks
+    // the first alphabetically available doctype (Standard Order) instead of the correct one.
+    // Mirrors NeoCrudHandler.executePostCalloutCascade on the create path.
+    if (adTab != null) {
+      DocTypeResolver.reapplyDocTypeFromTabFilter(defaults, adTab, ctx);
+    }
+    return adTab;
   }
 
   /**
@@ -372,7 +400,7 @@ public class NeoDefaultsService {
     }
 
     // NEO-specific: Link-to-parent columns use the parentId from query params
-    if (adColumn.isLinkToParentColumn()
+    if (Boolean.TRUE.equals(adColumn.isLinkToParentColumn())
         && request.parentId != null && !request.parentId.isEmpty()) {
       return request.parentId;
     }
@@ -405,8 +433,8 @@ public class NeoDefaultsService {
 
     // SQL expressions — resolve parameters and execute
     if (defaultExpr.startsWith("@SQL=")) {
-      return resolveSQLDefault(defaultExpr, request.vars, request.conn, request.windowId, adColumn,
-          request.parentValues);
+      return NeoDefaultsSqlHelper.resolveSQLDefault(defaultExpr, request.vars, request.conn,
+          request.windowId, adColumn, request.parentValues);
     }
 
     // Delegate to Utility.getDefault for all other cases:
@@ -451,50 +479,11 @@ public class NeoDefaultsService {
       return docTypeId;
     }
     if (!colUpper.endsWith("_ID") && adColumn.getTable() != null) {
-      String dbDefault = resolveDbColumnDefault(
+      String dbDefault = NeoDefaultsSqlHelper.resolveDbColumnDefault(
           adColumn.getTable().getDBTableName(), dbColumnName);
       if (dbDefault != null) {
         return dbDefault;
       }
-    }
-    return null;
-  }
-
-  /**
-   * Read the DB-level column DEFAULT from {@code information_schema.columns}.
-   * Used as a last-resort fallback when {@code AD_Column.DefaultValue} is null/empty and
-   * no preference or doctype default can be resolved.
-   */
-  private static String resolveDbColumnDefault(String tableName, String columnName) {
-    try {
-      String sql = "SELECT column_default FROM information_schema.columns "
-          + "WHERE LOWER(table_name) = LOWER(?) AND LOWER(column_name) = LOWER(?)";
-      try (PreparedStatement ps =
-          OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
-        ps.setString(1, tableName);
-        ps.setString(2, columnName);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            String colDefault = rs.getString(1);
-            if (colDefault == null || colDefault.isEmpty()) {
-              return null;
-            }
-            if (colDefault.startsWith("'")) {
-              int endQuote = colDefault.indexOf("'", 1);
-              if (endQuote > 0) {
-                return colDefault.substring(1, endQuote);
-              }
-            }
-            String stripped = colDefault.split("::")[0].trim();
-            if (!stripped.isEmpty()) {
-              return stripped;
-            }
-          }
-        }
-      }
-    } catch (SQLException e) {
-      log.debug("Could not read DB-level column default for {}.{}: {}",
-          tableName, columnName, e.getMessage());
     }
     return null;
   }
@@ -619,121 +608,6 @@ public class NeoDefaultsService {
           adColumn.getDBColumnName(), e.getMessage());
       return "<auto>";
     }
-  }
-
-  /**
-   * Resolve a @SQL= default expression.
-   * Adapted from UIDefinition.getDefaultValueFromSQLExpression — parses the SQL,
-   * resolves @parameter@ tokens via Utility.getContext, and executes the query.
-   */
-  private static String resolveSQLDefault(String defaultExpr, VariablesSecureApp vars,
-      DalConnectionProvider conn, String windowId, Column adColumn) {
-    return resolveSQLDefault(defaultExpr, vars, conn, windowId, adColumn, null);
-  }
-
-  /**
-   * Resolve a @SQL= default expression, preferring parent record values over session context
-   * for non-session parameters. This ensures that columns like @M_Warehouse_ID@ and @AD_Client_ID@
-   * resolve to the parent record's values (e.g. the inventory's warehouse and client) rather than
-   * the session user's warehouse/client, which may differ when the user belongs to a different org.
-   *
-   * Session parameters (prefixed with #, e.g. @#Date@) always use session context.
-   */
-  private static String resolveSQLDefault(String defaultExpr, VariablesSecureApp vars,
-      DalConnectionProvider conn, String windowId, Column adColumn,
-      Map<String, Object> parentValues) {
-    try {
-      ArrayList<String> params = new ArrayList<>();
-      String sql = parseSQLExpression(defaultExpr, params);
-
-      try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
-        int paramIndex = 1;
-        for (String parameter : params) {
-          String value = null;
-          // Non-session params: check parent record values first (e.g. @M_Warehouse_ID@, @AD_Client_ID@)
-          if (parentValues != null && !parentValues.isEmpty() && !parameter.startsWith("#")) {
-            Object pv = parentValues.get(parameter.toUpperCase());
-            if (pv != null) {
-              value = String.valueOf(pv);
-              log.debug("[resolveSQLDefault] param @{}@ from parentValues: {}", parameter, value);
-            }
-          }
-          if (value == null || value.isEmpty()) {
-            value = Utility.getContext(conn, vars, parameter, windowId);
-          }
-          ps.setObject(paramIndex++, value);
-        }
-
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            return rs.getString(1);
-          }
-        }
-      }
-      return null;
-    } catch (Exception e) {
-      log.debug("Could not resolve SQL default for column {}: {}",
-          adColumn.getDBColumnName(), e.getMessage());
-      return null;
-    }
-  }
-
-  /**
-   * Parse a @SQL= expression, extracting parameter names and replacing @param@ tokens with ?.
-   * Simplified version of UIDefinition.parseSQL adapted for NEO context.
-   *
-   * Input: "@SQL=SELECT name FROM ad_org WHERE ad_org_id = '@#AD_Org_ID@'"
-   * Output SQL: "SELECT name FROM ad_org WHERE ad_org_id = ?"
-   * Output params: ["#AD_Org_ID"]
-   */
-  private static String parseSQLExpression(String expression, ArrayList<String> paramNames) {
-    if (expression == null || expression.trim().isEmpty()) {
-      return "";
-    }
-
-    String value = expression;
-
-    // Remove @SQL= prefix
-    int sqlStart = value.indexOf("@SQL=");
-    if (sqlStart >= 0) {
-      value = value.substring(sqlStart + 5);
-    }
-
-    StringBuilder sqlOut = new StringBuilder();
-    int i = value.indexOf("@");
-
-    while (i != -1) {
-      // Append everything before the @
-      String before = value.substring(0, i);
-      // Strip trailing quote if parameter was quoted in SQL (e.g., '@param@')
-      if (before.endsWith("'")) {
-        before = before.substring(0, before.length() - 1);
-      }
-      sqlOut.append(before);
-
-      value = value.substring(i + 1);
-      int j = value.indexOf("@");
-      if (j < 0) {
-        // No closing @ — append remaining and stop
-        sqlOut.append(value);
-        break;
-      }
-
-      // Extract token name
-      String token = value.substring(0, j);
-      paramNames.add(token);
-      sqlOut.append("?");
-
-      value = value.substring(j + 1);
-      // Strip leading quote after closing @ (e.g., '@param@')
-      if (value.startsWith("'")) {
-        value = value.substring(1);
-      }
-      i = value.indexOf("@");
-    }
-
-    sqlOut.append(value);
-    return sqlOut.toString();
   }
 
   /**
@@ -1155,36 +1029,6 @@ public class NeoDefaultsService {
     }
   }
 
-  /**
-   * Returns the ID of the first active non-system organization for the given client.
-   * Used when the session context org is "0" (the "*" all-orgs pseudo-org) so that
-   * mandatory FK defaults like AD_Org_ID resolve to a real org rather than "0",
-   * which OBDal rejects for business documents.
-   *
-   * A role with access to "*" has implicit access to all orgs, so using any active
-   * org of the client is safe.
-   *
-   * @param clientId the AD_Client_ID of the current session
-   * @return the first org ID ordered by name, or null if none found
-   */
-  public static String resolveFirstOrgForClient(String clientId) {
-    try {
-      String sql = "SELECT AD_Org_ID FROM AD_Org"
-          + " WHERE AD_Client_ID = ? AND IsActive = 'Y' AND AD_Org_ID != '0'"
-          + " ORDER BY Name LIMIT 1";
-      try (PreparedStatement ps = OBDal.getInstance().getConnection(false).prepareStatement(sql)) {
-        ps.setString(1, clientId);
-        try (ResultSet rs = ps.executeQuery()) {
-          if (rs.next()) {
-            return rs.getString(1);
-          }
-        }
-      }
-    } catch (Exception e) {
-      log.debug("Could not resolve first org for client {}: {}", clientId, e.getMessage());
-    }
-    return null;
-  }
   // ---------------------------------------------------------------------------
   // FIC combo preselection helpers (restored in ETP-3894 correction)
   // These only fire for combo-style references (TableDir/Table/List) — they

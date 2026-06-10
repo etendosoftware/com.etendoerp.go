@@ -19,6 +19,8 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
 
@@ -32,6 +34,16 @@ import org.junit.jupiter.api.Test;
  * Unit tests for {@link ProductHandlerUtils}.
  */
 class ProductHandlerUtilsTest {
+
+  @Test
+  @DisplayName("Utility class hides its constructor")
+  void utilityClassHidesConstructor() throws ReflectiveOperationException {
+    Constructor<ProductHandlerUtils> constructor = ProductHandlerUtils.class.getDeclaredConstructor();
+    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
+    constructor.setAccessible(true);
+    constructor.newInstance();
+  }
+
 
   private static Object invokeStatic(String methodName, Class<?>[] paramTypes, Object... args)
       throws Exception {
