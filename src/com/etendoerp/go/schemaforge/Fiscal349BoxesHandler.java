@@ -35,6 +35,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
@@ -319,6 +320,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
     crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
     crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, searchKey));
+    crit.addOrder(Order.desc(TaxReport.PROPERTY_ORGANIZATION + ".id"));
     crit.setMaxResults(1);
     List<TaxReport> list = crit.list();
     return list.isEmpty() ? null : list.get(0);
