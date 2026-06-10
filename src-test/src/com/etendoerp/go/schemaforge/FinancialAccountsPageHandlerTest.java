@@ -324,6 +324,26 @@ public class FinancialAccountsPageHandlerTest {
   }
 
   /**
+   * Verifies that {@code buildAccountsArray()} serialises the PSD2 masked card
+   * number (column {@code EM_PSD2_Masked_Pan}) into the row's {@code maskedPan}
+   * field so the UI can show it under a card account's type.
+   *
+   * @throws Exception
+   *     if the JSON traversal fails
+   */
+  @Test
+  public void testBuildAccountsArrayEmitsMaskedPanForCard() throws Exception {
+    AccountRow card = new AccountRow("acc-9", "Tarjeta", "CA", new BigDecimal("0.00"),
+        new Currency(currencyId("EUR"), "EUR"), "", false);
+    card.maskedPan = "**** **** **** 1234";
+
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(card), Collections.emptyMap());
+    JSONObject row = arr.getJSONObject(0);
+    assertEquals("CA", row.getString("type"));
+    assertEquals("**** **** **** 1234", row.getString("maskedPan"));
+  }
+
+  /**
    * Verifies that {@code buildAccountsArray()} emits the {@code active} flag for
    * each row: active accounts serialise {@code true}, archived ones serialise
    * {@code false}, so the UI can split them into the normal and "inactive"
