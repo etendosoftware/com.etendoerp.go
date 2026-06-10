@@ -16,8 +16,6 @@
  */
 package com.etendoerp.go.schemaforge;
 
-import java.util.Arrays;
-import java.util.HashSet;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -51,7 +49,7 @@ final class SystemClientSelectorRegistry {
    *       client='0' and must be visible to all tenants.</li>
    * </ul>
    */
-  private static final Set<String> SYSTEM_CLIENT_REFS = new HashSet<>(Arrays.asList("158"));
+  private static final Set<String> SYSTEM_CLIENT_REFS = Set.of("158");
 
   /** Matches the HQL client equality predicate produced by SqlToHqlTranslator. */
   private static final Pattern CLIENT_EQUALITY = Pattern.compile(
@@ -70,19 +68,21 @@ final class SystemClientSelectorRegistry {
   }
 
   /**
-   * Returns {@code true} when the column's reference search key (AD_Reference_Value_ID)
-   * is registered for system-client inclusion.
+   * Returns {@code true} when the column's base reference (AD_Reference_ID) or its
+   * reference search key (AD_Reference_Value_ID) is registered for system-client inclusion.
    *
-   * <p>Use this instead of {@link #isRegistered(String)} when calling with an AD_Column,
-   * because {@code getBaseReferenceId()} returns the base type ("18", "19", "30") while
-   * the specific reference ID lives on {@code column.getReferenceSearchKey()}.
+   * <p>Standard columns like {@code C_Tax_ID} carry the registered ID ("158") on the base
+   * reference ({@code column.getReference()}). Extension columns may carry it on the search key
+   * ({@code column.getReferenceSearchKey()}). Both are checked.
    */
   static boolean isRegisteredColumn(Column column) {
     if (column == null) {
       return false;
     }
+    org.openbravo.model.ad.domain.Reference baseRef = column.getReference();
     org.openbravo.model.ad.domain.Reference refSearchKey = column.getReferenceSearchKey();
-    return refSearchKey != null && isRegistered(refSearchKey.getId());
+    return (baseRef != null && isRegistered(baseRef.getId())) ||
+           (refSearchKey != null && isRegistered(refSearchKey.getId()));
   }
 
   /**
@@ -96,7 +96,7 @@ final class SystemClientSelectorRegistry {
       return hqlFilter;
     }
     Matcher m = CLIENT_EQUALITY.matcher(hqlFilter);
-    StringBuffer sb = new StringBuffer();
+    StringBuilder sb = new StringBuilder();
     while (m.find()) {
       String clientId = m.group(1);
       m.appendReplacement(sb, Matcher.quoteReplacement(
