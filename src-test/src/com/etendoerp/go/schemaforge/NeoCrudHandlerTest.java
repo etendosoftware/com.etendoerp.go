@@ -2422,4 +2422,78 @@ class NeoCrudHandlerTest {
       }
     }
   }
+
+  // -------------------------------------------------------------------------
+  // addTabWherePredicate tests (via reflection)
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("addTabWherePredicate")
+  class AddTabWherePredicate {
+
+    @SuppressWarnings("unchecked")
+    private List<String> invokeAddTabWherePredicate(Tab adTab, String tabWhere,
+        String parentId) throws Exception {
+      List<String> predicates = new ArrayList<>();
+      invokePrivate(handler, "addTabWherePredicate",
+          new Class<?>[] { Tab.class, String.class, String.class, List.class },
+          adTab, tabWhere, parentId, predicates);
+      return predicates;
+    }
+
+    @Test
+    @DisplayName("Adds wrapped predicate for a plain (token-free) where clause")
+    void addsPlainWhereClause() throws Exception {
+      Tab adTab = mock(Tab.class);
+
+      List<String> predicates = invokeAddTabWherePredicate(adTab, "e.active = true", null);
+
+      assertEquals(1, predicates.size());
+      assertEquals("(e.active = true)", predicates.get(0));
+    }
+
+    @Test
+    @DisplayName("Adds nothing for a blank tab where clause")
+    void addsNothingForBlankClause() throws Exception {
+      Tab adTab = mock(Tab.class);
+
+      List<String> predicates = invokeAddTabWherePredicate(adTab, "   ", "PARENT-1");
+
+      assertTrue(predicates.isEmpty());
+    }
+
+    @Test
+    @DisplayName("Resolves @token@ via resolveTabWhereTokens when parentId is present")
+    void resolvesTokensWhenParentIdPresent() throws Exception {
+      Tab adTab = mock(Tab.class);
+
+      // With no parent tab, resolveTokenFromParent falls back to the parentId for each token,
+      // so the resolved clause no longer contains '@' and the predicate is added.
+      try (MockedStatic<KernelUtils> kernelMock = Mockito.mockStatic(KernelUtils.class)) {
+        KernelUtils kernelUtils = mock(KernelUtils.class);
+        kernelMock.when(KernelUtils::getInstance).thenReturn(kernelUtils);
+        when(kernelUtils.getParentTab(adTab)).thenReturn(null);
+
+        // resolveTabWhereTokens wraps the resolved value in single quotes, so the
+        // token is written unquoted (as in real AD tab-where clauses).
+        List<String> predicates = invokeAddTabWherePredicate(
+            adTab, "e.client.id = @AD_Client_ID@", "PARENT-1");
+
+        assertEquals(1, predicates.size());
+        assertEquals("(e.client.id = 'PARENT-1')", predicates.get(0));
+      }
+    }
+
+    @Test
+    @DisplayName("Skips predicate when unresolved @token@ remains")
+    void skipsWhenUnresolvedTokenRemains() throws Exception {
+      Tab adTab = mock(Tab.class);
+
+      // parentId is null, so token resolution is not attempted and the '@' stays — predicate skipped.
+      List<String> predicates = invokeAddTabWherePredicate(
+          adTab, "e.client.id = '@AD_Client_ID@'", null);
+
+      assertTrue(predicates.isEmpty(), "Predicate with unresolved @token@ must be skipped");
+    }
+  }
 }

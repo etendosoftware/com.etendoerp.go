@@ -105,3 +105,36 @@ model:
   next authentication step.
 - `login-alert` remains a registered contract but is not triggered until the SSO
   and risk-policy model is defined.
+
+## Provider-Agnostic SSO Behavior
+
+SSO account login is provider-agnostic at the account boundary. The public
+endpoint shape is `POST /sws/go/sso/{provider}` and the backend resolves the
+provider-specific verifier from a server-side registry. All providers return the
+same internal assertion shape: provider id, stable external subject, resolved
+email, display name, and whether the provider is authoritative for that email.
+
+Google is the first implementation at `POST /sws/go/sso/google`. It uses Google
+Identity Services, not the deprecated Google Sign-In `gapi.auth2` platform
+library. The web client must render the Google button with `google.accounts.id`
+and should enable FedCM for the button flow.
+
+The Google JavaScript callback flow sends only the Google ID token in
+`credential`; provider payload fields such as `subject`, `email`, or `name` are
+ignored as client authority. If a Google form/login-uri flow later sends a
+`g_csrf_token`, the server validates it against the matching GIS cookie, but the
+callback flow is not gated on that cookie. The server validates the ID token with
+Google, checks the configured audience, and stores the Google `sub` claim as the
+stable external subject.
+
+Configuration:
+
+| Property | Environment variable | Description |
+| --- | --- | --- |
+| `etendo.go.sso.google.clientId` | `ETGO_GOOGLE_CLIENT_ID` | Required Google Web OAuth client ID. Multiple IDs can be comma-separated. |
+
+SSO-only accounts are created without a local password hash. Existing local
+accounts are auto-linked by email only when the provider-specific verifier marks
+that email as authoritative. The Google implementation does this for any email
+verified by Google (where the `email_verified` claim is `true`). No email
+verification fields or login gates are added.

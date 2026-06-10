@@ -82,7 +82,9 @@ class StubHttpServletRequest implements HttpServletRequest {
   @Override public Object getAttribute(String name) { return null; }
   @Override public Enumeration<String> getAttributeNames() { return Collections.emptyEnumeration(); }
   @Override public String getCharacterEncoding() { return "UTF-8"; }
-  @Override public void setCharacterEncoding(String env) { }
+  @Override public void setCharacterEncoding(String env) {
+    // No-op: the stub serves fixed defaults and does not track request state.
+  }
   @Override public int getContentLength() { return 0; }
   @Override public long getContentLengthLong() { return 0; }
   @Override public String getContentType() { return null; }
@@ -94,8 +96,12 @@ class StubHttpServletRequest implements HttpServletRequest {
   @Override public BufferedReader getReader() { return null; }
   @Override public String getRemoteAddr() { return "127.0.0.1"; }
   @Override public String getRemoteHost() { return "localhost"; }
-  @Override public void setAttribute(String name, Object o) { }
-  @Override public void removeAttribute(String name) { }
+  @Override public void setAttribute(String name, Object o) {
+    // No-op: the stub serves fixed defaults and does not track request attributes.
+  }
+  @Override public void removeAttribute(String name) {
+    // No-op: the stub serves fixed defaults and does not track request attributes.
+  }
   @Override public Locale getLocale() { return Locale.US; }
   @Override public Enumeration<Locale> getLocales() { return Collections.enumeration(Collections.singletonList(Locale.US)); }
   @Override public boolean isSecure() { return false; }
@@ -137,8 +143,12 @@ class StubHttpServletRequest implements HttpServletRequest {
   @Override public boolean isRequestedSessionIdFromURL() { return false; }
   @Override public boolean isRequestedSessionIdFromUrl() { return false; }
   @Override public boolean authenticate(HttpServletResponse response) { return false; }
-  @Override public void login(String username, String password) { }
-  @Override public void logout() { }
+  @Override public void login(String username, String password) {
+    // No-op: the stub does not perform authentication.
+  }
+  @Override public void logout() {
+    // No-op: the stub does not perform authentication.
+  }
   @Override public Collection<Part> getParts() { return Collections.emptyList(); }
   @Override public Part getPart(String name) { return null; }
   @Override public <T extends HttpUpgradeHandler> T upgrade(Class<T> handlerClass) { return null; }

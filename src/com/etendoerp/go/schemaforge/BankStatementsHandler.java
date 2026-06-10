@@ -81,6 +81,7 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String ACTION_PROCESS = "process";
   private static final String ACTION_UPDATE = "update";
   private static final String ACTION_DELETE = "delete";
+  private static final String ACTION_REACTIVATE = "reactivate";
   private static final String PARAM_ACCOUNT_ID = "FIN_Financial_Account_ID";
   private static final String PARAM_STATEMENT_ID = "statementId";
   private static final String PARAM_ACTION = "action";
@@ -116,6 +117,10 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String MSG_BODY_REQUIRED = "Request body is required";
   private static final String MSG_STATEMENT_NOT_FOUND = "Bank statement not found: ";
   private static final String MSG_NOT_DRAFT = "Only draft (unprocessed) statements can be modified";
+  private static final String MSG_NOT_PROCESSED = "Only processed statements can be reactivated";
+  private static final String MSG_POSTED = "The statement is posted and cannot be reactivated";
+  private static final String MSG_HAS_RECONCILED =
+      "The statement has reconciled lines; unreconcile them first";
   private static final String MSG_LINE_REQUIRED = "At least one line is required";
 
   /**
@@ -201,6 +206,11 @@ public class BankStatementsHandler implements NeoHandler {
     return u;
   }
 
+  // The line count / matched count / totals / status are read straight from the
+  // persisted EM_ETGO_* columns (maintained by BankStatementAggregates) — single
+  // source of truth, no on-the-fly SUM/COUNT. The slim subquery only derives the
+  // period (min/max transaction date), which is still computed from the lines and
+  // used by the name fallback below.
   private static final String STATEMENTS_SQL =
       "SELECT bs.fin_bankstatement_id,"
           + "       bs.documentno,"
@@ -211,17 +221,16 @@ public class BankStatementsHandler implements NeoHandler {
           + "       bs.statementdate,"
           + "       bs.processed,"
           + "       bs.posted,"
-          + "       agg.line_count,"
-          + "       agg.matched_count,"
-          + "       agg.total_amount,"
+          + "       bs.em_etgo_line_count,"
+          + "       bs.em_etgo_matched_count,"
+          + "       bs.em_etgo_total_in,"
+          + "       bs.em_etgo_total_out,"
+          + "       bs.em_etgo_status,"
           + "       agg.period_from,"
           + "       agg.period_to"
           + "  FROM fin_bankstatement bs"
           + "  LEFT JOIN ("
           + "    SELECT bsl.fin_bankstatement_id,"
-          + "           COUNT(*) AS line_count,"
-          + "           SUM(CASE WHEN bsl.fin_finacc_transaction_id IS NOT NULL THEN 1 ELSE 0 END) AS matched_count,"
-          + "           SUM(COALESCE(bsl.cramount,0) + COALESCE(bsl.dramount,0)) AS total_amount,"
           + "           MIN(bsl.datetrx) AS period_from,"
           + "           MAX(bsl.datetrx) AS period_to"
           + "      FROM fin_bankstatementline bsl"
@@ -277,6 +286,7 @@ public class BankStatementsHandler implements NeoHandler {
     if (ACTION_PROCESS.equals(action)) return handleProcess(context);
     if (ACTION_UPDATE.equals(action))  return handleUpdate(context);
     if (ACTION_DELETE.equals(action))  return handleDelete(context);
+    if (ACTION_REACTIVATE.equals(action)) return handleReactivate(context);
     return NeoResponse.error(405, "Method not allowed.");
   }
 
@@ -331,6 +341,9 @@ public class BankStatementsHandler implements NeoHandler {
       return NeoResponse.error(400, MSG_BODY_REQUIRED);
     }
     try (AdminMode ignored = new AdminMode()) {
+      // Suppress the per-line observer for this bulk import — the aggregates are
+      // recomputed once below instead of once per parsed line.
+      BankStatementLineAggregateHandler.suppress();
       UploadInput in = parseUploadInput(body, true);
       if (in.error != null) return in.error;
 
@@ -339,6 +352,7 @@ public class BankStatementsHandler implements NeoHandler {
 
       int lineCount = runParser(in.format, in.fileBytes, statement);
       processStatement(statement);
+      BankStatementAggregates.recompute(statement);
       OBDal.getInstance().flush();
 
       JSONObject result = new JSONObject();
@@ -354,6 +368,8 @@ public class BankStatementsHandler implements NeoHandler {
       log.error("Error importing bank statement", e);
       OBDal.getInstance().rollbackAndClose();
       return NeoResponse.error(500, "Import failed: " + e.getMessage());
+    } finally {
+      BankStatementLineAggregateHandler.resume();
     }
   }
 
@@ -383,6 +399,7 @@ public class BankStatementsHandler implements NeoHandler {
     JSONObject body = context.getRequestBody();
     if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try (AdminMode ignored = new AdminMode()) {
+      BankStatementLineAggregateHandler.suppress();
       NeoResponse validation = validateCreateBody(body);
       if (validation != null) return validation;
 
@@ -403,6 +420,11 @@ public class BankStatementsHandler implements NeoHandler {
       if (process) {
         processStatement(statement);
       }
+      // Flush the freshly created lines BEFORE recomputing — the draft path
+      // (process == false) does not call processStatement, so without this the
+      // recompute query would not see the just-saved lines and would store 0.
+      OBDal.getInstance().flush();
+      BankStatementAggregates.recompute(statement);
       OBDal.getInstance().flush();
 
       JSONObject result = new JSONObject();
@@ -422,6 +444,8 @@ public class BankStatementsHandler implements NeoHandler {
       log.error("Error creating manual bank statement", e);
       OBDal.getInstance().rollbackAndClose();
       return NeoResponse.error(500, "Could not create the statement. Please check logs for details.");
+    } finally {
+      BankStatementLineAggregateHandler.resume();
     }
   }
 
@@ -434,8 +458,10 @@ public class BankStatementsHandler implements NeoHandler {
     JSONObject body = context.getRequestBody();
     if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try (AdminMode ignored = new AdminMode()) {
+      BankStatementLineAggregateHandler.suppress();
       FIN_BankStatement statement = requireDraft(body.optString(FIELD_ID, null));
       processStatement(statement);
+      BankStatementAggregates.recompute(statement);
       OBDal.getInstance().flush();
 
       JSONObject result = new JSONObject();
@@ -450,6 +476,50 @@ public class BankStatementsHandler implements NeoHandler {
       log.error("Error processing bank statement", e);
       OBDal.getInstance().rollbackAndClose();
       return NeoResponse.error(500, "Could not process the statement. Please check logs for details.");
+    } finally {
+      BankStatementLineAggregateHandler.resume();
+    }
+  }
+
+  /**
+   * {@code ?action=reactivate} — returns a processed statement to draft so it can
+   * be edited or deleted again, mirroring the core "Reactivate" action of
+   * {@code FIN_BankStatementProcess}. Only processed statements qualify; the
+   * statement must not be posted and must have no reconciled lines (reactivating
+   * does NOT reverse reconciliations — the user must unreconcile first).
+   * Body: {@code { "id": "..." }}.
+   */
+  private NeoResponse handleReactivate(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
+    try (AdminMode ignored = new AdminMode()) {
+      BankStatementLineAggregateHandler.suppress();
+      FIN_BankStatement statement = requireProcessed(body.optString(FIELD_ID, null));
+      if ("Y".equals(statement.getPosted())) {
+        return NeoResponse.error(400, MSG_POSTED);
+      }
+      if (hasReconciledLines(statement)) {
+        return NeoResponse.error(400, MSG_HAS_RECONCILED);
+      }
+      reactivateStatement(statement);
+      OBDal.getInstance().flush();
+      BankStatementAggregates.recompute(statement);
+      OBDal.getInstance().flush();
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_ID, statement.getId());
+      result.put(FIELD_PROCESSED, false);
+      return NeoResponse.ok(wrapInEnvelope(KEY_STATEMENT, result));
+    } catch (OBException e) {
+      log.warn("Reactivate statement failed: {}", e.getMessage());
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(400, e.getMessage());
+    } catch (Exception e) {
+      log.error("Error reactivating bank statement", e);
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(500, "Could not reactivate the statement. Please check logs for details.");
+    } finally {
+      BankStatementLineAggregateHandler.resume();
     }
   }
 
@@ -463,6 +533,7 @@ public class BankStatementsHandler implements NeoHandler {
     JSONObject body = context.getRequestBody();
     if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try (AdminMode ignored = new AdminMode()) {
+      BankStatementLineAggregateHandler.suppress();
       FIN_BankStatement statement = requireDraft(body.optString(FIELD_ID, null));
       if (StringUtils.isBlank(body.optString(FIELD_NAME, null))) {
         return NeoResponse.error(400, MSG_MISSING_FIELD + FIELD_NAME);
@@ -482,6 +553,11 @@ public class BankStatementsHandler implements NeoHandler {
       if (process) {
         processStatement(statement);
       }
+      // Flush the rebuilt lines BEFORE recomputing — update defaults to
+      // process == false, so without this the recompute query would not see the
+      // just-saved lines and would store 0 (same reason as handleCreate).
+      OBDal.getInstance().flush();
+      BankStatementAggregates.recompute(statement);
       OBDal.getInstance().flush();
 
       JSONObject result = new JSONObject();
@@ -498,6 +574,8 @@ public class BankStatementsHandler implements NeoHandler {
       log.error("Error updating bank statement", e);
       OBDal.getInstance().rollbackAndClose();
       return NeoResponse.error(500, "Could not update the statement. Please check logs for details.");
+    } finally {
+      BankStatementLineAggregateHandler.resume();
     }
   }
 
@@ -510,6 +588,10 @@ public class BankStatementsHandler implements NeoHandler {
     JSONObject body = context.getRequestBody();
     if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try (AdminMode ignored = new AdminMode()) {
+      // The statement is removed below, so there is nothing to recompute; we only
+      // suppress the per-line observer so deleting its lines doesn't try to update
+      // a statement that is about to vanish.
+      BankStatementLineAggregateHandler.suppress();
       FIN_BankStatement statement = requireDraft(body.optString(FIELD_ID, null));
       String id = statement.getId();
       deleteLines(statement);
@@ -527,6 +609,8 @@ public class BankStatementsHandler implements NeoHandler {
       log.error("Error deleting bank statement", e);
       OBDal.getInstance().rollbackAndClose();
       return NeoResponse.error(500, "Could not delete the statement. Please check logs for details.");
+    } finally {
+      BankStatementLineAggregateHandler.resume();
     }
   }
 
@@ -548,6 +632,66 @@ public class BankStatementsHandler implements NeoHandler {
       throw new OBException(MSG_NOT_DRAFT);
     }
     return statement;
+  }
+
+  /**
+   * Loads a statement by id and guards that it is processed (the only state that
+   * can be reactivated). Throws {@link OBException} (mapped to 400) when the id is
+   * blank, the statement does not exist, or it is still a draft.
+   */
+  private FIN_BankStatement requireProcessed(String id) {
+    if (StringUtils.isBlank(id)) {
+      throw new OBException(MSG_MISSING_FIELD + FIELD_ID);
+    }
+    FIN_BankStatement statement = OBDal.getInstance().get(FIN_BankStatement.class, id);
+    if (statement == null) {
+      throw new OBException(MSG_STATEMENT_NOT_FOUND + id);
+    }
+    if (!Boolean.TRUE.equals(statement.isProcessed())) {
+      throw new OBException(MSG_NOT_PROCESSED);
+    }
+    return statement;
+  }
+
+  /**
+   * Whether {@code statement} has at least one active line already reconciled
+   * (linked to a financial-account transaction). Reactivation is blocked in that
+   * case — mirrors the core {@code FIN_BankStatementProcess} guard. Package-private
+   * so it can be stubbed in unit tests.
+   */
+  boolean hasReconciledLines(FIN_BankStatement statement) {
+    OBCriteria<FIN_BankStatementLine> crit =
+        OBDal.getInstance().createCriteria(FIN_BankStatementLine.class);
+    crit.add(org.hibernate.criterion.Restrictions.eq(
+        FIN_BankStatementLine.PROPERTY_BANKSTATEMENT, statement));
+    crit.add(org.hibernate.criterion.Restrictions.eq(
+        FIN_BankStatementLine.PROPERTY_ACTIVE, true));
+    crit.add(org.hibernate.criterion.Restrictions.isNotNull(
+        FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION));
+    crit.setFilterOnReadableOrganization(false);
+    crit.setMaxResults(1);
+    return !crit.list().isEmpty();
+  }
+
+  /**
+   * Returns a processed statement to draft, mirroring the core "Reactivate"
+   * action: clears the Processed flag and flips the APRM process selector back to
+   * "P". Callers must have already validated it is processed, not posted and has
+   * no reconciled lines.
+   */
+  void reactivateStatement(FIN_BankStatement statement) {
+    statement.setProcessNow(true);
+    OBDal.getInstance().save(statement);
+    OBDal.getInstance().flush();
+
+    statement.setProcessed(false);
+    statement.setAPRMProcessBankStatement("P");
+    statement.setAPRMProcessBankStatementForce("P");
+    OBDal.getInstance().save(statement);
+    OBDal.getInstance().flush();
+
+    statement.setProcessNow(false);
+    OBDal.getInstance().save(statement);
   }
 
   /** Removes every line of {@code statement} so {@link #createLines} can rebuild them. */
@@ -768,7 +912,7 @@ public class BankStatementsHandler implements NeoHandler {
 
       // Use the SQL row count as the canonical lineCount — that's the only
       // value guaranteed to match what the user will actually see in step 2.
-      JSONObject result = buildPreviewPayload(in.format, in.fileName, lines.length(), lines);
+      JSONObject result = BankStatementPreview.buildPayload(in.format, in.fileName, lines.length(), lines);
 
       // Drop everything we parsed — preview is read-only. rollbackAndClose
       // discards both the statement and the cascaded lines from the DB.
@@ -812,8 +956,8 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("lineNo", rs.getLong("line"));
           row.put("date", formatDate(rs.getTimestamp("datetrx")));
           row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
-          row.put("bpartnerName", StringUtils.trimToEmpty(rs.getString("bpartnername")));
-          row.put("reference", StringUtils.trimToEmpty(rs.getString("referenceno")));
+          row.put(FIELD_BPARTNER_NAME, StringUtils.trimToEmpty(rs.getString("bpartnername")));
+          row.put(FIELD_REFERENCE, StringUtils.trimToEmpty(rs.getString("referenceno")));
           row.put(FIELD_CRAMOUNT, credit);
           row.put(FIELD_DRAMOUNT, debit);
           arr.put(row);
@@ -821,62 +965,6 @@ public class BankStatementsHandler implements NeoHandler {
       }
     }
     return arr;
-  }
-
-  /**
-   * Builds the envelope JSON returned by {@code handlePreview}. Aggregates
-   * totals (abonos / cargos) and the period (min/max transaction date) over
-   * the {@code lines} array supplied by {@link #readLinesForPreview}.
-   */
-  private JSONObject buildPreviewPayload(StatementFormat format, String fileName,
-                                         int lineCount, JSONArray lines) throws Exception {
-    PreviewTotals totals = aggregatePreviewTotals(lines);
-
-    JSONObject result = new JSONObject();
-    result.put("format", format.name());
-    result.put(FIELD_FILE_NAME, fileName);
-    result.put(FIELD_LINE_COUNT, lineCount);
-    result.put("totalIn", totals.totalIn);
-    result.put("totalOut", totals.totalOut);
-    result.put("periodFrom", totals.periodFrom);
-    result.put("periodTo", totals.periodTo);
-    result.put(ACTION_LINES, lines);
-    return result;
-  }
-
-  /** Aggregation result computed from the parsed lines: totals + period. */
-  private static final class PreviewTotals {
-    BigDecimal totalIn = BigDecimal.ZERO;
-    BigDecimal totalOut = BigDecimal.ZERO;
-    String periodFrom = "";
-    String periodTo = "";
-  }
-
-  /**
-   * Walks the parsed lines once, accumulating totalIn / totalOut and the
-   * min/max transaction date. Extracted from {@link #buildPreviewPayload} so
-   * the parent method stays under Sonar's cognitive-complexity threshold.
-   */
-  private static PreviewTotals aggregatePreviewTotals(JSONArray lines) throws Exception {
-    PreviewTotals t = new PreviewTotals();
-    for (int i = 0; i < lines.length(); i++) {
-      JSONObject row = lines.getJSONObject(i);
-      t.totalIn = t.totalIn.add(amountFrom(row, FIELD_CRAMOUNT));
-      t.totalOut = t.totalOut.add(amountFrom(row, FIELD_DRAMOUNT));
-      updatePeriod(t, row.optString("date", ""));
-    }
-    return t;
-  }
-
-  private static BigDecimal amountFrom(JSONObject row, String key) throws Exception {
-    if (!row.has(key) || row.isNull(key)) return BigDecimal.ZERO;
-    return new BigDecimal(row.getString(key));
-  }
-
-  private static void updatePeriod(PreviewTotals t, String date) {
-    if (date.isEmpty()) return;
-    if (t.periodFrom.isEmpty() || date.compareTo(t.periodFrom) < 0) t.periodFrom = date;
-    if (t.periodTo.isEmpty()   || date.compareTo(t.periodTo)   > 0) t.periodTo = date;
   }
 
   FIN_BankStatement newBankStatement(FIN_FinancialAccount account, String fileName) {
@@ -964,8 +1052,10 @@ public class BankStatementsHandler implements NeoHandler {
       ps.setString(1, accountId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          int lineCount = rs.getInt("line_count");
-          int matchedCount = rs.getInt("matched_count");
+          int lineCount = rs.getInt("em_etgo_line_count");
+          int matchedCount = rs.getInt("em_etgo_matched_count");
+          BigDecimal totalIn = nullSafeBigDecimal(rs.getBigDecimal("em_etgo_total_in"));
+          BigDecimal totalOut = nullSafeBigDecimal(rs.getBigDecimal("em_etgo_total_out"));
           String periodFrom = formatDate(rs.getTimestamp("period_from"));
           String periodTo = formatDate(rs.getTimestamp("period_to"));
 
@@ -975,17 +1065,27 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("name", StringUtils.trimToEmpty(rs.getString("name")));
           row.put(FIELD_FILE_NAME, StringUtils.trimToEmpty(rs.getString("filename")));
           row.put(FIELD_NOTES, StringUtils.trimToEmpty(rs.getString(FIELD_NOTES)));
-          row.put("importDate", formatDate(rs.getTimestamp("importdate")));
-          row.put("transactionDate", formatDate(rs.getTimestamp("statementdate")));
+          row.put(FIELD_IMPORT_DATE, formatDate(rs.getTimestamp("importdate")));
+          row.put(FIELD_TRANSACTION_DATE, formatDate(rs.getTimestamp("statementdate")));
           boolean processed = "Y".equalsIgnoreCase(rs.getString(FIELD_PROCESSED));
           row.put(FIELD_PROCESSED, StringUtils.trimToEmpty(rs.getString(FIELD_PROCESSED)));
           row.put("posted", StringUtils.trimToEmpty(rs.getString("posted")));
           row.put(FIELD_LINE_COUNT, lineCount);
           row.put("matchedCount", matchedCount);
-          row.put("totalAmount", nullSafeBigDecimal(rs.getBigDecimal("total_amount")));
+          // totalAmount is kept for the existing conditional filter; it is just the
+          // sum of the two persisted columns, derived here so we store one less column.
+          row.put("totalAmount", totalIn.add(totalOut));
+          row.put("totalIn", totalIn);
+          row.put("totalOut", totalOut);
           row.put("periodFrom", periodFrom);
           row.put("periodTo", periodTo);
-          row.put("status", deriveStatementStatus(processed, lineCount, matchedCount));
+          // Read the persisted status; fall back to deriving it for rows that
+          // predate the column and have not been backfilled yet.
+          String status = StringUtils.trimToEmpty(rs.getString("em_etgo_status"));
+          if (StringUtils.isBlank(status)) {
+            status = deriveStatementStatus(processed, lineCount, matchedCount);
+          }
+          row.put("status", status);
           arr.put(row);
         }
       }
