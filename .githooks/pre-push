@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+# .githooks/pre-push
+# Run local JUnit tests and SonarQube checks before pushing.
+set -e
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+MODULE_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+CORE_DIR="$(cd -- "$MODULE_DIR/../.." && pwd)"
+
+echo "==> Running pre-push checks..."
+
+# Path where run-sonar.sh writes a copy-pasteable handoff prompt when the
+# Quality Gate fails. Cleared up-front so a stale file from a previous run is
+# never shown for an unrelated failure.
+HANDOFF_FILE="$MODULE_DIR/sonar-reports/sonar-handoff-prompt.md"
+rm -f "$HANDOFF_FILE"
+
+# Fail fast: Check for uncommitted or untracked changes in the module repository
+cd "$MODULE_DIR"
+if [ -n "$(git status --porcelain)" ]; then
+  echo "❌ ERROR: You have uncommitted or untracked changes in the module repository."
+  echo "   Please commit or stash them before pushing, or use 'git push --no-verify' to bypass."
+  echo "   Uncommitted files:"
+  git status --porcelain
+  exit 1
+fi
+
+# Resolve base branch dynamically
+BASE_REF=""
+for branch in "origin/epic/ETP-3504" "origin/develop" "origin/main"; do
+  if git rev-parse --verify --quiet "$branch" >/dev/null; then
+    BASE_REF="$branch"
+    break
+  fi
+done
+
+# ----------------------------------------------------------------------------
+# Live progress helpers
+# ----------------------------------------------------------------------------
+# Detect interactive terminal: only animate when stdout is a TTY (skip in CI).
+if [ -t 1 ]; then IS_TTY=1; else IS_TTY=0; fi
+
+SPIN_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+
+# Per-step duration cache (used as ETA baseline across runs). Under tmp/ → gitignored.
+DURATIONS_FILE="$MODULE_DIR/tmp/pre-push/durations"
+LAST_DURATION=0
+
+# Look up the last recorded duration (seconds) for a step key, or 0.
+prev_duration() {
+  local val=""
+  [ -f "$DURATIONS_FILE" ] && val="$(grep "^${1}=" "$DURATIONS_FILE" 2>/dev/null | tail -n1 | cut -d= -f2)"
+  [[ "$val" =~ ^[0-9]+$ ]] && echo "$val" || echo 0
+}
+
+# Persist the duration (seconds) for a step key.
+save_duration() {
+  local key="$1" dur="$2"
+  mkdir -p "$(dirname "$DURATIONS_FILE")"
+  if [ -f "$DURATIONS_FILE" ]; then
+    grep -v "^${key}=" "$DURATIONS_FILE" > "$DURATIONS_FILE.tmp" 2>/dev/null || true
+    mv "$DURATIONS_FILE.tmp" "$DURATIONS_FILE"
+  fi
+  echo "${key}=${dur}" >> "$DURATIONS_FILE"
+}
+
+# Animate a spinner + ETA + last log line while $1 (pid) is alive.
+monitor_progress() {
+  local pid="$1" key="$2" log="$3"
+  local start=$SECONDS i=0
+  local baseline; baseline="$(prev_duration "$key")"
+  local cols; cols="$(tput cols 2>/dev/null || echo 80)"
+
+  while kill -0 "$pid" 2>/dev/null; do
+    local elapsed=$(( SECONDS - start ))
+    local frame="${SPIN_FRAMES[$(( i % ${#SPIN_FRAMES[@]} ))]}"
+    i=$(( i + 1 ))
+
+    # Progress / ETA section.
+    local prog
+    if [ "$baseline" -gt 0 ]; then
+      local pct=$(( elapsed * 100 / baseline ))
+      [ "$pct" -gt 99 ] && pct=99
+      local remaining=$(( baseline - elapsed ))
+      [ "$remaining" -lt 0 ] && remaining=0
+      local filled=$(( pct / 10 )) bar="" c=0
+      while [ "$c" -lt 10 ]; do
+        if [ "$c" -lt "$filled" ]; then bar="${bar}█"; else bar="${bar}░"; fi
+        c=$(( c + 1 ))
+      done
+      prog="[${bar}] ${pct}% · ${elapsed}s elapsed · ~${remaining}s left"
+    else
+      prog="${elapsed}s elapsed (no baseline yet)"
+    fi
+
+    # Activity = last non-empty log line (strip CR and ANSI color codes).
+    local activity=""
+    if [ -s "$log" ]; then
+      activity="$(grep -v '^[[:space:]]*$' "$log" 2>/dev/null | tail -n1 | tr -d '\r' | sed $'s/\033\\[[0-9;]*m//g')"
+    fi
+
+    local line="   ${frame} ${prog}   ${activity}"
+    printf '\r\033[K%s' "${line:0:$(( cols - 1 ))}"
+    sleep 0.2
+  done
+  printf '\r\033[K'
+}
+
+# Run a command (string, eval'd) in a dir, streaming live progress.
+# Sets LAST_DURATION. Records duration on success. Returns the command's exit status.
+exec_with_progress() {
+  local key="$1" run_dir="$2" abs_log="$3" cmd="$4"
+  mkdir -p "$(dirname "$abs_log")"
+
+  local start=$SECONDS
+  set +e
+  ( cd "$run_dir" && eval "$cmd" ) > "$abs_log" 2>&1 &
+  local pid=$!
+  [ "$IS_TTY" = "1" ] && monitor_progress "$pid" "$key" "$abs_log"
+  wait "$pid"
+  local st=$?
+  set -e
+
+  LAST_DURATION=$(( SECONDS - start ))
+  [ $st -eq 0 ] && save_duration "$key" "$LAST_DURATION"
+  return $st
+}
+
+# Pipeline runner helper
+run_step() {
+  local step_num="$1"
+  local step_name="$2"
+  local run_dir="$3"
+  local log_file="$4"
+  local cmd="$5"
+  local abs_log="$MODULE_DIR/$log_file"
+
+  echo "==> [$step_num/2] $step_name..."
+
+  # NOTE: capture the exit status without tripping `set -e`. Calling
+  # exec_with_progress bare would abort the whole script on a non-zero return
+  # (before we can print the failure detail), which is why a failed push showed
+  # nothing in the console.
+  local exit_status=0
+  exec_with_progress "step-${step_num}" "$run_dir" "$abs_log" "$cmd" || exit_status=$?
+
+  if [ $exit_status -eq 0 ]; then
+    echo "==> [$step_num/2] $step_name... SUCCESS ✅ (${LAST_DURATION}s)"
+  else
+    echo "==> [$step_num/2] $step_name... FAILED ❌ (${LAST_DURATION}s)"
+    echo ""
+    # If the step produced a ready-to-use handoff prompt (e.g. the Sonar gate),
+    # print it IN FULL to the console so the developer sees exactly what to fix.
+    if [ -f "$HANDOFF_FILE" ]; then
+      cat "$HANDOFF_FILE"
+    else
+      echo "========================================================================="
+      echo "❌ ERROR: Step '$step_name' failed with exit code $exit_status."
+      echo "👉 Log file: $abs_log"
+      echo "========================================================================="
+      echo "Showing last 25 lines of log:"
+      echo "-------------------------------------------------------------------------"
+      tail -n 25 "$abs_log"
+      echo "-------------------------------------------------------------------------"
+      echo ""
+    fi
+    exit 1
+  fi
+}
+
+# 0. Fetch the base branch and fail fast if this branch conflicts with it.
+# Runs BEFORE the expensive tests/sonar so a conflicting branch is rejected quickly.
+check_base_conflicts() {
+  echo "==> Checking for conflicts with base branch (fetch + merge-tree)..."
+
+  # Fetch the latest base branch (prefer epic/ETP-3504, then develop, then main).
+  local base_branch=""
+  for b in "epic/ETP-3504" "develop" "main"; do
+    if git fetch --quiet origin "$b" 2>/dev/null; then
+      base_branch="$b"
+      break
+    fi
+  done
+
+  if [ -z "$base_branch" ]; then
+    echo "    SKIPPED ⚠️ (could not fetch any base branch from origin — offline?)"
+    return 0
+  fi
+
+  local base_ref="origin/$base_branch"
+
+  # Tree-level merge check — no working-tree changes (git >= 2.38).
+  local out rc
+  out="$(git merge-tree --write-tree --name-only "$base_ref" HEAD 2>/dev/null)"
+  rc=$?
+
+  if [ "$rc" -eq 0 ]; then
+    echo "    SUCCESS ✅ (merges cleanly into $base_ref)"
+    return 0
+  elif [ "$rc" -eq 1 ]; then
+    # Conflicts. Output is: <tree-oid> on line 1, then conflicted file paths.
+    echo "    FAILED ❌ (conflicts with $base_ref)"
+    echo ""
+    echo "========================================================================="
+    echo "❌ ERROR: This branch has merge conflicts with $base_ref."
+    echo "========================================================================="
+    echo "Conflicting file(s):"
+    echo "$out" | tail -n +2 | sed 's/^/  - /'
+    echo ""
+    echo "👉 Update your branch and resolve the conflicts before pushing:"
+    echo "     git merge $base_ref        # or: git rebase $base_branch"
+    echo "   Then re-run the push (or bypass with 'git push --no-verify')."
+    echo "========================================================================="
+    exit 1
+  else
+    # rc > 1: merge-tree errored or unsupported — warn but don't hard-block.
+    echo "    SKIPPED ⚠️ (merge-tree unavailable or errored, rc=$rc)"
+    return 0
+  fi
+}
+
+check_base_conflicts
+
+# 1. Run JUnit / Gradle tests
+run_step "1" "Running JUnit/Gradle tests" "$CORE_DIR" "tmp/pre-push/junit-tests.log" "./gradlew test --tests \"com.etendoerp.go.*\""
+
+# 2. Run SonarQube Quality Gate
+# --fail-on-gate makes run-sonar.sh exit non-zero when the Quality Gate is in
+# ERROR, so this step (and the push) is blocked exactly when CI's gate would fail.
+if [ -n "$BASE_REF" ]; then
+  SONAR_CMD="./run-sonar.sh --base-ref \"$BASE_REF\" --fail-on-gate"
+else
+  SONAR_CMD="./run-sonar.sh --all-issues --fail-on-gate"
+fi
+run_step "2" "Running SonarQube analysis" "$MODULE_DIR" "tmp/pre-push/sonar-analysis.log" "$SONAR_CMD"
+
+echo ""
+echo "=========================================="
+echo "🎉 Pre-push checks passed successfully!"
+echo "=========================================="
+exit 0
