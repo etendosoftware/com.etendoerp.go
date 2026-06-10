@@ -18,11 +18,14 @@
 package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.BankStatementFormatDetector.detectFormat;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.buildLineTxns;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.deriveStatementStatus;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.formatDate;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.isBlankLine;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.nullSafeBigDecimal;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseAmount;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseIsoDate;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseStatementIds;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.truncate;
 
 import com.etendoerp.go.schemaforge.BankStatementFormatDetector.StatementFormat;
@@ -32,7 +35,6 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
@@ -349,25 +351,6 @@ public class BankStatementsHandler implements NeoHandler {
       log.error("Error loading lines for statements {}", statementIds, e);
       return NeoResponse.error(500, "Internal Server Error");
     }
-  }
-
-  /**
-   * Collects the requested statement ids: the comma-separated {@code statementIds}
-   * (used by the multi-statement CSV export) takes precedence, falling back to the
-   * single {@code statementId} used by the inline/detail line views.
-   */
-  private static List<String> parseStatementIds(String multi, String single) {
-    List<String> ids = new ArrayList<>();
-    if (StringUtils.isNotBlank(multi)) {
-      for (String id : multi.split(",")) {
-        if (StringUtils.isNotBlank(id)) {
-          ids.add(id.trim());
-        }
-      }
-    } else if (StringUtils.isNotBlank(single)) {
-      ids.add(single.trim());
-    }
-    return ids;
   }
 
   /**
@@ -879,15 +862,6 @@ public class BankStatementsHandler implements NeoHandler {
    * ignored on purpose: the UI pre-fills it with today, so a row with only that
    * default date still counts as empty.
    */
-  private static boolean isBlankLine(JSONObject l) {
-    return StringUtils.isBlank(l.optString(FIELD_DESCRIPTION, null))
-        && StringUtils.isBlank(l.optString(FIELD_BPARTNER_NAME, null))
-        && StringUtils.isBlank(l.optString(FIELD_BPARTNER_ID, null))
-        && StringUtils.isBlank(l.optString(FIELD_GLITEM_ID, null))
-        && StringUtils.isBlank(l.optString(FIELD_REFERENCE, null))
-        && parseAmount(l.optString("in", null)).signum() == 0
-        && parseAmount(l.optString("out", null)).signum() == 0;
-  }
 
   /**
    * Dispatches to the right parser by {@link StatementFormat} and returns the
@@ -1169,6 +1143,8 @@ public class BankStatementsHandler implements NeoHandler {
       return loadLines(statementIds.get(0));
     }
     JSONArray arr = new JSONArray();
+    // The only dynamic part is the count of "?" bind markers; the actual ids are
+    // bound via setString, so this is not a SQL-injection vector.
     String placeholders = String.join(",", Collections.nCopies(statementIds.size(), "?"));
     String sql = LINES_SQL_HEAD
         + " WHERE bsl.isactive = 'Y'"
@@ -1176,7 +1152,7 @@ public class BankStatementsHandler implements NeoHandler {
         + " ORDER BY bsl.fin_bankstatement_id, bsl.line ASC";
     // Connection is managed by the DAL's Hibernate Session; don't close it.
     Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    try (PreparedStatement ps = conn.prepareStatement(sql)) { // NOSONAR java:S2077 — placeholders are only "?" markers
       for (int i = 0; i < statementIds.size(); i++) {
         ps.setString(i + 1, statementIds.get(i));
       }
@@ -1211,32 +1187,5 @@ public class BankStatementsHandler implements NeoHandler {
     row.put("matched", matched);
     row.put("txns", buildLineTxns(rs, matched));
     return row;
-  }
-
-  /**
-   * Builds the {@code txns[]} array for a statement line from the joined
-   * transaction columns of {@link #LINES_SQL}. The relationship is 1:1 today, so
-   * the array has 0 or 1 element; the shape is kept array-based so a future 1:N
-   * reconciliation only changes the query, not the contract. Amounts/types mirror
-   * the Movimientos tab; {@code trxType} and {@code posted} are emitted raw and
-   * labelled in the frontend.
-   */
-  private static JSONArray buildLineTxns(ResultSet rs, boolean matched) throws Exception {
-    JSONArray txns = new JSONArray();
-    if (!matched) {
-      return txns;
-    }
-    JSONObject t = new JSONObject();
-    t.put("documentNo", StringUtils.trimToEmpty(rs.getString("txn_documentno")));
-    t.put("date", formatDate(rs.getTimestamp("txn_date")));
-    t.put("contact", StringUtils.trimToEmpty(rs.getString("txn_contact")));
-    t.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString("txn_description")));
-    t.put("trxType", StringUtils.trimToEmpty(rs.getString("txn_trxtype")));
-    t.put("paymentStatus", StringUtils.trimToEmpty(rs.getString("txn_status")));
-    t.put("amount", nullSafeBigDecimal(rs.getBigDecimal("txn_amount")));
-    t.put("paymentId", StringUtils.trimToEmpty(rs.getString("txn_payment_id")));
-    t.put("paymentIsReceipt", StringUtils.trimToEmpty(rs.getString("txn_payment_isreceipt")));
-    txns.put(t);
-    return txns;
   }
 }

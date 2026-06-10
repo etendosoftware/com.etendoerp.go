@@ -68,8 +68,9 @@ final class NeoCsvExportService {
   private static final String PARAM_FILENAME = "filename";
   private static final String TYPE_DATE = "date";
   private static final String FIELD_ID = "id";
+  private static final String DEFAULT_FILENAME = "export";
   // UTF-8 BOM so spreadsheet apps (Excel) detect the encoding and render accents.
-  private static final String UTF8_BOM = "﻿";
+  private static final String UTF8_BOM = "\uFEFF";
   private static final String CRLF = "\r\n";
 
   private NeoCsvExportService() {
@@ -160,7 +161,7 @@ final class NeoCsvExportService {
   }
 
   private static boolean isFilteredOut(JSONObject row, Set<String> idFilter) {
-    if (idFilter == null) {
+    if (idFilter.isEmpty()) {
       return false;
     }
     String id = row.optString(FIELD_ID, null);
@@ -170,18 +171,25 @@ final class NeoCsvExportService {
   /** When no column spec is given, fall back to all keys of the first kept row. */
   private static List<Column> deriveColumns(JSONArray rows, Set<String> idFilter) {
     List<Column> cols = new ArrayList<>();
-    for (int r = 0; r < rows.length(); r++) {
-      JSONObject row = rows.optJSONObject(r);
-      if (row == null || isFilteredOut(row, idFilter)) {
-        continue;
-      }
-      for (Iterator<String> it = row.keys(); it.hasNext();) {
+    JSONObject sample = firstKeptRow(rows, idFilter);
+    if (sample != null) {
+      for (Iterator<String> it = sample.keys(); it.hasNext();) {
         String key = it.next();
         cols.add(new Column(key, key, ""));
       }
-      break;
     }
     return cols;
+  }
+
+  /** First row that passes the id filter, or {@code null} when there is none. */
+  private static JSONObject firstKeptRow(JSONArray rows, Set<String> idFilter) {
+    for (int r = 0; r < rows.length(); r++) {
+      JSONObject row = rows.optJSONObject(r);
+      if (row != null && !isFilteredOut(row, idFilter)) {
+        return row;
+      }
+    }
+    return null;
   }
 
   /** Resolves a flat key or a dotted path ({@code txns.0.documentNo}) on a row. */
@@ -250,21 +258,22 @@ final class NeoCsvExportService {
     return cols;
   }
 
+  /** Parses the comma-separated id filter. Empty set means "no filter". */
   private static Set<String> parseIds(String spec) {
-    if (StringUtils.isBlank(spec)) {
-      return null;
-    }
     Set<String> ids = new HashSet<>();
+    if (StringUtils.isBlank(spec)) {
+      return ids;
+    }
     for (String id : spec.split(",")) {
       if (StringUtils.isNotBlank(id)) {
         ids.add(id.trim());
       }
     }
-    return ids.isEmpty() ? null : ids;
+    return ids;
   }
 
   private static String sanitizeFilename(String name) {
-    String base = StringUtils.isBlank(name) ? "export" : name.trim();
+    String base = StringUtils.isBlank(name) ? DEFAULT_FILENAME : name.trim();
     base = base.replaceAll("[^\\w.\\-]+", "_");
     if (!StringUtils.endsWithIgnoreCase(base, ".csv")) {
       base = base + ".csv";

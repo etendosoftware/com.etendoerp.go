@@ -123,42 +123,11 @@ class NeoRequestRouter {
    */
   void handleReportSpecRequest(SFSpec spec, NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws Exception {
-    // Check for a custom NeoHandler qualifier on any entity of this report spec
-    String reportHandlerQualifier = null;
-    try {
-      OBCriteria<SFEntity> qCriteria = OBDal.getInstance().createCriteria(SFEntity.class);
-      qCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
-      for (SFEntity qEntity : qCriteria.list()) {
-        if (StringUtils.isNotBlank(qEntity.getJavaQualifier())) {
-          reportHandlerQualifier = qEntity.getJavaQualifier();
-          break;
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Error checking report handler qualifier for spec '{}': {}", spec.getName(), e.getMessage());
-    }
-    if (reportHandlerQualifier != null) {
-      JSONObject requestBody = NeoRequestBodyParser.parseOptionalJsonObject(NeoRequestBodyParser.readRequestBody(request));
-      NeoContext handlerContext = NeoContext.builder()
-          .specName(pathInfo.specName)
-          .entityName(pathInfo.specName)
-          .httpMethod(method)
-          .requestBody(requestBody)
-          .queryParams(servlet.extractQueryParams(request))
-          .obContext(OBContext.getOBContext())
-          .build();
-      NeoResponse handlerResult = servlet.handleWithHooks(reportHandlerQualifier, handlerContext, request, response);
-      if (handlerResult != null) {
-        // Generic CSV export: a single-segment handler (e.g. bank-statements) is
-        // dispatched here; when the GET carries export=csv, stream its rows as CSV.
-        if ("GET".equals(method)
-            && NeoCsvExportService.tryExport(handlerResult, handlerContext.getQueryParams(),
-                response)) {
-          return;
-        }
-        servlet.writeResponse(response, handlerResult);
-        return;
-      }
+    // Custom NeoHandler dispatch (single-segment handlers such as bank-statements).
+    String reportHandlerQualifier = findReportHandlerQualifier(spec);
+    if (reportHandlerQualifier != null
+        && dispatchReportHandler(reportHandlerQualifier, pathInfo, method, request, response)) {
+      return;
     }
     Process adReportProcess = spec.getProcess();
     if (adReportProcess != null && !servlet.authenticator.hasProcessAccess(adReportProcess.getId())) {
@@ -181,6 +150,50 @@ class NeoRequestRouter {
       return;
     }
     servlet.processReportEndpoint.handleReportSpec(spec, request, response);
+  }
+
+  /** First non-blank Java_Qualifier among the spec's entities, or {@code null}. */
+  private String findReportHandlerQualifier(SFSpec spec) {
+    try {
+      OBCriteria<SFEntity> qCriteria = OBDal.getInstance().createCriteria(SFEntity.class);
+      qCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
+      for (SFEntity qEntity : qCriteria.list()) {
+        if (StringUtils.isNotBlank(qEntity.getJavaQualifier())) {
+          return qEntity.getJavaQualifier();
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Error checking report handler qualifier for spec '{}': {}", spec.getName(), e.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * Runs the custom handler and writes its result (or streams a CSV export when
+   * the GET carries {@code export=csv}). Returns {@code true} when it handled the
+   * request, {@code false} when there was no handler result to write.
+   */
+  private boolean dispatchReportHandler(String qualifier, NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws Exception {
+    JSONObject requestBody = NeoRequestBodyParser.parseOptionalJsonObject(NeoRequestBodyParser.readRequestBody(request));
+    NeoContext handlerContext = NeoContext.builder()
+        .specName(pathInfo.specName)
+        .entityName(pathInfo.specName)
+        .httpMethod(method)
+        .requestBody(requestBody)
+        .queryParams(servlet.extractQueryParams(request))
+        .obContext(OBContext.getOBContext())
+        .build();
+    NeoResponse handlerResult = servlet.handleWithHooks(qualifier, handlerContext, request, response);
+    if (handlerResult == null) {
+      return false;
+    }
+    if ("GET".equals(method)
+        && NeoCsvExportService.tryExport(handlerResult, handlerContext.getQueryParams(), response)) {
+      return true;
+    }
+    servlet.writeResponse(response, handlerResult);
+    return true;
   }
 
   /**

@@ -121,6 +121,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String KEY_RESPONSE = "response";
   private static final String FIELD_TRX_TYPE = "trxType";
   private static final String FIELD_DESCRIPTION = "description";
+  private static final String FIELD_DEPOSIT_AMOUNT = "depositAmount";
 
   /** Accounting-dimension UI keys, reused across marshalling, mapping and ordering. */
   private static final String DIM_ORGANIZATION = "organization";
@@ -314,7 +315,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           // "Payment" label, and the processed flag. Column order/labels live in the
           // Movements tab (MOVEMENT_CSV_COLUMNS in index.jsx).
           row.put("transactionTypeLabel", trxTypeClassicLabel(trxType));
-          row.put("depositAmount", nullSafeBigDecimal(rs.getBigDecimal("deposit_amt")));
+          row.put(FIELD_DEPOSIT_AMOUNT, nullSafeBigDecimal(rs.getBigDecimal("deposit_amt")));
           row.put("withdrawalAmount", nullSafeBigDecimal(rs.getBigDecimal("payment_amt")));
           row.put("statusLabel", statusClassicLabel(status));
           row.put("processed", !"RPAP".equals(status) && !"RPAE".equals(status));
@@ -664,7 +665,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     if (!"BPD".equals(trxType) && !"BPW".equals(trxType) && !"BF".equals(trxType)) {
       return NeoResponse.error(400, "Invalid trxType. Must be 'BPD' (deposit), 'BPW' (withdrawal) or 'BF' (bank fee).");
     }
-    BigDecimal deposit = nullSafeBigDecimal(optBigDecimal(body, "depositAmount"));
+    BigDecimal deposit = nullSafeBigDecimal(optBigDecimal(body, FIELD_DEPOSIT_AMOUNT));
     BigDecimal payment = nullSafeBigDecimal(optBigDecimal(body, "paymentAmount"));
     if (deposit.signum() < 0 || payment.signum() < 0) {
       return NeoResponse.error(400, "Amounts must be non-negative");
@@ -685,7 +686,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
                                                  Currency currency) {
     String trxType = body.optString(FIELD_TRX_TYPE, null);
     String description = body.optString(FIELD_DESCRIPTION, "");
-    BigDecimal depositAmount = nullSafeBigDecimal(optBigDecimal(body, "depositAmount"));
+    BigDecimal depositAmount = nullSafeBigDecimal(optBigDecimal(body, FIELD_DEPOSIT_AMOUNT));
     BigDecimal paymentAmount = nullSafeBigDecimal(optBigDecimal(body, "paymentAmount"));
     Date transactionDate = parseDate(body.optString("transactionDate", null), new Date());
     Date accountingDate = parseDate(body.optString("accountingDate", null), transactionDate);
