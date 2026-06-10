@@ -146,7 +146,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       summary.put("total" + e.getKey(), e.getValue().setScale(2, RoundingMode.HALF_UP).toString());
     }
 
-    String    orgNif      = resolveOrgNif(orgId, dao349);
+    String    orgNif      = resolveOrgNif(orgId);
     JSONArray invoicesArr = collectInvoices(purch, sales);
 
     JSONObject root = new JSONObject();
@@ -277,18 +277,17 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
   // ── resolution helpers ────────────────────────────────────────────
 
-  private String resolveOrgNif(String orgId, AEAT3492010ReportDao dao) {
+  private String resolveOrgNif(String orgId) {
     OBCriteria<OrganizationInformation> crit =
         OBDal.getInstance().createCriteria(OrganizationInformation.class);
-    crit.add(Restrictions.eq(OrganizationInformation.PROPERTY_ORGANIZATION + ".id", orgId));
+    crit.add(Restrictions.in(OrganizationInformation.PROPERTY_ORGANIZATION + ".id",
+        Arrays.asList(orgId, "0")));
+    crit.addOrder(Order.desc(OrganizationInformation.PROPERTY_ORGANIZATION + ".id"));
     crit.setMaxResults(1);
-    if (crit.list().isEmpty()) return "";
-    try {
-      return dao.getOrgTaxID(orgId);
-    } catch (Exception e) {
-      log.warn("Could not resolve orgNif for org=" + orgId, e);
-      return "";
-    }
+    List<OrganizationInformation> list = crit.list();
+    if (list.isEmpty()) return "";
+    String taxId = list.get(0).getTaxID();
+    return taxId != null ? taxId : "";
   }
 
   private String resolveOrgPhone(String orgId) {
