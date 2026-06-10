@@ -32,7 +32,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
-import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
@@ -1184,7 +1183,7 @@ public class Fiscal303BoxesHandlerTest {
       // The criteria returns a TaxReport whose org is "0" (system level).
       when(crit.list()).thenReturn(Collections.singletonList(report));
 
-      TaxReport result = invokeResolveTaxReport(handler, "org-abc", "AEAT303_Q_2025");
+      TaxReport result = handler.resolveTaxReport("org-abc", "AEAT303_Q_2025");
       assertSame("Expected the system-level TaxReport to be returned", report, result);
     }
   }
@@ -1204,7 +1203,7 @@ public class Fiscal303BoxesHandlerTest {
       // The criteria returns a TaxReport registered directly under the calling org.
       when(crit.list()).thenReturn(Collections.singletonList(report));
 
-      TaxReport result = invokeResolveTaxReport(handler, "org-xyz", "AEAT303_M_2025");
+      TaxReport result = handler.resolveTaxReport("org-xyz", "AEAT303_M_2025");
       assertSame("Expected the org-specific TaxReport to be returned", report, result);
     }
   }
@@ -1222,32 +1221,12 @@ public class Fiscal303BoxesHandlerTest {
       when(crit.list()).thenReturn(Collections.emptyList());
 
       try {
-        invokeResolveTaxReport(handler, "org-nf", "AEAT303_Q_2024");
+        handler.resolveTaxReport("org-nf", "AEAT303_Q_2024");
         fail("Expected OBException when no TaxReport is found");
       } catch (OBException e) {
         assertTrue("Message must contain orgId", e.getMessage().contains("org-nf"));
         assertTrue("Message must contain searchKey", e.getMessage().contains("AEAT303_Q_2024"));
       }
-    }
-  }
-
-  /**
-   * Invokes the private {@code resolveTaxReport(String, String)} via reflection.
-   * Uses {@link java.lang.reflect.InvocationTargetException} unwrapping so that
-   * {@link OBException} propagates naturally to the calling test.
-   */
-  private static TaxReport invokeResolveTaxReport(
-      Fiscal303BoxesHandler handler, String orgId, String valueKey) throws Exception {
-    Method m = Fiscal303BoxesHandler.class.getDeclaredMethod(
-        "resolveTaxReport", String.class, String.class);
-    m.setAccessible(true);
-    try {
-      return (TaxReport) m.invoke(handler, orgId, valueKey);
-    } catch (java.lang.reflect.InvocationTargetException e) {
-      Throwable cause = e.getCause();
-      if (cause instanceof OBException) throw (OBException) cause;
-      if (cause instanceof Exception) throw (Exception) cause;
-      throw e;
     }
   }
 

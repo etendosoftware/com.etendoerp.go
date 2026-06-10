@@ -48,6 +48,7 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
+import org.hibernate.criterion.Criterion;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Before;
 import org.junit.Test;
@@ -397,7 +398,7 @@ public class Fiscal349BoxesHandlerTest {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       OBCriteria<TaxReport> crit = mock(OBCriteria.class);
       when(obDal.createCriteria(TaxReport.class)).thenReturn(crit);
-      when(crit.add(any())).thenReturn(crit);
+      when(crit.add(any(Criterion.class))).thenReturn(crit);
       when(crit.setMaxResults(1)).thenReturn(crit);
       // Primary search key (AEAT3492010_Q) hits on the first lookup.
       when(crit.list()).thenReturn(Collections.singletonList(report));
@@ -419,10 +420,10 @@ public class Fiscal349BoxesHandlerTest {
       OBCriteria<TaxReport> fallback = mock(OBCriteria.class);
       // First createCriteria → primary (AEAT3492010_M, empty), second → fallback (AEAT349_M, hit).
       when(obDal.createCriteria(TaxReport.class)).thenReturn(primary, fallback);
-      when(primary.add(any())).thenReturn(primary);
+      when(primary.add(any(Criterion.class))).thenReturn(primary);
       when(primary.setMaxResults(1)).thenReturn(primary);
       when(primary.list()).thenReturn(Collections.emptyList());
-      when(fallback.add(any())).thenReturn(fallback);
+      when(fallback.add(any(Criterion.class))).thenReturn(fallback);
       when(fallback.setMaxResults(1)).thenReturn(fallback);
       when(fallback.list()).thenReturn(Collections.singletonList(report));
 
@@ -439,7 +440,7 @@ public class Fiscal349BoxesHandlerTest {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       OBCriteria<TaxReport> crit = mock(OBCriteria.class);
       when(obDal.createCriteria(TaxReport.class)).thenReturn(crit);
-      when(crit.add(any())).thenReturn(crit);
+      when(crit.add(any(Criterion.class))).thenReturn(crit);
       when(crit.setMaxResults(1)).thenReturn(crit);
       when(crit.list()).thenReturn(Collections.emptyList());
 
@@ -472,7 +473,7 @@ public class Fiscal349BoxesHandlerTest {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       OBCriteria<TaxReport> crit = mock(OBCriteria.class);
       when(obDal.createCriteria(TaxReport.class)).thenReturn(crit);
-      when(crit.add(any())).thenReturn(crit);
+      when(crit.add(any(Criterion.class))).thenReturn(crit);
       when(crit.setMaxResults(1)).thenReturn(crit);
       // Criteria returns a TaxReport registered under org='0' (system level).
       when(crit.list()).thenReturn(Collections.singletonList(report));
@@ -493,7 +494,7 @@ public class Fiscal349BoxesHandlerTest {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       OBCriteria<TaxReport> crit = mock(OBCriteria.class);
       when(obDal.createCriteria(TaxReport.class)).thenReturn(crit);
-      when(crit.add(any())).thenReturn(crit);
+      when(crit.add(any(Criterion.class))).thenReturn(crit);
       when(crit.setMaxResults(1)).thenReturn(crit);
       // Criteria returns a TaxReport registered directly under the calling org.
       when(crit.list()).thenReturn(Collections.singletonList(report));
@@ -517,10 +518,10 @@ public class Fiscal349BoxesHandlerTest {
       OBCriteria<TaxReport> primary  = mock(OBCriteria.class);
       OBCriteria<TaxReport> fallback = mock(OBCriteria.class);
       when(obDal.createCriteria(TaxReport.class)).thenReturn(primary, fallback);
-      when(primary.add(any())).thenReturn(primary);
+      when(primary.add(any(Criterion.class))).thenReturn(primary);
       when(primary.setMaxResults(1)).thenReturn(primary);
       when(primary.list()).thenReturn(Collections.emptyList());   // AEAT3492010_Q misses
-      when(fallback.add(any())).thenReturn(fallback);
+      when(fallback.add(any(Criterion.class))).thenReturn(fallback);
       when(fallback.setMaxResults(1)).thenReturn(fallback);
       when(fallback.list()).thenReturn(Collections.emptyList());  // AEAT349_Q misses too
 
@@ -551,10 +552,10 @@ public class Fiscal349BoxesHandlerTest {
       OBCriteria<TaxReport> primary  = mock(OBCriteria.class);
       OBCriteria<TaxReport> fallback = mock(OBCriteria.class);
       when(obDal.createCriteria(TaxReport.class)).thenReturn(primary, fallback);
-      when(primary.add(any())).thenReturn(primary);
+      when(primary.add(any(Criterion.class))).thenReturn(primary);
       when(primary.setMaxResults(1)).thenReturn(primary);
       when(primary.list()).thenReturn(Collections.emptyList()); // null → continue to fallback
-      when(fallback.add(any())).thenReturn(fallback);
+      when(fallback.add(any(Criterion.class))).thenReturn(fallback);
       when(fallback.setMaxResults(1)).thenReturn(fallback);
       when(fallback.list()).thenReturn(Collections.singletonList(fallbackReport));
 

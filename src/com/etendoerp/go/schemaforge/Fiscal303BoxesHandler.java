@@ -114,8 +114,6 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
   private void handleGenerate(String orgId, int year, String period, String tipo,
       HttpServletResponse response) throws Exception {
-    Organization org = OBDal.getInstance().get(Organization.class, orgId);
-
     boolean quarterly = period.startsWith("T");
     String valueKey = quarterly ? "AEAT303_Q_" + year : "AEAT303_M_" + year;
 
@@ -477,7 +475,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
   // ── Resolution helpers ───────────────────────────────────────────
 
-  private TaxReport resolveTaxReport(String orgId, String valueKey) {
+  TaxReport resolveTaxReport(String orgId, String valueKey) {
     OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
     crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
     crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, valueKey));
