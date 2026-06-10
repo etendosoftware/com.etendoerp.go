@@ -149,7 +149,7 @@ class CalloutRequestBuilder {
     }
     String clientId = obCtx.getCurrentClient() != null ? obCtx.getCurrentClient().getId() : null;
     if (clientId != null && !clientId.isEmpty()) {
-      String realOrgId = NeoDefaultsService.resolveFirstOrgForClient(clientId);
+      String realOrgId = NeoDefaultsSqlHelper.resolveFirstOrgForClient(clientId);
       if (realOrgId != null && !realOrgId.isEmpty()) {
         return realOrgId;
       }

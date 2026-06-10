@@ -1650,7 +1650,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
 
-      String result = NeoDefaultsService.resolveFirstOrgForClient("CLIENT-1");
+      String result = NeoDefaultsSqlHelper.resolveFirstOrgForClient("CLIENT-1");
 
       assertEquals("ORG-ABC", result);
       verify(ps).setString(1, "CLIENT-1");
@@ -1672,7 +1672,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
 
-      String result = NeoDefaultsService.resolveFirstOrgForClient("CLIENT-1");
+      String result = NeoDefaultsSqlHelper.resolveFirstOrgForClient("CLIENT-1");
 
       assertNull(result);
     }
@@ -1686,7 +1686,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
 
-      String result = NeoDefaultsService.resolveFirstOrgForClient("CLIENT-1");
+      String result = NeoDefaultsSqlHelper.resolveFirstOrgForClient("CLIENT-1");
 
       assertNull("Exception should be swallowed and null returned", result);
     }
@@ -1799,8 +1799,7 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testParseSQLExpressionBasicSubstitution() throws Exception {
     ArrayList<String> params = new ArrayList<>();
-    String sql = (String) invokePrivate("parseSQLExpression",
-        new Class<?>[]{ String.class, ArrayList.class },
+    String sql = NeoDefaultsSqlHelper.parseSQLExpression(
         "@SQL=SELECT name FROM ad_org WHERE ad_org_id = '@#AD_Org_ID@'", params);
 
     assertEquals("SELECT name FROM ad_org WHERE ad_org_id = ?", sql);
@@ -1811,8 +1810,7 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testParseSQLExpressionMultipleParams() throws Exception {
     ArrayList<String> params = new ArrayList<>();
-    String sql = (String) invokePrivate("parseSQLExpression",
-        new Class<?>[]{ String.class, ArrayList.class },
+    String sql = NeoDefaultsSqlHelper.parseSQLExpression(
         "@SQL=SELECT id FROM t WHERE col1 = '@A@' AND col2 = '@B@'", params);
 
     assertEquals("SELECT id FROM t WHERE col1 = ? AND col2 = ?", sql);
@@ -1824,8 +1822,7 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testParseSQLExpressionNoParams() throws Exception {
     ArrayList<String> params = new ArrayList<>();
-    String sql = (String) invokePrivate("parseSQLExpression",
-        new Class<?>[]{ String.class, ArrayList.class },
+    String sql = NeoDefaultsSqlHelper.parseSQLExpression(
         "@SQL=SELECT 1 FROM DUAL", params);
 
     assertEquals("SELECT 1 FROM DUAL", sql);
@@ -1835,8 +1832,7 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testParseSQLExpressionNullReturnsEmpty() throws Exception {
     ArrayList<String> params = new ArrayList<>();
-    String sql = (String) invokePrivate("parseSQLExpression",
-        new Class<?>[]{ String.class, ArrayList.class },
+    String sql = NeoDefaultsSqlHelper.parseSQLExpression(
         null, params);
 
     assertEquals("", sql);
@@ -1846,8 +1842,7 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testParseSQLExpressionEmptyReturnsEmpty() throws Exception {
     ArrayList<String> params = new ArrayList<>();
-    String sql = (String) invokePrivate("parseSQLExpression",
-        new Class<?>[]{ String.class, ArrayList.class },
+    String sql = NeoDefaultsSqlHelper.parseSQLExpression(
         "  ", params);
 
     assertEquals("", sql);
@@ -1857,8 +1852,7 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testParseSQLExpressionUnpairedAtSign() throws Exception {
     ArrayList<String> params = new ArrayList<>();
-    String sql = (String) invokePrivate("parseSQLExpression",
-        new Class<?>[]{ String.class, ArrayList.class },
+    String sql = NeoDefaultsSqlHelper.parseSQLExpression(
         "@SQL=SELECT 1 WHERE x = @incomplete", params);
 
     // Unpaired @ — remainder appended
@@ -1869,8 +1863,7 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testParseSQLExpressionParamWithoutQuotes() throws Exception {
     ArrayList<String> params = new ArrayList<>();
-    String sql = (String) invokePrivate("parseSQLExpression",
-        new Class<?>[]{ String.class, ArrayList.class },
+    String sql = NeoDefaultsSqlHelper.parseSQLExpression(
         "@SQL=SELECT id FROM t WHERE col = @MyParam@", params);
 
     assertEquals("SELECT id FROM t WHERE col = ?", sql);
@@ -2424,8 +2417,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = (String) invokePrivate("resolveDbColumnDefault",
-          new Class<?>[]{ String.class, String.class }, "C_Order", "IsActive");
+      String result = NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Order", "IsActive");
 
       assertEquals("N", result);
     }
@@ -2447,8 +2439,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = (String) invokePrivate("resolveDbColumnDefault",
-          new Class<?>[]{ String.class, String.class }, "C_Order", "Description");
+      String result = NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Order", "Description");
 
       assertNull(result);
     }
@@ -2470,8 +2461,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = (String) invokePrivate("resolveDbColumnDefault",
-          new Class<?>[]{ String.class, String.class }, "C_Order", "Description");
+      String result = NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Order", "Description");
 
       assertNull(result);
     }
@@ -2492,8 +2482,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = (String) invokePrivate("resolveDbColumnDefault",
-          new Class<?>[]{ String.class, String.class }, "C_Order", "Description");
+      String result = NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Order", "Description");
 
       assertNull(result);
     }
@@ -2516,8 +2505,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = (String) invokePrivate("resolveDbColumnDefault",
-          new Class<?>[]{ String.class, String.class }, "C_Order", "Line");
+      String result = NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Order", "Line");
 
       assertEquals("0", result);
     }
@@ -2533,8 +2521,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = (String) invokePrivate("resolveDbColumnDefault",
-          new Class<?>[]{ String.class, String.class }, "C_Order", "Line");
+      String result = NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Order", "Line");
 
       assertNull(result);
     }
