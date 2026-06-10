@@ -60,6 +60,7 @@ import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.TaxReportParameter;
 
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Criterion;
 
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.BoxGroupConfig;
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.ComputeResult;
@@ -1178,7 +1179,7 @@ public class Fiscal303BoxesHandlerTest {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       OBCriteria<TaxReport> crit = mock(OBCriteria.class);
       when(obDal.createCriteria(TaxReport.class)).thenReturn(crit);
-      when(crit.add(any())).thenReturn(crit);
+      when(crit.add(any(Criterion.class))).thenReturn(crit);
       when(crit.setMaxResults(1)).thenReturn(crit);
       // The criteria returns a TaxReport whose org is "0" (system level).
       when(crit.list()).thenReturn(Collections.singletonList(report));
@@ -1198,7 +1199,7 @@ public class Fiscal303BoxesHandlerTest {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       OBCriteria<TaxReport> crit = mock(OBCriteria.class);
       when(obDal.createCriteria(TaxReport.class)).thenReturn(crit);
-      when(crit.add(any())).thenReturn(crit);
+      when(crit.add(any(Criterion.class))).thenReturn(crit);
       when(crit.setMaxResults(1)).thenReturn(crit);
       // The criteria returns a TaxReport registered directly under the calling org.
       when(crit.list()).thenReturn(Collections.singletonList(report));
@@ -1216,7 +1217,7 @@ public class Fiscal303BoxesHandlerTest {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       OBCriteria<TaxReport> crit = mock(OBCriteria.class);
       when(obDal.createCriteria(TaxReport.class)).thenReturn(crit);
-      when(crit.add(any())).thenReturn(crit);
+      when(crit.add(any(Criterion.class))).thenReturn(crit);
       when(crit.setMaxResults(1)).thenReturn(crit);
       when(crit.list()).thenReturn(Collections.emptyList());
 
