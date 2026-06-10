@@ -1108,8 +1108,8 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("lineNo", rs.getLong("line"));
           row.put("date", formatDate(rs.getTimestamp("datetrx")));
           row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
-          row.put("reference", StringUtils.trimToEmpty(rs.getString("referenceno")));
-          row.put("bpartnerName", StringUtils.trimToEmpty(rs.getString("bpartnername")));
+          row.put(FIELD_REFERENCE, StringUtils.trimToEmpty(rs.getString("referenceno")));
+          row.put(FIELD_BPARTNER_NAME, StringUtils.trimToEmpty(rs.getString("bpartnername")));
           row.put(FIELD_BPARTNER_ID, StringUtils.trimToEmpty(rs.getString("c_bpartner_id")));
           row.put("bpartnerFkName", StringUtils.trimToEmpty(rs.getString("bpartner_fk_name")));
           row.put(FIELD_GLITEM_ID, StringUtils.trimToEmpty(rs.getString("c_glitem_id")));

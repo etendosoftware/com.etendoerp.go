@@ -25,6 +25,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
 
@@ -61,6 +63,16 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class McpToolRouterSupportTest {
+
+  @Test
+  @DisplayName("Utility class hides its constructor")
+  void utilityClassHidesConstructor() throws ReflectiveOperationException {
+    Constructor<McpToolRouterSupport> constructor = McpToolRouterSupport.class.getDeclaredConstructor();
+    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
+    constructor.setAccessible(true);
+    constructor.newInstance();
+  }
+
 
   private static Object invokeStatic(String methodName, Class<?>[] paramTypes, Object... args)
       throws Exception {
