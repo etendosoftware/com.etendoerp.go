@@ -65,6 +65,7 @@ final class EtendoGoJwtDalHelper {
   private static final String PROPERTY_EXTERNAL_SUBJECT = Account.PROPERTY_EXTERNALSUBJECT;
   private static final String PROPERTY_EXTERNAL_EMAIL = Account.PROPERTY_EXTERNALEMAIL;
   private static final String PROPERTY_LAST_SSO_LOGIN = Account.PROPERTY_LASTSSOLOGIN;
+  private static final String PROPERTY_ONBOARDING_DRAFT = Account.PROPERTY_ONBOARDINGDRAFT;
 
   private EtendoGoJwtDalHelper() {
   }
@@ -224,6 +225,16 @@ final class EtendoGoJwtDalHelper {
     account.set(PROPERTY_RESET_TOKEN_EXPIRES, null);
     account.set(PROPERTY_RESET_TOKEN_CONSUMED, changedAt);
     account.set(PROPERTY_PASSWORD_CHANGED, changedAt);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+  }
+
+  static String getOnboardingDraft(Account account) {
+    return account == null ? null : (String) account.get(PROPERTY_ONBOARDING_DRAFT);
+  }
+
+  static void updateOnboardingDraft(Account account, String draftJson) {
+    account.set(PROPERTY_ONBOARDING_DRAFT, draftJson);
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
   }

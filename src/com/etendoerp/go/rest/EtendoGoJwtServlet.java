@@ -74,6 +74,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *   POST /sws/go/password-reset/confirm — Confirm password reset token (public)
  *   POST /sws/go/change-password — Change local password (requires session token)
  *   POST /sws/go/onboarding   — Create a new environment (requires session token, streams NDJSON)
+ *   GET  /sws/go/onboarding/draft  — Get the saved onboarding wizard draft (requires session token)
+ *   POST /sws/go/onboarding/draft  — Save or clear the onboarding wizard draft (requires session token)
  *   GET  /sws/go/me           — Get current account info (requires session token)
  *   GET  /sws/go/environments — List environments for the account (requires session token)
  *   GET  /sws/go/login?userId=X — Get an Etendo JWT for an AD_User (requires session token + ownership)
@@ -123,6 +125,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PASSWORD_RESET_INVALID_MESSAGE =
       "Invalid or expired password reset token";
   private static final String SSO_PREFIX = "/sso/";
+  private static final String PATH_ONBOARDING_DRAFT = "/onboarding/draft";
+  private static final String FIELD_DRAFT = "draft";
+  private static final String FIELD_DRAFT_STEP = "step";
+  private static final String FIELD_DRAFT_FORM = "form";
+  private static final int ONBOARDING_DRAFT_MAX_LENGTH = 4000;
+  private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { "fullName", "businessType",
+      "clientName", "currency", "language", "countryCode", "fiscalIdType", "fiscalIdValue",
+      "address", "sector" };
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
   OnboardingSequenceGeneratorService onboardingSequenceGeneratorService =
@@ -166,6 +176,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String path = request.getPathInfo();
     if ("/me".equals(path) || "/me/".equals(path)) {
       handleMe(request, response);
+    } else if (PATH_ONBOARDING_DRAFT.equals(path) || (PATH_ONBOARDING_DRAFT + "/").equals(path)) {
+      handleGetOnboardingDraft(request, response);
     } else if ("/environments".equals(path) || "/environments/".equals(path)) {
       handleEnvironments(request, response);
     } else if ("/login".equals(path) || "/login/".equals(path)) {
@@ -193,6 +205,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handlePasswordResetConfirm(request, response);
     } else if ("/change-password".equals(path) || "/change-password/".equals(path)) {
       handleChangePassword(request, response);
+    } else if (PATH_ONBOARDING_DRAFT.equals(path) || (PATH_ONBOARDING_DRAFT + "/").equals(path)) {
+      handleSaveOnboardingDraft(request, response);
     } else if ("/onboarding".equals(path) || "/onboarding/".equals(path)) {
       handleOnboarding(request, response);
     } else {
@@ -659,6 +673,150 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * GET /sws/go/onboarding/draft
+   * Header: Authorization: Bearer <session_token>
+   * Returns 200 with { status, draft } where draft is the saved onboarding
+   * wizard draft (object) or null when no draft is stored.
+   */
+  private void handleGetOnboardingDraft(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String token = extractBearerToken(request);
+    if (token == null) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
+      return;
+    }
+
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
+      if (account == null) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_DRAFT, parseStoredOnboardingDraft(account));
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (RuntimeException e) {
+      log.error("Database error fetching onboarding draft", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error building onboarding draft response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * POST /sws/go/onboarding/draft
+   * Header: Authorization: Bearer <session_token>
+   * Body: { "draft": { "step": 1|2, "form": { ... } } } to save, { "draft": null } to clear.
+   * Only whitelisted form fields are stored; the serialized draft is capped at 4000 chars.
+   */
+  private void handleSaveOnboardingDraft(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String token = extractBearerToken(request);
+    if (token == null) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
+      return;
+    }
+
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return;
+    }
+
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
+      if (account == null) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+
+      JSONObject draft = body.optJSONObject(FIELD_DRAFT);
+      String storedDraft = null;
+      if (draft != null) {
+        storedDraft = sanitizeOnboardingDraft(draft).toString();
+        if (storedDraft.length() > ONBOARDING_DRAFT_MAX_LENGTH) {
+          writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+              "Onboarding draft is too large");
+          return;
+        }
+      }
+      EtendoGoJwtDalHelper.updateOnboardingDraft(account, storedDraft);
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("save onboarding draft", e, log);
+      log.error("Saving onboarding draft failed", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error building onboarding draft save response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Keep only known wizard fields so arbitrary client payloads are never persisted.
+   */
+  private JSONObject sanitizeOnboardingDraft(JSONObject draft) throws JSONException {
+    JSONObject clean = new JSONObject();
+    int step = draft.optInt(FIELD_DRAFT_STEP, 1);
+    clean.put(FIELD_DRAFT_STEP, Math.min(Math.max(step, 1), 2));
+    JSONObject cleanForm = new JSONObject();
+    JSONObject form = draft.optJSONObject(FIELD_DRAFT_FORM);
+    if (form != null) {
+      for (String field : ONBOARDING_DRAFT_FORM_FIELDS) {
+        Object value = form.opt(field);
+        if (value instanceof String) {
+          cleanForm.put(field, value);
+        }
+      }
+    }
+    clean.put(FIELD_DRAFT_FORM, cleanForm);
+    return clean;
+  }
+
+  private Object parseStoredOnboardingDraft(Account account) {
+    String storedDraft = EtendoGoJwtDalHelper.getOnboardingDraft(account);
+    if (StringUtils.isBlank(storedDraft)) {
+      return JSONObject.NULL;
+    }
+    try {
+      return new JSONObject(storedDraft);
+    } catch (JSONException e) {
+      log.warn("Stored onboarding draft for account {} is not valid JSON; ignoring",
+          account.getId());
+      return JSONObject.NULL;
+    }
+  }
+
+  private void clearOnboardingDraftBestEffort(Account account) {
+    if (account == null) {
+      return;
+    }
+    try {
+      EtendoGoJwtDalHelper.updateOnboardingDraft(account, null);
+    } catch (RuntimeException e) {
+      log.warn("Clearing onboarding draft failed without blocking onboarding", e);
+    }
+  }
+
+  /**
    * GET /sws/go/environments
    * Header: Authorization: Bearer <session_token>
    * Returns 200 with environments linked to the account.
@@ -843,6 +1001,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
       Account account = findAccountForCommittedOnboarding(token, accountEmail);
+      clearOnboardingDraftBestEffort(account);
       String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
       sendAuthEmailBestEffort("environment-ready",
           () -> authEmailSender.sendEnvironmentReady(account, clientId, normalizedLanguage));
