@@ -27,6 +27,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.apache.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
@@ -179,14 +180,13 @@ abstract class AbstractFiscalHandler {
     }
     // Session org is * — find the non-summary leaf org for the current client.
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
-    List<Organization> orgs = OBDal.getInstance().getSession()
-        .createQuery(
-            "from Organization where client.id = :clientId and isSummary = 'N' "
-            + "and id != '0' order by name",
-            Organization.class)
-        .setParameter("clientId", clientId)
-        .setMaxResults(1)
-        .list();
+    OBCriteria<Organization> crit = OBDal.getInstance().createCriteria(Organization.class);
+    crit.add(Restrictions.eq(Organization.PROPERTY_CLIENT + ".id", clientId));
+    crit.add(Restrictions.eq(Organization.PROPERTY_SUMMARYLEVEL, false));
+    crit.add(Restrictions.ne(Organization.PROPERTY_ID, "0"));
+    crit.addOrder(Order.asc(Organization.PROPERTY_NAME));
+    crit.setMaxResults(1);
+    List<Organization> orgs = crit.list();
     if (orgs.isEmpty()) {
       throw new OBException("No leaf organization found for client=" + clientId);
     }
