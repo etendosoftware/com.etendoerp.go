@@ -330,4 +330,5 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       "WHERE iol.isactive = 'Y' AND " + whereClause + " " +
       "GROUP BY iol.m_inout_id";
   }
+
 }

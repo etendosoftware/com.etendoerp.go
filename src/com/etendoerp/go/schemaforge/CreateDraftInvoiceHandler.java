@@ -1076,6 +1076,17 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     il.setPriceLimit(ol.getPriceLimit());
     int precision = invoice.getCurrency().getStandardPrecision().intValue();
     il.setLineNetAmount(qty.multiply(unitPrice).setScale(precision, RoundingMode.HALF_UP));
+    // c_invoiceline_before_trg recalculates priceactual from gross_unit_price for tax-inclusive
+    // price lists — copy all gross price fields so the trigger produces the correct net price
+    if (ol.getGrossUnitPrice() != null) {
+      il.setGrossUnitPrice(ol.getGrossUnitPrice());
+    }
+    if (ol.getGrossListPrice() != null) {
+      il.setGrossListPrice(ol.getGrossListPrice());
+    }
+    if (ol.getBaseGrossUnitPrice() != null) {
+      il.setBaseGrossUnitPrice(ol.getBaseGrossUnitPrice());
+    }
     il.setTax(ol.getTax());
     il.setSalesOrderLine(ol);
   }
@@ -1095,6 +1106,15 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     }
     int precision = invoice.getCurrency().getStandardPrecision().intValue();
     il.setLineNetAmount(qty.multiply(unitPrice).setScale(precision, RoundingMode.HALF_UP));
+    if (sourceIL.getGrossUnitPrice() != null) {
+      il.setGrossUnitPrice(sourceIL.getGrossUnitPrice());
+    }
+    if (sourceIL.getGrossListPrice() != null) {
+      il.setGrossListPrice(sourceIL.getGrossListPrice());
+    }
+    if (sourceIL.getBaseGrossUnitPrice() != null) {
+      il.setBaseGrossUnitPrice(sourceIL.getBaseGrossUnitPrice());
+    }
     if (sourceIL.getTax() != null) {
       il.setTax(sourceIL.getTax());
     }
