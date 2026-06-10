@@ -2539,4 +2539,98 @@ public class NeoDefaultsServiceTest {
       assertNull(result);
     }
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // resolveOrFirstComboOption — via reflection
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  public void testResolveOrFirstComboOptionReturnsResolvedWhenNotNull() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(mock(SFEntity.class))
+        .obContext(mock(OBContext.class))
+        .build();
+    Column column = mock(Column.class);
+
+    // When resolved is non-null it must be returned verbatim, without touching the selector.
+    try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+      Object result = invokePrivate("resolveOrFirstComboOption",
+          new Class<?>[]{ NeoContext.class, Column.class, Object.class },
+          ctx, column, "ALREADY-RESOLVED");
+
+      assertEquals("ALREADY-RESOLVED", result);
+      selectorMock.verify(() -> NeoSelectorService.getBaseReferenceId(any(Column.class)),
+          never());
+    }
+  }
+
+  @Test
+  public void testResolveOrFirstComboOptionFallsBackToFirstComboOption() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(mock(SFEntity.class))
+        .obContext(mock(OBContext.class))
+        .build();
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn("C_Reject_Reason_ID");
+
+    JSONObject item = new JSONObject();
+    item.put("id", "FIRST-OPTION-ID");
+    JSONArray items = new JSONArray();
+    items.put(item);
+    JSONObject selectorBody = new JSONObject();
+    selectorBody.put("items", items);
+    NeoResponse selectorResp = NeoResponse.ok(selectorBody);
+
+    // baseRefId "17" is a List reference (FIC combo) so resolveFirstComboOption proceeds.
+    try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+      selectorMock.when(() -> NeoSelectorService.getBaseReferenceId(column)).thenReturn("17");
+      selectorMock.when(() -> NeoSelectorService.hasObuiselSelector(column)).thenReturn(false);
+      selectorMock.when(() -> NeoSelectorService.querySelectorByColumn(
+          eq(column), eq("C_Reject_Reason_ID"), eq(null), eq(1), eq(0), any()))
+          .thenReturn(selectorResp);
+
+      Object result = invokePrivate("resolveOrFirstComboOption",
+          new Class<?>[]{ NeoContext.class, Column.class, Object.class },
+          ctx, column, null);
+
+      assertEquals("FIRST-OPTION-ID", result);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // getSfFieldColumns — via reflection
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testGetSfFieldColumnsUpperCasesAndSkipsNulls() throws Exception {
+    // Field with a valid lowercase column name → expected upper-cased.
+    SFField fieldWithColumn = mock(SFField.class);
+    Column adColumn = mock(Column.class);
+    when(adColumn.getDBColumnName()).thenReturn("documentno");
+    when(fieldWithColumn.getADColumn()).thenReturn(adColumn);
+
+    // Field whose adColumn is null → skipped.
+    SFField fieldNullColumn = mock(SFField.class);
+    when(fieldNullColumn.getADColumn()).thenReturn(null);
+
+    // A null SFField entry → skipped.
+    List<SFField> fields = Arrays.asList(fieldWithColumn, fieldNullColumn, null);
+
+    Set<String> result = (Set<String>) invokePrivate("getSfFieldColumns",
+        new Class<?>[]{ List.class }, fields);
+
+    assertEquals("Only the field with a column name should be included", 1, result.size());
+    assertTrue("Column name must be upper-cased", result.contains("DOCUMENTNO"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testGetSfFieldColumnsHandlesNullList() throws Exception {
+    Set<String> result = (Set<String>) invokePrivate("getSfFieldColumns",
+        new Class<?>[]{ List.class }, new Object[]{ null });
+
+    assertNotNull(result);
+    assertTrue("Result should be empty for a null field list", result.isEmpty());
+  }
 }
