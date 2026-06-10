@@ -956,8 +956,8 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("lineNo", rs.getLong("line"));
           row.put("date", formatDate(rs.getTimestamp("datetrx")));
           row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
-          row.put("bpartnerName", StringUtils.trimToEmpty(rs.getString("bpartnername")));
-          row.put("reference", StringUtils.trimToEmpty(rs.getString("referenceno")));
+          row.put(FIELD_BPARTNER_NAME, StringUtils.trimToEmpty(rs.getString("bpartnername")));
+          row.put(FIELD_REFERENCE, StringUtils.trimToEmpty(rs.getString("referenceno")));
           row.put(FIELD_CRAMOUNT, credit);
           row.put(FIELD_DRAMOUNT, debit);
           arr.put(row);
@@ -1065,8 +1065,8 @@ public class BankStatementsHandler implements NeoHandler {
           row.put("name", StringUtils.trimToEmpty(rs.getString("name")));
           row.put(FIELD_FILE_NAME, StringUtils.trimToEmpty(rs.getString("filename")));
           row.put(FIELD_NOTES, StringUtils.trimToEmpty(rs.getString(FIELD_NOTES)));
-          row.put("importDate", formatDate(rs.getTimestamp("importdate")));
-          row.put("transactionDate", formatDate(rs.getTimestamp("statementdate")));
+          row.put(FIELD_IMPORT_DATE, formatDate(rs.getTimestamp("importdate")));
+          row.put(FIELD_TRANSACTION_DATE, formatDate(rs.getTimestamp("statementdate")));
           boolean processed = "Y".equalsIgnoreCase(rs.getString(FIELD_PROCESSED));
           row.put(FIELD_PROCESSED, StringUtils.trimToEmpty(rs.getString(FIELD_PROCESSED)));
           row.put("posted", StringUtils.trimToEmpty(rs.getString("posted")));

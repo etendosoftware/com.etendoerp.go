@@ -53,7 +53,9 @@ public class NeoFieldFilter {
   private static final Logger log = LogManager.getLogger(NeoFieldFilter.class);
   private static final String IDENTIFIER_SUFFIX = "$_identifier";
 
-  /** Set of DAL property names that are included (IsIncluded=Y). */
+  /**
+   * Set of DAL property names that are included (IsIncluded=Y).
+   */
   private final Set<String> includedFields;
 
   /**
@@ -75,7 +77,9 @@ public class NeoFieldFilter {
    */
   private final Map<String, String> propNameToApiKey;
 
-  /** Whether filtering is active (false if no SF_FIELD config exists). */
+  /**
+   * Whether filtering is active (false if no SF_FIELD config exists).
+   */
   private final boolean active;
 
   private NeoFieldFilter(Set<String> includedFields, Set<String> writableFields,
@@ -91,8 +95,10 @@ public class NeoFieldFilter {
    * Build a field filter for the given SFEntity.
    * Loads all ETGO_SF_FIELD records and resolves their DAL property names.
    *
-   * @param sfEntity      the schema forge entity configuration
-   * @param dalEntityName the DAL entity name (from adTab.getTable().getName())
+   * @param sfEntity
+   *     the schema forge entity configuration
+   * @param dalEntityName
+   *     the DAL entity name (from adTab.getTable().getName())
    * @return a filter instance, which may be inactive if no fields are configured
    */
   @SuppressWarnings("unchecked")
@@ -176,19 +182,29 @@ public class NeoFieldFilter {
         included.add(propName);
         // For FK properties, also include the "_identifier" variant
         // that DefaultJsonDataService adds to the JSON
-        if (!prop.isPrimitive() && prop.getTargetEntity() != null) {
-          included.add(propName + IDENTIFIER_SUFFIX);
-          // When a javaQualifier alias exists, the $_identifier must also be renamed
-          // so the frontend receives "account$_identifier" instead of "finFinancialAccount$_identifier"
-          if (qualifier != null && !qualifier.equals(propName)) {
-            propToApiMap.put(propName + IDENTIFIER_SUFFIX, qualifier + IDENTIFIER_SUFFIX);
-            apiKeyMap.put(qualifier + IDENTIFIER_SUFFIX, propName + IDENTIFIER_SUFFIX);
-          }
-        }
+        includeFkIdentifierVariant(included, apiKeyMap, propToApiMap, prop, propName, qualifier);
 
         if (!Boolean.TRUE.equals(sfField.isReadOnly())) {
           writable.add(propName);
         }
+      }
+    }
+  }
+
+  /**
+   * For an included FK property, also registers its {@code $_identifier} variant
+   * (added by DefaultJsonDataService) in the included set, and renames that variant
+   * to the javaQualifier alias when one is configured.
+   */
+  private static void includeFkIdentifierVariant(Set<String> included, Map<String, String> apiKeyMap,
+      Map<String, String> propToApiMap, Property prop, String propName, String qualifier) {
+    if (!prop.isPrimitive() && prop.getTargetEntity() != null) {
+      included.add(propName + IDENTIFIER_SUFFIX);
+      // When a javaQualifier alias exists, the $_identifier must also be renamed
+      // so the frontend receives "account$_identifier" instead of "finFinancialAccount$_identifier"
+      if (qualifier != null && !qualifier.equals(propName)) {
+        propToApiMap.put(propName + IDENTIFIER_SUFFIX, qualifier + IDENTIFIER_SUFFIX);
+        apiKeyMap.put(qualifier + IDENTIFIER_SUFFIX, propName + IDENTIFIER_SUFFIX);
       }
     }
   }
@@ -244,7 +260,8 @@ public class NeoFieldFilter {
    * The response has structure: { "response": { "data": [...], ... } }
    * Removes properties not in the included set from each data record.
    *
-   * @param responseJson the full JSON response from jsonService.fetch()
+   * @param responseJson
+   *     the full JSON response from jsonService.fetch()
    * @return the filtered JSON (modified in place)
    */
   public JSONObject filterGetResponse(JSONObject responseJson) {
@@ -261,9 +278,9 @@ public class NeoFieldFilter {
       JSONArray data = response.optJSONArray("data");
       if (data != null) {
         for (int i = 0; i < data.length(); i++) {
-          JSONObject record = data.getJSONObject(i);
-          filterRecord(record, includedFields);
-          renameToApiKeys(record);
+          JSONObject item = data.getJSONObject(i);
+          filterRecord(item, includedFields);
+          renameToApiKeys(item);
         }
       }
     } catch (Exception e) {
@@ -278,7 +295,8 @@ public class NeoFieldFilter {
    * Removes fields that are not included or are read-only.
    * The input is the raw JSON body from the client.
    *
-   * @param requestBody the request body JSON
+   * @param requestBody
+   *     the request body JSON
    * @return the filtered JSON (modified in place)
    */
   public JSONObject filterWriteRequest(JSONObject requestBody) {
@@ -291,7 +309,8 @@ public class NeoFieldFilter {
    * or defaults that are required for record creation (e.g., transactionDocument).
    * Only removes fields that are not included at all.
    *
-   * @param requestBody the request body JSON
+   * @param requestBody
+   *     the request body JSON
    * @return the filtered JSON (modified in place)
    */
   public JSONObject filterCreateRequest(JSONObject requestBody) {
@@ -398,13 +417,13 @@ public class NeoFieldFilter {
   }
 
   /**
-   * Remove all keys from a JSON record that are NOT in the allowed set.
+   * Remove all keys from a JSON item that are NOT in the allowed set.
    * Preserves standard metadata keys added by DefaultJsonDataService
    * (e.g., _identifier, _entityName, recordTime).
    */
   @SuppressWarnings("unchecked")
-  private void filterRecord(JSONObject record, Set<String> allowedFields) {
-    Iterator<String> keys = record.keys();
+  private void filterRecord(JSONObject item, Set<String> allowedFields) {
+    Iterator<String> keys = item.keys();
     Set<String> toRemove = new HashSet<>();
 
     while (keys.hasNext()) {
@@ -419,7 +438,7 @@ public class NeoFieldFilter {
     }
 
     for (String key : toRemove) {
-      record.remove(key);
+      item.remove(key);
     }
   }
 

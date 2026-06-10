@@ -21,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
@@ -37,6 +39,8 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.Property;
 
 /**
  * Unit tests for {@link NeoFieldFilter}.
@@ -71,6 +75,19 @@ class NeoFieldFilterTest {
     Method m = NeoFieldFilter.class.getDeclaredMethod("isMetadataKey", String.class);
     m.setAccessible(true);
     return (boolean) m.invoke(filter, key);
+  }
+
+  /**
+   * Invokes the private static {@code includeFkIdentifierVariant} helper via reflection.
+   * Passes {@code null} as the instance because the method is static.
+   */
+  private static void invokeIncludeFkIdentifierVariant(Set<String> included,
+      Map<String, String> apiKeyMap, Map<String, String> propToApiMap, Property prop,
+      String propName, String qualifier) throws Exception {
+    Method m = NeoFieldFilter.class.getDeclaredMethod("includeFkIdentifierVariant",
+        Set.class, Map.class, Map.class, Property.class, String.class, String.class);
+    m.setAccessible(true);
+    m.invoke(null, included, apiKeyMap, propToApiMap, prop, propName, qualifier);
   }
 
   @Nested
@@ -356,6 +373,115 @@ class NeoFieldFilterTest {
         assertTrue(rec.has("name"));
         assertFalse(rec.has("hidden"));
       }
+    }
+  }
+
+  @Nested
+  @DisplayName("includeFkIdentifierVariant")
+  class IncludeFkIdentifierVariant {
+
+    @Test
+    @DisplayName("primitive property adds nothing")
+    void primitivePropertyAddsNothing() throws Exception {
+      Set<String> included = new HashSet<>();
+      Map<String, String> apiKeyMap = new HashMap<>();
+      Map<String, String> propToApiMap = new HashMap<>();
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(true);
+
+      invokeIncludeFkIdentifierVariant(included, apiKeyMap, propToApiMap, prop,
+          "businessPartner", "partner");
+
+      assertTrue(included.isEmpty(), "included must stay empty for primitive property");
+      assertTrue(apiKeyMap.isEmpty(), "apiKeyMap must stay empty for primitive property");
+      assertTrue(propToApiMap.isEmpty(), "propToApiMap must stay empty for primitive property");
+    }
+
+    @Test
+    @DisplayName("non-primitive with null target entity adds nothing")
+    void nonPrimitiveNullTargetAddsNothing() throws Exception {
+      Set<String> included = new HashSet<>();
+      Map<String, String> apiKeyMap = new HashMap<>();
+      Map<String, String> propToApiMap = new HashMap<>();
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(false);
+      when(prop.getTargetEntity()).thenReturn(null);
+
+      invokeIncludeFkIdentifierVariant(included, apiKeyMap, propToApiMap, prop,
+          "businessPartner", "partner");
+
+      assertTrue(included.isEmpty(), "included must stay empty when targetEntity is null");
+      assertTrue(apiKeyMap.isEmpty(), "apiKeyMap must stay empty when targetEntity is null");
+      assertTrue(propToApiMap.isEmpty(),
+          "propToApiMap must stay empty when targetEntity is null");
+    }
+
+    @Test
+    @DisplayName("FK with null qualifier includes identifier variant only")
+    void fkNullQualifierIncludesVariantOnly() throws Exception {
+      Set<String> included = new HashSet<>();
+      Map<String, String> apiKeyMap = new HashMap<>();
+      Map<String, String> propToApiMap = new HashMap<>();
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(false);
+      when(prop.getTargetEntity()).thenReturn(mock(Entity.class));
+
+      invokeIncludeFkIdentifierVariant(included, apiKeyMap, propToApiMap, prop,
+          "businessPartner", null);
+
+      assertTrue(included.contains("businessPartner$_identifier"),
+          "included must contain the $_identifier variant");
+      assertEquals(1, included.size());
+      assertTrue(apiKeyMap.isEmpty(), "apiKeyMap must stay empty with null qualifier");
+      assertTrue(propToApiMap.isEmpty(), "propToApiMap must stay empty with null qualifier");
+    }
+
+    @Test
+    @DisplayName("FK with qualifier equal to propName includes identifier variant only")
+    void fkQualifierEqualToPropNameIncludesVariantOnly() throws Exception {
+      Set<String> included = new HashSet<>();
+      Map<String, String> apiKeyMap = new HashMap<>();
+      Map<String, String> propToApiMap = new HashMap<>();
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(false);
+      when(prop.getTargetEntity()).thenReturn(mock(Entity.class));
+
+      invokeIncludeFkIdentifierVariant(included, apiKeyMap, propToApiMap, prop,
+          "businessPartner", "businessPartner");
+
+      assertTrue(included.contains("businessPartner$_identifier"),
+          "included must contain the $_identifier variant");
+      assertEquals(1, included.size());
+      assertTrue(apiKeyMap.isEmpty(),
+          "apiKeyMap must stay empty when qualifier equals propName");
+      assertTrue(propToApiMap.isEmpty(),
+          "propToApiMap must stay empty when qualifier equals propName");
+    }
+
+    @Test
+    @DisplayName("FK with distinct qualifier registers alias in both maps")
+    void fkDistinctQualifierRegistersAlias() throws Exception {
+      Set<String> included = new HashSet<>();
+      Map<String, String> apiKeyMap = new HashMap<>();
+      Map<String, String> propToApiMap = new HashMap<>();
+      Property prop = mock(Property.class);
+      when(prop.isPrimitive()).thenReturn(false);
+      when(prop.getTargetEntity()).thenReturn(mock(Entity.class));
+
+      invokeIncludeFkIdentifierVariant(included, apiKeyMap, propToApiMap, prop,
+          "finFinancialAccount", "account");
+
+      assertTrue(included.contains("finFinancialAccount$_identifier"),
+          "included must contain the DAL $_identifier variant");
+      assertEquals(1, included.size());
+      assertEquals("account$_identifier",
+          propToApiMap.get("finFinancialAccount$_identifier"),
+          "propToApiMap must map DAL variant to qualifier variant");
+      assertEquals(1, propToApiMap.size());
+      assertEquals("finFinancialAccount$_identifier",
+          apiKeyMap.get("account$_identifier"),
+          "apiKeyMap must map qualifier variant to DAL variant");
+      assertEquals(1, apiKeyMap.size());
     }
   }
 }
