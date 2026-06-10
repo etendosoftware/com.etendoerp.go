@@ -113,7 +113,7 @@ public class DocTypeResolver {
 
       String[] subTypeFilters = parseSubTypeFilters(ctx);
       return queryDefaultDocType(clientId, docBaseType, isSOTrx,
-          subTypeFilters[0], subTypeFilters[1], colName);
+          subTypeFilters[0], subTypeFilters[1], subTypeFilters[2], colName);
 
     } catch (Exception e) {
       log.debug("Could not resolve default doctype for {}: {}", colName, e.getMessage());
@@ -122,12 +122,15 @@ public class DocTypeResolver {
   }
 
   /**
-   * Parse DocSubTypeSO filter and exclude values from the tab's HQL where clause.
-   * Returns a two-element array: [subTypeFilter, subTypeExclude], either may be null.
+   * Parse DocSubTypeSO filter, exclude values, and isReturn flag from the tab's HQL where clause.
+   * Returns a three-element array: [subTypeFilter, subTypeExclude, isReturn], any may be null.
+   * isReturn is "Y" when the clause contains {@code documentType.return=true},
+   * "N" when it contains {@code documentType.return=false}.
    */
   private static String[] parseSubTypeFilters(NeoContext ctx) {
     String subTypeFilter = null;
     String subTypeExclude = null;
+    String isReturn = null;
     if (ctx != null && ctx.getSfEntity() != null && ctx.getSfEntity().getADTab() != null) {
       String tabWhere = ctx.getSfEntity().getADTab().getHqlwhereclause();
       if (tabWhere != null) {
@@ -146,16 +149,23 @@ public class DocTypeResolver {
             subTypeFilter = m.group(1);
           }
         }
+        java.util.regex.Matcher rm = java.util.regex.Pattern
+            .compile("documentType\\.return\\s*=\\s*(true|false)",
+                java.util.regex.Pattern.CASE_INSENSITIVE)
+            .matcher(tabWhere);
+        if (rm.find()) {
+          isReturn = "true".equalsIgnoreCase(rm.group(1)) ? "Y" : "N";
+        }
       }
     }
-    return new String[] { subTypeFilter, subTypeExclude };
+    return new String[] { subTypeFilter, subTypeExclude, isReturn };
   }
 
   /**
    * Query the C_DocType table for the default document type matching the given criteria.
    */
   private static String queryDefaultDocType(String clientId, String docBaseType,
-      String isSOTrx, String subTypeFilter, String subTypeExclude, String colName)
+      String isSOTrx, String subTypeFilter, String subTypeExclude, String isReturn, String colName)
       throws Exception {
     String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
 
@@ -172,6 +182,9 @@ public class DocTypeResolver {
     } else if (subTypeExclude != null) {
       sql.append("AND (dt.DocSubTypeSO IS NULL OR dt.DocSubTypeSO != ?) ");
     }
+    if (isReturn != null) {
+      sql.append("AND dt.IsReturn = ? ");
+    }
     sql.append("ORDER BY dt.IsDefault DESC, dt.Name ASC");
 
     try (PreparedStatement ps = OBDal.getInstance().getConnection(false)
@@ -183,23 +196,26 @@ public class DocTypeResolver {
       ps.setString(paramIndex++, orgId);
       ps.setString(paramIndex++, clientId);
       if (subTypeFilter != null) {
-        ps.setString(paramIndex, subTypeFilter);
+        ps.setString(paramIndex++, subTypeFilter);
       } else if (subTypeExclude != null) {
-        ps.setString(paramIndex, subTypeExclude);
+        ps.setString(paramIndex++, subTypeExclude);
+      }
+      if (isReturn != null) {
+        ps.setString(paramIndex, isReturn);
       }
 
       try (ResultSet rs = ps.executeQuery()) {
         if (rs.next()) {
           String docTypeId = rs.getString(1);
-          log.debug("Resolved default doctype for {} (DocBaseType={}, IsSOTrx={}): {}",
-              colName, docBaseType, isSOTrx, docTypeId);
+          log.debug("Resolved default doctype for {} (DocBaseType={}, IsSOTrx={}, IsReturn={}): {}",
+              colName, docBaseType, isSOTrx, isReturn, docTypeId);
           return docTypeId;
         }
       }
     }
 
-    log.debug("No matching doctype found for {} (DocBaseType={}, IsSOTrx={})",
-        colName, docBaseType, isSOTrx);
+    log.debug("No matching doctype found for {} (DocBaseType={}, IsSOTrx={}, IsReturn={})",
+        colName, docBaseType, isSOTrx, isReturn);
     return null;
   }
 

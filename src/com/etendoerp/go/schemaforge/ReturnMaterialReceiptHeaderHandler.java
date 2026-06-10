@@ -85,6 +85,12 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && "POST".equals(context.getHttpMethod())
+        && context.getRecordId() == null) {
+      NeoHandlerUtils.injectReturnDocType(context, "MMS", true);
+    }
+
     if (!NeoEndpointType.ACTION.equals(context.getEndpointType())) {
       return null;
     }

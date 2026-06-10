@@ -87,6 +87,12 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && "POST".equals(context.getHttpMethod())
+        && context.getRecordId() == null) {
+      NeoHandlerUtils.injectReturnDocType(context, "MMR", false);
+    }
+
     if (!NeoEndpointType.ACTION.equals(context.getEndpointType())) {
       return null;
     }
@@ -156,7 +162,7 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
           retLine.setLineNo(nextLineNo);
           retLine.setProduct(sourceLine.getProduct());
           retLine.setUOM(sourceLine.getUOM());
-          retLine.setMovementQuantity(qty);
+          retLine.setMovementQuantity(qty.negate());
           retLine.setCanceledInoutLine(sourceLine);
           if (sourceLine.getStorageBin() != null) {
             retLine.setStorageBin(sourceLine.getStorageBin());
@@ -207,7 +213,7 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
           "  SELECT rl.Canceled_Inoutline_ID, SUM(ABS(rl.MovementQty)) AS ret_qty " +
           "  FROM M_InOutLine rl " +
           "  JOIN M_InOut rh ON rh.M_InOut_ID = rl.M_InOut_ID " +
-          "  WHERE rl.Canceled_Inoutline_ID IS NOT NULL AND rh.DocStatus = 'CO' " +
+          "  WHERE rl.Canceled_Inoutline_ID IS NOT NULL AND rh.DocStatus NOT IN ('VO')" +
           "  GROUP BY rl.Canceled_Inoutline_ID " +
           ") ret ON ret.Canceled_Inoutline_ID = l.M_InOutLine_ID " +
           "WHERE h.C_BPartner_ID = ? " +
@@ -248,23 +254,29 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
   private NeoResponse handleAvailableReceiptLines(NeoContext context) {
     JSONObject body = context.getRequestBody();
     String receiptId = body != null ? body.optString("receiptId", null) : null;
+    String bpId = body != null ? body.optString("businessPartner", null) : null;
     if (receiptId == null || receiptId.isBlank()) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "receiptId param is required");
+    }
+    if (bpId == null || bpId.isBlank()) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "businessPartner param is required");
     }
     try {
       String sql =
           "SELECT l.M_InOutLine_ID, l.M_Product_ID, p.Name AS product_name, l.C_UOM_ID, " +
           "  l.MovementQty - COALESCE(ret.ret_qty, 0) AS available_qty " +
           "FROM M_InOutLine l " +
+          "JOIN M_InOut h ON h.M_InOut_ID = l.M_InOut_ID " +
           "JOIN M_Product p ON p.M_Product_ID = l.M_Product_ID " +
           "LEFT JOIN ( " +
           "  SELECT rl.Canceled_Inoutline_ID, SUM(ABS(rl.MovementQty)) AS ret_qty " +
           "  FROM M_InOutLine rl " +
           "  JOIN M_InOut rh ON rh.M_InOut_ID = rl.M_InOut_ID " +
-          "  WHERE rl.Canceled_Inoutline_ID IS NOT NULL AND rh.DocStatus = 'CO' " +
+          "  WHERE rl.Canceled_Inoutline_ID IS NOT NULL AND rh.DocStatus NOT IN ('VO')" +
           "  GROUP BY rl.Canceled_Inoutline_ID " +
           ") ret ON ret.Canceled_Inoutline_ID = l.M_InOutLine_ID " +
           "WHERE l.M_InOut_ID = ? " +
+          "AND h.C_BPartner_ID = ? " +
           "AND l.MovementQty > COALESCE(ret.ret_qty, 0) " +
           "ORDER BY l.Line";
 
@@ -272,6 +284,7 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
       Connection conn = OBDal.getInstance().getConnection();
       try (PreparedStatement ps = conn.prepareStatement(sql)) {
         ps.setString(1, receiptId);
+        ps.setString(2, bpId);
         try (ResultSet rs = ps.executeQuery()) {
           while (rs.next()) {
             JSONObject row = new JSONObject();

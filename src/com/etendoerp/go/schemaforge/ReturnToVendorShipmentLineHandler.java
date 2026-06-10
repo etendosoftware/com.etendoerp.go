@@ -55,6 +55,29 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    // Negate movementQuantity on write so the frontend always works with positive values.
+    // V- documents store negative quantities in the DB; the UI (like Etendo Classic) shows positive.
+    String method = context.getHttpMethod();
+    if (("PUT".equals(method) || "PATCH".equals(method) || "POST".equals(method))
+        && context.getRequestBody() != null) {
+      JSONObject body = context.getRequestBody();
+      if (body.has("movementQuantity")) {
+        double qty = body.optDouble("movementQuantity", Double.NaN);
+        if (!Double.isNaN(qty) && qty > 0) {
+          try {
+            body.put("movementQuantity", -qty);
+          } catch (Exception e) {
+            log.warn("Could not negate movementQuantity in request body: {}", e.getMessage());
+          }
+        }
+        // Remove product from PATCH/PUT body so SL_InOutLine_Product callout does not fire
+        // and overwrite the user-supplied movementQuantity with the on-hand stock value.
+        // Product is already persisted in the DB and is not changing on a quantity edit.
+        if (!"POST".equals(method)) {
+          body.remove("product");
+        }
+      }
+    }
     return null;
   }
 
@@ -80,6 +103,12 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
           if (ld.productCode != null) {
             rec.put("productCode", ld.productCode);
           }
+        }
+        // Return positive movementQuantity to the frontend (V- docs store negative in DB).
+        // Etendo Classic displays the absolute value; we match that behaviour here.
+        double mv = rec.optDouble("movementQuantity", Double.NaN);
+        if (!Double.isNaN(mv) && mv < 0) {
+          rec.put("movementQuantity", -mv);
         }
       }
       return NeoResponse.ok(body);
