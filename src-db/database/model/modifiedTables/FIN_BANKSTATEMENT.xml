@@ -17,7 +17,7 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="EM_ETGO_STATUS" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+      <column name="EM_ETGO_STATUS" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
