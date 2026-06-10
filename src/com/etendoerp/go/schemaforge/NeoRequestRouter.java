@@ -149,6 +149,13 @@ class NeoRequestRouter {
           .build();
       NeoResponse handlerResult = servlet.handleWithHooks(reportHandlerQualifier, handlerContext, request, response);
       if (handlerResult != null) {
+        // Generic CSV export: a single-segment handler (e.g. bank-statements) is
+        // dispatched here; when the GET carries export=csv, stream its rows as CSV.
+        if ("GET".equals(method)
+            && NeoCsvExportService.tryExport(handlerResult, handlerContext.getQueryParams(),
+                response)) {
+          return;
+        }
         servlet.writeResponse(response, handlerResult);
         return;
       }
