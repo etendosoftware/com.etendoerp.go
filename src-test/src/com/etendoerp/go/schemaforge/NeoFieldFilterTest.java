@@ -48,6 +48,16 @@ import org.openbravo.base.model.Property;
  */
 class NeoFieldFilterTest {
 
+  @Test
+  @DisplayName("forEntity with a null SFEntity yields an inactive pass-through filter")
+  void forEntityNullYieldsInactiveFilter() {
+    NeoFieldFilter filter = NeoFieldFilter.forEntity(null, "Order");
+    assertNotNull(filter);
+    JSONObject input = new JSONObject();
+    assertEquals(input, filter.filterGetResponse(input));
+  }
+
+
   /**
    * Creates a NeoFieldFilter via the private constructor for testing.
    */
