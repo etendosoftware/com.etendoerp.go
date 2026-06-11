@@ -18,13 +18,18 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
 
 /**
  * Stateless helpers shared across {@link BankStatementsHandler}: statement
@@ -135,5 +140,75 @@ public final class BankStatementsSupport {
    */
   public static String truncate(String s, int max) {
     return s.length() > max ? s.substring(0, max) : s;
+  }
+
+  /**
+   * Collects the requested statement ids: the comma-separated {@code multi}
+   * (used by the multi-statement CSV export) takes precedence, falling back to
+   * the single {@code single} id used by the inline/detail line views.
+   *
+   * @param multi  comma-separated statement ids, or blank
+   * @param single a single statement id, used when {@code multi} is blank
+   * @return the parsed, trimmed ids (possibly empty, never {@code null})
+   */
+  public static List<String> parseStatementIds(String multi, String single) {
+    List<String> ids = new ArrayList<>();
+    if (StringUtils.isNotBlank(multi)) {
+      for (String id : multi.split(",")) {
+        if (StringUtils.isNotBlank(id)) {
+          ids.add(id.trim());
+        }
+      }
+    } else if (StringUtils.isNotBlank(single)) {
+      ids.add(single.trim());
+    }
+    return ids;
+  }
+
+  /**
+   * True when a manual statement line carries no meaningful data (no
+   * description / counterparty / G-L item / reference and zero amounts).
+   *
+   * @param l the line JSON from the create/update request body
+   * @return whether the line is effectively empty
+   */
+  public static boolean isBlankLine(JSONObject l) {
+    return StringUtils.isBlank(l.optString("description", null))
+        && StringUtils.isBlank(l.optString("bpartnerName", null))
+        && StringUtils.isBlank(l.optString("bpartnerId", null))
+        && StringUtils.isBlank(l.optString("glItemId", null))
+        && StringUtils.isBlank(l.optString("reference", null))
+        && parseAmount(l.optString("in", null)).signum() == 0
+        && parseAmount(l.optString("out", null)).signum() == 0;
+  }
+
+  /**
+   * Builds the {@code txns[]} array for a statement line from the joined
+   * transaction columns of the lines query. The relationship is 1:1 today, so
+   * the array has 0 or 1 element; the shape is kept array-based so a future 1:N
+   * reconciliation only changes the query, not the contract.
+   *
+   * @param rs      the lines result set positioned on the current row
+   * @param matched whether the line has a linked financial-account transaction
+   * @return the transactions array (empty when {@code matched} is false)
+   * @throws Exception if reading the result set or building the JSON fails
+   */
+  public static JSONArray buildLineTxns(ResultSet rs, boolean matched) throws Exception {
+    JSONArray txns = new JSONArray();
+    if (!matched) {
+      return txns;
+    }
+    JSONObject t = new JSONObject();
+    t.put("documentNo", StringUtils.trimToEmpty(rs.getString("txn_documentno")));
+    t.put("date", formatDate(rs.getTimestamp("txn_date")));
+    t.put("contact", StringUtils.trimToEmpty(rs.getString("txn_contact")));
+    t.put("description", StringUtils.trimToEmpty(rs.getString("txn_description")));
+    t.put("trxType", StringUtils.trimToEmpty(rs.getString("txn_trxtype")));
+    t.put("paymentStatus", StringUtils.trimToEmpty(rs.getString("txn_status")));
+    t.put("amount", nullSafeBigDecimal(rs.getBigDecimal("txn_amount")));
+    t.put("paymentId", StringUtils.trimToEmpty(rs.getString("txn_payment_id")));
+    t.put("paymentIsReceipt", StringUtils.trimToEmpty(rs.getString("txn_payment_isreceipt")));
+    txns.put(t);
+    return txns;
   }
 }
