@@ -17,13 +17,8 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 import javax.inject.Named;
 
@@ -45,15 +40,6 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(ReturnToVendorShipmentLineHandler.class);
 
   private static final String FIELD_MOVEMENT_QUANTITY = "movementQuantity";
-
-  private static final class LineData {
-    final BigDecimal qty;
-    final String productCode;
-    LineData(BigDecimal qty, String productCode) {
-      this.qty = qty;
-      this.productCode = productCode;
-    }
-  }
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -95,11 +81,11 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
       }
       JSONObject body = previousResult.getBody();
       List<String> lineIds = NeoHandlerUtils.collectIds(dataArr);
-      Map<String, LineData> lineDataMap = fetchLineData(lineIds);
+      Map<String, ReturnShipmentUtils.LineData> lineDataMap = ReturnShipmentUtils.fetchLineData(lineIds, log);
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
         String id = rec.optString("id", null);
-        LineData ld = lineDataMap.get(id);
+        ReturnShipmentUtils.LineData ld = lineDataMap.get(id);
         if (ld != null) {
           if (ld.qty != null) {
             rec.put("orderQuantity", ld.qty);
@@ -129,33 +115,4 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
     }
   }
 
-  @SuppressWarnings("java:S2077")
-  private Map<String, LineData> fetchLineData(List<String> lineIds) {
-    Map<String, LineData> result = new HashMap<>();
-    if (lineIds.isEmpty()) {
-      return result;
-    }
-    String placeholders = lineIds.stream().map(id -> "?").collect(Collectors.joining(","));
-    String sql =
-        "SELECT l.M_InOutLine_ID, COALESCE(orig.MovementQty, l.QuantityOrder) AS effective_qty, " +
-        "  p.Value AS product_code " +
-        "FROM M_InOutLine l " +
-        "LEFT JOIN M_InOutLine orig ON orig.M_InOutLine_ID = l.Canceled_Inoutline_ID " +
-        "LEFT JOIN M_Product p ON p.M_Product_ID = l.M_Product_ID " +
-        "WHERE l.M_InOutLine_ID IN (" + placeholders + ")";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      for (int i = 0; i < lineIds.size(); i++) {
-        ps.setString(i + 1, lineIds.get(i));
-      }
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          result.put(rs.getString(1), new LineData(rs.getBigDecimal(2), rs.getString(3)));
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Error fetching line data for return-to-vendor-shipment lines: {}", e.getMessage());
-    }
-    return result;
-  }
 }

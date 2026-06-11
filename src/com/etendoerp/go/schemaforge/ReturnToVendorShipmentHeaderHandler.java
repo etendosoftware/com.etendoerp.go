@@ -69,7 +69,6 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
   private static final String FIELD_SOURCE_RECEIPT_DOC_NO = "sourceReceiptDocNo";
   private static final String FIELD_SOURCE_RECEIPTS = "sourceReceipts";
   private static final String FIELD_DOCUMENT_NO = "documentNo";
-  private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   private static final String FIELD_BUSINESS_PARTNER = "businessPartner";
   private static final String ACTION_IMPORT_LINES = "importReceiptLines";
   private static final String ACTION_AVAILABLE_RECEIPTS = "availableReceipts";
@@ -438,7 +437,7 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
               : line.getStorageBin();
           if (target == null) {
             if (defaultLocator == null) {
-              defaultLocator = findDefaultLocator(returnDoc.getWarehouse().getId());
+              defaultLocator = ReturnShipmentUtils.findDefaultLocator(returnDoc.getWarehouse().getId(), log);
             }
             target = defaultLocator;
           }
@@ -456,24 +455,6 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
       log.warn("Could not fill missing storage bins for return shipment {}: {}",
           returnId, e.getMessage());
     }
-  }
-
-  @SuppressWarnings("java:S2077")
-  private Locator findDefaultLocator(String warehouseId) {
-    String sql = "SELECT m_locator_id FROM m_locator " +
-        "WHERE m_warehouse_id = ? AND isdefault = 'Y' AND isactive = 'Y' LIMIT 1";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, warehouseId);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          return OBDal.getInstance().get(Locator.class, rs.getString(1));
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Could not find default locator for warehouse {}: {}", warehouseId, e.getMessage());
-    }
-    return null;
   }
 
   // ---------------------------------------------------------------------------

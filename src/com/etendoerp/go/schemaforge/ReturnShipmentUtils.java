@@ -38,6 +38,7 @@ import org.openbravo.erpCommon.businessUtility.Tax;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
+import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 import org.openbravo.service.db.DalConnectionProvider;
 
@@ -66,6 +67,71 @@ final class ReturnShipmentUtils {
     JSONObject wrapper = new JSONObject();
     wrapper.put(KEY_RESPONSE, responseData);
     return NeoResponse.ok(wrapper);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Line data – shared between both return line handlers
+  // ---------------------------------------------------------------------------
+
+  static final class LineData {
+    final BigDecimal qty;
+    final String productCode;
+    LineData(BigDecimal qty, String productCode) {
+      this.qty = qty;
+      this.productCode = productCode;
+    }
+  }
+
+  @SuppressWarnings("java:S2077")
+  static Map<String, LineData> fetchLineData(List<String> lineIds, Logger callerLog) {
+    Map<String, LineData> result = new HashMap<>();
+    if (lineIds.isEmpty()) {
+      return result;
+    }
+    String placeholders = lineIds.stream().map(id -> "?").collect(Collectors.joining(","));
+    String sql =
+        "SELECT l.M_InOutLine_ID, COALESCE(orig.MovementQty, l.QuantityOrder) AS effective_qty, " +
+        "  p.Value AS product_code " +
+        "FROM M_InOutLine l " +
+        "LEFT JOIN M_InOutLine orig ON orig.M_InOutLine_ID = l.Canceled_Inoutline_ID " +
+        "LEFT JOIN M_Product p ON p.M_Product_ID = l.M_Product_ID " +
+        "WHERE l.M_InOutLine_ID IN (" + placeholders + ")";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      for (int i = 0; i < lineIds.size(); i++) {
+        ps.setString(i + 1, lineIds.get(i));
+      }
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          result.put(rs.getString(1), new LineData(rs.getBigDecimal(2), rs.getString(3)));
+        }
+      }
+    } catch (Exception e) {
+      callerLog.warn("Error fetching line data: {}", e.getMessage());
+    }
+    return result;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Default locator – shared between both return header handlers
+  // ---------------------------------------------------------------------------
+
+  @SuppressWarnings("java:S2077")
+  static Locator findDefaultLocator(String warehouseId, Logger callerLog) {
+    String sql = "SELECT m_locator_id FROM m_locator " +
+        "WHERE m_warehouse_id = ? AND isdefault = 'Y' AND isactive = 'Y' LIMIT 1";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, warehouseId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          return OBDal.getInstance().get(Locator.class, rs.getString(1));
+        }
+      }
+    } catch (Exception e) {
+      callerLog.warn("Could not find default locator for warehouse {}: {}", warehouseId, e.getMessage());
+    }
+    return null;
   }
 
   // ---------------------------------------------------------------------------
