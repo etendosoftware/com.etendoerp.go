@@ -62,7 +62,6 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
 
   private static final String FIELD_SOURCE_RECEIPT_DOC_NO = "sourceReceiptDocNo";
   private static final String FIELD_SOURCE_RECEIPTS = "sourceReceipts";
-  private static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String FIELD_BUSINESS_PARTNER = "businessPartner";
   private static final String ACTION_IMPORT_LINES = "importReceiptLines";
   private static final String ACTION_AVAILABLE_RECEIPTS = "availableReceipts";
