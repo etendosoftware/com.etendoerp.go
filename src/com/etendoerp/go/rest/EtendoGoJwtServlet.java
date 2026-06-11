@@ -700,6 +700,43 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return account;
   }
 
+  @FunctionalInterface
+  private interface AuthenticatedAccountAction {
+    void execute(Account account) throws IOException, JSONException;
+  }
+
+  /**
+   * Shared request template for the draft endpoints: resolves the account,
+   * runs the action, and maps failures to the standard 500 responses with a
+   * DAL rollback. Keeps the per-endpoint logic free of boilerplate.
+   */
+  private void runWithAuthenticatedAccount(HttpServletRequest request,
+      HttpServletResponse response, String actionLabel, AuthenticatedAccountAction action)
+      throws IOException {
+    try {
+      Account account = resolveAuthenticatedAccount(request, response);
+      if (account == null) {
+        return;
+      }
+      action.execute(account);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges(actionLabel, e, log);
+      log.error("Request '{}' failed", actionLabel, e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error handling '{}'", actionLabel, e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void writeSuccessStatus(HttpServletResponse response, JSONObject result)
+      throws IOException, JSONException {
+    result.put(FIELD_STATUS, STATUS_SUCCESS);
+    writeResponse(response, HttpServletResponse.SC_OK, result);
+  }
+
   /**
    * GET /sws/go/onboarding/draft
    * Header: Authorization: Bearer <session_token>
@@ -708,24 +745,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleGetOnboardingDraft(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    try {
-      Account account = resolveAuthenticatedAccount(request, response);
-      if (account == null) {
-        return;
-      }
+    runWithAuthenticatedAccount(request, response, "get onboarding draft", account -> {
       JSONObject result = new JSONObject();
-      result.put(FIELD_STATUS, STATUS_SUCCESS);
       result.put(FIELD_DRAFT, parseStoredOnboardingDraft(account));
-      writeResponse(response, HttpServletResponse.SC_OK, result);
-    } catch (RuntimeException e) {
-      log.error("Database error fetching onboarding draft", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
-    } catch (JSONException e) {
-      log.error("JSON error building onboarding draft response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+      writeSuccessStatus(response, result);
+    });
   }
 
   /**
@@ -736,11 +760,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleSaveOnboardingDraft(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    try {
-      Account account = resolveAuthenticatedAccount(request, response);
-      if (account == null) {
-        return;
-      }
+    runWithAuthenticatedAccount(request, response, "save onboarding draft", account -> {
       JSONObject body = readJsonBodyOrBadRequest(request, response);
       if (body == null) {
         return;
@@ -755,21 +775,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           return;
         }
       }
+      // updateOnboardingDraft flushes and commits internally
+      // (EtendoGoJwtDalHelper.flushAndCommitDalChanges) — no extra commit here.
       EtendoGoJwtDalHelper.updateOnboardingDraft(account, storedDraft);
-
-      JSONObject result = new JSONObject();
-      result.put(FIELD_STATUS, STATUS_SUCCESS);
-      writeResponse(response, HttpServletResponse.SC_OK, result);
-    } catch (RuntimeException e) {
-      EtendoGoDalHelper.rollbackDalChanges("save onboarding draft", e, log);
-      log.error("Saving onboarding draft failed", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
-    } catch (JSONException e) {
-      log.error("JSON error building onboarding draft save response", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+      writeSuccessStatus(response, new JSONObject());
+    });
   }
 
   /**
@@ -826,6 +836,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
     try {
+      // updateOnboardingDraft flushes and commits internally
+      // (EtendoGoJwtDalHelper.flushAndCommitDalChanges) — no extra commit here.
       EtendoGoJwtDalHelper.updateOnboardingDraft(account, null);
     } catch (RuntimeException e) {
       log.warn("Clearing onboarding draft failed without blocking onboarding", e);
