@@ -21,6 +21,7 @@ import java.math.BigDecimal;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import javax.inject.Named;
@@ -37,6 +38,7 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
+import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
@@ -95,7 +97,12 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
           returnReceipt.setPartnerAddress(original.getPartnerAddress());
         }
         returnReceipt.setWarehouse(original.getWarehouse());
-        returnReceipt.setDocumentType(original.getDocumentType());
+        DocumentType returnDocType = findRtvShipmentDocType(original.getOrganization().getId());
+        if (returnDocType == null) {
+          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+              "No RTV Shipment document type (MMR, isReturn=Y) found for this organization");
+        }
+        returnReceipt.setDocumentType(returnDocType);
         returnReceipt.setMovementType(MOVEMENT_TYPE_PURCHASE_RETURN);
         returnReceipt.setSalesTransaction(false);
         returnReceipt.setDocumentStatus("DR");
@@ -175,6 +182,22 @@ public class CreatePurchaseReturnHandler implements NeoHandler {
     returnLine.setUpdated(new Date());
     returnReceipt.getMaterialMgmtShipmentInOutLineList().add(returnLine);
     OBDal.getInstance().save(returnLine);
+  }
+
+  private DocumentType findRtvShipmentDocType(String orgId) {
+    List<DocumentType> candidates = OBDal.getInstance().getSession()
+        .createQuery(
+            "FROM DocumentType WHERE documentCategory = 'MMR' AND return = true" +
+            " AND salesTransaction = false AND active = true ORDER BY isDefault DESC",
+            DocumentType.class)
+        .list();
+    for (DocumentType dt : candidates) {
+      if (orgId.equals(dt.getOrganization().getId())) return dt;
+    }
+    for (DocumentType dt : candidates) {
+      if ("0".equals(dt.getOrganization().getId())) return dt;
+    }
+    return candidates.isEmpty() ? null : candidates.get(0);
   }
 
   private void ensureDocumentNo(ShipmentInOut returnReceipt) {
