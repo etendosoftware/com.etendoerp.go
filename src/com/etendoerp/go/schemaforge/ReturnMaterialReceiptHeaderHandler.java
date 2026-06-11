@@ -17,15 +17,11 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.text.SimpleDateFormat;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -43,17 +39,13 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.erpCommon.businessUtility.Tax;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.invoice.Invoice;
-import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.invoice.ReversedInvoice;
-import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
-import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * Post-hook for the Return Material Receipt header entity.
@@ -75,8 +67,6 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
   private static final String FIELD_SOURCE_SHIPMENT_DOC_NO = "sourceShipmentDocNo";
   private static final String FIELD_SOURCE_SHIPMENTS = "sourceShipments";
   private static final String FIELD_DOCUMENT_NO = "documentNo";
-  private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
-  private static final String KEY_RESPONSE = "response";
   private static final String ACTION_IMPORT_LINES = "importShipmentLines";
   private static final String ACTION_AVAILABLE_SHIPMENTS = "availableShipments";
   private static final String ACTION_AVAILABLE_LINES = "availableShipmentLines";
@@ -187,7 +177,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "No lines specified");
         }
 
-        long nextLineNo = fetchMaxLineNo(receiptId) + 10;
+        long nextLineNo = ReturnShipmentUtils.fetchMaxLineNo(receiptId) + 10;
         int imported = 0;
 
         for (int i = 0; i < requestedLines.length(); i++) {
@@ -219,7 +209,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
 
         JSONObject data = new JSONObject();
         data.put("importedCount", imported);
-        return wrapOkData(data);
+        return ReturnShipmentUtils.wrapOkData(data);
 
       } finally {
         OBContext.restorePreviousMode();
@@ -275,7 +265,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           }
         }
       }
-      return wrapOkData(data);
+      return ReturnShipmentUtils.wrapOkData(data);
     } catch (Exception e) {
       log.error("Error fetching available shipments for BP {}: {}", bpId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -323,7 +313,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           }
         }
       }
-      return wrapOkData(data);
+      return ReturnShipmentUtils.wrapOkData(data);
     } catch (Exception e) {
       log.error("Error fetching available lines for shipment {}: {}", shipmentId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -360,7 +350,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
               "No return invoice document type (ARI_RM) found for this organization");
         }
 
-        Invoice sourceInvoice = findSourceInvoice(lines);
+        Invoice sourceInvoice = ReturnShipmentUtils.findSourceInvoice(lines);
         Invoice invoice = buildReturnInvoiceHeader(receipt, docType, sourceInvoice);
         OBDal.getInstance().save(invoice);
         OBDal.getInstance().flush();
@@ -369,7 +359,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           linkReversedInvoice(invoice, sourceInvoice);
         }
 
-        addReturnInvoiceLines(invoice, lines);
+        ReturnShipmentUtils.addReturnInvoiceLines(invoice, lines, createDraftInvoiceHandler);
         OBDal.getInstance().flush();
         OBDal.getInstance().getSession().refresh(invoice);
 
@@ -381,7 +371,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
         JSONObject data = new JSONObject();
         data.put("id", invoice.getId());
         data.put(FIELD_DOCUMENT_NO, invoice.getDocumentNo());
-        return wrapOkData(data);
+        return ReturnShipmentUtils.wrapOkData(data);
 
       } finally {
         OBContext.restorePreviousMode();
@@ -462,144 +452,6 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
     OBDal.getInstance().save(link);
   }
 
-  @SuppressWarnings("java:S2077")
-  private Map<String, Integer> fetchLineCounts(List<String> ids) {
-    Map<String, Integer> result = new HashMap<>();
-    if (ids.isEmpty()) return result;
-    String placeholders = ids.stream().map(id -> "?").collect(Collectors.joining(","));
-    String sql = "SELECT M_InOut_ID, COUNT(M_InOutLine_ID) FROM M_InOutLine " +
-        "WHERE M_InOut_ID IN (" + placeholders + ") GROUP BY M_InOut_ID";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      for (int i = 0; i < ids.size(); i++) ps.setString(i + 1, ids.get(i));
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) result.put(rs.getString(1), rs.getInt(2));
-      }
-    } catch (Exception e) {
-      log.warn("Error fetching line counts: {}", e.getMessage());
-    }
-    return result;
-  }
-
-  private Invoice findSourceInvoice(List<ShipmentInOutLine> lines) {
-    for (ShipmentInOutLine retLine : lines) {
-      ShipmentInOutLine origLine = retLine.getCanceledInoutLine();
-      if (origLine == null) continue;
-      String hql = "SELECT il.invoice FROM InvoiceLine il " +
-          "WHERE il.goodsShipmentLine.id = :lineId AND il.invoice.documentStatus != 'VO'";
-      List<Invoice> results = OBDal.getInstance().getSession()
-          .createQuery(hql, Invoice.class)
-          .setParameter("lineId", origLine.getId())
-          .setMaxResults(1)
-          .list();
-      if (!results.isEmpty()) return results.get(0);
-    }
-    return null;
-  }
-
-  private void addReturnInvoiceLines(Invoice invoice, List<ShipmentInOutLine> lines) {
-    int precision = invoice.getCurrency() != null
-        ? invoice.getCurrency().getStandardPrecision().intValue() : 2;
-    long lineNo = 10;
-    for (ShipmentInOutLine retLine : lines) {
-      BigDecimal qty = retLine.getMovementQuantity() != null
-          ? retLine.getMovementQuantity().negate() : BigDecimal.ZERO;
-      if (retLine.getProduct() == null || qty.compareTo(BigDecimal.ZERO) == 0) continue;
-      buildAndSaveInvoiceLine(invoice, retLine, qty, precision, lineNo);
-      lineNo += 10;
-    }
-  }
-
-  private void buildAndSaveInvoiceLine(Invoice invoice, ShipmentInOutLine retLine,
-      BigDecimal qty, int precision, long lineNo) {
-    // Delegate to CreateDraftInvoiceHandler which already handles price lookup from
-    // order line and linked invoice line — pass origLine so it finds the right source
-    ShipmentInOutLine origLine = retLine.getCanceledInoutLine();
-    ShipmentInOutLine pricingLine = (origLine != null) ? origLine : retLine;
-    InvoiceLine il = createDraftInvoiceHandler.createShipmentInvoiceLine(invoice, pricingLine, qty, lineNo);
-    il.setGoodsShipmentLine(retLine); // must point to the return receipt line
-
-    // Price list fallback: createShipmentInvoiceLine leaves price=0 when no order/linked invoice
-    BigDecimal unitPrice = il.getUnitPrice() != null ? il.getUnitPrice() : BigDecimal.ZERO;
-    if (unitPrice.compareTo(BigDecimal.ZERO) == 0
-        && retLine.getProduct() != null && invoice.getPriceList() != null) {
-      String productId = retLine.getProduct().getId();
-      String priceListId = invoice.getPriceList().getId();
-      unitPrice = resolvePriceFromPriceList(productId, priceListId, "standardPrice", BigDecimal.ZERO);
-      BigDecimal listPrice = resolvePriceFromPriceList(productId, priceListId, "listPrice", unitPrice);
-      il.setUnitPrice(unitPrice);
-      il.setListPrice(listPrice);
-      il.setLineNetAmount(qty.multiply(unitPrice).setScale(precision, RoundingMode.HALF_UP));
-    }
-
-    // Tax fallback: applyPricesFromInvoiceLine (no-order path) does not set tax
-    if (il.getTax() == null && retLine.getProduct() != null) {
-      il.setTax(resolveApplicableTax(invoice, retLine));
-    }
-    if (il.getTax() == null && unitPrice.compareTo(BigDecimal.ZERO) != 0) {
-      throw new OBException("Cannot determine tax rate for product '"
-          + retLine.getProduct().getName() + "'.");
-    }
-
-    OBDal.getInstance().save(il);
-  }
-
-  private TaxRate resolveApplicableTax(Invoice invoice, ShipmentInOutLine retLine) {
-    try {
-      String productId = retLine.getProduct().getId();
-      String orgId = invoice.getOrganization().getId();
-      String warehouseId = retLine.getShipmentReceipt() != null && retLine.getShipmentReceipt().getWarehouse() != null
-          ? retLine.getShipmentReceipt().getWarehouse().getId() : "";
-      String bpLocId = invoice.getPartnerAddress() != null
-          ? invoice.getPartnerAddress().getId() : "";
-      Date invoiceDate = invoice.getInvoiceDate() != null ? invoice.getInvoiceDate() : new Date();
-      String strDate = new SimpleDateFormat("dd-MM-yyyy").format(invoiceDate);
-      boolean isSOTrx = Boolean.TRUE.equals(invoice.isSalesTransaction());
-      String taxId = Tax.get(new DalConnectionProvider(), productId, strDate, orgId,
-          warehouseId, bpLocId, bpLocId, "", isSOTrx);
-      if (taxId != null && !taxId.isEmpty()) {
-        return OBDal.getInstance().get(TaxRate.class, taxId);
-      }
-    } catch (Exception e) {
-      log.warn("Tax.get() fallback failed for product {}: {}", retLine.getProduct().getId(),
-          e.getMessage());
-    }
-    return null;
-  }
-
-  private BigDecimal resolvePriceFromPriceList(String productId, String priceListId,
-      String priceProperty, BigDecimal fallback) {
-    if (productId == null || priceListId == null) return fallback;
-    try {
-      // Use HQL to avoid raw JDBC session-state issues after Hibernate auto-flush
-      String hql =
-          "SELECT pp." + priceProperty + " FROM ProductPrice pp " +
-          "WHERE pp.product.id = :productId " +
-          "AND pp.priceListVersion.priceList.id = :priceListId " +
-          "AND pp.priceListVersion.active = true " +
-          "AND pp.active = true " +
-          "AND pp.priceListVersion.validFromDate <= :today " +
-          "ORDER BY pp.priceListVersion.validFromDate DESC";
-      List<BigDecimal> rows = OBDal.getInstance().getSession()
-          .createQuery(hql, BigDecimal.class)
-          .setParameter("productId", productId)
-          .setParameter("priceListId", priceListId)
-          .setParameter("today", new Date())
-          .setMaxResults(1)
-          .list();
-      if (!rows.isEmpty()) {
-        BigDecimal price = rows.get(0);
-        return (price != null && price.compareTo(BigDecimal.ZERO) > 0) ? price : fallback;
-      }
-      log.warn("No price list entry for product {} in price list {} ({})",
-          productId, priceListId, priceProperty);
-    } catch (Exception e) {
-      log.warn("Could not resolve {} for product {} from price list {}: {}",
-          priceProperty, productId, priceListId, e.getMessage());
-    }
-    return fallback;
-  }
-
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     try {
@@ -610,9 +462,9 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       JSONObject body = context.getPreviousResult().getBody();
       List<String> ids = NeoHandlerUtils.collectIds(dataArr);
 
-      Map<String, List<JSONObject>> shipmentsMap = fetchSourceShipments(ids);
-      Map<String, List<JSONObject>> returnInvoicesMap = fetchReturnInvoices(ids);
-      Map<String, Integer> lineCountMap = fetchLineCounts(ids);
+      Map<String, List<JSONObject>> shipmentsMap = ReturnShipmentUtils.fetchSourceDocuments(ids);
+      Map<String, List<JSONObject>> returnInvoicesMap = ReturnShipmentUtils.fetchReturnInvoices(ids);
+      Map<String, Integer> lineCountMap = ReturnShipmentUtils.fetchLineCounts(ids);
 
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
@@ -651,110 +503,4 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
     }
   }
 
-  @SuppressWarnings("java:S2077")
-  private Map<String, List<JSONObject>> fetchSourceShipments(List<String> receiptIds) {
-    Map<String, List<JSONObject>> result = new HashMap<>();
-    if (receiptIds.isEmpty()) return result;
-    String placeholders = receiptIds.stream().map(id -> "?").collect(Collectors.joining(","));
-    String sql =
-        "SELECT DISTINCT l.M_InOut_ID, src.M_InOut_ID, src.DocumentNo, src.DocStatus " +
-        "FROM M_InOutLine l " +
-        "JOIN M_InOutLine orig ON orig.M_InOutLine_ID = l.Canceled_Inoutline_ID " +
-        "JOIN M_InOut src ON src.M_InOut_ID = orig.M_InOut_ID " +
-        "WHERE l.M_InOut_ID IN (" + placeholders + ") " +
-        "  AND l.Canceled_Inoutline_ID IS NOT NULL";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      for (int i = 0; i < receiptIds.size(); i++) ps.setString(i + 1, receiptIds.get(i));
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          addShipmentToMap(result, rs);
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Error fetching source shipments: {}", e.getMessage());
-    }
-    return result;
-  }
-
-  private void addShipmentToMap(Map<String, List<JSONObject>> result, ResultSet rs) {
-    try {
-      String receiptId = rs.getString(1);
-      JSONObject ship = new JSONObject();
-      ship.put("id", rs.getString(2));
-      ship.put(FIELD_DOCUMENT_NO, rs.getString(3));
-      ship.put(FIELD_DOCUMENT_STATUS, rs.getString(4));
-      result.computeIfAbsent(receiptId, k -> new ArrayList<>()).add(ship);
-    } catch (Exception je) {
-      log.warn("Error building sourceShipment JSON: {}", je.getMessage());
-    }
-  }
-
-  @SuppressWarnings("java:S2077")
-  private Map<String, List<JSONObject>> fetchReturnInvoices(List<String> receiptIds) {
-    Map<String, List<JSONObject>> result = new HashMap<>();
-    if (receiptIds.isEmpty()) return result;
-    String placeholders = receiptIds.stream().map(id -> "?").collect(Collectors.joining(","));
-    String sql =
-        "SELECT DISTINCT l.M_InOut_ID, i.C_Invoice_ID, i.DocumentNo, i.DocStatus, " +
-        "  i.GrandTotal, cur.ISO_Code " +
-        "FROM M_InOutLine l " +
-        "JOIN C_InvoiceLine il ON il.M_InOutLine_ID = l.M_InOutLine_ID " +
-        "JOIN C_Invoice i ON i.C_Invoice_ID = il.C_Invoice_ID " +
-        "LEFT JOIN C_Currency cur ON cur.C_Currency_ID = i.C_Currency_ID " +
-        "WHERE l.M_InOut_ID IN (" + placeholders + ") " +
-        "  AND i.DocStatus != 'VO'";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      for (int i = 0; i < receiptIds.size(); i++) ps.setString(i + 1, receiptIds.get(i));
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          addInvoiceToMap(result, rs);
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Error fetching return invoices for receipts: {}", e.getMessage());
-    }
-    return result;
-  }
-
-  private void addInvoiceToMap(Map<String, List<JSONObject>> result, ResultSet rs) {
-    try {
-      String receiptId = rs.getString(1);
-      JSONObject inv = new JSONObject();
-      inv.put("id", rs.getString(2));
-      inv.put(FIELD_DOCUMENT_NO, rs.getString(3));
-      inv.put(FIELD_DOCUMENT_STATUS, rs.getString(4));
-      BigDecimal total = rs.getBigDecimal(5);
-      inv.put("grandTotalAmount", total != null ? total : JSONObject.NULL);
-      String iso = rs.getString(6);
-      inv.put("currency$_identifier", iso != null ? iso : JSONObject.NULL);
-      result.computeIfAbsent(receiptId, k -> new ArrayList<>()).add(inv);
-    } catch (Exception je) {
-      log.warn("Error building returnInvoice JSON: {}", je.getMessage());
-    }
-  }
-
-  @SuppressWarnings("java:S2077")
-  private long fetchMaxLineNo(String receiptId) {
-    String sql = "SELECT COALESCE(MAX(Line), 0) FROM M_InOutLine WHERE M_InOut_ID = ?";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, receiptId);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) return rs.getLong(1);
-      }
-    } catch (Exception e) {
-      log.warn("Could not fetch max lineNo for receipt {}: {}", receiptId, e.getMessage());
-    }
-    return 0;
-  }
-
-  private static NeoResponse wrapOkData(Object data) throws Exception {
-    JSONObject responseData = new JSONObject();
-    responseData.put("data", data);
-    JSONObject wrapper = new JSONObject();
-    wrapper.put(KEY_RESPONSE, responseData);
-    return NeoResponse.ok(wrapper);
-  }
 }

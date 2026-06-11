@@ -128,37 +128,34 @@ public class DocTypeResolver {
    * "N" when it contains {@code documentType.return=false}.
    */
   private static String[] parseSubTypeFilters(NeoContext ctx) {
-    String subTypeFilter = null;
-    String subTypeExclude = null;
-    String isReturn = null;
-    if (ctx != null && ctx.getSfEntity() != null && ctx.getSfEntity().getADTab() != null) {
-      String tabWhere = ctx.getSfEntity().getADTab().getHqlwhereclause();
-      if (tabWhere != null) {
-        java.util.regex.Matcher m = java.util.regex.Pattern
-            .compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'",
-                java.util.regex.Pattern.CASE_INSENSITIVE)
-            .matcher(tabWhere);
-        if (m.find()) {
-          subTypeExclude = m.group(1);
-        } else {
-          m = java.util.regex.Pattern
-              .compile("sOSubType\\s+LIKE\\s+'(\\w+)'",
-                  java.util.regex.Pattern.CASE_INSENSITIVE)
-              .matcher(tabWhere);
-          if (m.find()) {
-            subTypeFilter = m.group(1);
-          }
-        }
-        java.util.regex.Matcher rm = java.util.regex.Pattern
-            .compile("documentType\\.return\\s*=\\s*(true|false)",
-                java.util.regex.Pattern.CASE_INSENSITIVE)
-            .matcher(tabWhere);
-        if (rm.find()) {
-          isReturn = "true".equalsIgnoreCase(rm.group(1)) ? "Y" : "N";
-        }
-      }
+    if (ctx == null || ctx.getSfEntity() == null || ctx.getSfEntity().getADTab() == null) {
+      return new String[]{null, null, null};
     }
-    return new String[] { subTypeFilter, subTypeExclude, isReturn };
+    String tabWhere = ctx.getSfEntity().getADTab().getHqlwhereclause();
+    if (tabWhere == null) {
+      return new String[]{null, null, null};
+    }
+    String subTypeExclude = matchFirst(tabWhere, "sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'");
+    String subTypeFilter = subTypeExclude == null
+        ? matchFirst(tabWhere, "sOSubType\\s+LIKE\\s+'(\\w+)'")
+        : null;
+    String isReturn = parseIsReturnValue(
+        matchFirst(tabWhere, "documentType\\.return\\s*=\\s*(true|false)"));
+    return new String[]{subTypeFilter, subTypeExclude, isReturn};
+  }
+
+  private static String matchFirst(String text, String pattern) {
+    java.util.regex.Matcher m = java.util.regex.Pattern
+        .compile(pattern, java.util.regex.Pattern.CASE_INSENSITIVE)
+        .matcher(text);
+    return m.find() ? m.group(1) : null;
+  }
+
+  private static String parseIsReturnValue(String match) {
+    if (match == null) {
+      return null;
+    }
+    return "true".equalsIgnoreCase(match) ? "Y" : "N";
   }
 
   /**
