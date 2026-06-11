@@ -25,7 +25,9 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -34,21 +36,29 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Collections;
+import java.util.List;
 
 import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
+import org.hibernate.query.Query;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.common.uom.UOM;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
@@ -675,6 +685,244 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
       assertEquals("APC-001", returnInvoices.getJSONObject(0).getString("documentNo"));
       assertTrue(enriched.getBoolean("hasReturnInvoice"));
       assertEquals(2, enriched.getInt("linesCount"));
+    }
+  }
+
+  // ── handle() — availableReceiptLines SQL exception ────────────────────────
+
+  /**
+   * ACTION "availableReceiptLines", SQL throws: handle returns 500 Internal Error.
+   */
+  @Test
+  public void testHandleAvailableReceiptLinesSqlThrowsReturnsInternalError() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("DB error"));
+
+      JSONObject body = new JSONObject();
+      try {
+        body.put("receiptId", "rcpt-1").put("businessPartner", "bp-1");
+      } catch (Exception ignored) {}
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("availableReceiptLines").requestBody(body).build();
+
+      NeoResponse result = handler.handle(ctx);
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
+    }
+  }
+
+  // ── handle() — documentAction with non-null recordId ─────────────────────
+
+  /**
+   * ACTION "documentAction", returnDoc is null:
+   * fillMissingStorageBins exits early; handle returns null.
+   */
+  @Test
+  public void testHandleDocumentActionDocNotFoundReturnsNull() {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(ShipmentInOut.class, "ret-x")).thenReturn(null);
+
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("documentAction").recordId("ret-x").build();
+      assertNull(handler.handle(ctx));
+    }
+  }
+
+  /**
+   * ACTION "documentAction", returnDoc has no lines:
+   * fillMissingStorageBins loop does not execute; handle returns null.
+   */
+  @Test
+  public void testHandleDocumentActionWithDocAndEmptyLinesReturnsNull() {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      when(dal.get(ShipmentInOut.class, "ret-x")).thenReturn(returnDoc);
+      when(returnDoc.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Collections.<ShipmentInOutLine>emptyList());
+
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("documentAction").recordId("ret-x").build();
+      assertNull(handler.handle(ctx));
+    }
+  }
+
+  // ── handle() — importReceiptLines ─────────────────────────────────────────
+
+  /**
+   * ACTION "importReceiptLines", one valid line with qty>0:
+   * the line is created and saved; response data has importedCount=1.
+   */
+  @Test
+  public void testHandleImportReceiptLinesHappyPathImportsOneLine() throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      // fetchMaxLineNo uses getConnection()
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true);
+      when(rs.getLong(1)).thenReturn(10L); // nextLineNo = 20
+
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      when(dal.get(ShipmentInOut.class, "ret-1")).thenReturn(returnDoc);
+      when(returnDoc.getClient()).thenReturn(mock(Client.class));
+      when(returnDoc.getOrganization()).thenReturn(mock(Organization.class));
+
+      ShipmentInOutLine sourceLine = mock(ShipmentInOutLine.class);
+      when(dal.get(ShipmentInOutLine.class, "src-1")).thenReturn(sourceLine);
+      when(sourceLine.getProduct()).thenReturn(mock(Product.class));
+      when(sourceLine.getUOM()).thenReturn(mock(UOM.class));
+      when(sourceLine.getStorageBin()).thenReturn(null);
+
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      ShipmentInOutLine retLine = mock(ShipmentInOutLine.class);
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(retLine);
+
+      JSONObject body = new JSONObject().put("lines",
+          new JSONArray().put(
+              new JSONObject().put("sourceLineId", "src-1").put("returnQuantity", "3")));
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("importReceiptLines").recordId("ret-1").requestBody(body).build();
+
+      NeoResponse result = handler.handle(ctx);
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      assertEquals(1, result.getBody()
+          .getJSONObject("response").getJSONObject("data").getInt("importedCount"));
+    }
+  }
+
+  /**
+   * ACTION "importReceiptLines", line has returnQuantity="0": the line is skipped;
+   * response data has importedCount=0.
+   */
+  @Test
+  public void testHandleImportReceiptLinesSkipsLineWithZeroQuantity() throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      when(dal.get(ShipmentInOut.class, "ret-1")).thenReturn(returnDoc);
+
+      JSONObject body = new JSONObject().put("lines",
+          new JSONArray().put(
+              new JSONObject().put("sourceLineId", "src-1").put("returnQuantity", "0")));
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("importReceiptLines").recordId("ret-1").requestBody(body).build();
+
+      NeoResponse result = handler.handle(ctx);
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      assertEquals(0, result.getBody()
+          .getJSONObject("response").getJSONObject("data").getInt("importedCount"));
+    }
+  }
+
+  // ── handle() — createReturnInvoice: findApcDocType org-specific match ─────
+
+  /**
+   * ACTION "createReturnInvoice", findApcDocType returns a doc type that matches
+   * the org exactly (first loop in findApcDocType), but buildReturnInvoiceHeader
+   * throws OBException because the business partner is missing payment terms:
+   * handle returns 400.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testHandleCreateReturnInvoiceOrgSpecificDocTypeFoundBpMissingPaymentTermsReturns400()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Organization org = mock(Organization.class);
+      when(org.getId()).thenReturn("org-1");
+
+      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
+      when(dal.get(ShipmentInOut.class, "ret-1")).thenReturn(returnDoc);
+      when(returnDoc.getDocumentStatus()).thenReturn("CO");
+      when(returnDoc.getOrganization()).thenReturn(org);
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getProduct()).thenReturn(mock(Product.class));
+      when(returnDoc.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Collections.singletonList(line));
+
+      // findApcDocType: one candidate that matches org-1 exactly
+      DocumentType apcDocType = mock(DocumentType.class);
+      Organization dtOrg = mock(Organization.class);
+      when(dtOrg.getId()).thenReturn("org-1");
+      when(apcDocType.getOrganization()).thenReturn(dtOrg);
+      OBCriteria<DocumentType> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(DocumentType.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.addOrderBy(anyString(), anyBoolean())).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.singletonList(apcDocType));
+
+      // ReturnShipmentUtils.findSourceInvoice uses dal.getSession() + createQuery
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+      Query<Invoice> query = mock(Query.class);
+      when(session.createQuery(anyString(), eq(Invoice.class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.setMaxResults(anyInt())).thenReturn(query);
+      when(query.list()).thenReturn(Collections.<Invoice>emptyList());
+
+      // buildReturnInvoiceHeader: OBProvider creates invoice mock
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      Invoice invoice = mock(Invoice.class);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      // bp missing payment terms → OBException
+      BusinessPartner bp = mock(BusinessPartner.class);
+      when(returnDoc.getBusinessPartner()).thenReturn(bp);
+      when(bp.getPurchasePricelist()).thenReturn(null);
+      when(bp.getPaymentTerms()).thenReturn(null); // triggers OBException
+
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("createReturnInvoice").recordId("ret-1").build();
+
+      NeoResponse result = handler.handle(ctx);
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
     }
   }
 }
