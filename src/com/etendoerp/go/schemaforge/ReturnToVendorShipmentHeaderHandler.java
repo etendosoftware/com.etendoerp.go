@@ -142,7 +142,7 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
         for (int i = 0; i < requestedLines.length(); i++) {
           JSONObject req = requestedLines.getJSONObject(i);
           String sourceLineId = req.optString("sourceLineId", null);
-          BigDecimal qty = BigDecimal.valueOf(req.optDouble("returnQuantity", 0));
+          BigDecimal qty = new BigDecimal(req.optString("returnQuantity", "0"));
           ShipmentInOutLine sourceLine = sourceLineId != null
               ? OBDal.getInstance().get(ShipmentInOutLine.class, sourceLineId) : null;
           if (sourceLineId == null || qty.compareTo(BigDecimal.ZERO) <= 0 || sourceLine == null) continue;
@@ -442,7 +442,8 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
             }
             target = defaultLocator;
           }
-          if (target != null && !target.equals(line.getStorageBin())) {
+          if (target != null && (line.getStorageBin() == null
+              || !target.getId().equals(line.getStorageBin().getId()))) {
             line.setStorageBin(target);
             OBDal.getInstance().save(line);
           }

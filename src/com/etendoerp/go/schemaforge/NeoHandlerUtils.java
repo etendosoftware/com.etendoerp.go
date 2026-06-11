@@ -144,6 +144,8 @@ final class NeoHandlerUtils {
   private static DocumentType findReturnDocType(String orgId, String docBaseType,
       boolean isSalesTransaction) {
     List<DocumentType> candidates = OBDal.getInstance().createCriteria(DocumentType.class)
+        .add(Restrictions.eq(DocumentType.PROPERTY_CLIENT,
+            OBContext.getOBContext().getCurrentClient()))
         .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, docBaseType))
         .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, isSalesTransaction))
         .add(Restrictions.eq(DocumentType.PROPERTY_RETURN, true))

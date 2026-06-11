@@ -69,13 +69,13 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
 
   private void negateMovQtyIfNeeded(JSONObject body, String method) {
     if (body.has(FIELD_MOVEMENT_QUANTITY)) {
-      double qty = body.optDouble(FIELD_MOVEMENT_QUANTITY, Double.NaN);
-      if (!Double.isNaN(qty) && qty > 0) {
-        try {
-          body.put(FIELD_MOVEMENT_QUANTITY, -qty);
-        } catch (Exception e) {
-          log.warn("Could not negate movementQuantity: {}", e.getMessage());
+      try {
+        BigDecimal qty = new BigDecimal(body.get(FIELD_MOVEMENT_QUANTITY).toString());
+        if (qty.compareTo(BigDecimal.ZERO) > 0) {
+          body.put(FIELD_MOVEMENT_QUANTITY, qty.negate());
         }
+      } catch (Exception e) {
+        log.warn("Could not negate movementQuantity: {}", e.getMessage());
       }
       // Remove product from PATCH/PUT body so SL_InOutLine_Product callout does not fire
       // and overwrite the user-supplied movementQuantity with the on-hand stock value.
@@ -110,9 +110,16 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
         }
         // Return positive movementQuantity to the frontend (V- docs store negative in DB).
         // Etendo Classic displays the absolute value; we match that behaviour here.
-        double mv = rec.optDouble(FIELD_MOVEMENT_QUANTITY, Double.NaN);
-        if (!Double.isNaN(mv) && mv < 0) {
-          rec.put(FIELD_MOVEMENT_QUANTITY, -mv);
+        Object mvObj = rec.opt(FIELD_MOVEMENT_QUANTITY);
+        if (mvObj != null) {
+          try {
+            BigDecimal mv = new BigDecimal(mvObj.toString());
+            if (mv.compareTo(BigDecimal.ZERO) < 0) {
+              rec.put(FIELD_MOVEMENT_QUANTITY, mv.negate());
+            }
+          } catch (Exception e) {
+            log.warn("Could not flip movementQuantity sign: {}", e.getMessage());
+          }
         }
       }
       return NeoResponse.ok(body);

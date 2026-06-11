@@ -2,6 +2,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.regex.Pattern;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -25,6 +26,13 @@ import org.openbravo.service.db.DalConnectionProvider;
 public class DocTypeResolver {
 
   private static final Logger log = LogManager.getLogger(DocTypeResolver.class);
+
+  private static final Pattern PAT_SUBTYPE_NOT_LIKE =
+      Pattern.compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'", Pattern.CASE_INSENSITIVE);
+  private static final Pattern PAT_SUBTYPE_LIKE =
+      Pattern.compile("sOSubType\\s+LIKE\\s+'(\\w+)'", Pattern.CASE_INSENSITIVE);
+  private static final Pattern PAT_IS_RETURN =
+      Pattern.compile("documentType\\.return\\s*=\\s*(true|false)", Pattern.CASE_INSENSITIVE);
 
   private DocTypeResolver() {
   }
@@ -135,19 +143,16 @@ public class DocTypeResolver {
     if (tabWhere == null) {
       return new String[]{null, null, null};
     }
-    String subTypeExclude = matchFirst(tabWhere, "sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'");
+    String subTypeExclude = matchFirst(tabWhere, PAT_SUBTYPE_NOT_LIKE);
     String subTypeFilter = subTypeExclude == null
-        ? matchFirst(tabWhere, "sOSubType\\s+LIKE\\s+'(\\w+)'")
+        ? matchFirst(tabWhere, PAT_SUBTYPE_LIKE)
         : null;
-    String isReturn = parseIsReturnValue(
-        matchFirst(tabWhere, "documentType\\.return\\s*=\\s*(true|false)"));
+    String isReturn = parseIsReturnValue(matchFirst(tabWhere, PAT_IS_RETURN));
     return new String[]{subTypeFilter, subTypeExclude, isReturn};
   }
 
-  private static String matchFirst(String text, String pattern) {
-    java.util.regex.Matcher m = java.util.regex.Pattern
-        .compile(pattern, java.util.regex.Pattern.CASE_INSENSITIVE)
-        .matcher(text);
+  private static String matchFirst(String text, Pattern pattern) {
+    java.util.regex.Matcher m = pattern.matcher(text);
     return m.find() ? m.group(1) : null;
   }
 
