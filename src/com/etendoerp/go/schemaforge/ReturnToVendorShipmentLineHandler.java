@@ -94,24 +94,29 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
             rec.put("productCode", ld.productCode);
           }
         }
-        // Return positive movementQuantity to the frontend (V- docs store negative in DB).
-        // Etendo Classic displays the absolute value; we match that behaviour here.
-        Object mvObj = rec.opt(FIELD_MOVEMENT_QUANTITY);
-        if (mvObj != null) {
-          try {
-            BigDecimal mv = new BigDecimal(mvObj.toString());
-            if (mv.compareTo(BigDecimal.ZERO) < 0) {
-              rec.put(FIELD_MOVEMENT_QUANTITY, mv.negate());
-            }
-          } catch (Exception e) {
-            log.warn("Could not flip movementQuantity sign: {}", e.getMessage());
-          }
-        }
+        flipMovQtySignIfNegative(rec);
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching return-to-vendor-shipment lines", e);
       return context.getPreviousResult();
+    }
+  }
+
+  // Return positive movementQuantity to the frontend (V- docs store negative in DB).
+  // Etendo Classic displays the absolute value; we match that behaviour here.
+  private void flipMovQtySignIfNegative(JSONObject rec) {
+    Object mvObj = rec.opt(FIELD_MOVEMENT_QUANTITY);
+    if (mvObj == null) {
+      return;
+    }
+    try {
+      BigDecimal mv = new BigDecimal(mvObj.toString());
+      if (mv.compareTo(BigDecimal.ZERO) < 0) {
+        rec.put(FIELD_MOVEMENT_QUANTITY, mv.negate());
+      }
+    } catch (Exception e) {
+      log.warn("Could not flip movementQuantity sign: {}", e.getMessage());
     }
   }
 

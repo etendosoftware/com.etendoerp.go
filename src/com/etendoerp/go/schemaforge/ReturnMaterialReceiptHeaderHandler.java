@@ -21,7 +21,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Collections;
-import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -34,14 +33,11 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.DocumentType;
-import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.ReversedInvoice;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
@@ -114,25 +110,9 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       OBContext.setAdminMode(true);
       try {
         ShipmentInOut receipt = OBDal.getInstance().get(ShipmentInOut.class, receiptId);
-        if (receipt == null) return;
-        Locator defaultLocator = null;
-        for (ShipmentInOutLine line : receipt.getMaterialMgmtShipmentInOutLineList()) {
-          ShipmentInOutLine origLine = line.getCanceledInoutLine();
-          Locator target = (origLine != null && origLine.getStorageBin() != null)
-              ? origLine.getStorageBin()
-              : line.getStorageBin();
-          if (target == null) {
-            if (defaultLocator == null) {
-              defaultLocator = ReturnShipmentUtils.findDefaultLocator(receipt.getWarehouse().getId(), log);
-            }
-            target = defaultLocator;
-          }
-          if (target != null && !target.equals(line.getStorageBin())) {
-            line.setStorageBin(target);
-            OBDal.getInstance().save(line);
-          }
+        if (receipt != null) {
+          ReturnShipmentUtils.assignBinsToLines(receipt);
         }
-        OBDal.getInstance().flush();
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -172,19 +152,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
               ? OBDal.getInstance().get(ShipmentInOutLine.class, sourceLineId) : null;
           if (sourceLineId == null || qty.compareTo(BigDecimal.ZERO) <= 0 || sourceLine == null) continue;
 
-          ShipmentInOutLine retLine = OBProvider.getInstance().get(ShipmentInOutLine.class);
-          retLine.setClient(receipt.getClient());
-          retLine.setOrganization(receipt.getOrganization());
-          retLine.setShipmentReceipt(receipt);
-          retLine.setLineNo(nextLineNo);
-          retLine.setProduct(sourceLine.getProduct());
-          retLine.setUOM(sourceLine.getUOM());
-          retLine.setMovementQuantity(qty);
-          retLine.setCanceledInoutLine(sourceLine);
-          if (sourceLine.getStorageBin() != null) {
-            retLine.setStorageBin(sourceLine.getStorageBin());
-          }
-          OBDal.getInstance().save(retLine);
+          ReturnShipmentUtils.buildAndSaveReturnLine(receipt, sourceLine, nextLineNo, qty);
           nextLineNo += 10;
           imported++;
         }
@@ -239,13 +207,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
         ps.setString(1, bpId);
         try (ResultSet rs = ps.executeQuery()) {
           while (rs.next()) {
-            JSONObject row = new JSONObject();
-            row.put("id", rs.getString(1));
-            row.put(FIELD_DOCUMENT_NO, rs.getString(2));
-            row.put("movementDate", rs.getString(3));
-            row.put("businessPartner$_identifier", rs.getString(4));
-            row.put("businessPartner", rs.getString(5));
-            data.put(row);
+            data.put(ReturnShipmentUtils.buildAvailableDocumentRow(rs));
           }
         }
       }
@@ -287,13 +249,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
         ps.setString(1, shipmentId);
         try (ResultSet rs = ps.executeQuery()) {
           while (rs.next()) {
-            JSONObject row = new JSONObject();
-            row.put("id", rs.getString(1));
-            row.put("product", rs.getString(2));
-            row.put("product$_identifier", rs.getString(3));
-            row.put("uOM", rs.getString(4));
-            row.put("movementQuantity", rs.getBigDecimal(5));
-            data.put(row);
+            data.put(ReturnShipmentUtils.buildAvailableLineRow(rs));
           }
         }
       }
@@ -328,14 +284,15 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "No product lines in this receipt");
         }
 
-        DocumentType docType = findAriRmDocType(receipt.getOrganization().getId());
+        DocumentType docType = ReturnShipmentUtils.findReturnDocTypeForOrg(
+            receipt.getOrganization().getId(), "ARI_RM", true, true);
         if (docType == null) {
           return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
               "No return invoice document type (ARI_RM) found for this organization");
         }
 
         Invoice sourceInvoice = ReturnShipmentUtils.findSourceInvoice(lines);
-        Invoice invoice = buildReturnInvoiceHeader(receipt, docType, sourceInvoice);
+        Invoice invoice = ReturnShipmentUtils.buildReturnInvoiceHeader(receipt, docType, sourceInvoice, true);
         OBDal.getInstance().save(invoice);
         OBDal.getInstance().flush();
 
@@ -368,63 +325,6 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the return invoice");
     }
-  }
-
-  private DocumentType findAriRmDocType(String orgId) {
-    List<DocumentType> candidates = OBDal.getInstance().createCriteria(DocumentType.class)
-        .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, "ARI_RM"))
-        .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, true))
-        .add(Restrictions.eq(DocumentType.PROPERTY_RETURN, true))
-        .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true))
-        .addOrderBy(DocumentType.PROPERTY_DEFAULT, false)
-        .list();
-    for (DocumentType dt : candidates) {
-      if (orgId.equals(dt.getOrganization().getId())) return dt;
-    }
-    for (DocumentType dt : candidates) {
-      if ("0".equals(dt.getOrganization().getId())) return dt;
-    }
-    return candidates.isEmpty() ? null : candidates.get(0);
-  }
-
-  private Invoice buildReturnInvoiceHeader(ShipmentInOut receipt, DocumentType docType,
-      Invoice sourceInvoice) {
-    BusinessPartner bp = receipt.getBusinessPartner();
-
-    Invoice invoice = OBProvider.getInstance().get(Invoice.class);
-    invoice.setClient(receipt.getClient());
-    invoice.setOrganization(receipt.getOrganization());
-    invoice.setDocumentType(docType);
-    invoice.setTransactionDocument(docType);
-    invoice.setDocumentStatus("DR");
-    invoice.setDocumentAction("CO");
-    invoice.setSalesTransaction(true);
-    invoice.setInvoiceDate(new Date());
-    invoice.setAccountingDate(new Date());
-    invoice.setBusinessPartner(bp);
-    invoice.setPartnerAddress(receipt.getPartnerAddress());
-    invoice.setSummedLineAmount(BigDecimal.ZERO);
-    invoice.setGrandTotalAmount(BigDecimal.ZERO);
-    invoice.setWithholdingamount(BigDecimal.ZERO);
-
-    if (sourceInvoice != null) {
-      invoice.setCurrency(sourceInvoice.getCurrency());
-      invoice.setPriceList(sourceInvoice.getPriceList());
-      invoice.setPaymentTerms(sourceInvoice.getPaymentTerms());
-      invoice.setPaymentMethod(sourceInvoice.getPaymentMethod());
-    } else {
-      invoice.setPriceList(bp.getPriceList());
-      if (bp.getPriceList() != null) {
-        invoice.setCurrency(bp.getPriceList().getCurrency());
-      }
-      if (bp.getPaymentTerms() == null || bp.getPaymentMethod() == null) {
-        throw new OBException("Business Partner is missing mandatory Payment Terms or Payment Method");
-      }
-      invoice.setPaymentTerms(bp.getPaymentTerms());
-      invoice.setPaymentMethod(bp.getPaymentMethod());
-    }
-
-    return invoice;
   }
 
   private void linkReversedInvoice(Invoice creditNote, Invoice originalInvoice) {

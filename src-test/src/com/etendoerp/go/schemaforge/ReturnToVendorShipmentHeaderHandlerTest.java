@@ -694,16 +694,14 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
    * ACTION "availableReceiptLines", SQL throws: handle returns 500 Internal Error.
    */
   @Test
-  public void testHandleAvailableReceiptLinesSqlThrowsReturnsInternalError() {
+  public void testHandleAvailableReceiptLinesSqlThrowsReturnsInternalError() throws Exception {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.getConnection()).thenThrow(new RuntimeException("DB error"));
 
-      JSONObject body = new JSONObject();
-      try {
-        body.put("receiptId", "rcpt-1").put("businessPartner", "bp-1");
-      } catch (Exception ignored) {}
+      JSONObject body = new JSONObject()
+          .put("receiptId", "rcpt-1").put("businessPartner", "bp-1");
       NeoContext ctx = NeoContext.builder()
           .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
           .fieldName("availableReceiptLines").requestBody(body).build();

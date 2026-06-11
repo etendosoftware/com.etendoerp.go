@@ -32,13 +32,19 @@ import java.util.stream.Collectors;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.Tax;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
-import org.openbravo.model.common.enterprise.Locator;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 import org.openbravo.service.db.DalConnectionProvider;
 
@@ -132,6 +138,149 @@ final class ReturnShipmentUtils {
       callerLog.warn("Could not find default locator for warehouse {}: {}", warehouseId, e.getMessage());
     }
     return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Storage bin fill – shared between both return header handlers
+  // ---------------------------------------------------------------------------
+
+  static void assignBinsToLines(ShipmentInOut doc) {
+    Locator defaultLocator = null;
+    for (ShipmentInOutLine line : doc.getMaterialMgmtShipmentInOutLineList()) {
+      ShipmentInOutLine origLine = line.getCanceledInoutLine();
+      Locator target = (origLine != null && origLine.getStorageBin() != null)
+          ? origLine.getStorageBin()
+          : line.getStorageBin();
+      if (target == null) {
+        if (defaultLocator == null) {
+          defaultLocator = findDefaultLocator(doc.getWarehouse().getId(), log);
+        }
+        target = defaultLocator;
+      }
+      if (target != null && (line.getStorageBin() == null
+          || !target.getId().equals(line.getStorageBin().getId()))) {
+        line.setStorageBin(target);
+        OBDal.getInstance().save(line);
+      }
+    }
+    OBDal.getInstance().flush();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Document type lookup – shared between both return header handlers
+  // ---------------------------------------------------------------------------
+
+  static DocumentType findReturnDocTypeForOrg(String orgId, String docCategory,
+      boolean isSales, boolean requireReturn) {
+    OBCriteria<DocumentType> crit = OBDal.getInstance().createCriteria(DocumentType.class)
+        .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, docCategory))
+        .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, isSales))
+        .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true));
+    if (requireReturn) {
+      crit.add(Restrictions.eq(DocumentType.PROPERTY_RETURN, true));
+    }
+    crit.addOrderBy(DocumentType.PROPERTY_DEFAULT, false);
+    List<DocumentType> candidates = crit.list();
+    for (DocumentType dt : candidates) {
+      if (orgId.equals(dt.getOrganization().getId())) return dt;
+    }
+    for (DocumentType dt : candidates) {
+      if ("0".equals(dt.getOrganization().getId())) return dt;
+    }
+    return candidates.isEmpty() ? null : candidates.get(0);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Return invoice header – shared between both return header handlers
+  // ---------------------------------------------------------------------------
+
+  static Invoice buildReturnInvoiceHeader(ShipmentInOut doc, DocumentType docType,
+      Invoice sourceInvoice, boolean isSales) {
+    BusinessPartner bp = doc.getBusinessPartner();
+    Invoice invoice = OBProvider.getInstance().get(Invoice.class);
+    invoice.setClient(doc.getClient());
+    invoice.setOrganization(doc.getOrganization());
+    invoice.setDocumentType(docType);
+    invoice.setTransactionDocument(docType);
+    invoice.setDocumentStatus("DR");
+    invoice.setDocumentAction("CO");
+    invoice.setSalesTransaction(isSales);
+    invoice.setInvoiceDate(new Date());
+    invoice.setAccountingDate(new Date());
+    invoice.setBusinessPartner(bp);
+    invoice.setPartnerAddress(doc.getPartnerAddress());
+    invoice.setSummedLineAmount(BigDecimal.ZERO);
+    invoice.setGrandTotalAmount(BigDecimal.ZERO);
+    invoice.setWithholdingamount(BigDecimal.ZERO);
+    if (sourceInvoice != null) {
+      invoice.setCurrency(sourceInvoice.getCurrency());
+      invoice.setPriceList(sourceInvoice.getPriceList());
+      invoice.setPaymentTerms(sourceInvoice.getPaymentTerms());
+      invoice.setPaymentMethod(sourceInvoice.getPaymentMethod());
+    } else {
+      if (isSales) {
+        invoice.setPriceList(bp.getPriceList());
+        if (bp.getPriceList() != null) {
+          invoice.setCurrency(bp.getPriceList().getCurrency());
+        }
+      } else {
+        invoice.setPriceList(bp.getPurchasePricelist());
+        if (bp.getPurchasePricelist() != null) {
+          invoice.setCurrency(bp.getPurchasePricelist().getCurrency());
+        }
+      }
+      if (bp.getPaymentTerms() == null || bp.getPaymentMethod() == null) {
+        throw new OBException("Business Partner is missing mandatory Payment Terms or Payment Method");
+      }
+      invoice.setPaymentTerms(bp.getPaymentTerms());
+      invoice.setPaymentMethod(bp.getPaymentMethod());
+    }
+    return invoice;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Return shipment line builder – shared between both return header handlers
+  // ---------------------------------------------------------------------------
+
+  static void buildAndSaveReturnLine(ShipmentInOut doc, ShipmentInOutLine sourceLine,
+      long lineNo, BigDecimal qty) {
+    ShipmentInOutLine retLine = OBProvider.getInstance().get(ShipmentInOutLine.class);
+    retLine.setClient(doc.getClient());
+    retLine.setOrganization(doc.getOrganization());
+    retLine.setShipmentReceipt(doc);
+    retLine.setLineNo(lineNo);
+    retLine.setProduct(sourceLine.getProduct());
+    retLine.setUOM(sourceLine.getUOM());
+    retLine.setMovementQuantity(qty);
+    retLine.setCanceledInoutLine(sourceLine);
+    if (sourceLine.getStorageBin() != null) {
+      retLine.setStorageBin(sourceLine.getStorageBin());
+    }
+    OBDal.getInstance().save(retLine);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Available document / line row builders – shared result-set mappers
+  // ---------------------------------------------------------------------------
+
+  static JSONObject buildAvailableDocumentRow(ResultSet rs) throws Exception {
+    JSONObject row = new JSONObject();
+    row.put("id", rs.getString(1));
+    row.put("documentNo", rs.getString(2));
+    row.put("movementDate", rs.getString(3));
+    row.put("businessPartner$_identifier", rs.getString(4));
+    row.put("businessPartner", rs.getString(5));
+    return row;
+  }
+
+  static JSONObject buildAvailableLineRow(ResultSet rs) throws Exception {
+    JSONObject row = new JSONObject();
+    row.put("id", rs.getString(1));
+    row.put("product", rs.getString(2));
+    row.put("product$_identifier", rs.getString(3));
+    row.put("uOM", rs.getString(4));
+    row.put("movementQuantity", rs.getBigDecimal(5));
+    return row;
   }
 
   // ---------------------------------------------------------------------------
