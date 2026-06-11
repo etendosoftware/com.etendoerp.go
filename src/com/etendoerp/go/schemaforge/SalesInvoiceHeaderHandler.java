@@ -17,6 +17,10 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+
 import javax.inject.Inject;
 import javax.inject.Named;
 
@@ -24,6 +28,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.service.OBDal;
 
 /**
  * NeoHandler for the Sales Invoice header entity.
@@ -81,15 +86,19 @@ public class SalesInvoiceHeaderHandler implements NeoHandler {
    */
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse rateError = AbstractOrderHeaderHandler.validateExchangeRateBeforeComplete(context);
+    if (rateError != null) {
+      return rateError;
+    }
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
     return NeoHeaderActionRouter.dispatch(context, cloneRecordHandler, registerPaymentHandler, siiSendHandler,
         tbaiXmlgeneratorHandler);
   }
 
   /**
-   * Adjusts grandTotalAmount and outstandingAmount in GET responses for draft invoices that have
-   * an etgoTotalDiscount set. Confirmed invoices already have the discount reflected in the DB via
-   * negative lines created by TotalDiscountService at completion time.
+   * Adjusts grandTotalAmount / outstandingAmount for draft invoices with a total discount, and
+   * injects {@code tbaiSyncEstado} (latest sync status from {@code tbai_syncinvoice}) into every
+   * record so the frontend can display it without a separate inSet GET request to the TBAI spec.
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
@@ -111,11 +120,16 @@ public class SalesInvoiceHeaderHandler implements NeoHandler {
         return null;
       }
       for (int i = 0; i < data.length(); i++) {
-        applyTotalDiscountToRecord(data.getJSONObject(i));
+        JSONObject rec = data.getJSONObject(i);
+        applyTotalDiscountToRecord(rec);
+        if (context.getRecordId() != null) {
+          enrichSourceInvoice(rec, context.getRecordId());
+        }
       }
+      TbaiSyncStatusInjector.inject(data);
       return NeoResponse.ok(body);
     } catch (Exception e) {
-      log.error("Error adjusting grandTotalAmount for total discount", e);
+      log.error("Error post-processing sales invoice GET response", e);
       return null;
     }
   }
@@ -130,6 +144,53 @@ public class SalesInvoiceHeaderHandler implements NeoHandler {
    * @throws Exception
    *     if a JSON read or write operation fails
    */
+  /**
+   * For return invoices, injects:
+   * - {@code sourceReturnReceipt}: the return receipt that originated this invoice
+   * - {@code sourceInvoice}: the original invoice being reversed
+   * Both are traced via C_InvoiceLine → M_InOutLine chains.
+   * Returns nothing for regular invoices (no Canceled_Inoutline_ID on their lines).
+   */
+  @SuppressWarnings("java:S2077")
+  private void enrichSourceInvoice(JSONObject rec, String invoiceId) {
+    String sql =
+        "SELECT DISTINCT " +
+        "  ret.M_InOut_ID AS ret_id, ret.DocumentNo AS ret_doc, ret.DocStatus AS ret_status, " +
+        "  orig_i.C_Invoice_ID AS inv_id, orig_i.DocumentNo AS inv_doc " +
+        "FROM C_InvoiceLine il " +
+        "JOIN M_InOutLine ret_line ON ret_line.M_InOutLine_ID = il.M_InOutLine_ID " +
+        "JOIN M_InOut ret ON ret.M_InOut_ID = ret_line.M_InOut_ID " +
+        "LEFT JOIN M_InOutLine orig_line ON orig_line.M_InOutLine_ID = ret_line.Canceled_Inoutline_ID " +
+        "LEFT JOIN C_InvoiceLine orig_il ON orig_il.M_InOutLine_ID = orig_line.M_InOutLine_ID " +
+        "LEFT JOIN C_Invoice orig_i ON orig_i.C_Invoice_ID = orig_il.C_Invoice_ID " +
+        "  AND orig_i.DocStatus != 'VO' " +
+        "WHERE il.C_Invoice_ID = ? AND ret_line.Canceled_Inoutline_ID IS NOT NULL " +
+        "ORDER BY orig_i.DateInvoiced DESC LIMIT 1";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, invoiceId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          JSONObject retReceipt = new JSONObject();
+          retReceipt.put("id", rs.getString("ret_id"));
+          retReceipt.put("documentNo", rs.getString("ret_doc"));
+          retReceipt.put("documentStatus", rs.getString("ret_status"));
+          rec.put("sourceReturnReceipt", retReceipt);
+
+          String origInvId = rs.getString("inv_id");
+          if (origInvId != null) {
+            JSONObject sourceInvoice = new JSONObject();
+            sourceInvoice.put("id", origInvId);
+            sourceInvoice.put("documentNo", rs.getString("inv_doc"));
+            rec.put("sourceInvoice", sourceInvoice);
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not enrich return invoice relations for {}: {}", invoiceId, e.getMessage());
+    }
+  }
+
   private void applyTotalDiscountToRecord(JSONObject invoice) throws Exception {
     if (invoice.optBoolean("processed", false)) {
       return;

@@ -23,12 +23,34 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import org.openbravo.model.financialmgmt.payment.PaymentTerm;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.pricing.pricelist.PriceList;
 
 /**
  * Shared commercial document projection helpers for order-driven documents.
  */
 final class NeoCommercialDocumentFactory {
+
+  static ShipmentInOut createReturnReceiptHeader(ShipmentInOut source, DocumentType docType) {
+    ShipmentInOut ret = OBProvider.getInstance().get(ShipmentInOut.class);
+    ret.setClient(source.getClient());
+    ret.setOrganization(source.getOrganization());
+    ret.setBusinessPartner(source.getBusinessPartner());
+    ret.setPartnerAddress(source.getPartnerAddress());
+    ret.setWarehouse(source.getWarehouse());
+    ret.setMovementDate(new Date());
+    ret.setAccountingDate(new Date());
+    ret.setDocumentType(docType);
+    ret.setDocumentNo("<*>");
+    ret.setSalesTransaction(true);
+    ret.setSalesOrder(source.getSalesOrder());
+    ret.setProcessed(false);
+    ret.setDocumentStatus("DR");
+    ret.setMovementType("C-");
+    return ret;
+  }
 
   private NeoCommercialDocumentFactory() {
   }
@@ -51,6 +73,58 @@ final class NeoCommercialDocumentFactory {
     shipment.setDocumentStatus("DR");
     shipment.setMovementType(movementType);
     return shipment;
+  }
+
+  static ShipmentInOut createShipmentReceiptHeader(ShipmentInOut source, DocumentType docType,
+      boolean salesTransaction, String movementType) {
+    ShipmentInOut shipment = OBProvider.getInstance().get(ShipmentInOut.class);
+    shipment.setClient(source.getClient());
+    shipment.setOrganization(source.getOrganization());
+    shipment.setBusinessPartner(source.getBusinessPartner());
+    shipment.setPartnerAddress(source.getPartnerAddress());
+    shipment.setWarehouse(source.getWarehouse());
+    Date now = new Date();
+    shipment.setMovementDate(now);
+    shipment.setAccountingDate(now);
+    shipment.setDocumentType(docType);
+    shipment.setDocumentNo("<*>");
+    shipment.setSalesTransaction(salesTransaction);
+    shipment.setSalesOrder(source.getSalesOrder());
+    shipment.setProcessed(false);
+    shipment.setDocumentStatus("DR");
+    shipment.setMovementType(movementType);
+    return shipment;
+  }
+
+  /**
+   * Builds a draft AP Invoice header from a goods receipt that has no linked purchase order.
+   * Financial fields (price list, payment terms, payment method) come from the
+   * business partner's purchase defaults, resolved by the caller.
+   */
+  static Invoice createInvoiceFromReceiptHeader(ShipmentInOut receipt,
+      DocumentType invoiceDocType, PriceList priceList,
+      PaymentTerm paymentTerms, FIN_PaymentMethod paymentMethod) {
+    Invoice invoice = OBProvider.getInstance().get(Invoice.class);
+    invoice.setClient(receipt.getClient());
+    invoice.setOrganization(receipt.getOrganization());
+    invoice.setDocumentType(invoiceDocType);
+    invoice.setTransactionDocument(invoiceDocType);
+    invoice.setDocumentStatus("DR");
+    invoice.setDocumentAction("CO");
+    invoice.setSalesTransaction(false);
+    invoice.setInvoiceDate(new Date());
+    invoice.setAccountingDate(new Date());
+    invoice.setBusinessPartner(receipt.getBusinessPartner());
+    invoice.setPartnerAddress(receipt.getPartnerAddress());
+    invoice.setPriceList(priceList);
+    invoice.setCurrency(priceList.getCurrency());
+    invoice.setPaymentTerms(paymentTerms);
+    invoice.setPaymentMethod(paymentMethod);
+    invoice.setSummedLineAmount(BigDecimal.ZERO);
+    invoice.setGrandTotalAmount(BigDecimal.ZERO);
+    invoice.setWithholdingamount(BigDecimal.ZERO);
+    invoice.setDocumentNo("<*>");
+    return invoice;
   }
 
   static Invoice createInvoiceFromOrderHeader(Order order, DocumentType invoiceDocType,
@@ -76,6 +150,9 @@ final class NeoCommercialDocumentFactory {
     invoice.setWithholdingamount(BigDecimal.ZERO);
     invoice.setSalesOrder(order);
     invoice.setDocumentNo("<*>");
+    // Carry over the header-level total discount percentage so TotalDiscountService
+    // can materialize the matching ETGO_DTO discount line on the new invoice.
+    invoice.setEtgoTotalDiscount(order.getEtgoTotalDiscount());
     return invoice;
   }
 }

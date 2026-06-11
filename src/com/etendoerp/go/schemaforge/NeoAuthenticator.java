@@ -25,8 +25,12 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Language;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -106,6 +110,39 @@ class NeoAuthenticator {
     }
     OBContext.setOBContext(context);
     OBContext.setOBContextInSession(request, context);
+    applyRequestLanguage(request);
+  }
+
+  /**
+   * Apply the UI language requested via the {@code Accept-Language} header to the
+   * current {@link OBContext}, so server-side message translation (AD_Message)
+   * matches the language the user selected in the frontend. Falls back silently
+   * to the context default when the header is absent or not a valid active language.
+   *
+   * <p>Only Etendo language codes ({@code xx_YY}, e.g. {@code es_ES}) are honored;
+   * browser-style values ({@code es-ES,es;q=0.9}) are ignored on purpose so the
+   * explicit app locale wins and nothing else does.
+   */
+  private void applyRequestLanguage(HttpServletRequest request) {
+    String code = request.getHeader("Accept-Language");
+    if (code == null || !code.trim().matches("[a-z]{2}_[A-Z]{2}")) {
+      return;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      OBCriteria<Language> crit = OBDal.getInstance().createCriteria(Language.class);
+      crit.add(Restrictions.eq(Language.PROPERTY_LANGUAGE, code.trim()));
+      crit.add(Restrictions.eq(Language.PROPERTY_ACTIVE, true));
+      crit.setMaxResults(1);
+      Language language = (Language) crit.uniqueResult();
+      if (language != null) {
+        OBContext.getOBContext().setLanguage(language);
+      }
+    } catch (Exception e) {
+      log.warn("Could not apply requested language '{}': {}", code, e.getMessage());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   boolean hasWindowAccess(String windowId) {

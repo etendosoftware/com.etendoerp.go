@@ -559,7 +559,7 @@ public class NeoCalloutService {
     // When logged in with "*" org (id=0), resolve the first real org so that
     // @#AD_Org_ID@ expressions inside callouts resolve to a valid org.
     if ("0".equals(orgId)) {
-      String realOrgId = NeoDefaultsService.resolveFirstOrgForClient(clientId);
+      String realOrgId = NeoDefaultsSqlHelper.resolveFirstOrgForClient(clientId);
       if (realOrgId != null) {
         orgId = realOrgId;
       }

@@ -30,6 +30,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.jspecify.annotations.Nullable;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
@@ -107,9 +108,7 @@ public class NeoCrudHelper {
   static void buildWhereClause(Map<String, String> params, Tab adTab, NeoContext context) {
     StringBuilder whereClause = new StringBuilder();
 
-    String parentId = context.getQueryParams() != null
-        ? context.getQueryParams().get(PARENT_ID_KEY)
-        : null;
+    String parentId = getParentId(context);
 
     String tabWhere = adTab.getHqlwhereclause();
     if (StringUtils.isNotBlank(tabWhere)) {
@@ -141,6 +140,12 @@ public class NeoCrudHelper {
       params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause.toString());
       params.put(JsonConstants.USE_ALIAS, "true");
     }
+  }
+
+  private static @Nullable String getParentId(NeoContext context) {
+    return context.getQueryParams() != null
+        ? context.getQueryParams().get(PARENT_ID_KEY)
+        : null;
   }
 
   /**

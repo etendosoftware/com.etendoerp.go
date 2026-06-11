@@ -16,8 +16,10 @@
  */
 package com.etendoerp.go.rest;
 
+import java.util.Date;
 import java.util.List;
 
+import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.provider.OBProvider;
@@ -38,12 +40,16 @@ final class EtendoGoJwtDalHelper {
   private static final String SYSTEM_USER_ID = "100";
   private static final String PARAM_EMAIL = "email";
   private static final String PARAM_TOKEN = "token";
+  private static final String PARAM_AUTH_PROVIDER = "authProvider";
+  private static final String PARAM_EXTERNAL_SUBJECT = "externalSubject";
+  private static final String PARAM_RESET_TOKEN_HASH = "resetTokenHash";
   private static final String PARAM_ACCOUNT_EMAIL = "accountEmail";
   private static final String PARAM_ACCOUNT_PREFIX = "accountPrefix";
   private static final String PARAM_CLIENT_ID = "clientId";
   private static final String PARAM_CURRENCY_ISO = "currencyIso";
   private static final String PARAM_STAR_VALUE = "starValue";
   private static final String PARAM_SYSTEM_USER_ID = "systemUserId";
+  private static final String ACTIVE_ACCOUNT_FILTER = " and account.active = true";
   private static final String FIELD_CLIENT_ID = "clientId";
   private static final String FIELD_CLIENT_NAME = "clientName";
   private static final String FIELD_ORG_ID = "orgId";
@@ -51,13 +57,21 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_ADMIN_USER_ID = "adminUserId";
   private static final String FIELD_ADMIN_USER = "adminUser";
   private static final String FIELD_ADMIN_USER_NAME = "adminUserName";
+  private static final String PROPERTY_PASSWORD_CHANGED = Account.PROPERTY_PASSWORDCHANGED;
+  private static final String PROPERTY_RESET_TOKEN_CONSUMED = Account.PROPERTY_RESETTOKENCONSUMED;
+  private static final String PROPERTY_RESET_TOKEN_EXPIRES = Account.PROPERTY_RESETTOKENEXPIRES;
+  private static final String PROPERTY_RESET_TOKEN_HASH = Account.PROPERTY_RESETTOKENHASH;
+  private static final String PROPERTY_AUTH_PROVIDER = Account.PROPERTY_AUTHPROVIDER;
+  private static final String PROPERTY_EXTERNAL_SUBJECT = Account.PROPERTY_EXTERNALSUBJECT;
+  private static final String PROPERTY_EXTERNAL_EMAIL = Account.PROPERTY_EXTERNALEMAIL;
+  private static final String PROPERTY_LAST_SSO_LOGIN = Account.PROPERTY_LASTSSOLOGIN;
 
   private EtendoGoJwtDalHelper() {
   }
 
   static Account findActiveAccountByEmail(String email) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where lower(account.email) = :" + PARAM_EMAIL + " and account.active = true");
+        "as account where lower(account.email) = :" + PARAM_EMAIL + ACTIVE_ACCOUNT_FILTER);
     query.setNamedParameter(PARAM_EMAIL, email.toLowerCase());
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
@@ -66,8 +80,20 @@ final class EtendoGoJwtDalHelper {
 
   static Account findActiveAccountByToken(String token) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        "as account where account.sessionToken = :" + PARAM_TOKEN + " and account.active = true");
+        "as account where account.sessionToken = :" + PARAM_TOKEN + ACTIVE_ACCOUNT_FILTER);
     query.setNamedParameter(PARAM_TOKEN, token);
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    return query.uniqueResult();
+  }
+
+  static Account findActiveAccountBySsoIdentity(String provider, String subject) {
+    OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
+        "as account where account." + PROPERTY_AUTH_PROVIDER + " = :" + PARAM_AUTH_PROVIDER
+            + " and account." + PROPERTY_EXTERNAL_SUBJECT + " = :" + PARAM_EXTERNAL_SUBJECT
+            + ACTIVE_ACCOUNT_FILTER);
+    query.setNamedParameter(PARAM_AUTH_PROVIDER, provider);
+    query.setNamedParameter(PARAM_EXTERNAL_SUBJECT, subject);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     return query.uniqueResult();
@@ -86,8 +112,118 @@ final class EtendoGoJwtDalHelper {
     return account;
   }
 
+  static Account createSsoAccount(String email, String name, String provider, String subject,
+      String externalEmail, String sessionToken, Date loginAt) {
+    Account account = OBProvider.getInstance().get(Account.class);
+    account.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
+    account.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
+    account.setEmail(email);
+    account.setPasswordHash(null);
+    account.setName(name);
+    account.setSessionToken(sessionToken);
+    account.set(PROPERTY_AUTH_PROVIDER, provider);
+    account.set(PROPERTY_EXTERNAL_SUBJECT, subject);
+    account.set(PROPERTY_EXTERNAL_EMAIL, externalEmail);
+    account.set(PROPERTY_LAST_SSO_LOGIN, loginAt);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+    return account;
+  }
+
   static void updateSessionToken(Account account, String sessionToken) {
     account.setSessionToken(sessionToken);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+  }
+
+  static boolean hasLocalPassword(Account account) {
+    return account != null && StringUtils.isNotBlank(account.getPasswordHash());
+  }
+
+  static boolean linkSsoIdentityIfCompatible(Account account, String provider, String subject,
+      String externalEmail) {
+    String currentProvider = StringUtils.trimToNull((String) account.get(PROPERTY_AUTH_PROVIDER));
+    String currentSubject = StringUtils.trimToNull((String) account.get(PROPERTY_EXTERNAL_SUBJECT));
+    if (currentProvider == null && currentSubject == null) {
+      account.set(PROPERTY_AUTH_PROVIDER, provider);
+      account.set(PROPERTY_EXTERNAL_SUBJECT, subject);
+      account.set(PROPERTY_EXTERNAL_EMAIL, externalEmail);
+      return true;
+    }
+    return StringUtils.equals(provider, currentProvider) && StringUtils.equals(subject,
+        currentSubject);
+  }
+
+  static void updateSsoSession(Account account, String externalEmail, String sessionToken,
+      Date loginAt) {
+    account.setSessionToken(sessionToken);
+    account.set(PROPERTY_EXTERNAL_EMAIL, externalEmail);
+    account.set(PROPERTY_LAST_SSO_LOGIN, loginAt);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+  }
+
+  static void storePasswordResetToken(Account account, String resetTokenHash, Date expiresAt) {
+    account.set(PROPERTY_RESET_TOKEN_HASH, resetTokenHash);
+    account.set(PROPERTY_RESET_TOKEN_EXPIRES, expiresAt);
+    account.set(PROPERTY_RESET_TOKEN_CONSUMED, null);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+  }
+
+  static PasswordResetTokenState capturePasswordResetToken(Account account) {
+    if (account == null) {
+      return null;
+    }
+    return new PasswordResetTokenState((String) account.get(PROPERTY_RESET_TOKEN_HASH),
+        (Date) account.get(PROPERTY_RESET_TOKEN_EXPIRES),
+        (Date) account.get(PROPERTY_RESET_TOKEN_CONSUMED));
+  }
+
+  static void restorePasswordResetToken(Account account, PasswordResetTokenState tokenState) {
+    if (account == null || tokenState == null) {
+      return;
+    }
+    account.set(PROPERTY_RESET_TOKEN_HASH, tokenState.resetTokenHash);
+    account.set(PROPERTY_RESET_TOKEN_EXPIRES, tokenState.resetTokenExpires);
+    account.set(PROPERTY_RESET_TOKEN_CONSUMED, tokenState.resetTokenConsumed);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+  }
+
+  static Account findActiveAccountByResetTokenHash(String resetTokenHash, Date now) {
+    OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
+        "as account where account." + PROPERTY_RESET_TOKEN_HASH + " = :"
+            + PARAM_RESET_TOKEN_HASH
+            + " and account." + PROPERTY_RESET_TOKEN_EXPIRES + " > :now"
+            + " and account." + PROPERTY_RESET_TOKEN_CONSUMED + " is null"
+            + " and account.active = true");
+    query.setNamedParameter(PARAM_RESET_TOKEN_HASH, resetTokenHash);
+    query.setNamedParameter("now", now);
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    return query.uniqueResult();
+  }
+
+  static void consumePasswordReset(Account account, String passwordHash, Date changedAt) {
+    account.setPasswordHash(passwordHash);
+    account.setSessionToken(null);
+    account.set(PROPERTY_RESET_TOKEN_HASH, null);
+    account.set(PROPERTY_RESET_TOKEN_EXPIRES, null);
+    account.set(PROPERTY_RESET_TOKEN_CONSUMED, changedAt);
+    account.set(PROPERTY_PASSWORD_CHANGED, changedAt);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+  }
+
+  static void changePassword(Account account, String passwordHash, String sessionToken,
+      Date changedAt) {
+    account.setPasswordHash(passwordHash);
+    account.setSessionToken(sessionToken);
+    account.set(PROPERTY_RESET_TOKEN_HASH, null);
+    account.set(PROPERTY_RESET_TOKEN_EXPIRES, null);
+    account.set(PROPERTY_RESET_TOKEN_CONSUMED, changedAt);
+    account.set(PROPERTY_PASSWORD_CHANGED, changedAt);
     OBDal.getInstance().save(account);
     flushAndCommitDalChanges();
   }
@@ -170,5 +306,18 @@ final class EtendoGoJwtDalHelper {
   private static void flushAndCommitDalChanges() {
     OBDal.getInstance().flush();
     OBDal.getInstance().commitAndClose();
+  }
+
+  static final class PasswordResetTokenState {
+    private final String resetTokenHash;
+    private final Date resetTokenExpires;
+    private final Date resetTokenConsumed;
+
+    private PasswordResetTokenState(String resetTokenHash, Date resetTokenExpires,
+        Date resetTokenConsumed) {
+      this.resetTokenHash = resetTokenHash;
+      this.resetTokenExpires = resetTokenExpires;
+      this.resetTokenConsumed = resetTokenConsumed;
+    }
   }
 }

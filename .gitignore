@@ -4,6 +4,9 @@ out/
 web/
 *.class
 
+# Local hook logs (pre-push / pre-commit)
+tmp/
+
 # IDE
 .idea/
 *.iml
@@ -31,3 +34,4 @@ config/apps-spike/private-key.pem
 .env
 .scannerwork/
 sonar-reports/
+sonar-results.md

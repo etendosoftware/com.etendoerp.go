@@ -33,6 +33,8 @@ public class PublicUrlResolverTest {
   public void clearProperties() {
     System.clearProperty(PublicUrlResolver.MCP_PUBLIC_URL_PROPERTY);
     System.clearProperty(PublicUrlResolver.OAUTH2_PUBLIC_URL_PROPERTY);
+    System.clearProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY);
+    System.clearProperty("etgo.app.url");
   }
 
   @Test
@@ -68,6 +70,29 @@ public class PublicUrlResolverTest {
     assertEquals("https://go.experimental.etendo.cloud/mcp/.well-known/oauth-protected-resource",
         PublicUrlResolver.appendPath("https://go.experimental.etendo.cloud/mcp/",
             "/.well-known/oauth-protected-resource"));
+  }
+
+  @Test
+  public void resolvesConfiguredAppBaseUrlWithoutTrailingSlash() {
+    HttpServletRequest request = buildLocalRequest();
+
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY,
+        "https://go.experimental.etendo.cloud/app/");
+
+    assertEquals("https://go.experimental.etendo.cloud/app",
+        PublicUrlResolver.resolveAppBaseUrl(request));
+    assertEquals("https://go.experimental.etendo.cloud/app",
+        PublicUrlResolver.resolveConfiguredAppBaseUrl());
+  }
+
+  @Test
+  public void fallsBackToRequestBaseForAppBaseUrl() {
+    HttpServletRequest request = buildLocalRequest();
+    System.setProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY, "/");
+    System.setProperty("etgo.app.url", "/");
+
+    assertEquals("http://localhost:8080/etendo_sf2",
+        PublicUrlResolver.resolveAppBaseUrl(request));
   }
 
   @Test

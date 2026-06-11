@@ -24,13 +24,16 @@ import static org.junit.Assert.fail;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 
 /**
  * Unit tests for {@link MissingRequiredFieldsException} and the pure-data branch of
- * {@link NeoDefaultsService#findMissingMandatoryFields}.
+ * {@link NeoMandatoryFieldValidator#findMissingMandatoryFields}.
  *
  * <p>These tests do not require a database. Tests that exercise DAL/Tab introspection
  * are covered by the manual smoke matrix listed in the ETP-3894 plan.</p>
@@ -83,7 +86,7 @@ public class MissingRequiredFieldsExceptionTest {
    */
   @Test
   public void testFindMissingMandatoryFieldsHandlesNullBody() {
-    java.util.List<String> result = NeoDefaultsService.findMissingMandatoryFields(null, null);
+    List<String> result = NeoMandatoryFieldValidator.findMissingMandatoryFields(null, null);
     assertNotNull(result);
     assertEquals(0, result.size());
   }
@@ -94,7 +97,7 @@ public class MissingRequiredFieldsExceptionTest {
    */
   @Test
   public void testFindMissingMandatoryFieldsHandlesNullTab() {
-    java.util.List<String> result = NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null);
+    List<String> result = NeoMandatoryFieldValidator.findMissingMandatoryFields(new JSONObject(), null);
     assertNotNull(result);
     assertEquals(0, result.size());
   }
@@ -106,8 +109,8 @@ public class MissingRequiredFieldsExceptionTest {
    */
   @Test
   public void testFindMissingMandatoryFieldsWithUserSubmittedFieldsHandlesNullTab() {
-    java.util.Set<String> submitted = new java.util.HashSet<>(java.util.Arrays.asList("businessPartner", "priceList"));
-    java.util.List<String> result = NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null, submitted);
+    Set<String> submitted = new HashSet<>(Arrays.asList("businessPartner", "priceList"));
+    List<String> result = NeoMandatoryFieldValidator.findMissingMandatoryFields(new JSONObject(), null, submitted);
     assertNotNull(result);
     assertEquals(0, result.size());
   }
@@ -118,8 +121,8 @@ public class MissingRequiredFieldsExceptionTest {
    */
   @Test
   public void testFindMissingMandatoryFieldsBackwardCompatOverloadDelegatesToThreeParam() {
-    java.util.List<String> twoParam = NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null);
-    java.util.List<String> threeParam = NeoDefaultsService.findMissingMandatoryFields(new JSONObject(), null, null);
+    List<String> twoParam = NeoMandatoryFieldValidator.findMissingMandatoryFields(new JSONObject(), null);
+    List<String> threeParam = NeoMandatoryFieldValidator.findMissingMandatoryFields(new JSONObject(), null, null);
     assertEquals(twoParam, threeParam);
   }
 }

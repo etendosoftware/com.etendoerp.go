@@ -27,6 +27,8 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
+import com.smf.securewebservices.SWSConfig;
 
 /**
  * NEO Headless 2.0 servlet.
@@ -49,6 +51,7 @@ public class NeoServlet extends HttpBaseServlet {
 
   private static final String METHOD_DELETE = "DELETE";
   private static final String METHOD_PATCH = "PATCH";
+  private static final String DOCUMENT_DOWNLOAD_PREFIX = "/document-download/";
   static final String ERR_ENTITY_NOT_FOUND = "Entity not found: ";
   static final String ERR_NO_LINKED_TAB = "Entity has no linked AD_Tab: ";
   public static final String ACTION_REQUEST_BODY_ATTR = "neo.action.requestBody";
@@ -58,6 +61,8 @@ public class NeoServlet extends HttpBaseServlet {
       new NeoBuiltInEndpointHandler(this, discoveryHandler);
   final NeoButtonHandler buttonHandler = new NeoButtonHandler();
   final NeoDisplayLogicHandler displayLogicHandler = new NeoDisplayLogicHandler();
+  // Package-private so sibling collaborators (BatchService) can dispatch through
+  // the same default CRUD pipeline without going via HTTP.
   final NeoCrudHandler crudHandler = new NeoCrudHandler(this);
   final NeoAuthenticator authenticator = new NeoAuthenticator(this);
   private final NeoRequestRouter requestRouter = new NeoRequestRouter(this);
@@ -67,6 +72,7 @@ public class NeoServlet extends HttpBaseServlet {
   final NeoCalloutEndpoint calloutEndpoint = new NeoCalloutEndpoint(this);
   final NeoDefaultsEndpoint defaultsEndpoint = new NeoDefaultsEndpoint(this);
   final NeoProcessReportEndpoint processReportEndpoint = new NeoProcessReportEndpoint(this);
+  private final BatchService batchService = new BatchService(this);
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -97,7 +103,7 @@ public class NeoServlet extends HttpBaseServlet {
         super.service(request, response);
       } catch (Exception e) {
         log.error("Error in NeoServlet.service", e);
-        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+        sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
       }
     }
   }
@@ -107,6 +113,13 @@ public class NeoServlet extends HttpBaseServlet {
     // Readiness probe: no auth required, used by ALB health check
     if ("GET".equals(method) && "/health/ready".equals(request.getPathInfo())) {
       handleReadinessCheck(response);
+      return;
+    }
+
+    // Download links are intentionally unauthenticated: the signed, expiring token carries the
+    // record/client scope and NeoDocumentDownloadService validates it before serving any file.
+    if ("GET".equals(method) && isDocumentDownloadPath(request.getPathInfo())) {
+      handleDocumentDownload(request, response);
       return;
     }
 
@@ -124,10 +137,53 @@ public class NeoServlet extends HttpBaseServlet {
       if (builtInEndpointHandler.handle(pathInfo, method, request, response)) {
         return;
       }
+
+      // Generic transactional batch endpoint: POST /sws/neo/batch
+      //   Runs an ordered list of CRUD ops in one OBDal transaction with
+      //   $ref:<opId> substitution between ops. Same primitive is consumed by
+      //   the React UI (composite-document ingest) and external agents (MCP).
+      //   Find-or-create logic stays with the caller — no per-window server code.
+      if ("batch".equals(pathInfo.specName)) {
+        if (!"POST".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Batch endpoint only supports POST");
+          return;
+        }
+        batchService.handle(request, response);
+        return;
+      }
       requestRouter.handleSpecRequest(pathInfo, method, request, response);
     } catch (Exception e) {
       log.error("Error processing NEO request: {}", e.getMessage(), e);
-      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private boolean isDocumentDownloadPath(String pathInfo) {
+    return pathInfo != null && pathInfo.startsWith(DOCUMENT_DOWNLOAD_PREFIX);
+  }
+
+  private void handleDocumentDownload(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String token = StringUtils.substringAfter(request.getPathInfo(), DOCUMENT_DOWNLOAD_PREFIX);
+    if (StringUtils.isBlank(token)) {
+      sendError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing download token");
+      return;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      NeoDocumentDownloadService.handle(token, response);
+    } catch (Exception e) {
+      log.error("Error processing document download request", e);
+      if (!response.isCommitted()) {
+        response.reset();
+        response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+        response.setContentType("text/plain");
+        response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+        response.getWriter().write("Document download failed");
+      }
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -255,7 +311,7 @@ public class NeoServlet extends HttpBaseServlet {
       OBContext.setAdminMode();
       OBDal.getInstance().getSession()
           .createNativeQuery("SELECT 1").getSingleResult();
-      ready = true;
+      ready = SWSConfig.getInstance().getPrivateKey() != null;
     } catch (Exception e) {
       log.warn("Readiness check failed: {}", e.getMessage());
     } finally {
