@@ -29,19 +29,46 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
 /**
- * Post-hook for the Return Material Receipt line entity.
+ * NeoHandler for the Return to Vendor Shipment line entity.
  *
- * Injects {@code orderQuantity} (original delivered qty from canceled source line)
+ * <p>Injects {@code orderQuantity} (original received qty from the canceled goods receipt line)
  * and {@code productCode} (M_Product.Value / search key) into every GET response.
  */
-@Named("returnMaterialReceiptLineHandler")
-public class ReturnMaterialReceiptLineHandler implements NeoHandler {
+@Named("returnToVendorShipmentLineHandler")
+public class ReturnToVendorShipmentLineHandler implements NeoHandler {
 
-  private static final Logger log = LogManager.getLogger(ReturnMaterialReceiptLineHandler.class);
+  private static final Logger log = LogManager.getLogger(ReturnToVendorShipmentLineHandler.class);
+
+  private static final String FIELD_MOVEMENT_QUANTITY = "movementQuantity";
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    // Negate movementQuantity on write so the frontend always works with positive values.
+    // V- documents store negative quantities in the DB; the UI (like Etendo Classic) shows positive.
+    String method = context.getHttpMethod();
+    if (("PUT".equals(method) || "PATCH".equals(method) || "POST".equals(method))
+        && context.getRequestBody() != null) {
+      negateMovQtyIfNeeded(context.getRequestBody(), method);
+    }
     return null;
+  }
+
+  private void negateMovQtyIfNeeded(JSONObject body, String method) {
+    if (body.has(FIELD_MOVEMENT_QUANTITY)) {
+      try {
+        BigDecimal qty = new BigDecimal(body.get(FIELD_MOVEMENT_QUANTITY).toString());
+        if (qty.compareTo(BigDecimal.ZERO) > 0) {
+          body.put(FIELD_MOVEMENT_QUANTITY, qty.negate());
+        }
+      } catch (Exception e) {
+        log.warn("Could not negate movementQuantity: {}", e.getMessage());
+      }
+      // Remove product from PATCH/PUT body so SL_InOutLine_Product callout does not fire
+      // and overwrite the user-supplied movementQuantity with the on-hand stock value.
+      if (!"POST".equals(method)) {
+        body.remove("product");
+      }
+    }
   }
 
   @Override
@@ -67,11 +94,29 @@ public class ReturnMaterialReceiptLineHandler implements NeoHandler {
             rec.put("productCode", ld.productCode);
           }
         }
+        flipMovQtySignIfNegative(rec);
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {
-      log.error("Error enriching return-material-receipt lines", e);
+      log.error("Error enriching return-to-vendor-shipment lines", e);
       return context.getPreviousResult();
+    }
+  }
+
+  // Return positive movementQuantity to the frontend (V- docs store negative in DB).
+  // Etendo Classic displays the absolute value; we match that behaviour here.
+  private void flipMovQtySignIfNegative(JSONObject rec) {
+    Object mvObj = rec.opt(FIELD_MOVEMENT_QUANTITY);
+    if (mvObj == null) {
+      return;
+    }
+    try {
+      BigDecimal mv = new BigDecimal(mvObj.toString());
+      if (mv.compareTo(BigDecimal.ZERO) < 0) {
+        rec.put(FIELD_MOVEMENT_QUANTITY, mv.negate());
+      }
+    } catch (Exception e) {
+      log.warn("Could not flip movementQuantity sign: {}", e.getMessage());
     }
   }
 
