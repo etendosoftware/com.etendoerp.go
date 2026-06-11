@@ -20,7 +20,6 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -306,20 +305,7 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
         Invoice invoice = ReturnShipmentUtils.buildReturnInvoiceHeader(returnDoc, docType, sourceInvoice, false);
         OBDal.getInstance().save(invoice);
         OBDal.getInstance().flush();
-
-        ReturnShipmentUtils.addReturnInvoiceLines(invoice, lines, createDraftInvoiceHandler);
-        OBDal.getInstance().flush();
-        OBDal.getInstance().getSession().refresh(invoice);
-
-        createDraftInvoiceHandler.ensureDocumentNo(invoice);
-        createDraftInvoiceHandler.getSupport().ensureLineGrossAmounts(invoice);
-        createDraftInvoiceHandler.recalculateTotals(invoice);
-        OBDal.getInstance().flush();
-
-        JSONObject data = new JSONObject();
-        data.put("id", invoice.getId());
-        data.put(FIELD_DOCUMENT_NO, invoice.getDocumentNo());
-        return ReturnShipmentUtils.wrapOkData(data);
+        return ReturnShipmentUtils.finalizeReturnInvoice(invoice, lines, createDraftInvoiceHandler);
 
       } finally {
         OBContext.restorePreviousMode();
@@ -378,32 +364,9 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
         String id = rec.optString("id", null);
-
-        List<JSONObject> receipts = receiptsMap.getOrDefault(id, Collections.emptyList());
-        JSONArray receiptsArr = new JSONArray();
-        for (JSONObject r : receipts) {
-          receiptsArr.put(r);
-        }
-        rec.put(FIELD_SOURCE_RECEIPTS, receiptsArr);
-
-        if (!receipts.isEmpty()) {
-          String combined = receipts.stream()
-              .map(r -> r.optString(FIELD_DOCUMENT_NO, ""))
-              .filter(s -> !s.isEmpty())
-              .collect(Collectors.joining(", "));
-          if (!combined.isEmpty()) {
-            rec.put(FIELD_SOURCE_RECEIPT_DOC_NO, combined);
-          }
-        }
-
-        List<JSONObject> invoices = returnInvoicesMap.getOrDefault(id, Collections.emptyList());
-        JSONArray invoicesArr = new JSONArray();
-        for (JSONObject inv : invoices) {
-          invoicesArr.put(inv);
-        }
-        rec.put("returnInvoices", invoicesArr);
-        rec.put("hasReturnInvoice", !invoices.isEmpty());
-        rec.put("linesCount", lineCountMap.getOrDefault(id, 0));
+        ReturnShipmentUtils.enrichReturnRecord(rec, id, receiptsMap,
+            FIELD_SOURCE_RECEIPTS, FIELD_SOURCE_RECEIPT_DOC_NO,
+            returnInvoicesMap, lineCountMap);
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {

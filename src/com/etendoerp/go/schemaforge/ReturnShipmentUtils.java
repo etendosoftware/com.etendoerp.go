@@ -23,6 +23,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -31,6 +32,7 @@ import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
@@ -266,7 +268,7 @@ final class ReturnShipmentUtils {
   static JSONObject buildAvailableDocumentRow(ResultSet rs) throws Exception {
     JSONObject row = new JSONObject();
     row.put("id", rs.getString(1));
-    row.put("documentNo", rs.getString(2));
+    row.put(FIELD_DOCUMENT_NO, rs.getString(2));
     row.put("movementDate", rs.getString(3));
     row.put("businessPartner$_identifier", rs.getString(4));
     row.put("businessPartner", rs.getString(5));
@@ -411,6 +413,58 @@ final class ReturnShipmentUtils {
       log.warn("Could not fetch max lineNo for inout {}: {}", inoutId, e.getMessage());
     }
     return 0;
+  }
+
+  // ---------------------------------------------------------------------------
+  // afterHandle enrichment – shared between both return header handlers
+  // ---------------------------------------------------------------------------
+
+  static void enrichReturnRecord(JSONObject rec, String id,
+      Map<String, List<JSONObject>> sourceDocsMap, String sourceDocsField, String sourceDocNoField,
+      Map<String, List<JSONObject>> returnInvoicesMap,
+      Map<String, Integer> lineCountMap) throws Exception {
+    List<JSONObject> sourceDocs = sourceDocsMap.getOrDefault(id, Collections.emptyList());
+    JSONArray sourceDocsArr = new JSONArray();
+    for (JSONObject d : sourceDocs) {
+      sourceDocsArr.put(d);
+    }
+    rec.put(sourceDocsField, sourceDocsArr);
+    if (!sourceDocs.isEmpty()) {
+      String combined = sourceDocs.stream()
+          .map(d -> d.optString(FIELD_DOCUMENT_NO, ""))
+          .filter(s -> !s.isEmpty())
+          .collect(Collectors.joining(", "));
+      if (!combined.isEmpty()) {
+        rec.put(sourceDocNoField, combined);
+      }
+    }
+    List<JSONObject> invoices = returnInvoicesMap.getOrDefault(id, Collections.emptyList());
+    JSONArray invoicesArr = new JSONArray();
+    for (JSONObject inv : invoices) {
+      invoicesArr.put(inv);
+    }
+    rec.put("returnInvoices", invoicesArr);
+    rec.put("hasReturnInvoice", !invoices.isEmpty());
+    rec.put("linesCount", lineCountMap.getOrDefault(id, 0));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Invoice finalization – shared between both return header handlers
+  // ---------------------------------------------------------------------------
+
+  static NeoResponse finalizeReturnInvoice(Invoice invoice, List<ShipmentInOutLine> lines,
+      CreateDraftInvoiceHandler createDraftInvoiceHandler) throws Exception {
+    addReturnInvoiceLines(invoice, lines, createDraftInvoiceHandler);
+    OBDal.getInstance().flush();
+    OBDal.getInstance().getSession().refresh(invoice);
+    createDraftInvoiceHandler.ensureDocumentNo(invoice);
+    createDraftInvoiceHandler.getSupport().ensureLineGrossAmounts(invoice);
+    createDraftInvoiceHandler.recalculateTotals(invoice);
+    OBDal.getInstance().flush();
+    JSONObject data = new JSONObject();
+    data.put("id", invoice.getId());
+    data.put(FIELD_DOCUMENT_NO, invoice.getDocumentNo());
+    return wrapOkData(data);
   }
 
   // ---------------------------------------------------------------------------
