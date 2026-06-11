@@ -146,18 +146,18 @@ class DocTypeResolverTest {
     }
 
     @Test
-    @DisplayName("Returns [null, null] when context is null")
+    @DisplayName("Returns [null, null, null] when context is null")
     void nullContext() throws Exception {
       String[] result = invokeParseSubTypeFilters(null);
-      assertArrayEquals(new String[] { null, null }, result);
+      assertArrayEquals(new String[] { null, null, null }, result);
     }
 
     @Test
-    @DisplayName("Returns [null, null] when sfEntity is null")
+    @DisplayName("Returns [null, null, null] when sfEntity is null")
     void nullSfEntity() throws Exception {
       NeoContext ctx = NeoContext.builder().build();
       String[] result = invokeParseSubTypeFilters(ctx);
-      assertArrayEquals(new String[] { null, null }, result);
+      assertArrayEquals(new String[] { null, null, null }, result);
     }
 
     @Test
