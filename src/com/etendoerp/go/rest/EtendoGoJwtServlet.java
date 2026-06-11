@@ -102,6 +102,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_SUCCESS = "success";
   private static final String FIELD_ACCOUNT = "account";
   private static final String FIELD_AUTH_METHOD = "authMethod";
+  private static final String FIELD_LANGUAGE = "language";
   private static final String STATUS_SUCCESS = FIELD_SUCCESS;
   private static final String INVALID_JSON_BODY = "Invalid JSON body";
   private static final String INTERNAL_ERROR = "Internal error";
@@ -131,8 +132,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_DRAFT_FORM = "form";
   private static final int ONBOARDING_DRAFT_MAX_LENGTH = 4000;
   private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { "fullName", "businessType",
-      "clientName", "currency", "language", "countryCode", "fiscalIdType", "fiscalIdValue",
-      "address", "sector" };
+      FIELD_CLIENT_NAME, "currency", FIELD_LANGUAGE, "countryCode", "fiscalIdType",
+      "fiscalIdValue", "address", "sector" };
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
   OnboardingSequenceGeneratorService onboardingSequenceGeneratorService =
@@ -171,16 +172,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   // --- HTTP method dispatchers ---
 
+  /**
+   * Route matcher tolerating an optional trailing slash.
+   */
+  private static boolean isPath(String path, String route) {
+    return route.equals(path) || (route + "/").equals(path);
+  }
+
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
-    if ("/me".equals(path) || "/me/".equals(path)) {
+    if (isPath(path, "/me")) {
       handleMe(request, response);
-    } else if (PATH_ONBOARDING_DRAFT.equals(path) || (PATH_ONBOARDING_DRAFT + "/").equals(path)) {
+    } else if (isPath(path, PATH_ONBOARDING_DRAFT)) {
       handleGetOnboardingDraft(request, response);
-    } else if ("/environments".equals(path) || "/environments/".equals(path)) {
+    } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
-    } else if ("/login".equals(path) || "/login/".equals(path)) {
+    } else if (isPath(path, "/login")) {
       handleEnvironmentLogin(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
@@ -191,23 +199,21 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
     String ssoProvider = extractSsoProvider(path);
-    if ("/register".equals(path) || "/register/".equals(path)) {
+    if (isPath(path, "/register")) {
       handleRegister(request, response);
-    } else if ("/login".equals(path) || "/login/".equals(path)) {
+    } else if (isPath(path, "/login")) {
       handleLogin(request, response);
     } else if (ssoProvider != null) {
       handleSsoLogin(ssoProvider, request, response);
-    } else if ("/password-reset/request".equals(path)
-        || "/password-reset/request/".equals(path)) {
+    } else if (isPath(path, "/password-reset/request")) {
       handlePasswordResetRequest(request, response);
-    } else if ("/password-reset/confirm".equals(path)
-        || "/password-reset/confirm/".equals(path)) {
+    } else if (isPath(path, "/password-reset/confirm")) {
       handlePasswordResetConfirm(request, response);
-    } else if ("/change-password".equals(path) || "/change-password/".equals(path)) {
+    } else if (isPath(path, "/change-password")) {
       handleChangePassword(request, response);
-    } else if (PATH_ONBOARDING_DRAFT.equals(path) || (PATH_ONBOARDING_DRAFT + "/").equals(path)) {
+    } else if (isPath(path, PATH_ONBOARDING_DRAFT)) {
       handleSaveOnboardingDraft(request, response);
-    } else if ("/onboarding".equals(path) || "/onboarding/".equals(path)) {
+    } else if (isPath(path, "/onboarding")) {
       handleOnboarding(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
@@ -239,7 +245,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       email = body.getString(FIELD_EMAIL).trim().toLowerCase();
       password = body.getString(FIELD_PASSWORD);
       name = body.getString("name").trim();
-      language = body.optString("language", "").trim();
+      language = body.optString(FIELD_LANGUAGE, "").trim();
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Missing required fields: email, password, name");
@@ -673,6 +679,28 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * Resolve the platform account from the request's Bearer token under the
+   * system admin context. Always enters admin mode (so callers can restore it
+   * in their finally block) and writes the 401 response when the header is
+   * missing or the token does not match an active account, returning null.
+   */
+  private Account resolveAuthenticatedAccount(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    OBContext.setOBContext("0", "0", "0", "0");
+    OBContext.setAdminMode(true);
+    String token = extractBearerToken(request);
+    if (token == null) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
+      return null;
+    }
+    Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
+    if (account == null) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+    }
+    return account;
+  }
+
+  /**
    * GET /sws/go/onboarding/draft
    * Header: Authorization: Bearer <session_token>
    * Returns 200 with { status, draft } where draft is the saved onboarding
@@ -680,22 +708,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleGetOnboardingDraft(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    String token = extractBearerToken(request);
-    if (token == null) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
-      return;
-    }
-
     try {
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
+      Account account = resolveAuthenticatedAccount(request, response);
       if (account == null) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
-
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
       result.put(FIELD_DRAFT, parseStoredOnboardingDraft(account));
@@ -719,30 +736,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleSaveOnboardingDraft(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    String token = extractBearerToken(request);
-    if (token == null) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
-      return;
-    }
-
-    JSONObject body;
     try {
-      body = readJsonBody(request);
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
-      return;
-    }
-
-    try {
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
+      Account account = resolveAuthenticatedAccount(request, response);
       if (account == null) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
-
+      JSONObject body = readJsonBodyOrBadRequest(request, response);
+      if (body == null) {
+        return;
+      }
       JSONObject draft = body.optJSONObject(FIELD_DRAFT);
       String storedDraft = null;
       if (draft != null) {
@@ -767,6 +769,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Read the JSON request body, writing a 400 response and returning null when
+   * the payload is not valid JSON.
+   */
+  private JSONObject readJsonBodyOrBadRequest(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    try {
+      return readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return null;
     }
   }
 
@@ -1080,7 +1096,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OnboardingRequestData data = new OnboardingRequestData();
       data.clientName = clientName;
       data.currencyIso = body.optString("currency", "EUR").trim();
-      data.language = body.optString("language", "en_US").trim();
+      data.language = body.optString(FIELD_LANGUAGE, "en_US").trim();
       return data;
     } catch (JSONException e) {
         String message = e.getMessage() != null && e.getMessage().contains(FIELD_CLIENT_NAME)
