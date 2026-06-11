@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -33,6 +34,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.ScrollableResults;
+import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBCriteria;
@@ -112,13 +114,11 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
   private void handleGenerate(String orgId, int year, String period, String tipo,
       HttpServletResponse response) throws Exception {
-    Organization org = OBDal.getInstance().get(Organization.class, orgId);
-
     boolean quarterly = period.startsWith("T");
     String valueKey = quarterly ? "AEAT303_Q_" + year : "AEAT303_M_" + year;
 
     TaxReport taxReport   = resolveTaxReport(orgId, valueKey);
-    AcctSchema acctSchema = resolveAcctSchema(org);
+    AcctSchema acctSchema = resolveAcctSchema();
     List<Period> periods  = resolvePeriods(orgId, year, period);
 
     if (periods.isEmpty()) {
@@ -205,7 +205,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
         : "AEAT303_M_" + year;
     TaxReport taxReport = resolveTaxReport(orgId, valueKey);
 
-    AcctSchema acctSchema = resolveAcctSchema(org);
+    AcctSchema acctSchema = resolveAcctSchema();
 
     List<Period> periods = resolvePeriods(orgId, year, period);
     if (periods.isEmpty()) {
@@ -475,10 +475,11 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
 
   // ── Resolution helpers ───────────────────────────────────────────
 
-  private TaxReport resolveTaxReport(String orgId, String valueKey) {
+  TaxReport resolveTaxReport(String orgId, String valueKey) {
     OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
-    crit.add(Restrictions.eq(TaxReport.PROPERTY_ORGANIZATION + ".id", orgId));
+    crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
     crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, valueKey));
+    crit.addOrder(Order.desc(TaxReport.PROPERTY_ORGANIZATION + ".id"));
     crit.setMaxResults(1);
     List<TaxReport> list = crit.list();
     if (list.isEmpty()) {

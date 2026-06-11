@@ -60,7 +60,7 @@ import org.openbravo.model.common.enterprise.Warehouse;
  * Unit tests for {@link CalloutRequestBuilder}.
  *
  * <p>All tests mock the Etendo static singletons (OBDal, OBContext, ModelProvider,
- * NeoDefaultsService) so no live database is required. Mocks are opened in
+ * NeoDefaultsSqlHelper) so no live database is required. Mocks are opened in
  * {@link #setUp()} and closed in reverse order in {@link #tearDown()} to guarantee
  * correct isolation when the full suite runs.</p>
  */
@@ -70,7 +70,7 @@ public class CalloutRequestBuilderTest {
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
   private MockedStatic<ModelProvider> modelProviderMock;
-  private MockedStatic<NeoDefaultsService> neoDefaultsMock;
+  private MockedStatic<NeoDefaultsSqlHelper> neoSqlHelperMock;
 
   private OBDal dal;
   private ModelProvider modelProvider;
@@ -93,9 +93,9 @@ public class CalloutRequestBuilderTest {
     obContextMock = mockStatic(OBContext.class);
     obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
 
-    // ── NeoDefaultsService ────────────────────────────────────────────
-    neoDefaultsMock = mockStatic(NeoDefaultsService.class);
-    neoDefaultsMock.when(() -> NeoDefaultsService.resolveFirstOrgForClient(anyString()))
+    // ── NeoDefaultsSqlHelper ──────────────────────────────────────────
+    neoSqlHelperMock = mockStatic(NeoDefaultsSqlHelper.class);
+    neoSqlHelperMock.when(() -> NeoDefaultsSqlHelper.resolveFirstOrgForClient(anyString()))
         .thenReturn(null);
 
     // ── default OBContext chain so tests can share a minimal setup ────
@@ -114,7 +114,7 @@ public class CalloutRequestBuilderTest {
   @After
   public void tearDown() {
     // Close in REVERSE open order to satisfy Mockito's scope nesting requirement.
-    neoDefaultsMock.close();
+    neoSqlHelperMock.close();
     obContextMock.close();
     modelProviderMock.close();
     obDalMock.close();
@@ -821,7 +821,7 @@ public class CalloutRequestBuilderTest {
     when(org.getId()).thenReturn("0");
     when(obContext.getCurrentOrganization()).thenReturn(org);
     // resolveFirstOrgForClient returns a real org
-    neoDefaultsMock.when(() -> NeoDefaultsService.resolveFirstOrgForClient("CLIENT-001"))
+    neoSqlHelperMock.when(() -> NeoDefaultsSqlHelper.resolveFirstOrgForClient("CLIENT-001"))
         .thenReturn("REAL-ORG-999");
 
     Tab tab = tabWithTable("C_ORDER");
@@ -944,8 +944,8 @@ public class CalloutRequestBuilderTest {
 
     assertEquals("REAL-ORG-123", params.get("inpadOrgId")[0]);
     // resolveFirstOrgForClient must NOT be called when org is already a real value
-    neoDefaultsMock.verify(
-        () -> NeoDefaultsService.resolveFirstOrgForClient(anyString()), never());
+    neoSqlHelperMock.verify(
+        () -> NeoDefaultsSqlHelper.resolveFirstOrgForClient(anyString()), never());
   }
 
   @Test

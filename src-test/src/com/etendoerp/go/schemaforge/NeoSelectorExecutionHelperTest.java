@@ -37,6 +37,9 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Modifier;
+
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -53,6 +56,16 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * dependencies are stubbed via {@code MockedStatic}.
  */
 class NeoSelectorExecutionHelperTest {
+
+  @Test
+  @DisplayName("Utility class hides its constructor")
+  void utilityClassHidesConstructor() throws ReflectiveOperationException {
+    Constructor<NeoSelectorExecutionHelper> constructor = NeoSelectorExecutionHelper.class.getDeclaredConstructor();
+    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
+    constructor.setAccessible(true);
+    constructor.newInstance();
+  }
+
 
   // ------------------------------------------------------------------ //
   // appendLiteralFilter

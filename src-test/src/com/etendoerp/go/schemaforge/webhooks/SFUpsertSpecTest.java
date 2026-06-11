@@ -199,6 +199,20 @@ class SFUpsertSpecTest extends BaseWebhookTest {
         verify(obDal, never()).save(any());
     }
 
+    /** Verifies SpecType validation is case-sensitive: lowercase is rejected. */
+    @Test
+    @DisplayName("Lowercase SpecType is rejected (case-sensitive)")
+    void testLowercaseSpecTypeIsRejected() {
+        parameters.put(NAME, TEST_NAME);
+        parameters.put(MODULE_ID, TEST_ID_1);
+        parameters.put(SPEC_TYPE, "p");
+
+        webhook.get(parameters, responseVars);
+
+        assertEquals("Invalid SpecType: p. Must be W or P.", responseVars.get(ERROR));
+        verify(obDal, never()).save(any());
+    }
+
     /** Verifies error when WindowID is missing for a Window spec. */
     @Test
     @DisplayName("Missing WindowID for SpecType=W returns error")

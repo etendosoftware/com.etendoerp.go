@@ -27,6 +27,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.apache.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
@@ -99,7 +100,7 @@ abstract class AbstractFiscalHandler {
       return;
     }
     try {
-      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+      String orgId = resolveEffectiveOrg();
       dispatch(entityName, orgId, year, period, request, response);
     } catch (FiscalHandlerException e) {
       log.error("Error in /" + getModelKey() + "/" + entityName, e);
@@ -172,14 +173,35 @@ abstract class AbstractFiscalHandler {
     response.flushBuffer();
   }
 
-  protected AcctSchema resolveAcctSchema(Organization org) {
+  protected String resolveEffectiveOrg() {
+    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+    if (!"0".equals(orgId)) {
+      return orgId;
+    }
+    // Session org is * — find the non-summary leaf org for the current client.
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    OBCriteria<Organization> crit = OBDal.getInstance().createCriteria(Organization.class);
+    crit.add(Restrictions.eq(Organization.PROPERTY_CLIENT + ".id", clientId));
+    crit.add(Restrictions.eq(Organization.PROPERTY_SUMMARYLEVEL, false));
+    crit.add(Restrictions.ne(Organization.PROPERTY_ID, "0"));
+    crit.addOrder(Order.asc(Organization.PROPERTY_NAME));
+    crit.setMaxResults(1);
+    List<Organization> orgs = crit.list();
+    if (orgs.isEmpty()) {
+      throw new OBException("No leaf organization found for client=" + clientId);
+    }
+    return orgs.get(0).getId();
+  }
+
+  protected AcctSchema resolveAcctSchema() {
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
     OBCriteria<AcctSchema> crit = OBDal.getInstance().createCriteria(AcctSchema.class);
-    crit.add(Restrictions.eq(AcctSchema.PROPERTY_CLIENT + ".id", org.getClient().getId()));
+    crit.add(Restrictions.eq(AcctSchema.PROPERTY_CLIENT + ".id", clientId));
     crit.add(Restrictions.eq(AcctSchema.PROPERTY_ACTIVE, true));
     crit.setMaxResults(1);
     List<AcctSchema> list = crit.list();
     if (list.isEmpty()) {
-      throw new OBException("No AcctSchema found for client=" + org.getClient().getId());
+      throw new OBException("No AcctSchema found for client=" + clientId);
     }
     return list.get(0);
   }

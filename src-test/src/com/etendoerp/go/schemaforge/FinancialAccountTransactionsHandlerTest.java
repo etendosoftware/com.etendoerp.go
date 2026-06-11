@@ -380,6 +380,50 @@ public class FinancialAccountTransactionsHandlerTest {
   }
 
   /**
+   * Verifies the CSV-export-only derived fields added to each transaction row
+   * (consumed by the generic {@code ?export=csv} path): Classic type/status
+   * labels, the deposit/withdrawal split (from raw {@code depositamt}/{@code
+   * paymentamt}), the synthetic "Payment" label and the processed flag.
+   *
+   * @throws Exception
+   *     if the mocked JDBC chain or JSON traversal fails
+   */
+  @Test
+  public void testLoadTransactionsAddsCsvExportDerivedFields() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, false);
+
+    Timestamp date = Timestamp.from(Instant.parse("2026-05-06T10:00:00Z"));
+    stubTransactionRow(rs,
+        "TRX-1", date, "RPPC", "BPD",
+        new BigDecimal("100.00"), new BigDecimal("500.00"),
+        "desc", "Y", "PAY-1", "ACME SL", "EUR");
+    when(rs.getBigDecimal("deposit_amt")).thenReturn(new BigDecimal("100.00"));
+    when(rs.getBigDecimal("payment_amt")).thenReturn(BigDecimal.ZERO);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      JSONObject row = handler.loadTransactions(ACCOUNT_ID).getJSONObject(0);
+      assertEquals("BP Deposit", row.getString("transactionTypeLabel"));
+      assertEquals("Payment Cleared", row.getString("statusLabel"));
+      assertEquals(0,
+          new BigDecimal("100.00").compareTo(new BigDecimal(row.getString("depositAmount"))));
+      assertEquals(0,
+          BigDecimal.ZERO.compareTo(new BigDecimal(row.getString("withdrawalAmount"))));
+      assertTrue(row.getBoolean("processed"));
+      assertEquals("PAY-1 - 06-05-2026 - ACME SL - 100", row.getString("paymentLabel"));
+    }
+  }
+
+  /**
    * Verifies that when the statement date is {@code null}, the row's
    * {@code date} field is serialised as an empty string. This exercises the
    * {@code formatDate(null) → ""} branch and the

@@ -196,7 +196,8 @@ public class NeoSelectorService {
         return ListReferenceSelectorExecutor.resolveListSelector(column, search, safeLimit,
             safeOffset, contextParams);
       }
-      if (!isObuisel && ComboReferenceSelectorExecutor.shouldUseCoreComboSelector(sourceEntity, column, refId)) {
+      if (!isObuisel && !SystemClientSelectorRegistry.isRegisteredColumn(column)
+          && ComboReferenceSelectorExecutor.shouldUseCoreComboSelector(sourceEntity, column, refId)) {
         log.info("[ComboSelector] routing {} via core ComboTableData (SQL validation rule)",
             column.getDBColumnName());
         return ComboReferenceSelectorExecutor.resolveClassicSelectorWithCoreCombo(
@@ -211,6 +212,9 @@ public class NeoSelectorService {
 
       String validationFilter = SelectorValidationResolver.resolveValidationFilter(
           column, meta.entityName, contextParams);
+      if (SystemClientSelectorRegistry.isRegisteredColumn(column)) {
+        validationFilter = SystemClientSelectorRegistry.expandClientFilter(validationFilter);
+      }
       String contextOrganizationId = SelectorContextResolver.resolveContextOrganizationId(sourceEntity, contextParams);
       String filterAlias = resolveFilterAlias(meta);
       String combinedFilter = buildCombinedFilter(
