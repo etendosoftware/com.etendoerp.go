@@ -334,10 +334,7 @@ public final class SelectorDescriptorResolver {
    */
   private static void addReferencedIdentifierPaths(List<String> props, Entity entity) {
     for (Property idProp : entity.getIdentifierProperties()) {
-      if (idProp.isPrimitive()) {
-        continue;
-      }
-      Entity targetEntity = idProp.getTargetEntity();
+      Entity targetEntity = idProp.isPrimitive() ? null : idProp.getTargetEntity();
       if (targetEntity == null) {
         continue;
       }
