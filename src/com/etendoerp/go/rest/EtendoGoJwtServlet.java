@@ -53,6 +53,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingDefaultCustomerService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
@@ -116,6 +117,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_FISCAL = "fiscal";
   private static final String PROGRESS_ORG_READY = "orgReady";
   private static final String PROGRESS_CUSTOMER = "customer";
+  private static final String PROGRESS_BASELINE = "baseline";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
   private static final long PASSWORD_RESET_TTL_SECONDS = 30 * 60L;
   private static final String PASSWORD_RESET_NEUTRAL_MESSAGE =
@@ -133,6 +135,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingFiscalDataSetupService();
   OnboardingDefaultCustomerService onboardingDefaultCustomerService =
       new OnboardingDefaultCustomerService();
+  OnboardingBaselineService onboardingBaselineService =
+      new OnboardingBaselineService();
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
 
@@ -1089,7 +1093,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!setupFiscalData(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
-    return ensureDefaultCustomer(writer, clientId, orgId, adminUserId, adminRoleId);
+    if (!ensureDefaultCustomer(writer, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
+    }
+    // Final action before commitDalChanges: stamp the tenant's data-fix baseline so it lands in the
+    // same atomic onboarding commit. A genuine SQL error propagates (not caught here) so the outer
+    // handleOnboarding catch rolls back cleanly; the expected ON CONFLICT->0-rows case is benign.
+    return registerBaseline(writer, clientId);
   }
 
   boolean importOnboardingDataset(PrintWriter writer, String clientId, String orgId) {
@@ -1178,6 +1188,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendFinalResult(writer, false, errorMessage);
       return false;
     }
+  }
+
+  /**
+   * Registers the tenant's data-fix baseline row (the LIVE preventive counterpart of the corrective
+   * runner's DETECTED sweep) as the final onboarding action before the commit.
+   *
+   * <p>Unlike the other steps, a genuine SQL failure here is NOT caught-and-returned-false: it
+   * propagates so {@code handleOnboarding}'s catch performs a clean {@code rollbackDalChanges}.
+   * Swallowing it would poison the shared transaction and abort the otherwise-successful commit.
+   * The expected {@code ON CONFLICT DO NOTHING} → 0-rows outcome never throws (DETECTED conserved).</p>
+   */
+  boolean registerBaseline(PrintWriter writer, String clientId) {
+    sendProgress(writer, PROGRESS_BASELINE, PROGRESS_IN_PROGRESS,
+        "Registering data-fix baseline...");
+    onboardingBaselineService.registerBaseline(clientId);
+    sendProgress(writer, PROGRESS_BASELINE, "done", "Data-fix baseline registered");
+    return true;
   }
 
 

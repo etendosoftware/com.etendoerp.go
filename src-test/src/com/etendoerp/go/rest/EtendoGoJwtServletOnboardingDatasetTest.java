@@ -28,6 +28,7 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.service.db.ImportResult;
 
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
+import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingDefaultCustomerService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
@@ -57,7 +58,10 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     CountingImportService importService = new CountingImportService();
     CountingSequenceGeneratorService sequenceService = new CountingSequenceGeneratorService();
     CountingDefaultCustomerService customerService = new CountingDefaultCustomerService();
-    TestServlet servlet = new TestServlet(importService, sequenceService, customerService);
+    CountingBaselineService baselineService = new CountingBaselineService();
+    TestServlet servlet = new TestServlet(importService, sequenceService,
+        new CountingMarkOrgReadyService(), new CountingFiscalDataSetupService(), customerService,
+        baselineService);
     StringWriter output = new StringWriter();
 
     boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
@@ -76,10 +80,15 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     assertEquals("ORG-1", customerService.orgId);
     assertEquals("USER-1", customerService.userId);
     assertEquals("ROLE-1", customerService.roleId);
+    assertEquals(1, baselineService.registerCount);
+    assertEquals("CLIENT-1", baselineService.clientId);
     assertTrue(ndjson.contains("Organization sequences generated"));
     assertTrue(ndjson.contains("Default customer ready"));
+    assertTrue(ndjson.contains("Data-fix baseline registered"));
     assertTrue(ndjson.indexOf("Organization sequences generated")
         < ndjson.indexOf("Default customer ready"));
+    assertTrue(ndjson.indexOf("Default customer ready")
+        < ndjson.indexOf("Data-fix baseline registered"));
   }
 
   @Test
@@ -101,9 +110,11 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
 
   @Test
   public void testEnsureOnboardingDatasetReturnsFinalFailureOnDefaultCustomerError() {
+    CountingBaselineService baselineService = new CountingBaselineService();
     TestServlet servlet = new TestServlet(new SuccessfulImportService(),
         new CountingSequenceGeneratorService(),
-        new FailingDefaultCustomerService("broken customer"));
+        new CountingMarkOrgReadyService(), new CountingFiscalDataSetupService(),
+        new FailingDefaultCustomerService("broken customer"), baselineService);
     StringWriter output = new StringWriter();
 
     boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
@@ -111,6 +122,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
 
     String ndjson = output.toString();
     assertFalse(ready);
+    assertEquals(0, baselineService.registerCount);
     assertTrue(ndjson.contains("\"step\":\"customer\""));
     assertTrue(ndjson.contains("\"status\":\"error\""));
     assertTrue(ndjson.contains("broken customer"));
@@ -137,7 +149,10 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     CountingImportService importService = new CountingImportService();
     CountingSequenceGeneratorService sequenceService = new CountingSequenceGeneratorService();
     CountingDefaultCustomerService customerService = new CountingDefaultCustomerService();
-    TestServlet servlet = new TestServlet(importService, sequenceService, customerService);
+    CountingBaselineService baselineService = new CountingBaselineService();
+    TestServlet servlet = new TestServlet(importService, sequenceService,
+        new CountingMarkOrgReadyService(), new CountingFiscalDataSetupService(), customerService,
+        baselineService);
     StringWriter output = new StringWriter();
 
     boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", false,
@@ -148,10 +163,12 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     assertEquals(0, importService.importCount);
     assertEquals(1, sequenceService.generateCount);
     assertEquals(1, customerService.seedCount);
+    assertEquals(1, baselineService.registerCount);
     assertTrue(ndjson.contains("\"step\":\"dataset\""));
     assertTrue(ndjson.contains("\"status\":\"done\""));
     assertTrue(ndjson.contains("skipping onboarding dataset import"));
     assertTrue(ndjson.contains("Default customer ready"));
+    assertTrue(ndjson.contains("Data-fix baseline registered"));
   }
 
   @Test
@@ -224,6 +241,68 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
   }
 
   @Test
+  public void testEnsureOnboardingDatasetRegistersBaselineAfterDefaultCustomer() {
+    CountingBaselineService baselineService = new CountingBaselineService();
+    TestServlet servlet = new TestServlet(new SuccessfulImportService(),
+        new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
+        new CountingFiscalDataSetupService(), new CountingDefaultCustomerService(),
+        baselineService);
+    StringWriter output = new StringWriter();
+
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
+        "USER-1", "ROLE-1");
+
+    String ndjson = output.toString();
+    assertTrue(ready);
+    assertEquals(1, baselineService.registerCount);
+    assertEquals("CLIENT-1", baselineService.clientId);
+    assertTrue(ndjson.contains("\"step\":\"baseline\""));
+    assertTrue(ndjson.contains("Registering data-fix baseline"));
+    assertTrue(ndjson.contains("Data-fix baseline registered"));
+    assertTrue(ndjson.indexOf("Default customer ready")
+        < ndjson.indexOf("Data-fix baseline registered"));
+  }
+
+  @Test
+  public void testEnsureOnboardingDatasetPropagatesBaselineFailure() {
+    TestServlet servlet = new TestServlet(new SuccessfulImportService(),
+        new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
+        new CountingFiscalDataSetupService(), new CountingDefaultCustomerService(),
+        new FailingBaselineService("broken baseline"));
+    StringWriter output = new StringWriter();
+
+    try {
+      servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
+          "USER-1", "ROLE-1");
+      org.junit.Assert.fail("Expected baseline failure to propagate");
+    } catch (OBException e) {
+      assertEquals("broken baseline", e.getMessage());
+    }
+
+    String ndjson = output.toString();
+    assertTrue(ndjson.contains("\"step\":\"baseline\""));
+    assertTrue(ndjson.contains("\"status\":\"in_progress\""));
+    assertFalse(ndjson.contains("Data-fix baseline registered"));
+    assertFalse(ndjson.contains("\"success\":false"));
+  }
+
+  @Test
+  public void testEnsureOnboardingDatasetSkipsBaselineWhenFiscalDataFails() {
+    CountingBaselineService baselineService = new CountingBaselineService();
+    TestServlet servlet = new TestServlet(new SuccessfulImportService(),
+        new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
+        new FailingFiscalDataSetupService("broken fiscal"),
+        new CountingDefaultCustomerService(), baselineService);
+    StringWriter output = new StringWriter();
+
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
+        "USER-1", "ROLE-1");
+
+    assertFalse(ready);
+    assertEquals(0, baselineService.registerCount);
+  }
+
+  @Test
   public void testEnsureOnboardingDatasetReturnsFinalFailureOnFiscalDataError() {
     TestServlet servlet = new TestServlet(new SuccessfulImportService(),
         new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
@@ -260,20 +339,23 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
   private static final class TestServlet extends EtendoGoJwtServlet {
     private TestServlet(OnboardingDatasetImportService importService) {
       this(importService, new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
-          new CountingFiscalDataSetupService(), new CountingDefaultCustomerService());
+          new CountingFiscalDataSetupService(), new CountingDefaultCustomerService(),
+          new CountingBaselineService());
     }
 
     private TestServlet(OnboardingDatasetImportService importService,
         OnboardingSequenceGeneratorService sequenceGeneratorService) {
       this(importService, sequenceGeneratorService, new CountingMarkOrgReadyService(),
-          new CountingFiscalDataSetupService(), new CountingDefaultCustomerService());
+          new CountingFiscalDataSetupService(), new CountingDefaultCustomerService(),
+          new CountingBaselineService());
     }
 
     private TestServlet(OnboardingDatasetImportService importService,
         OnboardingSequenceGeneratorService sequenceGeneratorService,
         OnboardingDefaultCustomerService defaultCustomerService) {
       this(importService, sequenceGeneratorService, new CountingMarkOrgReadyService(),
-          new CountingFiscalDataSetupService(), defaultCustomerService);
+          new CountingFiscalDataSetupService(), defaultCustomerService,
+          new CountingBaselineService());
     }
 
     private TestServlet(OnboardingDatasetImportService importService,
@@ -281,11 +363,22 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
         OnboardingMarkOrgReadyService markOrgReadyService,
         OnboardingFiscalDataSetupService fiscalDataSetupService,
         OnboardingDefaultCustomerService defaultCustomerService) {
+      this(importService, sequenceGeneratorService, markOrgReadyService, fiscalDataSetupService,
+          defaultCustomerService, new CountingBaselineService());
+    }
+
+    private TestServlet(OnboardingDatasetImportService importService,
+        OnboardingSequenceGeneratorService sequenceGeneratorService,
+        OnboardingMarkOrgReadyService markOrgReadyService,
+        OnboardingFiscalDataSetupService fiscalDataSetupService,
+        OnboardingDefaultCustomerService defaultCustomerService,
+        OnboardingBaselineService baselineService) {
       this.onboardingDatasetImportService = importService;
       this.onboardingSequenceGeneratorService = sequenceGeneratorService;
       this.onboardingMarkOrgReadyService = markOrgReadyService;
       this.onboardingFiscalDataSetupService = fiscalDataSetupService;
       this.onboardingDefaultCustomerService = defaultCustomerService;
+      this.onboardingBaselineService = baselineService;
     }
   }
 
@@ -433,6 +526,30 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
 
     @Override
     public void markOrgReady(String clientId, String orgId, String userId, String roleId) {
+      throw new OBException(message);
+    }
+  }
+
+  private static class CountingBaselineService extends OnboardingBaselineService {
+    private int registerCount;
+    private String clientId;
+
+    @Override
+    public void registerBaseline(String clientId) {
+      registerCount++;
+      this.clientId = clientId;
+    }
+  }
+
+  private static final class FailingBaselineService extends OnboardingBaselineService {
+    private final String message;
+
+    private FailingBaselineService(String message) {
+      this.message = message;
+    }
+
+    @Override
+    public void registerBaseline(String clientId) {
       throw new OBException(message);
     }
   }
