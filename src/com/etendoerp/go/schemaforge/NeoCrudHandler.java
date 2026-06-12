@@ -149,6 +149,12 @@ class NeoCrudHandler {
     }
     NeoResponse neoResponse = dispatchCrudRequest(entity, neoContext, request, response);
     if (neoResponse != null) {
+      // Generic CSV export: when the GET carries export=csv, stream the rows the
+      // handler produced as a CSV attachment instead of the JSON envelope.
+      if ("GET".equals(method)
+          && NeoCsvExportService.tryExport(neoResponse, queryParams, response)) {
+        return;
+      }
       servlet.writeResponse(response, neoResponse);
     }
   }

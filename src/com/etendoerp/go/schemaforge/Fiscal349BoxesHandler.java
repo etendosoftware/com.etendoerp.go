@@ -35,6 +35,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
@@ -105,7 +106,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       throw new OBException("Organization not found: " + orgId);
     }
     TaxReport  taxReport  = resolveTaxReport349(orgId, period);
-    AcctSchema acctSchema = resolveAcctSchema(org);
+    AcctSchema acctSchema = resolveAcctSchema();
     List<Period> periods  = resolvePeriods(orgId, year, period);
 
     if (periods.isEmpty()) {
@@ -145,7 +146,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       summary.put("total" + e.getKey(), e.getValue().setScale(2, RoundingMode.HALF_UP).toString());
     }
 
-    String    orgNif      = dao349.getOrgTaxID(orgId);
+    String    orgNif      = resolveOrgNif(orgId);
     JSONArray invoicesArr = collectInvoices(purch, sales);
 
     JSONObject root = new JSONObject();
@@ -234,9 +235,8 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
   private void handleGenerate(String orgId, int year, String period,
       HttpServletRequest request, HttpServletResponse response) throws Exception {
-    Organization org      = OBDal.getInstance().get(Organization.class, orgId);
     TaxReport    taxReport  = resolveTaxReport349(orgId, period);
-    AcctSchema   acctSchema = resolveAcctSchema(org);
+    AcctSchema   acctSchema = resolveAcctSchema();
     List<Period> periods    = resolvePeriods(orgId, year, period);
 
     if (periods.isEmpty()) {
@@ -276,6 +276,19 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
   // ── resolution helpers ────────────────────────────────────────────
 
+  private String resolveOrgNif(String orgId) {
+    OBCriteria<OrganizationInformation> crit =
+        OBDal.getInstance().createCriteria(OrganizationInformation.class);
+    crit.add(Restrictions.in(OrganizationInformation.PROPERTY_ORGANIZATION + ".id",
+        Arrays.asList(orgId, "0")));
+    crit.addOrder(Order.desc(OrganizationInformation.PROPERTY_ORGANIZATION + ".id"));
+    crit.setMaxResults(1);
+    List<OrganizationInformation> list = crit.list();
+    if (list.isEmpty()) return "";
+    String taxId = list.get(0).getTaxID();
+    return taxId != null ? taxId : "";
+  }
+
   private String resolveOrgPhone(String orgId) {
     OBCriteria<OrganizationInformation> crit =
         OBDal.getInstance().createCriteria(OrganizationInformation.class);
@@ -303,8 +316,9 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
   private TaxReport findTaxReport(String orgId, String searchKey) {
     OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
-    crit.add(Restrictions.eq(TaxReport.PROPERTY_ORGANIZATION + ".id", orgId));
+    crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
     crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, searchKey));
+    crit.addOrder(Order.desc(TaxReport.PROPERTY_ORGANIZATION + ".id"));
     crit.setMaxResults(1);
     List<TaxReport> list = crit.list();
     return list.isEmpty() ? null : list.get(0);

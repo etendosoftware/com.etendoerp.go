@@ -121,6 +121,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String KEY_RESPONSE = "response";
   private static final String FIELD_TRX_TYPE = "trxType";
   private static final String FIELD_DESCRIPTION = "description";
+  private static final String FIELD_DEPOSIT_AMOUNT = "depositAmount";
 
   /** Accounting-dimension UI keys, reused across marshalling, mapping and ordering. */
   private static final String DIM_ORGANIZATION = "organization";
@@ -146,6 +147,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           + "       ft.status,"
           + "       ft.trxtype,"
           + "       CASE WHEN ft.trxtype = 'BPD' THEN ft.depositamt ELSE -ft.paymentamt END AS amount,"
+          + "       ft.depositamt AS deposit_amt,"
+          + "       ft.paymentamt AS payment_amt,"
           + "       COALESCE(ft.description, fp.description, '') AS description,"
           + "       ft.posted,"
           + "       COALESCE(fp.documentno, '') AS document_no,"
@@ -284,22 +287,39 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           JSONObject row = new JSONObject();
+          Timestamp dateTs = rs.getTimestamp("statementdate");
+          String status = StringUtils.trimToEmpty(rs.getString("status"));
+          String trxType = StringUtils.trimToEmpty(rs.getString("trxtype"));
+          BigDecimal amount = nullSafeBigDecimal(rs.getBigDecimal("amount"));
+          String documentNo = StringUtils.trimToEmpty(rs.getString("document_no"));
+          String contact = StringUtils.trimToEmpty(rs.getString("contact"));
           row.put("id", rs.getString("fin_finacc_transaction_id"));
-          row.put("date", formatDate(rs.getTimestamp("statementdate")));
-          row.put("paymentStatus", StringUtils.trimToEmpty(rs.getString("status")));
-          row.put(FIELD_TRX_TYPE, StringUtils.trimToEmpty(rs.getString("trxtype")));
-          row.put("amount", nullSafeBigDecimal(rs.getBigDecimal("amount")));
+          row.put("date", formatDate(dateTs));
+          row.put("paymentStatus", status);
+          row.put(FIELD_TRX_TYPE, trxType);
+          row.put("amount", amount);
           row.put(KEY_BALANCE, nullSafeBigDecimal(rs.getBigDecimal(KEY_BALANCE)));
           row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
           row.put("posted", StringUtils.trimToEmpty(rs.getString("posted")));
-          row.put("documentNo", StringUtils.trimToEmpty(rs.getString("document_no")));
+          row.put("documentNo", documentNo);
           // Payment link: id + whether it's a received (IN) or made (OUT) payment,
           // so the UI can navigate to the payment-in / payment-out window.
           row.put("paymentId", StringUtils.trimToEmpty(rs.getString("payment_id")));
           row.put("paymentIsReceipt", StringUtils.trimToEmpty(rs.getString("payment_isreceipt")));
-          row.put("contact", StringUtils.trimToEmpty(rs.getString("contact")));
+          row.put("contact", contact);
           row.put("glItem", StringUtils.trimToEmpty(rs.getString("gl_item")));
           row.put("currencyIso", StringUtils.trimToEmpty(rs.getString("currency_iso")));
+          // Pre-derived fields consumed by the generic CSV export (export=csv) so it
+          // stays a dumb serializer: Classic-style type/status labels, the deposit
+          // /withdrawal split (raw depositamt/paymentamt columns), the synthetic
+          // "Payment" label, and the processed flag. Column order/labels live in the
+          // Movements tab (MOVEMENT_CSV_COLUMNS in index.jsx).
+          row.put("transactionTypeLabel", trxTypeClassicLabel(trxType));
+          row.put(FIELD_DEPOSIT_AMOUNT, nullSafeBigDecimal(rs.getBigDecimal("deposit_amt")));
+          row.put("withdrawalAmount", nullSafeBigDecimal(rs.getBigDecimal("payment_amt")));
+          row.put("statusLabel", statusClassicLabel(status));
+          row.put("processed", !"RPAP".equals(status) && !"RPAE".equals(status));
+          row.put("paymentLabel", buildPaymentLabel(documentNo, dateTs, contact, amount));
           // Accounting dimensions for the expandable "more info" panel. All are
           // marshalled; the UI shows only the ones enabled in the chart of
           // accounts (see enabledDimensions in the payload).
@@ -511,6 +531,55 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     return value == null ? BigDecimal.ZERO : value;
   }
 
+  // ---------------------------------------------------------------------------
+  // CSV-export helpers — Classic-parity labels for the generic export=csv path.
+  // The Movements tab used to build this CSV client-side; that logic now lives
+  // here so large lists stream from the server.
+  // ---------------------------------------------------------------------------
+
+  private static final DateTimeFormatter DMY_DASH =
+      DateTimeFormatter.ofPattern("dd-MM-yyyy").withZone(ZoneOffset.UTC);
+
+  /** trxType code → Classic "Transaction Type" label (unknown codes pass through). */
+  private static final Map<String, String> TRX_TYPE_CLASSIC = Map.of(
+      "BPD", "BP Deposit",
+      "BPW", "BP Withdrawal");
+
+  private static String trxTypeClassicLabel(String code) {
+    return StringUtils.isBlank(code) ? "" : TRX_TYPE_CLASSIC.getOrDefault(code, code);
+  }
+
+  /** payment status code → long Classic label (dual of movementStatusConfig). */
+  private static final Map<String, String> STATUS_CLASSIC = Map.of(
+      "RPAP", "Awaiting Payment",
+      "RPAE", "Awaiting Execution",
+      "RPVOID", "Voided",
+      "RPR", "Payment Received",
+      "PPM", "Payment Made",
+      "PWNC", "Withdrawn not Cleared",
+      "RDNC", "Deposited not Cleared",
+      "RPPC", "Payment Cleared");
+
+  private static String statusClassicLabel(String code) {
+    return StringUtils.isBlank(code) ? "" : STATUS_CLASSIC.getOrDefault(code, code);
+  }
+
+  /** Synthetic "Payment" column: {@code docNo - dd-MM-yyyy - contact - |amount|}. */
+  private static String buildPaymentLabel(String docNo, Timestamp date, String contact,
+      BigDecimal amount) {
+    String dateStr = date == null ? "" : DMY_DASH.format(Instant.ofEpochMilli(date.getTime()));
+    String amt = (amount == null ? BigDecimal.ZERO : amount.abs())
+        .stripTrailingZeros().toPlainString();
+    StringBuilder sb = new StringBuilder();
+    for (String part : new String[] { docNo, dateStr, contact, amt }) {
+      if (StringUtils.isNotBlank(part)) {
+        if (sb.length() > 0) sb.append(" - ");
+        sb.append(part);
+      }
+    }
+    return sb.toString();
+  }
+
   /**
    * Handles {@code POST ?action=create} — inserts a new {@code FIN_FinaccTransaction}
    * row for the requested account. Validation is delegated to
@@ -596,7 +665,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     if (!"BPD".equals(trxType) && !"BPW".equals(trxType) && !"BF".equals(trxType)) {
       return NeoResponse.error(400, "Invalid trxType. Must be 'BPD' (deposit), 'BPW' (withdrawal) or 'BF' (bank fee).");
     }
-    BigDecimal deposit = nullSafeBigDecimal(optBigDecimal(body, "depositAmount"));
+    BigDecimal deposit = nullSafeBigDecimal(optBigDecimal(body, FIELD_DEPOSIT_AMOUNT));
     BigDecimal payment = nullSafeBigDecimal(optBigDecimal(body, "paymentAmount"));
     if (deposit.signum() < 0 || payment.signum() < 0) {
       return NeoResponse.error(400, "Amounts must be non-negative");
@@ -617,7 +686,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
                                                  Currency currency) {
     String trxType = body.optString(FIELD_TRX_TYPE, null);
     String description = body.optString(FIELD_DESCRIPTION, "");
-    BigDecimal depositAmount = nullSafeBigDecimal(optBigDecimal(body, "depositAmount"));
+    BigDecimal depositAmount = nullSafeBigDecimal(optBigDecimal(body, FIELD_DEPOSIT_AMOUNT));
     BigDecimal paymentAmount = nullSafeBigDecimal(optBigDecimal(body, "paymentAmount"));
     Date transactionDate = parseDate(body.optString("transactionDate", null), new Date());
     Date accountingDate = parseDate(body.optString("accountingDate", null), transactionDate);

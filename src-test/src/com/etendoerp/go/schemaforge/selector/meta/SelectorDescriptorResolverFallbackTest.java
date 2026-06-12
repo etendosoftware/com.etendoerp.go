@@ -24,12 +24,14 @@ import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.Property;
 
 /**
  * Unit tests for {@link SelectorDescriptorResolver#ensureSearchableFallback} —
@@ -44,7 +46,23 @@ class SelectorDescriptorResolverFallbackTest {
     Set<String> known = new java.util.HashSet<>(Arrays.asList(properties));
     lenient().when(entity.hasProperty(org.mockito.ArgumentMatchers.anyString()))
         .thenAnswer(inv -> known.contains(inv.<String>getArgument(0)));
+    lenient().when(entity.getIdentifierProperties()).thenReturn(Collections.emptyList());
     return entity;
+  }
+
+  private static Property primitiveProperty(String name) {
+    Property prop = mock(Property.class);
+    lenient().when(prop.getName()).thenReturn(name);
+    lenient().when(prop.isPrimitive()).thenReturn(true);
+    return prop;
+  }
+
+  private static Property fkProperty(String name, Entity target) {
+    Property prop = mock(Property.class);
+    lenient().when(prop.getName()).thenReturn(name);
+    lenient().when(prop.isPrimitive()).thenReturn(false);
+    lenient().when(prop.getTargetEntity()).thenReturn(target);
+    return prop;
   }
 
   @Test
@@ -154,5 +172,55 @@ class SelectorDescriptorResolverFallbackTest {
     SelectorDescriptorResolver.ensureSearchableFallback(props, null, "name", "searchKey");
 
     assertEquals(List.of("name"), props);
+  }
+
+  @Test
+  @DisplayName("Expands a non-primitive identifier FK into its referenced identifier paths")
+  void expandsNonPrimitiveIdentifierFk() {
+    List<String> props = new ArrayList<>();
+    // Build property mocks first — nesting them inside thenReturn(...) trips
+    // Mockito's "stubbing inside stubbing" guard.
+    Property searchKeyProp = primitiveProperty("searchKey");
+    Property nameProp = primitiveProperty("name");
+    // Target entity (e.g. C_ElementValue) exposes primitive searchKey + name identifiers.
+    Entity refEntity = entityWithProperties();
+    when(refEntity.getIdentifierProperties()).thenReturn(List.of(searchKeyProp, nameProp));
+    // Source entity (e.g. AccountingCombination): displayProp "combination" + FK "account".
+    Property accountFk = fkProperty("account", refEntity);
+    Entity entity = entityWithProperties("combination");
+    when(entity.getIdentifierProperties()).thenReturn(List.of(accountFk));
+
+    SelectorDescriptorResolver.ensureSearchableFallback(props, entity, "combination", "id");
+
+    assertTrue(props.contains("combination"), "local display prop kept");
+    assertTrue(props.contains("account.searchKey"), "FK searchKey path added");
+    assertTrue(props.contains("account.name"), "FK name path added");
+    assertEquals(3, props.size());
+  }
+
+  @Test
+  @DisplayName("Does not add FK paths when the identifier is primitive (no regression)")
+  void primitiveIdentifierAddsNoFkPaths() {
+    List<String> props = new ArrayList<>();
+    Property nameProp = primitiveProperty("name");
+    Entity entity = entityWithProperties("name", "searchKey");
+    when(entity.getIdentifierProperties()).thenReturn(List.of(nameProp));
+
+    SelectorDescriptorResolver.ensureSearchableFallback(props, entity, "name", "searchKey");
+
+    assertEquals(List.of("name"), props);
+  }
+
+  @Test
+  @DisplayName("Skips a FK identifier whose target entity is null (no NPE)")
+  void skipsFkWithNullTarget() {
+    List<String> props = new ArrayList<>();
+    Property accountFk = fkProperty("account", null);
+    Entity entity = entityWithProperties("combination");
+    when(entity.getIdentifierProperties()).thenReturn(List.of(accountFk));
+
+    SelectorDescriptorResolver.ensureSearchableFallback(props, entity, "combination", "id");
+
+    assertEquals(List.of("combination"), props);
   }
 }

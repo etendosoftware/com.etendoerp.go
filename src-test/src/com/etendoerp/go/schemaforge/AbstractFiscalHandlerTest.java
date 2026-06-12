@@ -470,15 +470,16 @@ public class AbstractFiscalHandlerTest {
   @Test
   public void testResolveAcctSchemaReturnsFirst() {
     StubHandler handler = new StubHandler(servlet, false);
-    Organization org = mock(Organization.class);
+    AcctSchema schema = mock(AcctSchema.class);
     org.openbravo.model.ad.system.Client client =
         mock(org.openbravo.model.ad.system.Client.class);
-    when(org.getClient()).thenReturn(client);
     when(client.getId()).thenReturn("client1");
+    OBContext ctx = mock(OBContext.class);
+    when(ctx.getCurrentClient()).thenReturn(client);
 
-    AcctSchema schema = mock(AcctSchema.class);
-
-    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       OBCriteria<AcctSchema> crit = mock(OBCriteria.class);
@@ -487,7 +488,7 @@ public class AbstractFiscalHandlerTest {
       when(crit.setMaxResults(1)).thenReturn(crit);
       when(crit.list()).thenReturn(Collections.singletonList(schema));
 
-      AcctSchema result = handler.resolveAcctSchema(org);
+      AcctSchema result = handler.resolveAcctSchema();
       assertEquals(schema, result);
     }
   }
@@ -496,13 +497,15 @@ public class AbstractFiscalHandlerTest {
   @Test
   public void testResolveAcctSchemaThrowsWhenEmpty() {
     StubHandler handler = new StubHandler(servlet, false);
-    Organization org = mock(Organization.class);
     org.openbravo.model.ad.system.Client client =
         mock(org.openbravo.model.ad.system.Client.class);
-    when(org.getClient()).thenReturn(client);
     when(client.getId()).thenReturn("client1");
+    OBContext ctx = mock(OBContext.class);
+    when(ctx.getCurrentClient()).thenReturn(client);
 
-    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
       OBDal obDal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       OBCriteria<AcctSchema> crit = mock(OBCriteria.class);
@@ -512,7 +515,7 @@ public class AbstractFiscalHandlerTest {
       when(crit.list()).thenReturn(Collections.emptyList());
 
       try {
-        handler.resolveAcctSchema(org);
+        handler.resolveAcctSchema();
         fail("Expected OBException for missing AcctSchema");
       } catch (OBException e) {
         assertTrue(e.getMessage().contains("client1"));
