@@ -95,11 +95,6 @@ public class MatchRuleHandlerTest {
     return o;
   }
 
-  /** A minimal valid rule body (Contains condition, literal pattern). */
-  private static JSONObject validBody() throws Exception {
-    return body("name", "Bank fee", "textCondition", "C", "textPattern", "COMM");
-  }
-
   private static void assertStatus(int expected, NeoResponse response) {
     assertNotNull("expected a rejection response, got null (accepted)", response);
     assertEquals(expected, response.getHttpStatus());
