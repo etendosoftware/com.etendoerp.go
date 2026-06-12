@@ -76,14 +76,16 @@ public class ProductPriceHandler implements NeoHandler {
       + "  pl.name                         AS price_list_name, "
       + "  pp.m_product_id || ' - ' || plv.name AS identifier, "
       + "  c.cursymbol                     AS currency_symbol, "
-      + "  c.iso_code                      AS currency_iso "
+      + "  c.iso_code                      AS currency_iso, "
+      + "  pl.isdefault                    AS is_default, "
+      + "  plv.validfrom                   AS valid_from_date "
       + "FROM m_productprice pp "
       + "JOIN m_pricelist_version plv ON plv.m_pricelist_version_id = pp.m_pricelist_version_id "
       + "JOIN m_pricelist pl          ON pl.m_pricelist_id = plv.m_pricelist_id "
       + "LEFT JOIN c_currency c       ON c.c_currency_id = pl.c_currency_id "
       + "WHERE pp.m_product_id = :productId "
       + "  AND pp.isactive = 'Y' "
-      + "ORDER BY pl.issopricelist DESC, plv.name";
+      + "ORDER BY pl.issopricelist DESC, plv.validfrom DESC, plv.name";
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
@@ -201,6 +203,12 @@ public class ProductPriceHandler implements NeoHandler {
           item.put("_identifier",                      row[10]);
           item.put("currencySymbol",                   row[11] != null ? String.valueOf(row[11]) : null);
           item.put("currencyIso",                      row[12] != null ? String.valueOf(row[12]) : null);
+          // isdefault (M_PriceList) — CHAR(1) 'Y'/'N'; lets the frontend pick the
+          // default sales/purchase price list when a product has several.
+          item.put("priceListVersion$default",         "Y".equals(String.valueOf(row[13])));
+          // validfromdate (M_PriceList_Version) — tiebreaker: among defaults the
+          // frontend keeps the most recent version (<= today).
+          item.put("priceListVersion$validFromDate",   row[14] != null ? String.valueOf(row[14]) : null);
           item.put("_entityName",                      "PricingProductPrice");
           data.put(item);
         }
