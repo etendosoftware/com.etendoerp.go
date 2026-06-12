@@ -221,10 +221,7 @@ check_base_conflicts() {
 
 check_base_conflicts
 
-# 1. Run JUnit / Gradle tests
-run_step "1" "Running JUnit/Gradle tests" "$CORE_DIR" "tmp/pre-push/junit-tests.log" "./gradlew test --tests \"com.etendoerp.go.*\""
-
-# 2. Run SonarQube Quality Gate
+# 1. Run SonarQube Quality Gate
 # --fail-on-gate makes run-sonar.sh exit non-zero when the Quality Gate is in
 # ERROR, so this step (and the push) is blocked exactly when CI's gate would fail.
 if [ -n "$BASE_REF" ]; then
@@ -232,7 +229,10 @@ if [ -n "$BASE_REF" ]; then
 else
   SONAR_CMD="./run-sonar.sh --all-issues --fail-on-gate"
 fi
-run_step "2" "Running SonarQube analysis" "$MODULE_DIR" "tmp/pre-push/sonar-analysis.log" "$SONAR_CMD"
+run_step "1" "Running SonarQube analysis" "$MODULE_DIR" "tmp/pre-push/sonar-analysis.log" "$SONAR_CMD"
+
+# 2. Run JUnit / Gradle tests
+run_step "2" "Running JUnit/Gradle tests" "$CORE_DIR" "tmp/pre-push/junit-tests.log" "./gradlew test --tests \"com.etendoerp.go.*\""
 
 echo ""
 echo "=========================================="
