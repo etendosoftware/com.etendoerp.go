@@ -38,9 +38,6 @@ repositories {
         url = "https://maven.pkg.github.com/etendosoftware/com.etendoerp.go"
     }
     maven {
-        url = "https://maven.pkg.github.com/etendosoftware/com.etendoerp.localization.spain.extensions"
-    }
-    maven {
         url = "https://repo.futit.cloud/repository/maven-releases"
     }
     maven {
