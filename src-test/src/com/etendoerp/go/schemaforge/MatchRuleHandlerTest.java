@@ -151,6 +151,16 @@ public class MatchRuleHandlerTest {
         body("name", "n", "textCondition", "S", "textPattern", "REF-")));
   }
 
+  @Test
+  public void acceptsJsonNullTransactionType() throws Exception {
+    // Editing a rule with no transaction type sends {"transactionType": null}. Jettison's
+    // optString returns the literal "null" for a JSON null, which must NOT be treated as an
+    // invalid value — the optional field is simply unset.
+    JSONObject b = body("name", "n", "textCondition", "C", "textPattern", "p");
+    b.put("transactionType", JSONObject.NULL);
+    assertNull(handler.validateContent(b));
+  }
+
   // ── validateContent: regex condition (R) ─────────────────────────────────────
 
   @Test

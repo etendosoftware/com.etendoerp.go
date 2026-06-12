@@ -144,6 +144,6 @@
       <check name="ETGO_MATCH_RULE_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_MR_CREATETX_CHK"><![CDATA[CREATETRANSACTION IN ('Y', 'N')]]></check>
       <check name="ETGO_MR_TEXTCOND_CHK"><![CDATA[TEXTCONDITION IN ('C', 'S', 'R')]]></check>
-      <check name="ETGO_MR_TRXTYPE_CHK"><![CDATA[TRANSACTIONTYPE IN ('B', 'T', 'H', 'R', 'O')]]></check>
+      <check name="ETGO_MR_TRXTYPE_CHK"><![CDATA[TRANSACTIONTYPE IN ('B', 'T', 'H')]]></check>
     </table>
   </database>

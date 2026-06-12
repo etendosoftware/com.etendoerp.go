@@ -90,7 +90,7 @@ public class MatchRuleHandler implements NeoHandler {
 
   /** Allowed values for the closed lists (mirror of the AD list references). */
   private static final Set<String> TEXT_CONDITIONS = new HashSet<>(Arrays.asList("C", "S", "R"));
-  private static final Set<String> TRANSACTION_TYPES = new HashSet<>(Arrays.asList("B", "T", "H", "R", "O"));
+  private static final Set<String> TRANSACTION_TYPES = new HashSet<>(Arrays.asList("B", "T", "H"));
   private static final String COND_REGEX = "R";
 
   /** Cap for compiling + test-matching a user regex, to reject catastrophic patterns. */
@@ -163,10 +163,10 @@ public class MatchRuleHandler implements NeoHandler {
    * transaction type. Returns {@code null} when valid.
    */
   NeoResponse validateContent(JSONObject body) {
-    String name = body.optString(F_NAME, "").trim();
-    String textCondition = body.optString(F_TEXT_CONDITION, "").trim();
-    String textPattern = body.optString(F_TEXT_PATTERN, "").trim();
-    String transactionType = StringUtils.trimToNull(body.optString(F_TRANSACTION_TYPE, ""));
+    String name = optTrimmed(body, F_NAME);
+    String textCondition = optTrimmed(body, F_TEXT_CONDITION);
+    String textPattern = optTrimmed(body, F_TEXT_PATTERN);
+    String transactionType = optTrimmed(body, F_TRANSACTION_TYPE);
 
     if (StringUtils.isBlank(name)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is required");
@@ -217,7 +217,7 @@ public class MatchRuleHandler implements NeoHandler {
    */
   FIN_FinancialAccount resolveScopeAccount(JSONObject body, String recordId) {
     if (body.has(F_FINANCIAL_ACCOUNT)) {
-      String accountId = StringUtils.trimToNull(body.optString(F_FINANCIAL_ACCOUNT, ""));
+      String accountId = optTrimmed(body, F_FINANCIAL_ACCOUNT);
       return accountId == null ? null : OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
     }
     if (StringUtils.isNotBlank(recordId)) {
@@ -279,6 +279,19 @@ public class MatchRuleHandler implements NeoHandler {
 
   private boolean isWriteMethod(String method) {
     return METHOD_POST.equals(method) || METHOD_PUT.equals(method) || METHOD_PATCH.equals(method);
+  }
+
+  /**
+   * Reads a trimmed string field, treating absent, JSON-null and blank as {@code null}.
+   * Jettison's {@code optString} returns the literal {@code "null"} for a JSON null value,
+   * which would otherwise leak into validation (e.g. an empty optional transactionType on
+   * edit becoming an "invalid" value) — this guard prevents that.
+   */
+  private static String optTrimmed(JSONObject body, String key) {
+    if (!body.has(key) || body.isNull(key)) {
+      return null;
+    }
+    return StringUtils.trimToNull(body.optString(key, ""));
   }
 
   void enterAdminMode() {
