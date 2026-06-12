@@ -33,7 +33,7 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="C_GLITEM_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+      <column name="C_ELEMENTVALUE_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
@@ -123,11 +123,11 @@
       <foreign-key foreignTable="C_COSTCENTER" name="ETGO_MR_COSTCENTER_FK">
         <reference local="C_COSTCENTER_ID" foreign="C_COSTCENTER_ID"/>
       </foreign-key>
+      <foreign-key foreignTable="C_ELEMENTVALUE" name="ETGO_MR_ELEMENTVALUE_FK">
+        <reference local="C_ELEMENTVALUE_ID" foreign="C_ELEMENTVALUE_ID"/>
+      </foreign-key>
       <foreign-key foreignTable="FIN_FINANCIAL_ACCOUNT" name="ETGO_MR_FINACC_FK">
         <reference local="FIN_FINANCIAL_ACCOUNT_ID" foreign="FIN_FINANCIAL_ACCOUNT_ID"/>
-      </foreign-key>
-      <foreign-key foreignTable="C_GLITEM" name="ETGO_MR_GLITEM_FK">
-        <reference local="C_GLITEM_ID" foreign="C_GLITEM_ID"/>
       </foreign-key>
       <foreign-key foreignTable="C_PROJECT" name="ETGO_MR_PROJECT_FK">
         <reference local="C_PROJECT_ID" foreign="C_PROJECT_ID"/>
