@@ -98,9 +98,9 @@ public final class NeoButtonActionHelper {
       actionObj.put("processType", "OBUIAPP");
       actionObj.put("processName", obuiappProcess.getName() != null ? obuiappProcess.getName() : "");
       actionObj.put("processId", obuiappProcess.getId());
-    } else {
+    } else if (classicProcess != null) {
       actionObj.put("processType", "Classic");
-      actionObj.put("processName", classicProcess.getName() != null ? classicProcess.getName() : "");
+      actionObj.put("processName", StringUtils.defaultString(classicProcess.getName()));
       actionObj.put("processId", classicProcess.getId());
     }
     return actionObj;
