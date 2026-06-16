@@ -20,27 +20,39 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
 /**
@@ -91,6 +103,17 @@ public class FinancialAccountHandlerTest {
     org.mockito.Mockito.doNothing().when(handler).enterAdminMode();
     org.mockito.Mockito.doNothing().when(handler).exitAdminMode();
     org.mockito.Mockito.doNothing().when(handler).doRollbackAndClose();
+  }
+
+  /**
+   * Clears Mockito's inline mock cache after each test. The seam tests below use
+   * {@code MockedStatic}, whose inline mocks otherwise accumulate across the
+   * whole module suite (a single test JVM) and push the fork past its heap
+   * limit. Clearing keeps the heap flat without touching the build config.
+   */
+  @After
+  public void clearMocks() {
+    Mockito.framework().clearInlineMocks();
   }
 
   private NeoContext contextFor(String method, JSONObject body, String recordId) {
@@ -440,5 +463,250 @@ public class FinancialAccountHandlerTest {
     assertEquals("B", handler.normalizeType(""));
     assertEquals("B", handler.normalizeType("junk"));
     assertTrue(handler.normalizeType(null) != null);
+  }
+
+  // ── seam real-body coverage ───────────────────────────────────────────────
+  //
+  // The tests above stub the DAL-bound seams on the spy, so those methods' real
+  // bodies never run. The tests below invoke the real bodies on a fresh, NON-spy
+  // handler, mocking the static OBDal/OBContext entry points so the DAL layer is
+  // never actually hit.
+
+  /** normalizeType keeps a cash code unchanged (real body, no spy). */
+  @Test
+  public void testNormalizeTypeRealBodyCash() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    assertEquals("C", h.normalizeType("C"));
+    assertEquals("CA", h.normalizeType("CA"));
+    assertEquals("B", h.normalizeType("B"));
+    assertEquals("B", h.normalizeType(null));
+  }
+
+  /** loadCurrency delegates to OBDal.get(Currency.class, id) and returns it. */
+  @Test
+  public void testLoadCurrencyReturnsDalResult() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    Currency currency = mock(Currency.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Currency.class, EUR_ID)).thenReturn(currency);
+
+      assertSame(currency, h.loadCurrency(EUR_ID));
+      verify(dal).get(Currency.class, EUR_ID);
+    }
+  }
+
+  /** loadAccount delegates to OBDal.get(FIN_FinancialAccount.class, id). */
+  @Test
+  public void testLoadAccountReturnsDalResult() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_FinancialAccount.class, ACC_ID)).thenReturn(account);
+
+      assertSame(account, h.loadAccount(ACC_ID));
+      verify(dal).get(FIN_FinancialAccount.class, ACC_ID);
+    }
+  }
+
+  /** A null IBAN resolves to no country without ever touching the DAL. */
+  @Test
+  public void testResolveCountryFromIbanNullReturnsNullWithoutDal() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      assertNull(h.resolveCountryFromIban(null));
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /** An IBAN shorter than two chars resolves to no country without the DAL. */
+  @Test
+  public void testResolveCountryFromIbanTooShortReturnsNullWithoutDal() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      assertNull(h.resolveCountryFromIban("E"));
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * A valid IBAN uppercases its ISO prefix, disables the readable client/org
+   * filters and returns the criteria's unique result.
+   */
+  @Test
+  public void testResolveCountryFromIbanUppercasesPrefixAndReturnsMatch() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    Country spain = mock(Country.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Country> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Country.class)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(spain);
+
+      // Lower-case prefix must still match (the body uppercases to "ES").
+      assertSame(spain, h.resolveCountryFromIban("es9121000418450200051332"));
+
+      verify(criteria).setFilterOnReadableClients(false);
+      verify(criteria).setFilterOnReadableOrganization(false);
+      verify(criteria).setMaxResults(1);
+      verify(criteria).uniqueResult();
+    }
+  }
+
+  /** nameExists with no excludeId adds three restrictions and returns false on an empty list. */
+  @Test
+  public void testNameExistsEmptyListReturnsFalse() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      OBContext ctx = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      when(ctx.getCurrentOrganization()).thenReturn(org);
+      obContext.when(OBContext::getOBContext).thenReturn(ctx);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_FinancialAccount> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_FinancialAccount.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.emptyList());
+
+      assertFalse(h.nameExists("BBVA", null));
+      // name + organization + active (no excludeId branch).
+      verify(criteria, times(3)).add(any());
+      verify(criteria).setMaxResults(1);
+    }
+  }
+
+  /**
+   * nameExists with a non-blank excludeId adds the extra {@code ne id}
+   * restriction and returns true on a non-empty list.
+   */
+  @Test
+  public void testNameExistsWithExcludeIdAddsExtraRestrictionAndReturnsTrue() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      OBContext ctx = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      when(ctx.getCurrentOrganization()).thenReturn(org);
+      obContext.when(OBContext::getOBContext).thenReturn(ctx);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_FinancialAccount> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_FinancialAccount.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Arrays.asList(mock(FIN_FinancialAccount.class)));
+
+      assertTrue(h.nameExists("BBVA", ACC_ID));
+      // name + organization + active + ne id (excludeId branch).
+      verify(criteria, times(4)).add(any());
+    }
+  }
+
+  /** hasOpenReconciliations returns false when the criteria yields no row. */
+  @Test
+  public void testHasOpenReconciliationsNullReturnsFalse() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_Reconciliation> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_Reconciliation.class)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+
+      assertFalse(h.hasOpenReconciliations(account));
+      verify(criteria).setMaxResults(1);
+    }
+  }
+
+  /** hasOpenReconciliations returns true when the criteria yields a row. */
+  @Test
+  public void testHasOpenReconciliationsNonNullReturnsTrue() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_Reconciliation> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_Reconciliation.class)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(mock(FIN_Reconciliation.class));
+
+      assertTrue(h.hasOpenReconciliations(account));
+    }
+  }
+
+  /** listMatchingAlgorithms returns the criteria list and orders by name ascending. */
+  @Test
+  public void testListMatchingAlgorithmsReturnsListAndOrders() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    List<MatchingAlgorithm> expected = Arrays.asList(mock(MatchingAlgorithm.class));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<MatchingAlgorithm> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(MatchingAlgorithm.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(expected);
+
+      assertSame(expected, h.listMatchingAlgorithms());
+      verify(criteria).addOrderBy(MatchingAlgorithm.PROPERTY_NAME, true);
+    }
+  }
+
+  /** doRollbackAndClose delegates to OBDal.getInstance().rollbackAndClose(). */
+  @Test
+  public void testDoRollbackAndCloseCallsDal() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      h.doRollbackAndClose();
+
+      verify(dal).rollbackAndClose();
+    }
+  }
+
+  /** enterAdminMode sets the admin mode flag on OBContext. */
+  @Test
+  public void testEnterAdminModeSetsAdminMode() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      h.enterAdminMode();
+      obContext.verify(() -> OBContext.setAdminMode(true));
+    }
+  }
+
+  /** exitAdminMode restores the previous OBContext mode. */
+  @Test
+  public void testExitAdminModeRestoresPreviousMode() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      h.exitAdminMode();
+      obContext.verify(OBContext::restorePreviousMode);
+    }
   }
 }
