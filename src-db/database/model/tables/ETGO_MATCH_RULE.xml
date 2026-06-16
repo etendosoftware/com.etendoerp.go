@@ -65,14 +65,6 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="USER1_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
-        <default/>
-        <onCreateDefault/>
-      </column>
-      <column name="USER2_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
-        <default/>
-        <onCreateDefault/>
-      </column>
       <column name="TEXTCONDITION" primaryKey="false" required="true" type="VARCHAR" size="60" autoIncrement="false">
         <default><![CDATA[C]]></default>
         <onCreateDefault/>
@@ -104,23 +96,17 @@
       <foreign-key foreignTable="FIN_FINANCIAL_ACCOUNT" name="ETGO_MR_FINACC_FK">
         <reference local="FIN_FINANCIAL_ACCOUNT_ID" foreign="FIN_FINANCIAL_ACCOUNT_ID"/>
       </foreign-key>
-      <foreign-key foreignTable="C_PROJECT" name="ETGO_MR_PROJECT_FK">
-        <reference local="C_PROJECT_ID" foreign="C_PROJECT_ID"/>
+      <foreign-key foreignTable="C_GLITEM" name="ETGO_MR_GLITEM_FK">
+        <reference local="C_GLITEM_ID" foreign="C_GLITEM_ID"/>
       </foreign-key>
       <foreign-key foreignTable="M_PRODUCT" name="ETGO_MR_PRODUCT_FK">
         <reference local="M_PRODUCT_ID" foreign="M_PRODUCT_ID"/>
       </foreign-key>
-      <foreign-key foreignTable="C_GLITEM" name="ETGO_MR_GLITEM_FK">
-        <reference local="C_GLITEM_ID" foreign="C_GLITEM_ID"/>
+      <foreign-key foreignTable="C_PROJECT" name="ETGO_MR_PROJECT_FK">
+        <reference local="C_PROJECT_ID" foreign="C_PROJECT_ID"/>
       </foreign-key>
       <foreign-key foreignTable="ETGO_TRANSACTION_TYPE" name="ETGO_MR_TRXTYPE_FK">
         <reference local="ETGO_TRANSACTION_TYPE_ID" foreign="ETGO_TRANSACTION_TYPE_ID"/>
-      </foreign-key>
-      <foreign-key foreignTable="C_ELEMENTVALUE" name="ETGO_MR_USER1_FK">
-        <reference local="USER1_ID" foreign="C_ELEMENTVALUE_ID"/>
-      </foreign-key>
-      <foreign-key foreignTable="C_ELEMENTVALUE" name="ETGO_MR_USER2_FK">
-        <reference local="USER2_ID" foreign="C_ELEMENTVALUE_ID"/>
       </foreign-key>
       <check name="ETGO_MATCH_RULE_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_MR_TEXTCOND_CHK"><![CDATA[TEXTCONDITION IN ('C', 'S', 'R')]]></check>
