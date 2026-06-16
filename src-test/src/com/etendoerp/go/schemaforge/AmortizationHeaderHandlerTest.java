@@ -34,7 +34,6 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.model.Entity;
-import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.RequestContext;
@@ -50,11 +49,9 @@ public class AmortizationHeaderHandlerTest {
 
   private static final String ASSET_ID = "ASSET-001";
   private static final String ASSET_ENTITY_NAME = "FinancialMgmtAsset";
-  private static final String A_ASSET_TABLE = "A_Asset";
   private static final String COL_NAME = "Name";
   private static final String COL_START_DATE = "Amortizationstartdate";
   private static final String EXPECTED_FALLBACK = "Amortización";
-  private static final String EXPECTED_PREFIX = "Amortización - ";
 
   private final AmortizationHeaderHandler handler = new AmortizationHeaderHandler();
 
@@ -162,8 +159,7 @@ public class AmortizationHeaderHandlerTest {
     Date assetDate = new SimpleDateFormat("yyyy-MM-dd").parse("2026-01-15");
 
     try (MockedStatic<RequestContext> reqCtx = Mockito.mockStatic(RequestContext.class);
-         MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
-         MockedStatic<ModelProvider> modelProviderMock = Mockito.mockStatic(ModelProvider.class)) {
+         MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
 
       // RequestContext
       RequestContext requestContext = mock(RequestContext.class);
@@ -178,11 +174,9 @@ public class AmortizationHeaderHandlerTest {
       BaseOBObject asset = mock(BaseOBObject.class);
       when(dal.get(ASSET_ENTITY_NAME, ASSET_ID)).thenReturn(asset);
 
-      // ModelProvider + Entity + Properties
-      ModelProvider mp = mock(ModelProvider.class);
-      modelProviderMock.when(ModelProvider::getInstance).thenReturn(mp);
+      // Entity + Properties via asset.getEntity()
       Entity assetEntity = mock(Entity.class);
-      when(mp.getEntityByTableName(A_ASSET_TABLE)).thenReturn(assetEntity);
+      when(asset.getEntity()).thenReturn(assetEntity);
 
       Property nameProp = mock(Property.class);
       when(nameProp.getName()).thenReturn("name");
@@ -248,8 +242,7 @@ public class AmortizationHeaderHandlerTest {
         .build();
 
     try (MockedStatic<RequestContext> reqCtx = Mockito.mockStatic(RequestContext.class);
-         MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
-         MockedStatic<ModelProvider> modelProviderMock = Mockito.mockStatic(ModelProvider.class)) {
+         MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
 
       RequestContext requestContext = mock(RequestContext.class);
       HttpServletRequest request = mock(HttpServletRequest.class);
@@ -262,10 +255,8 @@ public class AmortizationHeaderHandlerTest {
       BaseOBObject asset = mock(BaseOBObject.class);
       when(dal.get(ASSET_ENTITY_NAME, ASSET_ID)).thenReturn(asset);
 
-      ModelProvider mp = mock(ModelProvider.class);
-      modelProviderMock.when(ModelProvider::getInstance).thenReturn(mp);
       Entity assetEntity = mock(Entity.class);
-      when(mp.getEntityByTableName(A_ASSET_TABLE)).thenReturn(assetEntity);
+      when(asset.getEntity()).thenReturn(assetEntity);
 
       Property nameProp = mock(Property.class);
       when(nameProp.getName()).thenReturn("name");
@@ -298,8 +289,7 @@ public class AmortizationHeaderHandlerTest {
         .build();
 
     try (MockedStatic<RequestContext> reqCtx = Mockito.mockStatic(RequestContext.class);
-         MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
-         MockedStatic<ModelProvider> modelProviderMock = Mockito.mockStatic(ModelProvider.class)) {
+         MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
 
       RequestContext requestContext = mock(RequestContext.class);
       HttpServletRequest request = mock(HttpServletRequest.class);
@@ -312,10 +302,8 @@ public class AmortizationHeaderHandlerTest {
       BaseOBObject asset = mock(BaseOBObject.class);
       when(dal.get(ASSET_ENTITY_NAME, ASSET_ID)).thenReturn(asset);
 
-      ModelProvider mp = mock(ModelProvider.class);
-      modelProviderMock.when(ModelProvider::getInstance).thenReturn(mp);
       Entity assetEntity = mock(Entity.class);
-      when(mp.getEntityByTableName(A_ASSET_TABLE)).thenReturn(assetEntity);
+      when(asset.getEntity()).thenReturn(assetEntity);
 
       Property nameProp = mock(Property.class);
       when(nameProp.getName()).thenReturn("name");
@@ -348,8 +336,7 @@ public class AmortizationHeaderHandlerTest {
         .build();
 
     try (MockedStatic<RequestContext> reqCtx = Mockito.mockStatic(RequestContext.class);
-         MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
-         MockedStatic<ModelProvider> modelProviderMock = Mockito.mockStatic(ModelProvider.class)) {
+         MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
 
       RequestContext requestContext = mock(RequestContext.class);
       HttpServletRequest request = mock(HttpServletRequest.class);
@@ -362,10 +349,8 @@ public class AmortizationHeaderHandlerTest {
       BaseOBObject asset = mock(BaseOBObject.class);
       when(dal.get(ASSET_ENTITY_NAME, ASSET_ID)).thenReturn(asset);
 
-      ModelProvider mp = mock(ModelProvider.class);
-      modelProviderMock.when(ModelProvider::getInstance).thenReturn(mp);
       Entity assetEntity = mock(Entity.class);
-      when(mp.getEntityByTableName(A_ASSET_TABLE)).thenReturn(assetEntity);
+      when(asset.getEntity()).thenReturn(assetEntity);
 
       Property nameProp = mock(Property.class);
       when(nameProp.getName()).thenReturn("name");

@@ -26,7 +26,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
-import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.RequestContext;
@@ -118,7 +117,8 @@ public class AmortizationHeaderHandler implements NeoHandler {
         log.debug("Asset not found for id '{}', using fallback name", assetId);
         return NAME_FALLBACK;
       }
-      Entity assetEntity = ModelProvider.getInstance().getEntityByTableName("A_Asset");
+      // Use the entity of the already-loaded asset — never null, no extra ModelProvider lookup.
+      Entity assetEntity = asset.getEntity();
       Property nameProp = assetEntity.getPropertyByColumnName(COLUMN_NAME, false);
       Property dateProp = assetEntity.getPropertyByColumnName(COLUMN_START_DATE, false);
 
