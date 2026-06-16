@@ -21,7 +21,6 @@ import java.util.Set;
 
 import javax.enterprise.inject.spi.Bean;
 import javax.enterprise.inject.spi.BeanManager;
-import javax.inject.Named;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONException;
@@ -48,8 +47,9 @@ final class McpHookExecutor {
   }
 
   /**
-   * Resolve the {@link NeoHandler} registered for the entity's Java_Qualifier,
-   * mirroring {@code NeoServlet.lookupHandler}.
+   * Resolve the {@link NeoHandler} registered for the entity's Java_Qualifier.
+   * Uses {@link Bean#getName()} — the CDI-standard way to read the {@code @Named}
+   * value; works correctly on scoped proxies ({@code @ApplicationScoped}, etc.).
    *
    * @return the matching handler, or {@code null} when the entity declares no
    *         qualifier or no matching {@code @Named} handler is deployed
@@ -63,8 +63,7 @@ final class McpHookExecutor {
     BeanManager bm = WeldUtils.getStaticInstanceBeanManager();
     Set<Bean<?>> beans = bm.getBeans(NeoHandler.class, WeldUtils.ANY_LITERAL);
     for (Bean<?> bean : beans) {
-      Named named = bean.getBeanClass().getAnnotation(Named.class);
-      if (named != null && qualifier.equals(named.value())) {
+      if (qualifier.equals(bean.getName())) {
         return (NeoHandler) bm.getReference(bean, NeoHandler.class,
             bm.createCreationalContext(bean));
       }
