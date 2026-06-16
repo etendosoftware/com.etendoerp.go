@@ -107,6 +107,12 @@
       <foreign-key foreignTable="C_PROJECT" name="ETGO_MR_PROJECT_FK">
         <reference local="C_PROJECT_ID" foreign="C_PROJECT_ID"/>
       </foreign-key>
+      <foreign-key foreignTable="M_PRODUCT" name="ETGO_MR_PRODUCT_FK">
+        <reference local="M_PRODUCT_ID" foreign="M_PRODUCT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="C_GLITEM" name="ETGO_MR_GLITEM_FK">
+        <reference local="C_GLITEM_ID" foreign="C_GLITEM_ID"/>
+      </foreign-key>
       <foreign-key foreignTable="ETGO_TRANSACTION_TYPE" name="ETGO_MR_TRXTYPE_FK">
         <reference local="ETGO_TRANSACTION_TYPE_ID" foreign="ETGO_TRANSACTION_TYPE_ID"/>
       </foreign-key>

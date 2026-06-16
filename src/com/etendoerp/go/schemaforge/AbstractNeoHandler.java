@@ -43,7 +43,7 @@ abstract class AbstractNeoHandler implements NeoHandler {
    * (Jettison's {@code optString} otherwise returns the literal {@code "null"} for a JSON null).
    */
   protected static String optTrimmed(JSONObject body, String key) {
-    if (!body.has(key) || body.isNull(key)) {
+    if (body == null || !body.has(key) || body.isNull(key)) {
       return null;
     }
     return StringUtils.trimToNull(body.optString(key, ""));
