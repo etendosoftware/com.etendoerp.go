@@ -85,77 +85,86 @@ public class AssetsHandler implements NeoHandler {
     if (body == null) {
       return null;
     }
-
     boolean startDateInBody = hasValue(body, FIELD_DEPRECIATION_START_DATE);
     boolean usableLifeInBody = hasValue(body, FIELD_USABLE_LIFE_MONTHS);
-
-    // For POST: both fields must come from the body.
-    // For PATCH: recompute whenever at least one source field changed; the other is loaded
-    // from the persisted record so partial updates (only usableLifeMonths, for example) work.
-    if (HTTP_POST.equalsIgnoreCase(method)) {
-      if (!startDateInBody || !usableLifeInBody) {
-        return null;
-      }
-    } else {
-      // PATCH: skip entirely if neither source field was touched
-      if (!startDateInBody && !usableLifeInBody) {
-        return null;
-      }
+    if (!hasRequiredSourceFields(method, startDateInBody, usableLifeInBody)) {
+      return null;
     }
-
     try {
-      // Resolve startDate: prefer body, fall back to persisted record on PATCH
-      String startDateStr = null;
-      if (startDateInBody) {
-        startDateStr = body.getString(FIELD_DEPRECIATION_START_DATE);
-      } else {
-        startDateStr = loadStartDateFromRecord(context.getRecordId());
-        if (startDateStr == null) {
-          log.warn("AssetsHandler: PATCH has usableLifeMonths but depreciationStartDate not in body "
-              + "and could not be loaded from record {} — skipping computation", context.getRecordId());
-          return null;
-        }
+      String startDateStr = resolveStartDate(startDateInBody, body, context.getRecordId());
+      if (startDateStr == null) {
+        return null;
       }
-
-      // Resolve usableLifeMonths: prefer body, fall back to persisted record on PATCH.
-      // Use optString to tolerate numeric values sent as string or decimal (W1).
-      long usableLifeMonths;
-      if (usableLifeInBody) {
-        usableLifeMonths = parseUsableLifeMonths(body, context.getRecordId());
-        if (usableLifeMonths < 0) {
-          return null; // parse warning already logged inside helper
-        }
-      } else {
-        Long persisted = loadUsableLifeMonthsFromRecord(context.getRecordId());
-        if (persisted == null) {
-          log.warn("AssetsHandler: PATCH has depreciationStartDate but usableLifeMonths not in body "
-              + "and could not be loaded from record {} — skipping computation", context.getRecordId());
-          return null;
-        }
-        usableLifeMonths = persisted;
+      Long usableLifeMonths = resolveUsableLifeMonths(usableLifeInBody, body, context.getRecordId());
+      if (usableLifeMonths == null) {
+        return null;
       }
-
-      LocalDate startDate = LocalDate.parse(startDateStr, DATE_FORMATTER);
-      LocalDate endDate = startDate.plusMonths(usableLifeMonths);
+      LocalDate endDate = LocalDate.parse(startDateStr, DATE_FORMATTER).plusMonths(usableLifeMonths);
       String endDateStr = endDate.format(DATE_FORMATTER);
-
       // NOTE: this relies on depreciationEndDate being a writable (editable) field. The CRUD
       // write filter (NeoFieldFilter.filterWriteRequest) strips any included+readOnly field, so
       // if depreciationEndDate is ever reclassified to readOnly, this body.put is silently
       // dropped and the recompute regresses. If that classification changes, move this write to
       // afterHandle() and mutate the persisted record directly (see InventoryLineHandler).
       body.put(FIELD_DEPRECIATION_END_DATE, endDateStr);
-      log.debug(
-          "AssetsHandler: computed depreciationEndDate={} from startDate={} + {}mo",
-          endDateStr, startDateStr, usableLifeMonths
-      );
+      log.debug("AssetsHandler: computed depreciationEndDate={} from startDate={} + {}mo",
+          endDateStr, startDateStr, usableLifeMonths);
     } catch (DateTimeParseException e) {
       log.warn("AssetsHandler: could not parse depreciationStartDate — skipping computation", e);
     } catch (Exception e) {
       log.warn("AssetsHandler: unexpected error computing depreciationEndDate — skipping", e);
     }
-    // Return null to continue with default CRUD handling
     return null;
+  }
+
+  /**
+   * Returns true when the request contains the source fields needed to recompute
+   * {@code depreciationEndDate}. For POST, both fields must be present. For PATCH,
+   * at least one must be present (the other is loaded from the persisted record).
+   */
+  private static boolean hasRequiredSourceFields(String method, boolean startDateInBody,
+      boolean usableLifeInBody) {
+    if (HTTP_POST.equalsIgnoreCase(method)) {
+      return startDateInBody && usableLifeInBody;
+    }
+    return startDateInBody || usableLifeInBody;
+  }
+
+  /**
+   * Resolves the depreciation start date. Prefers the value in the request body; on PATCH
+   * falls back to the persisted record when the field is absent from the diff. Returns
+   * {@code null} if the value cannot be resolved (computation should be skipped).
+   */
+  private static String resolveStartDate(boolean startDateInBody, JSONObject body,
+      String recordId) throws org.codehaus.jettison.json.JSONException {
+    if (startDateInBody) {
+      return body.getString(FIELD_DEPRECIATION_START_DATE);
+    }
+    String loaded = loadStartDateFromRecord(recordId);
+    if (loaded == null) {
+      log.warn("AssetsHandler: PATCH has usableLifeMonths but depreciationStartDate not in body "
+          + "and could not be loaded from record {} — skipping computation", recordId);
+    }
+    return loaded;
+  }
+
+  /**
+   * Resolves the usable life in months. Prefers the value in the request body (parsed
+   * tolerantly); on PATCH falls back to the persisted record. Returns {@code null} if the
+   * value cannot be resolved (computation should be skipped).
+   */
+  private static Long resolveUsableLifeMonths(boolean usableLifeInBody, JSONObject body,
+      String recordId) {
+    if (usableLifeInBody) {
+      long parsed = parseUsableLifeMonths(body, recordId);
+      return parsed < 0 ? null : parsed;
+    }
+    Long loaded = loadUsableLifeMonthsFromRecord(recordId);
+    if (loaded == null) {
+      log.warn("AssetsHandler: PATCH has depreciationStartDate but usableLifeMonths not in body "
+          + "and could not be loaded from record {} — skipping computation", recordId);
+    }
+    return loaded;
   }
 
   /**
