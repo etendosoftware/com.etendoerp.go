@@ -23,6 +23,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -167,7 +168,9 @@ public class FinancialAccountHandlerTest {
   public void testHandleTranslatesRuntimeExceptionTo500() throws Exception {
     JSONObject body = validCreateBody();
     doReturn(mock(Currency.class)).when(handler).loadCurrency(EUR_ID);
-    when(handler.nameExists("BBVA", null)).thenThrow(new RuntimeException("boom"));
+    // doThrow(...).when(spy) — NOT when(spy.method()).thenThrow — so the real nameExists
+    // (which hits OBDal/OBContext) is never invoked during stubbing.
+    doThrow(new RuntimeException("boom")).when(handler).nameExists("BBVA", null);
 
     NeoResponse response = handler.handle(contextFor("POST", body, null));
 
