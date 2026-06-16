@@ -64,11 +64,17 @@ if [[ -z "${SONAR_TOKEN:-}" || -z "${SONAR_HOST_URL:-}" ]]; then
   exit 1
 fi
 
-PROJECT_KEY="$(grep '^sonar.projectKey=' "$MODULE_DIR/sonar-project.properties" | cut -d= -f2-)"
+SONAR_PROPERTIES="$MODULE_DIR/sonar-project.properties"
+PROJECT_KEY="$(grep '^sonar.projectKey=' "$SONAR_PROPERTIES" | cut -d= -f2-)"
 if [[ -z "$PROJECT_KEY" ]]; then
   echo "❌ ERROR: sonar.projectKey not found in sonar-project.properties" >&2
   exit 1
 fi
+
+# sonar.sources is also declared in sonar-project.properties; derive it instead
+# of assuming "src". Only the first path is used (the module has a single root).
+SONAR_SOURCES="$(grep '^sonar.sources=' "$SONAR_PROPERTIES" | cut -d= -f2- | cut -d, -f1 | tr -d '[:space:]')"
+SONAR_SOURCES="${SONAR_SOURCES:-src}"
 
 # ── Step 1: (re)generate the JaCoCo aggregate report, same as Jenkins ──
 if [[ "$RUN_TESTS" == "1" ]]; then
@@ -88,7 +94,7 @@ fi
 
 # ── Step 2: compute current coverage + fetch epic baseline + compare ──
 PROJECT_KEY="$PROJECT_KEY" COMPARE_BRANCH="$COMPARE_BRANCH" REPORT="$REPORT" \
-MODULE_SRC="$MODULE_DIR/src" FAIL_ON_DROP="$FAIL_ON_DROP" \
+MODULE_SRC="$MODULE_DIR/$SONAR_SOURCES" FAIL_ON_DROP="$FAIL_ON_DROP" \
 SONAR_TOKEN="$SONAR_TOKEN" SONAR_HOST_URL="$SONAR_HOST_URL" \
 python3 - <<'PYEOF'
 import os, sys, json, urllib.parse, urllib.request
