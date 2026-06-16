@@ -399,9 +399,16 @@ public class NeoDefaultsService {
       return true;
     }
 
-    // NEO-specific: Link-to-parent columns use the parentId from query params
+    // NEO-specific: Link-to-parent columns use the parentId from query params.
+    // Guard: only apply parentId to the column whose referenced entity matches the parent
+    // tab's table. Some child tabs have multiple isParent='Y' columns (e.g. A_Amortizationline
+    // has both A_Amortization_ID and A_Asset_ID flagged as parent). Without this guard, all
+    // of them would receive the header id, which is wrong for any FK that references a
+    // different table (A_Asset in this case). Falls through to normal default resolution
+    // when the column references a different entity than the parent tab's table.
     if (Boolean.TRUE.equals(adColumn.isLinkToParentColumn())
-        && request.parentId != null && !request.parentId.isEmpty()) {
+        && request.parentId != null && !request.parentId.isEmpty()
+        && isColumnReferencingParentTab(adColumn, request.ctx)) {
       return request.parentId;
     }
 
@@ -450,6 +457,57 @@ public class NeoDefaultsService {
     }
 
     return null;
+  }
+
+  /**
+   * Returns true only when the given column's referenced entity (target entity via DAL model)
+   * matches the parent tab's table entity.
+   *
+   * <p>Some child tabs have multiple {@code isParent='Y'} columns — for example,
+   * {@code A_Amortizationline} flags both {@code A_Amortization_ID} (the true parent FK to the
+   * header document) and {@code A_Asset_ID} (an additional FK to A_Asset) as parent columns in AD.
+   * Without this check every {@code isParent} column would receive the header id, which is wrong
+   * for {@code A_Asset_ID} whose referenced table is {@code A_Asset}, not {@code A_Amortization}.
+   *
+   * <p>Falls back to {@code true} (permissive) when the parent tab cannot be determined (root
+   * tab, missing context, or resolution error), preserving the pre-fix behavior for normal cases.
+   *
+   * @param adColumn the AD column being evaluated
+   * @param ctx      the NeoContext providing the child tab
+   * @return {@code true} if {@code parentId} should be applied to this column
+   */
+  private static boolean isColumnReferencingParentTab(Column adColumn, NeoContext ctx) {
+    try {
+      Tab childTab = ctx != null ? ctx.getAdTab() : null;
+      if (childTab == null) {
+        return true; // no tab context — fall back to legacy behavior
+      }
+      Tab parentTab = org.openbravo.client.kernel.KernelUtils.getInstance()
+          .getParentTab(childTab);
+      if (parentTab == null || parentTab.getTable() == null) {
+        return true; // root tab or no parent — only one parent possible, allow it
+      }
+      Entity parentEntity = ModelProvider.getInstance()
+          .getEntityByTableId(parentTab.getTable().getId());
+      if (parentEntity == null) {
+        return true;
+      }
+      // Resolve the DAL property for this column and compare its target entity
+      Entity childEntity = ModelProvider.getInstance()
+          .getEntityByTableId(childTab.getTable().getId());
+      if (childEntity == null) {
+        return true;
+      }
+      Property prop = childEntity.getPropertyByColumnName(adColumn.getDBColumnName(), false);
+      if (prop == null || prop.getTargetEntity() == null) {
+        return true; // non-FK or unresolvable — preserve legacy behavior
+      }
+      return parentEntity.equals(prop.getTargetEntity());
+    } catch (Exception e) {
+      log.debug("Could not determine parent entity for column {}: {}",
+          adColumn.getDBColumnName(), e.getMessage());
+      return true; // on error, preserve legacy behavior
+    }
   }
 
   /**
