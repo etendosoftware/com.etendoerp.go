@@ -49,6 +49,7 @@ import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
+import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoReportService;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -363,6 +364,15 @@ public class McpToolRouter {
       return wrapAsErrorContent(errorObj.toString(2));
     }
 
+    // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path): it may
+    // validate and mutate filteredBody (e.g. inject derived FK values) before persist.
+    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, "POST", null, filteredBody, adTab, sfEntity);
+    JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
+    if (preHookResult != null) {
+      return preHookResult;
+    }
+
     // Wrap for DefaultJsonDataService
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
     String result = jsonService.add(params, wrappedBody);
@@ -374,6 +384,11 @@ public class McpToolRouter {
     }
 
     fieldFilter.filterGetResponse(responseJson);
+
+    JSONObject postHookResult = McpHookExecutor.runPostHook(handler, hookCtx, responseJson);
+    if (postHookResult != null) {
+      return postHookResult;
+    }
 
     return wrapAsTextContent(responseJson.toString(2));
   }
@@ -403,6 +418,14 @@ public class McpToolRouter {
     // MCP: accept all valid table columns from AI agents
     JSONObject filteredBody = mapFieldsToDalProperties(fields, adTab);
 
+    // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path).
+    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, "PUT", recordId, filteredBody, adTab, sfEntity);
+    JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
+    if (preHookResult != null) {
+      return preHookResult;
+    }
+
     // Wrap for DefaultJsonDataService with record ID
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, recordId);
     String result = jsonService.update(params, wrappedBody);
@@ -414,6 +437,11 @@ public class McpToolRouter {
     }
 
     fieldFilter.filterGetResponse(responseJson);
+
+    JSONObject postHookResult = McpHookExecutor.runPostHook(handler, hookCtx, responseJson);
+    if (postHookResult != null) {
+      return postHookResult;
+    }
 
     return wrapAsTextContent(responseJson.toString(2));
   }
@@ -438,6 +466,15 @@ public class McpToolRouter {
 
     Map<String, String> params = buildBaseParams(adTab, dalEntityName);
     params.put(JsonConstants.ID, recordId);
+
+    // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path). A
+    // handler may fully handle the delete (e.g. a soft-archive) or reject it.
+    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, "DELETE", recordId, null, adTab, sfEntity);
+    JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
+    if (preHookResult != null) {
+      return preHookResult;
+    }
 
     String result = jsonService.remove(params);
     JSONObject responseJson = new JSONObject(result);
@@ -495,7 +532,7 @@ public class McpToolRouter {
 
     NeoResponse response = McpSelectorContextHelper.withDiagnostics(
         neoResponse, columnName, contextParams);
-    return neoResponseToMcpResult(response);
+    return McpHookExecutor.neoResponseToMcpResult(response);
   }
 
   // ── neo_defaults ──────────────────────────────────────────────────────
@@ -524,7 +561,7 @@ public class McpToolRouter {
         .build();
 
     NeoResponse neoResponse = NeoDefaultsService.resolveDefaults(ctx, parentId);
-    return neoResponseToMcpResult(neoResponse);
+    return McpHookExecutor.neoResponseToMcpResult(neoResponse);
   }
 
   // ── neo_schema ─────────────────────────────────────────────────────────
@@ -783,7 +820,7 @@ public class McpToolRouter {
 
     JSONObject parameters = args != null ? args.optJSONObject(McpConstants.PARAM_PARAMETERS) : null;
     NeoResponse neoResponse = NeoProcessService.executeProcess(adProcess, parameters);
-    return neoResponseToMcpResult(neoResponse);
+    return McpHookExecutor.neoResponseToMcpResult(neoResponse);
   }
 
   // ── Report generation ─────────────────────────────────────────────────
@@ -836,7 +873,7 @@ public class McpToolRouter {
       fallback.put("description", describeResponse.getBody());
       fallback.put("hint", "Use the REST endpoint POST /sws/neo/" + specName
           + " with exportType and params to generate the report via HTTP");
-      return wrapAsErrorContent(fallback.toString(2));
+      return McpToolRouter.wrapAsErrorContent(fallback.toString(2));
     }
   }
 
@@ -1225,24 +1262,6 @@ public class McpToolRouter {
     } catch (JSONException e) {
       throw new McpToolException("Error building MCP error content", e);
     }
-  }
-
-  /**
-   * Convert a NeoResponse to MCP result format.
-   * Successful responses become text content; error responses set isError.
-   */
-  private JSONObject neoResponseToMcpResult(NeoResponse neoResponse) throws JSONException {
-    if (neoResponse.getHttpStatus() >= 400) {
-      String errorText = neoResponse.getBody() != null
-          ? neoResponse.getBody().toString(2)
-          : "Request failed with status " + neoResponse.getHttpStatus();
-      return wrapAsErrorContent(errorText);
-    }
-
-    String text = neoResponse.getBody() != null
-        ? neoResponse.getBody().toString(2)
-        : "{}";
-    return wrapAsTextContent(text);
   }
 
   // ── Validation helpers ────────────────────────────────────────────────

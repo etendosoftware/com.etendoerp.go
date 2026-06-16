@@ -19,7 +19,6 @@ package com.etendoerp.go.schemaforge;
 
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
@@ -27,16 +26,13 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
@@ -44,38 +40,49 @@ import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
 /**
- * NeoHandler that powers the offline management of financial accounts introduced
- * by ETP-4096 (create / archive) plus a defaults endpoint for the New Account form.
+ * NeoHandler that powers the financial-account window as a generic W (CRUD) spec
+ * (ETP-4239, converting the former report-style spec from ETP-4096).
  *
- * <p>It is a report-style spec ({@code SPEC_TYPE=R}), so {@link NeoContext#getEndpointType()}
- * is {@code null} and the handler routes purely on the HTTP method plus an {@code action}
- * query parameter:
+ * <p>It is registered against the {@code account} header entity of the
+ * {@code financial-account} spec via {@code ETGO_SF_ENTITY.Java_Qualifier =
+ * "financialAccountHeaderHandler"}, so it runs as a pre/post hook around the
+ * generic CRUD persistence — the same way {@code SalesInvoiceHeaderHandler}
+ * does. Both the HTTP CRUD path ({@code NeoCrudHandler.handleWithHooks}) and the
+ * MCP write path ({@code McpToolRouter}) invoke {@link #handle(NeoContext)}.
  *
- * <ul>
- *   <li>{@code POST /sws/neo/financial-account} — create an account from the JSON body</li>
- *   <li>{@code POST /sws/neo/financial-account?action=update&id=<id>} — edit general data</li>
- *   <li>{@code POST /sws/neo/financial-account?action=archive&id=<id>} — soft-delete an account</li>
- *   <li>{@code GET  /sws/neo/financial-account?action=defaults} — session currency + currency list</li>
- * </ul>
+ * <p>Request body uses the DAL property names of {@code FIN_Financial_Account}:
+ * {@code { "name", "currency", "type"?, "iBAN"?, "swiftCode"? }}.
+ * {@code type} is {@code 'B'} (Bank, default), {@code 'C'} (Cash) or
+ * {@code 'CA'} (Card). PSD2 / "Con conexión" wiring is out of scope (T3).
  *
- * <p>Create body: {@code { "name", "currencyId", "type"?, "iban"?, "swiftCode"? }}.
- * {@code type} is {@code 'B'} (Bank, default), {@code 'C'} (Cash) or {@code 'CA'} (Card, from the PSD2 module);
- * {@code iban}/{@code swiftCode} are optional and only used for bank accounts. PSD2 /
- * "Con conexión" wiring is out of scope (T3).
+ * <p>The pre-hook does NOT persist the record itself: on create/update it
+ * validates and then <b>mutates the request body</b> (injecting {@code country}
+ * derived from the IBAN and a default {@code matchingAlgorithm}) and returns
+ * {@code null}, letting the generic CRUD service persist within its single
+ * transaction. Injecting {@code country} before the insert is mandatory because
+ * the row-level trigger {@code FIN_FINANCIAL_ACCOUNT_TRG2} ({@code @COUNTRY_IBAN@})
+ * rejects a bank account that carries an IBAN without a country. On DELETE the
+ * hook short-circuits with a soft-archive ({@code IsActive='N'}) to preserve the
+ * former archive semantics and avoid FK violations from a hard delete.
  */
-@Named("financial-account")
+@Named("financialAccountHeaderHandler")
 public class FinancialAccountHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(FinancialAccountHandler.class);
 
   private static final String SPEC = "financial-account";
-  private static final String METHOD_GET = "GET";
   private static final String METHOD_POST = "POST";
-  private static final String PARAM_ACTION = "action";
-  private static final String PARAM_ID = "id";
-  private static final String ACTION_DEFAULTS = "defaults";
-  private static final String ACTION_ARCHIVE = "archive";
-  private static final String ACTION_UPDATE = "update";
+  private static final String METHOD_PUT = "PUT";
+  private static final String METHOD_PATCH = "PATCH";
+  private static final String METHOD_DELETE = "DELETE";
+
+  private static final String FIELD_NAME = "name";
+  private static final String FIELD_CURRENCY = "currency";
+  private static final String FIELD_TYPE = "type";
+  private static final String FIELD_IBAN = "iBAN";
+  private static final String FIELD_SWIFT_CODE = "swiftCode";
+  private static final String FIELD_COUNTRY = "country";
+  private static final String FIELD_MATCHING_ALGORITHM = "matchingAlgorithm";
 
   private static final String TYPE_BANK = "B";
   private static final String TYPE_CASH = "C";
@@ -83,11 +90,6 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final int NAME_MAX_LENGTH = 60;
   private static final int IBAN_MAX_LENGTH = 34;
   private static final int SWIFT_MAX_LENGTH = 20;
-
-  private static final String FIELD_SWIFT_CODE = "swiftCode";
-
-  private static final String KEY_RESPONSE = "response";
-  private static final String KEY_DATA = "data";
 
   /** Reconciliation document statuses considered closed (not "open"). */
   private static final List<String> CLOSED_RECONCILIATION_STATUSES = Arrays.asList("CO", "CL");
@@ -98,31 +100,29 @@ public class FinancialAccountHandler implements NeoHandler {
       return null;
     }
     String method = context.getHttpMethod();
-    Map<String, String> params = context.getQueryParams();
-    String action = params != null ? params.get(PARAM_ACTION) : null;
-
     try {
       enterAdminMode();
-      if (METHOD_GET.equals(method) && ACTION_DEFAULTS.equals(action)) {
-        return buildDefaults();
-      }
-      if (METHOD_POST.equals(method) && ACTION_ARCHIVE.equals(action)) {
-        return archive(params != null ? params.get(PARAM_ID) : null);
-      }
-      if (METHOD_POST.equals(method) && ACTION_UPDATE.equals(action)) {
-        return update(params != null ? params.get(PARAM_ID) : null, context.getRequestBody());
-      }
       if (METHOD_POST.equals(method)) {
-        return create(context.getRequestBody());
+        return validateAndEnrichCreate(context.getRequestBody());
       }
-      return NeoResponse.error(HttpServletResponse.SC_METHOD_NOT_ALLOWED, "Method not allowed.");
+      if (METHOD_PUT.equals(method) || METHOD_PATCH.equals(method)) {
+        return validateAndEnrichUpdate(context.getRecordId(), context.getRequestBody());
+      }
+      if (METHOD_DELETE.equals(method)) {
+        return archive(context.getRecordId());
+      }
+      // GET (list / getById) flows straight through to the generic service.
+      return null;
     } catch (OBException e) {
+      // The pre-hook short-circuits on error, so rolling back here is safe: the
+      // generic CRUD never runs and the archive write (the only persist in this
+      // hook) must not survive.
       doRollbackAndClose();
-      log.warn("financial-account handler business error: {}", e.getMessage());
+      log.warn("financial-account hook business error: {}", e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
       doRollbackAndClose();
-      log.error("financial-account handler error", e);
+      log.error("financial-account hook error", e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal Server Error");
     } finally {
       exitAdminMode();
@@ -130,34 +130,26 @@ public class FinancialAccountHandler implements NeoHandler {
   }
 
   // ---------------------------------------------------------------------------
-  // Create
+  // Create (pre-hook: validate + enrich body, then let generic CRUD persist)
   // ---------------------------------------------------------------------------
 
-  NeoResponse create(JSONObject body) throws JSONException {
+  NeoResponse validateAndEnrichCreate(JSONObject body) throws JSONException {
     if (body == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Missing request body");
     }
-    String name = body.optString("name", "").trim();
-    String currencyId = body.optString("currencyId", "").trim();
-    String type = normalizeType(body.optString("type", TYPE_BANK).trim());
-    String iban = body.optString("iban", "").trim();
+    String name = body.optString(FIELD_NAME, "").trim();
+    String currencyId = body.optString(FIELD_CURRENCY, "").trim();
+    String iban = body.optString(FIELD_IBAN, "").trim();
     String swift = body.optString(FIELD_SWIFT_CODE, "").trim();
 
-    if (StringUtils.isBlank(name)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is required");
-    }
-    if (name.length() > NAME_MAX_LENGTH) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is too long");
+    NeoResponse lengthError = validateLengths(name, iban, swift);
+    if (lengthError != null) {
+      return lengthError;
     }
     if (StringUtils.isBlank(currencyId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Currency is required");
     }
-    if (iban.length() > IBAN_MAX_LENGTH || swift.length() > SWIFT_MAX_LENGTH) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "IBAN or BIC/SWIFT is too long");
-    }
-
-    Currency currency = loadCurrency(currencyId);
-    if (currency == null) {
+    if (loadCurrency(currencyId) == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid currency");
     }
     if (nameExists(name, null)) {
@@ -165,119 +157,64 @@ public class FinancialAccountHandler implements NeoHandler {
           "An account with this name already exists");
     }
 
-    List<MatchingAlgorithm> algorithms = listMatchingAlgorithms();
-    MatchingAlgorithm defaultAlgorithm = algorithms.isEmpty() ? null : algorithms.get(0);
+    // Normalize the account type (defaults to Bank) so the generic service
+    // always persists one of the allowed values.
+    body.put(FIELD_TYPE, normalizeType(body.optString(FIELD_TYPE, TYPE_BANK).trim()));
 
-    FIN_FinancialAccount account = persist(name, type, currency, iban, swift, defaultAlgorithm);
-
-    JSONObject data = new JSONObject();
-    data.put("id", account.getId());
-    data.put("name", account.getName());
-    return NeoResponse.createdWithData(data);
-  }
-
-  /**
-   * Persists a new {@link FIN_FinancialAccount} under the current OBContext client
-   * and organization. Exposed package-private so unit tests can stub the OBDal layer.
-   */
-  FIN_FinancialAccount persist(String name, String type, Currency currency, String iban,
-      String swift, MatchingAlgorithm algorithm) {
-    FIN_FinancialAccount account = OBProvider.getInstance().get(FIN_FinancialAccount.class);
-    account.setClient(OBContext.getOBContext().getCurrentClient());
-    account.setOrganization(OBContext.getOBContext().getCurrentOrganization());
-    account.setActive(true);
-    account.setName(name);
-    account.setType(type);
-    account.setCurrency(currency);
+    // Inject the country derived from the IBAN before the insert — the trigger
+    // FIN_FINANCIAL_ACCOUNT_TRG2 rejects a bank account with an IBAN but no country.
     if (StringUtils.isNotBlank(iban)) {
-      account.setIBAN(iban);
-      // FIN_FINANCIAL_ACCOUNT_TRG2 rejects a bank account that carries an IBAN
-      // without a country (@COUNTRY_IBAN@). Derive it from the IBAN's ISO prefix.
-      account.setCountry(resolveCountryFromIban(iban));
+      Country country = resolveCountryFromIban(iban);
+      if (country != null) {
+        body.put(FIELD_COUNTRY, country.getId());
+      }
     }
-    if (StringUtils.isNotBlank(swift)) {
-      account.setSwiftCode(swift);
-    }
-    if (algorithm != null) {
-      account.setMatchingAlgorithm(algorithm);
-    }
-    OBDal.getInstance().save(account);
-    OBDal.getInstance().flush();
-    return account;
+    // Inject a default matching algorithm when the caller did not provide one,
+    // so reconciliation has an algorithm to work with.
+    injectDefaultMatchingAlgorithm(body);
+
+    return null;
   }
 
   // ---------------------------------------------------------------------------
-  // Update (general data only — PSD2 connection is out of scope, T3)
+  // Update (pre-hook: validate + keep country in sync with the IBAN)
   // ---------------------------------------------------------------------------
 
-  NeoResponse update(String id, JSONObject body) throws JSONException {
-    if (StringUtils.isBlank(id)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Missing account id");
-    }
+  NeoResponse validateAndEnrichUpdate(String id, JSONObject body) throws JSONException {
     if (body == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Missing request body");
+      return null;
     }
-    FIN_FinancialAccount account = loadAccount(id);
-    if (account == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Account not found");
-    }
-
-    String name = body.optString("name", "").trim();
-    String currencyId = body.optString("currencyId", "").trim();
-    String iban = body.optString("iban", "").trim();
+    String name = body.has(FIELD_NAME) ? body.optString(FIELD_NAME, "").trim() : null;
+    String iban = body.optString(FIELD_IBAN, "").trim();
     String swift = body.optString(FIELD_SWIFT_CODE, "").trim();
 
-    if (StringUtils.isBlank(name)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is required");
-    }
-    if (name.length() > NAME_MAX_LENGTH) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is too long");
+    if (name != null) {
+      if (StringUtils.isBlank(name)) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is required");
+      }
+      if (name.length() > NAME_MAX_LENGTH) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is too long");
+      }
+      if (nameExists(name, id)) {
+        return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+            "An account with this name already exists");
+      }
     }
     if (iban.length() > IBAN_MAX_LENGTH || swift.length() > SWIFT_MAX_LENGTH) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "IBAN or BIC/SWIFT is too long");
     }
-    if (nameExists(name, account.getId())) {
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-          "An account with this name already exists");
-    }
-
-    account.setName(name);
-    if (StringUtils.isNotBlank(currencyId)) {
-      Currency currency = loadCurrency(currencyId);
-      if (currency == null) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid currency");
-      }
-      account.setCurrency(currency);
-    }
-    // Only touch IBAN / BIC when the caller sent the key, so editing the general
-    // data (which omits BIC) does not wipe a stored value.
-    if (body.has("iban")) {
-      String ibanValue = StringUtils.trimToNull(iban);
-      account.setIBAN(ibanValue);
-      // Keep the country in sync with the IBAN so FIN_FINANCIAL_ACCOUNT_TRG2
-      // (@COUNTRY_IBAN@) accepts the row whenever an IBAN is present.
-      if (ibanValue != null) {
-        account.setCountry(resolveCountryFromIban(ibanValue));
+    // Keep the country in sync with the IBAN whenever the caller sends an IBAN.
+    if (body.has(FIELD_IBAN) && StringUtils.isNotBlank(iban)) {
+      Country country = resolveCountryFromIban(iban);
+      if (country != null) {
+        body.put(FIELD_COUNTRY, country.getId());
       }
     }
-    if (body.has(FIELD_SWIFT_CODE)) {
-      account.setSwiftCode(StringUtils.trimToNull(swift));
-    }
-    OBDal.getInstance().save(account);
-    OBDal.getInstance().flush();
-
-    JSONObject data = new JSONObject();
-    data.put("id", account.getId());
-    data.put("name", account.getName());
-    JSONObject responseData = new JSONObject();
-    responseData.put(KEY_DATA, data);
-    JSONObject envelope = new JSONObject();
-    envelope.put(KEY_RESPONSE, responseData);
-    return NeoResponse.ok(envelope);
+    return null;
   }
 
   // ---------------------------------------------------------------------------
-  // Archive
+  // Delete (short-circuit with a soft-archive)
   // ---------------------------------------------------------------------------
 
   NeoResponse archive(String id) {
@@ -299,34 +236,30 @@ public class FinancialAccountHandler implements NeoHandler {
   }
 
   // ---------------------------------------------------------------------------
-  // Defaults
+  // Helpers
   // ---------------------------------------------------------------------------
 
-  NeoResponse buildDefaults() throws JSONException {
-    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-    Currency defaultCurrency = resolveDefaultCurrency(orgId);
-
-    JSONObject data = new JSONObject();
-    if (defaultCurrency != null) {
-      data.put("defaultCurrencyId", defaultCurrency.getId());
-      data.put("defaultCurrencyIso", StringUtils.trimToEmpty(defaultCurrency.getISOCode()));
+  private NeoResponse validateLengths(String name, String iban, String swift) {
+    if (StringUtils.isBlank(name)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is required");
     }
-
-    JSONArray currencies = new JSONArray();
-    for (Currency currency : listCurrencies()) {
-      JSONObject entry = new JSONObject();
-      entry.put("id", currency.getId());
-      entry.put("iso", StringUtils.trimToEmpty(currency.getISOCode()));
-      entry.put("symbol", StringUtils.trimToEmpty(currency.getSymbol()));
-      currencies.put(entry);
+    if (name.length() > NAME_MAX_LENGTH) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is too long");
     }
-    data.put("currencies", currencies);
+    if (iban.length() > IBAN_MAX_LENGTH || swift.length() > SWIFT_MAX_LENGTH) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "IBAN or BIC/SWIFT is too long");
+    }
+    return null;
+  }
 
-    JSONObject responseData = new JSONObject();
-    responseData.put(KEY_DATA, data);
-    JSONObject envelope = new JSONObject();
-    envelope.put(KEY_RESPONSE, responseData);
-    return NeoResponse.ok(envelope);
+  void injectDefaultMatchingAlgorithm(JSONObject body) throws JSONException {
+    if (StringUtils.isNotBlank(body.optString(FIELD_MATCHING_ALGORITHM, ""))) {
+      return;
+    }
+    List<MatchingAlgorithm> algorithms = listMatchingAlgorithms();
+    if (!algorithms.isEmpty()) {
+      body.put(FIELD_MATCHING_ALGORITHM, algorithms.get(0).getId());
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -346,8 +279,12 @@ public class FinancialAccountHandler implements NeoHandler {
   }
 
   String normalizeType(String type) {
-    if (TYPE_CASH.equals(type)) return TYPE_CASH;
-    if (TYPE_CARD.equals(type)) return TYPE_CARD;
+    if (TYPE_CASH.equals(type)) {
+      return TYPE_CASH;
+    }
+    if (TYPE_CARD.equals(type)) {
+      return TYPE_CARD;
+    }
     return TYPE_BANK;
   }
 
@@ -407,18 +344,6 @@ public class FinancialAccountHandler implements NeoHandler {
         Restrictions.in(FIN_Reconciliation.PROPERTY_DOCUMENTSTATUS, CLOSED_RECONCILIATION_STATUSES)));
     criteria.setMaxResults(1);
     return criteria.uniqueResult() != null;
-  }
-
-  Currency resolveDefaultCurrency(String orgId) {
-    String currencyId = OBCurrencyUtils.getOrgCurrency(orgId);
-    return currencyId != null ? OBDal.getInstance().get(Currency.class, currencyId) : null;
-  }
-
-  List<Currency> listCurrencies() {
-    OBCriteria<Currency> criteria = OBDal.getInstance().createCriteria(Currency.class);
-    criteria.add(Restrictions.eq(Currency.PROPERTY_ACTIVE, true));
-    criteria.addOrderBy(Currency.PROPERTY_ISOCODE, true);
-    return criteria.list();
   }
 
   List<MatchingAlgorithm> listMatchingAlgorithms() {
