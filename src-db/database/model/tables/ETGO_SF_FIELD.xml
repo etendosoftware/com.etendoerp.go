@@ -57,6 +57,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="AGENT_PROMPT" primaryKey="false" required="false" type="VARCHAR" size="2000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <column name="JAVA_QUALIFIER" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
         <default/>
         <onCreateDefault/>
