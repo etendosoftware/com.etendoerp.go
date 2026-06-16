@@ -819,8 +819,6 @@ class McpToolRouterRouteTest {
 
     @org.junit.jupiter.api.BeforeEach
     void setupActionSupport() {
-      // mapNeoResponseToActionResult was moved to McpToolRouterSupport;
-      // call the real implementation so the mapping logic is exercised.
       supportMock.when(() -> McpToolRouterSupport.mapNeoResponseToActionResult(any()))
           .thenCallRealMethod();
       supportMock.when(() -> McpToolRouterSupport.resolveStatusFromErrorBody(any()))
