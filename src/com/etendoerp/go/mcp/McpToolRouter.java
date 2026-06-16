@@ -84,12 +84,6 @@ public class McpToolRouter {
   private static final Logger log = LogManager.getLogger(McpToolRouter.class);
   private static final String ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX = "' for current role";
 
-  // ── JSON key constants (avoids Sonar duplicated-literal warnings) ──────
-  private static final String KEY_ERROR = "error";
-  private static final String KEY_STATUS = "status";
-  private static final String KEY_MESSAGE = "message";
-  private static final String KEY_PROCESS_RESULT = "processResult";
-  private static final String KEY_PROCESS_MESSAGE = "processMessage";
 
   /**
    * Route a tool call to its handler.
@@ -358,7 +352,7 @@ public class McpToolRouter {
     JSONArray missingFields = validateMandatoryFields(filteredBody, adTab, dalEntity);
     if (missingFields.length() > 0) {
       JSONObject errorObj = new JSONObject();
-      errorObj.put(KEY_ERROR, "Missing required fields that could not be auto-resolved");
+      errorObj.put(McpConstants.KEY_ERROR, "Missing required fields that could not be auto-resolved");
       errorObj.put("missingFields", missingFields);
       errorObj.put("hint", "Provide these fields in the request, or use neo_selectors to find valid values for foreignKey fields");
       return wrapAsErrorContent(errorObj.toString(2));
@@ -722,81 +716,20 @@ public class McpToolRouter {
     NeoResponse neoResponse = NeoButtonActionHelper.executeButtonActionCore(
         sfEntity, recordId, actionName, parameters);
 
-    JSONObject actionResult = mapNeoResponseToActionResult(neoResponse);
+    JSONObject actionResult = McpToolRouterSupport.mapNeoResponseToActionResult(neoResponse);
 
     if (neoResponse.getHttpStatus() >= 400) {
-      if (!actionResult.has(KEY_PROCESS_RESULT)) {
-        actionResult.put(KEY_PROCESS_RESULT, KEY_ERROR);
+      if (!actionResult.has(McpConstants.KEY_PROCESS_RESULT)) {
+        actionResult.put(McpConstants.KEY_PROCESS_RESULT, McpConstants.KEY_ERROR);
       }
-      if (!actionResult.has(KEY_PROCESS_MESSAGE)) {
-        actionResult.put(KEY_PROCESS_MESSAGE,
+      if (!actionResult.has(McpConstants.KEY_PROCESS_MESSAGE)) {
+        actionResult.put(McpConstants.KEY_PROCESS_MESSAGE,
             "Request failed with HTTP status " + neoResponse.getHttpStatus());
       }
       return wrapAsErrorContent(actionResult.toString(2));
     }
 
     return wrapAsTextContent(actionResult.toString(2));
-  }
-
-  /**
-   * Maps a {@link NeoResponse} body to the structured MCP action result keys.
-   * Handles both top-level {@code {status, message}} bodies (from
-   * {@code NeoProcessService.translate*Result}) and nested
-   * {@code {"error":{status, message}}} bodies (from {@code NeoResponse.error()}).
-   * Extra keys from the process result are passed through unchanged.
-   */
-  private JSONObject mapNeoResponseToActionResult(NeoResponse neoResponse) throws JSONException {
-    JSONObject actionResult = new JSONObject();
-    JSONObject body = neoResponse.getBody();
-    if (body == null) {
-      return actionResult;
-    }
-    // Primary path: top-level status/message (NeoProcessService.translate*Result)
-    String status = body.optString(KEY_STATUS, null);
-    String message = body.optString(KEY_MESSAGE, null);
-
-    // Fallback path: nested error object (NeoResponse.error(int, String))
-    if (status == null && message == null) {
-      status = resolveStatusFromErrorBody(body);
-      JSONObject errorObj = body.optJSONObject(KEY_ERROR);
-      if (errorObj != null) {
-        message = errorObj.optString(KEY_MESSAGE, null);
-      }
-    }
-
-    if (status != null) {
-      actionResult.put(KEY_PROCESS_RESULT, status);
-    }
-    if (message != null) {
-      actionResult.put(KEY_PROCESS_MESSAGE, message);
-    }
-    // Pass through any extra keys the process returned (best-effort)
-    Iterator<String> keys = body.keys();
-    while (keys.hasNext()) {
-      String key = keys.next();
-      if (!KEY_STATUS.equals(key) && !KEY_MESSAGE.equals(key) && !KEY_ERROR.equals(key)) {
-        actionResult.put(key, body.get(key));
-      }
-    }
-    return actionResult;
-  }
-
-  /**
-   * Resolves the status string from a nested error body produced by
-   * {@code NeoResponse.error(int, String)}.
-   * The status may be a string or an int (HTTP status code).
-   */
-  private static String resolveStatusFromErrorBody(JSONObject body) {
-    JSONObject errorObj = body.optJSONObject(KEY_ERROR);
-    if (errorObj == null) {
-      return null;
-    }
-    String status = errorObj.optString(KEY_STATUS, null);
-    if (status != null) {
-      return status;
-    }
-    int errorStatus = errorObj.optInt(KEY_STATUS, -1);
-    return errorStatus > 0 ? String.valueOf(errorStatus) : null;
   }
 
   // ── Process execution ─────────────────────────────────────────────────
@@ -869,7 +802,7 @@ public class McpToolRouter {
       // Fall back to describe
       NeoResponse describeResponse = NeoReportService.describeReport(adProcess);
       JSONObject fallback = new JSONObject();
-      fallback.put(KEY_ERROR, "Report generation failed: " + e.getMessage());
+      fallback.put(McpConstants.KEY_ERROR, "Report generation failed: " + e.getMessage());
       fallback.put("description", describeResponse.getBody());
       fallback.put("hint", "Use the REST endpoint POST /sws/neo/" + specName
           + " with exportType and params to generate the report via HTTP");
@@ -1203,7 +1136,7 @@ public class McpToolRouter {
     if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
       if (innerResponse.has(JsonConstants.RESPONSE_ERROR)) {
         return innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
-            .optString(KEY_MESSAGE, "Operation failed");
+            .optString(McpConstants.KEY_MESSAGE, "Operation failed");
       }
       return "Operation failed";
     }

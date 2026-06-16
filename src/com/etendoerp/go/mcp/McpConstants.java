@@ -35,6 +35,13 @@ final class McpConstants {
   static final String KEY_PROPERTIES = "properties";
   static final String KEY_DESCRIPTION = "description";
   static final String GENERATE_PREFIX = "generate_";
+  // Action result JSON keys
+  static final String KEY_ERROR = "error";
+  static final String KEY_STATUS = "status";
+  static final String KEY_MESSAGE = "message";
+  static final String KEY_PROCESS_RESULT = "processResult";
+  static final String KEY_PROCESS_MESSAGE = "processMessage";
+
   static final String LABEL_SPEC_NAME = "Spec name";
   static final String LABEL_ENTITY_NAME = "Entity name within the spec";
   static final String LABEL_ENTITY_NAME_WITH_EXAMPLE =

@@ -817,6 +817,16 @@ class McpToolRouterRouteTest {
     private static final String RECORD_ID = "record-001";
     private static final String ACTION_NAME = "Processed";
 
+    @org.junit.jupiter.api.BeforeEach
+    void setupActionSupport() {
+      // mapNeoResponseToActionResult was moved to McpToolRouterSupport;
+      // call the real implementation so the mapping logic is exercised.
+      supportMock.when(() -> McpToolRouterSupport.mapNeoResponseToActionResult(any()))
+          .thenCallRealMethod();
+      supportMock.when(() -> McpToolRouterSupport.resolveStatusFromErrorBody(any()))
+          .thenCallRealMethod();
+    }
+
     private JSONObject buildActionArgs() throws Exception {
       JSONObject args = new JSONObject();
       args.put("spec", SPEC_NAME);
