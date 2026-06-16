@@ -256,10 +256,42 @@ public class NeoDefaultsService {
       resolvedValue = resolveFirstComboOption(adColumn, ctx);
     }
     if (resolvedValue != null) {
+      // Coerce "Y"/"N" string defaults to JSON boolean for Yes/No (boolean) properties.
+      // Reuses the same Boolean detection that NeoTypeCoercionHelper.coerceField uses on the
+      // create path: check prop.getPrimitiveObjectType() == Boolean.class (line 156 of that file).
+      resolvedValue = coerceBooleanDefault(dalEntity, propertyName, resolvedValue);
       defaults.put(propertyName, resolvedValue);
       // For FK fields, also inject $_identifier so selectors display the label, not the ID
       tryInjectIdentifier(defaults, dalEntity, propertyName, resolvedValue);
     }
+  }
+
+  /**
+   * If {@code value} is the string {@code "Y"} or {@code "N"} and the DAL property for
+   * {@code propertyName} is a {@link Boolean} primitive type, returns the corresponding
+   * {@code Boolean} ({@code true} for "Y", {@code false} for "N"/"anything else").
+   * In all other cases the original value is returned unchanged.
+   *
+   * <p>This mirrors the coercion applied on the create path by
+   * {@code NeoTypeCoercionHelper.coerceField} (Boolean branch, line ~157).
+   */
+  private static Object coerceBooleanDefault(Entity dalEntity, String propertyName, Object value) {
+    if (dalEntity == null || !(value instanceof String)) {
+      return value;
+    }
+    try {
+      Property prop = dalEntity.getProperty(propertyName);
+      if (prop != null && prop.isPrimitive()) {
+        Class<?> type = prop.getPrimitiveObjectType();
+        if (type != null && Boolean.class.isAssignableFrom(type)) {
+          String strVal = (String) value;
+          return "Y".equals(strVal) || "true".equalsIgnoreCase(strVal);
+        }
+      }
+    } catch (Exception e) {
+      log.debug("Could not coerce boolean default for property '{}': {}", propertyName, e.getMessage());
+    }
+    return value;
   }
 
   private static @NonNull Set<String> getSfFieldColumns(List<SFField> fields) {

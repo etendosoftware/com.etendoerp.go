@@ -25,6 +25,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -1790,6 +1791,150 @@ public class NeoDefaultsServiceTest {
 
     assertEquals(5, result.chainDepth);
     assertTrue(result.truncated);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // coerceBooleanDefault — via reflection (100% branch coverage)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  public void testCoerceBooleanDefaultNullEntityReturnsValueUnchanged() throws Exception {
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        null, "depreciate", "Y");
+    assertEquals("Y", result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultNonStringValueReturnsUnchanged() throws Exception {
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        mock(Entity.class), "depreciate", 42);
+    assertEquals(42, result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultNullPropertyReturnsValueUnchanged() throws Exception {
+    Entity entity = mock(Entity.class);
+    when(entity.getProperty("depreciate")).thenReturn(null);
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "Y");
+    assertEquals("Y", result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultNotPrimitiveReturnsValueUnchanged() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("businessPartner")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(false);
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "businessPartner", "Y");
+    assertEquals("Y", result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultNullPrimitiveTypeReturnsValueUnchanged() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("depreciate")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    // getPrimitiveObjectType() returns Class<?> — use doReturn to avoid wildcard compile error
+    doReturn(null).when(prop).getPrimitiveObjectType();
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "Y");
+    assertEquals("Y", result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultNonBooleanTypeReturnsValueUnchanged() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("name")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(String.class).when(prop).getPrimitiveObjectType();
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "name", "Y");
+    assertEquals("Y", result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultYValueReturnsTrueBoolean() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("depreciate")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(Boolean.class).when(prop).getPrimitiveObjectType();
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "Y");
+    assertEquals(Boolean.TRUE, result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultTrueLowerCaseReturnsTrueBoolean() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("depreciate")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(Boolean.class).when(prop).getPrimitiveObjectType();
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "true");
+    assertEquals(Boolean.TRUE, result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultTrueMixedCaseReturnsTrueBoolean() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("depreciate")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(Boolean.class).when(prop).getPrimitiveObjectType();
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "TRUE");
+    assertEquals(Boolean.TRUE, result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultNValueReturnsFalseBoolean() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("depreciate")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(Boolean.class).when(prop).getPrimitiveObjectType();
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "N");
+    assertEquals(Boolean.FALSE, result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultFalseValueReturnsFalseBoolean() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("depreciate")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(Boolean.class).when(prop).getPrimitiveObjectType();
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "false");
+    assertEquals(Boolean.FALSE, result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultGetPropertyThrowsReturnsValueUnchanged() throws Exception {
+    Entity entity = mock(Entity.class);
+    when(entity.getProperty("depreciate")).thenThrow(new RuntimeException("property not found"));
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "Y");
+    assertEquals("Y", result);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
