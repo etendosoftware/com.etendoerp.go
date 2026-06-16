@@ -229,19 +229,21 @@ class ProductPriceHandlerTest {
     when(nativeQuery.setParameter(eq("productId"), eq(parentId))).thenReturn(nativeQuery);
 
     Object[] row = new Object[]{
-        "pp-id-1",                     // id
-        "product-123",                 // product_id
-        "plv-id-1",                    // plv_id
-        "Sales Q1 2026",               // plv_name
-        new BigDecimal("100.00"),      // standard_price
-        new BigDecimal("120.00"),      // list_price
-        new BigDecimal("90.00"),       // price_limit
-        "S",                           // algo_code
-        "Y",                           // is_sales
-        "Sales Price List",            // price_list_name
-        "product-123 - Sales Q1 2026", // identifier
-        "$",                           // currency_symbol
-        "USD"                          // currency_iso
+        "pp-id-1",                     // [0]  id
+        "product-123",                 // [1]  product_id
+        "plv-id-1",                    // [2]  plv_id
+        "Sales Q1 2026",               // [3]  plv_name
+        new BigDecimal("100.00"),      // [4]  standard_price
+        new BigDecimal("120.00"),      // [5]  list_price
+        new BigDecimal("90.00"),       // [6]  price_limit
+        "S",                           // [7]  algo_code
+        "Y",                           // [8]  is_sales
+        "Sales Price List",            // [9]  price_list_name
+        "product-123 - Sales Q1 2026", // [10] identifier
+        "$",                           // [11] currency_symbol
+        "USD",                         // [12] currency_iso
+        "Y",                           // [13] is_default (pl.isdefault)
+        java.sql.Date.valueOf("2026-01-01") // [14] valid_from_date (plv.validfrom)
     };
     List<Object[]> rows = Collections.singletonList(row);
     when(nativeQuery.list()).thenReturn(rows);
@@ -276,6 +278,9 @@ class ProductPriceHandlerTest {
     assertEquals("Sales Price List", item.getString("priceList$_identifier"));
     assertEquals("$", item.getString("currencySymbol"));
     assertEquals("USD", item.getString("currencyIso"));
+    // New fields: is_default and valid_from_date (added at indices 13 and 14)
+    assertTrue(item.getBoolean("priceListVersion$default"));
+    assertEquals(String.valueOf(java.sql.Date.valueOf("2026-01-01")), item.getString("priceListVersion$validFromDate"));
     assertEquals("PricingProductPrice", item.getString("_entityName"));
   }
 
@@ -322,10 +327,13 @@ class ProductPriceHandlerTest {
     when(nativeQuery.setParameter(eq("productId"), eq(parentId))).thenReturn(nativeQuery);
 
     Object[] row = new Object[]{
-        "pp-id-2", "product-456", "plv-id-2", "Purchase Q1",
-        new BigDecimal("50.00"), new BigDecimal("60.00"), new BigDecimal("45.00"),
-        "S", "N", "Purchase Price List",
-        "product-456 - Purchase Q1", null, "EUR"
+        "pp-id-2", "product-456", "plv-id-2", "Purchase Q1",        // [0-3]
+        new BigDecimal("50.00"), new BigDecimal("60.00"),             // [4-5]
+        new BigDecimal("45.00"),                                      // [6]
+        "S", "N", "Purchase Price List",                             // [7-9]
+        "product-456 - Purchase Q1", null, "EUR",                    // [10-12]
+        "N",                                                          // [13] is_default
+        null                                                          // [14] valid_from_date (null)
     };
     when(nativeQuery.list()).thenReturn(Collections.singletonList(row));
 
@@ -355,9 +363,11 @@ class ProductPriceHandlerTest {
     when(nativeQuery.setParameter(eq("productId"), eq(parentId))).thenReturn(nativeQuery);
 
     Object[] row = new Object[]{
-        "pp-id-3", "product-789", "plv-id-3", "PLV Name",
-        BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
-        "W", "Y", "PL Name", "ident", "$", "USD"
+        "pp-id-3", "product-789", "plv-id-3", "PLV Name",           // [0-3]
+        BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,           // [4-6]
+        "W", "Y", "PL Name", "ident", "$", "USD",                   // [7-12]
+        "N",                                                          // [13] is_default
+        null                                                          // [14] valid_from_date (null)
     };
     when(nativeQuery.list()).thenReturn(Collections.singletonList(row));
 
@@ -371,6 +381,87 @@ class ProductPriceHandlerTest {
     JSONObject item = response.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
     assertEquals("W", item.getString("algorithm"));
     assertEquals("W", item.getString("algorithm$_identifier"));
+  }
+
+  /**
+   * Verifies that priceListVersion$default is false and priceListVersion$validFromDate
+   * is null when row[13] is 'N' and row[14] is null.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandleGetListDefaultFalseAndNullValidFromDate() throws Exception {
+    String parentId = "product-defaults";
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", parentId);
+
+    when(session.createNativeQuery(anyString())).thenReturn(nativeQuery);
+    when(nativeQuery.setParameter(eq("productId"), eq(parentId))).thenReturn(nativeQuery);
+
+    Object[] row = new Object[]{
+        "pp-id-d1", "product-defaults", "plv-id-d1", "PLV Default Test", // [0-3]
+        new BigDecimal("10.00"), new BigDecimal("12.00"),                  // [4-5]
+        new BigDecimal("9.00"),                                            // [6]
+        "S", "Y", "PL Default Test",                                      // [7-9]
+        "product-defaults - PLV Default Test", "$", "USD",                // [10-12]
+        "N",                                                               // [13] is_default = false
+        null                                                               // [14] valid_from_date = null
+    };
+    List<Object[]> rows = Collections.singletonList(row);
+    when(nativeQuery.list()).thenReturn(rows);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .queryParams(params)
+        .build();
+
+    NeoResponse response = handler.handle(ctx);
+    assertEquals(200, response.getHttpStatus());
+
+    JSONObject item = response.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertFalse(item.getBoolean("priceListVersion$default"));
+    assertTrue(item.isNull("priceListVersion$validFromDate"));
+  }
+
+  /**
+   * Verifies that priceListVersion$default is true and priceListVersion$validFromDate
+   * equals String.valueOf(row[14]) when row[13] is 'Y' and row[14] is a date.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandleGetListDefaultTrueAndValidFromDatePresent() throws Exception {
+    String parentId = "product-default-true";
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", parentId);
+
+    when(session.createNativeQuery(anyString())).thenReturn(nativeQuery);
+    when(nativeQuery.setParameter(eq("productId"), eq(parentId))).thenReturn(nativeQuery);
+
+    java.sql.Date validFrom = java.sql.Date.valueOf("2025-06-01");
+    Object[] row = new Object[]{
+        "pp-id-d2", "product-default-true", "plv-id-d2", "PLV True Test", // [0-3]
+        new BigDecimal("20.00"), new BigDecimal("25.00"),                   // [4-5]
+        new BigDecimal("18.00"),                                            // [6]
+        "S", "Y", "PL True Test",                                          // [7-9]
+        "product-default-true - PLV True Test", null, "EUR",               // [10-12]
+        "Y",                                                                // [13] is_default = true
+        validFrom                                                           // [14] valid_from_date
+    };
+    List<Object[]> rows = Collections.singletonList(row);
+    when(nativeQuery.list()).thenReturn(rows);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .queryParams(params)
+        .build();
+
+    NeoResponse response = handler.handle(ctx);
+    assertEquals(200, response.getHttpStatus());
+
+    JSONObject item = response.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertTrue(item.getBoolean("priceListVersion$default"));
+    assertEquals(String.valueOf(validFrom), item.getString("priceListVersion$validFromDate"));
   }
 
   /**

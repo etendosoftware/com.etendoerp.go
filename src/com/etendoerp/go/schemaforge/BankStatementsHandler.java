@@ -18,11 +18,14 @@
 package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.BankStatementFormatDetector.detectFormat;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.buildLineTxns;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.deriveStatementStatus;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.formatDate;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.isBlankLine;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.nullSafeBigDecimal;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseAmount;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseIsoDate;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseStatementIds;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.truncate;
 
 import com.etendoerp.go.schemaforge.BankStatementFormatDetector.StatementFormat;
@@ -33,6 +36,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 
@@ -84,6 +88,9 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String ACTION_REACTIVATE = "reactivate";
   private static final String PARAM_ACCOUNT_ID = "FIN_Financial_Account_ID";
   private static final String PARAM_STATEMENT_ID = "statementId";
+  // Plural form used by the CSV export to fetch the lines of several selected
+  // statements in one request; comma-separated. Falls back to PARAM_STATEMENT_ID.
+  private static final String PARAM_STATEMENT_IDS = "statementIds";
   private static final String PARAM_ACTION = "action";
 
   private static final String C43_CLASS_NAME =
@@ -241,7 +248,9 @@ public class BankStatementsHandler implements NeoHandler {
           + "   AND bs.isactive = 'Y'"
           + " ORDER BY bs.importdate DESC";
 
-  private static final String LINES_SQL =
+  // SELECT + FROM + JOINs shared by the single- and multi-statement line queries.
+  // The WHERE/ORDER tail is appended per variant (single id vs IN-list for export).
+  private static final String LINES_SQL_HEAD =
       "SELECT bsl.fin_bankstatementline_id,"
           + "       bsl.line,"
           + "       bsl.datetrx,"
@@ -254,10 +263,30 @@ public class BankStatementsHandler implements NeoHandler {
           + "       gl.name AS glitem_name,"
           + "       bsl.cramount,"
           + "       bsl.dramount,"
-          + "       bsl.fin_finacc_transaction_id"
+          + "       bsl.fin_finacc_transaction_id,"
+          // Linked financial-account transaction (1:1 today; the frontend models it
+          // as a txns[] array so a future 1:N only changes this query). Same field
+          // mapping as FinancialAccountTransactionsHandler.TRANSACTIONS_SQL.
+          + "       COALESCE(fp.documentno, '') AS txn_documentno,"
+          + "       ft.statementdate            AS txn_date,"
+          + "       COALESCE(tbp.name, pbp.name, '') AS txn_contact,"
+          + "       COALESCE(ft.description, fp.description, '') AS txn_description,"
+          + "       ft.trxtype                  AS txn_trxtype,"
+          + "       ft.status                   AS txn_status,"
+          + "       CASE WHEN ft.trxtype = 'BPD' THEN ft.depositamt ELSE -ft.paymentamt END AS txn_amount,"
+          + "       ft.fin_payment_id           AS txn_payment_id,"
+          + "       fp.isreceipt                AS txn_payment_isreceipt"
           + "  FROM fin_bankstatementline bsl"
           + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = bsl.c_bpartner_id"
           + "  LEFT JOIN c_glitem gl ON gl.c_glitem_id = bsl.c_glitem_id"
+          + "  LEFT JOIN fin_finacc_transaction ft ON ft.fin_finacc_transaction_id = bsl.fin_finacc_transaction_id"
+          + "  LEFT JOIN fin_payment fp ON fp.fin_payment_id = ft.fin_payment_id"
+          + "  LEFT JOIN c_bpartner tbp ON tbp.c_bpartner_id = ft.c_bpartner_id"
+          + "  LEFT JOIN c_bpartner pbp ON pbp.c_bpartner_id = fp.c_bpartner_id";
+
+  /** Single-statement variant: one bound {@code statementId}, ordered by line. */
+  private static final String LINES_SQL =
+      LINES_SQL_HEAD
           + " WHERE bsl.fin_bankstatement_id = ?"
           + "   AND bsl.isactive = 'Y'"
           + " ORDER BY bsl.line ASC";
@@ -306,16 +335,20 @@ public class BankStatementsHandler implements NeoHandler {
   }
 
   private NeoResponse handleGetLines(NeoContext context) {
-    String statementId = context.getQueryParams() != null
+    String multi = context.getQueryParams() != null
+        ? context.getQueryParams().get(PARAM_STATEMENT_IDS)
+        : null;
+    String single = context.getQueryParams() != null
         ? context.getQueryParams().get(PARAM_STATEMENT_ID)
         : null;
-    if (StringUtils.isBlank(statementId)) {
+    List<String> statementIds = parseStatementIds(multi, single);
+    if (statementIds.isEmpty()) {
       return NeoResponse.error(400, "Missing required parameter: statementId");
     }
     try (AdminMode ignored = new AdminMode()) {
-      return NeoResponse.ok(wrapInEnvelope(ACTION_LINES, loadLines(statementId)));
+      return NeoResponse.ok(wrapInEnvelope(ACTION_LINES, loadLines(statementIds)));
     } catch (Exception e) {
-      log.error("Error loading lines for statement {}", statementId, e);
+      log.error("Error loading lines for statements {}", statementIds, e);
       return NeoResponse.error(500, "Internal Server Error");
     }
   }
@@ -829,15 +862,6 @@ public class BankStatementsHandler implements NeoHandler {
    * ignored on purpose: the UI pre-fills it with today, so a row with only that
    * default date still counts as empty.
    */
-  private static boolean isBlankLine(JSONObject l) {
-    return StringUtils.isBlank(l.optString(FIELD_DESCRIPTION, null))
-        && StringUtils.isBlank(l.optString(FIELD_BPARTNER_NAME, null))
-        && StringUtils.isBlank(l.optString(FIELD_BPARTNER_ID, null))
-        && StringUtils.isBlank(l.optString(FIELD_GLITEM_ID, null))
-        && StringUtils.isBlank(l.optString(FIELD_REFERENCE, null))
-        && parseAmount(l.optString("in", null)).signum() == 0
-        && parseAmount(l.optString("out", null)).signum() == 0;
-  }
 
   /**
    * Dispatches to the right parser by {@link StatementFormat} and returns the
@@ -1101,27 +1125,67 @@ public class BankStatementsHandler implements NeoHandler {
       ps.setString(1, statementId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          BigDecimal credit = nullSafeBigDecimal(rs.getBigDecimal(FIELD_CRAMOUNT));
-          BigDecimal debit = nullSafeBigDecimal(rs.getBigDecimal(FIELD_DRAMOUNT));
-          JSONObject row = new JSONObject();
-          row.put("id", rs.getString("fin_bankstatementline_id"));
-          row.put("lineNo", rs.getLong("line"));
-          row.put("date", formatDate(rs.getTimestamp("datetrx")));
-          row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
-          row.put("reference", StringUtils.trimToEmpty(rs.getString("referenceno")));
-          row.put("bpartnerName", StringUtils.trimToEmpty(rs.getString("bpartnername")));
-          row.put(FIELD_BPARTNER_ID, StringUtils.trimToEmpty(rs.getString("c_bpartner_id")));
-          row.put("bpartnerFkName", StringUtils.trimToEmpty(rs.getString("bpartner_fk_name")));
-          row.put(FIELD_GLITEM_ID, StringUtils.trimToEmpty(rs.getString("c_glitem_id")));
-          row.put("glItemName", StringUtils.trimToEmpty(rs.getString("glitem_name")));
-          row.put("in", credit);
-          row.put("out", debit);
-          row.put("amount", credit.subtract(debit));
-          row.put("matched", rs.getString("fin_finacc_transaction_id") != null);
-          arr.put(row);
+          arr.put(mapLineRow(rs));
         }
       }
     }
     return arr;
+  }
+
+  /**
+   * Loads the lines of one or several statements (used by the CSV export when
+   * multiple statements are selected). A single id delegates to the single-id
+   * query; several ids are bound into an {@code IN (...)} list and ordered by
+   * statement then line so each statement's lines stay grouped.
+   */
+  JSONArray loadLines(List<String> statementIds) throws Exception {
+    if (statementIds.size() == 1) {
+      return loadLines(statementIds.get(0));
+    }
+    JSONArray arr = new JSONArray();
+    // The only dynamic part is the count of "?" bind markers; the actual ids are
+    // bound via setString, so this is not a SQL-injection vector.
+    String placeholders = String.join(",", Collections.nCopies(statementIds.size(), "?"));
+    String sql = LINES_SQL_HEAD
+        + " WHERE bsl.isactive = 'Y'"
+        + "   AND bsl.fin_bankstatement_id IN (" + placeholders + ")"
+        + " ORDER BY bsl.fin_bankstatement_id, bsl.line ASC";
+    // Connection is managed by the DAL's Hibernate Session; don't close it.
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) { // NOSONAR java:S2077 — placeholders are only "?" markers
+      for (int i = 0; i < statementIds.size(); i++) {
+        ps.setString(i + 1, statementIds.get(i));
+      }
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          arr.put(mapLineRow(rs));
+        }
+      }
+    }
+    return arr;
+  }
+
+  /** Maps one {@link #LINES_SQL_HEAD} result row to the line JSON contract. */
+  private JSONObject mapLineRow(ResultSet rs) throws Exception {
+    BigDecimal credit = nullSafeBigDecimal(rs.getBigDecimal(FIELD_CRAMOUNT));
+    BigDecimal debit = nullSafeBigDecimal(rs.getBigDecimal(FIELD_DRAMOUNT));
+    JSONObject row = new JSONObject();
+    row.put("id", rs.getString("fin_bankstatementline_id"));
+    row.put("lineNo", rs.getLong("line"));
+    row.put("date", formatDate(rs.getTimestamp("datetrx")));
+    row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
+    row.put(FIELD_REFERENCE, StringUtils.trimToEmpty(rs.getString("referenceno")));
+    row.put(FIELD_BPARTNER_NAME, StringUtils.trimToEmpty(rs.getString("bpartnername")));
+    row.put(FIELD_BPARTNER_ID, StringUtils.trimToEmpty(rs.getString("c_bpartner_id")));
+    row.put("bpartnerFkName", StringUtils.trimToEmpty(rs.getString("bpartner_fk_name")));
+    row.put(FIELD_GLITEM_ID, StringUtils.trimToEmpty(rs.getString("c_glitem_id")));
+    row.put("glItemName", StringUtils.trimToEmpty(rs.getString("glitem_name")));
+    row.put("in", credit);
+    row.put("out", debit);
+    row.put("amount", credit.subtract(debit));
+    boolean matched = rs.getString("fin_finacc_transaction_id") != null;
+    row.put("matched", matched);
+    row.put("txns", buildLineTxns(rs, matched));
+    return row;
   }
 }

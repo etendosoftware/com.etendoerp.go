@@ -20,11 +20,14 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -42,6 +45,10 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.calendar.Period;
@@ -53,6 +60,7 @@ import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.TaxReportParameter;
 
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Criterion;
 
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.BoxGroupConfig;
 import com.etendoerp.go.schemaforge.Fiscal303BoxesHandler.ComputeResult;
@@ -1148,6 +1156,79 @@ public class Fiscal303BoxesHandlerTest {
 
     JSONObject json = declHandler.declToJson(decl);
     assertEquals("submitted", json.getString("status"));
+  }
+
+  // ── resolveTaxReport (system-org lookup, via reflection) ──────────────────
+
+  /**
+   * Regression test for ETP-4177: records stored at ad_org_id='0' (system level)
+   * must be found. The old implementation used {@code eq(org, orgId)}, which would
+   * silently return nothing when the TaxReport was registered under org='0' rather
+   * than the calling org — causing OBException at runtime with no clear error.
+   *
+   * The fix uses {@code in(org, [orgId, "0"])} so both org-specific and system-level
+   * records are matched.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolveTaxReport_systemOrgRecordFound() throws Exception {
+    TaxReport report = mock(TaxReport.class);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBCriteria<TaxReport> crit = mock(OBCriteria.class);
+      when(obDal.createCriteria(TaxReport.class)).thenReturn(crit);
+      when(crit.add(any(Criterion.class))).thenReturn(crit);
+      when(crit.setMaxResults(1)).thenReturn(crit);
+      // The criteria returns a TaxReport whose org is "0" (system level).
+      when(crit.list()).thenReturn(Collections.singletonList(report));
+
+      TaxReport result = handler.resolveTaxReport("org-abc", "AEAT303_Q_2025");
+      assertSame("Expected the system-level TaxReport to be returned", report, result);
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolveTaxReport_orgSpecificRecordFound() throws Exception {
+    TaxReport report = mock(TaxReport.class);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBCriteria<TaxReport> crit = mock(OBCriteria.class);
+      when(obDal.createCriteria(TaxReport.class)).thenReturn(crit);
+      when(crit.add(any(Criterion.class))).thenReturn(crit);
+      when(crit.setMaxResults(1)).thenReturn(crit);
+      // The criteria returns a TaxReport registered directly under the calling org.
+      when(crit.list()).thenReturn(Collections.singletonList(report));
+
+      TaxReport result = handler.resolveTaxReport("org-xyz", "AEAT303_M_2025");
+      assertSame("Expected the org-specific TaxReport to be returned", report, result);
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolveTaxReport_notFoundThrowsOBException() throws Exception {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBCriteria<TaxReport> crit = mock(OBCriteria.class);
+      when(obDal.createCriteria(TaxReport.class)).thenReturn(crit);
+      when(crit.add(any(Criterion.class))).thenReturn(crit);
+      when(crit.setMaxResults(1)).thenReturn(crit);
+      when(crit.list()).thenReturn(Collections.emptyList());
+
+      try {
+        handler.resolveTaxReport("org-nf", "AEAT303_Q_2024");
+        fail("Expected OBException when no TaxReport is found");
+      } catch (OBException e) {
+        assertTrue("Message must contain orgId", e.getMessage().contains("org-nf"));
+        assertTrue("Message must contain searchKey", e.getMessage().contains("AEAT303_Q_2024"));
+      }
+    }
   }
 
   private static void assertBd(String expected, BigDecimal actual) {

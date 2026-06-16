@@ -33,6 +33,16 @@ import org.junit.jupiter.api.Test;
  */
 class McpToolDefinitionTest {
 
+  @Test
+  @DisplayName("Constructor arguments are exposed through getters")
+  void exposesConstructorArguments() {
+    McpToolDefinition def = new McpToolDefinition("neo_get", "Get one record", null);
+    assertEquals("neo_get", def.getName());
+    assertEquals("Get one record", def.getDescription());
+    assertNotNull(def.getInputSchema());
+  }
+
+
   @Nested
   @DisplayName("Constructor and getters")
   class ConstructorAndGetters {
