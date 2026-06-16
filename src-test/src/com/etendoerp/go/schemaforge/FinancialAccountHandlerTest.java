@@ -18,55 +18,67 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.List;
 
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
+import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
 /**
- * Mockito-driven unit tests for {@link FinancialAccountHandler} (ETP-4096).
+ * Mockito-driven unit tests for {@link FinancialAccountHandler} (ETP-4239).
  *
- * <p>Strategy: spy the handler and stub the package-private DAL seams
+ * <p>The handler is a W-spec pre/post hook: on POST/PUT/PATCH it validates and
+ * <b>mutates the request body</b> (normalized {@code type}, {@code country}
+ * derived from the IBAN, default {@code matchingAlgorithm}) and returns
+ * {@code null} so the generic CRUD persists; on DELETE it short-circuits with a
+ * soft-archive. Strategy: spy the handler and stub the package-private DAL seams
  * ({@code loadCurrency}, {@code loadAccount}, {@code nameExists},
- * {@code hasOpenReconciliations}, {@code persist}, {@code resolveDefaultCurrency},
- * {@code listCurrencies}) so every {@code create} / {@code update} /
- * {@code archive} / {@code buildDefaults} path runs without a database or a live
- * OBContext. The {@code handle()} routing path is exercised through a mocked
- * {@link NeoContext} that only overrides the HTTP method + query params, with the
- * business methods stubbed so no static OBContext machinery is required.
+ * {@code hasOpenReconciliations}, {@code resolveCountryFromIban},
+ * {@code listMatchingAlgorithms}) so every path runs without a database or a
+ * live OBContext. The {@code handle()} routing path is exercised through a
+ * mocked {@link NeoContext}.
  *
  * <p>Scenarios:
  * <ul>
- *   <li>Wrong HTTP method → 405.</li>
- *   <li>create happy → 201 with id/name; blank name / blank currency / name too
- *       long → 400; duplicate name → 409; invalid currency → 400.</li>
- *   <li>update happy → 200; preserves swiftCode when the key is omitted;
- *       duplicate name → 409; missing account → 400.</li>
- *   <li>archive happy → 204; open reconciliations → 409; missing id → 400.</li>
- *   <li>defaults envelope shape (default currency + currencies array).</li>
+ *   <li>Routing: foreign spec / GET → null passthrough; POST/PUT/DELETE dispatch.</li>
+ *   <li>create: happy → null + body enriched (type, country-from-IBAN,
+ *       matchingAlgorithm); blank/too-long name, blank/invalid currency,
+ *       too-long IBAN/BIC → 400; duplicate name → 409.</li>
+ *   <li>update: name uniqueness (excluding self) → 409; IBAN→country sync;
+ *       missing-name body passes through.</li>
+ *   <li>delete: soft-archive → 204 + setActive(false); open reconciliations →
+ *       409; missing id / unknown account → 400.</li>
  * </ul>
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
@@ -75,6 +87,7 @@ public class FinancialAccountHandlerTest {
   private static final String SPEC = "financial-account";
   private static final String EUR_ID = "102";
   private static final String ACC_ID = "acc-1";
+  private static final String ES_IBAN = "ES9121000418450200051332";
 
   private FinancialAccountHandler handler;
 
@@ -85,493 +98,342 @@ public class FinancialAccountHandlerTest {
   @Before
   public void setUp() {
     handler = spy(new FinancialAccountHandler());
-    // Stub the OBContext/OBDal seams so routing tests run without a live
-    // Etendo session (CI has no initialized OBContext on the thread).
+    // Stub the OBContext/OBDal seams so tests run without a live Etendo
+    // session (CI has no initialized OBContext on the thread).
     org.mockito.Mockito.doNothing().when(handler).enterAdminMode();
     org.mockito.Mockito.doNothing().when(handler).exitAdminMode();
     org.mockito.Mockito.doNothing().when(handler).doRollbackAndClose();
   }
 
+  /**
+   * Clears Mockito's inline mock cache after each test. The seam tests below use
+   * {@code MockedStatic}, whose inline mocks otherwise accumulate across the
+   * whole module suite (a single test JVM) and push the fork past its heap
+   * limit. Clearing keeps the heap flat without touching the build config.
+   */
+  @After
+  public void clearMocks() {
+    Mockito.framework().clearInlineMocks();
+  }
+
+  private NeoContext contextFor(String method, JSONObject body, String recordId) {
+    NeoContext context = mock(NeoContext.class);
+    when(context.getSpecName()).thenReturn(SPEC);
+    when(context.getHttpMethod()).thenReturn(method);
+    when(context.getRequestBody()).thenReturn(body);
+    when(context.getRecordId()).thenReturn(recordId);
+    return context;
+  }
+
+  private JSONObject validCreateBody() throws Exception {
+    return new JSONObject().put("name", "BBVA").put("currency", EUR_ID);
+  }
+
+  private void stubValidCreate() {
+    doReturn(mock(Currency.class)).when(handler).loadCurrency(EUR_ID);
+    doReturn(false).when(handler).nameExists("BBVA", null);
+    doReturn(Collections.emptyList()).when(handler).listMatchingAlgorithms();
+  }
+
   // ── handle() routing ─────────────────────────────────────────────────────
 
-  /**
-   * A method that is neither GET (defaults) nor POST (create/update/archive)
-   * must be rejected with a 405 and none of the business methods invoked.
-   */
+  /** A context for another spec must pass through untouched (null). */
   @Test
-  public void testHandleRejectsUnsupportedMethodWith405() throws Exception {
-    NeoContext ctx = ctx("DELETE", null, null, null);
+  public void testHandleForeignSpecReturnsNull() {
+    NeoContext context = mock(NeoContext.class);
+    when(context.getSpecName()).thenReturn("sales-order");
 
-    NeoResponse response = handler.handle(ctx);
-
-    assertNotNull(response);
-    assertEquals(405, response.getHttpStatus());
-    verify(handler, never()).create(any());
-    verify(handler, never()).update(any(), any());
-    verify(handler, never()).archive(any());
-    verify(handler, never()).buildDefaults();
+    assertNull(handler.handle(context));
+    verify(handler, never()).enterAdminMode();
   }
 
-  /**
-   * A plain POST with no {@code action} routes to {@code create} and returns
-   * whatever that produces, untouched.
-   */
+  /** GET (list / getById) flows straight through to the generic service. */
   @Test
-  public void testHandlePostRoutesToCreate() throws Exception {
-    JSONObject body = new JSONObject().put("name", "BBVA").put("currencyId", EUR_ID);
-    NeoContext ctx = ctx("POST", null, null, body);
-    NeoResponse expected = NeoResponse.ok(new JSONObject());
-    doReturn(expected).when(handler).create(body);
-
-    assertSame(expected, handler.handle(ctx));
-    verify(handler).create(body);
+  public void testHandleGetReturnsNull() {
+    assertNull(handler.handle(contextFor("GET", null, null)));
   }
 
-  /**
-   * {@code POST ?action=update&id=...} routes to {@code update} with the id from
-   * the query string and the request body.
-   */
+  /** POST routes to the create validation/enrichment path. */
   @Test
-  public void testHandlePostUpdateRoutesToUpdate() throws Exception {
+  public void testHandlePostRoutesToCreateValidation() throws Exception {
+    JSONObject body = validCreateBody();
+    stubValidCreate();
+
+    assertNull(handler.handle(contextFor("POST", body, null)));
+    verify(handler).validateAndEnrichCreate(body);
+  }
+
+  /** PUT routes to the update validation path with the record id. */
+  @Test
+  public void testHandlePutRoutesToUpdateValidation() throws Exception {
     JSONObject body = new JSONObject().put("name", "BBVA");
-    NeoContext ctx = ctx("POST", "update", ACC_ID, body);
-    NeoResponse expected = NeoResponse.ok(new JSONObject());
-    doReturn(expected).when(handler).update(ACC_ID, body);
+    doReturn(false).when(handler).nameExists("BBVA", ACC_ID);
 
-    assertSame(expected, handler.handle(ctx));
-    verify(handler).update(ACC_ID, body);
+    assertNull(handler.handle(contextFor("PUT", body, ACC_ID)));
+    verify(handler).validateAndEnrichUpdate(ACC_ID, body);
   }
 
-  /**
-   * {@code POST ?action=archive&id=...} routes to {@code archive} with the id.
-   */
+  /** DELETE routes to the soft-archive and short-circuits. */
   @Test
-  public void testHandlePostArchiveRoutesToArchive() throws Exception {
-    NeoContext ctx = ctx("POST", "archive", ACC_ID, null);
-    NeoResponse expected = NeoResponse.noContent();
-    doReturn(expected).when(handler).archive(ACC_ID);
+  public void testHandleDeleteRoutesToArchive() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(true).when(handler).hasOpenReconciliations(account);
 
-    assertSame(expected, handler.handle(ctx));
+    NeoResponse response = handler.handle(contextFor("DELETE", null, ACC_ID));
+
+    assertEquals(409, response.getHttpStatus());
     verify(handler).archive(ACC_ID);
   }
 
-  /**
-   * {@code GET ?action=defaults} routes to {@code buildDefaults}.
-   */
+  /** An unexpected runtime failure is translated to a 500 with rollback. */
   @Test
-  public void testHandleGetDefaultsRoutesToBuildDefaults() throws Exception {
-    NeoContext ctx = ctx("GET", "defaults", null, null);
-    NeoResponse expected = NeoResponse.ok(new JSONObject());
-    doReturn(expected).when(handler).buildDefaults();
+  public void testHandleTranslatesRuntimeExceptionTo500() throws Exception {
+    JSONObject body = validCreateBody();
+    doReturn(mock(Currency.class)).when(handler).loadCurrency(EUR_ID);
+    // doThrow(...).when(spy) — NOT when(spy.method()).thenThrow — so the real nameExists
+    // (which hits OBDal/OBContext) is never invoked during stubbing.
+    doThrow(new RuntimeException("boom")).when(handler).nameExists("BBVA", null);
 
-    assertSame(expected, handler.handle(ctx));
-    verify(handler).buildDefaults();
+    NeoResponse response = handler.handle(contextFor("POST", body, null));
+
+    assertEquals(500, response.getHttpStatus());
+    verify(handler).doRollbackAndClose();
   }
 
-  /**
-   * The handler only claims its own spec — any other spec name falls through to
-   * {@code null} so the dispatcher keeps probing other handlers.
-   */
-  @Test
-  public void testHandleForeignSpecReturnsNull() {
-    NeoContext ctx = mock(NeoContext.class);
-    when(ctx.getSpecName()).thenReturn("sales-order");
+  // ── create: validation ───────────────────────────────────────────────────
 
-    assertEquals(null, handler.handle(ctx));
-  }
-
-  /**
-   * A business {@link org.openbravo.base.exception.OBException} thrown by a
-   * delegate must be translated into a 400 rather than propagating.
-   */
-  @Test
-  public void testHandleTranslatesObExceptionTo400() throws Exception {
-    JSONObject body = new JSONObject().put("name", "BBVA");
-    NeoContext ctx = ctx("POST", null, null, body);
-    doThrowOb(body);
-
-    NeoResponse response = handler.handle(ctx);
-
-    assertEquals(400, response.getHttpStatus());
-  }
-
-  private void doThrowOb(JSONObject body) throws Exception {
-    org.mockito.Mockito.doThrow(new org.openbravo.base.exception.OBException("boom"))
-        .when(handler).create(body);
-  }
-
-  // ── create() ─────────────────────────────────────────────────────────────
-
-  /**
-   * Full create happy path: a valid currency, a unique name and an in-memory
-   * persisted account produce a 201 carrying the new id + name.
-   */
-  @Test
-  public void testCreateHappyReturns201WithIdAndName() throws Exception {
-    JSONObject body = new JSONObject()
-        .put("name", "BBVA")
-        .put("currencyId", EUR_ID)
-        .put("iban", "ES9121000418450200051332")
-        .put("swiftCode", "BBVAESMM");
-
-    Currency currency = mock(Currency.class);
-    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-    when(account.getId()).thenReturn("new-acc");
-    when(account.getName()).thenReturn("BBVA");
-    doReturn(currency).when(handler).loadCurrency(EUR_ID);
-    doReturn(false).when(handler).nameExists(eq("BBVA"), isNull());
-    doReturn(Collections.emptyList()).when(handler).listMatchingAlgorithms();
-    doReturn(account).when(handler).persist(eq("BBVA"), eq("B"), eq(currency),
-        eq("ES9121000418450200051332"), eq("BBVAESMM"), isNull());
-
-    NeoResponse response = handler.create(body);
-
-    assertEquals(201, response.getHttpStatus());
-    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
-    assertEquals("new-acc", data.getString("id"));
-    assertEquals("BBVA", data.getString("name"));
-  }
-
-  /**
-   * Cash accounts default to type {@code B} only for the bank flow; an explicit
-   * {@code type=C} must be normalised and forwarded to persist as {@code C}.
-   */
-  @Test
-  public void testCreateCashAccountPersistsTypeC() throws Exception {
-    JSONObject body = new JSONObject()
-        .put("name", "Caja Central")
-        .put("currencyId", EUR_ID)
-        .put("type", "C");
-
-    Currency currency = mock(Currency.class);
-    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-    when(account.getId()).thenReturn("cash-1");
-    when(account.getName()).thenReturn("Caja Central");
-    doReturn(currency).when(handler).loadCurrency(EUR_ID);
-    doReturn(false).when(handler).nameExists(eq("Caja Central"), isNull());
-    doReturn(Collections.emptyList()).when(handler).listMatchingAlgorithms();
-    doReturn(account).when(handler).persist(eq("Caja Central"), eq("C"), eq(currency),
-        eq(""), eq(""), isNull());
-
-    NeoResponse response = handler.create(body);
-
-    assertEquals(201, response.getHttpStatus());
-    verify(handler).persist(eq("Caja Central"), eq("C"), eq(currency), eq(""), eq(""), isNull());
-  }
-
-  /**
-   * A {@code null} body is rejected at the boundary with a 400.
-   */
+  /** A missing body is rejected with a 400. */
   @Test
   public void testCreateNullBodyReturns400() throws Exception {
-    NeoResponse response = handler.create(null);
+    NeoResponse response = handler.validateAndEnrichCreate(null);
     assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).persist(any(), any(), any(), any(), any(), any());
   }
 
-  /**
-   * A blank (whitespace-only) name is rejected with a 400 — the trim collapses
-   * it to empty.
-   */
+  /** A blank name is rejected with a 400. */
   @Test
   public void testCreateBlankNameReturns400() throws Exception {
-    JSONObject body = new JSONObject().put("name", "   ").put("currencyId", EUR_ID);
-    NeoResponse response = handler.create(body);
-    assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).persist(any(), any(), any(), any(), any(), any());
+    JSONObject body = new JSONObject().put("name", "  ").put("currency", EUR_ID);
+    assertEquals(400, handler.validateAndEnrichCreate(body).getHttpStatus());
   }
 
-  /**
-   * A blank currency id is rejected with a 400 before any currency lookup.
-   */
-  @Test
-  public void testCreateBlankCurrencyReturns400() throws Exception {
-    JSONObject body = new JSONObject().put("name", "BBVA").put("currencyId", "");
-    NeoResponse response = handler.create(body);
-    assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).loadCurrency(any());
-  }
-
-  /**
-   * {@code FIN_Financial_Account.Name} caps at 60 chars; longer names fail fast
-   * with a 400.
-   */
+  /** A name longer than 60 chars is rejected with a 400. */
   @Test
   public void testCreateNameTooLongReturns400() throws Exception {
-    JSONObject body = new JSONObject()
-        .put("name", repeat("A", 61))
-        .put("currencyId", EUR_ID);
-    NeoResponse response = handler.create(body);
-    assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).persist(any(), any(), any(), any(), any(), any());
+    String longName = new String(new char[61]).replace('\0', 'x');
+    JSONObject body = new JSONObject().put("name", longName).put("currency", EUR_ID);
+    assertEquals(400, handler.validateAndEnrichCreate(body).getHttpStatus());
   }
 
-  /**
-   * An IBAN longer than 34 chars is rejected with a 400.
-   */
+  /** A missing currency is rejected with a 400. */
   @Test
-  public void testCreateIbanTooLongReturns400() throws Exception {
-    JSONObject body = new JSONObject()
-        .put("name", "BBVA")
-        .put("currencyId", EUR_ID)
-        .put("iban", repeat("E", 35));
-    NeoResponse response = handler.create(body);
-    assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).persist(any(), any(), any(), any(), any(), any());
+  public void testCreateBlankCurrencyReturns400() throws Exception {
+    JSONObject body = new JSONObject().put("name", "BBVA");
+    assertEquals(400, handler.validateAndEnrichCreate(body).getHttpStatus());
   }
 
-  /**
-   * A SWIFT/BIC longer than 20 chars is rejected with a 400.
-   */
-  @Test
-  public void testCreateSwiftTooLongReturns400() throws Exception {
-    JSONObject body = new JSONObject()
-        .put("name", "BBVA")
-        .put("currencyId", EUR_ID)
-        .put("swiftCode", repeat("S", 21));
-    NeoResponse response = handler.create(body);
-    assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).persist(any(), any(), any(), any(), any(), any());
-  }
-
-  /**
-   * When the supplied currency id resolves to {@code null}, the create is
-   * rejected with a 400 (invalid currency) before any name-uniqueness check.
-   */
+  /** A currency id that resolves to no Currency is rejected with a 400. */
   @Test
   public void testCreateInvalidCurrencyReturns400() throws Exception {
-    JSONObject body = new JSONObject().put("name", "BBVA").put("currencyId", "bad");
+    JSONObject body = new JSONObject().put("name", "BBVA").put("currency", "bad");
     doReturn(null).when(handler).loadCurrency("bad");
-
-    NeoResponse response = handler.create(body);
-
-    assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).nameExists(any(), any());
-    verify(handler, never()).persist(any(), any(), any(), any(), any(), any());
+    assertEquals(400, handler.validateAndEnrichCreate(body).getHttpStatus());
   }
 
-  /**
-   * A name already in use (for a new account, so {@code excludeId == null})
-   * returns a 409 conflict and never persists.
-   */
+  /** An IBAN longer than 34 chars is rejected with a 400. */
+  @Test
+  public void testCreateIbanTooLongReturns400() throws Exception {
+    String longIban = new String(new char[35]).replace('\0', '9');
+    JSONObject body = validCreateBody().put("iBAN", longIban);
+    assertEquals(400, handler.validateAndEnrichCreate(body).getHttpStatus());
+  }
+
+  /** A BIC/SWIFT longer than 20 chars is rejected with a 400. */
+  @Test
+  public void testCreateSwiftTooLongReturns400() throws Exception {
+    String longSwift = new String(new char[21]).replace('\0', 'B');
+    JSONObject body = validCreateBody().put("swiftCode", longSwift);
+    assertEquals(400, handler.validateAndEnrichCreate(body).getHttpStatus());
+  }
+
+  /** A duplicate active name within the organization is rejected with a 409. */
   @Test
   public void testCreateDuplicateNameReturns409() throws Exception {
-    JSONObject body = new JSONObject().put("name", "BBVA").put("currencyId", EUR_ID);
-    Currency currency = mock(Currency.class);
-    doReturn(currency).when(handler).loadCurrency(EUR_ID);
-    doReturn(true).when(handler).nameExists(eq("BBVA"), isNull());
-
-    NeoResponse response = handler.create(body);
-
-    assertEquals(409, response.getHttpStatus());
-    verify(handler, never()).persist(any(), any(), any(), any(), any(), any());
+    JSONObject body = validCreateBody();
+    doReturn(mock(Currency.class)).when(handler).loadCurrency(EUR_ID);
+    doReturn(true).when(handler).nameExists("BBVA", null);
+    assertEquals(409, handler.validateAndEnrichCreate(body).getHttpStatus());
   }
 
-  // ── update() ─────────────────────────────────────────────────────────────
+  // ── create: enrichment (the hook mutates the body, persist is generic) ────
 
-  /**
-   * Update happy path: a found account, a unique new name and an unchanged
-   * currency produce a 200 with the {@code response.data} envelope carrying the
-   * updated id + name.
-   */
+  /** A valid create returns null (pass through) and normalizes the type. */
   @Test
-  public void testUpdateHappyReturns200WithEnvelope() throws Exception {
-    JSONObject body = new JSONObject().put("name", "BBVA Renamed");
-    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-    when(account.getId()).thenReturn(ACC_ID);
-    when(account.getName()).thenReturn("BBVA Renamed");
-    doReturn(account).when(handler).loadAccount(ACC_ID);
-    doReturn(false).when(handler).nameExists("BBVA Renamed", ACC_ID);
+  public void testCreateHappyReturnsNullAndDefaultsTypeToBank() throws Exception {
+    JSONObject body = validCreateBody();
+    stubValidCreate();
 
-    try (org.mockito.MockedStatic<org.openbravo.dal.service.OBDal> obDalMock =
-        org.mockito.Mockito.mockStatic(org.openbravo.dal.service.OBDal.class)) {
-      org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
-      obDalMock.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
+    assertNull(handler.validateAndEnrichCreate(body));
+    assertEquals("B", body.getString("type"));
+  }
 
-      NeoResponse response = handler.update(ACC_ID, body);
+  /** A cash account keeps its explicit type after normalization. */
+  @Test
+  public void testCreateCashAccountKeepsTypeC() throws Exception {
+    JSONObject body = validCreateBody().put("type", "C");
+    stubValidCreate();
 
-      assertEquals(200, response.getHttpStatus());
-      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
-      assertEquals(ACC_ID, data.getString("id"));
-      assertEquals("BBVA Renamed", data.getString("name"));
-      verify(account).setName("BBVA Renamed");
-      verify(dal).save(account);
-      verify(dal).flush();
-    }
+    assertNull(handler.validateAndEnrichCreate(body));
+    assertEquals("C", body.getString("type"));
+  }
+
+  /** An unknown type code falls back to Bank. */
+  @Test
+  public void testCreateUnknownTypeFallsBackToBank() throws Exception {
+    JSONObject body = validCreateBody().put("type", "ZZ");
+    stubValidCreate();
+
+    assertNull(handler.validateAndEnrichCreate(body));
+    assertEquals("B", body.getString("type"));
   }
 
   /**
-   * When the body omits the {@code swiftCode} (and {@code iban}) keys — as the
-   * Edit modal does — the handler must NOT call {@code setSwiftCode} /
-   * {@code setIBAN}, so the stored values are preserved.
+   * When the body carries an IBAN, the country derived from its ISO prefix is
+   * injected into the body BEFORE the generic insert — the row-level trigger
+   * FIN_FINANCIAL_ACCOUNT_TRG2 rejects a bank account with an IBAN but no country.
    */
   @Test
-  public void testUpdatePreservesSwiftCodeWhenKeyOmitted() throws Exception {
-    JSONObject body = new JSONObject().put("name", "BBVA");
-    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-    when(account.getId()).thenReturn(ACC_ID);
-    when(account.getName()).thenReturn("BBVA");
-    doReturn(account).when(handler).loadAccount(ACC_ID);
-    doReturn(false).when(handler).nameExists("BBVA", ACC_ID);
-
-    try (org.mockito.MockedStatic<org.openbravo.dal.service.OBDal> obDalMock =
-        org.mockito.Mockito.mockStatic(org.openbravo.dal.service.OBDal.class)) {
-      org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
-      obDalMock.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
-
-      NeoResponse response = handler.update(ACC_ID, body);
-
-      assertEquals(200, response.getHttpStatus());
-      verify(account, never()).setSwiftCode(any());
-      verify(account, never()).setIBAN(any());
-    }
-  }
-
-  /**
-   * When the body explicitly carries an {@code iban} key, the IBAN is updated
-   * (trimmed-to-null) so the edit modal can clear or replace it.
-   */
-  @Test
-  public void testUpdateSetsIbanWhenKeyPresent() throws Exception {
-    JSONObject body = new JSONObject()
-        .put("name", "BBVA")
-        .put("iban", "ES9121000418450200051332");
-    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+  public void testCreateWithIbanInjectsCountry() throws Exception {
+    JSONObject body = validCreateBody().put("iBAN", ES_IBAN);
+    stubValidCreate();
     Country spain = mock(Country.class);
-    when(account.getId()).thenReturn(ACC_ID);
-    when(account.getName()).thenReturn("BBVA");
-    doReturn(account).when(handler).loadAccount(ACC_ID);
-    doReturn(false).when(handler).nameExists("BBVA", ACC_ID);
-    doReturn(spain).when(handler).resolveCountryFromIban("ES9121000418450200051332");
+    when(spain.getId()).thenReturn("106");
+    doReturn(spain).when(handler).resolveCountryFromIban(ES_IBAN);
 
-    try (org.mockito.MockedStatic<org.openbravo.dal.service.OBDal> obDalMock =
-        org.mockito.Mockito.mockStatic(org.openbravo.dal.service.OBDal.class)) {
-      org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
-      obDalMock.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
-
-      handler.update(ACC_ID, body);
-
-      verify(account).setIBAN("ES9121000418450200051332");
-      verify(account).setCountry(spain);
-    }
+    assertNull(handler.validateAndEnrichCreate(body));
+    assertEquals("106", body.getString("country"));
   }
 
-  /**
-   * Updating the currency only happens when a non-blank currency id is sent; a
-   * valid one resolves and is applied to the account.
-   */
+  /** An IBAN whose prefix matches no active country injects nothing. */
   @Test
-  public void testUpdateSetsCurrencyWhenProvided() throws Exception {
-    JSONObject body = new JSONObject().put("name", "BBVA").put("currencyId", EUR_ID);
-    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-    Currency currency = mock(Currency.class);
-    when(account.getId()).thenReturn(ACC_ID);
-    when(account.getName()).thenReturn("BBVA");
-    doReturn(account).when(handler).loadAccount(ACC_ID);
-    doReturn(false).when(handler).nameExists("BBVA", ACC_ID);
-    doReturn(currency).when(handler).loadCurrency(EUR_ID);
+  public void testCreateWithUnknownIbanPrefixInjectsNoCountry() throws Exception {
+    JSONObject body = validCreateBody().put("iBAN", "XX0012345678");
+    stubValidCreate();
+    doReturn(null).when(handler).resolveCountryFromIban("XX0012345678");
 
-    try (org.mockito.MockedStatic<org.openbravo.dal.service.OBDal> obDalMock =
-        org.mockito.Mockito.mockStatic(org.openbravo.dal.service.OBDal.class)) {
-      org.openbravo.dal.service.OBDal dal = mock(org.openbravo.dal.service.OBDal.class);
-      obDalMock.when(org.openbravo.dal.service.OBDal::getInstance).thenReturn(dal);
-
-      handler.update(ACC_ID, body);
-
-      verify(account).setCurrency(currency);
-    }
+    assertNull(handler.validateAndEnrichCreate(body));
+    assertFalse(body.has("country"));
   }
 
-  /**
-   * A non-blank but invalid currency id on update is rejected with a 400.
-   */
+  /** When no algorithm is provided, the first active one is injected. */
   @Test
-  public void testUpdateInvalidCurrencyReturns400() throws Exception {
-    JSONObject body = new JSONObject().put("name", "BBVA").put("currencyId", "bad");
-    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-    when(account.getId()).thenReturn(ACC_ID);
-    doReturn(account).when(handler).loadAccount(ACC_ID);
-    doReturn(false).when(handler).nameExists("BBVA", ACC_ID);
-    doReturn(null).when(handler).loadCurrency("bad");
+  public void testCreateInjectsDefaultMatchingAlgorithm() throws Exception {
+    JSONObject body = validCreateBody();
+    doReturn(mock(Currency.class)).when(handler).loadCurrency(EUR_ID);
+    doReturn(false).when(handler).nameExists("BBVA", null);
+    MatchingAlgorithm algorithm = mock(MatchingAlgorithm.class);
+    when(algorithm.getId()).thenReturn("alg-1");
+    doReturn(Arrays.asList(algorithm)).when(handler).listMatchingAlgorithms();
 
-    NeoResponse response = handler.update(ACC_ID, body);
-
-    assertEquals(400, response.getHttpStatus());
+    assertNull(handler.validateAndEnrichCreate(body));
+    assertEquals("alg-1", body.getString("matchingAlgorithm"));
   }
 
-  /**
-   * A missing/blank id is rejected with a 400 before any account lookup.
-   */
+  /** A caller-provided algorithm is never overridden by the default. */
   @Test
-  public void testUpdateMissingIdReturns400() throws Exception {
-    NeoResponse response = handler.update("  ", new JSONObject().put("name", "BBVA"));
-    assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).loadAccount(any());
+  public void testCreateKeepsCallerMatchingAlgorithm() throws Exception {
+    JSONObject body = validCreateBody().put("matchingAlgorithm", "alg-mine");
+    doReturn(mock(Currency.class)).when(handler).loadCurrency(EUR_ID);
+    doReturn(false).when(handler).nameExists("BBVA", null);
+
+    assertNull(handler.validateAndEnrichCreate(body));
+    assertEquals("alg-mine", body.getString("matchingAlgorithm"));
+    verify(handler, never()).listMatchingAlgorithms();
   }
 
-  /**
-   * A {@code null} body is rejected with a 400.
-   */
+  // ── update: validation + IBAN→country sync ───────────────────────────────
+
+  /** A null body passes through (nothing to validate or enrich). */
   @Test
-  public void testUpdateNullBodyReturns400() throws Exception {
-    NeoResponse response = handler.update(ACC_ID, null);
-    assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).loadAccount(any());
+  public void testUpdateNullBodyReturnsNull() throws Exception {
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, null));
   }
 
-  /**
-   * An id that resolves to no account is rejected with a 400 (account not
-   * found).
-   */
+  /** A body without a name key skips the name validation entirely. */
   @Test
-  public void testUpdateMissingAccountReturns400() throws Exception {
-    JSONObject body = new JSONObject().put("name", "BBVA");
-    doReturn(null).when(handler).loadAccount(ACC_ID);
+  public void testUpdateWithoutNameKeySkipsNameChecks() throws Exception {
+    JSONObject body = new JSONObject().put("swiftCode", "BBVAESMM");
 
-    NeoResponse response = handler.update(ACC_ID, body);
-
-    assertEquals(400, response.getHttpStatus());
-  }
-
-  /**
-   * A blank name on update is rejected with a 400.
-   */
-  @Test
-  public void testUpdateBlankNameReturns400() throws Exception {
-    JSONObject body = new JSONObject().put("name", "   ");
-    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-    doReturn(account).when(handler).loadAccount(ACC_ID);
-
-    NeoResponse response = handler.update(ACC_ID, body);
-
-    assertEquals(400, response.getHttpStatus());
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
     verify(handler, never()).nameExists(any(), any());
   }
 
-  /**
-   * A name colliding with a DIFFERENT account (excluding self) returns 409.
-   */
+  /** A blank name on update is rejected with a 400. */
+  @Test
+  public void testUpdateBlankNameReturns400() throws Exception {
+    JSONObject body = new JSONObject().put("name", "  ");
+    assertEquals(400, handler.validateAndEnrichUpdate(ACC_ID, body).getHttpStatus());
+  }
+
+  /** A duplicate name (excluding the record itself) is rejected with a 409. */
   @Test
   public void testUpdateDuplicateNameReturns409() throws Exception {
     JSONObject body = new JSONObject().put("name", "Taken");
-    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-    when(account.getId()).thenReturn(ACC_ID);
-    doReturn(account).when(handler).loadAccount(ACC_ID);
     doReturn(true).when(handler).nameExists("Taken", ACC_ID);
-
-    NeoResponse response = handler.update(ACC_ID, body);
-
-    assertEquals(409, response.getHttpStatus());
+    assertEquals(409, handler.validateAndEnrichUpdate(ACC_ID, body).getHttpStatus());
   }
 
-  // ── archive() ────────────────────────────────────────────────────────────
-
-  /**
-   * Archive happy path: a found account with no open reconciliations is soft
-   * deleted ({@code setActive(false)}) and the handler returns 204 No Content.
-   */
+  /** An IBAN sent on update re-syncs the derived country into the body. */
   @Test
-  public void testArchiveHappyReturns204() throws Exception {
+  public void testUpdateWithIbanSyncsCountry() throws Exception {
+    JSONObject body = new JSONObject().put("iBAN", ES_IBAN);
+    Country spain = mock(Country.class);
+    when(spain.getId()).thenReturn("106");
+    doReturn(spain).when(handler).resolveCountryFromIban(ES_IBAN);
+
+    assertNull(handler.validateAndEnrichUpdate(ACC_ID, body));
+    assertEquals("106", body.getString("country"));
+  }
+
+  /** A too-long IBAN on update is rejected with a 400. */
+  @Test
+  public void testUpdateIbanTooLongReturns400() throws Exception {
+    String longIban = new String(new char[35]).replace('\0', '9');
+    JSONObject body = new JSONObject().put("iBAN", longIban);
+    assertEquals(400, handler.validateAndEnrichUpdate(ACC_ID, body).getHttpStatus());
+  }
+
+  // ── delete: soft-archive ─────────────────────────────────────────────────
+
+  /** A blank id is rejected with a 400 before any account lookup. */
+  @Test
+  public void testArchiveMissingIdReturns400() {
+    NeoResponse response = handler.archive("  ");
+    assertEquals(400, response.getHttpStatus());
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /** An id that resolves to no account is rejected with a 400. */
+  @Test
+  public void testArchiveMissingAccountReturns400() {
+    doReturn(null).when(handler).loadAccount(ACC_ID);
+    assertEquals(400, handler.archive(ACC_ID).getHttpStatus());
+  }
+
+  /** An account with open reconciliations cannot be archived → 409. */
+  @Test
+  public void testArchiveOpenReconciliationsReturns409() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(true).when(handler).hasOpenReconciliations(account);
+
+    assertEquals(409, handler.archive(ACC_ID).getHttpStatus());
+    verify(account, never()).setActive(false);
+  }
+
+  /** A clean archive soft-deletes (IsActive='N') and returns 204. */
+  @Test
+  public void testArchiveHappySoftDeletesAndReturns204() {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     doReturn(account).when(handler).loadAccount(ACC_ID);
     doReturn(false).when(handler).hasOpenReconciliations(account);
@@ -590,187 +452,261 @@ public class FinancialAccountHandlerTest {
     }
   }
 
-  /**
-   * A missing/blank id is rejected with a 400 before any account lookup.
-   */
-  @Test
-  public void testArchiveMissingIdReturns400() throws Exception {
-    NeoResponse response = handler.archive("   ");
-    assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).loadAccount(any());
-  }
+  // ── normalizeType ────────────────────────────────────────────────────────
 
-  /**
-   * An id that resolves to no account is rejected with a 400.
-   */
-  @Test
-  public void testArchiveMissingAccountReturns400() throws Exception {
-    doReturn(null).when(handler).loadAccount(ACC_ID);
-
-    NeoResponse response = handler.archive(ACC_ID);
-
-    assertEquals(400, response.getHttpStatus());
-    verify(handler, never()).hasOpenReconciliations(any());
-  }
-
-  /**
-   * Archiving an account that still has open reconciliations is forbidden and
-   * returns a 409 — the account stays active.
-   */
-  @Test
-  public void testArchiveOpenReconciliationsReturns409() throws Exception {
-    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-    doReturn(account).when(handler).loadAccount(ACC_ID);
-    doReturn(true).when(handler).hasOpenReconciliations(account);
-
-    NeoResponse response = handler.archive(ACC_ID);
-
-    assertEquals(409, response.getHttpStatus());
-    verify(account, never()).setActive(false);
-  }
-
-  // ── buildDefaults() ──────────────────────────────────────────────────────
-
-  /**
-   * The defaults endpoint surfaces the resolved session currency plus the full
-   * active-currency list, wrapped in the {@code response.data} envelope the New
-   * Account form consumes.
-   */
-  @Test
-  public void testBuildDefaultsShapeWithDefaultCurrencyAndList() throws Exception {
-    Currency eur = mock(Currency.class);
-    when(eur.getId()).thenReturn(EUR_ID);
-    when(eur.getISOCode()).thenReturn("EUR");
-    when(eur.getSymbol()).thenReturn("€");
-    Currency usd = mock(Currency.class);
-    when(usd.getId()).thenReturn("100");
-    when(usd.getISOCode()).thenReturn("USD");
-    when(usd.getSymbol()).thenReturn("$");
-
-    doReturn(eur).when(handler).resolveDefaultCurrency(any());
-    doReturn(Arrays.asList(eur, usd)).when(handler).listCurrencies();
-
-    try (org.mockito.MockedStatic<org.openbravo.dal.core.OBContext> obContextMock =
-        org.mockito.Mockito.mockStatic(org.openbravo.dal.core.OBContext.class)) {
-      org.openbravo.dal.core.OBContext obCtx = mock(org.openbravo.dal.core.OBContext.class);
-      org.openbravo.model.common.enterprise.Organization org =
-          mock(org.openbravo.model.common.enterprise.Organization.class);
-      when(org.getId()).thenReturn("org-1");
-      when(obCtx.getCurrentOrganization()).thenReturn(org);
-      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
-
-      NeoResponse response = handler.buildDefaults();
-
-      assertEquals(200, response.getHttpStatus());
-      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
-      assertEquals(EUR_ID, data.getString("defaultCurrencyId"));
-      assertEquals("EUR", data.getString("defaultCurrencyIso"));
-      assertEquals(2, data.getJSONArray("currencies").length());
-      JSONObject first = data.getJSONArray("currencies").getJSONObject(0);
-      assertEquals(EUR_ID, first.getString("id"));
-      assertEquals("EUR", first.getString("iso"));
-      assertEquals("€", first.getString("symbol"));
-    }
-  }
-
-  /**
-   * When the org has no resolvable default currency, the defaults payload omits
-   * the {@code defaultCurrencyId} keys but still emits the currency list.
-   */
-  @Test
-  public void testBuildDefaultsOmitsDefaultWhenNull() throws Exception {
-    doReturn(null).when(handler).resolveDefaultCurrency(any());
-    doReturn(Collections.<Currency>emptyList()).when(handler).listCurrencies();
-
-    try (org.mockito.MockedStatic<org.openbravo.dal.core.OBContext> obContextMock =
-        org.mockito.Mockito.mockStatic(org.openbravo.dal.core.OBContext.class)) {
-      org.openbravo.dal.core.OBContext obCtx = mock(org.openbravo.dal.core.OBContext.class);
-      org.openbravo.model.common.enterprise.Organization org =
-          mock(org.openbravo.model.common.enterprise.Organization.class);
-      when(org.getId()).thenReturn("org-1");
-      when(obCtx.getCurrentOrganization()).thenReturn(org);
-      obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
-
-      NeoResponse response = handler.buildDefaults();
-
-      assertEquals(200, response.getHttpStatus());
-      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
-      assertTrue("no default currency id when unresolved", !data.has("defaultCurrencyId"));
-      assertEquals(0, data.getJSONArray("currencies").length());
-    }
-  }
-
-  // ── normalizeType() ──────────────────────────────────────────────────────
-
-  /**
-   * {@code normalizeType} keeps {@code C} (Cash) and {@code CA} (Card, PSD2 module)
-   * as-is and coerces everything else (unknown, legacy {@code T}, the default) to {@code B} Bank.
-   */
+  /** Type normalization accepts the three valid codes and defaults to Bank. */
   @Test
   public void testNormalizeType() {
-    assertEquals("C", handler.normalizeType("C"));
     assertEquals("B", handler.normalizeType("B"));
+    assertEquals("C", handler.normalizeType("C"));
     assertEquals("CA", handler.normalizeType("CA"));
-    assertEquals("B", handler.normalizeType("T"));
-    assertEquals("B", handler.normalizeType("anything"));
     assertEquals("B", handler.normalizeType(""));
+    assertEquals("B", handler.normalizeType("junk"));
+    assertTrue(handler.normalizeType(null) != null);
   }
 
-  // ── afterHandle hooks ────────────────────────────────────────────────────
+  // ── seam real-body coverage ───────────────────────────────────────────────
+  //
+  // The tests above stub the DAL-bound seams on the spy, so those methods' real
+  // bodies never run. The tests below invoke the real bodies on a fresh, NON-spy
+  // handler, mocking the static OBDal/OBContext entry points so the DAL layer is
+  // never actually hit.
+
+  /** normalizeType keeps a cash code unchanged (real body, no spy). */
+  @Test
+  public void testNormalizeTypeRealBodyCash() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    assertEquals("C", h.normalizeType("C"));
+    assertEquals("CA", h.normalizeType("CA"));
+    assertEquals("B", h.normalizeType("B"));
+    assertEquals("B", h.normalizeType(null));
+  }
+
+  /** loadCurrency delegates to OBDal.get(Currency.class, id) and returns it. */
+  @Test
+  public void testLoadCurrencyReturnsDalResult() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    Currency currency = mock(Currency.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Currency.class, EUR_ID)).thenReturn(currency);
+
+      assertSame(currency, h.loadCurrency(EUR_ID));
+      verify(dal).get(Currency.class, EUR_ID);
+    }
+  }
+
+  /** loadAccount delegates to OBDal.get(FIN_FinancialAccount.class, id). */
+  @Test
+  public void testLoadAccountReturnsDalResult() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_FinancialAccount.class, ACC_ID)).thenReturn(account);
+
+      assertSame(account, h.loadAccount(ACC_ID));
+      verify(dal).get(FIN_FinancialAccount.class, ACC_ID);
+    }
+  }
+
+  /** A null IBAN resolves to no country without ever touching the DAL. */
+  @Test
+  public void testResolveCountryFromIbanNullReturnsNullWithoutDal() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      assertNull(h.resolveCountryFromIban(null));
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /** An IBAN shorter than two chars resolves to no country without the DAL. */
+  @Test
+  public void testResolveCountryFromIbanTooShortReturnsNullWithoutDal() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      assertNull(h.resolveCountryFromIban("E"));
+      obDal.verifyNoInteractions();
+    }
+  }
 
   /**
-   * The handler does not override the default {@link NeoHandler} post-hooks, so
-   * both return {@code null} and leave the upstream response untouched.
+   * A valid IBAN uppercases its ISO prefix, disables the readable client/org
+   * filters and returns the criteria's unique result.
    */
   @Test
-  public void testAfterHandleHooksReturnNullByDefault() {
-    NeoContext ctx = mock(NeoContext.class);
-    assertEquals(null, handler.afterHandle(ctx));
-    assertEquals(null, handler.afterCallout(ctx));
+  public void testResolveCountryFromIbanUppercasesPrefixAndReturnsMatch() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    Country spain = mock(Country.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Country> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Country.class)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(spain);
+
+      // Lower-case prefix must still match (the body uppercases to "ES").
+      assertSame(spain, h.resolveCountryFromIban("es9121000418450200051332"));
+
+      verify(criteria).setFilterOnReadableClients(false);
+      verify(criteria).setFilterOnReadableOrganization(false);
+      verify(criteria).setMaxResults(1);
+      verify(criteria).uniqueResult();
+    }
   }
 
-  // ── Fixtures ─────────────────────────────────────────────────────────────
+  /** nameExists with no excludeId adds three restrictions and returns false on an empty list. */
+  @Test
+  public void testNameExistsEmptyListReturnsFalse() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
 
-  /**
-   * Builds a {@link NeoContext} mock that overrides only the request shape
-   * fields the handler routes on: spec name, HTTP method, action + id query
-   * params and the request body.
-   *
-   * @param method the HTTP method
-   * @param action the {@code action} query parameter, or {@code null}
-   * @param id the {@code id} query parameter, or {@code null}
-   * @param body the request body, or {@code null}
-   * @return a stubbed NeoContext
-   */
-  private NeoContext ctx(String method, String action, String id, JSONObject body) {
-    NeoContext ctx = mock(NeoContext.class);
-    when(ctx.getSpecName()).thenReturn(SPEC);
-    when(ctx.getHttpMethod()).thenReturn(method);
-    Map<String, String> params = new HashMap<>();
-    if (action != null) {
-      params.put("action", action);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      OBContext ctx = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      when(ctx.getCurrentOrganization()).thenReturn(org);
+      obContext.when(OBContext::getOBContext).thenReturn(ctx);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_FinancialAccount> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_FinancialAccount.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.emptyList());
+
+      assertFalse(h.nameExists("BBVA", null));
+      // name + organization + active (no excludeId branch).
+      verify(criteria, times(3)).add(any());
+      verify(criteria).setMaxResults(1);
     }
-    if (id != null) {
-      params.put("id", id);
-    }
-    when(ctx.getQueryParams()).thenReturn(params);
-    when(ctx.getRequestBody()).thenReturn(body);
-    return ctx;
   }
 
   /**
-   * Repeats a string {@code count} times — local helper to avoid depending on
-   * the Java 11 {@code String.repeat} (kept for clarity of intent).
-   *
-   * @param token the token to repeat
-   * @param count how many times
-   * @return the repeated string
+   * nameExists with a non-blank excludeId adds the extra {@code ne id}
+   * restriction and returns true on a non-empty list.
    */
-  private static String repeat(String token, int count) {
-    StringBuilder sb = new StringBuilder(token.length() * count);
-    for (int i = 0; i < count; i++) {
-      sb.append(token);
+  @Test
+  public void testNameExistsWithExcludeIdAddsExtraRestrictionAndReturnsTrue() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      OBContext ctx = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      when(ctx.getCurrentOrganization()).thenReturn(org);
+      obContext.when(OBContext::getOBContext).thenReturn(ctx);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_FinancialAccount> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_FinancialAccount.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Arrays.asList(mock(FIN_FinancialAccount.class)));
+
+      assertTrue(h.nameExists("BBVA", ACC_ID));
+      // name + organization + active + ne id (excludeId branch).
+      verify(criteria, times(4)).add(any());
     }
-    return sb.toString();
+  }
+
+  /** hasOpenReconciliations returns false when the criteria yields no row. */
+  @Test
+  public void testHasOpenReconciliationsNullReturnsFalse() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_Reconciliation> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_Reconciliation.class)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+
+      assertFalse(h.hasOpenReconciliations(account));
+      verify(criteria).setMaxResults(1);
+    }
+  }
+
+  /** hasOpenReconciliations returns true when the criteria yields a row. */
+  @Test
+  public void testHasOpenReconciliationsNonNullReturnsTrue() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_Reconciliation> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_Reconciliation.class)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(mock(FIN_Reconciliation.class));
+
+      assertTrue(h.hasOpenReconciliations(account));
+    }
+  }
+
+  /** listMatchingAlgorithms returns the criteria list and orders by name ascending. */
+  @Test
+  public void testListMatchingAlgorithmsReturnsListAndOrders() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    List<MatchingAlgorithm> expected = Arrays.asList(mock(MatchingAlgorithm.class));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<MatchingAlgorithm> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(MatchingAlgorithm.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(expected);
+
+      assertSame(expected, h.listMatchingAlgorithms());
+      verify(criteria).addOrderBy(MatchingAlgorithm.PROPERTY_NAME, true);
+    }
+  }
+
+  /** doRollbackAndClose delegates to OBDal.getInstance().rollbackAndClose(). */
+  @Test
+  public void testDoRollbackAndCloseCallsDal() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      h.doRollbackAndClose();
+
+      verify(dal).rollbackAndClose();
+    }
+  }
+
+  /** enterAdminMode sets the admin mode flag on OBContext. */
+  @Test
+  public void testEnterAdminModeSetsAdminMode() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      h.enterAdminMode();
+      obContext.verify(() -> OBContext.setAdminMode(true));
+    }
+  }
+
+  /** exitAdminMode restores the previous OBContext mode. */
+  @Test
+  public void testExitAdminModeRestoresPreviousMode() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      h.exitAdminMode();
+      obContext.verify(OBContext::restorePreviousMode);
+    }
   }
 }
