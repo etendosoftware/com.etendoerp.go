@@ -179,7 +179,7 @@ class CalloutRequestBuilder {
    * Resolve the Etendo UI date pattern from {@code dateFormat.java} (e.g. "dd-MM-yyyy").
    * Falls back to dd-MM-yyyy, which matches the Postgres {@code dateFormat()} default.
    */
-  private static String getCalloutDatePattern() {
+  static String getCalloutDatePattern() {
     try {
       String p = OBPropertiesProvider.getInstance().getOpenbravoProperties()
           .getProperty("dateFormat.java");
