@@ -37,7 +37,7 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * This is used to build the SchemaForge specification for a given entity.
  *
  * Required params: EntityID, ColumnID, ModuleID
- * Optional params: IsIncluded, IsReadOnly, DefaultValue, JavaQualifier,
+ * Optional params: IsIncluded, IsReadOnly, DefaultValue, AgentPrompt, JavaQualifier,
  *                  FieldID (for update), SeqNo
  */
 public class SFUpsertField extends BaseWebhookService {
@@ -106,6 +106,10 @@ public class SFUpsertField extends BaseWebhookService {
       }
       if (parameter.containsKey("DefaultValue")) {
         field.setDefaultValue(parameter.get("DefaultValue"));
+      }
+      if (parameter.containsKey("AgentPrompt")) {
+        String agentPrompt = parameter.get("AgentPrompt");
+        field.setAgentPrompt(agentPrompt == null || agentPrompt.isEmpty() ? null : agentPrompt);
       }
       if (parameter.containsKey("JavaQualifier")) {
         field.setJavaQualifier(parameter.get("JavaQualifier"));

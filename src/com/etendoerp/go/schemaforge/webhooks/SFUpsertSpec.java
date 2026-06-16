@@ -43,7 +43,7 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * This represents the top-level API configuration for a Window or Process.
  * <p>
  * Required params: Name, ModuleID
- * Optional params: Description, SpecID (for update), SpecType (W or P, default W)
+ * Optional params: Description, AgentPrompt, SpecID (for update), SpecType (W or P, default W)
  * When SpecType=W (default): WindowID is required
  * When SpecType=P: ProcessID is required
  */
@@ -73,6 +73,7 @@ public class SFUpsertSpec extends BaseWebhookService {
       String processId = parameter.get("ProcessID");
       String moduleId = parameter.get("ModuleID");
       String description = parameter.get("Description");
+      String agentPrompt = parameter.get("AgentPrompt");
       String specType = getSpecType(parameter);
 
       if (!isValidSpecType(specType)) {
@@ -123,6 +124,10 @@ public class SFUpsertSpec extends BaseWebhookService {
 
       if (description != null && !description.isEmpty()) {
         spec.setDescription(description);
+      }
+
+      if (agentPrompt != null) {
+        spec.setAgentPrompt(agentPrompt.isEmpty() ? null : agentPrompt);
       }
 
       OBDal.getInstance().save(spec);
