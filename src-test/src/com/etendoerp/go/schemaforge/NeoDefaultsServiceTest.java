@@ -39,8 +39,10 @@ import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -2764,5 +2766,365 @@ public class NeoDefaultsServiceTest {
 
     assertNotNull(result);
     assertTrue("Result should be empty for a null field list", result.isEmpty());
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // buildSfFieldDefaultsMap — via reflection
+  //
+  // Verifies the CREATE path uses ETGO_SF_FIELD.defaultvalue overrides and that
+  // columns without an SFField entry fall back to the AD_Column default.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * When an SFField has a non-blank defaultValue, buildSfFieldDefaultsMap must include it
+   * keyed by the DB column name in upper-case.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBuildSfFieldDefaultsMapIncludesNonBlankDefaultValues() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+
+    SFField sfField = mock(SFField.class);
+    Column adColumn = mock(Column.class);
+    when(adColumn.getDBColumnName()).thenReturn("CalculateType");
+    when(sfField.getADColumn()).thenReturn(adColumn);
+    // ETGO_SF_FIELD override "TI" — the AD_Column default would be "PE"
+    when(sfField.getDefaultValue()).thenReturn("TI");
+
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(obDal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+
+    SFEntity sfEntity = mock(SFEntity.class);
+    when(sfEntity.getId()).thenReturn("entity-assets");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(mock(OBContext.class))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      Map<String, String> result = (Map<String, String>) invokePrivate(
+          "buildSfFieldDefaultsMap",
+          new Class<?>[]{ NeoContext.class }, ctx);
+
+      assertNotNull(result);
+      assertEquals("Should contain exactly one entry", 1, result.size());
+      // Key must be upper-cased DB column name; value must be the SFField override
+      assertEquals("TI", result.get("CALCULATETYPE"));
+    }
+  }
+
+  /**
+   * When an SFField has a blank or null defaultValue, buildSfFieldDefaultsMap must NOT include
+   * it — blank entries must be absent so resolveFieldDefault falls back to AD_Column default.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBuildSfFieldDefaultsMapExcludesBlankAndNullDefaultValues() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+
+    // SFField with null defaultValue
+    SFField sfFieldNull = mock(SFField.class);
+    Column colNull = mock(Column.class);
+    when(colNull.getDBColumnName()).thenReturn("Depreciate");
+    when(sfFieldNull.getADColumn()).thenReturn(colNull);
+    when(sfFieldNull.getDefaultValue()).thenReturn(null);
+
+    // SFField with blank defaultValue
+    SFField sfFieldBlank = mock(SFField.class);
+    Column colBlank = mock(Column.class);
+    when(colBlank.getDBColumnName()).thenReturn("DocStatus");
+    when(sfFieldBlank.getADColumn()).thenReturn(colBlank);
+    when(sfFieldBlank.getDefaultValue()).thenReturn("   ");
+
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Arrays.asList(sfFieldNull, sfFieldBlank));
+    when(obDal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+
+    SFEntity sfEntity = mock(SFEntity.class);
+    when(sfEntity.getId()).thenReturn("entity-1");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(mock(OBContext.class))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      Map<String, String> result = (Map<String, String>) invokePrivate(
+          "buildSfFieldDefaultsMap",
+          new Class<?>[]{ NeoContext.class }, ctx);
+
+      assertNotNull(result);
+      assertTrue("Blank/null SFField defaults must not be included", result.isEmpty());
+    }
+  }
+
+  /**
+   * When ctx or ctx.getSfEntity() is null, buildSfFieldDefaultsMap returns an empty map
+   * (no NPE) and the caller falls back entirely to AD_Column defaults.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBuildSfFieldDefaultsMapReturnsEmptyWhenCtxOrEntityIsNull() throws Exception {
+    // null ctx
+    Map<String, String> resultNullCtx = (Map<String, String>) invokePrivate(
+        "buildSfFieldDefaultsMap",
+        new Class<?>[]{ NeoContext.class }, new Object[]{ null });
+    assertNotNull(resultNullCtx);
+    assertTrue(resultNullCtx.isEmpty());
+
+    // ctx with null sfEntity
+    NeoContext ctxNullEntity = NeoContext.builder()
+        .sfEntity(null)
+        .obContext(mock(OBContext.class))
+        .build();
+    Map<String, String> resultNullEntity = (Map<String, String>) invokePrivate(
+        "buildSfFieldDefaultsMap",
+        new Class<?>[]{ NeoContext.class }, ctxNullEntity);
+    assertNotNull(resultNullEntity);
+    assertTrue(resultNullEntity.isEmpty());
+  }
+
+  /**
+   * When an SFField has a null AD_Column reference, buildSfFieldDefaultsMap skips that entry
+   * (null-safe) so it does not throw and the other valid entries are still included.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBuildSfFieldDefaultsMapSkipsNullAdColumn() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+
+    // SFField with null adColumn — must be skipped
+    SFField sfFieldNullCol = mock(SFField.class);
+    when(sfFieldNullCol.getADColumn()).thenReturn(null);
+    when(sfFieldNullCol.getDefaultValue()).thenReturn("TI");
+
+    // SFField with a valid adColumn — must be included
+    SFField sfFieldValid = mock(SFField.class);
+    Column validCol = mock(Column.class);
+    when(validCol.getDBColumnName()).thenReturn("CalculateType");
+    when(sfFieldValid.getADColumn()).thenReturn(validCol);
+    when(sfFieldValid.getDefaultValue()).thenReturn("TI");
+
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Arrays.asList(sfFieldNullCol, sfFieldValid));
+    when(obDal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+
+    SFEntity sfEntity = mock(SFEntity.class);
+    when(sfEntity.getId()).thenReturn("entity-1");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(mock(OBContext.class))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      Map<String, String> result = (Map<String, String>) invokePrivate(
+          "buildSfFieldDefaultsMap",
+          new Class<?>[]{ NeoContext.class }, ctx);
+
+      assertEquals("Only the valid SFField entry should be included", 1, result.size());
+      assertEquals("TI", result.get("CALCULATETYPE"));
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // injectMandatoryDefaults — ETGO_SF_FIELD default honoured on CREATE path
+  //
+  // These are the regression tests for the bug described in ETP-4230:
+  // the CREATE path must use ETGO_SF_FIELD.defaultvalue (not AD_Column default)
+  // for columns that have a per-window override, exactly as /defaults does.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * When a column has an ETGO_SF_FIELD default ("TI"), the CREATE path must inject "TI",
+   * NOT the AD_Column default ("PE").  This is the core regression test for ETP-4230.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testInjectMandatoryDefaultsUsesSfFieldDefaultOverAdColumnDefault()
+      throws Exception {
+    // --- Setup ---
+    JSONObject body = new JSONObject();
+    Tab adTab = mock(Tab.class);
+    Table table = mock(Table.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    OBContext obContext = mock(OBContext.class);
+    Entity dalEntity = mock(Entity.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    OBDal obDal = mock(OBDal.class);
+
+    // The AD column: DB name "CalculateType", mandatory, NOT a key/audit column.
+    Column calcTypeCol = mock(Column.class);
+    when(calcTypeCol.getDBColumnName()).thenReturn("CalculateType");
+    when(calcTypeCol.isMandatory()).thenReturn(true);
+    when(calcTypeCol.isActive()).thenReturn(true);
+    when(calcTypeCol.isKeyColumn()).thenReturn(false);
+    // AD_Column default is "PE" — this is what the bug returned before the fix
+    when(calcTypeCol.getDefaultValue()).thenReturn("PE");
+    when(calcTypeCol.isLinkToParentColumn()).thenReturn(false);
+    when(calcTypeCol.isUseAutomaticSequence()).thenReturn(false);
+
+    // DAL property
+    Property calcTypeProp = mock(Property.class);
+    when(calcTypeProp.getName()).thenReturn("calculateType");
+    when(calcTypeProp.isAuditInfo()).thenReturn(false);
+    when(calcTypeProp.isPrimitive()).thenReturn(true);
+    when(dalEntity.getPropertyByColumnName("CalculateType")).thenReturn(calcTypeProp);
+
+    when(adTab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("TABLE-ASSETS");
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(calcTypeCol));
+
+    // SFField for this column: defaultValue = "TI" (the ETGO_SF_FIELD override)
+    SFField sfField = mock(SFField.class);
+    when(sfField.getADColumn()).thenReturn(calcTypeCol);
+    when(sfField.getDefaultValue()).thenReturn("TI");
+    @SuppressWarnings("unchecked")
+    OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+    when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+    when(sfFieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+
+    when(sfEntity.getId()).thenReturn("entity-assets");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<NeoParentValuesLoader> parentMock =
+             mockStatic(NeoParentValuesLoader.class)) {
+
+      ModelProvider mp = mock(ModelProvider.class);
+      modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("TABLE-ASSETS")).thenReturn(dalEntity);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
+          .thenReturn(dalEntity);
+      sequenceMock.when(() -> SequenceUtils.isSequence(calcTypeCol)).thenReturn(false);
+      parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
+          .thenReturn(java.util.Collections.emptyMap());
+      // Utility.getDefault called with "TI" (the SFField override), not "PE" (AD_Column default)
+      utilityMock.when(() -> Utility.getDefault(any(), eq(vars), eq("CalculateType"),
+          eq("TI"), anyString(), eq("")))
+          .thenReturn("TI");
+
+      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+
+      assertTrue("calculateType must be injected", body.has("calculateType"));
+      assertEquals(
+          "CREATE path must use ETGO_SF_FIELD default 'TI', not AD_Column default 'PE'",
+          "TI", body.getString("calculateType"));
+    }
+  }
+
+  /**
+   * When a column has NO ETGO_SF_FIELD default configured, the CREATE path must fall back to
+   * the AD_Column default — verifying no regression for the common case.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testInjectMandatoryDefaultsFallsBackToAdColumnDefaultWhenNoSfFieldDefault()
+      throws Exception {
+    JSONObject body = new JSONObject();
+    Tab adTab = mock(Tab.class);
+    Table table = mock(Table.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    OBContext obContext = mock(OBContext.class);
+    Entity dalEntity = mock(Entity.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    OBDal obDal = mock(OBDal.class);
+
+    // AD column with a default of "DR"
+    Column docStatusCol = mock(Column.class);
+    when(docStatusCol.getDBColumnName()).thenReturn("DocStatus");
+    when(docStatusCol.isMandatory()).thenReturn(true);
+    when(docStatusCol.isActive()).thenReturn(true);
+    when(docStatusCol.isKeyColumn()).thenReturn(false);
+    when(docStatusCol.getDefaultValue()).thenReturn("DR");
+    when(docStatusCol.isLinkToParentColumn()).thenReturn(false);
+    when(docStatusCol.isUseAutomaticSequence()).thenReturn(false);
+
+    Property docStatusProp = mock(Property.class);
+    when(docStatusProp.getName()).thenReturn("documentStatus");
+    when(docStatusProp.isAuditInfo()).thenReturn(false);
+    when(docStatusProp.isPrimitive()).thenReturn(true);
+    when(dalEntity.getPropertyByColumnName("DocStatus")).thenReturn(docStatusProp);
+
+    when(adTab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("TABLE-DOC");
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(docStatusCol));
+
+    // SFField exists but has NO defaultValue (null) — AD_Column default must be used
+    SFField sfField = mock(SFField.class);
+    when(sfField.getADColumn()).thenReturn(docStatusCol);
+    when(sfField.getDefaultValue()).thenReturn(null);
+    @SuppressWarnings("unchecked")
+    OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+    when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+    when(sfFieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+
+    when(sfEntity.getId()).thenReturn("entity-doc");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<NeoParentValuesLoader> parentMock =
+             mockStatic(NeoParentValuesLoader.class)) {
+
+      ModelProvider mp = mock(ModelProvider.class);
+      modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("TABLE-DOC")).thenReturn(dalEntity);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
+          .thenReturn(dalEntity);
+      sequenceMock.when(() -> SequenceUtils.isSequence(docStatusCol)).thenReturn(false);
+      parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
+          .thenReturn(java.util.Collections.emptyMap());
+      // Utility.getDefault is called with "DR" (the AD_Column default, because SFField has null)
+      utilityMock.when(() -> Utility.getDefault(any(), eq(vars), eq("DocStatus"),
+          eq("DR"), anyString(), eq("")))
+          .thenReturn("DR");
+
+      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+
+      assertTrue("documentStatus must be injected", body.has("documentStatus"));
+      assertEquals(
+          "Without ETGO_SF_FIELD default, AD_Column default 'DR' must be used",
+          "DR", body.getString("documentStatus"));
+    }
   }
 }
