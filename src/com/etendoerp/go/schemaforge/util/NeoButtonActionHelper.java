@@ -139,6 +139,7 @@ public final class NeoButtonActionHelper {
    * @param actionName the column name or Java qualifier of the button field
    * @param params     optional JSON parameters (may be null → treated as empty object)
    * @return NeoResponse with the process result or an error response
+   * @throws Exception if process resolution, execution, or JSON construction fails
    */
   public static NeoResponse executeButtonActionCore(SFEntity entity, String recordId,
       String actionName, JSONObject params) throws Exception {

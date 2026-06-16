@@ -439,7 +439,7 @@ public class ToolRegistry {
     props.put("id", stringProp("Record ID to act upon"));
     props.put("action", stringProp(
         "Column name of the button field to trigger (e.g. 'Processed', 'Processing')"));
-    props.put("parameters", objectProp(
+    props.put(McpConstants.PARAM_PARAMETERS, objectProp(
         "Optional JSON parameters to pass to the process (e.g. docAction value)"));
 
     return new McpToolDefinition(
@@ -464,7 +464,7 @@ public class ToolRegistry {
     Map<String, Object> paramProps = buildProcessParamSchema(spec);
 
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put("parameters", objectPropWithProperties("Process input parameters", paramProps));
+    props.put(McpConstants.PARAM_PARAMETERS, objectPropWithProperties("Process input parameters", paramProps));
 
     return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
   }
@@ -481,7 +481,7 @@ public class ToolRegistry {
     Map<String, Object> paramProps = buildProcessParamSchema(spec);
 
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put("parameters", objectPropWithProperties("Report input parameters", paramProps));
+    props.put(McpConstants.PARAM_PARAMETERS, objectPropWithProperties("Report input parameters", paramProps));
     props.put("format", stringProp("Output format: pdf, xlsx, csv (default: pdf)", false));
 
     return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
