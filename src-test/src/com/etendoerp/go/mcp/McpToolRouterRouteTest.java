@@ -60,6 +60,7 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 
 /**
  * Unit tests for {@link McpToolRouter#route} and its internal handler dispatch,
@@ -101,6 +102,7 @@ class McpToolRouterRouteTest {
   private MockedStatic<NeoProcessService> processMock;
   private MockedStatic<NeoReportService> reportMock;
   private MockedStatic<NeoSelectorService> selectorMock;
+  private MockedStatic<NeoButtonActionHelper> buttonActionMock;
 
   private McpToolRouter router;
 
@@ -115,6 +117,7 @@ class McpToolRouterRouteTest {
     processMock = mockStatic(NeoProcessService.class);
     reportMock = mockStatic(NeoReportService.class);
     selectorMock = mockStatic(NeoSelectorService.class);
+    buttonActionMock = mockStatic(NeoButtonActionHelper.class);
 
     obDalMock.when(OBDal::getInstance).thenReturn(mockOBDal);
     obContextMock.when(() -> OBContext.setAdminMode()).thenAnswer(inv -> null);
@@ -134,6 +137,7 @@ class McpToolRouterRouteTest {
     if (processMock != null) processMock.close();
     if (reportMock != null) reportMock.close();
     if (selectorMock != null) selectorMock.close();
+    if (buttonActionMock != null) buttonActionMock.close();
   }
 
   // ── Shared mock setup helpers ─────────────────────────────────────────
@@ -800,6 +804,138 @@ class McpToolRouterRouteTest {
       JSONObject result = McpToolRouter.wrapAsTextContent(json);
 
       assertEquals(json, result.getJSONArray("content").getJSONObject(0).getString("text"));
+    }
+  }
+
+  // ── neo_action ────────────────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("route — neo_action")
+  class ActionTests {
+
+    private static final Set<String> ACTION_SCOPES = Set.of("neo:write");
+    private static final String RECORD_ID = "record-001";
+    private static final String ACTION_NAME = "Processed";
+
+    private JSONObject buildActionArgs() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("spec", SPEC_NAME);
+      args.put("entity", ENTITY_NAME);
+      args.put("id", RECORD_ID);
+      args.put("action", ACTION_NAME);
+      return args;
+    }
+
+    @Test
+    @DisplayName("neo_action routes and returns processResult:success")
+    void actionSuccessReturnsProcessResult() throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      Tab tab = mockTab();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, tab);
+
+      JSONObject responseBody = new JSONObject();
+      responseBody.put("status", "success");
+      responseBody.put("message", "Process completed successfully");
+      NeoResponse neoResp = NeoResponse.ok(responseBody);
+
+      buttonActionMock.when(() ->
+          NeoButtonActionHelper.executeButtonActionCore(eq(entity), eq(RECORD_ID),
+              eq(ACTION_NAME), any()))
+          .thenReturn(neoResp);
+
+      JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+
+      assertFalse(result.has("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      JSONObject body = new JSONObject(text);
+      assertEquals("success", body.getString("processResult"));
+      assertEquals("Process completed successfully", body.getString("processMessage"));
+    }
+
+    @Test
+    @DisplayName("neo_action surfaces processResult:error for error NeoResponse")
+    void actionErrorSurfacesProcessResultError() throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      Tab tab = mockTab();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, tab);
+
+      JSONObject errorBody = new JSONObject();
+      errorBody.put("status", "error");
+      errorBody.put("message", "usableLifeMonths must be greater than 0");
+      NeoResponse errorResp = new NeoResponse(400, errorBody);
+
+      buttonActionMock.when(() ->
+          NeoButtonActionHelper.executeButtonActionCore(eq(entity), eq(RECORD_ID),
+              eq(ACTION_NAME), any()))
+          .thenReturn(errorResp);
+
+      JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      JSONObject body = new JSONObject(text);
+      assertEquals("error", body.getString("processResult"));
+      assertTrue(body.getString("processMessage").contains("usableLifeMonths"));
+    }
+
+    @Test
+    @DisplayName("neo_action with missing action argument returns error")
+    void actionMissingActionArgReturnsError() throws Exception {
+      SFSpec spec = mockSpec();
+      setupSpecLookup(spec);
+
+      JSONObject args = new JSONObject();
+      args.put("spec", SPEC_NAME);
+      args.put("entity", ENTITY_NAME);
+      args.put("id", RECORD_ID);
+      // "action" intentionally omitted
+
+      JSONObject result = router.route("neo_action", args, ACTION_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("action"));
+    }
+
+    @Test
+    @DisplayName("neo_action with null arguments returns error")
+    void actionNullArgsReturnsError() throws Exception {
+      JSONObject result = router.route("neo_action", null, ACTION_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("Missing arguments"));
+    }
+
+    @Test
+    @DisplayName("neo_action with warning NeoResponse returns success content with processResult:warning")
+    void actionWarningReturnsWarningResult() throws Exception {
+      SFSpec spec = mockSpec();
+      SFEntity entity = mockEntity();
+      Tab tab = mockTab();
+      setupSpecLookup(spec);
+      setupEntityLookup(entity, tab);
+
+      JSONObject warningBody = new JSONObject();
+      warningBody.put("status", "warning");
+      warningBody.put("message", "Process completed with warnings");
+      NeoResponse warningResp = NeoResponse.ok(warningBody);
+
+      buttonActionMock.when(() ->
+          NeoButtonActionHelper.executeButtonActionCore(eq(entity), eq(RECORD_ID),
+              eq(ACTION_NAME), any()))
+          .thenReturn(warningResp);
+
+      JSONObject result = router.route("neo_action", buildActionArgs(), ACTION_SCOPES);
+
+      assertFalse(result.has("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      JSONObject body = new JSONObject(text);
+      assertEquals("warning", body.getString("processResult"));
     }
   }
 }

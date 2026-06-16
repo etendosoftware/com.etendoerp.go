@@ -154,6 +154,7 @@ public class ToolRegistry {
       tools.add(buildUpdateTool(accessibleWindowSpecs));
       tools.add(buildDeleteTool(accessibleWindowSpecs));
       tools.add(buildBatchTool());
+      tools.add(buildActionTool(accessibleWindowSpecs));
     }
   }
 
@@ -203,6 +204,7 @@ public class ToolRegistry {
       case "neo_defaults":
       case "neo_schema":
       case "neo_batch":
+      case "neo_action":
         return true;
       default:
         return false;
@@ -426,6 +428,27 @@ public class ToolRegistry {
             + "fields exist and which are required. Only fields with userRequired=true need to "
             + "be provided — system fields are auto-derived by Etendo callouts.",
         buildObjectSchema(props, List.of("spec", "entity")));
+  }
+
+  // ── Action tool ────────────────────────────────────────────────────────
+
+  private McpToolDefinition buildActionTool(List<String> specNames) {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
+    props.put("id", stringProp("Record ID to act upon"));
+    props.put("action", stringProp(
+        "Column name of the button field to trigger (e.g. 'Processed', 'Processing')"));
+    props.put("parameters", objectProp(
+        "Optional JSON parameters to pass to the process (e.g. docAction value)"));
+
+    return new McpToolDefinition(
+        "neo_action",
+        "Fire a type:button action on a record and return the process result. "
+            + "Use neo_schema to discover available button fields and their action names. "
+            + "Returns {processResult: success|error|warning, processMessage: ...}.",
+        buildObjectSchema(props,
+            List.of("spec", McpConstants.PARAM_ENTITY, "id", "action")));
   }
 
   // ── Process tool ───────────────────────────────────────────────────────

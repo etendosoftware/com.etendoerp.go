@@ -45,6 +45,7 @@ import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.BatchService;
+import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
@@ -124,6 +125,8 @@ public class McpToolRouter {
             return handleSchema(specName, arguments);
           case "neo_batch":
             return handleBatch(arguments);
+          case "neo_action":
+            return handleAction(specName, arguments);
           default:
             // Check if it's a report tool (generate_*)
             if (toolName.startsWith(McpConstants.GENERATE_PREFIX)) {
@@ -644,6 +647,94 @@ public class McpToolRouter {
       log.error("Error executing neo_batch", e);
       return wrapAsErrorContent("Error executing neo_batch: " + e.getMessage());
     }
+  }
+
+  // ── neo_action ────────────────────────────────────────────────────────
+
+  /**
+   * Fire a button action on a record and return the structured process result.
+   * <p>
+   * Resolves the SFEntity from spec+entity arguments, validates the action column
+   * exists (delegating to {@link NeoButtonActionHelper#executeButtonActionCore}),
+   * then maps the NeoResponse body to MCP result keys:
+   * <ul>
+   *   <li>{@code processResult} — status from the process response (success|error|warning)</li>
+   *   <li>{@code processMessage} — translated message from the process response</li>
+   * </ul>
+   * A validation or process error surfaces as {@code processResult: "error"} with
+   * a descriptive {@code processMessage} — it is never swallowed.
+   */
+  JSONObject handleAction(String specName, JSONObject args) throws Exception {
+    validateArgs(args, McpConstants.PARAM_ENTITY, "id", "action");
+
+    String entityName = args.getString(McpConstants.PARAM_ENTITY);
+    String recordId = args.getString("id");
+    String actionName = args.getString("action");
+    JSONObject parameters = args.optJSONObject("parameters");
+
+    SFSpec spec = findSpecOrThrow(specName);
+    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+
+    NeoResponse neoResponse = NeoButtonActionHelper.executeButtonActionCore(
+        sfEntity, recordId, actionName, parameters);
+
+    // Map NeoResponse body → structured MCP action result.
+    // NeoResponse.ok()/translate*Result bodies use top-level {status, message}.
+    // NeoResponse.error(int, String) nests them under {"error": {status, message}}.
+    // We check both shapes so processMessage is always populated on error.
+    JSONObject body = neoResponse.getBody();
+    JSONObject actionResult = new JSONObject();
+    if (body != null) {
+      // Primary path: top-level status/message (NeoProcessService.translate*Result)
+      String status = body.optString("status", null);
+      String message = body.optString("message", null);
+
+      // Fallback path: nested error object (NeoResponse.error(int, String))
+      if (status == null && message == null) {
+        JSONObject errorObj = body.optJSONObject("error");
+        if (errorObj != null) {
+          status = errorObj.optString("status", null);
+          // "status" inside the error object is stored as an int in NeoResponse.error()
+          // Try reading it as a string; if absent fall back to HTTP status code
+          if (status == null) {
+            int errorStatus = errorObj.optInt("status", -1);
+            if (errorStatus > 0) {
+              status = String.valueOf(errorStatus);
+            }
+          }
+          message = errorObj.optString("message", null);
+        }
+      }
+
+      if (status != null) {
+        actionResult.put("processResult", status);
+      }
+      if (message != null) {
+        actionResult.put("processMessage", message);
+      }
+      // Pass through any extra keys the process returned (best-effort)
+      java.util.Iterator<String> keys = body.keys();
+      while (keys.hasNext()) {
+        String key = keys.next();
+        if (!"status".equals(key) && !"message".equals(key) && !"error".equals(key)) {
+          actionResult.put(key, body.get(key));
+        }
+      }
+    }
+
+    if (neoResponse.getHttpStatus() >= 400) {
+      // Surface error result — do not swallow
+      if (!actionResult.has("processResult")) {
+        actionResult.put("processResult", "error");
+      }
+      if (!actionResult.has("processMessage")) {
+        actionResult.put("processMessage",
+            "Request failed with HTTP status " + neoResponse.getHttpStatus());
+      }
+      return wrapAsErrorContent(actionResult.toString(2));
+    }
+
+    return wrapAsTextContent(actionResult.toString(2));
   }
 
   // ── Process execution ─────────────────────────────────────────────────

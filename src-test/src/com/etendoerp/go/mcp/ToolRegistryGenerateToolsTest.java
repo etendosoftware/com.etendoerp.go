@@ -999,4 +999,82 @@ class ToolRegistryGenerateToolsTest {
       assertFalse(paramsProp.containsKey("properties"));
     }
   }
+
+  // ── neo_action registration ──────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("generateTools — neo_action tool")
+  class NeoActionToolTests {
+
+    @Test
+    @DisplayName("write scope registers neo_action alongside write CRUD tools")
+    void writeScopeRegistersNeoAction() {
+      SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
+      when(spec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(spec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
+      List<String> names = toolNames(tools);
+
+      assertTrue(names.contains("neo_action"), "neo_action should be registered with write scope");
+    }
+
+    @Test
+    @DisplayName("read-only scope does not register neo_action")
+    void readScopeDoesNotRegisterNeoAction() {
+      SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
+      when(spec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(spec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+      List<String> names = toolNames(tools);
+
+      assertFalse(names.contains("neo_action"), "neo_action should NOT be registered with read-only scope");
+    }
+
+    @Test
+    @DisplayName("neo_action tool has required fields: spec, entity, id, action")
+    @SuppressWarnings("unchecked")
+    void neoActionToolHasRequiredFields() {
+      SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
+      when(spec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(spec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
+
+      McpToolDefinition actionTool = tools.stream()
+          .filter(t -> "neo_action".equals(t.getName()))
+          .findFirst()
+          .orElse(null);
+      assertNotNull(actionTool, "neo_action tool should be present");
+
+      Map<String, Object> schema = actionTool.getInputSchema();
+      List<String> required = (List<String>) schema.get("required");
+      assertNotNull(required);
+      assertTrue(required.contains("spec"));
+      assertTrue(required.contains("entity"));
+      assertTrue(required.contains("id"));
+      assertTrue(required.contains("action"));
+
+      Map<String, Object> props = (Map<String, Object>) schema.get("properties");
+      assertTrue(props.containsKey("parameters"), "neo_action should have optional parameters prop");
+    }
+
+    @Test
+    @DisplayName("isCrudTool returns true for neo_action")
+    void isCrudToolReturnsTrueForNeoAction() {
+      assertTrue(ToolRegistry.isCrudTool("neo_action"));
+    }
+
+    @Test
+    @DisplayName("neo:* scope registers neo_action")
+    void wildcardScopeRegistersNeoAction() {
+      SFSpec spec = createWindowSpec(SPEC_SALES_ORDER);
+      when(spec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(spec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
+      assertTrue(toolNames(tools).contains("neo_action"));
+    }
+  }
 }
