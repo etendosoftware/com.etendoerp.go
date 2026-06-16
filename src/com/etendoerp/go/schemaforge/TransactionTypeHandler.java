@@ -29,7 +29,6 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 
@@ -56,14 +55,11 @@ import com.etendoerp.go.schemaforge.data.ETGOTransactionType;
  * Returning {@code null} lets the generic CRUD proceed with the (possibly mutated) body.
  */
 @Named("transaction-type")
-public class TransactionTypeHandler implements NeoHandler {
+public class TransactionTypeHandler extends AbstractNeoHandler {
 
   private static final Logger log = LogManager.getLogger(TransactionTypeHandler.class);
 
   private static final String SPEC = "transaction-type";
-  private static final String METHOD_POST = "POST";
-  private static final String METHOD_PUT = "PUT";
-  private static final String METHOD_PATCH = "PATCH";
 
   private static final String F_NAME = "name";
   private static final String F_SEARCH_KEY = "searchKey";
@@ -134,11 +130,12 @@ public class TransactionTypeHandler implements NeoHandler {
    * non-alphanumeric characters into a single underscore (e.g. "Comisión bancaria" → "COMISION_BANCARIA").
    */
   static String slugify(String name) {
+    // Possessive quantifiers (++) prevent backtracking; StringUtils.strip trims the
+    // separator underscores without a regex (clearer than an anchored "^_+|_+$" alternation).
     String stripped = Normalizer.normalize(name.trim(), Normalizer.Form.NFD)
-        .replaceAll("\\p{M}+", "");
-    String slug = stripped.toUpperCase(Locale.ROOT)
-        .replaceAll("[^A-Z0-9]+", "_")
-        .replaceAll("^_+|_+$", "");
+        .replaceAll("\\p{M}++", "");
+    String collapsed = stripped.toUpperCase(Locale.ROOT).replaceAll("[^A-Z0-9]++", "_");
+    String slug = StringUtils.strip(collapsed, "_");
     return slug.isEmpty() ? DEFAULT_SLUG : slug;
   }
 
@@ -151,28 +148,5 @@ public class TransactionTypeHandler implements NeoHandler {
     }
     criteria.setMaxResults(1);
     return !criteria.list().isEmpty();
-  }
-
-  private boolean isWriteMethod(String method) {
-    return METHOD_POST.equals(method) || METHOD_PUT.equals(method) || METHOD_PATCH.equals(method);
-  }
-
-  /**
-   * Reads a trimmed string field, treating absent, JSON-null and blank as {@code null}
-   * (Jettison's {@code optString} otherwise returns the literal {@code "null"}).
-   */
-  private static String optTrimmed(JSONObject body, String key) {
-    if (!body.has(key) || body.isNull(key)) {
-      return null;
-    }
-    return StringUtils.trimToNull(body.optString(key, ""));
-  }
-
-  void enterAdminMode() {
-    OBContext.setAdminMode(true);
-  }
-
-  void exitAdminMode() {
-    OBContext.restorePreviousMode();
   }
 }

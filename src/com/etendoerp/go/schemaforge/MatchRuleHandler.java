@@ -37,7 +37,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
@@ -69,14 +68,11 @@ import com.etendoerp.go.schemaforge.data.MatchRule;
  * list, so there is no backend defaults endpoint here.
  */
 @Named("match-rule")
-public class MatchRuleHandler implements NeoHandler {
+public class MatchRuleHandler extends AbstractNeoHandler {
 
   private static final Logger log = LogManager.getLogger(MatchRuleHandler.class);
 
   private static final String SPEC = "match-rule";
-  private static final String METHOD_POST = "POST";
-  private static final String METHOD_PUT = "PUT";
-  private static final String METHOD_PATCH = "PATCH";
 
   private static final String F_NAME = "name";
   private static final String F_PRIORITY = "priority";
@@ -268,30 +264,5 @@ public class MatchRuleHandler implements NeoHandler {
     }
     criteria.setMaxResults(1);
     return !criteria.list().isEmpty();
-  }
-
-  private boolean isWriteMethod(String method) {
-    return METHOD_POST.equals(method) || METHOD_PUT.equals(method) || METHOD_PATCH.equals(method);
-  }
-
-  /**
-   * Reads a trimmed string field, treating absent, JSON-null and blank as {@code null}.
-   * Jettison's {@code optString} returns the literal {@code "null"} for a JSON null value,
-   * which would otherwise leak into validation (e.g. an empty optional transactionType on
-   * edit becoming an "invalid" value) — this guard prevents that.
-   */
-  private static String optTrimmed(JSONObject body, String key) {
-    if (!body.has(key) || body.isNull(key)) {
-      return null;
-    }
-    return StringUtils.trimToNull(body.optString(key, ""));
-  }
-
-  void enterAdminMode() {
-    OBContext.setAdminMode(true);
-  }
-
-  void exitAdminMode() {
-    OBContext.restorePreviousMode();
   }
 }
