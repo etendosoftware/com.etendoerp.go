@@ -36,12 +36,6 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
-import org.openbravo.dal.service.OBCriteria;
-import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
-
-import com.etendoerp.go.schemaforge.data.MatchRule;
 
 /**
  * Validation pre-hook for the Bank Reconciliation <b>matching rules</b> catalog (T5).
@@ -60,12 +54,12 @@ import com.etendoerp.go.schemaforge.data.MatchRule;
  *   <li>{@code textPattern} is required — HTTP 400</li>
  *   <li>when the condition is Regex (R), the pattern is compiled and test-matched under a
  *       {@value #REGEX_TIMEOUT_MS} ms cap to reject catastrophic backtracking — HTTP 400</li>
- *   <li>{@code priority} must be unique within scope (same {@code FIN_Financial_Account_ID},
- *       or "all accounts" when none is set) — HTTP 409</li>
  * </ul>
  *
- * <p>The "next priority" suggestion (max + 10) is computed on the FRONTEND from the loaded
- * list, so there is no backend defaults endpoint here.
+ * <p>{@code priority} is an ordering/ranking key (the functional spec presents the
+ * highest-priority match as the main suggestion and ties as alternatives), so it is NOT
+ * required to be unique. The "next priority" suggestion (max + 10) is computed on the
+ * FRONTEND from the loaded list, so there is no backend defaults endpoint here.
  */
 @Named("match-rule")
 public class MatchRuleHandler extends AbstractNeoHandler {
@@ -75,10 +69,8 @@ public class MatchRuleHandler extends AbstractNeoHandler {
   private static final String SPEC = "match-rule";
 
   private static final String F_NAME = "name";
-  private static final String F_PRIORITY = "priority";
   private static final String F_TEXT_CONDITION = "textCondition";
   private static final String F_TEXT_PATTERN = "textPattern";
-  private static final String F_FINANCIAL_ACCOUNT = "financialAccount";
 
   private static final int NAME_MAX_LENGTH = 60;
   private static final int PATTERN_MAX_LENGTH = 255;
@@ -125,22 +117,16 @@ public class MatchRuleHandler extends AbstractNeoHandler {
    */
   NeoResponse validateWrite(NeoContext context, JSONObject body) {
     final boolean isPatch = METHOD_PATCH.equals(context.getHttpMethod());
-    final String recordId = context.getRecordId();
 
-    // Full validation only applies when the relevant fields are present. A PATCH may carry
-    // a single field (inline toggle of `active`, inline edit of `priority`); fields absent
-    // from the body are not validated here.
+    // Full validation only applies when the relevant content fields are present. A PATCH
+    // may carry a single field (inline toggle of `active`); fields absent from the body
+    // are not validated here. Priority is NOT required to be unique — per the functional
+    // spec it is an ordering/ranking key (ties simply rank as alternatives), so duplicate
+    // priorities within a scope are allowed.
     if (!isPatch || hasContentFields(body)) {
       NeoResponse invalid = validateContent(body);
       if (invalid != null) {
         return invalid;
-      }
-    }
-
-    if (body.has(F_PRIORITY)) {
-      NeoResponse conflict = validatePriorityScope(body, recordId);
-      if (conflict != null) {
-        return conflict;
       }
     }
     return null;
@@ -186,39 +172,6 @@ public class MatchRuleHandler extends AbstractNeoHandler {
   }
 
   /**
-   * Enforces priority uniqueness within scope. On update / patch the scope account comes
-   * from the body when supplied, otherwise from the persisted rule. Returns {@code null}
-   * when the priority is free, or an HTTP 409 when it collides.
-   */
-  NeoResponse validatePriorityScope(JSONObject body, String recordId) {
-    long priority = body.optLong(F_PRIORITY);
-    FIN_FinancialAccount account = resolveScopeAccount(body, recordId);
-    if (priorityExists(priority, account, recordId)) {
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-          "A rule with this priority already exists for the selected scope");
-    }
-    return null;
-  }
-
-  /**
-   * Determines the financial-account scope for the priority check. Prefers the value in
-   * the body; on a partial PATCH that omits it, falls back to the persisted rule's account.
-   */
-  FIN_FinancialAccount resolveScopeAccount(JSONObject body, String recordId) {
-    if (body.has(F_FINANCIAL_ACCOUNT)) {
-      String accountId = optTrimmed(body, F_FINANCIAL_ACCOUNT);
-      return accountId == null ? null : OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
-    }
-    if (StringUtils.isNotBlank(recordId)) {
-      MatchRule rule = OBDal.getInstance().get(MatchRule.class, recordId);
-      if (rule != null) {
-        return rule.getFinancialAccount();
-      }
-    }
-    return null;
-  }
-
-  /**
    * Compiles and test-matches {@code pattern} under a {@value #REGEX_TIMEOUT_MS} ms cap.
    * Returns {@code null} when the regex is safe, or a human error message when it fails to
    * compile or exhibits catastrophic backtracking (so the caller can reject it with HTTP 400).
@@ -249,20 +202,4 @@ public class MatchRuleHandler extends AbstractNeoHandler {
     }
   }
 
-  /**
-   * True when another rule already uses {@code priority} within the same scope
-   * (the same financial account, or "all accounts" when {@code account} is null).
-   */
-  boolean priorityExists(long priority, FIN_FinancialAccount account, String excludeId) {
-    OBCriteria<MatchRule> criteria = OBDal.getInstance().createCriteria(MatchRule.class);
-    criteria.add(Restrictions.eq(MatchRule.PROPERTY_PRIORITY, priority));
-    criteria.add(account == null
-        ? Restrictions.isNull(MatchRule.PROPERTY_FINANCIALACCOUNT)
-        : Restrictions.eq(MatchRule.PROPERTY_FINANCIALACCOUNT, account));
-    if (StringUtils.isNotBlank(excludeId)) {
-      criteria.add(Restrictions.ne(MatchRule.PROPERTY_ID, excludeId));
-    }
-    criteria.setMaxResults(1);
-    return !criteria.list().isEmpty();
-  }
 }

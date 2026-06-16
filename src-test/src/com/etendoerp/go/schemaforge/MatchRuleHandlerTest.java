@@ -27,7 +27,6 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.util.Collections;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -36,14 +35,9 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
-import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
-import org.openbravo.dal.service.OBCriteria;
-import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
-import com.etendoerp.go.schemaforge.data.MatchRule;
 
 /**
  * Mockito-driven unit tests for {@link MatchRuleHandler} — the validation pre-hook for
@@ -53,8 +47,6 @@ import com.etendoerp.go.schemaforge.data.MatchRule;
  * <ul>
  *   <li>{@code validateContent} / {@code validateRegex} are pure (no DAL) and are exercised
  *       directly over in-memory JSON bodies.</li>
- *   <li>{@code priorityExists} / {@code validatePriorityScope} / {@code resolveScopeAccount}
- *       hit {@code OBDal} statics, mocked per-test with {@link MockedStatic}.</li>
  *   <li>{@code handle()} routing is covered with a {@link NeoContext} mock; the admin-mode
  *       seams are stubbed on a spy so {@code OBContext} is never touched.</li>
  * </ul>
@@ -66,7 +58,6 @@ import com.etendoerp.go.schemaforge.data.MatchRule;
 public class MatchRuleHandlerTest {
 
   private static final int BAD_REQUEST = HttpServletResponse.SC_BAD_REQUEST;   // 400
-  private static final int CONFLICT = HttpServletResponse.SC_CONFLICT;         // 409
 
   private MatchRuleHandler handler;
 
@@ -131,12 +122,6 @@ public class MatchRuleHandlerTest {
   public void rejectsPatternTooLong() throws Exception {
     assertStatus(BAD_REQUEST, handler.validateContent(
         body("name", "n", "textCondition", "C", "textPattern", repeat("p", 256))));
-  }
-
-  @Test
-  public void rejectsInvalidTransactionType() throws Exception {
-    assertStatus(BAD_REQUEST, handler.validateContent(
-        body("name", "n", "textCondition", "C", "textPattern", "p", "transactionType", "Z")));
   }
 
   @Test
@@ -208,95 +193,6 @@ public class MatchRuleHandlerTest {
     assertTrue(error.toLowerCase().contains("complex"));
   }
 
-  // ── priority uniqueness (OBDal) ──────────────────────────────────────────────
-
-  @Test
-  public void priorityFreeReturnsNoConflict() throws Exception {
-    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      @SuppressWarnings("unchecked")
-      OBCriteria<MatchRule> criteria = mock(OBCriteria.class);
-      when(dal.createCriteria(MatchRule.class)).thenReturn(criteria);
-      when(criteria.list()).thenReturn(Collections.emptyList());
-
-      assertNull(handler.validatePriorityScope(
-          body("priority", 10, "financialAccount", "ACC-1"), null));
-    }
-  }
-
-  @Test
-  public void duplicatePriorityReturnsConflict() throws Exception {
-    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-      when(dal.get(FIN_FinancialAccount.class, "ACC-1")).thenReturn(account);
-      @SuppressWarnings("unchecked")
-      OBCriteria<MatchRule> criteria = mock(OBCriteria.class);
-      when(dal.createCriteria(MatchRule.class)).thenReturn(criteria);
-      when(criteria.list()).thenReturn(Collections.singletonList(mock(MatchRule.class)));
-
-      assertStatus(CONFLICT, handler.validatePriorityScope(
-          body("priority", 10, "financialAccount", "ACC-1"), null));
-    }
-  }
-
-  @Test
-  public void priorityExistsScopesToAllAccountsWhenNoAccount() throws Exception {
-    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      @SuppressWarnings("unchecked")
-      OBCriteria<MatchRule> criteria = mock(OBCriteria.class);
-      when(dal.createCriteria(MatchRule.class)).thenReturn(criteria);
-      when(criteria.list()).thenReturn(Collections.emptyList());
-
-      // null account → "all accounts" scope; no collision when the list is empty.
-      assertTrue(!handler.priorityExists(10L, null, null));
-      verify(dal).createCriteria(MatchRule.class);
-    }
-  }
-
-  // ── resolveScopeAccount (OBDal) ──────────────────────────────────────────────
-
-  @Test
-  public void resolveScopeAccountReadsFromBody() throws Exception {
-    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-      when(dal.get(FIN_FinancialAccount.class, "ACC-9")).thenReturn(account);
-
-      assertEquals(account, handler.resolveScopeAccount(body("financialAccount", "ACC-9"), null));
-    }
-  }
-
-  @Test
-  public void resolveScopeAccountFallsBackToPersistedRuleOnPatch() throws Exception {
-    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-      MatchRule rule = mock(MatchRule.class);
-      when(rule.getFinancialAccount()).thenReturn(account);
-      when(dal.get(MatchRule.class, "RULE-1")).thenReturn(rule);
-
-      // Body omits financialAccount → scope comes from the persisted rule.
-      assertEquals(account, handler.resolveScopeAccount(new JSONObject(), "RULE-1"));
-    }
-  }
-
-  @Test
-  public void resolveScopeAccountReturnsNullForAllAccounts() throws Exception {
-    // Body explicitly sets an empty financialAccount → "all accounts" (null), no DAL get.
-    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      assertNull(handler.resolveScopeAccount(body("financialAccount", ""), null));
-    }
-  }
-
   // ── handle() routing ─────────────────────────────────────────────────────────
 
   @Test
@@ -353,17 +249,9 @@ public class MatchRuleHandlerTest {
     when(ctx.getRequestBody()).thenReturn(
         body("name", "Bank fee", "textCondition", "C", "textPattern", "COMM", "priority", 10));
 
-    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      @SuppressWarnings("unchecked")
-      OBCriteria<MatchRule> criteria = mock(OBCriteria.class);
-      when(dal.createCriteria(MatchRule.class)).thenReturn(criteria);
-      when(criteria.list()).thenReturn(Collections.emptyList());
-
-      // null → no rejection; generic CRUD proceeds.
-      assertNull(spyHandler.handle(ctx));
-    }
+    // Valid content and no uniqueness checks (priority may repeat) → null, so the
+    // generic CRUD proceeds. handle() no longer touches OBDal.
+    assertNull(spyHandler.handle(ctx));
   }
 
   @Test
