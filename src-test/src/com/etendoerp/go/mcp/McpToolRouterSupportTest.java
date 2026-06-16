@@ -379,6 +379,28 @@ class McpToolRouterSupportTest {
       JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
       assertFalse(result.has("isReport"));
     }
+
+    @Test
+    void agentPromptIsIncludedWhenPresent() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("purchase-order");
+      when(spec.getDescription()).thenReturn(null);
+      when(spec.getAgentPrompt()).thenReturn("Always confirm before completing the order.");
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      assertEquals("Always confirm before completing the order.", result.getString("agentPrompt"));
+    }
+
+    @Test
+    void blankAgentPromptIsOmitted() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("purchase-order");
+      when(spec.getDescription()).thenReturn(null);
+      when(spec.getAgentPrompt()).thenReturn("   ");
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      assertFalse(result.has("agentPrompt"));
+    }
   }
 
   // ─── isMandatoryValueMissing ────────────────────────────────────────
