@@ -82,7 +82,6 @@ public class MatchRuleHandler implements NeoHandler {
   private static final String F_PRIORITY = "priority";
   private static final String F_TEXT_CONDITION = "textCondition";
   private static final String F_TEXT_PATTERN = "textPattern";
-  private static final String F_TRANSACTION_TYPE = "transactionType";
   private static final String F_FINANCIAL_ACCOUNT = "financialAccount";
 
   private static final int NAME_MAX_LENGTH = 60;
@@ -90,7 +89,6 @@ public class MatchRuleHandler implements NeoHandler {
 
   /** Allowed values for the closed lists (mirror of the AD list references). */
   private static final Set<String> TEXT_CONDITIONS = new HashSet<>(Arrays.asList("C", "S", "R"));
-  private static final Set<String> TRANSACTION_TYPES = new HashSet<>(Arrays.asList("B", "T", "H"));
   private static final String COND_REGEX = "R";
 
   /** Cap for compiling + test-matching a user regex, to reject catastrophic patterns. */
@@ -154,8 +152,7 @@ public class MatchRuleHandler implements NeoHandler {
 
   /** True when the body carries any of the content fields that require full validation. */
   private boolean hasContentFields(JSONObject body) {
-    return body.has(F_NAME) || body.has(F_TEXT_CONDITION) || body.has(F_TEXT_PATTERN)
-        || body.has(F_TRANSACTION_TYPE);
+    return body.has(F_NAME) || body.has(F_TEXT_CONDITION) || body.has(F_TEXT_PATTERN);
   }
 
   /**
@@ -166,7 +163,6 @@ public class MatchRuleHandler implements NeoHandler {
     String name = optTrimmed(body, F_NAME);
     String textCondition = optTrimmed(body, F_TEXT_CONDITION);
     String textPattern = optTrimmed(body, F_TEXT_PATTERN);
-    String transactionType = optTrimmed(body, F_TRANSACTION_TYPE);
 
     if (StringUtils.isBlank(name)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is required");
@@ -183,9 +179,6 @@ public class MatchRuleHandler implements NeoHandler {
     }
     if (textPattern.length() > PATTERN_MAX_LENGTH) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Pattern is too long");
-    }
-    if (transactionType != null && !TRANSACTION_TYPES.contains(transactionType)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid transaction type");
     }
     if (COND_REGEX.equals(textCondition)) {
       String regexError = validateRegex(textPattern);

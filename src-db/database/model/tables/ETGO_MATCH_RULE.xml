@@ -45,10 +45,6 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="TRANSACTIONTYPE" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
-        <default/>
-        <onCreateDefault/>
-      </column>
       <column name="MATCHCOUNT" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
         <default><![CDATA[0]]></default>
         <onCreateDefault/>
@@ -89,6 +85,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="ETGO_TRANSACTION_TYPE_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_MATCH_RULE_AD_CLIENT_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
@@ -107,6 +107,9 @@
       <foreign-key foreignTable="C_PROJECT" name="ETGO_MR_PROJECT_FK">
         <reference local="C_PROJECT_ID" foreign="C_PROJECT_ID"/>
       </foreign-key>
+      <foreign-key foreignTable="ETGO_TRANSACTION_TYPE" name="ETGO_MR_TRXTYPE_FK">
+        <reference local="ETGO_TRANSACTION_TYPE_ID" foreign="ETGO_TRANSACTION_TYPE_ID"/>
+      </foreign-key>
       <foreign-key foreignTable="C_ELEMENTVALUE" name="ETGO_MR_USER1_FK">
         <reference local="USER1_ID" foreign="C_ELEMENTVALUE_ID"/>
       </foreign-key>
@@ -115,6 +118,5 @@
       </foreign-key>
       <check name="ETGO_MATCH_RULE_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_MR_TEXTCOND_CHK"><![CDATA[TEXTCONDITION IN ('C', 'S', 'R')]]></check>
-      <check name="ETGO_MR_TRXTYPE_CHK"><![CDATA[TRANSACTIONTYPE IN ('B', 'T', 'H')]]></check>
     </table>
   </database>
