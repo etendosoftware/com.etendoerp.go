@@ -61,7 +61,7 @@ import java.util.List;
  * <p>Accounting-schema (general-ledger) wiring is out of scope here — that belongs to Gap A1 and
  * lives in {@link OnboardingAccountingWiringService}.
  */
-public class OnboardingPeriodControlService {
+public class OnboardingPeriodControlService extends OnboardingContextSupport {
 
   private static final Logger log = LogManager.getLogger(OnboardingPeriodControlService.class);
 
@@ -262,48 +262,8 @@ public class OnboardingPeriodControlService {
     return new Date();
   }
 
-  protected Organization resolveOrganization(String orgId) {
-    return OBDal.getInstance().get(Organization.class, orgId);
-  }
-
-  protected void flushChanges() {
-    OBDal.getInstance().flush();
-  }
-
-  protected OBContext captureCurrentContext() {
-    return OBContext.getOBContext();
-  }
-
-  protected void applyExecutionContext(String adminUserId, String adminRoleId,
-      String clientId, String orgId) {
-    OBContext.setOBContext(adminUserId, adminRoleId, clientId, orgId);
-  }
-
-  protected void restoreExecutionContext(OBContext previousContext) {
-    OBContext.setOBContext(previousContext);
-  }
-
-  protected void enterAdminMode() {
-    OBContext.setAdminMode(true);
-  }
-
-  protected void exitAdminMode() {
-    OBContext.restorePreviousMode();
-  }
-
-  private void validateContext(String clientId, String orgId, String adminUserId,
-      String adminRoleId) {
-    if (clientId == null || clientId.isEmpty()) {
-      throw new OBException("Missing client for period-control wiring");
-    }
-    if (orgId == null || orgId.isEmpty()) {
-      throw new OBException("Missing organization for period-control wiring");
-    }
-    if (adminUserId == null || adminUserId.isEmpty()) {
-      throw new OBException("Missing admin user for period-control wiring");
-    }
-    if (adminRoleId == null || adminRoleId.isEmpty()) {
-      throw new OBException("Missing admin role for period-control wiring");
-    }
+  @Override
+  protected String contextSubject() {
+    return "period-control wiring";
   }
 }

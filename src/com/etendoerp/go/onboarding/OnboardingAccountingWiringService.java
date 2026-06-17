@@ -57,7 +57,7 @@ import org.w3c.dom.NodeList;
  * <p>Calendar/period wiring is intentionally out of scope here — that belongs to the period-control
  * gap (C1), not A1.
  */
-public class OnboardingAccountingWiringService {
+public class OnboardingAccountingWiringService extends OnboardingContextSupport {
 
   private static final Logger log = LogManager.getLogger(OnboardingAccountingWiringService.class);
 
@@ -689,48 +689,8 @@ public class OnboardingAccountingWiringService {
     return OBDal.getInstance().get(Client.class, clientId);
   }
 
-  protected Organization resolveOrganization(String orgId) {
-    return OBDal.getInstance().get(Organization.class, orgId);
-  }
-
-  protected void flushChanges() {
-    OBDal.getInstance().flush();
-  }
-
-  protected OBContext captureCurrentContext() {
-    return OBContext.getOBContext();
-  }
-
-  protected void applyExecutionContext(String adminUserId, String adminRoleId,
-      String clientId, String orgId) {
-    OBContext.setOBContext(adminUserId, adminRoleId, clientId, orgId);
-  }
-
-  protected void restoreExecutionContext(OBContext previousContext) {
-    OBContext.setOBContext(previousContext);
-  }
-
-  protected void enterAdminMode() {
-    OBContext.setAdminMode(true);
-  }
-
-  protected void exitAdminMode() {
-    OBContext.restorePreviousMode();
-  }
-
-  private void validateContext(String clientId, String orgId, String adminUserId,
-      String adminRoleId) {
-    if (clientId == null || clientId.isEmpty()) {
-      throw new OBException("Missing client for accounting wiring");
-    }
-    if (orgId == null || orgId.isEmpty()) {
-      throw new OBException("Missing organization for accounting wiring");
-    }
-    if (adminUserId == null || adminUserId.isEmpty()) {
-      throw new OBException("Missing admin user for accounting wiring");
-    }
-    if (adminRoleId == null || adminRoleId.isEmpty()) {
-      throw new OBException("Missing admin role for accounting wiring");
-    }
+  @Override
+  protected String contextSubject() {
+    return "accounting wiring";
   }
 }

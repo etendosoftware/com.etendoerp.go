@@ -40,7 +40,7 @@ import org.openbravo.model.common.geography.Location;
  * org-info has none, defaulting the country to Spain (ISO {@code ES}) when the request carries no
  * explicit country.</p>
  */
-public class OnboardingOrgInfoService {
+public class OnboardingOrgInfoService extends OnboardingContextSupport {
 
   /** Default ISO country code when the onboarding request supplies none. */
   static final String DEFAULT_COUNTRY_ISO = "ES";
@@ -168,48 +168,8 @@ public class OnboardingOrgInfoService {
     return OBDal.getInstance().get(Client.class, clientId);
   }
 
-  protected Organization resolveOrganization(String orgId) {
-    return OBDal.getInstance().get(Organization.class, orgId);
-  }
-
-  protected void flushChanges() {
-    OBDal.getInstance().flush();
-  }
-
-  protected OBContext captureCurrentContext() {
-    return OBContext.getOBContext();
-  }
-
-  protected void applyExecutionContext(String adminUserId, String adminRoleId,
-      String clientId, String orgId) {
-    OBContext.setOBContext(adminUserId, adminRoleId, clientId, orgId);
-  }
-
-  protected void restoreExecutionContext(OBContext previousContext) {
-    OBContext.setOBContext(previousContext);
-  }
-
-  protected void enterAdminMode() {
-    OBContext.setAdminMode(true);
-  }
-
-  protected void exitAdminMode() {
-    OBContext.restorePreviousMode();
-  }
-
-  private void validateContext(String clientId, String orgId, String adminUserId,
-      String adminRoleId) {
-    if (clientId == null || clientId.isEmpty()) {
-      throw new OBException("Missing client for org-info setup");
-    }
-    if (orgId == null || orgId.isEmpty()) {
-      throw new OBException("Missing organization for org-info setup");
-    }
-    if (adminUserId == null || adminUserId.isEmpty()) {
-      throw new OBException("Missing admin user for org-info setup");
-    }
-    if (adminRoleId == null || adminRoleId.isEmpty()) {
-      throw new OBException("Missing admin role for org-info setup");
-    }
+  @Override
+  protected String contextSubject() {
+    return "org-info setup";
   }
 }
