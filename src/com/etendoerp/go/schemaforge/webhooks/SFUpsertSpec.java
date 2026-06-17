@@ -80,32 +80,7 @@ public class SFUpsertSpec extends BaseWebhookService {
         throw new OBException("Invalid SpecType: " + specType + ". Must be W or P.");
       }
 
-      SFSpec spec;
-      if (!(StringUtils.isEmpty(specId))) {
-        spec = OBDal.getInstance().get(SFSpec.class, specId);
-        if (spec == null) {
-          throw new OBException("Spec not found: " + specId);
-        }
-      } else {
-        // Check for duplicate name
-        OBCriteria<SFSpec> dupCriteria = OBDal.getInstance().createCriteria(SFSpec.class);
-        dupCriteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, name));
-        dupCriteria.setMaxResults(1);
-        List<SFSpec> existing = dupCriteria.list();
-        if (!existing.isEmpty()) {
-          throw new OBException("A spec with name '" + name + "' already exists (ID: " + existing.get(0).getId() + ")");
-        }
-
-        spec = OBProvider.getInstance().get(SFSpec.class);
-        spec.setNewOBObject(true);
-        spec.setClient(OBContext.getOBContext().getCurrentClient());
-        spec.setOrganization(OBContext.getOBContext().getCurrentOrganization());
-        spec.setActive(true);
-        spec.setCreatedBy(OBContext.getOBContext().getUser());
-        spec.setUpdatedBy(OBContext.getOBContext().getUser());
-        spec.setCreationDate(new Date());
-        spec.setUpdated(new Date());
-      }
+      SFSpec spec = loadOrCreateSpec(specId, name);
 
       spec.setName(name);
       spec.setSpecType(specType);
@@ -145,6 +120,39 @@ public class SFUpsertSpec extends BaseWebhookService {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Load the existing spec by id, or create a new one (rejecting a duplicate name).
+   */
+  private static SFSpec loadOrCreateSpec(String specId, String name) {
+    if (!StringUtils.isEmpty(specId)) {
+      SFSpec spec = OBDal.getInstance().get(SFSpec.class, specId);
+      if (spec == null) {
+        throw new OBException("Spec not found: " + specId);
+      }
+      return spec;
+    }
+
+    // Check for duplicate name
+    OBCriteria<SFSpec> dupCriteria = OBDal.getInstance().createCriteria(SFSpec.class);
+    dupCriteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, name));
+    dupCriteria.setMaxResults(1);
+    List<SFSpec> existing = dupCriteria.list();
+    if (!existing.isEmpty()) {
+      throw new OBException("A spec with name '" + name + "' already exists (ID: " + existing.get(0).getId() + ")");
+    }
+
+    SFSpec spec = OBProvider.getInstance().get(SFSpec.class);
+    spec.setNewOBObject(true);
+    spec.setClient(OBContext.getOBContext().getCurrentClient());
+    spec.setOrganization(OBContext.getOBContext().getCurrentOrganization());
+    spec.setActive(true);
+    spec.setCreatedBy(OBContext.getOBContext().getUser());
+    spec.setUpdatedBy(OBContext.getOBContext().getUser());
+    spec.setCreationDate(new Date());
+    spec.setUpdated(new Date());
+    return spec;
   }
 
   private static void assignWindow(String windowId, SFSpec spec) {

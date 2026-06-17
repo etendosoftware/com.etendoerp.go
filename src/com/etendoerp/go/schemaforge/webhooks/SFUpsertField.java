@@ -98,25 +98,7 @@ public class SFUpsertField extends BaseWebhookService {
       field.setADColumn(column);
       field.setADModule(module);
 
-      if (parameter.containsKey("IsIncluded")) {
-        field.setIncluded("Y".equalsIgnoreCase(parameter.get("IsIncluded")));
-      }
-      if (parameter.containsKey("IsReadOnly")) {
-        field.setReadOnly("Y".equalsIgnoreCase(parameter.get("IsReadOnly")));
-      }
-      if (parameter.containsKey("DefaultValue")) {
-        field.setDefaultValue(parameter.get("DefaultValue"));
-      }
-      if (parameter.containsKey("AgentPrompt")) {
-        String agentPrompt = parameter.get("AgentPrompt");
-        field.setAgentPrompt(agentPrompt == null || agentPrompt.isEmpty() ? null : agentPrompt);
-      }
-      if (parameter.containsKey("JavaQualifier")) {
-        field.setJavaQualifier(parameter.get("JavaQualifier"));
-      }
-      if (parameter.containsKey("SeqNo")) {
-        field.setSeqNo(Long.valueOf(parameter.get("SeqNo")));
-      }
+      applyOptionalFieldParams(field, parameter);
 
       OBDal.getInstance().save(field);
       OBDal.getInstance().flush();
@@ -130,6 +112,32 @@ public class SFUpsertField extends BaseWebhookService {
       responseVars.put(ERROR_KEY, e.getMessage());
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Apply the optional field parameters that may be present in the request,
+   * each only when explicitly provided so omitted keys keep their current value.
+   */
+  private void applyOptionalFieldParams(SFField field, Map<String, String> parameter) {
+    if (parameter.containsKey("IsIncluded")) {
+      field.setIncluded("Y".equalsIgnoreCase(parameter.get("IsIncluded")));
+    }
+    if (parameter.containsKey("IsReadOnly")) {
+      field.setReadOnly("Y".equalsIgnoreCase(parameter.get("IsReadOnly")));
+    }
+    if (parameter.containsKey("DefaultValue")) {
+      field.setDefaultValue(parameter.get("DefaultValue"));
+    }
+    if (parameter.containsKey("AgentPrompt")) {
+      String agentPrompt = parameter.get("AgentPrompt");
+      field.setAgentPrompt(agentPrompt == null || agentPrompt.isEmpty() ? null : agentPrompt);
+    }
+    if (parameter.containsKey("JavaQualifier")) {
+      field.setJavaQualifier(parameter.get("JavaQualifier"));
+    }
+    if (parameter.containsKey("SeqNo")) {
+      field.setSeqNo(Long.valueOf(parameter.get("SeqNo")));
     }
   }
 }
