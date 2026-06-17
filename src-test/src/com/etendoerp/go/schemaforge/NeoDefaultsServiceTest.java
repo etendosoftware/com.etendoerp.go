@@ -1253,12 +1253,23 @@ public class NeoDefaultsServiceTest {
         .build();
 
     try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class)) {
       ModelProvider mp = mock(ModelProvider.class);
       modelMock.when(ModelProvider::getInstance).thenReturn(mp);
       when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
+      OBDal obDal = mock(OBDal.class);
+      @SuppressWarnings("unchecked")
+      OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+      when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+      when(sfFieldCriteria.list()).thenReturn(Collections.emptyList());
+      when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
 
       // Two-arg overload — should run cascade by default
@@ -2805,8 +2816,11 @@ public class NeoDefaultsServiceTest {
         .obContext(mock(OBContext.class))
         .build();
 
-    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      ctxMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
 
       Map<String, String> result = (Map<String, String>) invokePrivate(
           "buildSfFieldDefaultsMap",
@@ -2856,8 +2870,11 @@ public class NeoDefaultsServiceTest {
         .obContext(mock(OBContext.class))
         .build();
 
-    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      ctxMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
 
       Map<String, String> result = (Map<String, String>) invokePrivate(
           "buildSfFieldDefaultsMap",
@@ -2929,8 +2946,11 @@ public class NeoDefaultsServiceTest {
         .obContext(mock(OBContext.class))
         .build();
 
-    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      ctxMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
 
       Map<String, String> result = (Map<String, String>) invokePrivate(
           "buildSfFieldDefaultsMap",
@@ -3008,6 +3028,7 @@ public class NeoDefaultsServiceTest {
 
     try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
          MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
@@ -3020,6 +3041,8 @@ public class NeoDefaultsServiceTest {
       modelMock.when(ModelProvider::getInstance).thenReturn(mp);
       when(mp.getEntityByTableId("TABLE-ASSETS")).thenReturn(dalEntity);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
       cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
           .thenReturn(dalEntity);
@@ -3096,6 +3119,7 @@ public class NeoDefaultsServiceTest {
 
     try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
          MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class);
@@ -3108,6 +3132,8 @@ public class NeoDefaultsServiceTest {
       modelMock.when(ModelProvider::getInstance).thenReturn(mp);
       when(mp.getEntityByTableId("TABLE-DOC")).thenReturn(dalEntity);
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
       cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
           .thenReturn(dalEntity);
