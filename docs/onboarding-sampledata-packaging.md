@@ -17,6 +17,7 @@ The staged classpath payload must also include `etendo_core/WebContent/WEB-INF/c
 > The curated onboarding dataset keeps `C_DOCTYPE` together with its cascading dependencies `AD_SEQUENCE` and `GL_CATEGORY`, so `DataImportService` can resolve document-number sequences and GL categories during import.
 
 - `C_PAYMENTTERM` is also curated directly from GOClient. It does not introduce extra foreign-key tables beyond the normal client/organization ownership that the normalizer already remaps.
+- `ETGO_TRANSACTION_TYPE` is curated from GOClient so every new tenant is seeded with the default transaction types (`COMISION` / Comisión, `TRANSFERENCIA` / Transferencia, `RETENCION` / Retención) used by the match-rule selector. The same file is the sample data developers get; it only owns client/organization columns, which the normalizer remaps.
 
 ## Build Contract
 A module Gradle task prepares the classpath payload from `referencedata/sampledata/GOClient` and hooks the root Etendo packaging tasks so `smartbuild`, `war`, and `antWar` always package the staged files into the final WAR by writing them into the root `WebContent/WEB-INF/classes` tree consumed by `antWar`.

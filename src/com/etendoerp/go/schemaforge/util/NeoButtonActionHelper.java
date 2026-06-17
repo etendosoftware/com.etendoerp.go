@@ -24,8 +24,6 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
@@ -99,15 +97,21 @@ public final class NeoButtonActionHelper {
     if (obuiappProcess != null) {
       actionObj.put("processType", "OBUIAPP");
       actionObj.put("processName", obuiappProcess.getName() != null ? obuiappProcess.getName() : "");
-    } else {
+      actionObj.put("processId", obuiappProcess.getId());
+    } else if (classicProcess != null) {
       actionObj.put("processType", "Classic");
-      actionObj.put("processName", classicProcess.getName() != null ? classicProcess.getName() : "");
+      actionObj.put("processName", StringUtils.defaultString(classicProcess.getName()));
+      actionObj.put("processId", classicProcess.getId());
     }
     return actionObj;
   }
 
   /**
    * Executes a button action on a specific record.
+   * <p>
+   * Extracts {@code recordId} and any JSON body parameters from the HTTP request,
+   * then delegates to {@link #executeButtonActionCore(SFEntity, String, String, JSONObject)}
+   * so that all guard-clause and process-execution logic is single-sourced.
    *
    * @param entity   the entity configuration that owns the button field
    * @param pathInfo parsed path components containing the action name and record ID
@@ -118,15 +122,36 @@ public final class NeoButtonActionHelper {
    */
   public static NeoResponse executeButtonAction(SFEntity entity,
       NeoPathInfo pathInfo, HttpServletRequest request) throws Exception {
-    Column targetColumn = findButtonColumn(entity.getId(), pathInfo.actionName);
+    Object cachedBody = request.getAttribute(NeoServlet.ACTION_REQUEST_BODY_ATTR);
+    String bodyStr = cachedBody instanceof String
+        ? (String) cachedBody
+        : new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+    JSONObject params = StringUtils.isNotBlank(bodyStr) ? new JSONObject(bodyStr) : null;
+    return executeButtonActionCore(entity, pathInfo.recordId, pathInfo.actionName, params);
+  }
+
+  /**
+   * Servlet-free core: executes a button action given plain parameters.
+   * Called by the MCP router. The existing servlet path delegates here.
+   *
+   * @param entity     the SFEntity that owns the button field
+   * @param recordId   the record ID to act upon
+   * @param actionName the column name or Java qualifier of the button field
+   * @param params     optional JSON parameters (may be null → treated as empty object)
+   * @return NeoResponse with the process result or an error response
+   * @throws Exception if process resolution, execution, or JSON construction fails
+   */
+  public static NeoResponse executeButtonActionCore(SFEntity entity, String recordId,
+      String actionName, JSONObject params) throws Exception {
+    Column targetColumn = findButtonColumn(entity.getId(), actionName);
     if (targetColumn == null) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
-          "Action not found: " + pathInfo.actionName);
+          "Action not found: " + actionName);
     }
     if (targetColumn.getReference() == null
         || !"28".equals((String) targetColumn.getReference().getId())) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Field is not a button: " + pathInfo.actionName);
+          "Field is not a button: " + actionName);
     }
     org.openbravo.client.application.Process obuiappProcess = targetColumn.getOBUIAPPProcess();
     Process adProcess = targetColumn.getProcess();
@@ -134,43 +159,38 @@ public final class NeoButtonActionHelper {
       obuiappProcess = NeoAccessHelper.resolveFallbackObuiappProcess(targetColumn);
       if (adProcess == null && obuiappProcess == null) {
         return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-            "No process linked to button: " + pathInfo.actionName);
+            "No process linked to button: " + actionName);
       }
     }
-    Object cachedBody = request.getAttribute(NeoServlet.ACTION_REQUEST_BODY_ATTR);
-    String bodyStr = cachedBody instanceof String
-        ? (String) cachedBody
-        : new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
-    JSONObject params = StringUtils.isNotBlank(bodyStr) ? new JSONObject(bodyStr) : new JSONObject();
-    params.put("recordId", pathInfo.recordId);
-    params.put("inpRecordId", pathInfo.recordId);
-    addTabParams(entity, pathInfo, params);
+    JSONObject effectiveParams = params != null ? params : new JSONObject();
+    effectiveParams.put("recordId", recordId);
+    effectiveParams.put("inpRecordId", recordId);
+    addTabParamsCore(entity, recordId, effectiveParams);
     if (obuiappProcess != null) {
       if (!NeoAccessHelper.hasObuiappProcessAccess(obuiappProcess.getId())) {
         return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
             "Access denied to process for current role");
       }
-      return NeoProcessService.executeObuiappProcess(obuiappProcess, params);
+      return NeoProcessService.executeObuiappProcess(obuiappProcess, effectiveParams);
     }
     if (!NeoAccessHelper.hasProcessAccess(adProcess.getId())) {
       return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN,
           "Access denied to process for current role");
     }
-    return NeoProcessService.executeProcess(adProcess, params);
+    return NeoProcessService.executeProcess(adProcess, effectiveParams);
   }
 
-  private static void addTabParams(SFEntity entity, NeoPathInfo pathInfo,
+  private static void addTabParamsCore(SFEntity entity, String recordId,
       JSONObject params) throws Exception {
     if (entity.getADTab() == null) {
       return;
     }
     params.put("inpTabId", entity.getADTab().getId());
-    // Pass the table-specific ID key expected by scheduling processes (e.g. M_Inventory_ID)
     String tableName = entity.getADTab().getTable() != null
         ? entity.getADTab().getTable().getDBTableName()
         : null;
     if (tableName != null) {
-      params.put(tableName + "_ID", pathInfo.recordId);
+      params.put(tableName + "_ID", recordId);
     }
   }
 
