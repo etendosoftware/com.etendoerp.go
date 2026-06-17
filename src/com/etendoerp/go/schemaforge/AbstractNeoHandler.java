@@ -17,7 +17,10 @@
 
 package com.etendoerp.go.schemaforge;
 
+import javax.servlet.http.HttpServletResponse;
+
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 
@@ -55,5 +58,45 @@ abstract class AbstractNeoHandler implements NeoHandler {
 
   protected void exitAdminMode() {
     OBContext.restorePreviousMode();
+  }
+
+  /**
+   * Validation applied to a write request body, after admin mode has been entered.
+   * Returns {@code null} to let the generic CRUD proceed, or a {@link NeoResponse} error
+   * to reject the write. May mutate the body to enrich it before persistence.
+   */
+  @FunctionalInterface
+  protected interface WriteValidator {
+    NeoResponse validate(JSONObject body) throws Exception;
+  }
+
+  /**
+   * Template for a write pre-hook shared by the generic-CRUD-backed handlers. Lets the
+   * generic CRUD proceed (returns {@code null}) for a non-matching spec, a non-write method
+   * or a missing body; otherwise runs {@code validator} under admin mode and maps any thrown
+   * exception to HTTP 500. A non-null {@link NeoResponse} short-circuits the request.
+   */
+  protected NeoResponse runWriteHook(NeoContext context, String spec, Logger log, WriteValidator validator) {
+    if (!spec.equals(context.getSpecName())) {
+      return null;
+    }
+    if (!isWriteMethod(context.getHttpMethod())) {
+      // GET / DELETE flow straight through to generic CRUD.
+      return null;
+    }
+    JSONObject body = context.getRequestBody();
+    if (body == null) {
+      // Let the generic CRUD produce the canonical "missing body" error.
+      return null;
+    }
+    try {
+      enterAdminMode();
+      return validator.validate(body);
+    } catch (Exception e) {
+      log.error("{} hook error", spec, e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal Server Error");
+    } finally {
+      exitAdminMode();
+    }
   }
 }

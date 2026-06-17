@@ -70,28 +70,7 @@ public class TransactionTypeHandler extends AbstractNeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    if (!SPEC.equals(context.getSpecName())) {
-      return null;
-    }
-    if (!isWriteMethod(context.getHttpMethod())) {
-      // GET / DELETE flow straight through to generic CRUD.
-      return null;
-    }
-    JSONObject body = context.getRequestBody();
-    if (body == null) {
-      // Let the generic CRUD produce the canonical "missing body" error.
-      return null;
-    }
-
-    try {
-      enterAdminMode();
-      return validateAndEnrich(body, context.getRecordId());
-    } catch (JSONException e) {
-      log.error("transaction-type hook error", e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal Server Error");
-    } finally {
-      exitAdminMode();
-    }
+    return runWriteHook(context, SPEC, log, body -> validateAndEnrich(body, context.getRecordId()));
   }
 
   /**
