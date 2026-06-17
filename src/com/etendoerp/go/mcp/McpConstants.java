@@ -25,6 +25,7 @@ final class McpConstants {
   static final String PARAM_FIELD = "field";
   static final String PARAM_QUERY = "query";
   static final String PARAM_PARENT_ID = "parentId";
+  static final String PARAM_ASSET_ID = "assetId";
   /** Current record context used to resolve dependent MCP selectors. */
   static final String PARAM_RECORD_CONTEXT = "recordContext";
   /** Parent/header record context used to resolve child MCP selectors. */

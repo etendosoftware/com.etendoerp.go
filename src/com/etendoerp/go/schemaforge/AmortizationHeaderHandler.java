@@ -92,7 +92,7 @@ public class AmortizationHeaderHandler implements NeoHandler {
       if (defaults.has(PROPERTY_NAME) && !defaults.isNull(PROPERTY_NAME)) {
         return null;
       }
-      String computedName = computeNameDefault();
+      String computedName = computeNameDefault(context);
       defaults.put(PROPERTY_NAME, computedName);
       return NeoResponse.ok(body);
     } catch (Exception e) {
@@ -102,12 +102,12 @@ public class AmortizationHeaderHandler implements NeoHandler {
   }
 
   /**
-   * Reads {@code assetId} from the current HTTP request via {@link RequestContext} and computes
-   * the name default. Returns the fallback value when no asset id is present or the asset is not
-   * found.
+   * Computes the name default by resolving {@code assetId} from the {@link NeoContext}
+   * query-param map (populated by both the MCP path and the REST path) with a fallback to
+   * the HTTP {@link RequestContext} for callers that do not yet populate queryParams.
    */
-  private static String computeNameDefault() {
-    String assetId = readAssetIdFromRequest();
+  private static String computeNameDefault(NeoContext context) {
+    String assetId = readAssetIdFromContext(context);
     if (assetId == null) {
       return NAME_FALLBACK;
     }
@@ -139,7 +139,25 @@ public class AmortizationHeaderHandler implements NeoHandler {
     }
   }
 
-  private static String readAssetIdFromRequest() {
+  /**
+   * Resolves {@code assetId} using a two-step lookup:
+   * <ol>
+   *   <li>{@link NeoContext#getQueryParams()} — populated by both the MCP path
+   *       ({@code McpToolRouter.handleDefaults}) and the REST path
+   *       ({@code NeoDefaultsEndpoint}).</li>
+   *   <li>{@link RequestContext} HTTP parameter — kept as a fallback for any direct
+   *       servlet invocation that does not populate queryParams.</li>
+   * </ol>
+   */
+  private static String readAssetIdFromContext(NeoContext context) {
+    // Primary: queryParams populated by McpToolRouter and NeoDefaultsEndpoint
+    if (context != null && context.getQueryParams() != null) {
+      String assetId = context.getQueryParams().get(PARAM_ASSET_ID);
+      if (assetId != null && !assetId.isEmpty()) {
+        return assetId;
+      }
+    }
+    // Fallback: direct HTTP request (legacy callers that do not set queryParams)
     try {
       if (RequestContext.get() == null || RequestContext.get().getRequest() == null) {
         return null;

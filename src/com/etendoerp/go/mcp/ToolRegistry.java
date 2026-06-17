@@ -329,6 +329,9 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME_WITH_EXAMPLE));
     props.put(McpConstants.PARAM_PARENT_ID, stringProp(
         "Optional parent record ID for child entities (e.g. order ID when getting line defaults)"));
+    props.put(McpConstants.PARAM_ASSET_ID, stringProp(
+        "Optional asset ID for computing dynamic defaults that depend on a specific asset "
+            + "(e.g. the amortization header name derived from the asset name and start date)"));
 
     return new McpToolDefinition(
         "neo_defaults",
