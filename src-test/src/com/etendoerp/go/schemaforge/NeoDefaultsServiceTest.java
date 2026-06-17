@@ -65,6 +65,7 @@ import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.ad.utility.Sequence;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.client.kernel.KernelUtils;
 
 import com.etendoerp.go.schemaforge.NeoMandatoryFieldValidator;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -2780,6 +2781,93 @@ public class NeoDefaultsServiceTest {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // isColumnReferencingParentTab — Issue 1 fix: discriminate FK target entities
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Helper to invoke the private static {@code isColumnReferencingParentTab} via reflection.
+   */
+  private static boolean invokeIsColumnReferencingParentTab(Column column, NeoContext ctx)
+      throws Exception {
+    return (Boolean) invokePrivate(
+        "isColumnReferencingParentTab",
+        new Class<?>[]{ Column.class, NeoContext.class },
+        column, ctx);
+  }
+
+  /**
+   * IRCPT-1: ctx is null → returns true (permissive fallback).
+   */
+  @Test
+  public void testIsColumnReferencingParentTabNullCtxReturnsTrue() throws Exception {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn("A_Amortization_ID");
+
+    boolean result = invokeIsColumnReferencingParentTab(column, null);
+
+    assertTrue("null ctx should fall back to true", result);
+  }
+
+  /**
+   * IRCPT-2: ctx.getAdTab() is null → returns true (permissive fallback).
+   */
+  @Test
+  public void testIsColumnReferencingParentTabNullTabReturnsTrue() throws Exception {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn("A_Amortization_ID");
+
+    NeoContext ctx = NeoContext.builder().adTab(null).build();
+
+    boolean result = invokeIsColumnReferencingParentTab(column, ctx);
+
+    assertTrue("null adTab should fall back to true", result);
+  }
+
+  /**
+   * IRCPT-3: column's target entity matches parent tab's table entity → true (the real FK case).
+   */
+  @Test
+  public void testIsColumnReferencingParentTabMatchingEntityReturnsTrue() throws Exception {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn("A_Amortization_ID");
+
+    Tab childTab = mock(Tab.class);
+    Table childTable = mock(Table.class);
+    when(childTab.getTable()).thenReturn(childTable);
+    when(childTable.getId()).thenReturn("CHILD-TABLE-ID");
+
+    Tab parentTab = mock(Tab.class);
+    Table parentTable = mock(Table.class);
+    when(parentTab.getTable()).thenReturn(parentTable);
+    when(parentTable.getId()).thenReturn("PARENT-TABLE-ID");
+
+    NeoContext ctx = NeoContext.builder().adTab(childTab).build();
+
+    // The shared entity instance: parentEntity == prop.getTargetEntity()
+    Entity sharedEntity = mock(Entity.class);
+    Entity childEntity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(prop.getTargetEntity()).thenReturn(sharedEntity);
+    when(childEntity.getPropertyByColumnName("A_Amortization_ID", false)).thenReturn(prop);
+
+    try (MockedStatic<KernelUtils> kernelMock = mockStatic(KernelUtils.class);
+         MockedStatic<ModelProvider> modelProviderMock = mockStatic(ModelProvider.class)) {
+
+      KernelUtils kernelUtils = mock(KernelUtils.class);
+      kernelMock.when(KernelUtils::getInstance).thenReturn(kernelUtils);
+      when(kernelUtils.getParentTab(childTab)).thenReturn(parentTab);
+
+      ModelProvider mp = mock(ModelProvider.class);
+      modelProviderMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("PARENT-TABLE-ID")).thenReturn(sharedEntity);
+      when(mp.getEntityByTableId("CHILD-TABLE-ID")).thenReturn(childEntity);
+
+      boolean result = invokeIsColumnReferencingParentTab(column, ctx);
+
+      assertTrue("matching target entity should return true", result);
+    }
+  }
+
   // buildSfFieldDefaultsMap — via reflection
   //
   // Verifies the CREATE path uses ETGO_SF_FIELD.defaultvalue overrides and that
@@ -3060,6 +3148,76 @@ public class NeoDefaultsServiceTest {
       assertEquals(
           "CREATE path must use ETGO_SF_FIELD default 'TI', not AD_Column default 'PE'",
           "TI", body.getString("calculateType"));
+    }
+  }
+
+  /**
+   * IRCPT-4: column's target entity does NOT match parent tab's table entity → false.
+   * This is the A_Asset_ID bug case — the column FK points to A_Asset, not A_Amortization.
+   */
+  @Test
+  public void testIsColumnReferencingParentTabNonMatchingEntityReturnsFalse() throws Exception {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn("A_Asset_ID");
+
+    Tab childTab = mock(Tab.class);
+    Table childTable = mock(Table.class);
+    when(childTab.getTable()).thenReturn(childTable);
+    when(childTable.getId()).thenReturn("CHILD-TABLE-ID");
+
+    Tab parentTab = mock(Tab.class);
+    Table parentTable = mock(Table.class);
+    when(parentTab.getTable()).thenReturn(parentTable);
+    when(parentTable.getId()).thenReturn("PARENT-TABLE-ID");
+
+    NeoContext ctx = NeoContext.builder().adTab(childTab).build();
+
+    // parentEntity and the column's target entity are DIFFERENT mocks
+    Entity parentEntity = mock(Entity.class);   // A_Amortization entity
+    Entity assetEntity = mock(Entity.class);    // A_Asset entity — different instance
+    Entity childEntity = mock(Entity.class);    // child line entity
+    Property prop = mock(Property.class);
+    when(prop.getTargetEntity()).thenReturn(assetEntity); // FK points to A_Asset
+    when(childEntity.getPropertyByColumnName("A_Asset_ID", false)).thenReturn(prop);
+
+    try (MockedStatic<KernelUtils> kernelMock = mockStatic(KernelUtils.class);
+         MockedStatic<ModelProvider> modelProviderMock = mockStatic(ModelProvider.class)) {
+
+      KernelUtils kernelUtils = mock(KernelUtils.class);
+      kernelMock.when(KernelUtils::getInstance).thenReturn(kernelUtils);
+      when(kernelUtils.getParentTab(childTab)).thenReturn(parentTab);
+
+      ModelProvider mp = mock(ModelProvider.class);
+      modelProviderMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("PARENT-TABLE-ID")).thenReturn(parentEntity);
+      when(mp.getEntityByTableId("CHILD-TABLE-ID")).thenReturn(childEntity);
+
+      boolean result = invokeIsColumnReferencingParentTab(column, ctx);
+
+      assertFalse("A_Asset_ID pointing to A_Asset should NOT match the parent A_Amortization entity",
+          result);
+    }
+  }
+
+  /**
+   * IRCPT-5: getParentTab throws → returns true (error fallback, preserve legacy behavior).
+   */
+  @Test
+  public void testIsColumnReferencingParentTabExceptionReturnsTrue() throws Exception {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn("A_Amortization_ID");
+
+    Tab childTab = mock(Tab.class);
+    NeoContext ctx = NeoContext.builder().adTab(childTab).build();
+
+    try (MockedStatic<KernelUtils> kernelMock = mockStatic(KernelUtils.class)) {
+      KernelUtils kernelUtils = mock(KernelUtils.class);
+      kernelMock.when(KernelUtils::getInstance).thenReturn(kernelUtils);
+      when(kernelUtils.getParentTab(childTab)).thenThrow(new RuntimeException("KernelUtils boom"));
+
+      boolean result = invokeIsColumnReferencingParentTab(column, ctx);
+
+      assertTrue("exception during resolution should fall back to true", result);
     }
   }
 

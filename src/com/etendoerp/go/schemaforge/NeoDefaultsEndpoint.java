@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Map;
+
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -66,6 +68,11 @@ class NeoDefaultsEndpoint {
 
       String parentId = request.getParameter(PARAM_PARENT_ID);
 
+      // Populate queryParams from all request parameters so NeoHandler implementations
+      // (e.g. AmortizationHeaderHandler) can read named params (assetId, etc.) via
+      // NeoContext.getQueryParams() — unified with the MCP path in McpToolRouter.
+      Map<String, String> queryParams = servlet.extractQueryParams(request);
+
       NeoContext ctx = NeoContext.builder()
           .specName(pathInfo.specName)
           .entityName(pathInfo.entityName)
@@ -73,6 +80,7 @@ class NeoDefaultsEndpoint {
           .adTab(tab)
           .sfEntity(sfEntity)
           .obContext(OBContext.getOBContext())
+          .queryParams(queryParams)
           .build();
 
       return NeoDefaultsService.resolveDefaults(ctx, parentId);
