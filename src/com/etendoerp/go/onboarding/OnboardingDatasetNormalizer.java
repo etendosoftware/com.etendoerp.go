@@ -26,8 +26,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilder;
@@ -38,10 +42,14 @@ import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Language;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -63,6 +71,7 @@ public class OnboardingDatasetNormalizer {
 
   private final SourceFileProvider sourceFileProvider;
   private final EntityResolver entityResolver;
+  private final ReferenceIdResolver referenceIdResolver;
   /**
    * Creates a normalizer that reads the packaged GOClient sourcedata from the runtime classpath.
    */
@@ -73,6 +82,12 @@ public class OnboardingDatasetNormalizer {
   OnboardingDatasetNormalizer(ClassLoader classLoader, EntityResolver entityResolver) {
     this(classpathSourceFileProvider(Objects.requireNonNull(classLoader, "classLoader is required")),
         entityResolver);
+  }
+
+  OnboardingDatasetNormalizer(ClassLoader classLoader, EntityResolver entityResolver,
+      ReferenceIdResolver referenceIdResolver) {
+    this(classpathSourceFileProvider(Objects.requireNonNull(classLoader, "classLoader is required")),
+        entityResolver, referenceIdResolver);
   }
 
   /**
@@ -89,11 +104,24 @@ public class OnboardingDatasetNormalizer {
         "sampleDataDirectory is required")), entityResolver);
   }
 
+  OnboardingDatasetNormalizer(Path sampleDataDirectory, EntityResolver entityResolver,
+      ReferenceIdResolver referenceIdResolver) {
+    this(directorySourceFileProvider(Objects.requireNonNull(sampleDataDirectory,
+        "sampleDataDirectory is required")), entityResolver, referenceIdResolver);
+  }
+
   private OnboardingDatasetNormalizer(SourceFileProvider sourceFileProvider,
       EntityResolver entityResolver) {
+    this(sourceFileProvider, entityResolver, dalReferenceIdResolver());
+  }
+
+  private OnboardingDatasetNormalizer(SourceFileProvider sourceFileProvider,
+      EntityResolver entityResolver, ReferenceIdResolver referenceIdResolver) {
     this.sourceFileProvider = Objects.requireNonNull(sourceFileProvider,
         "sourceFileProvider is required");
     this.entityResolver = Objects.requireNonNull(entityResolver, "entityResolver is required");
+    this.referenceIdResolver = Objects.requireNonNull(referenceIdResolver,
+        "referenceIdResolver is required");
   }
 
   /**
@@ -118,15 +146,17 @@ public class OnboardingDatasetNormalizer {
     root.setAttribute("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance");
     output.appendChild(root);
 
+    // Per-build state so repeated calls never leak excluded ids into one another.
+    RowExclusionFilter rowExclusionFilter = new RowExclusionFilter();
     for (SourceFile sourceFile : listIncludedSourceFiles()) {
-      appendEntities(sourceFile, builder, output, root, targetOrganizationId);
+      appendEntities(sourceFile, builder, output, root, targetOrganizationId, rowExclusionFilter);
     }
 
     return toXml(output);
   }
 
   private void appendEntities(SourceFile sourceFile, DocumentBuilder builder, Document output, Element root,
-      String targetOrganizationId) {
+      String targetOrganizationId, RowExclusionFilter rowExclusionFilter) {
     Entity entity = resolveEntity(tableName(sourceFile.fileName));
     try (InputStream inputStream = sourceFile.openStream()) {
       Document source = builder.parse(inputStream);
@@ -134,7 +164,11 @@ public class OnboardingDatasetNormalizer {
       for (int i = 0; i < childNodes.getLength(); i++) {
         Node child = childNodes.item(i);
         if (child instanceof Element) {
-          root.appendChild(convertRow((Element) child, entity, targetOrganizationId, output));
+          Element converted = convertRow((Element) child, entity, targetOrganizationId, output,
+              rowExclusionFilter);
+          if (converted != null) {
+            root.appendChild(converted);
+          }
         }
       }
     } catch (Exception e) {
@@ -144,7 +178,12 @@ public class OnboardingDatasetNormalizer {
   }
 
   private Element convertRow(Element sourceRow, Entity entity, String targetOrganizationId,
-      Document output) {
+      Document output, RowExclusionFilter rowExclusionFilter) {
+    Map<String, String> rawColumns = readRawColumns(sourceRow);
+    if (rowExclusionFilter.isExcludedRow(entity.getTableName(), rawColumns)) {
+      return null;
+    }
+
     Element entityElement = output.createElement(entity.getName());
     RowConversionState rowState = new RowConversionState();
 
@@ -171,7 +210,7 @@ public class OnboardingDatasetNormalizer {
     String columnName = sourceField.getTagName();
     String rawValue = normalizeFieldValue(sourceField.getTextContent());
 
-    if (shouldSkipColumn(columnName, rawValue)) {
+    if (shouldSkipColumn(entity, columnName, rawValue)) {
       return;
     }
 
@@ -193,15 +232,32 @@ public class OnboardingDatasetNormalizer {
     }
   }
 
+  /**
+   * Reads the raw sourcedata columns of a row into a case-insensitive map (keys upper-cased),
+   * so row-level filters can inspect ownership and parent references before conversion.
+   */
+  private Map<String, String> readRawColumns(Element sourceRow) {
+    Map<String, String> columns = new HashMap<>();
+    NodeList children = sourceRow.getChildNodes();
+    for (int i = 0; i < children.getLength(); i++) {
+      Node child = children.item(i);
+      if (child instanceof Element) {
+        Element field = (Element) child;
+        columns.put(field.getTagName().toUpperCase(), normalizeFieldValue(field.getTextContent()));
+      }
+    }
+    return columns;
+  }
+
   private String normalizeFieldValue(String rawValue) {
     return rawValue == null ? null : rawValue.trim();
   }
 
-  private boolean shouldSkipColumn(String columnName, String rawValue) {
+  private boolean shouldSkipColumn(Entity entity, String columnName, String rawValue) {
     return rawValue == null
         || rawValue.isEmpty()
         || "AD_CLIENT_ID".equals(columnName)
-        || OnboardingDatasetDefinition.getStrippedFields().contains(columnName);
+        || OnboardingDatasetDefinition.isStrippedColumn(entity.getTableName(), columnName);
   }
 
   private void appendPropertyElement(Document output, Element entityElement, Property property,
@@ -210,7 +266,7 @@ public class OnboardingDatasetNormalizer {
     if (property.isPrimitive()) {
       propertyElement.setTextContent(rawValue);
     } else {
-      propertyElement.setAttribute("id", mapReferenceId(rawValue));
+      propertyElement.setAttribute("id", resolveReferenceId(property, rawValue));
     }
     entityElement.appendChild(propertyElement);
   }
@@ -233,8 +289,49 @@ public class OnboardingDatasetNormalizer {
     entityElement.appendChild(organizationElement);
   }
 
-  private String mapReferenceId(String rawValue) {
-    return rawValue;
+  /**
+   * Resolves the value emitted as the {@code id} attribute of a reference property.
+   *
+   * <p>Most sourcedata reference columns already carry the referenced row's DAL id, so the raw value
+   * is passed through unchanged. The exception is the {@code AD_LANGUAGE} column on translation
+   * (_TRL) tables: GOClient stores the language <em>code</em> there (e.g. {@code es_ES}), but the
+   * importer resolves references by DAL id ({@code AD_Language.AD_Language_ID}). For
+   * {@code ADLanguage} references the code is therefore resolved to its installed id; the resolution
+   * targets the always-present {@code AD_Language} master table, never GOAdmin.
+   */
+  private String resolveReferenceId(Property property, String rawValue) {
+    Entity targetEntity = property.getTargetEntity();
+    String targetEntityName = targetEntity == null ? null : targetEntity.getName();
+    return referenceIdResolver.resolve(targetEntityName, rawValue);
+  }
+
+  /**
+   * DAL-backed reference resolver. Language codes are resolved to their installed
+   * {@code AD_Language} DAL id (cached per build); all other references pass through unchanged.
+   */
+  private static ReferenceIdResolver dalReferenceIdResolver() {
+    Map<String, String> languageIdByCode = new HashMap<>();
+    return (targetEntityName, rawValue) -> {
+      if (!Language.ENTITY_NAME.equals(targetEntityName)) {
+        return rawValue;
+      }
+      return languageIdByCode.computeIfAbsent(rawValue,
+          OnboardingDatasetNormalizer::resolveInstalledLanguageId);
+    };
+  }
+
+  private static String resolveInstalledLanguageId(String languageCode) {
+    OBCriteria<Language> criteria = OBDal.getInstance().createCriteria(Language.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.eq(Language.PROPERTY_LANGUAGE, languageCode));
+    criteria.setMaxResults(1);
+    Language language = (Language) criteria.uniqueResult();
+    if (language == null) {
+      throw new OBException("Onboarding dataset references language '" + languageCode
+          + "' which is not installed in this Etendo instance");
+    }
+    return language.getId();
   }
 
   private Entity resolveEntity(String tableName) {
@@ -422,6 +519,22 @@ public class OnboardingDatasetNormalizer {
     Entity resolve(String tableName);
   }
 
+  /**
+   * Resolves the {@code id} attribute value for a reference property, given the referenced entity's
+   * name and the raw sourcedata value. Lets tests stub away the {@code AD_Language} DAL lookup.
+   */
+  @FunctionalInterface
+  interface ReferenceIdResolver {
+    /**
+     * Returns the id to emit for a reference property.
+     *
+     * @param targetEntityName the referenced entity name, or {@code null} when unknown
+     * @param rawValue         the raw sourcedata value of the reference column
+     * @return the id attribute value to emit in the normalized XML
+     */
+    String resolve(String targetEntityName, String rawValue);
+  }
+
 
   @FunctionalInterface
   private interface SourceFileProvider {
@@ -461,5 +574,118 @@ public class OnboardingDatasetNormalizer {
   private static final class RowConversionState {
     private String rowId;
     private String sourceOrganizationId;
+  }
+
+  /**
+   * Skips org-specific account-element trees so only the client-level
+   * ({@code AD_ORG_ID = '0'}) chart of accounts reaches a new tenant.
+   *
+   * <p>GOClient ships a second, organization-owned {@code C_ELEMENT} tree that is not wired to any
+   * accounting schema and has no valid combinations — a dangling chart. Importing it would create
+   * an orphan chart of accounts in every onboarded tenant. This filter ignores it at import time
+   * <em>without modifying the source dataset</em>: it drops the org-specific element row, then
+   * cascades the exclusion to that element's {@code C_ELEMENTVALUE} rows and their
+   * {@code C_ELEMENTVALUE_TRL} translations. The cascade relies on the alphabetical source-file
+   * order ({@code C_ELEMENT} → {@code C_ELEMENTVALUE} → {@code C_ELEMENTVALUE_TRL}), which the
+   * source providers guarantee.
+   */
+  private static final class AccountElementTreeFilter {
+    private static final String ELEMENT_TABLE = "C_ELEMENT";
+    private static final String ELEMENT_VALUE_TABLE = "C_ELEMENTVALUE";
+    private static final String ELEMENT_VALUE_TRL_TABLE = "C_ELEMENTVALUE_TRL";
+    private static final String CLIENT_LEVEL_ORG = "0";
+
+    private final Set<String> excludedElementIds = new HashSet<>();
+    private final Set<String> excludedElementValueIds = new HashSet<>();
+
+    private boolean isExcludedRow(String tableName, Map<String, String> rawColumns) {
+      if (tableName == null) {
+        return false;
+      }
+      switch (tableName.toUpperCase()) {
+        case ELEMENT_TABLE:
+          return excludeOrgSpecificElement(rawColumns);
+        case ELEMENT_VALUE_TABLE:
+          return excludeValueOfExcludedElement(rawColumns);
+        case ELEMENT_VALUE_TRL_TABLE:
+          return excludedElementValueIds.contains(rawColumns.get("C_ELEMENTVALUE_ID"));
+        default:
+          return false;
+      }
+    }
+
+    private boolean excludeOrgSpecificElement(Map<String, String> rawColumns) {
+      String org = rawColumns.get("AD_ORG_ID");
+      if (org == null || CLIENT_LEVEL_ORG.equals(org)) {
+        return false;
+      }
+      String elementId = rawColumns.get("C_ELEMENT_ID");
+      if (elementId != null) {
+        excludedElementIds.add(elementId);
+      }
+      return true;
+    }
+
+    private boolean excludeValueOfExcludedElement(Map<String, String> rawColumns) {
+      String parentElementId = rawColumns.get("C_ELEMENT_ID");
+      if (parentElementId == null || !excludedElementIds.contains(parentElementId)) {
+        return false;
+      }
+      String valueId = rawColumns.get("C_ELEMENTVALUE_ID");
+      if (valueId != null) {
+        excludedElementValueIds.add(valueId);
+      }
+      return true;
+    }
+  }
+
+  /**
+   * Aggregates the per-build stateful row filters applied while normalizing the dataset. Each
+   * sub-filter owns mutable exclusion state, so a fresh instance is created per
+   * {@link #buildDatasetXml(String)} call and shared across all source files of that build.
+   */
+  private static final class RowExclusionFilter {
+    private final AccountElementTreeFilter accountElementTree = new AccountElementTreeFilter();
+    private final DanglingCalendarFilter danglingCalendar = new DanglingCalendarFilter();
+
+    private boolean isExcludedRow(String tableName, Map<String, String> rawColumns) {
+      // Sub-filters operate on disjoint table sets, so a row excluded by one is never relevant to
+      // the other; short-circuit evaluation keeps the unrelated filter's state untouched.
+      return accountElementTree.isExcludedRow(tableName, rawColumns)
+          || danglingCalendar.isExcludedRow(tableName, rawColumns);
+    }
+  }
+
+  /**
+   * Skips the dangling client-level fiscal calendar so only the operative calendar (remapped to the
+   * new tenant's organization) reaches the tenant.
+   *
+   * <p>GOClient ships two calendars: an organization-owned one with a full year of periods and
+   * period-control rows (the keeper, wired to the org by {@code OnboardingPeriodControlService}), and
+   * a second, client-level ({@code AD_ORG_ID = '0'}) calendar whose single year has no periods — a
+   * dangling empty calendar, the fiscal analogue of the orphan account-element tree. Importing it
+   * would create a useless second calendar in every onboarded tenant. This filter ignores it at
+   * import time <em>without modifying the source dataset</em>.
+   *
+   * <p>Unlike {@link AccountElementTreeFilter}, the cascade cannot rely on alphabetical source-file
+   * order, because it does not match the fiscal hierarchy ({@code C_CALENDAR} &lt; {@code C_PERIOD}
+   * &lt; {@code C_PERIODCONTROL} &lt; {@code C_YEAR} alphabetically, but the hierarchy is
+   * calendar → year → period → period-control). Instead the filter keys on ownership: every
+   * client-level ({@code AD_ORG_ID = '0'}) calendar, year, period and period-control row is dropped.
+   * GOClient's only client-level fiscal rows are the dangling calendar and its empty year; all real
+   * fiscal data lives at the operative organization level and is therefore kept. This rule is
+   * order-independent and remains correct even if the dangling calendar ever ships periods.
+   */
+  private static final class DanglingCalendarFilter {
+    private static final String CLIENT_LEVEL_ORG = "0";
+    private static final Set<String> FISCAL_TABLES =
+        Set.of("C_CALENDAR", "C_YEAR", "C_PERIOD", "C_PERIODCONTROL");
+
+    private boolean isExcludedRow(String tableName, Map<String, String> rawColumns) {
+      if (tableName == null || !FISCAL_TABLES.contains(tableName.toUpperCase())) {
+        return false;
+      }
+      return CLIENT_LEVEL_ORG.equals(rawColumns.get("AD_ORG_ID"));
+    }
   }
 }

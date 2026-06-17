@@ -16,6 +16,7 @@
  */
 package com.etendoerp.go.onboarding;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -23,9 +24,11 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.Test;
 import org.openbravo.base.model.Entity;
@@ -157,15 +160,20 @@ public class OnboardingDatasetNormalizerTest {
     String xml = pathBackedNormalizer().buildDatasetXml();
 
     assertFalse(xml.contains("<SALESREP_ID>"));
-    assertFalse(xml.contains("<AD_LANGUAGE>"));
   }
 
-  /** Verifies that system-scoped language rows are stripped from the normalized XML. */
+  /**
+   * Verifies that the {@code AD_LANGUAGE} column of translation (_TRL) rows is retained in the
+   * normalized XML. It is a mandatory NOT-NULL key on {@code C_ELEMENTVALUE_TRL}, so dropping it
+   * would make the import fail. The raw uppercase {@code <AD_LANGUAGE>} source tag is renamed to the
+   * property name during normalization; with the always-primitive mock the column is emitted as
+   * {@code <adLanguage>es_ES</adLanguage>}, carrying the GOClient language code.
+   */
   @Test
-  public void testNormalizerStripsSystemScopedLanguageRows() {
+  public void testNormalizerRetainsLanguageColumnOnTranslationRows() {
     String xml = pathBackedNormalizer().buildDatasetXml();
 
-    assertFalse(xml.contains("<AD_LANGUAGE>"));
+    assertTrue(xml.contains("<adLanguage>es_ES</adLanguage>"));
   }
 
 
@@ -191,6 +199,96 @@ public class OnboardingDatasetNormalizerTest {
   }
 
 
+  /**
+   * Verifies that the org-specific (orphan) account-element tree shipped by GOClient is ignored at
+   * import time while the client-level ({@code AD_ORG_ID='0'}) chart of accounts is kept. The source
+   * dataset is never modified — exclusion happens during normalization. The orphan element
+   * ({@code 91D04...}, org-owned) and its element values must be absent, while the wired element
+   * ({@code BB9B...}, client-level) survives.
+   */
+  @Test
+  public void testNormalizerExcludesOrgSpecificAccountElementTree() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    String wiredElementId = "BB9B64C5B6534A40A36F7C0F45C2CC0B";
+    String orphanElementId = "91D04C02EF8F4975B9E4F5E07543B6EA";
+
+    assertTrue(xml.contains(wiredElementId));
+    assertFalse(xml.contains(orphanElementId));
+  }
+
+  /**
+   * Verifies that non-primitive reference columns route their raw value through the injected
+   * {@link OnboardingDatasetNormalizer.ReferenceIdResolver} and emit the resolver-returned id rather
+   * than the raw code. The {@code AD_LANGUAGE} column on {@code C_ELEMENTVALUE_TRL} is an
+   * {@code ADLanguage} reference whose GOClient code ({@code es_ES}) must be translated to its
+   * installed DAL id ({@code 140}) before import. The stub resolver records the call so we can assert
+   * it was invoked with the {@code ADLanguage} target entity name.
+   */
+  @Test
+  public void testNormalizerResolvesLanguageReferenceIdViaResolver() throws Exception {
+    Path sampleDir = Files.createTempDirectory("onboarding-language-reference");
+    Files.write(sampleDir.resolve("C_ELEMENTVALUE_TRL.xml"),
+        ("<data>"
+            + "<C_ELEMENTVALUE_TRL>"
+            + "<C_ELEMENTVALUE_TRL_ID><![CDATA[ROW1]]></C_ELEMENTVALUE_TRL_ID>"
+            + "<AD_LANGUAGE><![CDATA[es_ES]]></AD_LANGUAGE>"
+            + "</C_ELEMENTVALUE_TRL>"
+            + "</data>").getBytes(StandardCharsets.UTF_8));
+
+    AtomicReference<String> observedTargetEntityName = new AtomicReference<>();
+    OnboardingDatasetNormalizer.ReferenceIdResolver recordingResolver =
+        (targetEntityName, rawValue) -> {
+          observedTargetEntityName.set(targetEntityName);
+          return "ADLanguage".equals(targetEntityName) ? "140" : rawValue;
+        };
+
+    OnboardingDatasetNormalizer normalizer = new OnboardingDatasetNormalizer(
+        sampleDir, this::mockLanguageReferenceEntityForTable, recordingResolver);
+
+    String xml = normalizer.buildDatasetXml();
+
+    assertEquals("ADLanguage", observedTargetEntityName.get());
+    assertTrue(xml.contains("<adLanguage id=\"140\""));
+    assertFalse(xml.contains("es_ES"));
+  }
+
+  /**
+   * Builds an entity whose {@code AD_LANGUAGE} column is a non-primitive {@code ADLanguage}
+   * reference, so the resolver branch in {@code appendPropertyElement} is exercised. All other
+   * columns keep the default always-primitive behavior.
+   */
+  private Entity mockLanguageReferenceEntityForTable(String tableName) {
+    Entity entity = mock(Entity.class);
+    when(entity.getName()).thenReturn(toLowerCamel(tableName));
+    when(entity.getTableName()).thenReturn(tableName);
+    when(entity.isOrganizationEnabled()).thenReturn(true);
+    when(entity.getPropertyByColumnName(anyString(), eq(false)))
+        .thenAnswer(invocation -> {
+          String columnName = invocation.getArgument(0);
+          return "AD_LANGUAGE".equals(columnName)
+              ? mockReferenceProperty(columnName, "ADLanguage")
+              : mockProperty(tableName, columnName);
+        });
+    return entity;
+  }
+
+  /**
+   * Mocks a non-primitive reference property whose target entity reports the given name, so the
+   * normalizer emits an {@code id} attribute resolved through the {@code ReferenceIdResolver}.
+   */
+  private Property mockReferenceProperty(String columnName, String targetEntityName) {
+    Property property = mock(Property.class);
+    when(property.getName()).thenReturn(toLowerCamel(columnName));
+    when(property.isId()).thenReturn(false);
+    when(property.isOneToMany()).thenReturn(false);
+    when(property.isPrimitive()).thenReturn(false);
+    Entity targetEntity = mock(Entity.class);
+    when(targetEntity.getName()).thenReturn(targetEntityName);
+    when(property.getTargetEntity()).thenReturn(targetEntity);
+    return property;
+  }
+
   private OnboardingDatasetNormalizer pathBackedNormalizer() {
     return new OnboardingDatasetNormalizer(sampleDataDir(), this::mockEntityForTable);
   }
@@ -202,6 +300,7 @@ public class OnboardingDatasetNormalizerTest {
   private Entity mockEntityForTable(String tableName) {
     Entity entity = mock(Entity.class);
     when(entity.getName()).thenReturn(toLowerCamel(tableName));
+    when(entity.getTableName()).thenReturn(tableName);
     when(entity.isOrganizationEnabled()).thenReturn(true);
     when(entity.getPropertyByColumnName(anyString(), eq(false)))
         .thenAnswer(invocation -> mockProperty(tableName, invocation.getArgument(0)));

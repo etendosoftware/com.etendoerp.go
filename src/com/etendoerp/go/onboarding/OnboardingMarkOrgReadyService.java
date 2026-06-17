@@ -44,6 +44,30 @@ public class OnboardingMarkOrgReadyService {
   private static final String ORG_READY_PROCESS_KEY = "AD_Org_Ready";
 
   /**
+   * B1 defensive provisioning. AD_Org_Ready already populates AD_ORG_TREE, but its tree INSERT
+   * filters on AD_ISORGINCLUDED_TREENODE(...) &gt; 0 and runs on its own DalConnectionProvider
+   * connection. During onboarding the new org/treenode rows are only flushed (not committed) on
+   * the DAL session, so that separate connection cannot see them and the filter yields no rows —
+   * AD_ORG_TREE stays empty for the new org. We therefore (re)insert the 2 rows a flat onboarding
+   * org needs, on the DAL session connection (same transaction, sees the flushed org), idempotently
+   * guarded so it is a no-op whenever AD_Org_Ready did populate the tree. Kept in lockstep with R1
+   * step 12 (the corrective twin for already-onboarded tenants).
+   */
+  private static final String ORG_TREE_SELF_SQL =
+      "INSERT INTO ad_org_tree (ad_org_tree_id, ad_client_id, isactive, created, createdby,"
+          + " updated, updatedby, ad_org_id, ad_parent_org_id, levelno)"
+          + " SELECT get_uuid(), :clientId, 'Y', now(), '0', now(), '0', :orgId, :orgId, 1"
+          + " WHERE NOT EXISTS (SELECT 1 FROM ad_org_tree t"
+          + " WHERE t.ad_org_id = :orgId AND t.ad_parent_org_id = :orgId)";
+
+  private static final String ORG_TREE_PARENT_SQL =
+      "INSERT INTO ad_org_tree (ad_org_tree_id, ad_client_id, isactive, created, createdby,"
+          + " updated, updatedby, ad_org_id, ad_parent_org_id, levelno)"
+          + " SELECT get_uuid(), :clientId, 'Y', now(), '0', now(), '0', :orgId, '0', 2"
+          + " WHERE NOT EXISTS (SELECT 1 FROM ad_org_tree t"
+          + " WHERE t.ad_org_id = :orgId AND t.ad_parent_org_id = '0')";
+
+  /**
    * Marks the organization as ready if not already done.
    *
    * @param clientId    target client identifier
@@ -70,7 +94,34 @@ public class OnboardingMarkOrgReadyService {
       org.setReady(true);
       saveOrganization(org);
     }
+
+    // B1: (re)provision the AD_ORG_TREE rows on the DAL session connection. See ORG_TREE_*_SQL.
+    provisionOrgTree(clientId, orgId);
+
     flushChanges();
+  }
+
+  /**
+   * Inserts the two AD_ORG_TREE rows a flat onboarding organization requires (self-reference at
+   * levelno 1, child of the root org '0' at levelno 2). Both inserts are idempotent (NOT EXISTS
+   * guards) so re-running onboarding — or a successful AD_Org_Ready that already populated the
+   * tree — never double-inserts. Without these rows AD_ISORGINCLUDED returns -1 and same-org
+   * documents fail with "lines org does not depend on header org".
+   */
+  protected void provisionOrgTree(String clientId, String orgId) {
+    runOrgTreeInsert(ORG_TREE_SELF_SQL, clientId, orgId);
+    runOrgTreeInsert(ORG_TREE_PARENT_SQL, clientId, orgId);
+  }
+
+  protected void runOrgTreeInsert(String sql, String clientId, String orgId) {
+    int rows = OBDal.getInstance().getSession()
+        .createNativeQuery(sql)
+        .setParameter("clientId", clientId)
+        .setParameter("orgId", orgId)
+        .executeUpdate();
+    if (rows > 0) {
+      log.debug("Provisioned {} AD_ORG_TREE row(s) for org {}", rows, orgId);
+    }
   }
 
   protected void executeOrgReadyProcess(String orgId, String clientId,
