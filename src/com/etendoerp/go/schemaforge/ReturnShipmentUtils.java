@@ -219,32 +219,33 @@ final class ReturnShipmentUtils {
       invoice.setPaymentTerms(sourceInvoice.getPaymentTerms());
       invoice.setPaymentMethod(sourceInvoice.getPaymentMethod());
     } else {
-      if (isSales) {
-        invoice.setPriceList(bp.getPriceList());
-        if (bp.getPriceList() != null) {
-          invoice.setCurrency(bp.getPriceList().getCurrency());
-        }
-      } else {
-        invoice.setPriceList(bp.getPurchasePricelist());
-        if (bp.getPurchasePricelist() != null) {
-          invoice.setCurrency(bp.getPurchasePricelist().getCurrency());
-        }
-      }
-      if (!isSales) {
-        if (bp.getPOPaymentTerms() == null || bp.getPOPaymentMethod() == null) {
-          throw new OBException("Business Partner is missing mandatory PO Payment Terms or PO Payment Method");
-        }
-        invoice.setPaymentTerms(bp.getPOPaymentTerms());
-        invoice.setPaymentMethod(bp.getPOPaymentMethod());
-      } else {
-        if (bp.getPaymentTerms() == null || bp.getPaymentMethod() == null) {
-          throw new OBException("Business Partner is missing mandatory Payment Terms or Payment Method");
-        }
-        invoice.setPaymentTerms(bp.getPaymentTerms());
-        invoice.setPaymentMethod(bp.getPaymentMethod());
-      }
+      applyBusinessPartnerFinancials(invoice, bp, isSales);
     }
     return invoice;
+  }
+
+  private static void applyBusinessPartnerFinancials(Invoice invoice, BusinessPartner bp, boolean isSales) {
+    if (isSales) {
+      invoice.setPriceList(bp.getPriceList());
+      if (bp.getPriceList() != null) {
+        invoice.setCurrency(bp.getPriceList().getCurrency());
+      }
+      if (bp.getPaymentTerms() == null || bp.getPaymentMethod() == null) {
+        throw new OBException("Business Partner is missing mandatory Payment Terms or Payment Method");
+      }
+      invoice.setPaymentTerms(bp.getPaymentTerms());
+      invoice.setPaymentMethod(bp.getPaymentMethod());
+    } else {
+      invoice.setPriceList(bp.getPurchasePricelist());
+      if (bp.getPurchasePricelist() != null) {
+        invoice.setCurrency(bp.getPurchasePricelist().getCurrency());
+      }
+      if (bp.getPOPaymentTerms() == null || bp.getPOPaymentMethod() == null) {
+        throw new OBException("Business Partner is missing mandatory PO Payment Terms or PO Payment Method");
+      }
+      invoice.setPaymentTerms(bp.getPOPaymentTerms());
+      invoice.setPaymentMethod(bp.getPOPaymentMethod());
+    }
   }
 
   // ---------------------------------------------------------------------------

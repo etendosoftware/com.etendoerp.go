@@ -49,7 +49,6 @@ import org.openbravo.dal.service.OBDal;
 public class PurchaseInvoiceHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(PurchaseInvoiceHeaderHandler.class);
-  private static final String FIELD_DOCUMENT_ACTION = "documentAction";
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;

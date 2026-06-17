@@ -27,6 +27,7 @@ import org.openbravo.service.db.DalConnectionProvider;
 public class DocTypeResolver {
 
   private static final Logger log = LogManager.getLogger(DocTypeResolver.class);
+  private static final String COL_DOC_TYPE_TARGET_ID = "C_DocTypeTarget_ID";
 
   private static final Pattern PAT_SUBTYPE_NOT_LIKE =
       Pattern.compile("sOSubType\\s+NOT\\s+LIKE\\s+'(\\w+)'", Pattern.CASE_INSENSITIVE);
@@ -68,7 +69,7 @@ public class DocTypeResolver {
         Entity dalEntity = ModelProvider.getInstance()
             .getEntityByTableId(adTab.getTable().getId());
         if (dalEntity != null) {
-          Property targetProp = dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID");
+          Property targetProp = dalEntity.getPropertyByColumnName(COL_DOC_TYPE_TARGET_ID);
           if (targetProp != null && clientSubmittedFields.contains(targetProp.getName())) {
             log.debug("Skipping doctype reapply — client explicitly submitted {}={}",
                 targetProp.getName(), body.optString(targetProp.getName()));
@@ -85,7 +86,13 @@ public class DocTypeResolver {
     }
   }
 
-  /** Overload for callers without client-fields context — existing behavior preserved. */
+  /**
+   * Overload for callers without client-fields context — existing behavior preserved.
+   *
+   * @param body  the JSON request body to apply the resolved doc type to
+   * @param adTab the AD tab whose table contains the doc type target column
+   * @param ctx   the NEO context carrying session and request state
+   */
   public static void reapplyDocTypeFromTabFilter(JSONObject body, Tab adTab, NeoContext ctx) {
     reapplyDocTypeFromTabFilter(body, adTab, ctx, null);
   }
@@ -95,7 +102,7 @@ public class DocTypeResolver {
    */
   private static Column findDocTypeTargetColumn(Tab adTab) {
     for (Column col : adTab.getTable().getADColumnList()) {
-      if ("C_DocTypeTarget_ID".equalsIgnoreCase(col.getDBColumnName())) {
+      if (COL_DOC_TYPE_TARGET_ID.equalsIgnoreCase(col.getDBColumnName())) {
         return col;
       }
     }
@@ -112,7 +119,7 @@ public class DocTypeResolver {
     if (dalEntity == null) {
       return;
     }
-    Property targetProp = dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID");
+    Property targetProp = dalEntity.getPropertyByColumnName(COL_DOC_TYPE_TARGET_ID);
     Property typeProp = dalEntity.getPropertyByColumnName("C_DocType_ID");
     if (targetProp != null) {
       body.put(targetProp.getName(), docTypeId);
