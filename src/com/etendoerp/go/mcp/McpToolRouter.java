@@ -540,6 +540,17 @@ public class McpToolRouter {
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String parentId = args.optString(McpConstants.PARAM_PARENT_ID, null);
+    String assetId = args.optString(McpConstants.PARAM_ASSET_ID, null);
+
+    // Build queryParams so NeoHandler implementations (e.g. AmortizationHeaderHandler)
+    // can read named request params via NeoContext.getQueryParams().
+    Map<String, String> queryParams = new HashMap<>();
+    if (parentId != null) {
+      queryParams.put(McpConstants.PARAM_PARENT_ID, parentId);
+    }
+    if (assetId != null) {
+      queryParams.put(McpConstants.PARAM_ASSET_ID, assetId);
+    }
 
     SFSpec spec = findSpecOrThrow(specName);
     SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
@@ -552,9 +563,26 @@ public class McpToolRouter {
         .adTab(adTab)
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
+        .queryParams(queryParams)
         .build();
 
     NeoResponse neoResponse = NeoDefaultsService.resolveDefaults(ctx, parentId);
+
+    // Fire the entity's afterHandle hook for the DEFAULTS endpoint, mirroring the
+    // REST path (NeoSubEndpointDispatcher → NeoHookDispatcher). This allows handlers
+    // like AmortizationHeaderHandler to compute dynamic defaults (e.g. the header name
+    // from assetId) over MCP, just as they do over REST.
+    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    if (handler != null) {
+      NeoContext hookCtx = McpHookExecutor.buildDefaultsHookContext(
+          specName, entityName, adTab, sfEntity, queryParams);
+      hookCtx.setPreviousResult(neoResponse);
+      NeoResponse afterResult = handler.afterHandle(hookCtx);
+      if (afterResult != null) {
+        neoResponse = afterResult;
+      }
+    }
+
     return McpHookExecutor.neoResponseToMcpResult(neoResponse);
   }
 

@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.mcp;
 
+import java.util.Map;
 import java.util.Set;
 
 import javax.enterprise.inject.spi.Bean;
@@ -88,6 +89,26 @@ final class McpHookExecutor {
         .sfEntity(sfEntity)
         .obContext(OBContext.getOBContext())
         .endpointType(NeoEndpointType.CRUD)
+        .build();
+  }
+
+  /**
+   * Build the {@link NeoContext} for the DEFAULTS endpoint hook.
+   * Unlike the CRUD overload, this sets {@code endpointType=DEFAULTS} and carries
+   * the query-param map (e.g. {@code assetId}) so handlers like
+   * {@code AmortizationHeaderHandler} can read them via {@link NeoContext#getQueryParams()}.
+   */
+  static NeoContext buildDefaultsHookContext(String specName, String entityName,
+      Tab adTab, SFEntity sfEntity, Map<String, String> queryParams) {
+    return NeoContext.builder()
+        .specName(specName)
+        .entityName(entityName)
+        .httpMethod("GET")
+        .adTab(adTab)
+        .sfEntity(sfEntity)
+        .obContext(OBContext.getOBContext())
+        .endpointType(NeoEndpointType.DEFAULTS)
+        .queryParams(queryParams)
         .build();
   }
 
