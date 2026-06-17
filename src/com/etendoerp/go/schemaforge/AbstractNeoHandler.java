@@ -21,6 +21,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 
@@ -67,7 +68,16 @@ abstract class AbstractNeoHandler implements NeoHandler {
    */
   @FunctionalInterface
   protected interface WriteValidator {
-    NeoResponse validate(JSONObject body) throws Exception;
+    /**
+     * Validates (and may enrich) the write request {@code body}.
+     *
+     * @param body the request body, already known to be non-null; may be mutated to inject
+     *     derived fields before persistence
+     * @return {@code null} to let the generic CRUD proceed, or a {@link NeoResponse} error to
+     *     reject the write
+     * @throws JSONException if reading or mutating the JSON body fails
+     */
+    NeoResponse validate(JSONObject body) throws JSONException;
   }
 
   /**
