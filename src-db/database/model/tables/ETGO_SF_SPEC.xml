@@ -41,10 +41,6 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="AGENT_PROMPT" primaryKey="false" required="false" type="CLOB" size="4000" autoIncrement="false">
-        <default/>
-        <onCreateDefault/>
-      </column>
       <column name="AD_WINDOW_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
         <default/>
         <onCreateDefault/>
@@ -62,6 +58,10 @@
         <onCreateDefault/>
       </column>
       <column name="AD_PROCESS_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AGENT_PROMPT" primaryKey="false" required="false" type="CLOB" size="4000" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
