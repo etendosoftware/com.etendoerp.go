@@ -81,6 +81,23 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue(xml.contains("30 Días"));
   }
 
+  /** Verifies that the user-definable transaction type lookup is kept in the curated dataset. */
+  @Test
+  public void testDefinitionIncludesTransactionTypes() {
+    assertTrue(OnboardingDatasetDefinition.getIncludedTables().contains("ETGO_TRANSACTION_TYPE"));
+  }
+
+  /** Verifies that normalized onboarding XML seeds the default transaction types from GOClient. */
+  @Test
+  public void testNormalizerIncludesDefaultTransactionTypes() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue(xml.contains("<etgoTransactionType"));
+    assertTrue(xml.contains("Comisión"));
+    assertTrue(xml.contains("Transferencia"));
+    assertTrue(xml.contains("Retención"));
+  }
+
   /** Verifies that business partner rows are excluded while the shared BP group catalog stays available. */
   @Test
   public void testDefinitionExcludesBusinessPartnerRowsButKeepsBpGroup() {
