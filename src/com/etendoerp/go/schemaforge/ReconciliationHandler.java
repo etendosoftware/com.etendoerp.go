@@ -127,6 +127,7 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String KEY_AMOUNT = "amount";
   private static final String KEY_STATUS = "status";
   private static final String STATUS_PENDING = "pending";
+  private static final String MSG_INTERNAL_SERVER_ERROR = "Internal Server Error";
 
   private static final DateTimeFormatter ISO_UTC =
       DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
@@ -217,7 +218,7 @@ public class ReconciliationHandler implements NeoHandler {
       return buildPendingLines(accountId, clientId, orgs, qp);
     } catch (Exception e) {
       log.error("Error building pendingLines for account {}", accountId, e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal Server Error");
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_SERVER_ERROR);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -306,7 +307,7 @@ public class ReconciliationHandler implements NeoHandler {
       return buildCandidates(accountId, lineId, docType);
     } catch (Exception e) {
       log.error("Error building candidates for account {}", accountId, e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal Server Error");
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_SERVER_ERROR);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -350,7 +351,7 @@ public class ReconciliationHandler implements NeoHandler {
       }
     }
     JSONObject data = new JSONObject();
-    data.put("candidates", candidates);
+    data.put(ACTION_CANDIDATES, candidates);
     return envelope(data);
   }
 
@@ -404,7 +405,7 @@ public class ReconciliationHandler implements NeoHandler {
     } catch (Exception e) {
       log.error("reconcileGroup failed", e);
       doRollbackAndClose();
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal Server Error");
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_SERVER_ERROR);
     } finally {
       OBContext.restorePreviousMode();
     }
