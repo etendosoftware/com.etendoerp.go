@@ -135,7 +135,7 @@ run_step() {
   local cmd="$5"
   local abs_log="$MODULE_DIR/$log_file"
 
-  echo "==> [$step_num/2] $step_name..."
+  echo "==> [$step_num/3] $step_name..."
 
   # NOTE: capture the exit status without tripping `set -e`. Calling
   # exec_with_progress bare would abort the whole script on a non-zero return
@@ -145,9 +145,9 @@ run_step() {
   exec_with_progress "step-${step_num}" "$run_dir" "$abs_log" "$cmd" || exit_status=$?
 
   if [ $exit_status -eq 0 ]; then
-    echo "==> [$step_num/2] $step_name... SUCCESS ✅ (${LAST_DURATION}s)"
+    echo "==> [$step_num/3] $step_name... SUCCESS ✅ (${LAST_DURATION}s)"
   else
-    echo "==> [$step_num/2] $step_name... FAILED ❌ (${LAST_DURATION}s)"
+    echo "==> [$step_num/3] $step_name... FAILED ❌ (${LAST_DURATION}s)"
     echo ""
     # If the step produced a ready-to-use handoff prompt (e.g. the Sonar gate),
     # print it IN FULL to the console so the developer sees exactly what to fix.
@@ -221,10 +221,14 @@ check_base_conflicts() {
 
 check_base_conflicts
 
-# 1. Run JUnit / Gradle tests
-run_step "1" "Running JUnit/Gradle tests" "$CORE_DIR" "tmp/pre-push/junit-tests.log" "./gradlew test --tests \"com.etendoerp.go.*\""
+# 1. Validate sourcedata XML record order + constraints (mirrors CI's
+# xml-order-check.yml). Cheap and fails fast before the expensive tests/Sonar.
+run_step "1" "Validating sourcedata XML order/constraints" "$MODULE_DIR" "tmp/pre-push/xml-check.log" "./check-etgo-xml.sh"
 
-# 2. Run SonarQube Quality Gate
+# 2. Run JUnit / Gradle tests
+run_step "2" "Running JUnit/Gradle tests" "$CORE_DIR" "tmp/pre-push/junit-tests.log" "./gradlew test --tests \"com.etendoerp.go.*\""
+
+# 3. Run SonarQube Quality Gate
 # --fail-on-gate makes run-sonar.sh exit non-zero when the Quality Gate is in
 # ERROR, so this step (and the push) is blocked exactly when CI's gate would fail.
 if [ -n "$BASE_REF" ]; then
@@ -232,7 +236,7 @@ if [ -n "$BASE_REF" ]; then
 else
   SONAR_CMD="./run-sonar.sh --all-issues --fail-on-gate"
 fi
-run_step "2" "Running SonarQube analysis" "$MODULE_DIR" "tmp/pre-push/sonar-analysis.log" "$SONAR_CMD"
+run_step "3" "Running SonarQube analysis" "$MODULE_DIR" "tmp/pre-push/sonar-analysis.log" "$SONAR_CMD"
 
 echo ""
 echo "=========================================="
