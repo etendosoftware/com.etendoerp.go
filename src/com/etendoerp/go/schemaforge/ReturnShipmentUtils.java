@@ -178,9 +178,7 @@ final class ReturnShipmentUtils {
         .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, docCategory))
         .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, isSales))
         .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true));
-    if (requireReturn) {
-      crit.add(Restrictions.eq(DocumentType.PROPERTY_RETURN, true));
-    }
+    crit.add(Restrictions.eq(DocumentType.PROPERTY_RETURN, requireReturn));
     crit.addOrderBy(DocumentType.PROPERTY_DEFAULT, false);
     List<DocumentType> candidates = crit.list();
     for (DocumentType dt : candidates) {
@@ -211,6 +209,7 @@ final class ReturnShipmentUtils {
     invoice.setAccountingDate(new Date());
     invoice.setBusinessPartner(bp);
     invoice.setPartnerAddress(doc.getPartnerAddress());
+    invoice.setDocumentNo("<*>");
     invoice.setSummedLineAmount(BigDecimal.ZERO);
     invoice.setGrandTotalAmount(BigDecimal.ZERO);
     invoice.setWithholdingamount(BigDecimal.ZERO);
@@ -231,11 +230,19 @@ final class ReturnShipmentUtils {
           invoice.setCurrency(bp.getPurchasePricelist().getCurrency());
         }
       }
-      if (bp.getPaymentTerms() == null || bp.getPaymentMethod() == null) {
-        throw new OBException("Business Partner is missing mandatory Payment Terms or Payment Method");
+      if (!isSales) {
+        if (bp.getPOPaymentTerms() == null || bp.getPOPaymentMethod() == null) {
+          throw new OBException("Business Partner is missing mandatory PO Payment Terms or PO Payment Method");
+        }
+        invoice.setPaymentTerms(bp.getPOPaymentTerms());
+        invoice.setPaymentMethod(bp.getPOPaymentMethod());
+      } else {
+        if (bp.getPaymentTerms() == null || bp.getPaymentMethod() == null) {
+          throw new OBException("Business Partner is missing mandatory Payment Terms or Payment Method");
+        }
+        invoice.setPaymentTerms(bp.getPaymentTerms());
+        invoice.setPaymentMethod(bp.getPaymentMethod());
       }
-      invoice.setPaymentTerms(bp.getPaymentTerms());
-      invoice.setPaymentMethod(bp.getPaymentMethod());
     }
     return invoice;
   }
@@ -509,6 +516,15 @@ final class ReturnShipmentUtils {
     il.setGoodsShipmentLine(retLine);
 
     BigDecimal unitPrice = il.getUnitPrice() != null ? il.getUnitPrice() : BigDecimal.ZERO;
+    if (unitPrice.compareTo(BigDecimal.ZERO) == 0 && origLine != null) {
+      unitPrice = resolvePriceFromSourceInvoiceLine(origLine.getId(), "unitPrice", BigDecimal.ZERO);
+      if (unitPrice.compareTo(BigDecimal.ZERO) != 0) {
+        BigDecimal listPrice = resolvePriceFromSourceInvoiceLine(origLine.getId(), "listPrice", unitPrice);
+        il.setUnitPrice(unitPrice);
+        il.setListPrice(listPrice);
+        il.setLineNetAmount(qty.multiply(unitPrice).setScale(precision, RoundingMode.HALF_UP));
+      }
+    }
     if (unitPrice.compareTo(BigDecimal.ZERO) == 0
         && retLine.getProduct() != null && invoice.getPriceList() != null) {
       String productId = retLine.getProduct().getId();
@@ -555,12 +571,39 @@ final class ReturnShipmentUtils {
     return null;
   }
 
+  static BigDecimal resolvePriceFromSourceInvoiceLine(String shipmentLineId,
+      String priceField, BigDecimal fallback) {
+    if (shipmentLineId == null) return fallback;
+    try {
+      String hql =
+          "SELECT il." + priceField + " FROM InvoiceLine il " +
+          "WHERE il.goodsShipmentLine.id = :lineId " +
+          "AND il.active = true " +
+          "AND il.invoice.documentStatus = 'CO' " +
+          "ORDER BY il.invoice.invoiceDate DESC";
+      List<BigDecimal> rows = OBDal.getInstance().getSession()
+          .createQuery(hql, BigDecimal.class)
+          .setParameter("lineId", shipmentLineId)
+          .setMaxResults(1)
+          .list();
+      if (!rows.isEmpty()) {
+        BigDecimal price = rows.get(0);
+        return (price != null && price.compareTo(BigDecimal.ZERO) > 0) ? price : fallback;
+      }
+      log.warn("No completed invoice line found for shipment line {} ({})", shipmentLineId, priceField);
+    } catch (Exception e) {
+      log.warn("Could not resolve {} from source invoice line {}: {}",
+          priceField, shipmentLineId, e.getMessage());
+    }
+    return fallback;
+  }
+
   static BigDecimal resolvePriceFromPriceList(String productId, String priceListId,
       String priceProperty, BigDecimal fallback) {
     if (productId == null || priceListId == null) return fallback;
     try {
       String hql =
-          "SELECT pp." + priceProperty + " FROM ProductPrice pp " +
+          "SELECT pp." + priceProperty + " FROM PricingProductPrice pp " +
           "WHERE pp.product.id = :productId " +
           "AND pp.priceListVersion.priceList.id = :priceListId " +
           "AND pp.priceListVersion.active = true " +

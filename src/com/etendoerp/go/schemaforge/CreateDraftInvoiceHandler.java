@@ -448,14 +448,29 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * sequence names are hard-coded anywhere in this class.
    */
   protected void ensureDocumentNo(Invoice invoice) {
-    if (StringUtils.isNotBlank(invoice.getDocumentNo())) {
+    String current = invoice.getDocumentNo();
+    if (StringUtils.isNotBlank(current) && !current.startsWith("<")) {
       return;
     }
     String docNo = generateInvoiceDocumentNo(invoice);
     if (StringUtils.isBlank(docNo)) {
+      // generateInvoiceDocumentNo relies on RequestContext which may be absent in
+      // backend action contexts (e.g. createReturnInvoice from NeoServlet). Fall back
+      // to the same table-level sequence approach that CreatePurchaseInvoiceHandler uses.
+      docNo = Utility.getDocumentNoConnection(
+          OBDal.getInstance().getConnection(false),
+          new DalConnectionProvider(false),
+          invoice.getClient().getId(),
+          "C_Invoice",
+          true);
+    }
+    if (StringUtils.isBlank(docNo)) {
       log.warn(
-          "Could not generate documentNo for invoice {} (docType={}, client={}). " + "Verify the DocType's DocNoSequence_ID is set, or that the table-level " + "AD_Sequence for C_Invoice exists for the client.",
-          invoice.getId(), invoice.getDocumentType() != null ? invoice.getDocumentType().getId() : "null",
+          "Could not generate documentNo for invoice {} (docType={}, client={}). "
+              + "Configure DocNoSequence_ID on the document type or activate "
+              + "AD_Sequence 'DocumentNo_C_Invoice' for the client.",
+          invoice.getId(),
+          invoice.getDocumentType() != null ? invoice.getDocumentType().getId() : "null",
           invoice.getClient() != null ? invoice.getClient().getId() : "null");
       return;
     }
