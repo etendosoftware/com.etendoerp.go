@@ -137,6 +137,13 @@ public class NeoFieldFilter {
       included.add("id");
       writable.add("id");
 
+      // Always expose the standard "active" flag. It is a base AD column, never an
+      // ETGO_SF_FIELD row, so it would otherwise be stripped from GET responses —
+      // breaking YESNO toggle columns (e.g. match-rule "Activa") — and from writes,
+      // breaking inline activate/deactivate. Kept writable so toggles persist.
+      included.add("active");
+      writable.add("active");
+
       addParentColumnMappings(sfEntity, dalEntity, included, writable);
 
       log.debug("Field filter for entity {}: {} included, {} writable",
