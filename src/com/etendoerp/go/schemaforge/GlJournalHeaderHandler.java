@@ -19,7 +19,6 @@ package com.etendoerp.go.schemaforge;
 import java.util.HashMap;
 import java.util.Map;
 
-import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
@@ -48,7 +47,6 @@ import org.openbravo.service.db.DalConnectionProvider;
  * so that process NPEs on {@code bundle.getContext().toVars()}. This hook intercepts the Complete
  * action and runs the process with a proper context, short-circuiting the broken default dispatch.
  */
-@ApplicationScoped
 @Named("glJournalHeaderHandler")
 public class GlJournalHeaderHandler implements NeoHandler {
 
