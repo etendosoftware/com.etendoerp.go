@@ -68,6 +68,8 @@ public class OnboardingDatasetNormalizer {
   private static final String SAMPLE_DATA_INDEX_RESOURCE =
       SAMPLE_DATA_RESOURCE_ROOT + "/index.txt";
   private static final String RESOURCE_PATH_SEPARATOR = "/";
+  private static final String CLASS_LOADER_REQUIRED = "classLoader is required";
+  private static final String AD_ORG_ID_COLUMN = "AD_ORG_ID";
 
   private final SourceFileProvider sourceFileProvider;
   private final EntityResolver entityResolver;
@@ -80,13 +82,13 @@ public class OnboardingDatasetNormalizer {
   }
 
   OnboardingDatasetNormalizer(ClassLoader classLoader, EntityResolver entityResolver) {
-    this(classpathSourceFileProvider(Objects.requireNonNull(classLoader, "classLoader is required")),
+    this(classpathSourceFileProvider(Objects.requireNonNull(classLoader, CLASS_LOADER_REQUIRED)),
         entityResolver);
   }
 
   OnboardingDatasetNormalizer(ClassLoader classLoader, EntityResolver entityResolver,
       ReferenceIdResolver referenceIdResolver) {
-    this(classpathSourceFileProvider(Objects.requireNonNull(classLoader, "classLoader is required")),
+    this(classpathSourceFileProvider(Objects.requireNonNull(classLoader, CLASS_LOADER_REQUIRED)),
         entityResolver, referenceIdResolver);
   }
 
@@ -214,7 +216,7 @@ public class OnboardingDatasetNormalizer {
       return;
     }
 
-    if ("AD_ORG_ID".equals(columnName)) {
+    if (AD_ORG_ID_COLUMN.equals(columnName)) {
       rowState.sourceOrganizationId = rawValue;
       return;
     }
@@ -378,7 +380,7 @@ public class OnboardingDatasetNormalizer {
   }
 
   private static SourceFileProvider classpathSourceFileProvider(ClassLoader classLoader) {
-    Objects.requireNonNull(classLoader, "classLoader is required");
+    Objects.requireNonNull(classLoader, CLASS_LOADER_REQUIRED);
     return () -> {
       List<SourceFile> files = new ArrayList<>();
       for (String fileName : readBundledSourceFileNames(classLoader)) {
@@ -615,7 +617,7 @@ public class OnboardingDatasetNormalizer {
     }
 
     private boolean excludeOrgSpecificElement(Map<String, String> rawColumns) {
-      String org = rawColumns.get("AD_ORG_ID");
+      String org = rawColumns.get(AD_ORG_ID_COLUMN);
       if (org == null || CLIENT_LEVEL_ORG.equals(org)) {
         return false;
       }
@@ -685,7 +687,7 @@ public class OnboardingDatasetNormalizer {
       if (tableName == null || !FISCAL_TABLES.contains(tableName.toUpperCase())) {
         return false;
       }
-      return CLIENT_LEVEL_ORG.equals(rawColumns.get("AD_ORG_ID"));
+      return CLIENT_LEVEL_ORG.equals(rawColumns.get(AD_ORG_ID_COLUMN));
     }
   }
 }

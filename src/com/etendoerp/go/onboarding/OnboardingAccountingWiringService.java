@@ -304,23 +304,34 @@ public class OnboardingAccountingWiringService {
         skipped++;
         continue;
       }
-      String parentTenantId = GENERIC_ORG_ID;
-      if (!GENERIC_ORG_ID.equals(node.parentId)) {
-        String parentValue = sourceIdToValue.get(node.parentId);
-        String resolvedParent = parentValue == null ? null : tenantValueToId.get(parentValue);
-        if (resolvedParent != null) {
-          parentTenantId = resolvedParent;
-        } else {
-          log.warn("Parent account for node {} (parent value {}) not found for client {};"
-              + " attaching to root", childValue, parentValue, clientId);
-        }
-      }
+      String parentTenantId = resolveParentTenantId(node, sourceIdToValue, tenantValueToId,
+          childValue, clientId);
       inserted += insertTreeNode(treeId, childTenantId, clientId, parentTenantId, node.seqno);
     }
     if (log.isDebugEnabled()) {
       log.debug("Provisioned {} AD_TREENODE row(s) ({} source nodes not present in tenant) for"
           + " client {} EV tree {}", inserted, skipped, clientId, treeId);
     }
+  }
+
+  /**
+   * Resolves the tenant {@code C_ELEMENTVALUE} id to use as a node's parent. Root nodes (and nodes
+   * whose parent account cannot be resolved in this tenant) attach to the tree root
+   * ({@code GENERIC_ORG_ID}); the unresolved case is logged so drift in the bundled data is visible.
+   */
+  private String resolveParentTenantId(SourceTreeNode node, Map<String, String> sourceIdToValue,
+      Map<String, String> tenantValueToId, String childValue, String clientId) {
+    if (GENERIC_ORG_ID.equals(node.parentId)) {
+      return GENERIC_ORG_ID;
+    }
+    String parentValue = sourceIdToValue.get(node.parentId);
+    String resolvedParent = parentValue == null ? null : tenantValueToId.get(parentValue);
+    if (resolvedParent != null) {
+      return resolvedParent;
+    }
+    log.warn("Parent account for node {} (parent value {}) not found for client {};"
+        + " attaching to root", childValue, parentValue, clientId);
+    return GENERIC_ORG_ID;
   }
 
   /** Runs one idempotent {@link #ELEMENT_TREENODE_SQL} insert; returns the rows created (0 or 1). */
@@ -368,12 +379,11 @@ public class OnboardingAccountingWiringService {
         continue;
       }
       String nodeId = textOf(row, "NODE_ID");
-      if (nodeId == null) {
-        continue;
+      if (nodeId != null) {
+        String parentId = textOf(row, "PARENT_ID");
+        nodes.add(new SourceTreeNode(nodeId, parentId == null ? GENERIC_ORG_ID : parentId,
+            parseSeqno(textOf(row, "SEQNO"))));
       }
-      String parentId = textOf(row, "PARENT_ID");
-      nodes.add(new SourceTreeNode(nodeId, parentId == null ? GENERIC_ORG_ID : parentId,
-          parseSeqno(textOf(row, "SEQNO"))));
     }
     return nodes;
   }
