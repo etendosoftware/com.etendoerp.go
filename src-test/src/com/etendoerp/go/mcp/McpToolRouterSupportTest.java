@@ -55,6 +55,7 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for {@link McpToolRouterSupport}.
@@ -1041,6 +1042,147 @@ class McpToolRouterSupportTest {
       when(table.getADColumnList()).thenReturn(java.util.List.of(col));
 
       assertNull(McpToolRouterSupport.findColumn(tab, "notMatching", null));
+    }
+  }
+
+  // ─── addButtonInfo ──────────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("addButtonInfo")
+  class AddButtonInfo {
+
+    private MockedStatic<NeoAccessHelper> accessHelperMock;
+
+    @BeforeEach
+    void setUp() {
+      accessHelperMock = mockStatic(NeoAccessHelper.class);
+    }
+
+    @AfterEach
+    void tearDown() {
+      accessHelperMock.close();
+    }
+
+    @Test
+    @DisplayName("buttonColumnWithObuiappProcessEmitsAllFields")
+    void buttonColumnWithObuiappProcessEmitsAllFields() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      org.openbravo.client.application.Process obuiappProcess = mock(
+          org.openbravo.client.application.Process.class);
+
+      when(col.getDBColumnName()).thenReturn("Processed");
+      when(col.getProcess()).thenReturn(null);
+      when(col.getOBUIAPPProcess()).thenReturn(obuiappProcess);
+      when(obuiappProcess.getName()).thenReturn("Complete Order");
+      when(obuiappProcess.getId()).thenReturn("OBUIAPP-PROC-001");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
+          fieldObj, col);
+
+      assertEquals("Y", fieldObj.getString("triggerValue"));
+      assertEquals("Processed", fieldObj.getString("action"));
+      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertEquals("OBUIAPP", fieldObj.getString("processType"));
+      assertEquals("Complete Order", fieldObj.getString("processName"));
+      assertEquals("OBUIAPP-PROC-001", fieldObj.getString("processId"));
+    }
+
+    @Test
+    @DisplayName("buttonColumnWithClassicProcessEmitsAllFields")
+    void buttonColumnWithClassicProcessEmitsAllFields() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      Process classicProcess = mock(Process.class);
+
+      when(col.getDBColumnName()).thenReturn("DocAction");
+      when(col.getProcess()).thenReturn(classicProcess);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(classicProcess.getName()).thenReturn("Post Document");
+      when(classicProcess.getId()).thenReturn("CLASSIC-PROC-001");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
+          fieldObj, col);
+
+      assertEquals("Y", fieldObj.getString("triggerValue"));
+      assertEquals("DocAction", fieldObj.getString("action"));
+      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertEquals("Classic", fieldObj.getString("processType"));
+      assertEquals("Post Document", fieldObj.getString("processName"));
+      assertEquals("CLASSIC-PROC-001", fieldObj.getString("processId"));
+    }
+
+    @Test
+    @DisplayName("buttonColumnWithNoProcessEmitsOnlyTrigger")
+    void buttonColumnWithNoProcessEmitsOnlyTrigger() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+
+      when(col.getDBColumnName()).thenReturn("Posted");
+      when(col.getProcess()).thenReturn(null);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      accessHelperMock.when(
+          () -> NeoAccessHelper.resolveFallbackObuiappProcess(col)).thenReturn(null);
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
+          fieldObj, col);
+
+      assertEquals("Y", fieldObj.getString("triggerValue"));
+      assertEquals("Posted", fieldObj.getString("action"));
+      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertFalse(fieldObj.has("processType"));
+      assertFalse(fieldObj.has("processName"));
+      assertFalse(fieldObj.has("processId"));
+    }
+
+    @Test
+    @DisplayName("buildSchemaFieldButtonIncludesTriggerValue")
+    void buildSchemaFieldButtonIncludesTriggerValue() throws Exception {
+      // Set up column with ref "28" (button)
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      org.openbravo.model.ad.domain.Reference ref = mock(
+          org.openbravo.model.ad.domain.Reference.class);
+      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
+      org.openbravo.model.ad.datamodel.Table table = mock(
+          org.openbravo.model.ad.datamodel.Table.class);
+
+      when(ref.getId()).thenReturn("28");
+      when(col.getReference()).thenReturn(ref);
+      when(col.getDBColumnName()).thenReturn("Processed");
+      when(col.getName()).thenReturn("Processed");
+      when(col.isMandatory()).thenReturn(false);
+      when(col.isUseAutomaticSequence()).thenReturn(false);
+      when(col.getDefaultValue()).thenReturn(null);
+      when(col.getProcess()).thenReturn(null);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(col.getId()).thenReturn("col-processed-id");
+      when(tab.getTable()).thenReturn(table);
+      when(table.getDBTableName()).thenReturn("C_Order");
+
+      accessHelperMock.when(
+          () -> NeoAccessHelper.resolveFallbackObuiappProcess(col)).thenReturn(null);
+
+      JSONObject result = (JSONObject) invokeStatic("buildSchemaField",
+          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
+              org.openbravo.model.ad.ui.Tab.class,
+              org.openbravo.base.model.Entity.class,
+              java.util.Map.class,
+              java.util.Set.class },
+          col, tab, null,
+          new java.util.HashMap<>(),
+          new java.util.HashSet<>());
+
+      assertEquals("button", result.getString("type"));
+      assertEquals("Y", result.getString("triggerValue"));
+      assertEquals("Processed", result.getString("action"));
+      assertEquals("neo_action", result.getString("invokeVia"));
     }
   }
 
