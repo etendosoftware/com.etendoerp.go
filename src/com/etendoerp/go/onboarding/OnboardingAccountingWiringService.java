@@ -641,6 +641,10 @@ public class OnboardingAccountingWiringService {
 
   // Tax posting accounts: required for invoice posting (the tax-due/tax-credit lines).
   // Without a C_TAX_ACCT row per tax, AcctServer fails with "Account could not be found".
+  // Taxes (C_TAX) are now system-level (ad_client_id = '0') and shared across tenants, so the
+  // source side reads from the system catalog; the C_TAX_ACCT rows themselves are client-level
+  // (ad_client_id = :clientId, ad_org_id '0' inherited from the system tax). Defaults are copied
+  // from the tenant's single C_ACCTSCHEMA_DEFAULT row.
   private static final String TAX_ACCT_SQL =
       "INSERT INTO c_tax_acct ("
       + "  c_tax_acct_id, ad_client_id, ad_org_id, isactive, created, createdby, updated, updatedby,"
@@ -648,7 +652,7 @@ public class OnboardingAccountingWiringService {
       + "SELECT get_uuid(), :clientId, t.ad_org_id, 'Y', now(), '0', now(), '0',"
       + "  t.c_tax_id, :schemaId, d.t_due_acct, d.t_credit_acct "
       + "FROM c_tax t, c_acctschema_default d "
-      + "WHERE t.ad_client_id = :clientId AND d.c_acctschema_id = :schemaId "
+      + "WHERE t.ad_client_id = '0' AND d.c_acctschema_id = :schemaId "
       + "  AND d.t_due_acct IS NOT NULL AND d.t_credit_acct IS NOT NULL "
       + "  AND NOT EXISTS (SELECT 1 FROM c_tax_acct a"
       + "    WHERE a.c_tax_id = t.c_tax_id AND a.c_acctschema_id = :schemaId)";

@@ -66,8 +66,11 @@ public final class OnboardingDatasetDefinition {
       "C_PAYMENTTERM",
       "C_PERIOD",
       "C_PERIODCONTROL",
-      "C_TAX",
-      "C_TAXCATEGORY",
+      // NOTE: C_TAX and C_TAXCATEGORY are intentionally NOT imported per-client. They are now
+      // provisioned at system level (ad_client_id = '0') and shared by every tenant; imported
+      // products and the client-level C_BP_TAXCATEGORY reference those system rows directly. The
+      // per-client posting accounts (C_TAX_ACCT) ARE still client-level and are created by
+      // OnboardingAccountingWiringService against the system taxes.
       "C_VALIDCOMBINATION",
       "C_YEAR",
       "FIN_FINACC_PAYMENTMETHOD",
