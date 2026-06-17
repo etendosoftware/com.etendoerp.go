@@ -39,6 +39,8 @@ public class OnboardingMarkOrgReadyServiceTest {
 
     assertEquals(0, service.processExecutionCount);
     assertEquals(0, service.flushCount);
+    assertEquals("No tree provisioning when org is already ready", 0,
+        service.provisionOrgTreeCount);
   }
 
   @Test
@@ -74,6 +76,10 @@ public class OnboardingMarkOrgReadyServiceTest {
     assertEquals("ORG-1", service.processOrgId);
     assertEquals("USER-1", service.processUserId);
     assertEquals("ROLE-1", service.processRoleId);
+    assertEquals("AD_ORG_TREE must be provisioned on the not-ready path", 1,
+        service.provisionOrgTreeCount);
+    assertEquals("CLIENT-1", service.provisionOrgTreeClientId);
+    assertEquals("ORG-1", service.provisionOrgTreeOrgId);
   }
 
   @Test
@@ -119,11 +125,14 @@ public class OnboardingMarkOrgReadyServiceTest {
     int processExecutionCount;
     int flushCount;
     int saveCount;
+    int provisionOrgTreeCount;
     boolean flushBeforeProcess;
     String processClientId;
     String processOrgId;
     String processUserId;
     String processRoleId;
+    String provisionOrgTreeClientId;
+    String provisionOrgTreeOrgId;
     Organization savedOrg;
 
     @Override
@@ -165,6 +174,16 @@ public class OnboardingMarkOrgReadyServiceTest {
     @Override
     protected void flushChanges() {
       flushCount++;
+    }
+
+    @Override
+    protected void provisionOrgTree(String clientId, String orgId) {
+      // The real implementation hits the DAL session (OBDal), unavailable in unit tests, so we
+      // track invocation here instead. Asserting it is called keeps the AD_ORG_TREE provisioning
+      // wired into markOrgReady; the SQL itself is covered by integration tests.
+      provisionOrgTreeCount++;
+      provisionOrgTreeClientId = clientId;
+      provisionOrgTreeOrgId = orgId;
     }
   }
 }

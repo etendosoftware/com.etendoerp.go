@@ -56,6 +56,11 @@ public class OnboardingDefaultCustomerServiceTest {
 
     assertEquals("BP-EXISTING", result);
     assertEquals(0, service.createdCount);
+    // Even for an existing customer the currency/location/contact wiring must run (idempotent
+    // top-up), so a partially set-up BP gets completed.
+    assertEquals(1, service.currencyWiringCount);
+    assertEquals(1, service.locationWiringCount);
+    assertEquals(1, service.contactWiringCount);
   }
 
   @Test
@@ -82,6 +87,9 @@ public class OnboardingDefaultCustomerServiceTest {
     private BusinessPartner existingCustomer;
     private boolean failOnCreate;
     private int createdCount;
+    private int currencyWiringCount;
+    private int locationWiringCount;
+    private int contactWiringCount;
 
     private TestableService() {
       when(client.getId()).thenReturn("CLIENT-1");
@@ -154,6 +162,28 @@ public class OnboardingDefaultCustomerServiceTest {
     @Override
     protected Organization resolveOrganization(String orgId) {
       return organization;
+    }
+
+    // The customer wiring below reaches into OBDal (currency/location/contact lookups), which is
+    // unavailable in unit tests. We track invocation instead of touching the DB; asserting these
+    // counts keeps the wiring connected to ensureDefaultCustomer (the OBDal logic itself is
+    // covered by integration tests).
+    @Override
+    protected void ensureDefaultCustomerCurrency(BusinessPartner customer) {
+      currencyWiringCount++;
+    }
+
+    @Override
+    protected org.openbravo.model.common.businesspartner.Location ensureDefaultCustomerLocation(
+        Client client, Organization organization, BusinessPartner customer) {
+      locationWiringCount++;
+      return null;
+    }
+
+    @Override
+    protected void ensureDefaultCustomerContact(Client client, Organization organization,
+        BusinessPartner customer, org.openbravo.model.common.businesspartner.Location location) {
+      contactWiringCount++;
     }
   }
 }
