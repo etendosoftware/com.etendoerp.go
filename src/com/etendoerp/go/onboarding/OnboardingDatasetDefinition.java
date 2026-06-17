@@ -58,6 +58,7 @@ public final class OnboardingDatasetDefinition {
       "C_TAX",
       "C_TAXCATEGORY",
       "C_YEAR",
+      "ETGO_TRANSACTION_TYPE",
       "FIN_FINACC_PAYMENTMETHOD",
       "FIN_FINANCIAL_ACCOUNT",
       "FIN_MATCHING_ALGORITHM",
