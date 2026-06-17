@@ -27,8 +27,11 @@ import org.junit.Test;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.service.db.ImportResult;
 
+import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
+import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
+import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingDefaultCustomerService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
@@ -65,7 +68,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     StringWriter output = new StringWriter();
 
     boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
-        "USER-1", "ROLE-1");
+        "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
     assertTrue(ready);
@@ -98,7 +101,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     StringWriter output = new StringWriter();
 
     boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
-        "USER-1", "ROLE-1");
+        "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
     assertFalse(ready);
@@ -118,7 +121,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     StringWriter output = new StringWriter();
 
     boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
-        "USER-1", "ROLE-1");
+        "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
     assertFalse(ready);
@@ -156,7 +159,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     StringWriter output = new StringWriter();
 
     boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", false,
-        "USER-1", "ROLE-1");
+        "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
     assertTrue(ready);
@@ -180,7 +183,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     StringWriter output = new StringWriter();
 
     boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
-        "USER-1", "ROLE-1");
+        "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
     assertTrue(ready);
@@ -204,7 +207,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     StringWriter output = new StringWriter();
 
     boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
-        "USER-1", "ROLE-1");
+        "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
     assertFalse(ready);
@@ -223,7 +226,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     StringWriter output = new StringWriter();
 
     boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
-        "USER-1", "ROLE-1");
+        "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
     assertTrue(ready);
@@ -250,7 +253,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     StringWriter output = new StringWriter();
 
     boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
-        "USER-1", "ROLE-1");
+        "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
     assertTrue(ready);
@@ -273,7 +276,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
 
     try {
       servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
-          "USER-1", "ROLE-1");
+          "USER-1", "ROLE-1", null);
       org.junit.Assert.fail("Expected baseline failure to propagate");
     } catch (OBException e) {
       assertEquals("broken baseline", e.getMessage());
@@ -296,7 +299,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     StringWriter output = new StringWriter();
 
     boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
-        "USER-1", "ROLE-1");
+        "USER-1", "ROLE-1", null);
 
     assertFalse(ready);
     assertEquals(0, baselineService.registerCount);
@@ -311,7 +314,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     StringWriter output = new StringWriter();
 
     boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
-        "USER-1", "ROLE-1");
+        "USER-1", "ROLE-1", null);
 
     String ndjson = output.toString();
     assertFalse(ready);
@@ -330,7 +333,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     StringWriter output = new StringWriter();
 
     boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1", true,
-        "USER-1", "ROLE-1");
+        "USER-1", "ROLE-1", null);
 
     assertFalse(ready);
     assertEquals(0, fiscalService.setupCount);
@@ -379,6 +382,40 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
       this.onboardingFiscalDataSetupService = fiscalDataSetupService;
       this.onboardingDefaultCustomerService = defaultCustomerService;
       this.onboardingBaselineService = baselineService;
+      // The accounting/period/org-info provisioning steps touch the DAL and are exercised by their
+      // own dedicated unit tests; here they are stubbed to no-ops so the dataset orchestration under
+      // test runs without a database while keeping the servlet's own progress/flow logic intact.
+      this.onboardingAccountingWiringService = new NoOpAccountingWiringService();
+      this.onboardingPeriodControlService = new NoOpPeriodControlService();
+      this.onboardingOrgInfoService = new NoOpOrgInfoService();
+    }
+  }
+
+  private static final class NoOpAccountingWiringService extends OnboardingAccountingWiringService {
+    @Override
+    public void wire(String clientId, String orgId, String adminUserId, String adminRoleId) {
+      // no-op: DAL wiring is covered by OnboardingAccountingWiringServiceTest
+    }
+
+    @Override
+    public void wireBusinessPartnerAccounts(String clientId, String orgId, String adminUserId,
+        String adminRoleId) {
+      // no-op: DAL wiring is covered by OnboardingAccountingWiringServiceTest
+    }
+  }
+
+  private static final class NoOpPeriodControlService extends OnboardingPeriodControlService {
+    @Override
+    public void wire(String clientId, String orgId, String adminUserId, String adminRoleId) {
+      // no-op: DAL wiring is covered by OnboardingPeriodControlServiceTest
+    }
+  }
+
+  private static final class NoOpOrgInfoService extends OnboardingOrgInfoService {
+    @Override
+    public void ensureOrgInfo(String clientId, String orgId, String adminUserId, String adminRoleId,
+        String countryIso, String address) {
+      // no-op: DAL wiring is covered by OnboardingOrgInfoServiceTest
     }
   }
 
