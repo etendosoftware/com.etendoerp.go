@@ -315,7 +315,7 @@ echo "==> Downloading reports..."
 
 # Issues (paginated, saved to a single file)
 python3 - <<'PYEOF'
-import json, os, urllib.request, sys
+import json, os, urllib.parse, urllib.request, sys
 
 base = os.environ["SONAR_HOST_URL"]
 token = os.environ["SONAR_TOKEN"]
@@ -479,6 +479,81 @@ if measures:
     with open(f"{report_dir}/sonar-measures.json", "w") as f:
         json.dump(measures, f, indent=2)
     print(f"    Saved: {report_dir}/sonar-measures.json")
+
+# Duplications — only when the Quality Gate fails on a duplication metric. Enumerates
+# the files carrying (new) duplicated lines and, via /api/duplications/show, the partner
+# file each duplicated block points at, so the handoff can name exactly WHERE to dedupe
+# instead of printing only the density percentage.
+def gate_has_duplication_failure(qg_doc):
+    for c in (qg_doc or {}).get("projectStatus", {}).get("conditions", []):
+        if c.get("status") == "ERROR" and "duplicated" in c.get("metricKey", ""):
+            return True
+    return False
+
+def measure_values(component):
+    # New-code metrics live in measures[].value on recent servers and in
+    # measures[].period.value on older ones — read whichever is present.
+    vals = {}
+    for x in component.get("measures", []):
+        v = x.get("value")
+        if v is None:
+            v = (x.get("period") or {}).get("value")
+        vals[x["metric"]] = v
+    return vals
+
+if gate_has_duplication_failure(qg):
+    tree = api_get(
+        f"/api/measures/component_tree?component={project}"
+        f"&metricKeys=new_duplicated_lines,duplicated_lines,duplicated_lines_density"
+        f"&qualifier=FIL&ps=500&s=metric&metricSort=new_duplicated_lines&asc=false{PR_Q}")
+    dup_files = []
+    for comp in (tree or {}).get("components", []):
+        vals = measure_values(comp)
+        new_dup = vals.get("new_duplicated_lines")
+        total_dup = vals.get("duplicated_lines")
+        try:
+            new_dup_n = float(new_dup) if new_dup is not None else 0.0
+        except ValueError:
+            new_dup_n = 0.0
+        try:
+            total_dup_n = float(total_dup) if total_dup is not None else 0.0
+        except ValueError:
+            total_dup_n = 0.0
+        # Prefer files with NEW duplicated lines (what the PR gate counts); fall back to
+        # total duplicated lines when the server does not expose the new-code breakdown.
+        if new_dup_n <= 0 and not (new_dup is None and total_dup_n > 0):
+            continue
+        dup_files.append({
+            "file": comp.get("key", "").split(":", 1)[-1],
+            "componentKey": comp.get("key", ""),
+            "new_duplicated_lines": new_dup,
+            "duplicated_lines": total_dup,
+            "duplicated_lines_density": vals.get("duplicated_lines_density"),
+        })
+    # Ask Sonar which blocks duplicate which partner files, per duplicated file.
+    for df in dup_files:
+        show = api_get(
+            f"/api/duplications/show?key={urllib.parse.quote(df['componentKey'], safe='')}{PR_Q}")
+        partners = set()
+        blocks = []
+        if show:
+            ref_to_name = {k: (v.get("name") or v.get("key", ""))
+                           for k, v in (show.get("files", {}) or {}).items()}
+            for dup in show.get("duplications", []):
+                blk = []
+                for b in dup.get("blocks", []):
+                    name = ref_to_name.get(b.get("_ref"), "")
+                    short = name.split(":", 1)[-1] if name else ""
+                    blk.append({"file": short, "from": b.get("from"), "size": b.get("size")})
+                    if short and short != df["file"]:
+                        partners.add(short)
+                blocks.append(blk)
+        df["partners"] = sorted(partners)
+        df["blocks"] = blocks
+    with open(f"{report_dir}/sonar-duplications.json", "w") as f:
+        json.dump({"total": len(dup_files), "files": dup_files}, f, indent=2)
+    print(f"    Saved: {report_dir}/sonar-duplications.json "
+          f"({len(dup_files)} {'file' if len(dup_files) == 1 else 'files'} with duplication)")
 
 # ── Summary ──
 print()
@@ -655,6 +730,12 @@ hotspots_forbidden = bool(hs_doc.get("apiForbidden", False))
 hotspot_metrics = [d for (m, d) in failing
                    if "security_hotspot" in m or "security_review" in m]
 
+# Per-file duplication detail (saved by the download step when a duplication condition
+# fails) — names the files carrying duplicated lines and the partner each block matches.
+dup_path = os.path.join(report_dir, "sonar-duplications.json")
+dup_doc = json.load(open(dup_path)) if os.path.isfile(dup_path) else {}
+dup_files = dup_doc.get("files", [])
+
 # ── Local heuristic: candidate hotspot locations from the diff ──
 # Only used when the gate flags a hotspot condition but the API would not name it
 # (403). Greps THIS push's changed files for the security-sensitive patterns Sonar
@@ -743,6 +824,29 @@ if other_failing:
     lines.append("Failing Quality Gate condition(s):")
     for d in other_failing:
         lines.append(f"  - {d}")
+    lines.append("")
+if dup_files:
+    lines.append(f"Files carrying duplicated lines ({len(dup_files)}, most new-duplicated first) —")
+    lines.append("dedupe these; a duplicated block needs only ONE copy refactored to clear it:")
+    for n, df in enumerate(dup_files, 1):
+        bits = []
+        if df.get("new_duplicated_lines") is not None:
+            bits.append(f"new dup lines: {df['new_duplicated_lines']}")
+        if df.get("duplicated_lines") is not None:
+            bits.append(f"total dup lines: {df['duplicated_lines']}")
+        if df.get("duplicated_lines_density") is not None:
+            bits.append(f"file density: {df['duplicated_lines_density']}%")
+        suffix = f"  ({', '.join(bits)})" if bits else ""
+        lines.append(f"  {n}. {df['file']}{suffix}")
+        partners = df.get("partners", [])
+        if partners:
+            lines.append(f"     duplicates with: {', '.join(partners)}")
+        for blk in df.get("blocks", [])[:3]:
+            locs = "; ".join(
+                f"{b['file']}:{b['from']}-{b['from'] + (b['size'] or 1) - 1}"
+                for b in blk if b.get("from") is not None and b.get("file"))
+            if locs:
+                lines.append(f"       block: {locs}")
     lines.append("")
 if hotspot_metrics:
     host = os.environ.get("SONAR_HOST_URL", "").rstrip("/")
