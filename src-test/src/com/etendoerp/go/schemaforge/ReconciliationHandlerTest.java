@@ -183,7 +183,7 @@ public class ReconciliationHandlerTest {
     ResultSet rs = mock(ResultSet.class);
     when(rs.next()).thenReturn(true, true, false);
     when(rs.getString("fin_bankstatementline_id")).thenReturn("l1", "l2");
-    when(rs.getTimestamp("transactiondate")).thenReturn(null);
+    when(rs.getTimestamp("datetrx")).thenReturn(null);
     when(rs.getString("description")).thenReturn("DESC1", "DESC2");
     when(rs.getBigDecimal("amount")).thenReturn(new BigDecimal("100.00"), new BigDecimal("19.51"));
 

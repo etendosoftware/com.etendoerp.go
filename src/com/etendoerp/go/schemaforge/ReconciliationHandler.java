@@ -138,11 +138,14 @@ public class ReconciliationHandler implements NeoHandler {
    */
   private static final String PENDING_LINES_SQL =
       "SELECT bsl.fin_bankstatementline_id,"
-          + "       bsl.transactiondate,"
+          + "       bsl.datetrx,"
           + "       COALESCE(bsl.description, '') AS description,"
+          + "       COALESCE(bp.name, NULLIF(bsl.bpartnername, ''), '') AS partner_name,"
+          + "       COALESCE(bsl.referenceno, '') AS reference_no,"
           + "       COALESCE(bsl.cramount, 0) - COALESCE(bsl.dramount, 0) AS amount"
           + "  FROM fin_bankstatementline bsl"
           + "  JOIN fin_bankstatement bs ON bs.fin_bankstatement_id = bsl.fin_bankstatement_id"
+          + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = bsl.c_bpartner_id"
           + " WHERE bsl.fin_finacc_transaction_id IS NULL"
           + "   AND bsl.isactive = 'Y'"
           + "   AND bs.isactive = 'Y'"
@@ -151,7 +154,7 @@ public class ReconciliationHandler implements NeoHandler {
           + "   AND bs.ad_org_id = ANY (?)";
 
   private static final String PENDING_LINES_ORDER =
-      " ORDER BY bsl.transactiondate ASC, bsl.line ASC";
+      " ORDER BY bsl.datetrx ASC, bsl.line ASC";
 
   /**
    * Available reconciliation candidates (panel right): processed finacc
@@ -229,10 +232,10 @@ public class ReconciliationHandler implements NeoHandler {
 
     StringBuilder sql = new StringBuilder(PENDING_LINES_SQL);
     if (StringUtils.isNotBlank(dateFrom)) {
-      sql.append(" AND bsl.transactiondate >= ?");
+      sql.append(" AND bsl.datetrx >= ?");
     }
     if (StringUtils.isNotBlank(dateTo)) {
-      sql.append(" AND bsl.transactiondate <= ?");
+      sql.append(" AND bsl.datetrx <= ?");
     }
     if (StringUtils.isNotBlank(q)) {
       sql.append(" AND LOWER(bsl.description) LIKE ?");
@@ -261,8 +264,10 @@ public class ReconciliationHandler implements NeoHandler {
           BigDecimal amount = nullSafe(rs.getBigDecimal(KEY_AMOUNT));
           JSONObject row = new JSONObject();
           row.put(KEY_ID, rs.getString("fin_bankstatementline_id"));
-          row.put(KEY_DATE, formatDate(rs.getTimestamp("transactiondate")));
+          row.put(KEY_DATE, formatDate(rs.getTimestamp("datetrx")));
           row.put("description", StringUtils.trimToEmpty(rs.getString("description")));
+          row.put("partnerName", StringUtils.trimToEmpty(rs.getString("partner_name")));
+          row.put("referenceNo", StringUtils.trimToEmpty(rs.getString("reference_no")));
           // T6 only lists pending lines; the status column is reserved for the
           // reconciled/suggested/by-rule states added by later tasks.
           row.put(KEY_STATUS, STATUS_PENDING);
