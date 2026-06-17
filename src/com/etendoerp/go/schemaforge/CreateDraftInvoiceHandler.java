@@ -453,7 +453,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       return;
     }
     String docNo = generateInvoiceDocumentNo(invoice);
-    if (StringUtils.isBlank(docNo)) {
+    if (StringUtils.isBlank(docNo) && invoice.getClient() != null) {
       // generateInvoiceDocumentNo relies on RequestContext which may be absent in
       // backend action contexts (e.g. createReturnInvoice from NeoServlet). Fall back
       // to the same table-level sequence approach that CreatePurchaseInvoiceHandler uses.
