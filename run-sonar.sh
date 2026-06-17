@@ -501,7 +501,7 @@ def measure_values(component):
         vals[x["metric"]] = v
     return vals
 
-if gate_has_duplication_failure(qg):
+def fetch_duplications_via_api():
     tree = api_get(
         f"/api/measures/component_tree?component={project}"
         f"&metricKeys=new_duplicated_lines,duplicated_lines,duplicated_lines_density"
@@ -550,10 +550,104 @@ if gate_has_duplication_failure(qg):
                 blocks.append(blk)
         df["partners"] = sorted(partners)
         df["blocks"] = blocks
+    return dup_files
+
+def local_duplication_scan():
+    # Fallback when the measures API is forbidden (analysis tokens often get 403 on
+    # /api/measures/*): approximate Sonar's CPD locally so the handoff can still NAME
+    # the duplicated files. Line-based (≈Sonar's ~10-line minimum block), over the
+    # module's duplication-eligible sources (src/**/*.java — src-test/ and src-db/ are
+    # excluded from duplication, mirroring the analysis config). Heuristic, not exact.
+    import glob
+    WINDOW = 10
+    repo_root = os.environ.get("REPO_ROOT") or os.getcwd()
+    base_ref = os.environ.get("BASE_REF", "")
+    java_files = glob.glob(os.path.join(repo_root, "src", "**", "*.java"), recursive=True)
+
+    def significant_lines(path):
+        # (lineno, normalized) for lines that carry real logic. Blank, brace-only and
+        # comment lines are dropped so they do not seed noise matches.
+        out = []
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for idx, raw in enumerate(fh, 1):
+                    s = raw.strip()
+                    if not s or s in ("{", "}", "};", "});", ");", ")", "(") \
+                            or s.startswith(("//", "*", "/*", "*/")):
+                        continue
+                    out.append((idx, s))
+        except OSError:
+            pass
+        return out
+
+    # window (tuple of normalized lines) -> list of (relpath, start_line, end_line)
+    seeds = {}
+    for path in java_files:
+        rel = os.path.relpath(path, repo_root)
+        sig = significant_lines(path)
+        for i in range(len(sig) - WINDOW + 1):
+            window = tuple(t for _, t in sig[i:i + WINDOW])
+            seeds.setdefault(window, []).append((rel, sig[i][0], sig[i + WINDOW - 1][0]))
+    dup_seeds = [v for v in seeds.values() if len(v) >= 2]
+
+    # Restrict reporting to blocks that touch THIS push's changed source files.
+    changed = set()
+    if base_ref:
+        try:
+            import subprocess
+            diff = subprocess.run(["git", "diff", "--name-only", f"{base_ref}...HEAD"],
+                                  cwd=repo_root, capture_output=True, text=True, check=False)
+            changed = {l.strip() for l in diff.stdout.splitlines()
+                       if l.strip().endswith(".java") and l.strip().startswith("src/")}
+        except Exception:
+            changed = set()
+
+    per_file = {}
+    for occ_list in dup_seeds:
+        files_in_seed = {o[0] for o in occ_list}
+        for (rel, s_line, e_line) in occ_list:
+            if changed and rel not in changed:
+                continue
+            entry = per_file.setdefault(rel, {"ranges": [], "partners": set()})
+            entry["ranges"].append((s_line, e_line))
+            entry["partners"].update(f for f in files_in_seed if f != rel)
+
+    def merge(ranges):
+        merged = []
+        for s, e in sorted(ranges):
+            if merged and s <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+            else:
+                merged.append([s, e])
+        return merged
+
+    results = []
+    for rel, entry in per_file.items():
+        blocks = merge(entry["ranges"])
+        results.append({
+            "file": rel,
+            "componentKey": "",
+            "new_duplicated_lines": None,
+            "duplicated_lines": sum(e - s + 1 for s, e in blocks),
+            "duplicated_lines_density": None,
+            "partners": sorted(entry["partners"]),
+            "blocks": [[{"file": rel, "from": s, "size": e - s + 1}] for s, e in blocks],
+        })
+    results.sort(key=lambda d: d["duplicated_lines"], reverse=True)
+    return results
+
+if gate_has_duplication_failure(qg):
+    dup_files = fetch_duplications_via_api()
+    dup_source = "sonar-api"
+    if not dup_files:
+        # API gave nothing (commonly a 403 on /api/measures/* for analysis tokens).
+        dup_files = local_duplication_scan()
+        dup_source = "local-heuristic"
     with open(f"{report_dir}/sonar-duplications.json", "w") as f:
-        json.dump({"total": len(dup_files), "files": dup_files}, f, indent=2)
+        json.dump({"total": len(dup_files), "source": dup_source, "files": dup_files}, f, indent=2)
     print(f"    Saved: {report_dir}/sonar-duplications.json "
-          f"({len(dup_files)} {'file' if len(dup_files) == 1 else 'files'} with duplication)")
+          f"({len(dup_files)} {'file' if len(dup_files) == 1 else 'files'} with duplication, "
+          f"source: {dup_source})")
 
 # ── Summary ──
 print()
@@ -735,6 +829,7 @@ hotspot_metrics = [d for (m, d) in failing
 dup_path = os.path.join(report_dir, "sonar-duplications.json")
 dup_doc = json.load(open(dup_path)) if os.path.isfile(dup_path) else {}
 dup_files = dup_doc.get("files", [])
+dup_source = dup_doc.get("source", "")
 
 # ── Local heuristic: candidate hotspot locations from the diff ──
 # Only used when the gate flags a hotspot condition but the API would not name it
@@ -826,8 +921,12 @@ if other_failing:
         lines.append(f"  - {d}")
     lines.append("")
 if dup_files:
-    lines.append(f"Files carrying duplicated lines ({len(dup_files)}, most new-duplicated first) —")
+    lines.append(f"Files carrying duplicated lines ({len(dup_files)}, most-duplicated first) —")
     lines.append("dedupe these; a duplicated block needs only ONE copy refactored to clear it:")
+    if dup_source == "local-heuristic":
+        lines.append("  (LOCAL HEURISTIC — SonarQube's measures API was not readable with this token,")
+        lines.append("   so duplicated blocks were detected locally over src/**/*.java with a ~10-line")
+        lines.append("   window. Line ranges are approximate; verify against the SonarQube UI.)")
     for n, df in enumerate(dup_files, 1):
         bits = []
         if df.get("new_duplicated_lines") is not None:
