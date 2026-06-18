@@ -664,6 +664,34 @@ public class CreateDraftInvoiceHandlerTest {
     }
   }
 
+  @Test
+  public void testEnsureDocNoFallbackToGetDocumentNoConnectionWhenClientPresent() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<Utility> utilityMock = Mockito.mockStatic(Utility.class)) {
+      OBDal dal = mock(OBDal.class);
+      Connection connection = mock(Connection.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection(false)).thenReturn(connection);
+
+      Client client = mock(Client.class);
+      when(client.getId()).thenReturn("CLIENT-001");
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getDocumentNo()).thenReturn(null);
+      when(invoice.getClient()).thenReturn(client);
+
+      utilityMock.when(() -> Utility.getDocumentNoConnection(
+          eq(connection), any(), eq("CLIENT-001"), eq("C_Invoice"), eq(true)))
+          .thenReturn("FALLBACK-001");
+
+      TestableHandler h = new TestableHandler();
+      h.generatedDocNo = ""; // blank primary → triggers fallback
+      h.ensureDocumentNo(invoice);
+
+      verify(invoice).setDocumentNo("FALLBACK-001");
+      verify(dal).save(invoice);
+    }
+  }
+
   // ── loadAndValidateShipments ──────────────────────────────────────────────
 
   @Test(expected = OBException.class)

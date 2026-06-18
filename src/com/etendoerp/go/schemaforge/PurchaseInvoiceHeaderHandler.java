@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -42,9 +41,9 @@ import org.openbravo.dal.service.OBDal;
  *   <li>{@code Em_Tbai_Xmlgenerator} → {@link TbaiXmlgeneratorHandler}</li>
  * </ul>
  *
- * <p>Before the Complete action (documentAction=CO), creates the total discount line so it is
- * included in the completed invoice. Delegates to {@link TotalDiscountService} via the shared
- * helper in {@link AbstractOrderHeaderHandler}.
+ * <p>Before the Complete action (documentAction=CO), creates the total discount line.
+ * Delegates to {@link TotalDiscountService} via the shared helper in
+ * {@link AbstractOrderHeaderHandler}.
  */
 @Named("purchaseInvoiceHeaderHandler")
 public class PurchaseInvoiceHeaderHandler implements NeoHandler {
