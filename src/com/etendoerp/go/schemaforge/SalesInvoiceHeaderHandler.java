@@ -85,10 +85,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse rateError = AbstractOrderHeaderHandler.validateExchangeRateBeforeComplete(context);
-    if (rateError != null) {
-      return rateError;
-    }
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       NeoResponse lockError = validateDocTypeLock(context);
       if (lockError != null) {

@@ -49,9 +49,9 @@ import org.openbravo.dal.service.OBDal;
  * standard Etendo behaviour: configuring EUR→USD at 1.16 implicitly covers USD→EUR
  * at 0.862, so clients do not need to register both directions.
  *
- * <p>This endpoint allows the frontend to perform a soft pre-validation before the user
- * completes a document whose currency differs from the org's functional currency. The hard
- * block at CO time is enforced separately by {@code AbstractOrderHeaderHandler.blockCompleteWhenNoExchangeRate()}.
+ * <p>This endpoint allows the frontend to validate the existence of an exchange rate when the
+ * user changes the document currency. Since ETP-4027 the backend no longer blocks completion on
+ * a missing rate — the validation lives entirely in the frontend at currency-change time.
  */
 class NeoExchangeRateService {
 

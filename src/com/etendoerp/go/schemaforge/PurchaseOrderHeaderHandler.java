@@ -60,10 +60,6 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
   @Override
   public NeoResponse handle(NeoContext context) {
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
-    NeoResponse blocked = AbstractOrderHeaderHandler.blockCompleteWhenNoExchangeRate(context);
-    if (blocked != null) {
-      return blocked;
-    }
     return NeoHeaderActionRouter.dispatch(
         context,
         cloneRecordHandler,
