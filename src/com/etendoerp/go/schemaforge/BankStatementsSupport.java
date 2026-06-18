@@ -28,8 +28,11 @@ import java.util.Date;
 import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.model.ModelProvider;
 
 /**
  * Stateless helpers shared across {@link BankStatementsHandler}: statement
@@ -39,6 +42,39 @@ import org.codehaus.jettison.json.JSONObject;
  * limit; every method here is pure (no DB, no OBContext) and trivially testable.
  */
 public final class BankStatementsSupport {
+
+  private static final Logger log = LogManager.getLogger(BankStatementsSupport.class);
+
+  // Cached result of the C43 column existence check (null = not yet checked).
+  private static volatile Boolean c43DescColumn;
+
+  /**
+   * SQL expression for the description column of {@code FIN_BankStatementLine}.
+   * Prefers {@code bsl.description}; when the optional C43 module column
+   * {@code bsl.em_c43_description} exists (detected via {@link ModelProvider},
+   * database-agnostic), falls back to it so C43-imported statements show the
+   * concept text that Classic stores in that extension column.
+   *
+   * <p>Result is cached after the first call (the module set is fixed at runtime).
+   */
+  public static String descriptionExpr() {
+    Boolean cached = c43DescColumn;
+    if (cached == null) {
+      try {
+        cached = ModelProvider.getInstance()
+            .getEntityByTableName("FIN_BankStatementLine")
+            .getProperties().stream()
+            .anyMatch(p -> "em_c43_description".equalsIgnoreCase(p.getColumnName()));
+      } catch (Exception e) {
+        log.debug("Could not check C43 column existence via ModelProvider; defaulting to false", e);
+        cached = Boolean.FALSE;
+      }
+      c43DescColumn = cached;
+    }
+    return Boolean.TRUE.equals(cached)
+        ? "COALESCE(NULLIF(TRIM(bsl.description), ''), NULLIF(TRIM(bsl.em_c43_description), ''), '')"
+        : "COALESCE(bsl.description, '')";
+  }
 
   private static final DateTimeFormatter ISO_UTC =
       DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);

@@ -23,7 +23,6 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
@@ -496,12 +495,6 @@ public class BankStatementsHandlerTest {
     ResultSet rs = mock(ResultSet.class);
 
     when(conn.prepareStatement(anyString())).thenReturn(ps);
-    // C43 column-existence probe gets its own mock (does not consume the data RS).
-    PreparedStatement colPs = mock(PreparedStatement.class);
-    ResultSet colRs = mock(ResultSet.class);
-    when(colRs.next()).thenReturn(false);
-    when(colPs.executeQuery()).thenReturn(colRs);
-    when(conn.prepareStatement(contains("information_schema"))).thenReturn(colPs);
     when(ps.executeQuery()).thenReturn(rs);
     when(rs.next()).thenReturn(true, false);
     when(rs.getString("fin_bankstatementline_id")).thenReturn("line-1");
@@ -536,12 +529,6 @@ public class BankStatementsHandlerTest {
     ResultSet rs = mock(ResultSet.class);
 
     when(conn.prepareStatement(anyString())).thenReturn(ps);
-    // C43 column-existence probe gets its own mock (does not consume the data RS).
-    PreparedStatement colPs = mock(PreparedStatement.class);
-    ResultSet colRs = mock(ResultSet.class);
-    when(colRs.next()).thenReturn(false);
-    when(colPs.executeQuery()).thenReturn(colRs);
-    when(conn.prepareStatement(contains("information_schema"))).thenReturn(colPs);
     when(ps.executeQuery()).thenReturn(rs);
     when(rs.next()).thenReturn(true, false);
     when(rs.getLong("line")).thenReturn(10L);

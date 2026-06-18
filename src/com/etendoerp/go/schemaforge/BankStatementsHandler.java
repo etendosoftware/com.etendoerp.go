@@ -294,50 +294,9 @@ public class BankStatementsHandler implements NeoHandler {
           + "   AND bsl.isactive = 'Y'"
           + " ORDER BY bsl.line ASC";
 
-  // Cached existence of the optional C43 module column on FIN_BankStatementLine.
-  private static volatile Boolean c43DescColumn;
-
   /** Builds {@link #LINES_SQL_HEAD} with the runtime-resolved description column. */
-  private static String linesSqlHead(Connection conn) {
-    return String.format(LINES_SQL_HEAD, descriptionExpr(conn));
-  }
-
-  /**
-   * Description column expression. Prefers the standard {@code description}; when
-   * the optional C43 module column {@code em_c43_description} exists, falls back
-   * to it (C43 statements store the concept text there). Environments without the
-   * C43 module just use {@code bsl.description}.
-   */
-  private static String descriptionExpr(Connection conn) {
-    return hasC43DescColumn(conn)
-        ? "COALESCE(NULLIF(TRIM(bsl.description), ''), NULLIF(TRIM(bsl.em_c43_description), ''))"
-        : "bsl.description";
-  }
-
-  private static boolean hasC43DescColumn(Connection conn) {
-    Boolean cached = c43DescColumn;
-    if (cached != null) {
-      return cached;
-    }
-    boolean exists = columnExists(conn, "fin_bankstatementline", "em_c43_description");
-    c43DescColumn = exists;
-    return exists;
-  }
-
-  /** True if {@code table.column} exists (case-insensitive), via information_schema. */
-  private static boolean columnExists(Connection conn, String table, String column) {
-    String sql = "SELECT 1 FROM information_schema.columns"
-        + " WHERE lower(table_name) = lower(?) AND lower(column_name) = lower(?)";
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, table);
-      ps.setString(2, column);
-      try (ResultSet rs = ps.executeQuery()) {
-        return rs.next();
-      }
-    } catch (Exception e) {
-      log.debug("columnExists check failed for {}.{}", table, column, e);
-      return false;
-    }
+  private static String linesSqlHead() {
+    return String.format(LINES_SQL_HEAD, BankStatementsSupport.descriptionExpr());
   }
 
   @Override
@@ -1019,7 +978,7 @@ public class BankStatementsHandler implements NeoHandler {
     // Session — DO NOT close it here. Only the PreparedStatement and
     // ResultSet go inside try-with-resources.
     Connection conn = OBDal.getInstance().getConnection();
-    String sql = linesSqlHead(conn) + LINES_SQL_SINGLE_TAIL;
+    String sql = linesSqlHead() + LINES_SQL_SINGLE_TAIL;
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, statementId);
       try (ResultSet rs = ps.executeQuery()) {
@@ -1171,7 +1130,7 @@ public class BankStatementsHandler implements NeoHandler {
     JSONArray arr = new JSONArray();
     // Connection is managed by the DAL's Hibernate Session; don't close it.
     Connection conn = OBDal.getInstance().getConnection();
-    String sql = linesSqlHead(conn) + LINES_SQL_SINGLE_TAIL;
+    String sql = linesSqlHead() + LINES_SQL_SINGLE_TAIL;
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, statementId);
       try (ResultSet rs = ps.executeQuery()) {
@@ -1199,7 +1158,7 @@ public class BankStatementsHandler implements NeoHandler {
     String placeholders = String.join(",", Collections.nCopies(statementIds.size(), "?"));
     // Connection is managed by the DAL's Hibernate Session; don't close it.
     Connection conn = OBDal.getInstance().getConnection();
-    String sql = linesSqlHead(conn)
+    String sql = linesSqlHead()
         + " WHERE bsl.isactive = 'Y'"
         + "   AND bsl.fin_bankstatement_id IN (" + placeholders + ")"
         + " ORDER BY bsl.fin_bankstatement_id, bsl.line ASC";
