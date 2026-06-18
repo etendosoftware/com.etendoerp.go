@@ -39,7 +39,6 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -54,7 +53,6 @@ import org.junit.runner.RunWith;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
-import org.openbravo.advpaymentmngt.dao.MatchTransactionDao;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
@@ -74,8 +72,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
  * {@code matchBankStatementLine}, {@code processReconciliation},
  * {@code accessibleOrgs}, {@code doRollbackAndClose}) so every path runs without
  * a database or a live OBContext. SQL-bound paths mock {@link OBDal} statically
- * and drive a fake {@link ResultSet}. The static {@link MatchTransactionDao} is
- * mocked for the suggested-marking assertions.
+ * and drive a fake {@link ResultSet}.
  *
  * <p>Scenarios:
  * <ul>
@@ -290,29 +287,25 @@ public class ReconciliationHandlerTest {
     assertTrue(handler.suggestedTransactionIds(ACC_ID, "").isEmpty());
   }
 
-  /** With a lineId the DAO is composed with the line's signed amount and reference. */
+  /**
+   * When the account has no matching algorithm configured, the standard-algorithm path is skipped
+   * and no suggestion is produced (graceful, no crash) — the Classic algorithm is never bypassed
+   * with relaxed criteria.
+   */
   @Test
-  public void testSuggestedTransactionIdsComposesDao() {
+  public void testSuggestedTransactionIdsNoAlgorithmReturnsEmpty() {
     FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
-    when(line.getCramount()).thenReturn(new BigDecimal("100.00"));
-    when(line.getDramount()).thenReturn(BigDecimal.ZERO);
-    when(line.getTransactionDate()).thenReturn(new Date());
-    when(line.getReferenceNo()).thenReturn("REF-1");
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getMatchingAlgorithm()).thenReturn(null);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
 
-    FIN_FinaccTransaction match = mock(FIN_FinaccTransaction.class);
-    when(match.getId()).thenReturn("t1");
-
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<MatchTransactionDao> dao = mockStatic(MatchTransactionDao.class)) {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(FIN_BankStatementLine.class, LINE_ID)).thenReturn(line);
-      dao.when(() -> MatchTransactionDao.getMatchingFinancialTransaction(
-          eq(ACC_ID), any(), eq("REF-1"), eq(new BigDecimal("100.00")), any()))
-          .thenReturn(Arrays.asList(match));
 
       Set<String> ids = handler.suggestedTransactionIds(ACC_ID, LINE_ID);
-      assertTrue(ids.contains("t1"));
+      assertTrue(ids.isEmpty());
     }
   }
 

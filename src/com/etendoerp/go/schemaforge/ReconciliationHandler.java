@@ -44,10 +44,10 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.advpaymentmngt.dao.AdvPaymentMngtDao;
-import org.openbravo.advpaymentmngt.dao.MatchTransactionDao;
 import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.advpaymentmngt.utility.APRM_MatchingUtility;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
+import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
 import org.openbravo.advpaymentmngt.utility.FIN_Utility;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.secureApp.VariablesSecureApp;
@@ -199,8 +199,8 @@ public class ReconciliationHandler implements NeoHandler {
   /**
    * Available reconciliation candidates (panel right): processed finacc
    * transactions of the account not yet reconciled. Joins FIN_Payment +
-   * C_BPartner for display info. Mirrors the availability predicate used by
-   * {@link MatchTransactionDao#getMatchingFinancialTransaction}.
+   * C_BPartner for display info. Mirrors the availability predicate used by the
+   * standard Etendo matching DAO (unreconciled, processed, status &lt;&gt; 'RPPC').
    */
   private static final String CANDIDATES_SQL =
       "SELECT ft.fin_finacc_transaction_id,"
@@ -408,13 +408,12 @@ public class ReconciliationHandler implements NeoHandler {
   }
 
   /**
-   * Returns the ids of the finacc transactions suggested for the selected
-   * bank-statement line, or an empty set when no line is selected. Composes
-   * {@link MatchTransactionDao#getMatchingFinancialTransaction} matching purely
-   * on the signed amount: the bank-statement line date almost never equals the
-   * finacc transaction date (and references rarely match exactly either), so
-   * forcing those would yield zero suggestions. Amount equality is the reliable
-   * signal — the user confirms the rest visually before reconciling.
+   * Returns the id of the finacc transaction the <b>standard Etendo matching algorithm</b>
+   * suggests for the selected bank-statement line, or an empty set when no line is selected or
+   * the algorithm finds no match. Delegates to the account's configured
+   * {@link FIN_MatchingTransaction} exactly as Classic does (amount + date / reference / business
+   * partner per the algorithm's own flags), so it returns at most ONE best match — never every
+   * same-amount transaction. The Classic algorithm is used as-is; no criteria are relaxed here.
    */
   Set<String> suggestedTransactionIds(String accountId, String lineId) {
     Set<String> ids = new HashSet<>();
@@ -425,12 +424,21 @@ public class ReconciliationHandler implements NeoHandler {
     if (line == null) {
       return ids;
     }
-    BigDecimal amount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
-    // Match by amount only (null date, empty reference) so same-amount candidates surface.
-    List<FIN_FinaccTransaction> matches = MatchTransactionDao.getMatchingFinancialTransaction(
-        accountId, null, "", amount, new ArrayList<>());
-    for (FIN_FinaccTransaction match : matches) {
-      ids.add(match.getId());
+    FIN_FinancialAccount account = loadAccount(accountId);
+    if (account == null || account.getMatchingAlgorithm() == null
+        || StringUtils.isBlank(account.getMatchingAlgorithm().getJavaClassName())) {
+      return ids;
+    }
+    try {
+      FIN_MatchingTransaction matcher =
+          new FIN_MatchingTransaction(account.getMatchingAlgorithm().getJavaClassName());
+      FIN_MatchedTransaction matched = matcher.match(line, new ArrayList<>());
+      if (matched != null && matched.getTransaction() != null
+          && !FIN_MatchedTransaction.NOMATCH.equals(matched.getMatchLevel())) {
+        ids.add(matched.getTransaction().getId());
+      }
+    } catch (Exception e) {
+      log.debug("Standard matching algorithm failed for line {}: {}", lineId, e.getMessage());
     }
     return ids;
   }
@@ -641,8 +649,7 @@ public class ReconciliationHandler implements NeoHandler {
     int willCreate = 0;
 
     for (FIN_BankStatementLine line : pendingLines) {
-      // Pass 1 (1:1): use the same MatchTransactionDao path as the candidates panel.
-      // This does not require the account to have a MatchingAlgorithm configured in AD.
+      // Pass 1 (1:1): the standard Etendo matching algorithm suggests at most one transaction.
       Set<String> suggested = suggestedTransactionIds(accountId, line.getId());
       // Skip transactions already claimed by a previous line in this preview run.
       suggested.removeAll(usedTxnIds);
