@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge.webhooks;
 import java.util.Date;
 import java.util.Map;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.provider.OBProvider;
@@ -131,7 +132,7 @@ public class SFUpsertField extends BaseWebhookService {
     }
     if (parameter.containsKey("AgentPrompt")) {
       String agentPrompt = parameter.get("AgentPrompt");
-      field.setAgentPrompt(agentPrompt == null || agentPrompt.isEmpty() ? null : agentPrompt);
+      field.setAgentPrompt(StringUtils.trimToNull(agentPrompt));
     }
     if (parameter.containsKey("JavaQualifier")) {
       field.setJavaQualifier(parameter.get("JavaQualifier"));

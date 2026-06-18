@@ -102,7 +102,7 @@ public class SFUpsertSpec extends BaseWebhookService {
       }
 
       if (agentPrompt != null) {
-        spec.setAgentPrompt(agentPrompt.isEmpty() ? null : agentPrompt);
+        spec.setAgentPrompt(StringUtils.trimToNull(agentPrompt));
       }
 
       OBDal.getInstance().save(spec);
