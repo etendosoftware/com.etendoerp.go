@@ -19,9 +19,13 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mockStatic;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.base.secureApp.VariablesSecureApp;
 
 /**
  * Unit tests for {@link GlJournalHeaderHandler}.
@@ -183,5 +187,89 @@ public class GlJournalHeaderHandlerTest {
         .requestBody(body)
         .build();
     assertNull(handler.handle(ctx));
+  }
+
+  // ─── isCompleteAction(): fieldValues present with non-CO docAction ─────────
+
+  @Test
+  public void handleActionWithFieldValuesDocActionNotCO() throws Exception {
+    // isCompleteAction() ternary true-branch: fieldValues present but docAction ≠ CO → false.
+    // httpMethod=GET so handle() short-circuits before any DB call.
+    JSONObject fieldValues = new JSONObject();
+    fieldValues.put("documentAction", "VD");
+    JSONObject body = new JSONObject();
+    body.put("fieldValues", fieldValues);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("documentAction")
+        .httpMethod("GET")
+        .requestBody(body)
+        .build();
+    assertNull(handler.handle(ctx));
+  }
+
+  // ─── completeJournal(): exception path → 500 ─────────────────────────────
+
+  @Test
+  public void handleCompleteActionExceptionReturns500() throws Exception {
+    // Complete action with non-empty recordId; buildVariablesSecureApp throws →
+    // completeJournal() catch block returns 500.
+    JSONObject body = new JSONObject();
+    body.put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("documentAction")
+        .httpMethod("POST")
+        .requestBody(body)
+        .recordId("GL-JOURNAL-001")
+        .build();
+    try (MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class)) {
+      neoMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenThrow(new RuntimeException("session unavailable"));
+      NeoResponse response = handler.handle(ctx);
+      assertEquals(500, response.getHttpStatus());
+    }
+  }
+
+  // ─── handle(): POST injection — session has no schema → warn path ─────────
+
+  @Test
+  public void handlePostInjectionAcctSchemaEmpty() throws Exception {
+    // buildVariablesSecureApp returns a VSA with no $C_AcctSchema_ID in session →
+    // handler logs warn and returns null without modifying the body.
+    JSONObject body = new JSONObject();
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+    VariablesSecureApp vars = new VariablesSecureApp("u", "c", "o", "r", "en_US");
+    try (MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class)) {
+      neoMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenReturn(vars);
+      assertNull(handler.handle(ctx));
+    }
+  }
+
+  // ─── handle(): POST injection — session has schema → inject into body ─────
+
+  @Test
+  public void handlePostInjectsAcctSchemaId() throws Exception {
+    // buildVariablesSecureApp returns a VSA with $C_AcctSchema_ID set → handler
+    // injects the value into the request body and returns null.
+    JSONObject body = new JSONObject();
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+    VariablesSecureApp vars = new VariablesSecureApp("u", "c", "o", "r", "en_US");
+    vars.setSessionValue("$C_AcctSchema_ID", "ACCT-SCHEMA-001");
+    try (MockedStatic<NeoDefaultsService> neoMock = mockStatic(NeoDefaultsService.class)) {
+      neoMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenReturn(vars);
+      assertNull(handler.handle(ctx));
+      assertEquals("ACCT-SCHEMA-001", body.getString("accountingSchema"));
+    }
   }
 }
