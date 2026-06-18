@@ -569,6 +569,200 @@ class NeoButtonActionHelperTest {
     }
   }
 
+  // ── executeButtonActionCore ───────────────────────────────────────────
+
+  @Nested
+  @DisplayName("executeButtonActionCore")
+  class ExecuteButtonActionCore {
+
+    @Test
+    @DisplayName("should return 404 when action not found")
+    void shouldReturn404WhenActionNotFound() throws Exception {
+      SFEntity entity = mock(SFEntity.class);
+      doReturn("entity1").when(entity).getId();
+      setupFieldCriteria(Collections.emptyList());
+
+      NeoResponse response = NeoButtonActionHelper.executeButtonActionCore(
+          entity, "rec1", "nonExistent", null);
+
+      assertEquals(HttpServletResponse.SC_NOT_FOUND, response.getHttpStatus());
+      assertTrue(response.getBody().getString("error").contains("Action not found"));
+    }
+
+    @Test
+    @DisplayName("should return 400 when field is not a button")
+    void shouldReturn400WhenFieldNotButton() throws Exception {
+      SFEntity entity = mock(SFEntity.class);
+      doReturn("entity1").when(entity).getId();
+
+      Column nonBtnColumn = mock(Column.class);
+      Reference nonButtonReference = createNonButtonReference();
+      when(nonBtnColumn.getDBColumnName()).thenReturn("Name");
+      when(nonBtnColumn.getReference()).thenReturn(nonButtonReference);
+      SFField field = createMockField(nonBtnColumn, "name");
+
+      List<SFField> fields = new ArrayList<>();
+      fields.add(field);
+      setupFieldCriteria(fields);
+
+      NeoResponse response = NeoButtonActionHelper.executeButtonActionCore(
+          entity, "rec1", "Name", null);
+
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, response.getHttpStatus());
+      assertTrue(response.getBody().getString("error").contains("not a button"));
+    }
+
+    @Test
+    @DisplayName("should return 400 when no process linked to button")
+    void shouldReturn400WhenNoProcess() throws Exception {
+      SFEntity entity = mock(SFEntity.class);
+      doReturn("entity1").when(entity).getId();
+      when(entity.getADTab()).thenReturn(null);
+
+      Column btnColumn = createButtonColumn("Processing", null, null);
+      SFField field = createMockField(btnColumn, "processNow");
+
+      List<SFField> fields = new ArrayList<>();
+      fields.add(field);
+      setupFieldCriteria(fields);
+
+      accessHelperMock.when(() -> NeoAccessHelper.resolveFallbackObuiappProcess(btnColumn))
+          .thenReturn(null);
+
+      NeoResponse response = NeoButtonActionHelper.executeButtonActionCore(
+          entity, "rec1", "Processing", new JSONObject());
+
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, response.getHttpStatus());
+      assertTrue(response.getBody().getString("error").contains("No process linked"));
+    }
+
+    @Test
+    @DisplayName("should return 403 when OBUIAPP process access denied")
+    void shouldReturn403WhenObuiappAccessDenied() throws Exception {
+      SFEntity entity = mock(SFEntity.class);
+      doReturn("entity1").when(entity).getId();
+      when(entity.getADTab()).thenReturn(null);
+
+      org.openbravo.client.application.Process obuiProc = mock(
+          org.openbravo.client.application.Process.class);
+      doReturn("proc1").when(obuiProc).getId();
+      when(obuiProc.getName()).thenReturn("TestProc");
+
+      Column btnColumn = createButtonColumn("DocAction", null, obuiProc);
+      SFField field = createMockField(btnColumn, "documentAction");
+
+      List<SFField> fields = new ArrayList<>();
+      fields.add(field);
+      setupFieldCriteria(fields);
+
+      accessHelperMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess("proc1"))
+          .thenReturn(false);
+
+      NeoResponse response = NeoButtonActionHelper.executeButtonActionCore(
+          entity, "rec1", "DocAction", null);
+
+      assertEquals(HttpServletResponse.SC_FORBIDDEN, response.getHttpStatus());
+      assertTrue(response.getBody().getString("error").contains("Access denied"));
+    }
+
+    @Test
+    @DisplayName("should return 403 when Classic process access denied")
+    void shouldReturn403WhenClassicAccessDenied() throws Exception {
+      SFEntity entity = mock(SFEntity.class);
+      doReturn("entity1").when(entity).getId();
+      when(entity.getADTab()).thenReturn(null);
+
+      Process classicProc = mock(Process.class);
+      doReturn("cproc1").when(classicProc).getId();
+      when(classicProc.getName()).thenReturn("ClassicProc");
+
+      Column btnColumn = createButtonColumn("Posted", classicProc, null);
+      SFField field = createMockField(btnColumn, "posted");
+
+      List<SFField> fields = new ArrayList<>();
+      fields.add(field);
+      setupFieldCriteria(fields);
+
+      accessHelperMock.when(() -> NeoAccessHelper.hasProcessAccess("cproc1"))
+          .thenReturn(false);
+
+      NeoResponse response = NeoButtonActionHelper.executeButtonActionCore(
+          entity, "rec1", "Posted", null);
+
+      assertEquals(HttpServletResponse.SC_FORBIDDEN, response.getHttpStatus());
+      assertTrue(response.getBody().getString("error").contains("Access denied"));
+    }
+
+    @Test
+    @DisplayName("should execute OBUIAPP process successfully and return 200")
+    void shouldExecuteObuiappSuccessfully() throws Exception {
+      SFEntity entity = mock(SFEntity.class);
+      doReturn("entity1").when(entity).getId();
+      when(entity.getADTab()).thenReturn(null);
+
+      org.openbravo.client.application.Process obuiProc = mock(
+          org.openbravo.client.application.Process.class);
+      doReturn("proc1").when(obuiProc).getId();
+      when(obuiProc.getName()).thenReturn("TestProc");
+
+      Column btnColumn = createButtonColumn("DocAction", null, obuiProc);
+      SFField field = createMockField(btnColumn, "documentAction");
+
+      List<SFField> fields = new ArrayList<>();
+      fields.add(field);
+      setupFieldCriteria(fields);
+
+      accessHelperMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess("proc1"))
+          .thenReturn(true);
+
+      NeoResponse successResponse = NeoResponse.ok(new JSONObject("{\"status\":\"success\",\"message\":\"Done\"}"));
+      processServiceMock.when(
+          () -> NeoProcessService.executeObuiappProcess(
+              eq(obuiProc), any(JSONObject.class)))
+          .thenReturn(successResponse);
+
+      NeoResponse response = NeoButtonActionHelper.executeButtonActionCore(
+          entity, "rec1", "DocAction", null);
+
+      assertEquals(200, response.getHttpStatus());
+      assertEquals("success", response.getBody().getString("status"));
+    }
+
+    @Test
+    @DisplayName("should treat null params as empty object without NPE")
+    void shouldHandleNullParamsGracefully() throws Exception {
+      SFEntity entity = mock(SFEntity.class);
+      doReturn("entity1").when(entity).getId();
+      when(entity.getADTab()).thenReturn(null);
+
+      Process classicProc = mock(Process.class);
+      doReturn("cproc2").when(classicProc).getId();
+      when(classicProc.getName()).thenReturn("ClassicProc");
+
+      Column btnColumn = createButtonColumn("Posted", classicProc, null);
+      SFField field = createMockField(btnColumn, "posted");
+
+      List<SFField> fields = new ArrayList<>();
+      fields.add(field);
+      setupFieldCriteria(fields);
+
+      accessHelperMock.when(() -> NeoAccessHelper.hasProcessAccess("cproc2"))
+          .thenReturn(true);
+
+      NeoResponse successResponse = NeoResponse.ok(new JSONObject("{\"status\":\"success\"}"));
+      processServiceMock.when(
+          () -> NeoProcessService.executeProcess(
+              eq(classicProc), any(JSONObject.class)))
+          .thenReturn(successResponse);
+
+      // null params — should not throw NPE
+      NeoResponse response = NeoButtonActionHelper.executeButtonActionCore(
+          entity, "rec1", "Posted", null);
+
+      assertEquals(200, response.getHttpStatus());
+    }
+  }
+
   // ── findButtonColumn ──────────────────────────────────────────────────
 
   @Nested

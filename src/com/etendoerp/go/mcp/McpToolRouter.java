@@ -45,6 +45,7 @@ import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.BatchService;
+import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
@@ -82,6 +83,7 @@ public class McpToolRouter {
 
   private static final Logger log = LogManager.getLogger(McpToolRouter.class);
   private static final String ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX = "' for current role";
+
 
   /**
    * Route a tool call to its handler.
@@ -125,6 +127,8 @@ public class McpToolRouter {
             return handleSchema(specName, arguments);
           case "neo_batch":
             return handleBatch(arguments);
+          case "neo_action":
+            return handleAction(specName, arguments);
           default:
             // Check if it's a report tool (generate_*)
             if (toolName.startsWith(McpConstants.GENERATE_PREFIX)) {
@@ -348,7 +352,7 @@ public class McpToolRouter {
     JSONArray missingFields = validateMandatoryFields(filteredBody, adTab, dalEntity);
     if (missingFields.length() > 0) {
       JSONObject errorObj = new JSONObject();
-      errorObj.put("error", "Missing required fields that could not be auto-resolved");
+      errorObj.put(McpConstants.KEY_ERROR, "Missing required fields that could not be auto-resolved");
       errorObj.put("missingFields", missingFields);
       errorObj.put("hint", "Provide these fields in the request, or use neo_selectors to find valid values for foreignKey fields");
       return wrapAsErrorContent(errorObj.toString(2));
@@ -711,6 +715,51 @@ public class McpToolRouter {
     }
   }
 
+  // ── neo_action ────────────────────────────────────────────────────────
+
+  /**
+   * Fire a button action on a record and return the structured process result.
+   * <p>
+   * Resolves the SFEntity from spec+entity arguments, validates the action column
+   * exists (delegating to {@link NeoButtonActionHelper#executeButtonActionCore}),
+   * then maps the NeoResponse body to MCP result keys:
+   * <ul>
+   *   <li>{@code processResult} — status from the process response (success|error|warning)</li>
+   *   <li>{@code processMessage} — translated message from the process response</li>
+   * </ul>
+   * A validation or process error surfaces as {@code processResult: "error"} with
+   * a descriptive {@code processMessage} — it is never swallowed.
+   */
+  JSONObject handleAction(String specName, JSONObject args) throws Exception {
+    validateArgs(args, McpConstants.PARAM_ENTITY, "id", "action");
+
+    String entityName = args.getString(McpConstants.PARAM_ENTITY);
+    String recordId = args.getString("id");
+    String actionName = args.getString("action");
+    JSONObject parameters = args.optJSONObject(McpConstants.PARAM_PARAMETERS);
+
+    SFSpec spec = findSpecOrThrow(specName);
+    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+
+    NeoResponse neoResponse = NeoButtonActionHelper.executeButtonActionCore(
+        sfEntity, recordId, actionName, parameters);
+
+    JSONObject actionResult = McpToolRouterSupport.mapNeoResponseToActionResult(neoResponse);
+
+    if (neoResponse.getHttpStatus() >= 400) {
+      if (!actionResult.has(McpConstants.KEY_PROCESS_RESULT)) {
+        actionResult.put(McpConstants.KEY_PROCESS_RESULT, McpConstants.KEY_ERROR);
+      }
+      if (!actionResult.has(McpConstants.KEY_PROCESS_MESSAGE)) {
+        actionResult.put(McpConstants.KEY_PROCESS_MESSAGE,
+            "Request failed with HTTP status " + neoResponse.getHttpStatus());
+      }
+      return wrapAsErrorContent(actionResult.toString(2));
+    }
+
+    return wrapAsTextContent(actionResult.toString(2));
+  }
+
   // ── Process execution ─────────────────────────────────────────────────
 
   /**
@@ -730,7 +779,7 @@ public class McpToolRouter {
           + ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX);
     }
 
-    JSONObject parameters = args != null ? args.optJSONObject("parameters") : null;
+    JSONObject parameters = args != null ? args.optJSONObject(McpConstants.PARAM_PARAMETERS) : null;
     NeoResponse neoResponse = NeoProcessService.executeProcess(adProcess, parameters);
     return McpHookExecutor.neoResponseToMcpResult(neoResponse);
   }
@@ -757,7 +806,7 @@ public class McpToolRouter {
     }
 
     String format = args != null ? args.optString("format", "pdf") : "pdf";
-    JSONObject parameters = args != null ? args.optJSONObject("parameters") : null;
+    JSONObject parameters = args != null ? args.optJSONObject(McpConstants.PARAM_PARAMETERS) : null;
 
     // Generate report to byte array and return base64 or description
     try {
@@ -781,7 +830,7 @@ public class McpToolRouter {
       // Fall back to describe
       NeoResponse describeResponse = NeoReportService.describeReport(adProcess);
       JSONObject fallback = new JSONObject();
-      fallback.put("error", "Report generation failed: " + e.getMessage());
+      fallback.put(McpConstants.KEY_ERROR, "Report generation failed: " + e.getMessage());
       fallback.put("description", describeResponse.getBody());
       fallback.put("hint", "Use the REST endpoint POST /sws/neo/" + specName
           + " with exportType and params to generate the report via HTTP");
@@ -1115,7 +1164,7 @@ public class McpToolRouter {
     if (status == JsonConstants.RPCREQUEST_STATUS_FAILURE) {
       if (innerResponse.has(JsonConstants.RESPONSE_ERROR)) {
         return innerResponse.getJSONObject(JsonConstants.RESPONSE_ERROR)
-            .optString("message", "Operation failed");
+            .optString(McpConstants.KEY_MESSAGE, "Operation failed");
       }
       return "Operation failed";
     }
