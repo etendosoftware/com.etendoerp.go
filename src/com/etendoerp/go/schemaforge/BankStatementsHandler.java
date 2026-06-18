@@ -250,11 +250,15 @@ public class BankStatementsHandler implements NeoHandler {
 
   // SELECT + FROM + JOINs shared by the single- and multi-statement line queries.
   // The WHERE/ORDER tail is appended per variant (single id vs IN-list for export).
+  // %s = the description column expression, resolved at runtime by
+  // descriptionExpr() so a C43-imported statement (whose text lives in the
+  // optional em_c43_description module column) shows its concept, while
+  // environments without the C43 module fall back to bsl.description.
   private static final String LINES_SQL_HEAD =
       "SELECT bsl.fin_bankstatementline_id,"
           + "       bsl.line,"
           + "       bsl.datetrx,"
-          + "       bsl.description,"
+          + "       %s AS description,"
           + "       bsl.referenceno,"
           + "       bsl.bpartnername,"
           + "       bsl.c_bpartner_id,"
@@ -284,12 +288,57 @@ public class BankStatementsHandler implements NeoHandler {
           + "  LEFT JOIN c_bpartner tbp ON tbp.c_bpartner_id = ft.c_bpartner_id"
           + "  LEFT JOIN c_bpartner pbp ON pbp.c_bpartner_id = fp.c_bpartner_id";
 
-  /** Single-statement variant: one bound {@code statementId}, ordered by line. */
-  private static final String LINES_SQL =
-      LINES_SQL_HEAD
-          + " WHERE bsl.fin_bankstatement_id = ?"
+  /** Single-statement WHERE/ORDER tail: one bound {@code statementId}. */
+  private static final String LINES_SQL_SINGLE_TAIL =
+      " WHERE bsl.fin_bankstatement_id = ?"
           + "   AND bsl.isactive = 'Y'"
           + " ORDER BY bsl.line ASC";
+
+  // Cached existence of the optional C43 module column on FIN_BankStatementLine.
+  private static volatile Boolean c43DescColumn;
+
+  /** Builds {@link #LINES_SQL_HEAD} with the runtime-resolved description column. */
+  private static String linesSqlHead(Connection conn) {
+    return String.format(LINES_SQL_HEAD, descriptionExpr(conn));
+  }
+
+  /**
+   * Description column expression. Prefers the standard {@code description}; when
+   * the optional C43 module column {@code em_c43_description} exists, falls back
+   * to it (C43 statements store the concept text there). Environments without the
+   * C43 module just use {@code bsl.description}.
+   */
+  private static String descriptionExpr(Connection conn) {
+    return hasC43DescColumn(conn)
+        ? "COALESCE(NULLIF(TRIM(bsl.description), ''), NULLIF(TRIM(bsl.em_c43_description), ''))"
+        : "bsl.description";
+  }
+
+  private static boolean hasC43DescColumn(Connection conn) {
+    Boolean cached = c43DescColumn;
+    if (cached != null) {
+      return cached;
+    }
+    boolean exists = columnExists(conn, "fin_bankstatementline", "em_c43_description");
+    c43DescColumn = exists;
+    return exists;
+  }
+
+  /** True if {@code table.column} exists (case-insensitive), via information_schema. */
+  private static boolean columnExists(Connection conn, String table, String column) {
+    String sql = "SELECT 1 FROM information_schema.columns"
+        + " WHERE lower(table_name) = lower(?) AND lower(column_name) = lower(?)";
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, table);
+      ps.setString(2, column);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next();
+      }
+    } catch (Exception e) {
+      log.debug("columnExists check failed for {}.{}", table, column, e);
+      return false;
+    }
+  }
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -970,7 +1019,8 @@ public class BankStatementsHandler implements NeoHandler {
     // Session — DO NOT close it here. Only the PreparedStatement and
     // ResultSet go inside try-with-resources.
     Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(LINES_SQL)) {
+    String sql = linesSqlHead(conn) + LINES_SQL_SINGLE_TAIL;
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, statementId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
@@ -1121,7 +1171,8 @@ public class BankStatementsHandler implements NeoHandler {
     JSONArray arr = new JSONArray();
     // Connection is managed by the DAL's Hibernate Session; don't close it.
     Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(LINES_SQL)) {
+    String sql = linesSqlHead(conn) + LINES_SQL_SINGLE_TAIL;
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, statementId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
@@ -1146,12 +1197,12 @@ public class BankStatementsHandler implements NeoHandler {
     // The only dynamic part is the count of "?" bind markers; the actual ids are
     // bound via setString, so this is not a SQL-injection vector.
     String placeholders = String.join(",", Collections.nCopies(statementIds.size(), "?"));
-    String sql = LINES_SQL_HEAD
+    // Connection is managed by the DAL's Hibernate Session; don't close it.
+    Connection conn = OBDal.getInstance().getConnection();
+    String sql = linesSqlHead(conn)
         + " WHERE bsl.isactive = 'Y'"
         + "   AND bsl.fin_bankstatement_id IN (" + placeholders + ")"
         + " ORDER BY bsl.fin_bankstatement_id, bsl.line ASC";
-    // Connection is managed by the DAL's Hibernate Session; don't close it.
-    Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) { // NOSONAR java:S2077 — placeholders are only "?" markers
       for (int i = 0; i < statementIds.size(); i++) {
         ps.setString(i + 1, statementIds.get(i));

@@ -140,7 +140,7 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String PENDING_LINES_SQL =
       "SELECT bsl.fin_bankstatementline_id,"
           + "       bsl.datetrx,"
-          + "       COALESCE(bsl.description, '') AS description,"
+          + "       %s AS description,"
           + "       COALESCE(bp.name, NULLIF(bsl.bpartnername, ''), '') AS partner_name,"
           + "       COALESCE(bsl.referenceno, '') AS reference_no,"
           + "       COALESCE(bsl.cramount, 0) - COALESCE(bsl.dramount, 0) AS amount"
@@ -156,6 +156,47 @@ public class ReconciliationHandler implements NeoHandler {
 
   private static final String PENDING_LINES_ORDER =
       " ORDER BY bsl.datetrx ASC, bsl.line ASC";
+
+  // Cached existence of the optional C43 module column on FIN_BankStatementLine.
+  private static volatile Boolean c43DescColumn;
+
+  /**
+   * Description column expression for {@link #PENDING_LINES_SQL}. Prefers the
+   * standard {@code description}; when the optional C43 module column
+   * {@code em_c43_description} exists, falls back to it (C43 statements store the
+   * concept text there). Always non-null (empty string fallback).
+   */
+  private static String descriptionExpr(Connection conn) {
+    return hasC43DescColumn(conn)
+        ? "COALESCE(NULLIF(TRIM(bsl.description), ''), NULLIF(TRIM(bsl.em_c43_description), ''), '')"
+        : "COALESCE(bsl.description, '')";
+  }
+
+  private static boolean hasC43DescColumn(Connection conn) {
+    Boolean cached = c43DescColumn;
+    if (cached != null) {
+      return cached;
+    }
+    boolean exists = columnExists(conn, "fin_bankstatementline", "em_c43_description");
+    c43DescColumn = exists;
+    return exists;
+  }
+
+  /** True if {@code table.column} exists (case-insensitive), via information_schema. */
+  private static boolean columnExists(Connection conn, String table, String column) {
+    String sql = "SELECT 1 FROM information_schema.columns"
+        + " WHERE lower(table_name) = lower(?) AND lower(column_name) = lower(?)";
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, table);
+      ps.setString(2, column);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next();
+      }
+    } catch (Exception e) {
+      log.debug("columnExists check failed for {}.{}", table, column, e);
+      return false;
+    }
+  }
 
   /**
    * Available reconciliation candidates (panel right): processed finacc
@@ -231,7 +272,9 @@ public class ReconciliationHandler implements NeoHandler {
     String dateTo = filters != null ? filters.get(PARAM_DATE_TO) : null;
     String q = filters != null ? filters.get(PARAM_Q) : null;
 
-    StringBuilder sql = new StringBuilder(PENDING_LINES_SQL);
+    // Connection is managed by the DAL's Hibernate Session; don't close it.
+    Connection conn = OBDal.getInstance().getConnection();
+    StringBuilder sql = new StringBuilder(String.format(PENDING_LINES_SQL, descriptionExpr(conn)));
     if (StringUtils.isNotBlank(dateFrom)) {
       sql.append(" AND bsl.datetrx >= ?");
     }
@@ -239,13 +282,13 @@ public class ReconciliationHandler implements NeoHandler {
       sql.append(" AND bsl.datetrx <= ?");
     }
     if (StringUtils.isNotBlank(q)) {
-      sql.append(" AND LOWER(bsl.description) LIKE ?");
+      // Search the SAME unified description (standard + C43) shown in the column.
+      sql.append(" AND LOWER(").append(descriptionExpr(conn)).append(") LIKE ?");
     }
     sql.append(PENDING_LINES_ORDER);
 
     JSONArray lines = new JSONArray();
     BigDecimal total = BigDecimal.ZERO;
-    Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
       int idx = 1;
       ps.setString(idx++, accountId);

@@ -23,6 +23,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
@@ -147,6 +148,13 @@ public class ReconciliationHandlerTest {
     Connection conn = mock(Connection.class);
     when(dal.getConnection()).thenReturn(conn);
     when(conn.prepareStatement(anyString())).thenReturn(ps);
+    // The C43 column-existence probe (information_schema) gets its own mock so it
+    // never consumes the data ResultSet; "column absent" → plain description expr.
+    PreparedStatement colPs = mock(PreparedStatement.class);
+    ResultSet colRs = mock(ResultSet.class);
+    when(colRs.next()).thenReturn(false);
+    when(colPs.executeQuery()).thenReturn(colRs);
+    when(conn.prepareStatement(contains("information_schema"))).thenReturn(colPs);
     when(conn.createArrayOf(anyString(), any())).thenReturn(null);
     when(ps.executeQuery()).thenReturn(rs);
   }
