@@ -305,7 +305,7 @@ public class EmailFrameworkValueObjectsTest {
       assertEquals("user-1", context.getUserId());
       assertEquals("record-1", context.getRecordId());
       assertEquals("fixture-template", context.getTemplate());
-      assertEquals("Person@Example.COM", context.getRecipientAddress());
+      assertEquals("Person@example.com", context.getRecipientAddress());
       assertEquals("example.com", context.getRecipientDomain());
       assertEquals("client-2", clientOnlyContext.getTenantId());
     }
