@@ -402,10 +402,13 @@ public class ReconciliationHandler implements NeoHandler {
   }
 
   /**
-   * Returns the ids of the finacc transactions the standard matching algorithm
-   * suggests for the selected bank-statement line, or an empty set when no line
-   * is selected. Composes {@link MatchTransactionDao#getMatchingFinancialTransaction}
-   * — the same algorithm Classic uses — over the line's amount, date and reference.
+   * Returns the ids of the finacc transactions suggested for the selected
+   * bank-statement line, or an empty set when no line is selected. Composes
+   * {@link MatchTransactionDao#getMatchingFinancialTransaction} matching purely
+   * on the signed amount: the bank-statement line date almost never equals the
+   * finacc transaction date (and references rarely match exactly either), so
+   * forcing those would yield zero suggestions. Amount equality is the reliable
+   * signal — the user confirms the rest visually before reconciling.
    */
   Set<String> suggestedTransactionIds(String accountId, String lineId) {
     Set<String> ids = new HashSet<>();
@@ -417,9 +420,9 @@ public class ReconciliationHandler implements NeoHandler {
       return ids;
     }
     BigDecimal amount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
-    String reference = StringUtils.trimToEmpty(line.getReferenceNo());
+    // Match by amount only (null date, empty reference) so same-amount candidates surface.
     List<FIN_FinaccTransaction> matches = MatchTransactionDao.getMatchingFinancialTransaction(
-        accountId, line.getTransactionDate(), reference, amount, new ArrayList<>());
+        accountId, null, "", amount, new ArrayList<>());
     for (FIN_FinaccTransaction match : matches) {
       ids.add(match.getId());
     }
