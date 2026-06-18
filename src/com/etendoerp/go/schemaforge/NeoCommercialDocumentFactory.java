@@ -96,6 +96,25 @@ final class NeoCommercialDocumentFactory {
     return shipment;
   }
 
+  static ShipmentInOut createShipmentFromInvoiceHeader(Invoice invoice, DocumentType docType,
+      boolean salesTransaction, String movementType, org.openbravo.model.common.enterprise.Warehouse warehouse) {
+    ShipmentInOut shipment = OBProvider.getInstance().get(ShipmentInOut.class);
+    shipment.setClient(invoice.getClient());
+    shipment.setOrganization(invoice.getOrganization());
+    shipment.setBusinessPartner(invoice.getBusinessPartner());
+    shipment.setPartnerAddress(invoice.getPartnerAddress());
+    shipment.setWarehouse(warehouse);
+    shipment.setMovementDate(new Date());
+    shipment.setAccountingDate(new Date());
+    shipment.setDocumentType(docType);
+    shipment.setDocumentNo("<*>");
+    shipment.setSalesTransaction(salesTransaction);
+    shipment.setProcessed(false);
+    shipment.setDocumentStatus("DR");
+    shipment.setMovementType(movementType);
+    return shipment;
+  }
+
   /**
    * Builds a draft AP Invoice header from a goods receipt that has no linked purchase order.
    * Financial fields (price list, payment terms, payment method) come from the
@@ -126,6 +145,7 @@ final class NeoCommercialDocumentFactory {
     invoice.setDocumentNo("<*>");
     return invoice;
   }
+
 
   static Invoice createInvoiceFromOrderHeader(Order order, DocumentType invoiceDocType,
       boolean salesTransaction) {
