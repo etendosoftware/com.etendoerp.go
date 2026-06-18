@@ -37,22 +37,39 @@ import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
+import org.hibernate.ScrollableResults;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.advpaymentmngt.dao.AdvPaymentMngtDao;
 import org.openbravo.advpaymentmngt.dao.MatchTransactionDao;
+import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.advpaymentmngt.utility.APRM_MatchingUtility;
+import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
+import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
+import org.openbravo.advpaymentmngt.utility.FIN_Utility;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
+import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_Payment;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
+import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * NeoHandler that powers the manual bank-reconciliation split panel introduced by
@@ -79,9 +96,20 @@ import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
  *         {@code suggested:true}. Optional {@code docType} filter.</td>
  *   </tr>
  *   <tr>
+ *     <td>{@code GET ?action=autoMatch&accountId=X}</td>
+ *     <td>Preview: runs standard algorithm (pasada 1) + rule engine (pasada 2) over
+ *         all pending lines. Returns grouped suggestions without mutating any data.</td>
+ *   </tr>
+ *   <tr>
  *     <td>{@code POST action=reconcileGroup}</td>
  *     <td>Composes the standard Etendo reconciliation services for a 1:N manual
  *         match. Body: {@code { financialAccountId, statementLineId, operationIds:[...] }}.</td>
+ *   </tr>
+ *   <tr>
+ *     <td>{@code POST action=applySuggestions}</td>
+ *     <td>Commits the accepted groups from {@code autoMatch}. Creates GL-item
+ *         payments when required by a rule and reconciles. Body: {@code
+ *         { financialAccountId, groups:[{ statementLineId, operationIds:[], createPayment? }] }}.</td>
  *   </tr>
  * </table>
  *
@@ -113,6 +141,8 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String ACTION_PENDING_LINES = "pendingLines";
   private static final String ACTION_CANDIDATES = "candidates";
   private static final String ACTION_RECONCILE_GROUP = "reconcileGroup";
+  private static final String ACTION_AUTO_MATCH = "autoMatch";
+  private static final String ACTION_APPLY_SUGGESTIONS = "applySuggestions";
 
   /** Match level recorded on the reconciliation lines produced by this handler. */
   private static final String MATCH_LEVEL_MANUAL = "MANUALMATCH";
@@ -128,6 +158,8 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String KEY_DATE = "date";
   private static final String KEY_AMOUNT = "amount";
   private static final String KEY_STATUS = "status";
+  private static final String KEY_GROUPS = "groups";
+  private static final String KEY_IS_NEW = "isNew";
   private static final String STATUS_PENDING = "pending";
   private static final String MSG_INTERNAL_SERVER_ERROR = "Internal Server Error";
 
@@ -198,8 +230,14 @@ public class ReconciliationHandler implements NeoHandler {
     if (METHOD_GET.equals(method) && ACTION_CANDIDATES.equals(action)) {
       return handleCandidates(context);
     }
+    if (METHOD_GET.equals(method) && ACTION_AUTO_MATCH.equals(action)) {
+      return handleAutoMatch(context);
+    }
     if (METHOD_POST.equals(method) && ACTION_RECONCILE_GROUP.equals(action)) {
       return handleReconcileGroup(context);
+    }
+    if (METHOD_POST.equals(method) && ACTION_APPLY_SUGGESTIONS.equals(action)) {
+      return handleApplySuggestions(context);
     }
     // Any other request (generic list / getById of the W spec) flows through.
     return null;
@@ -549,6 +587,251 @@ public class ReconciliationHandler implements NeoHandler {
   }
 
   // ---------------------------------------------------------------------------
+  // GET autoMatch (preview — does not mutate any data)
+  // ---------------------------------------------------------------------------
+
+  private NeoResponse handleAutoMatch(NeoContext context) {
+    Map<String, String> qp = context.getQueryParams();
+    String accountId = qp != null ? qp.get(PARAM_ACCOUNT_ID) : null;
+    if (StringUtils.isBlank(accountId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Missing required parameter: " + PARAM_ACCOUNT_ID);
+    }
+    try {
+      OBContext.setAdminMode(true);
+      return buildAutoMatch(accountId);
+    } catch (Exception e) {
+      log.error("Error building autoMatch for account {}", accountId, e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_SERVER_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  NeoResponse buildAutoMatch(String accountId) throws Exception {
+    FIN_FinancialAccount account = loadAccount(accountId);
+    if (account == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Financial account not found: " + accountId);
+    }
+
+    Connection conn = OBDal.getInstance().getConnection();
+    List<MatchRuleEngine.Rule> rules = loadRules(conn, accountId);
+
+    // Collect all pending lines for this account.
+    List<FIN_BankStatementLine> pendingLines = loadPendingLines(accountId);
+
+    JSONArray groups = new JSONArray();
+    List<FIN_FinaccTransaction> excluded = new ArrayList<>();
+    int opsToLink = 0;
+    int willCreate = 0;
+
+    for (FIN_BankStatementLine line : pendingLines) {
+      // Pasada 1: standard algorithm.
+      FIN_MatchedTransaction matched = runStandardMatch(account, line, excluded);
+      if (matched != null && matched.getTransaction() != null) {
+        excluded.add(matched.getTransaction());
+        JSONObject group = AutoMatchSupport.buildStandardGroup(line, matched.getTransaction(), matched.getMatchLevel());
+        groups.put(group);
+        opsToLink++;
+        continue;
+      }
+
+      // Pasada 2: rule engine (only for lines not matched by standard algorithm).
+      String desc = StringUtils.trimToEmpty(line.getDescription());
+      String ref = StringUtils.trimToEmpty(line.getReferenceNo());
+      String partner = StringUtils.trimToEmpty(line.getBpartnername());
+      MatchRuleEngine.MatchResult ruleResult = MatchRuleEngine.evaluate(desc, ref, partner, rules);
+      if (ruleResult.isMatched()) {
+        JSONObject group = AutoMatchSupport.buildRuleGroup(line, ruleResult.primary, ruleResult.alternatives);
+        groups.put(group);
+        if (Boolean.TRUE.equals(group.opt(KEY_IS_NEW))) {
+          willCreate++;
+        } else {
+          opsToLink++;
+        }
+      }
+    }
+
+    JSONObject kpis = new JSONObject();
+    kpis.put("pendingLines", pendingLines.size());
+    kpis.put("groupsFound", groups.length());
+    kpis.put("opsToLink", opsToLink);
+    kpis.put("willCreate", willCreate);
+
+    JSONObject data = new JSONObject();
+    data.put("account", accountId);
+    data.put("kpis", kpis);
+    data.put(KEY_GROUPS, groups);
+    return envelope(data);
+  }
+
+
+  // ---------------------------------------------------------------------------
+  // POST applySuggestions (commit — creates payments + reconciles)
+  // ---------------------------------------------------------------------------
+
+  private NeoResponse handleApplySuggestions(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Request body is required");
+    }
+    try {
+      OBContext.setAdminMode(true);
+      return applySuggestions(body);
+    } catch (OBException e) {
+      log.warn("applySuggestions business error: {}", e.getMessage());
+      doRollbackAndClose();
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+    } catch (Exception e) {
+      log.error("applySuggestions failed", e);
+      doRollbackAndClose();
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_SERVER_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  NeoResponse applySuggestions(JSONObject body) throws Exception {
+    String accountId = body.optString("financialAccountId", null);
+    if (StringUtils.isBlank(accountId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "financialAccountId is required");
+    }
+    FIN_FinancialAccount account = loadAccount(accountId);
+    if (account == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Financial account not found: " + accountId);
+    }
+
+    JSONArray groupsJson = body.optJSONArray(KEY_GROUPS);
+    if (groupsJson == null || groupsJson.length() == 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "groups array is required");
+    }
+
+    JSONArray results = new JSONArray();
+    for (int i = 0; i < groupsJson.length(); i++) {
+      JSONObject groupEntry = groupsJson.optJSONObject(i);
+      if (groupEntry == null) {
+        continue;
+      }
+      NeoResponse groupResult = applyGroup(account, groupEntry);
+      results.put(groupResult.getBody());
+    }
+
+    JSONObject data = new JSONObject();
+    data.put("applied", results.length());
+    data.put("results", results);
+    return NeoResponse.createdWithData(data);
+  }
+
+  private NeoResponse applyGroup(FIN_FinancialAccount account, JSONObject groupEntry)
+      throws Exception {
+    String statementLineId = groupEntry.optString("statementLineId", null);
+    if (StringUtils.isBlank(statementLineId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "statementLineId is required");
+    }
+
+    FIN_BankStatementLine line = loadLine(statementLineId);
+    if (line == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          "Statement line not found: " + statementLineId);
+    }
+    if (line.getFinancialAccountTransaction() != null) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          "Statement line is already reconciled: " + statementLineId);
+    }
+
+    List<String> operationIds = readOperationIds(groupEntry);
+
+    // When a rule group requires creating a new payment, do that first.
+    JSONObject createPaymentSpec = groupEntry.optJSONObject("createPayment");
+    if (createPaymentSpec != null && StringUtils.isNotBlank(createPaymentSpec.optString("glItemId", null))) {
+      String newTxnId = createPaymentForRule(account, line, createPaymentSpec);
+      if (StringUtils.isNotBlank(newTxnId)) {
+        operationIds = new ArrayList<>(operationIds);
+        operationIds.add(newTxnId);
+        // Increment the rule's matchCount.
+        String ruleId = createPaymentSpec.optString("ruleId", null);
+        if (StringUtils.isNotBlank(ruleId)) {
+          AutoMatchSupport.incrementMatchCount(ruleId);
+        }
+      }
+    }
+
+    if (operationIds.isEmpty()) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "At least one operation is required for line: " + statementLineId);
+    }
+
+    return compose(account, line, operationIds);
+  }
+
+  /**
+   * Creates a GL-item based payment for a rule-origin group and returns the
+   * id of the resulting {@code FIN_FinaccTransaction}. Mirrors the sequence in
+   * {@link AddPaymentService}: create payment → add GL item → process with action "P".
+   */
+  String createPaymentForRule(FIN_FinancialAccount account, FIN_BankStatementLine line,
+      JSONObject spec) throws Exception {
+    String glItemId = spec.optString("glItemId", null);
+    String bpartnerId = spec.optString("bpartnerId", null);
+    String amtStr = spec.optString(KEY_AMOUNT, null);
+    BigDecimal amount = StringUtils.isNotBlank(amtStr) ? new BigDecimal(amtStr) : BigDecimal.ZERO;
+    if (amount.compareTo(BigDecimal.ZERO) == 0) {
+      amount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
+    }
+
+    GLItem glItem = OBDal.getInstance().get(GLItem.class, glItemId);
+    if (glItem == null) {
+      throw new OBException("GL item not found: " + glItemId);
+    }
+
+    Organization org = account.getOrganization();
+    boolean isReceipt = amount.signum() >= 0;
+    DocumentType docType = FIN_Utility.getDocumentType(org, isReceipt ? "ARR" : "APP");
+    if (docType == null) {
+      throw new OBException("Document type not found for org " + org.getId());
+    }
+
+    BusinessPartner bp = StringUtils.isNotBlank(bpartnerId)
+        ? OBDal.getInstance().get(BusinessPartner.class, bpartnerId) : null;
+
+    FIN_PaymentMethod paymentMethod = AutoMatchSupport.resolveDefaultPaymentMethod(account, isReceipt);
+    if (paymentMethod == null) {
+      throw new OBException("No payment method configured for financial account " + account.getId());
+    }
+
+    VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
+    RequestContext.get().setVariableSecureApp(vars);
+    DalConnectionProvider conn = new DalConnectionProvider(false);
+    AdvPaymentMngtDao dao = new AdvPaymentMngtDao();
+
+    BigDecimal absAmount = amount.abs();
+    String docNo = FIN_Utility.getDocumentNo(docType, "FIN_Payment");
+    Currency currency = account.getCurrency();
+    FIN_Payment payment = dao.getNewPayment(isReceipt, org, docType, docNo, bp, paymentMethod,
+        account, "0", line.getTransactionDate(), StringUtils.trimToEmpty(line.getReferenceNo()),
+        currency, BigDecimal.ONE, absAmount);
+    payment.setAmount(absAmount);
+    FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, BigDecimal.ONE, absAmount);
+    OBDal.getInstance().save(payment);
+    OBDal.getInstance().flush();
+
+    FIN_AddPayment.saveGLItem(payment, absAmount, glItem);
+
+    AutoMatchSupport.failOnError(FIN_AddPayment.processPayment(vars, conn, "P", payment, ""));
+    OBDal.getInstance().flush();
+    OBDal.getInstance().refresh(payment);
+
+    // The processed payment auto-creates a FIN_FinaccTransaction.
+    if (payment.getFINFinaccTransactionList() != null
+        && !payment.getFINFinaccTransactionList().isEmpty()) {
+      return payment.getFINFinaccTransactionList().get(0).getId();
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
   // Seams (package-private to allow unit tests to stub the DAL / Classic layer)
   // ---------------------------------------------------------------------------
 
@@ -583,6 +866,61 @@ public class ReconciliationHandler implements NeoHandler {
 
   void doRollbackAndClose() {
     OBDal.getInstance().rollbackAndClose();
+  }
+
+  /**
+   * Loads unreconciled bank-statement lines for the given account (pasada 1 / pasada 2 source).
+   * Package-private for testability.
+   */
+  List<FIN_BankStatementLine> loadPendingLines(String accountId) {
+    List<FIN_BankStatementLine> result = new ArrayList<>();
+    ScrollableResults sr = APRM_MatchingUtility
+        .getPendingToBeMatchedBankStatementLines(accountId, null);
+    try {
+      List<String> ids = new ArrayList<>();
+      while (sr.next()) {
+        FIN_BankStatementLine bsl = (FIN_BankStatementLine) sr.get(0);
+        ids.add(bsl.getId());
+      }
+      sr.close();
+      for (String id : ids) {
+        FIN_BankStatementLine bsl = OBDal.getInstance().get(FIN_BankStatementLine.class, id);
+        if (bsl != null) {
+          result.add(bsl);
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Error loading pending lines for account {}", accountId, e);
+      sr.close();
+    }
+    return result;
+  }
+
+  /**
+   * Runs the account's configured standard matching algorithm against one bank-statement line.
+   * Returns the match result, or a NOMATCH result if the algorithm fails or is not configured.
+   * Package-private for testability.
+   */
+  FIN_MatchedTransaction runStandardMatch(FIN_FinancialAccount account,
+      FIN_BankStatementLine line, List<FIN_FinaccTransaction> excluded) {
+    try {
+      MatchingAlgorithm ma = account.getMatchingAlgorithm();
+      if (ma == null || StringUtils.isBlank(ma.getJavaClassName())) {
+        return new FIN_MatchedTransaction(null, FIN_MatchedTransaction.NOMATCH);
+      }
+      FIN_MatchingTransaction mt = new FIN_MatchingTransaction(ma.getJavaClassName());
+      return mt.match(line, excluded);
+    } catch (Exception e) {
+      log.debug("Standard match failed for line {}: {}", line.getId(), e.getMessage());
+      return new FIN_MatchedTransaction(null, FIN_MatchedTransaction.NOMATCH);
+    }
+  }
+
+  /**
+   * Loads active matching rules from the DB. Package-private for testability.
+   */
+  List<MatchRuleEngine.Rule> loadRules(Connection conn, String accountId) throws Exception {
+    return MatchRuleEngine.loadRules(conn, accountId);
   }
 
   // ---------------------------------------------------------------------------
