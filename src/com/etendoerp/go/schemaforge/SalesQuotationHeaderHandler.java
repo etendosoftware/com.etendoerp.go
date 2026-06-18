@@ -56,10 +56,6 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
   public NeoResponse handle(NeoContext context) {
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
     AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction(context, totalDiscountService, false);
-    NeoResponse blocked = AbstractOrderHeaderHandler.blockCompleteWhenNoExchangeRate(context);
-    if (blocked != null) {
-      return blocked;
-    }
     NeoResponse result = cloneRecordHandler.handle(context);
     if (result != null) {
       return result;

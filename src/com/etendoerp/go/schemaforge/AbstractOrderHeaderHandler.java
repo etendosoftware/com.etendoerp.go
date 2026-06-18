@@ -26,8 +26,6 @@ import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-import javax.servlet.http.HttpServletResponse;
-
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -37,8 +35,6 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
-import org.openbravo.model.common.invoice.Invoice;
-import org.openbravo.model.common.order.Order;
 import org.openbravo.model.pricing.pricelist.PriceList;
 
 /**
@@ -100,42 +96,6 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       service.recalculate(recordId, isInvoice);
     } catch (Exception e) {
       log.error("Error recalculating total discount before complete for {} id={}", docType, recordId, e);
-    }
-  }
-
-  /**
-   * Blocks invoice completion when no exchange rate is available (see
-   * {@link InvoiceExchangeRateValidator}). Call at the top of {@code handle()} in invoice header
-   * subclasses; a non-null return short-circuits the Complete action. No-op for other endpoints.
-   *
-   * @param context the current NeoContext
-   * @return a {@link NeoResponse} error to block completion, or {@code null} to proceed
-   */
-  static NeoResponse validateExchangeRateBeforeComplete(NeoContext context) {
-    if (!isCompleteAction(context)) {
-      return null;
-    }
-    String recordId = context.getRecordId();
-    if (recordId == null || recordId.isEmpty()) {
-      return null;
-    }
-    OBContext.setAdminMode(true);
-    try {
-      Invoice invoice = OBDal.getInstance().get(Invoice.class, recordId);
-      if (invoice == null) {
-        return null;
-      }
-      String error = InvoiceExchangeRateValidator.checkRateForCompletion(invoice);
-      if (error != null) {
-        log.info("Blocking completion of invoice id={} — {}", recordId, error);
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, error);
-      }
-      return null;
-    } catch (Exception e) {
-      log.error("Error validating exchange rate before complete for invoice id={}", recordId, e);
-      return null;
-    } finally {
-      OBContext.restorePreviousMode();
     }
   }
 
@@ -414,76 +374,6 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     } catch (Exception e) {
       log.warn("[ETP-4027] appendMessage failed: {}", e.getMessage());
     }
-  }
-
-  /**
-   * Pre-hook helper: blocks the Complete action (documentAction=CO) when no
-   * conversion rate exists between the document currency and the org currency.
-   *
-   * <p>Call this at the top of {@code handle()} in each header subclass that
-   * supports the Complete action, AFTER {@link #applyTotalDiscountBeforeComplete}.
-   *
-   * @param context the current NeoContext
-   * @return a 422 NeoResponse if the check fails, or {@code null} to continue
-   */
-  static NeoResponse blockCompleteWhenNoExchangeRate(NeoContext context) {
-    try {
-      if (!isCompleteAction(context)) {
-        return null;
-      }
-      String recordId = context.getRecordId();
-      if (recordId == null || recordId.isEmpty()) {
-        return null;
-      }
-      Order order = OBDal.getInstance().get(Order.class, recordId);
-      if (order == null) {
-        return null;
-      }
-      String docCurrencyId = order.getCurrency() != null ? order.getCurrency().getId() : null;
-      java.util.Date orderDate = order.getOrderDate();
-      if (docCurrencyId == null || orderDate == null) {
-        return null;
-      }
-      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-      String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
-      if (orgCurrencyId == null || docCurrencyId.equals(orgCurrencyId)) {
-        return null; // same currency — no rate needed
-      }
-
-      // Check via direct SQL (same pattern as hasConversionRate)
-      String clientId = OBContext.getOBContext().getCurrentClient().getId();
-      java.time.LocalDate localDate = orderDate.toInstant()
-          .atZone(java.time.ZoneId.systemDefault()).toLocalDate();
-      String sql =
-          "SELECT 1 FROM c_conversion_rate"
-        + " WHERE c_currency_id = ?"
-        + " AND c_currency_id_to = ?"
-        + " AND isactive = 'Y'"
-        + " AND ad_client_id = ?"
-        + " AND (ad_org_id = '0' OR ad_org_id = ?)"
-        + " AND validfrom <= ?"
-        + " AND (validto IS NULL OR validto >= ?)"
-        + " LIMIT 1";
-      Connection conn = OBDal.getInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, docCurrencyId);
-        ps.setString(2, orgCurrencyId);
-        ps.setString(3, clientId);
-        ps.setString(4, orgId);
-        ps.setDate(5, java.sql.Date.valueOf(localDate));
-        ps.setDate(6, java.sql.Date.valueOf(localDate));
-        try (ResultSet rs = ps.executeQuery()) {
-          if (!rs.next()) {
-            log.debug("[ETP-4027] Blocking CO for order {} — no conversion rate", recordId);
-            return NeoResponse.error(422, "noExchangeRateAvailable");
-          }
-        }
-      }
-    } catch (Exception e) {
-      log.warn("[ETP-4027] blockCompleteWhenNoExchangeRate failed (non-fatal, allowing CO): {}",
-          e.getMessage());
-    }
-    return null;
   }
 
   /**
