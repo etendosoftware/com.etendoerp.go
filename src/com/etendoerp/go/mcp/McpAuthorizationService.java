@@ -77,6 +77,7 @@ final class McpAuthorizationService {
       case "neo_create":
       case "neo_update":
       case "neo_delete":
+      case "neo_action":
         return SCOPE_WRITE;
       default:
         return toolName.startsWith(McpConstants.GENERATE_PREFIX)
