@@ -97,7 +97,7 @@ final class AutoMatchSupport {
 
   private static List<FIN_FinaccTransaction> loadUnreconciledSameSign(String accountId,
       BigDecimal target, java.util.Set<String> usedTxnIds) {
-    String hql = "select ft from FIN_FinaccTransaction as ft"
+    String hql = "select ft from " + FIN_FinaccTransaction.ENTITY_NAME + " as ft"
         + " where ft.account.id = :acc"
         + "   and ft.reconciliation is null"
         + "   and ft.processed = true"
