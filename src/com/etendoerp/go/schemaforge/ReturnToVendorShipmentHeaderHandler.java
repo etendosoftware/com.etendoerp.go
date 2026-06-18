@@ -266,7 +266,7 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
   }
 
   // ---------------------------------------------------------------------------
-  // Action: createReturnInvoice  (AP Credit Memo — APC)
+  // Action: createReturnInvoice  (Reversed Purchase Invoice — API + isReturn)
   // ---------------------------------------------------------------------------
 
   private NeoResponse handleCreateReturnInvoice(NeoContext context) {
@@ -297,7 +297,7 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
             returnDoc.getOrganization().getId(), "APC", false, false);
         if (docType == null) {
           return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-              "No AP credit memo document type (APC) found for this organization");
+              "No AP CreditMemo document type (APC) found for this organization");
         }
 
         Invoice sourceInvoice = ReturnShipmentUtils.findSourceInvoice(lines);
