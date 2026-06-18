@@ -156,4 +156,32 @@ public class GlJournalHeaderHandlerTest {
     // Detected as a complete action; no recordId → 400
     assertEquals(400, response.getHttpStatus());
   }
+
+  // ─── handle(): POST short-circuits before DB ──────────────────────────────
+
+  @Test
+  public void handlePostSkipsInjectionWhenMultiGlIsY() throws Exception {
+    // Multi-ledger journals do not require a C_AcctSchema_ID — handler must exit early.
+    JSONObject body = new JSONObject();
+    body.put("multigeneralLedger", "Y");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+    assertNull(handler.handle(ctx));
+  }
+
+  @Test
+  public void handlePostSkipsInjectionWhenAccountingSchemaAlreadyPresent() throws Exception {
+    // Explicit caller-provided value must not be overwritten by the handler.
+    JSONObject body = new JSONObject();
+    body.put("accountingSchema", "SOME_ACCT_SCHEMA_ID");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+    assertNull(handler.handle(ctx));
+  }
 }
