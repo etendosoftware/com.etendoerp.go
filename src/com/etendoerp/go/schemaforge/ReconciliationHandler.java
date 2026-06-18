@@ -641,7 +641,7 @@ public class ReconciliationHandler implements NeoHandler {
     int willCreate = 0;
 
     for (FIN_BankStatementLine line : pendingLines) {
-      // Pasada 1: use the same MatchTransactionDao path as the candidates panel.
+      // Pass 1 (1:1): use the same MatchTransactionDao path as the candidates panel.
       // This does not require the account to have a MatchingAlgorithm configured in AD.
       Set<String> suggested = suggestedTransactionIds(accountId, line.getId());
       // Skip transactions already claimed by a previous line in this preview run.
@@ -658,7 +658,20 @@ public class ReconciliationHandler implements NeoHandler {
         }
       }
 
-      // Pasada 2: rule engine for lines without a standard match.
+      // Pass 1b (1:N): group unreconciled transactions that share a signal (partner / reference)
+      // and whose amounts sum to the line. The split sub-lines inherit the group id on apply.
+      List<FIN_FinaccTransaction> signalGroup =
+          AutoMatchSupport.findSignalGroup(accountId, line, usedTxnIds, TOLERANCE);
+      if (!signalGroup.isEmpty()) {
+        for (FIN_FinaccTransaction t : signalGroup) {
+          usedTxnIds.add(t.getId());
+        }
+        groups.put(AutoMatchSupport.buildMultiGroup(line, signalGroup));
+        opsToLink += signalGroup.size();
+        continue;
+      }
+
+      // Pass 2: rule engine for lines without a standard match.
       String desc = StringUtils.trimToEmpty(line.getDescription());
       String ref = StringUtils.trimToEmpty(line.getReferenceNo());
       String partner = StringUtils.trimToEmpty(line.getBpartnername());

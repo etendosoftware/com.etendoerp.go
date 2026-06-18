@@ -24,7 +24,12 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -59,6 +64,127 @@ final class AutoMatchSupport {
       DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
 
   private AutoMatchSupport() {
+  }
+
+  // ---------------------------------------------------------------------------
+  // 1:N signal-based grouping (chosen approach: shared signal)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Finds a 1:N group of unreconciled transactions that share a signal and whose signed amounts
+   * sum to the bank-statement line amount within {@code tolerance}. The signal is tried in order:
+   * business partner first, then payment reference. Only a signal-group whose <b>full</b> set of
+   * same-signed transactions sums to the line is proposed (no subset-sum), which keeps the result
+   * predictable and low on false positives for a money-mutating surface.
+   *
+   * @return the matching transactions (size &gt;= 2), or an empty list when none qualifies
+   */
+  static List<FIN_FinaccTransaction> findSignalGroup(String accountId, FIN_BankStatementLine line,
+      java.util.Set<String> usedTxnIds, BigDecimal tolerance) {
+    BigDecimal target = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
+    if (target.signum() == 0) {
+      return Collections.emptyList();
+    }
+    List<FIN_FinaccTransaction> pool = loadUnreconciledSameSign(accountId, target, usedTxnIds);
+    // Try grouping by business partner, then by payment reference.
+    List<FIN_FinaccTransaction> byPartner =
+        matchByKey(pool, target, tolerance, AutoMatchSupport::partnerKey);
+    if (!byPartner.isEmpty()) {
+      return byPartner;
+    }
+    return matchByKey(pool, target, tolerance, AutoMatchSupport::referenceKey);
+  }
+
+  private static List<FIN_FinaccTransaction> loadUnreconciledSameSign(String accountId,
+      BigDecimal target, java.util.Set<String> usedTxnIds) {
+    String hql = "select ft from FIN_FinaccTransaction as ft"
+        + " where ft.account.id = :acc"
+        + "   and ft.reconciliation is null"
+        + "   and ft.processed = true"
+        + "   and ft.status <> 'RPPC'";
+    List<FIN_FinaccTransaction> all = OBDal.getInstance().getSession()
+        .createQuery(hql, FIN_FinaccTransaction.class)
+        .setParameter("acc", accountId)
+        .list();
+    List<FIN_FinaccTransaction> pool = new ArrayList<>();
+    for (FIN_FinaccTransaction t : all) {
+      if (usedTxnIds.contains(t.getId())) {
+        continue;
+      }
+      BigDecimal amt = nullSafe(t.getDepositAmount()).subtract(nullSafe(t.getPaymentAmount()));
+      if (amt.signum() == target.signum()) {
+        pool.add(t);
+      }
+    }
+    return pool;
+  }
+
+  /**
+   * Partitions {@code pool} by the given signal key and returns the first partition with at least
+   * two transactions whose signed amounts sum to {@code target} within {@code tolerance}.
+   */
+  static List<FIN_FinaccTransaction> matchByKey(List<FIN_FinaccTransaction> pool,
+      BigDecimal target, BigDecimal tolerance, Function<FIN_FinaccTransaction, String> keyFn) {
+    Map<String, List<FIN_FinaccTransaction>> groups = new LinkedHashMap<>();
+    for (FIN_FinaccTransaction t : pool) {
+      String key = keyFn.apply(t);
+      if (StringUtils.isBlank(key)) {
+        continue;
+      }
+      groups.computeIfAbsent(key, k -> new ArrayList<>()).add(t);
+    }
+    for (List<FIN_FinaccTransaction> group : groups.values()) {
+      if (group.size() < 2) {
+        continue;
+      }
+      BigDecimal sum = BigDecimal.ZERO;
+      for (FIN_FinaccTransaction t : group) {
+        sum = sum.add(nullSafe(t.getDepositAmount()).subtract(nullSafe(t.getPaymentAmount())));
+      }
+      if (target.subtract(sum).abs().compareTo(tolerance) <= 0) {
+        return group;
+      }
+    }
+    return Collections.emptyList();
+  }
+
+  private static String partnerKey(FIN_FinaccTransaction t) {
+    if (t.getBusinessPartner() != null) {
+      return "bp:" + t.getBusinessPartner().getId();
+    }
+    if (t.getFinPayment() != null && t.getFinPayment().getBusinessPartner() != null) {
+      return "bp:" + t.getFinPayment().getBusinessPartner().getId();
+    }
+    return null;
+  }
+
+  private static String referenceKey(FIN_FinaccTransaction t) {
+    if (t.getFinPayment() != null && StringUtils.isNotBlank(t.getFinPayment().getReferenceNo())) {
+      return "ref:" + t.getFinPayment().getReferenceNo().trim();
+    }
+    return null;
+  }
+
+  /** Builds a 1:N group JSON from a bank-statement line and its matched transactions. */
+  static JSONObject buildMultiGroup(FIN_BankStatementLine line, List<FIN_FinaccTransaction> txns)
+      throws JSONException {
+    JSONObject group = new JSONObject();
+    StringBuilder key = new StringBuilder(line.getId());
+    JSONArray ops = new JSONArray();
+    BigDecimal opSum = BigDecimal.ZERO;
+    for (FIN_FinaccTransaction t : txns) {
+      key.append('-').append(t.getId());
+      ops.put(txnToJson(t));
+      opSum = opSum.add(nullSafe(t.getDepositAmount()).subtract(nullSafe(t.getPaymentAmount())));
+    }
+    group.put("groupKey", key.toString());
+    group.put("statementLine", lineToJson(line));
+    group.put("operations", ops);
+    group.put("origin", "standard");
+    BigDecimal lineAmt = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
+    group.put("difference", lineAmt.subtract(opSum));
+    group.put(KEY_IS_NEW, false);
+    return group;
   }
 
   // ---------------------------------------------------------------------------
