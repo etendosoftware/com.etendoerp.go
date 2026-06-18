@@ -44,6 +44,7 @@ import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -129,6 +130,8 @@ public class McpToolRouter {
             return handleBatch(arguments);
           case "neo_action":
             return handleAction(specName, arguments);
+          case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
+            return handleGenerateAmortizationPlan(arguments);
           default:
             // Check if it's a report tool (generate_*)
             if (toolName.startsWith(McpConstants.GENERATE_PREFIX)) {
@@ -758,6 +761,26 @@ public class McpToolRouter {
     }
 
     return wrapAsTextContent(actionResult.toString(2));
+  }
+
+  // ── neo_generate_amortization_plan ────────────────────────────────────
+
+  /**
+   * Handles the {@code neo_generate_amortization_plan} MCP tool call.
+   * Delegates to {@link AmortizationPlanService#generatePlan(String)}.
+   *
+   * @param arguments tool arguments containing {@code assetId}
+   * @return MCP result object
+   */
+  private JSONObject handleGenerateAmortizationPlan(JSONObject arguments) throws Exception {
+    String assetId = arguments != null ? arguments.optString("assetId", null) : null;
+    NeoResponse response = AmortizationPlanService.generatePlan(assetId);
+    if (response.getHttpStatus() >= 400) {
+      return wrapAsErrorContent(
+          response.getBody() != null ? response.getBody().toString() : "Error generating amortization plan");
+    }
+    return wrapAsTextContent(
+        response.getBody() != null ? response.getBody().toString(2) : "{}");
   }
 
   // ── Process execution ─────────────────────────────────────────────────

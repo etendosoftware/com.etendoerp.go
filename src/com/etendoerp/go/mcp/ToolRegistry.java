@@ -139,6 +139,12 @@ public class ToolRegistry {
 
   private void registerCrudTools(List<McpToolDefinition> tools, List<String> accessibleWindowSpecs,
       ScopePermissions permissions) {
+    // Register the amortization plan tool independently of window specs availability:
+    // it is a built-in endpoint that does not require a window spec to be accessible.
+    if (permissions.canProcess) {
+      tools.add(buildGenerateAmortizationPlanTool());
+    }
+
     if (accessibleWindowSpecs.isEmpty()) {
       return;
     }
@@ -156,6 +162,25 @@ public class ToolRegistry {
       tools.add(buildBatchTool());
       tools.add(buildActionTool(accessibleWindowSpecs));
     }
+  }
+
+  // ── Amortization plan tool ─────────────────────────────────────────────
+
+  private McpToolDefinition buildGenerateAmortizationPlanTool() {
+    Map<String, Object> properties = new LinkedHashMap<>();
+    Map<String, Object> assetIdProp = new HashMap<>();
+    assetIdProp.put(McpConstants.KEY_DESCRIPTION,
+        "The ID of the asset to generate the amortization plan for");
+    assetIdProp.put("type", McpConstants.TYPE_STRING);
+    properties.put("assetId", assetIdProp);
+
+    return new McpToolDefinition(
+        McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN,
+        "Generate an amortization plan for an asset. Fires the native A_Asset_Post process "
+            + "and returns the resulting plan summary (periods, amounts, dates). "
+            + "The asset must be configured for depreciation and must not already have a plan.",
+        buildObjectSchema(properties, java.util.Arrays.asList("assetId"))
+    );
   }
 
   // ── Tool name resolution ──────────────────────────────────────────────
@@ -205,6 +230,7 @@ public class ToolRegistry {
       case "neo_schema":
       case "neo_batch":
       case "neo_action":
+      case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
         return true;
       default:
         return false;

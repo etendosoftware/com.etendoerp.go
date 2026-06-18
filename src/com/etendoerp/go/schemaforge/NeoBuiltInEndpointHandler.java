@@ -91,6 +91,14 @@ class NeoBuiltInEndpointHandler {
       handleEmailContractsEndpoint(pathInfo, method, request, response);
       return true;
     }
+    // Only intercept amortization built-in endpoints (e.g. generate-plan).
+    // Regular amortization spec CRUD (entityName = header/lines/accounting) falls through to
+    // the standard window-spec router which resolves the DB spec.
+    if ("amortization".equals(pathInfo.specName)
+        && "generate-plan".equals(pathInfo.entityName)) {
+      handleAmortizationEndpoint(pathInfo, method, request, response);
+      return true;
+    }
     return false;
   }
 
@@ -408,5 +416,37 @@ class NeoBuiltInEndpointHandler {
       }
     }
     return sb.toString();
+  }
+
+  /**
+   * Handles {@code POST /sws/neo/amortization/generate-plan} — generates an asset
+   * amortization plan in a single call by firing the native A_Asset_Post process.
+   *
+   * <p>Body: {@code { "assetId": "<id>" }}
+   * <p>Responses: 200 OK with plan summary, 400/404/409 on validation failures,
+   * 500 on unexpected errors.
+   *
+   * <p>This method is only invoked when the path is exactly
+   * {@code amortization/generate-plan}, so there is no collision with the
+   * regular amortization window spec CRUD endpoints.
+   */
+  private void handleAmortizationEndpoint(NeoServlet.NeoPathInfo pathInfo, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!METHOD_POST.equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Amortization generate-plan endpoint only supports POST");
+      return;
+    }
+    String assetId;
+    try {
+      String body = NeoRequestBodyParser.readRequestBody(request);
+      JSONObject json = NeoRequestBodyParser.parseJsonObject(body);
+      assetId = json.optString("assetId", null);
+    } catch (Exception e) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Invalid JSON body: " + e.getMessage());
+      return;
+    }
+    servlet.writeResponse(response, AmortizationPlanService.generatePlan(assetId));
   }
 }

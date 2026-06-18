@@ -51,6 +51,8 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
+import com.etendoerp.go.schemaforge.AmortizationPlanService;
+import com.etendoerp.go.schemaforge.NeoRequestBodyParser;
 
 /**
  * Unit tests for attachment and built-in endpoint routing in
@@ -834,6 +836,232 @@ public class NeoBuiltInEndpointHandlerTest {
       verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_BAD_REQUEST),
           contains("Invalid JSON body"));
       verify(servlet).writeResponse(response, payload);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // handleAmortizationEndpoint — generate-plan REST glue
+  // -------------------------------------------------------------------------
+
+  /**
+   * Verifies that amortization/generate-plan is intercepted and returns true.
+   * Regular amortization CRUD entities (header, lines) must NOT be intercepted.
+   */
+  @Test
+  public void handleAmortizationGeneratePlanIsIntercepted() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse serviceResponse = NeoResponse.ok(new JSONObject());
+
+    try (MockedStatic<NeoRequestBodyParser> bodyMock = Mockito.mockStatic(NeoRequestBodyParser.class);
+        MockedStatic<AmortizationPlanService> serviceMock = Mockito.mockStatic(
+            AmortizationPlanService.class)) {
+      bodyMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
+          .thenReturn("{\"assetId\":\"ASSET-001\"}");
+      bodyMock.when(() -> NeoRequestBodyParser.parseJsonObject("{\"assetId\":\"ASSET-001\"}"))
+          .thenCallRealMethod();
+      serviceMock.when(() -> AmortizationPlanService.generatePlan("ASSET-001"))
+          .thenReturn(serviceResponse);
+
+      boolean handled = handler.handle(
+          new NeoServlet.NeoPathInfo("amortization", "generate-plan", null),
+          "POST", request, response);
+
+      assertTrue(handled);
+    }
+  }
+
+  /**
+   * Verifies that regular amortization CRUD entity names fall through to the
+   * standard spec router (handler returns false).
+   */
+  @Test
+  public void handleAmortizationHeaderFallsThrough() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    boolean handled = handler.handle(
+        new NeoServlet.NeoPathInfo("amortization", "header", null),
+        "GET", request, response);
+
+    assertFalse(handled);
+  }
+
+  /**
+   * Verifies that the generate-plan endpoint rejects non-POST methods with 405.
+   */
+  @Test
+  public void handleAmortizationGeneratePlanRejectsNonPostMethod() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    boolean handled = handler.handle(
+        new NeoServlet.NeoPathInfo("amortization", "generate-plan", null),
+        "GET", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Amortization generate-plan endpoint only supports POST"));
+  }
+
+  /**
+   * Verifies that a PUT on generate-plan is also rejected with 405.
+   */
+  @Test
+  public void handleAmortizationGeneratePlanRejectsPutMethod() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    boolean handled = handler.handle(
+        new NeoServlet.NeoPathInfo("amortization", "generate-plan", null),
+        "PUT", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Amortization generate-plan endpoint only supports POST"));
+  }
+
+  /**
+   * Happy path: valid POST with assetId delegates to the service and writes the
+   * success response.
+   */
+  @Test
+  public void handleAmortizationGeneratePlanHappyPathWritesServiceResponse() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse serviceResponse = NeoResponse.ok(new JSONObject());
+
+    try (MockedStatic<NeoRequestBodyParser> bodyMock = Mockito.mockStatic(NeoRequestBodyParser.class);
+        MockedStatic<AmortizationPlanService> serviceMock = Mockito.mockStatic(
+            AmortizationPlanService.class)) {
+      bodyMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
+          .thenReturn("{\"assetId\":\"ASSET-42\"}");
+      bodyMock.when(() -> NeoRequestBodyParser.parseJsonObject("{\"assetId\":\"ASSET-42\"}"))
+          .thenCallRealMethod();
+      serviceMock.when(() -> AmortizationPlanService.generatePlan("ASSET-42"))
+          .thenReturn(serviceResponse);
+
+      boolean handled = handler.handle(
+          new NeoServlet.NeoPathInfo("amortization", "generate-plan", null),
+          "POST", request, response);
+
+      assertTrue(handled);
+      serviceMock.verify(() -> AmortizationPlanService.generatePlan("ASSET-42"));
+      verify(servlet).writeResponse(response, serviceResponse);
+    }
+  }
+
+  /**
+   * Error propagation: when the service returns an error NeoResponse, the handler
+   * writes that exact response (does not swallow or replace it).
+   */
+  @Test
+  public void handleAmortizationGeneratePlanPropagatesServiceErrorResponse() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse errorResponse = NeoResponse.error(404, "Asset not found");
+
+    try (MockedStatic<NeoRequestBodyParser> bodyMock = Mockito.mockStatic(NeoRequestBodyParser.class);
+        MockedStatic<AmortizationPlanService> serviceMock = Mockito.mockStatic(
+            AmortizationPlanService.class)) {
+      bodyMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
+          .thenReturn("{\"assetId\":\"MISSING\"}");
+      bodyMock.when(() -> NeoRequestBodyParser.parseJsonObject("{\"assetId\":\"MISSING\"}"))
+          .thenCallRealMethod();
+      serviceMock.when(() -> AmortizationPlanService.generatePlan("MISSING"))
+          .thenReturn(errorResponse);
+
+      boolean handled = handler.handle(
+          new NeoServlet.NeoPathInfo("amortization", "generate-plan", null),
+          "POST", request, response);
+
+      assertTrue(handled);
+      verify(servlet).writeResponse(response, errorResponse);
+      verify(servlet, never()).sendError(eq(response), any(Integer.class), any());
+    }
+  }
+
+  /**
+   * Conflict-error propagation: a 409 from the service is also written through.
+   */
+  @Test
+  public void handleAmortizationGeneratePlanPropagatesConflictResponse() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse conflictResponse = NeoResponse.error(409, "Plan already exists");
+
+    try (MockedStatic<NeoRequestBodyParser> bodyMock = Mockito.mockStatic(NeoRequestBodyParser.class);
+        MockedStatic<AmortizationPlanService> serviceMock = Mockito.mockStatic(
+            AmortizationPlanService.class)) {
+      bodyMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
+          .thenReturn("{\"assetId\":\"DUP-ASSET\"}");
+      bodyMock.when(() -> NeoRequestBodyParser.parseJsonObject("{\"assetId\":\"DUP-ASSET\"}"))
+          .thenCallRealMethod();
+      serviceMock.when(() -> AmortizationPlanService.generatePlan("DUP-ASSET"))
+          .thenReturn(conflictResponse);
+
+      handler.handle(
+          new NeoServlet.NeoPathInfo("amortization", "generate-plan", null),
+          "POST", request, response);
+
+      verify(servlet).writeResponse(response, conflictResponse);
+    }
+  }
+
+  /**
+   * Missing assetId: body present but no assetId key → optString returns null →
+   * generatePlan is called with null (service owns that validation).
+   */
+  @Test
+  public void handleAmortizationGeneratePlanPassesNullAssetIdWhenKeyAbsent() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+    NeoResponse serviceResponse = NeoResponse.error(400, "assetId is required");
+
+    try (MockedStatic<NeoRequestBodyParser> bodyMock = Mockito.mockStatic(NeoRequestBodyParser.class);
+        MockedStatic<AmortizationPlanService> serviceMock = Mockito.mockStatic(
+            AmortizationPlanService.class)) {
+      bodyMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
+          .thenReturn("{\"other\":\"value\"}");
+      bodyMock.when(() -> NeoRequestBodyParser.parseJsonObject("{\"other\":\"value\"}"))
+          .thenCallRealMethod();
+      serviceMock.when(() -> AmortizationPlanService.generatePlan(isNull()))
+          .thenReturn(serviceResponse);
+
+      handler.handle(
+          new NeoServlet.NeoPathInfo("amortization", "generate-plan", null),
+          "POST", request, response);
+
+      serviceMock.verify(() -> AmortizationPlanService.generatePlan(null));
+      verify(servlet).writeResponse(response, serviceResponse);
+    }
+  }
+
+  /**
+   * Invalid JSON body: parse exception is caught and a 400 Bad Request is returned.
+   * The service is never called.
+   */
+  @Test
+  public void handleAmortizationGeneratePlanReturnsBadRequestForInvalidJson() throws Exception {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    HttpServletResponse response = mock(HttpServletResponse.class);
+
+    try (MockedStatic<NeoRequestBodyParser> bodyMock = Mockito.mockStatic(NeoRequestBodyParser.class);
+        MockedStatic<AmortizationPlanService> serviceMock = Mockito.mockStatic(
+            AmortizationPlanService.class)) {
+      bodyMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
+          .thenReturn("{not-valid-json");
+      bodyMock.when(() -> NeoRequestBodyParser.parseJsonObject("{not-valid-json"))
+          .thenCallRealMethod();
+
+      boolean handled = handler.handle(
+          new NeoServlet.NeoPathInfo("amortization", "generate-plan", null),
+          "POST", request, response);
+
+      assertTrue(handled);
+      verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_BAD_REQUEST),
+          contains("Invalid JSON body"));
+      serviceMock.verifyNoInteractions();
     }
   }
 }
