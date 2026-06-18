@@ -942,7 +942,7 @@ public class ReconciliationHandler implements NeoHandler {
         + "   and bsl.financialAccountTransaction is null"
         + "   and bsl.active = true"
         + "   and bs.active = true"
-        + " order by bsl.transactionDate asc, bsl.line asc";
+        + " order by bsl.transactionDate asc, bsl.lineNo asc";
     return OBDal.getInstance().getSession()
         .createQuery(hql, FIN_BankStatementLine.class)
         .setParameter("accountId", accountId)
