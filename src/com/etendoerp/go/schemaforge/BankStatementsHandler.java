@@ -980,7 +980,7 @@ public class BankStatementsHandler implements NeoHandler {
     // ResultSet go inside try-with-resources.
     Connection conn = OBDal.getInstance().getConnection();
     String sql = linesSqlHead() + LINES_SQL_SINGLE_TAIL;
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    try (PreparedStatement ps = conn.prepareStatement(sql)) { // NOSONAR java:S2077 — sql is built from hardcoded constants only, no user input
       ps.setString(1, statementId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
@@ -1132,7 +1132,7 @@ public class BankStatementsHandler implements NeoHandler {
     // Connection is managed by the DAL's Hibernate Session; don't close it.
     Connection conn = OBDal.getInstance().getConnection();
     String sql = linesSqlHead() + LINES_SQL_SINGLE_TAIL;
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    try (PreparedStatement ps = conn.prepareStatement(sql)) { // NOSONAR java:S2077 — sql is built from hardcoded constants only, no user input
       ps.setString(1, statementId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
