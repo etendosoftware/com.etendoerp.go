@@ -21,23 +21,36 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.Arrays;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
+import org.hibernate.Session;
+import org.hibernate.query.NativeQuery;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.utility.Tree;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.OrganizationAcctSchema;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
+import org.openbravo.model.financialmgmt.accounting.coa.Element;
+import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 
 /**
  * Unit tests for {@link OnboardingAccountingWiringService} (Gap A1/A2).
@@ -294,6 +307,442 @@ public class OnboardingAccountingWiringServiceTest {
   public void testReplaceSourceMonikerPassesNullThrough() {
     OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
     assertNull(service.replaceSourceMoniker(null, "Acme"));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // resolveImportedLedger() — real OBCriteria interaction
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveImportedLedgerReturnsNullWhenNoSchema() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AcctSchema> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertNull(service.resolveImportedLedger(client));
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveImportedLedgerReturnsFirstWhenSingleSchema() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+    AcctSchema schema = mock(AcctSchema.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AcctSchema> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Collections.singletonList(schema));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(schema, service.resolveImportedLedger(client));
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveImportedLedgerWarnsAndReturnsFirstWhenMultiple() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("C1");
+    AcctSchema first = mock(AcctSchema.class);
+    when(first.getId()).thenReturn("S1");
+    AcctSchema second = mock(AcctSchema.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AcctSchema> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Arrays.asList(first, second));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(first, service.resolveImportedLedger(client));
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // ensureOrganizationAcctSchema() — real OBCriteria/OBProvider interaction
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testEnsureOrganizationAcctSchemaSkipsWhenLinkExists() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    AcctSchema ledger = mock(AcctSchema.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<OrganizationAcctSchema> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(OrganizationAcctSchema.class)).thenReturn(crit);
+    when(crit.uniqueResult()).thenReturn(mock(OrganizationAcctSchema.class));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.ensureOrganizationAcctSchema(client, org, ledger);
+    }
+
+    verify(dal, never()).save(any(OrganizationAcctSchema.class));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testEnsureOrganizationAcctSchemaCreatesLinkWhenMissing() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    AcctSchema ledger = mock(AcctSchema.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<OrganizationAcctSchema> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(OrganizationAcctSchema.class)).thenReturn(crit);
+    when(crit.uniqueResult()).thenReturn(null);
+
+    OBProvider provider = mock(OBProvider.class);
+    OrganizationAcctSchema link = mock(OrganizationAcctSchema.class);
+    when(provider.get(OrganizationAcctSchema.class)).thenReturn(link);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+
+      service.ensureOrganizationAcctSchema(client, org, ledger);
+    }
+
+    verify(link).setNewOBObject(true);
+    verify(link).setClient(client);
+    verify(link).setOrganization(org);
+    verify(link).setAccountingSchema(ledger);
+    verify(dal).save(link);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // wireAccountElementTree() — real OBCriteria interaction
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Subclass that stubs only the tree-resolution and node-provisioning seams so the body of
+   * {@code wireAccountElementTree} (the element re-pointing loop) runs against mocked OBDal.
+   */
+  private static class TreeWiringService extends OnboardingAccountingWiringService {
+    Tree treeToReturn;
+    int provisionNodesCount;
+    Client provisionedClient;
+    Tree provisionedTree;
+
+    @Override
+    protected Tree resolveTenantElementValueTree(Client client) {
+      return treeToReturn;
+    }
+
+    @Override
+    protected void provisionElementTreeNodes(Client client, Tree tree) {
+      provisionNodesCount++;
+      provisionedClient = client;
+      provisionedTree = tree;
+    }
+  }
+
+  @Test
+  public void testWireAccountElementTreeWarnsAndReturnsWhenNoTree() {
+    TreeWiringService service = new TreeWiringService();
+    service.treeToReturn = null;
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("C1");
+
+    OBDal dal = mock(OBDal.class);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.wireAccountElementTree(client);
+    }
+
+    assertEquals("no node provisioning when there is no tree", 0, service.provisionNodesCount);
+    verify(dal, never()).createCriteria(Element.class);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testWireAccountElementTreeRepointsUntreedElementsAndProvisionsNodes() {
+    TreeWiringService service = new TreeWiringService();
+    Tree tree = mock(Tree.class);
+    service.treeToReturn = tree;
+    Client client = mock(Client.class);
+
+    Element untreed = mock(Element.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Element> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(Element.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Collections.singletonList(untreed));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.wireAccountElementTree(client);
+    }
+
+    verify(untreed).setTree(tree);
+    verify(dal).save(untreed);
+    assertEquals(1, service.provisionNodesCount);
+    assertSame(client, service.provisionedClient);
+    assertSame(tree, service.provisionedTree);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // provisionElementTreeNodes() — empty-source warn branch (bundled XML absent on test classpath)
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testProvisionElementTreeNodesWarnsWhenNoSourceNodes() {
+    // The bundled sourcedata XML is staged at build time and is not on the unit-test classpath,
+    // so loadSourceTreeNodes() returns empty and the method takes the early warn-and-return branch.
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("C1");
+    Tree tree = mock(Tree.class);
+
+    OBDal dal = mock(OBDal.class);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      // Must not throw and must not attempt any tenant-value lookups when source is empty.
+      service.provisionElementTreeNodes(client, tree);
+    }
+
+    verify(dal, never()).createCriteria(ElementValue.class);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // loadSourceTreeNodes() / loadSourceElementValues() — absent classpath resource → empty
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testLoadSourceTreeNodesReturnsEmptyWhenResourceAbsent() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    assertTrue("no bundled tree-node XML on the test classpath",
+        service.loadSourceTreeNodes().isEmpty());
+  }
+
+  @Test
+  public void testLoadSourceElementValuesReturnsEmptyWhenResourceAbsent() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    assertTrue("no bundled element-value XML on the test classpath",
+        service.loadSourceElementValues().isEmpty());
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // loadTenantElementValueIds() — real OBCriteria interaction
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testLoadTenantElementValueIdsMapsSearchKeyToId() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+
+    ElementValue ev = mock(ElementValue.class);
+    when(ev.getSearchKey()).thenReturn("4000");
+    when(ev.getId()).thenReturn("ev-1");
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<ElementValue> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(ElementValue.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Collections.singletonList(ev));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Map<String, String> byValue = service.loadTenantElementValueIds(client);
+      assertEquals(1, byValue.size());
+      assertEquals("ev-1", byValue.get("4000"));
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // insertTreeNode() — native query parameter binding
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testInsertTreeNodeBindsParametersAndReturnsRowCount() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    NativeQuery query = mock(NativeQuery.class);
+    when(session.createNativeQuery(anyString())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.executeUpdate()).thenReturn(1);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      int rows = service.insertTreeNode("tree-1", "node-1", "C1", "0", 10L);
+      assertEquals(1, rows);
+    }
+
+    verify(query).setParameter("treeId", "tree-1");
+    verify(query).setParameter("nodeId", "node-1");
+    verify(query).setParameter("clientId", "C1");
+    verify(query).setParameter("parentId", "0");
+    verify(query).setParameter("seqno", 10L);
+    verify(query).executeUpdate();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // runEntityAcctInsert() — native query parameter binding (real implementation)
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testRunEntityAcctInsertBindsClientAndSchemaIds() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    NativeQuery query = mock(NativeQuery.class);
+    when(session.createNativeQuery(anyString())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.executeUpdate()).thenReturn(3);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.runEntityAcctInsert("INSERT INTO x ...", "C1", "S1");
+    }
+
+    verify(session).createNativeQuery("INSERT INTO x ...");
+    verify(query).setParameter("clientId", "C1");
+    verify(query).setParameter("schemaId", "S1");
+    verify(query).executeUpdate();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // rebrandImportedChartNames() — real OBCriteria interaction
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testRebrandImportedChartNamesRewritesSchemaAndElements() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+    when(client.getName()).thenReturn("Acme");
+    AcctSchema ledger = mock(AcctSchema.class);
+    when(ledger.getName()).thenReturn("Esquema GO");
+
+    Element element = mock(Element.class);
+    when(element.getName()).thenReturn("Arbol de cuentas GO");
+    when(element.getDescription()).thenReturn("GOClient Account");
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Element> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(Element.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Collections.singletonList(element));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.rebrandImportedChartNames(client, ledger);
+    }
+
+    verify(ledger).setName("Esquema Acme");
+    verify(dal).save(ledger);
+    verify(element).setName("Arbol de cuentas Acme");
+    verify(element).setDescription("Acme Account");
+    verify(dal).save(element);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // resolveTenantElementValueTree() — real OBCriteria interaction
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveTenantElementValueTreeReturnsNullWhenNoTree() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Tree> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(Tree.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertNull(service.resolveTenantElementValueTree(client));
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveTenantElementValueTreeReturnsFirstWhenSingle() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+    Tree tree = mock(Tree.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Tree> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(Tree.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Collections.singletonList(tree));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(tree, service.resolveTenantElementValueTree(client));
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveTenantElementValueTreeWarnsAndReturnsFirstWhenMultiple() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("C1");
+    Tree first = mock(Tree.class);
+    when(first.getId()).thenReturn("T1");
+    Tree second = mock(Tree.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Tree> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(Tree.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Arrays.asList(first, second));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(first, service.resolveTenantElementValueTree(client));
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // resolveClient() — real OBDal.get delegation
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testResolveClientDelegatesToObDalGet() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(Client.class, "C1")).thenReturn(client);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(client, service.resolveClient("C1"));
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // contextSubject()
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testContextSubjectIsAccountingWiring() {
+    assertEquals("accounting wiring", new OnboardingAccountingWiringService().contextSubject());
   }
 
   // ---------------------------------------------------------------------------------------------

@@ -17,18 +17,181 @@
 package com.etendoerp.go.onboarding;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import org.hibernate.Session;
+import org.hibernate.query.NativeQuery;
 import org.junit.Test;
+import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.enterprise.Organization;
 
 public class OnboardingMarkOrgReadyServiceTest {
+
+  // ---------------------------------------------------------------------------------------------
+  // provisionOrgTree() / runOrgTreeInsert() — real native-query bodies
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testProvisionOrgTreeRunsBothIdempotentInserts() {
+    OnboardingMarkOrgReadyService service = new OnboardingMarkOrgReadyService();
+
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    NativeQuery query = mock(NativeQuery.class);
+    when(session.createNativeQuery(anyString())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.executeUpdate()).thenReturn(1);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.provisionOrgTree("CLIENT-1", "ORG-1");
+    }
+
+    // Two inserts (self-reference + parent), each binding clientId/orgId.
+    verify(session, org.mockito.Mockito.times(2)).createNativeQuery(anyString());
+    verify(query, org.mockito.Mockito.times(2)).setParameter("clientId", "CLIENT-1");
+    verify(query, org.mockito.Mockito.times(2)).setParameter("orgId", "ORG-1");
+    verify(query, org.mockito.Mockito.times(2)).executeUpdate();
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testRunOrgTreeInsertHandlesZeroRowResult() {
+    OnboardingMarkOrgReadyService service = new OnboardingMarkOrgReadyService();
+
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    NativeQuery query = mock(NativeQuery.class);
+    when(session.createNativeQuery(anyString())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.executeUpdate()).thenReturn(0);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      // Zero-row result skips the debug log; must not throw.
+      service.runOrgTreeInsert("INSERT INTO ad_org_tree ...", "CLIENT-1", "ORG-1");
+    }
+
+    verify(query).executeUpdate();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // executeOrgReadyProcess() — process-not-found guard (real body)
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testExecuteOrgReadyProcessFailsWhenProcessMissing() {
+    // Override only resolveProcess so the real executeOrgReadyProcess body runs and hits the
+    // null-process guard before touching any DalConnectionProvider / ProcessRunner machinery.
+    OnboardingMarkOrgReadyService service = new OnboardingMarkOrgReadyService() {
+      @Override
+      protected Process resolveProcess(String searchKey) {
+        return null;
+      }
+    };
+
+    try {
+      service.executeOrgReadyProcess("ORG-1", "CLIENT-1", "USER-1", "ROLE-1");
+      fail("Expected OBException for missing AD_Org_Ready process");
+    } catch (OBException e) {
+      assertTrue(e.getMessage().contains("AD_Org_Ready process not found"));
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // resolveProcess() — real OBCriteria interaction
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveProcessReturnsUniqueResult() {
+    OnboardingMarkOrgReadyService service = new OnboardingMarkOrgReadyService();
+    Process process = mock(Process.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Process> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(Process.class)).thenReturn(crit);
+    when(crit.uniqueResult()).thenReturn(process);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(process, service.resolveProcess("AD_Org_Ready"));
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // resolveOrganization() / saveOrganization() / flushChanges() — real OBDal delegation
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testResolveOrganizationDelegatesToObDalGet() {
+    OnboardingMarkOrgReadyService service = new OnboardingMarkOrgReadyService();
+    Organization org = mock(Organization.class);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(Organization.class, "ORG-1")).thenReturn(org);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(org, service.resolveOrganization("ORG-1"));
+    }
+  }
+
+  @Test
+  public void testResolveOrganizationReturnsNullWhenAbsent() {
+    OnboardingMarkOrgReadyService service = new OnboardingMarkOrgReadyService();
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(Organization.class, "ORG-1")).thenReturn(null);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertNull(service.resolveOrganization("ORG-1"));
+    }
+  }
+
+  @Test
+  public void testSaveOrganizationDelegatesToObDalSave() {
+    OnboardingMarkOrgReadyService service = new OnboardingMarkOrgReadyService();
+    Organization org = mock(Organization.class);
+
+    OBDal dal = mock(OBDal.class);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.saveOrganization(org);
+    }
+
+    verify(dal).save(org);
+  }
+
+  @Test
+  public void testFlushChangesDelegatesToObDalFlush() {
+    OnboardingMarkOrgReadyService service = new OnboardingMarkOrgReadyService();
+
+    OBDal dal = mock(OBDal.class);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.flushChanges();
+    }
+
+    verify(dal).flush();
+  }
 
   @Test
   public void testMarkOrgReadySkipsWhenAlreadyReady() {

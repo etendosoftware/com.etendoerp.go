@@ -16,6 +16,8 @@
  */
 package com.etendoerp.go.onboarding;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -26,6 +28,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 
@@ -33,12 +36,14 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.calendar.Calendar;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.calendar.PeriodControl;
+import org.openbravo.model.financialmgmt.calendar.Year;
 
 /**
  * Unit tests for {@link OnboardingPeriodControlService}.
@@ -287,6 +292,158 @@ public class OnboardingPeriodControlServiceTest {
     verify(org).setPeriodControlAllowedOrganization(org);
     verify(org).setCalendarOwnerOrganization(org);
     verify(dal).save(org);
+  }
+
+  // ---------------------------------------------------------------------------
+  // 8. resolveImportedCalendar() — real OBCriteria body
+  // ---------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveImportedCalendarReturnsOrgOwnedCalendar() {
+    OnboardingPeriodControlService service = new OnboardingPeriodControlService();
+    Organization org = mock(Organization.class);
+    Calendar calendar = mock(Calendar.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Calendar> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(Calendar.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Collections.singletonList(calendar));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(calendar, service.resolveImportedCalendar(org));
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveImportedCalendarWarnsAndReturnsFirstWhenMultiple() {
+    OnboardingPeriodControlService service = new OnboardingPeriodControlService();
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("ORG-1");
+    Calendar first = mock(Calendar.class);
+    when(first.getId()).thenReturn("CAL-1");
+    Calendar second = mock(Calendar.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Calendar> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(Calendar.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Arrays.asList(first, second));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(first, service.resolveImportedCalendar(org));
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveImportedCalendarFallsBackToClientCalendarWhenOrgOwnsNone() {
+    OnboardingPeriodControlService service = new OnboardingPeriodControlService();
+    Organization org = mock(Organization.class);
+    Client client = mock(Client.class);
+    when(org.getClient()).thenReturn(client);
+    Calendar clientCalendar = mock(Calendar.class);
+
+    OBDal dal = mock(OBDal.class);
+    // First criteria (org-owned) returns empty -> resolveClientCalendar() second criteria runs.
+    OBCriteria<Calendar> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(Calendar.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Collections.emptyList());
+    when(crit.uniqueResult()).thenReturn(clientCalendar);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(clientCalendar, service.resolveImportedCalendar(org));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 9. resolveCalendarPeriods() — real OBCriteria body, both year branches
+  // ---------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveCalendarPeriodsReturnsEmptyWhenNoYears() {
+    OnboardingPeriodControlService service = new OnboardingPeriodControlService();
+    Calendar calendar = mock(Calendar.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Year> yearCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(Year.class)).thenReturn(yearCrit);
+    when(yearCrit.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertTrue(service.resolveCalendarPeriods(calendar).isEmpty());
+    }
+
+    // No-years short circuit must not query periods.
+    verify(dal, never()).createCriteria(Period.class);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveCalendarPeriodsQueriesPeriodsForYears() {
+    OnboardingPeriodControlService service = new OnboardingPeriodControlService();
+    Calendar calendar = mock(Calendar.class);
+    Year year = mock(Year.class);
+    Period period = mock(Period.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Year> yearCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(Year.class)).thenReturn(yearCrit);
+    when(yearCrit.list()).thenReturn(Collections.singletonList(year));
+    OBCriteria<Period> periodCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(Period.class)).thenReturn(periodCrit);
+    when(periodCrit.list()).thenReturn(Collections.singletonList(period));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      List<Period> result = service.resolveCalendarPeriods(calendar);
+      assertEquals(1, result.size());
+      assertSame(period, result.get(0));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 10. resolvePeriodControls() — real OBCriteria body
+  // ---------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolvePeriodControlsReturnsControlRows() {
+    OnboardingPeriodControlService service = new OnboardingPeriodControlService();
+    Period period = mock(Period.class);
+    PeriodControl control = mock(PeriodControl.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<PeriodControl> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(PeriodControl.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Collections.singletonList(control));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      List<PeriodControl> result = service.resolvePeriodControls(period);
+      assertEquals(1, result.size());
+      assertSame(control, result.get(0));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // 11. currentDate() / contextSubject() — leaf seams
+  // ---------------------------------------------------------------------------
+
+  @Test
+  public void testCurrentDateReturnsNonNullInstant() {
+    assertNotNull(new OnboardingPeriodControlService().currentDate());
+  }
+
+  @Test
+  public void testContextSubjectIsPeriodControlWiring() {
+    assertEquals("period-control wiring",
+        new OnboardingPeriodControlService().contextSubject());
   }
 
   // ---------------------------------------------------------------------------

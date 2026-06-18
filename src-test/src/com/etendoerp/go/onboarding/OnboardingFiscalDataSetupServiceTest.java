@@ -17,19 +17,165 @@
 package com.etendoerp.go.onboarding;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.junit.Test;
+import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.module.sii.data.AEATSIIDescription;
 
 public class OnboardingFiscalDataSetupServiceTest {
+
+  // ---------------------------------------------------------------------------------------------
+  // setup() — client/org resolution failures (real branches)
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testSetupFailsWhenClientNotFound() {
+    TestableService service = new TestableService();
+    service.clientToReturn = null;
+    try {
+      service.setup("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
+      fail("Expected OBException for missing client");
+    } catch (OBException e) {
+      assertTrue(e.getMessage().contains("Client not found for fiscal data setup"));
+    }
+  }
+
+  @Test
+  public void testSetupFailsWhenOrganizationNotFound() {
+    TestableService service = new TestableService();
+    service.orgToReturn = null;
+    try {
+      service.setup("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
+      fail("Expected OBException for missing organization");
+    } catch (OBException e) {
+      assertTrue(e.getMessage().contains("Organization not found for fiscal data setup"));
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // buildSiiDescription() — real OBProvider-backed body
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testBuildSiiDescriptionPopulatesAllFields() {
+    OnboardingFiscalDataSetupService service = new OnboardingFiscalDataSetupService();
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+
+    OBProvider provider = mock(OBProvider.class);
+    AEATSIIDescription desc = mock(AEATSIIDescription.class);
+    when(provider.get(AEATSIIDescription.class)).thenReturn(desc);
+
+    try (MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      AEATSIIDescription result = service.buildSiiDescription(client, org, "Ventas", true, false);
+      assertSame(desc, result);
+    }
+
+    verify(desc).setNewOBObject(true);
+    verify(desc).setClient(client);
+    verify(desc).setOrganization(org);
+    verify(desc).setActive(true);
+    verify(desc).setName("Ventas");
+    verify(desc).setDescription("Ventas");
+    verify(desc).setSales(true);
+    verify(desc).setPurchase(false);
+    verify(desc).setDefault(true);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // siiDescriptionExists() — real OBCriteria body, both sales/purchase branches
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testSiiDescriptionExistsTrueForSalesWhenRowPresent() {
+    OnboardingFiscalDataSetupService service = new OnboardingFiscalDataSetupService();
+    Client client = mock(Client.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AEATSIIDescription> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(AEATSIIDescription.class)).thenReturn(crit);
+    when(crit.uniqueResult()).thenReturn(mock(AEATSIIDescription.class));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertTrue(service.siiDescriptionExists(client, true));
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testSiiDescriptionExistsFalseForPurchaseWhenNoRow() {
+    OnboardingFiscalDataSetupService service = new OnboardingFiscalDataSetupService();
+    Client client = mock(Client.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AEATSIIDescription> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(AEATSIIDescription.class)).thenReturn(crit);
+    when(crit.uniqueResult()).thenReturn(null);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertFalse(service.siiDescriptionExists(client, false));
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // resolveClient() / saveSiiDescription() — real OBDal delegation
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testResolveClientDelegatesToObDalGet() {
+    OnboardingFiscalDataSetupService service = new OnboardingFiscalDataSetupService();
+    Client client = mock(Client.class);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(Client.class, "CLIENT-1")).thenReturn(client);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(client, service.resolveClient("CLIENT-1"));
+    }
+  }
+
+  @Test
+  public void testSaveSiiDescriptionDelegatesToObDalSave() {
+    OnboardingFiscalDataSetupService service = new OnboardingFiscalDataSetupService();
+    AEATSIIDescription desc = mock(AEATSIIDescription.class);
+
+    OBDal dal = mock(OBDal.class);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.saveSiiDescription(desc);
+    }
+
+    verify(dal).save(desc);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // contextSubject()
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testContextSubjectIsFiscalDataSetup() {
+    assertEquals("fiscal data setup", new OnboardingFiscalDataSetupService().contextSubject());
+  }
 
   @Test
   public void testSetupFailsWhenClientIdIsMissing() {
@@ -120,10 +266,14 @@ public class OnboardingFiscalDataSetupServiceTest {
     boolean failOnSii;
     boolean flushed;
     int siiSaveCount;
+    Client clientToReturn;
+    Organization orgToReturn;
 
     private TestableService() {
       when(client.getId()).thenReturn("CLIENT-1");
       when(organization.getId()).thenReturn("ORG-1");
+      clientToReturn = client;
+      orgToReturn = organization;
     }
 
     @Override
@@ -159,12 +309,12 @@ public class OnboardingFiscalDataSetupServiceTest {
 
     @Override
     protected Client resolveClient(String clientId) {
-      return client;
+      return clientToReturn;
     }
 
     @Override
     protected Organization resolveOrganization(String orgId) {
-      return organization;
+      return orgToReturn;
     }
 
     @Override

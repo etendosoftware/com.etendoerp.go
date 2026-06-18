@@ -16,21 +16,25 @@
  */
 package com.etendoerp.go.onboarding;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
@@ -210,8 +214,8 @@ public class OnboardingOrgInfoServiceTest {
 
       // Already located: no location created, no link, no save.
       assertNull(service.createdLocation);
-      verify(orgInfo, never()).setLocationAddress(org.mockito.ArgumentMatchers.any());
-      verify(dal, never()).save(org.mockito.ArgumentMatchers.any());
+      verify(orgInfo, never()).setLocationAddress(any());
+      verify(dal, never()).save(any());
     }
   }
 
@@ -259,6 +263,173 @@ public class OnboardingOrgInfoServiceTest {
       verify(createdOrgInfo).setLocationAddress(location);
       verify(dal).save(createdOrgInfo);
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // resolveOrgInfo() / resolveClient() — real OBDal.get delegation
+  // ---------------------------------------------------------------------------
+
+  @Test
+  public void testResolveOrgInfoFetchesBySharedPrimaryKey() {
+    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("ORG-1");
+    OrganizationInformation orgInfo = mock(OrganizationInformation.class);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(OrganizationInformation.class, "ORG-1")).thenReturn(orgInfo);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(orgInfo, service.resolveOrgInfo(org));
+    }
+  }
+
+  @Test
+  public void testResolveClientDelegatesToObDalGet() {
+    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+    Client client = mock(Client.class);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(Client.class, "CLIENT-1")).thenReturn(client);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(client, service.resolveClient("CLIENT-1"));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // createOrgInfo() — real OBProvider-backed body (shared PK)
+  // ---------------------------------------------------------------------------
+
+  @Test
+  public void testCreateOrgInfoSetsSharedPrimaryKeyAndSaves() {
+    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("ORG-1");
+
+    OBProvider provider = mock(OBProvider.class);
+    OrganizationInformation orgInfo = mock(OrganizationInformation.class);
+    when(provider.get(OrganizationInformation.class)).thenReturn(orgInfo);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(orgInfo, service.createOrgInfo(client, org));
+    }
+
+    verify(orgInfo).setNewOBObject(true);
+    verify(orgInfo).setId("ORG-1");
+    verify(orgInfo).setClient(client);
+    verify(orgInfo).setOrganization(org);
+    verify(orgInfo).setActive(true);
+    verify(dal).save(orgInfo);
+  }
+
+  // ---------------------------------------------------------------------------
+  // createLocation() — real OBProvider-backed body, with and without address
+  // ---------------------------------------------------------------------------
+
+  @Test
+  public void testCreateLocationSetsAddressWhenProvided() {
+    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    Country country = mock(Country.class);
+
+    OBProvider provider = mock(OBProvider.class);
+    Location location = mock(Location.class);
+    when(provider.get(Location.class)).thenReturn(location);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(location, service.createLocation(client, org, country, "  Main St 1  "));
+    }
+
+    verify(location).setNewOBObject(true);
+    verify(location).setClient(client);
+    verify(location).setOrganization(org);
+    verify(location).setActive(true);
+    verify(location).setCountry(country);
+    verify(location).setAddressLine1("Main St 1"); // trimmed
+    verify(dal).save(location);
+  }
+
+  @Test
+  public void testCreateLocationSkipsAddressWhenBlank() {
+    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    Country country = mock(Country.class);
+
+    OBProvider provider = mock(OBProvider.class);
+    Location location = mock(Location.class);
+    when(provider.get(Location.class)).thenReturn(location);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.createLocation(client, org, country, "   ");
+    }
+
+    verify(location, never()).setAddressLine1(anyString());
+    verify(dal).save(location);
+  }
+
+  // ---------------------------------------------------------------------------
+  // findCountryByIso() / findAnyActiveCountry() — real OBCriteria bodies
+  // ---------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testFindCountryByIsoReturnsUniqueResult() {
+    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+    Country country = mock(Country.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Country> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(Country.class)).thenReturn(crit);
+    when(crit.uniqueResult()).thenReturn(country);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(country, service.findCountryByIso("ES"));
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testFindAnyActiveCountryReturnsUniqueResult() {
+    OnboardingOrgInfoService service = new OnboardingOrgInfoService();
+    Country country = mock(Country.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<Country> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(Country.class)).thenReturn(crit);
+    when(crit.uniqueResult()).thenReturn(country);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertSame(country, service.findAnyActiveCountry());
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // contextSubject()
+  // ---------------------------------------------------------------------------
+
+  @Test
+  public void testContextSubjectIsOrgInfoSetup() {
+    assertEquals("org-info setup", new OnboardingOrgInfoService().contextSubject());
   }
 
   // ---------------------------------------------------------------------------
