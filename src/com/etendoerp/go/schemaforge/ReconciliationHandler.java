@@ -145,16 +145,19 @@ public class ReconciliationHandler implements NeoHandler {
           + "       %s AS description,"
           + "       COALESCE(bp.name, NULLIF(bsl.bpartnername, ''), '') AS partner_name,"
           + "       COALESCE(bsl.referenceno, '') AS reference_no,"
+          + "       CASE WHEN bsl.fin_finacc_transaction_id IS NULL THEN 'pending' ELSE 'reconciled' END AS line_status,"
           + "       COALESCE(bsl.cramount, 0) - COALESCE(bsl.dramount, 0) AS amount"
           + "  FROM fin_bankstatementline bsl"
           + "  JOIN fin_bankstatement bs ON bs.fin_bankstatement_id = bsl.fin_bankstatement_id"
           + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = bsl.c_bpartner_id"
-          + " WHERE bsl.fin_finacc_transaction_id IS NULL"
-          + "   AND bsl.isactive = 'Y'"
+          + " WHERE bsl.isactive = 'Y'"
           + "   AND bs.isactive = 'Y'"
           + "   AND bs.fin_financial_account_id = ?"
           + "   AND bs.ad_client_id = ?"
           + "   AND bs.ad_org_id = ANY (?)";
+
+  /** Status filter codes accepted by {@code pendingLines}. */
+  private static final String STATUS_RECONCILED = "reconciled";
 
   private static final String PENDING_LINES_ORDER =
       " ORDER BY bsl.datetrx ASC, bsl.line ASC";
@@ -236,6 +239,13 @@ public class ReconciliationHandler implements NeoHandler {
     // Resolve the description expression once (ModelProvider-based, no DB round-trip).
     String descExpr = descriptionExpr();
     StringBuilder sql = new StringBuilder(String.format(PENDING_LINES_SQL, descExpr));
+    // Status filter: 'pending' (default) → unmatched lines; 'reconciled' → matched
+    // lines; blank / any other (e.g. "all") → both.
+    if (STATUS_RECONCILED.equalsIgnoreCase(status)) {
+      sql.append(" AND bsl.fin_finacc_transaction_id IS NOT NULL");
+    } else if (STATUS_PENDING.equalsIgnoreCase(status)) {
+      sql.append(" AND bsl.fin_finacc_transaction_id IS NULL");
+    }
     if (StringUtils.isNotBlank(dateFrom)) {
       sql.append(" AND bsl.datetrx >= ?");
     }
@@ -275,19 +285,13 @@ public class ReconciliationHandler implements NeoHandler {
           row.put("description", StringUtils.trimToEmpty(rs.getString("description")));
           row.put("partnerName", StringUtils.trimToEmpty(rs.getString("partner_name")));
           row.put("referenceNo", StringUtils.trimToEmpty(rs.getString("reference_no")));
-          // T6 only lists pending lines; the status column is reserved for the
-          // reconciled/suggested/by-rule states added by later tasks.
-          row.put(KEY_STATUS, STATUS_PENDING);
+          // Per-row state derived in SQL: 'pending' (unmatched) or 'reconciled'.
+          row.put(KEY_STATUS, StringUtils.defaultIfBlank(rs.getString("line_status"), STATUS_PENDING));
           row.put(KEY_AMOUNT, amount);
           lines.put(row);
           total = total.add(amount);
         }
       }
-    }
-    // The status filter is accepted but reserved: T6 only ever returns pending
-    // lines, so a non-pending status simply yields the same set.
-    if (StringUtils.isNotBlank(status) && !STATUS_PENDING.equalsIgnoreCase(status)) {
-      log.debug("pendingLines status filter '{}' ignored in T6 (only pending lines exist)", status);
     }
     JSONObject data = new JSONObject();
     data.put("lines", lines);
