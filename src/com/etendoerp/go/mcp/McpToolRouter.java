@@ -775,6 +775,9 @@ public class McpToolRouter {
   private JSONObject handleGenerateAmortizationPlan(JSONObject arguments) throws Exception {
     String assetId = arguments != null ? arguments.optString("assetId", null) : null;
     NeoResponse response = AmortizationPlanService.generatePlan(assetId);
+    if (response == null) {
+      return wrapAsErrorContent("Internal error: service returned a null response");
+    }
     if (response.getHttpStatus() >= 400) {
       return wrapAsErrorContent(
           response.getBody() != null ? response.getBody().toString() : "Error generating amortization plan");

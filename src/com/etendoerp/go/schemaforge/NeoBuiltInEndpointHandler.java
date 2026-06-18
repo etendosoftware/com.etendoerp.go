@@ -96,7 +96,7 @@ class NeoBuiltInEndpointHandler {
     // the standard window-spec router which resolves the DB spec.
     if ("amortization".equals(pathInfo.specName)
         && "generate-plan".equals(pathInfo.entityName)) {
-      handleAmortizationEndpoint(pathInfo, method, request, response);
+      handleAmortizationEndpoint(method, request, response);
       return true;
     }
     return false;
@@ -430,7 +430,7 @@ class NeoBuiltInEndpointHandler {
    * {@code amortization/generate-plan}, so there is no collision with the
    * regular amortization window spec CRUD endpoints.
    */
-  private void handleAmortizationEndpoint(NeoServlet.NeoPathInfo pathInfo, String method,
+  private void handleAmortizationEndpoint(String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     if (!METHOD_POST.equals(method)) {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
@@ -439,12 +439,17 @@ class NeoBuiltInEndpointHandler {
     }
     String assetId;
     try {
-      String body = NeoRequestBodyParser.readRequestBody(request);
-      JSONObject json = NeoRequestBodyParser.parseJsonObject(body);
+      String body = readBody(request);
+      JSONObject json = new JSONObject(body);
       assetId = json.optString("assetId", null);
     } catch (Exception e) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Invalid JSON body: " + e.getMessage());
+      return;
+    }
+    if (assetId == null || assetId.trim().isEmpty()) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "The 'assetId' parameter is mandatory.");
       return;
     }
     servlet.writeResponse(response, AmortizationPlanService.generatePlan(assetId));

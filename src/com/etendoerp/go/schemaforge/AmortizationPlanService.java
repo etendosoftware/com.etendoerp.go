@@ -25,6 +25,7 @@ import java.util.stream.Collectors;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
@@ -83,7 +84,9 @@ public class AmortizationPlanService {
    */
   private static final String ASSETS_SPEC_NAME = "assets";
 
-  /** Entity name within the assets spec used to resolve the AD_Tab at runtime. */
+  /**
+   * Entity name within the assets spec used to resolve the AD_Tab at runtime.
+   */
   private static final String ASSETS_ENTITY_NAME = "assets";
 
   private static final String DATE_FORMAT = "yyyy-MM-dd";
@@ -94,45 +97,19 @@ public class AmortizationPlanService {
   /**
    * Generate an amortization plan for the given asset.
    *
-   * @param assetId the {@code A_Asset_ID} (primary key) of the asset to process
+   * @param assetId
+   *     the {@code A_Asset_ID} (primary key) of the asset to process
    * @return a {@link NeoResponse} with HTTP 200 and a JSON summary on success,
-   *         or an appropriate 4xx/5xx error response on failure
+   *     or an appropriate 4xx/5xx error response on failure
    */
   public static NeoResponse generatePlan(String assetId) {
     try {
-      // Step 1 — validate assetId
-      if (StringUtils.isBlank(assetId)) {
-        return NeoResponse.error(400, "assetId is required");
+      // Steps 1-5 — validate asset ID, existence, and depreciation configuration
+      NeoResponse validationError = validateAssetInput(assetId);
+      if (validationError != null) {
+        return validationError;
       }
-
-      // Step 2 — load asset
       Asset asset = OBDal.getInstance().get(Asset.class, assetId);
-      if (asset == null) {
-        return NeoResponse.error(404, "Asset not found: " + assetId);
-      }
-
-      // Step 3 — validate depreciate flag
-      if (!Boolean.TRUE.equals(asset.isDepreciate())) {
-        return NeoResponse.error(400, "Asset is not configured for depreciation");
-      }
-
-      // Step 4 — validate not already processed
-      if ("Y".equals(asset.getProcessed())) {
-        return NeoResponse.error(409, "Asset already has a generated amortization plan");
-      }
-
-      // Step 5 — validate usable life for time-based amortization.
-      // PE (percentage-based) amortization: the percentage is validated by the native
-      // A_Asset_Post procedure, so the endpoint intentionally does not pre-validate it;
-      // only the TI (time-based) usable-life value is checked here.
-      if ("TI".equals(asset.getCalculateType())) {
-        Long usableLifeMonths = asset.getUsableLifeMonths();
-        if (usableLifeMonths == null || usableLifeMonths <= 0) {
-          return NeoResponse.error(400,
-              "Asset has no valid usable life configured "
-                  + "(usableLifeMonths must be > 0 for time-based amortization)");
-        }
-      }
 
       // Step 6 — resolve A_Asset_Post process at runtime by search key (no hardcoded ID)
       Process process = resolveAssetPostProcess();
@@ -145,8 +122,7 @@ public class AmortizationPlanService {
       String tabId = resolveAssetsTabId();
       if (tabId == null) {
         return NeoResponse.error(500,
-            "Assets AD_Tab could not be resolved from ETGO_SF_Entity "
-                + "(spec=" + ASSETS_SPEC_NAME + ", entity=" + ASSETS_ENTITY_NAME + ")");
+            "Assets AD_Tab could not be resolved from ETGO_SF_Entity " + "(spec=" + ASSETS_SPEC_NAME + ", entity=" + ASSETS_ENTITY_NAME + ")");
       }
 
       // Step 8 — fire the process
@@ -163,99 +139,164 @@ public class AmortizationPlanService {
       // running server — it cannot be proven by a local build alone.
       OBDal.getInstance().getSession().refresh(asset);
 
-      // Step 10 — read back the amortization plan via an explicit ordered query.
+      // Step 10 — read back amortization lines via an explicit ordered OBCriteria query.
       // We avoid walking the lazy Hibernate collection on asset, which may be stale after
       // A_Asset_Post0's internal commit. An OBCriteria query always reads from the DB directly.
-      OBCriteria<AmortizationLine> lineCriteria = OBDal.getInstance().createCriteria(AmortizationLine.class);
-      lineCriteria.add(Restrictions.eq(AmortizationLine.PROPERTY_ASSET, asset));
-      lineCriteria.addOrder(Order.asc(AmortizationLine.PROPERTY_LINENO));
-      List<AmortizationLine> lines = lineCriteria.list();
+      List<AmortizationLine> lines = queryAmortizationLines(asset);
 
       if (lines == null || lines.isEmpty()) {
         return NeoResponse.error(500,
             "Amortization plan was not generated: no amortization lines found after process execution");
       }
 
-      // Because the endpoint rejects already-processed assets with 409 BEFORE firing the process,
-      // a successful run means the asset had no prior plan and now has exactly ONE amortization header.
-      // All queried lines therefore belong to the single new plan — the header is unambiguous.
-      // Defensively: if more than one distinct header is present, pick the most-recently-created one
-      // and log a warning so the anomaly is visible in logs.
-      List<Amortization> distinctHeaders = lines.stream()
-          .map(AmortizationLine::getAmortization)
-          .distinct()
-          .collect(Collectors.toList());
-      if (distinctHeaders.size() > 1) {
-        log.warn("Multiple amortization headers found for asset '{}' after plan generation; "
-            + "picking the most-recently-created. Count: {}", assetId, distinctHeaders.size());
-        distinctHeaders.sort((a, b) -> {
-          java.util.Date da = a.getCreationDate();
-          java.util.Date db = b.getCreationDate();
-          if (da == null && db == null) return 0;
-          if (da == null) return 1;
-          if (db == null) return -1;
-          return db.compareTo(da); // descending: newest first
-        });
-      }
-      Amortization amortizationHeader = distinctHeaders.get(0);
+      // Step 11 — resolve the amortization header and build the result JSON.
+      Amortization header = resolveAmortizationHeader(lines, assetId);
+      List<AmortizationLine> headerLines = lines.stream().filter(
+          l -> header.getId().equals(l.getAmortization().getId())).collect(Collectors.toList());
 
-      // Filter lines to only those belonging to the selected header (matters only in the defensive path).
-      List<AmortizationLine> headerLines = lines.stream()
-          .filter(l -> amortizationHeader.getId().equals(l.getAmortization().getId()))
-          .collect(Collectors.toList());
-
-      int periodsGenerated = headerLines.size();
-
-      BigDecimal totalAmortization = BigDecimal.ZERO;
-      for (AmortizationLine line : headerLines) {
-        BigDecimal amt = line.getAmortizationAmount();
-        if (amt != null) {
-          totalAmortization = totalAmortization.add(amt);
-        }
-      }
-
-      // periodAmount is the first ordered line's amount; the last period may differ slightly due to rounding.
-      AmortizationLine firstLine = headerLines.get(0);
-      BigDecimal periodAmount = firstLine.getAmortizationAmount() != null
-          ? firstLine.getAmortizationAmount()
-          : BigDecimal.ZERO;
-
-      SimpleDateFormat sdf = new SimpleDateFormat(DATE_FORMAT);
-      String startDate = amortizationHeader.getStartingDate() != null
-          ? sdf.format(amortizationHeader.getStartingDate())
-          : null;
-      String endDate = amortizationHeader.getEndingDate() != null
-          ? sdf.format(amortizationHeader.getEndingDate())
-          : null;
-
-      // Step 11 — build and return result JSON
-      // accountingEntriesCreated is intentionally omitted: accounting entries are posted
-      // later, manually by the finance team, and are not part of plan generation.
-      // Resolve currency ISO code from the asset (guaranteed non-null by the native procedure).
-      Currency assetCurrency = asset.getCurrency();
-      String currencyIsoCode = assetCurrency != null ? assetCurrency.getISOCode() : null;
-
-      JSONObject result = new JSONObject();
-      result.put("success", true);
-      result.put("amortizationId", amortizationHeader.getId());
-      result.put("calculateType", asset.getCalculateType());
-      result.put("totalAmortization", totalAmortization);
-      if (currencyIsoCode != null) {
-        result.put("currency", currencyIsoCode);
-      }
-      result.put("periodsGenerated", periodsGenerated);
-      result.put("periodAmount", periodAmount);
-      result.put("startDate", startDate);
-      result.put("endDate", endDate);
-
-      return NeoResponse.ok(result);
+      return buildPlanResult(asset, header, headerLines);
 
     } catch (Exception e) {
-      log.error("Unexpected error generating amortization plan for asset '{}': {}",
-          assetId, e.getMessage(), e);
-      return NeoResponse.error(500,
-          "Unexpected error generating amortization plan: " + e.getMessage());
+      log.error("Unexpected error generating amortization plan for asset '{}': {}", assetId, e.getMessage(), e);
+      return NeoResponse.error(500, "Unexpected error generating amortization plan: " + e.getMessage());
     }
+  }
+
+  /**
+   * Validates the asset ID and the asset's depreciation configuration (steps 1–5 of
+   * {@link #generatePlan}).
+   *
+   * @param assetId
+   *     the raw asset ID from the request
+   * @return a {@link NeoResponse} error if any guard clause fails, or {@code null} if all pass
+   */
+  private static NeoResponse validateAssetInput(String assetId) {
+    if (StringUtils.isBlank(assetId)) {
+      return NeoResponse.error(400, "assetId is required");
+    }
+    Asset asset = OBDal.getInstance().get(Asset.class, assetId);
+    if (asset == null) {
+      return NeoResponse.error(404, "Asset not found: " + assetId);
+    }
+    if (!Boolean.TRUE.equals(asset.isDepreciate())) {
+      return NeoResponse.error(400, "Asset is not configured for depreciation");
+    }
+    if ("Y".equals(asset.getProcessed())) {
+      return NeoResponse.error(409, "Asset already has a generated amortization plan");
+    }
+    // Only TI usable life is pre-validated here; PE percentage is checked by A_Asset_Post.
+    if ("TI".equals(asset.getCalculateType())) {
+      Long usableLifeMonths = asset.getUsableLifeMonths();
+      if (usableLifeMonths == null || usableLifeMonths <= 0) {
+        return NeoResponse.error(400,
+            "Asset has no valid usable life configured " + "(usableLifeMonths must be > 0 for time-based amortization)");
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Queries {@link AmortizationLine} records for the given asset, ordered by line number.
+   * Uses an explicit OBCriteria query to bypass any stale Hibernate first-level cache.
+   *
+   * @param asset
+   *     the asset whose lines are fetched
+   * @return ordered list of amortization lines (may be empty but never null)
+   */
+  private static List<AmortizationLine> queryAmortizationLines(Asset asset) {
+    OBCriteria<AmortizationLine> criteria = OBDal.getInstance().createCriteria(AmortizationLine.class);
+    criteria.add(Restrictions.eq(AmortizationLine.PROPERTY_ASSET, asset));
+    criteria.addOrder(Order.asc(AmortizationLine.PROPERTY_LINENO));
+    return criteria.list();
+  }
+
+  /**
+   * Resolves the single {@link Amortization} header from a list of lines.
+   * When multiple distinct headers are found (defensive path), picks the most-recently-created
+   * and logs a warning.
+   *
+   * @param lines
+   *     non-empty list of amortization lines
+   * @param assetId
+   *     used only for the warning log message
+   * @return the resolved amortization header
+   */
+  private static Amortization resolveAmortizationHeader(List<AmortizationLine> lines, String assetId) {
+    // Because the endpoint rejects already-processed assets with 409 BEFORE firing the process,
+    // a successful run means the asset had no prior plan and now has exactly ONE amortization header.
+    // All queried lines therefore belong to the single new plan — the header is unambiguous.
+    // Defensively: if more than one distinct header is present, pick the most-recently-created one
+    // and log a warning so the anomaly is visible in logs.
+    List<Amortization> distinctHeaders = lines.stream().map(AmortizationLine::getAmortization).distinct().collect(
+        Collectors.toList());
+    if (distinctHeaders.size() > 1) {
+      log.warn(
+          "Multiple amortization headers found for asset '{}' after plan generation; " + "picking the most-recently-created. Count: {}",
+          assetId, distinctHeaders.size());
+      distinctHeaders.sort((a, b) -> {
+        java.util.Date da = a.getCreationDate();
+        java.util.Date db = b.getCreationDate();
+        if (da == null && db == null) return 0;
+        if (da == null) return 1;
+        if (db == null) return -1;
+        return db.compareTo(da); // descending: newest first
+      });
+    }
+    return distinctHeaders.get(0);
+  }
+
+  /**
+   * Builds the success {@link NeoResponse} for an amortization plan (step 11 of
+   * {@link #generatePlan}).
+   *
+   * @param asset
+   *     the asset that was processed
+   * @param header
+   *     the amortization header record
+   * @param headerLines
+   *     lines belonging to {@code header}, ordered by line number
+   * @return a 200 OK response containing the plan summary JSON
+   */
+  private static NeoResponse buildPlanResult(Asset asset, Amortization header,
+      List<AmortizationLine> headerLines) throws JSONException {
+    int periodsGenerated = headerLines.size();
+
+    BigDecimal totalAmortization = BigDecimal.ZERO;
+    for (AmortizationLine line : headerLines) {
+      BigDecimal amt = line.getAmortizationAmount();
+      if (amt != null) {
+        totalAmortization = totalAmortization.add(amt);
+      }
+    }
+
+    // periodAmount is the first ordered line's amount; the last period may differ slightly due to rounding.
+    AmortizationLine firstLine = headerLines.get(0);
+    BigDecimal periodAmount = firstLine.getAmortizationAmount() != null ? firstLine.getAmortizationAmount() : BigDecimal.ZERO;
+
+    SimpleDateFormat sdf = new SimpleDateFormat(DATE_FORMAT);
+    String startDate = header.getStartingDate() != null ? sdf.format(header.getStartingDate()) : null;
+    String endDate = header.getEndingDate() != null ? sdf.format(header.getEndingDate()) : null;
+
+    // accountingEntriesCreated is intentionally omitted: accounting entries are posted
+    // later, manually by the finance team, and are not part of plan generation.
+    // Resolve currency ISO code from the asset (guaranteed non-null by the native procedure).
+    Currency assetCurrency = asset.getCurrency();
+    String currencyIsoCode = assetCurrency != null ? assetCurrency.getISOCode() : null;
+
+    JSONObject result = new JSONObject();
+    result.put("success", true);
+    result.put("amortizationId", header.getId());
+    result.put("calculateType", asset.getCalculateType());
+    result.put("totalAmortization", totalAmortization);
+    if (currencyIsoCode != null) {
+      result.put("currency", currencyIsoCode);
+    }
+    result.put("periodsGenerated", periodsGenerated);
+    result.put("periodAmount", periodAmount);
+    result.put("startDate", startDate);
+    result.put("endDate", endDate);
+
+    return NeoResponse.ok(result);
   }
 
   /**
@@ -303,8 +344,7 @@ public class AmortizationPlanService {
 
     Tab adTab = sfEntity.getADTab();
     if (adTab == null) {
-      log.warn("Assets SFEntity has no linked AD_Tab (spec={}, entity={})",
-          ASSETS_SPEC_NAME, ASSETS_ENTITY_NAME);
+      log.warn("Assets SFEntity has no linked AD_Tab (spec={}, entity={})", ASSETS_SPEC_NAME, ASSETS_ENTITY_NAME);
       return null;
     }
     return adTab.getId();

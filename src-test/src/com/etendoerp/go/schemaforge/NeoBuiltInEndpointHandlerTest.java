@@ -930,14 +930,11 @@ public class NeoBuiltInEndpointHandlerTest {
     HttpServletRequest request = mock(HttpServletRequest.class);
     HttpServletResponse response = mock(HttpServletResponse.class);
     NeoResponse serviceResponse = NeoResponse.ok(new JSONObject());
+    when(request.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"assetId\":\"ASSET-42\"}")));
 
-    try (MockedStatic<NeoRequestBodyParser> bodyMock = Mockito.mockStatic(NeoRequestBodyParser.class);
-        MockedStatic<AmortizationPlanService> serviceMock = Mockito.mockStatic(
-            AmortizationPlanService.class)) {
-      bodyMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
-          .thenReturn("{\"assetId\":\"ASSET-42\"}");
-      bodyMock.when(() -> NeoRequestBodyParser.parseJsonObject("{\"assetId\":\"ASSET-42\"}"))
-          .thenCallRealMethod();
+    try (MockedStatic<AmortizationPlanService> serviceMock = Mockito.mockStatic(
+        AmortizationPlanService.class)) {
       serviceMock.when(() -> AmortizationPlanService.generatePlan("ASSET-42"))
           .thenReturn(serviceResponse);
 
@@ -960,14 +957,11 @@ public class NeoBuiltInEndpointHandlerTest {
     HttpServletRequest request = mock(HttpServletRequest.class);
     HttpServletResponse response = mock(HttpServletResponse.class);
     NeoResponse errorResponse = NeoResponse.error(404, "Asset not found");
+    when(request.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"assetId\":\"MISSING\"}")));
 
-    try (MockedStatic<NeoRequestBodyParser> bodyMock = Mockito.mockStatic(NeoRequestBodyParser.class);
-        MockedStatic<AmortizationPlanService> serviceMock = Mockito.mockStatic(
-            AmortizationPlanService.class)) {
-      bodyMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
-          .thenReturn("{\"assetId\":\"MISSING\"}");
-      bodyMock.when(() -> NeoRequestBodyParser.parseJsonObject("{\"assetId\":\"MISSING\"}"))
-          .thenCallRealMethod();
+    try (MockedStatic<AmortizationPlanService> serviceMock = Mockito.mockStatic(
+        AmortizationPlanService.class)) {
       serviceMock.when(() -> AmortizationPlanService.generatePlan("MISSING"))
           .thenReturn(errorResponse);
 
@@ -989,14 +983,11 @@ public class NeoBuiltInEndpointHandlerTest {
     HttpServletRequest request = mock(HttpServletRequest.class);
     HttpServletResponse response = mock(HttpServletResponse.class);
     NeoResponse conflictResponse = NeoResponse.error(409, "Plan already exists");
+    when(request.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"assetId\":\"DUP-ASSET\"}")));
 
-    try (MockedStatic<NeoRequestBodyParser> bodyMock = Mockito.mockStatic(NeoRequestBodyParser.class);
-        MockedStatic<AmortizationPlanService> serviceMock = Mockito.mockStatic(
-            AmortizationPlanService.class)) {
-      bodyMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
-          .thenReturn("{\"assetId\":\"DUP-ASSET\"}");
-      bodyMock.when(() -> NeoRequestBodyParser.parseJsonObject("{\"assetId\":\"DUP-ASSET\"}"))
-          .thenCallRealMethod();
+    try (MockedStatic<AmortizationPlanService> serviceMock = Mockito.mockStatic(
+        AmortizationPlanService.class)) {
       serviceMock.when(() -> AmortizationPlanService.generatePlan("DUP-ASSET"))
           .thenReturn(conflictResponse);
 
@@ -1009,31 +1000,27 @@ public class NeoBuiltInEndpointHandlerTest {
   }
 
   /**
-   * Missing assetId: body present but no assetId key → optString returns null →
-   * generatePlan is called with null (service owns that validation).
+   * Missing assetId: body is valid JSON but contains no assetId key →
+   * handler sends 400 Bad Request and does NOT invoke the service.
    */
   @Test
-  public void handleAmortizationGeneratePlanPassesNullAssetIdWhenKeyAbsent() throws Exception {
+  public void handleAmortizationGeneratePlanReturnsBadRequestWhenAssetIdMissing() throws Exception {
     HttpServletRequest request = mock(HttpServletRequest.class);
     HttpServletResponse response = mock(HttpServletResponse.class);
-    NeoResponse serviceResponse = NeoResponse.error(400, "assetId is required");
+    when(request.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"other\":\"value\"}")));
 
-    try (MockedStatic<NeoRequestBodyParser> bodyMock = Mockito.mockStatic(NeoRequestBodyParser.class);
-        MockedStatic<AmortizationPlanService> serviceMock = Mockito.mockStatic(
-            AmortizationPlanService.class)) {
-      bodyMock.when(() -> NeoRequestBodyParser.readRequestBody(request))
-          .thenReturn("{\"other\":\"value\"}");
-      bodyMock.when(() -> NeoRequestBodyParser.parseJsonObject("{\"other\":\"value\"}"))
-          .thenCallRealMethod();
-      serviceMock.when(() -> AmortizationPlanService.generatePlan(isNull()))
-          .thenReturn(serviceResponse);
+    try (MockedStatic<AmortizationPlanService> serviceMock = Mockito.mockStatic(
+        AmortizationPlanService.class)) {
 
-      handler.handle(
+      boolean handled = handler.handle(
           new NeoServlet.NeoPathInfo("amortization", "generate-plan", null),
           "POST", request, response);
 
-      serviceMock.verify(() -> AmortizationPlanService.generatePlan(null));
-      verify(servlet).writeResponse(response, serviceResponse);
+      assertTrue(handled);
+      verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_BAD_REQUEST),
+          contains("assetId"));
+      serviceMock.verifyNoInteractions();
     }
   }
 

@@ -53,6 +53,7 @@ import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoReportService;
@@ -817,7 +818,7 @@ class McpToolRouterRouteTest {
     private static final String RECORD_ID = "record-001";
     private static final String ACTION_NAME = "Processed";
 
-    @org.junit.jupiter.api.BeforeEach
+    @BeforeEach
     void setupActionSupport() {
       supportMock.when(() -> McpToolRouterSupport.mapNeoResponseToActionResult(any()))
           .thenCallRealMethod();
@@ -954,11 +955,11 @@ class McpToolRouterRouteTest {
   class GenerateAmortizationPlanTests {
 
     private static final Set<String> PROCESS_SCOPES_LOCAL = Set.of("neo:process");
-    private MockedStatic<com.etendoerp.go.schemaforge.AmortizationPlanService> amortMock;
+    private MockedStatic<AmortizationPlanService> amortMock;
 
-    @org.junit.jupiter.api.BeforeEach
+    @BeforeEach
     void setUpAmort() {
-      amortMock = mockStatic(com.etendoerp.go.schemaforge.AmortizationPlanService.class);
+      amortMock = mockStatic(AmortizationPlanService.class);
     }
 
     @org.junit.jupiter.api.AfterEach
@@ -977,9 +978,7 @@ class McpToolRouterRouteTest {
       planBody.put("periodsGenerated", 12);
       NeoResponse successResp = NeoResponse.ok(planBody);
 
-      amortMock.when(() ->
-          com.etendoerp.go.schemaforge.AmortizationPlanService.generatePlan(eq("ASSET-001")))
-          .thenReturn(successResp);
+      amortMock.when(() -> AmortizationPlanService.generatePlan(eq("ASSET-001"))).thenReturn(successResp);
 
       JSONObject args = new JSONObject();
       args.put("assetId", "ASSET-001");
@@ -997,9 +996,7 @@ class McpToolRouterRouteTest {
     void amortizationToolPropagates400() throws Exception {
       NeoResponse errorResp = NeoResponse.error(400, "assetId is required");
 
-      amortMock.when(() ->
-          com.etendoerp.go.schemaforge.AmortizationPlanService.generatePlan(isNull()))
-          .thenReturn(errorResp);
+      amortMock.when(() -> AmortizationPlanService.generatePlan(isNull())).thenReturn(errorResp);
 
       JSONObject result = router.route(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN,
           null, PROCESS_SCOPES_LOCAL);
@@ -1012,9 +1009,7 @@ class McpToolRouterRouteTest {
     void amortizationToolPropagates404() throws Exception {
       NeoResponse notFoundResp = NeoResponse.error(404, "Asset not found: UNKNOWN");
 
-      amortMock.when(() ->
-          com.etendoerp.go.schemaforge.AmortizationPlanService.generatePlan(eq("UNKNOWN")))
-          .thenReturn(notFoundResp);
+      amortMock.when(() -> AmortizationPlanService.generatePlan(eq("UNKNOWN"))).thenReturn(notFoundResp);
 
       JSONObject args = new JSONObject();
       args.put("assetId", "UNKNOWN");
@@ -1033,9 +1028,7 @@ class McpToolRouterRouteTest {
       NeoResponse conflictResp = NeoResponse.error(409,
           "Asset already has a generated amortization plan");
 
-      amortMock.when(() ->
-          com.etendoerp.go.schemaforge.AmortizationPlanService.generatePlan(eq("ASSET-001")))
-          .thenReturn(conflictResp);
+      amortMock.when(() -> AmortizationPlanService.generatePlan(eq("ASSET-001"))).thenReturn(conflictResp);
 
       JSONObject args = new JSONObject();
       args.put("assetId", "ASSET-001");
@@ -1054,9 +1047,7 @@ class McpToolRouterRouteTest {
       // When args has no assetId, the handler passes null to the service.
       NeoResponse errorResp = NeoResponse.error(400, "assetId is required");
 
-      amortMock.when(() ->
-          com.etendoerp.go.schemaforge.AmortizationPlanService.generatePlan(isNull()))
-          .thenReturn(errorResp);
+      amortMock.when(() -> AmortizationPlanService.generatePlan(isNull())).thenReturn(errorResp);
 
       // Pass args without assetId
       JSONObject args = new JSONObject();
