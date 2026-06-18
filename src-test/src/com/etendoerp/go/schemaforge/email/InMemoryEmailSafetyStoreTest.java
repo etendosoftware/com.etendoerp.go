@@ -168,11 +168,11 @@ public class InMemoryEmailSafetyStoreTest {
   public void recordAuditWithSentStatusIndexesByIdempotencyKey() throws Exception {
     InMemoryEmailSafetyStore store = new InMemoryEmailSafetyStore();
     EmailSendContext ctx = simpleContext();
-    EmailAuditRecord record = auditRecord(ctx, "key-1", TransactionalEmailService.STATUS_SENT);
-    store.recordAudit(record);
+    EmailAuditRecord auditRec = auditRecord(ctx, "key-1", TransactionalEmailService.STATUS_SENT);
+    store.recordAudit(auditRec);
     Optional<EmailAuditRecord> found = store.findSentByIdempotencyKey(ctx, "key-1");
     assertTrue(found.isPresent());
-    assertSame(record, found.get());
+    assertSame(auditRec, found.get());
   }
 
   @Test
