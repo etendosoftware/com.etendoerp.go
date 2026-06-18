@@ -56,14 +56,16 @@ public final class BankStatementsSupport {
    * concept text that Classic stores in that extension column.
    *
    * <p>Result is cached after the first call (the module set is fixed at runtime).
+   *
+   * @return SQL expression string, never {@code null}
    */
   public static String descriptionExpr() {
     Boolean cached = c43DescColumn;
     if (cached == null) {
       try {
-        cached = ModelProvider.getInstance()
-            .getEntityByTableName("FIN_BankStatementLine")
-            .getProperties().stream()
+        org.openbravo.base.model.Entity entity =
+            ModelProvider.getInstance().getEntityByTableName("FIN_BankStatementLine");
+        cached = entity != null && entity.getProperties().stream()
             .anyMatch(p -> "em_c43_description".equalsIgnoreCase(p.getColumnName()));
       } catch (Exception e) {
         log.debug("Could not check C43 column existence via ModelProvider; defaulting to false", e);
@@ -74,6 +76,38 @@ public final class BankStatementsSupport {
     return Boolean.TRUE.equals(cached)
         ? "COALESCE(NULLIF(TRIM(bsl.description), ''), NULLIF(TRIM(bsl.em_c43_description), ''), '')"
         : "COALESCE(bsl.description, '')";
+  }
+
+  /**
+   * Maps one {@code LINES_SQL_HEAD} result row to the line JSON contract.
+   * Extracted here (away from BankStatementsHandler) to keep the handler
+   * within the per-class method-count limit.
+   *
+   * @param rs an open {@link java.sql.ResultSet} positioned on the current row
+   * @return a JSON object representing the bank-statement line
+   * @throws Exception if any ResultSet accessor throws
+   */
+  public static JSONObject mapLineRow(ResultSet rs) throws Exception {
+    BigDecimal credit = nullSafeBigDecimal(rs.getBigDecimal("cramount"));
+    BigDecimal debit  = nullSafeBigDecimal(rs.getBigDecimal("dramount"));
+    JSONObject row = new JSONObject();
+    row.put("id", rs.getString("fin_bankstatementline_id"));
+    row.put("lineNo", rs.getLong("line"));
+    row.put("date", formatDate(rs.getTimestamp("datetrx")));
+    row.put("description",    StringUtils.trimToEmpty(rs.getString("description")));
+    row.put("reference",      StringUtils.trimToEmpty(rs.getString("referenceno")));
+    row.put("bpartnerName",   StringUtils.trimToEmpty(rs.getString("bpartnername")));
+    row.put("bpartnerId",     StringUtils.trimToEmpty(rs.getString("c_bpartner_id")));
+    row.put("bpartnerFkName", StringUtils.trimToEmpty(rs.getString("bpartner_fk_name")));
+    row.put("glItemId",       StringUtils.trimToEmpty(rs.getString("c_glitem_id")));
+    row.put("glItemName",     StringUtils.trimToEmpty(rs.getString("glitem_name")));
+    row.put("in",     credit);
+    row.put("out",    debit);
+    row.put("amount", credit.subtract(debit));
+    boolean matched = rs.getString("fin_finacc_transaction_id") != null;
+    row.put("matched", matched);
+    row.put("txns", buildLineTxns(rs, matched));
+    return row;
   }
 
   private static final DateTimeFormatter ISO_UTC =

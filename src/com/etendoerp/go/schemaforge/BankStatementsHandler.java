@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.BankStatementFormatDetector.detectFormat;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.buildLineTxns;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.mapLineRow;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.deriveStatementStatus;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.formatDate;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.isBlankLine;
@@ -1176,26 +1177,4 @@ public class BankStatementsHandler implements NeoHandler {
   }
 
   /** Maps one {@link #LINES_SQL_HEAD} result row to the line JSON contract. */
-  private JSONObject mapLineRow(ResultSet rs) throws Exception {
-    BigDecimal credit = nullSafeBigDecimal(rs.getBigDecimal(FIELD_CRAMOUNT));
-    BigDecimal debit = nullSafeBigDecimal(rs.getBigDecimal(FIELD_DRAMOUNT));
-    JSONObject row = new JSONObject();
-    row.put("id", rs.getString("fin_bankstatementline_id"));
-    row.put("lineNo", rs.getLong("line"));
-    row.put("date", formatDate(rs.getTimestamp("datetrx")));
-    row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
-    row.put(FIELD_REFERENCE, StringUtils.trimToEmpty(rs.getString("referenceno")));
-    row.put(FIELD_BPARTNER_NAME, StringUtils.trimToEmpty(rs.getString("bpartnername")));
-    row.put(FIELD_BPARTNER_ID, StringUtils.trimToEmpty(rs.getString("c_bpartner_id")));
-    row.put("bpartnerFkName", StringUtils.trimToEmpty(rs.getString("bpartner_fk_name")));
-    row.put(FIELD_GLITEM_ID, StringUtils.trimToEmpty(rs.getString("c_glitem_id")));
-    row.put("glItemName", StringUtils.trimToEmpty(rs.getString("glitem_name")));
-    row.put("in", credit);
-    row.put("out", debit);
-    row.put("amount", credit.subtract(debit));
-    boolean matched = rs.getString("fin_finacc_transaction_id") != null;
-    row.put("matched", matched);
-    row.put("txns", buildLineTxns(rs, matched));
-    return row;
-  }
 }
