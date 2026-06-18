@@ -96,6 +96,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_STATUS = "status";
   private static final String FIELD_TOKEN = "token";
   private static final String FIELD_MESSAGE = "message";
+  private static final String FIELD_CODE = "code";
+  private static final String FIELD_USER_MESSAGE = "userMessage";
   private static final String FIELD_PASSWORD = "password";
   private static final String FIELD_SUCCESS = "success";
   private static final String FIELD_ACCOUNT = "account";
@@ -235,6 +237,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (email.isEmpty() || password.isEmpty() || name.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Fields email, password, and name must not be empty");
+      return;
+    }
+    if (!PasswordPolicy.isStrong(password)) {
+      writeWeakPasswordError(response);
       return;
     }
 
@@ -504,6 +510,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           "Fields token and password must not be empty");
       return;
     }
+    if (!PasswordPolicy.isStrong(password)) {
+      writeWeakPasswordError(response);
+      return;
+    }
 
     try {
       OBContext.setOBContext("0", "0", "0", "0");
@@ -566,6 +576,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (currentPassword.isEmpty() || newPassword.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Fields currentPassword and newPassword must not be empty");
+      return;
+    }
+    if (!PasswordPolicy.isStrong(newPassword)) {
+      writeWeakPasswordError(response);
       return;
     }
 
@@ -1409,6 +1423,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         FIELD_MESSAGE,
         FIELD_STATUS,
         PROGRESS_ERROR);
+  }
+
+  /**
+   * Write the weak-password rejection as HTTP 400 with a stable, machine-readable
+   * envelope: {@code { "error": { "code": "WEAK_PASSWORD", "message": "...",
+   * "userMessage": "..." } } }.
+   */
+  private void writeWeakPasswordError(HttpServletResponse response) throws IOException {
+    try {
+      JSONObject error = new JSONObject();
+      error.put(FIELD_CODE, PasswordPolicy.ERROR_CODE);
+      error.put(FIELD_MESSAGE, PasswordPolicy.MESSAGE);
+      error.put(FIELD_USER_MESSAGE, PasswordPolicy.USER_MESSAGE);
+      JSONObject envelope = new JSONObject();
+      envelope.put(PROGRESS_ERROR, error);
+      writeResponse(response, HttpServletResponse.SC_BAD_REQUEST, envelope);
+    } catch (JSONException e) {
+      log.error("JSON error building weak-password response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
   }
 
   private static class OnboardingRequestData {
