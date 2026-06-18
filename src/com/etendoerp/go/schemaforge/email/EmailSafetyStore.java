@@ -53,6 +53,17 @@ public interface EmailSafetyStore {
   EmailThrottleResult checkAndIncrement(EmailSendContext context, List<EmailThrottleRule> rules);
 
   /**
+   * Checks whether a specific address or its domain is suppressed for the tenant.
+   *
+   * @param tenantId tenant or client id, or global when blank
+   * @param emailAddress recipient address to evaluate against the suppression list
+   * @return {@code true} when the address or its domain is suppressed
+   */
+  default boolean isRecipientSuppressed(String tenantId, String emailAddress) {
+    return false;
+  }
+
+  /**
    * Records an audit event.
    *
    * @param auditRecord audit record

@@ -435,7 +435,9 @@ public class InitialEmailContractsTest {
   }
 
   @Test
-  public void documentContractRejectsInvalidResolvedRecipient() throws Exception {
+  public void documentContractReturnsNoRecipientForInvalidBaseEmailWithoutEdits() throws Exception {
+    // Edge case 4 (ETP-4226): with editable recipients, a base contact without a usable email
+    // and no caller edits now resolves to NO_RECIPIENT instead of VALIDATION_FAILED.
     FakeProviderAdapter adapter = new FakeProviderAdapter();
     TransactionalEmailService service = service(adapter);
 
@@ -445,9 +447,9 @@ public class InitialEmailContractsTest {
     NeoResponse response = service.send("sales-order-send", command);
 
     JSONObject data = responseData(response);
-    assertEquals(400, response.getHttpStatus());
-    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
-    assertEquals("Email recipient is invalid", data.getString("message"));
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_NO_RECIPIENT, data.getString("status"));
+    assertEquals("Document has no recipient email", data.getString("message"));
     assertEquals(0, adapter.getSendCount());
   }
 
@@ -572,6 +574,26 @@ public class InitialEmailContractsTest {
   }
 
   @Test
+  public void accountLinkContractRejectsRecipientEdits() throws Exception {
+    assertNonDocumentContractRejectsRecipientEdits("reset-password", command -> {
+      command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1");
+      command.put(EmailContractCommandSupport.FIELD_LINK, "https://app.example.test/reset");
+    });
+  }
+
+  @Test
+  public void accountNoticeContractRejectsRecipientEdits() throws Exception {
+    assertNonDocumentContractRejectsRecipientEdits("password-changed", command ->
+        command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1"));
+  }
+
+  @Test
+  public void loginAlertContractRejectsRecipientEdits() throws Exception {
+    assertNonDocumentContractRejectsRecipientEdits("login-alert", command ->
+        command.put(EmailContractCommandSupport.FIELD_USER_ID, "user-1"));
+  }
+
+  @Test
   public void keepsCustomContractDisabledByDefault() throws Exception {
     FakeProviderAdapter adapter = new FakeProviderAdapter();
     TransactionalEmailService service = service(adapter);
@@ -595,6 +617,30 @@ public class InitialEmailContractsTest {
     assertEquals(first.hashCode(), second.hashCode());
     assertNotEquals(first, different);
     assertNotEquals(first, "Lucas");
+  }
+
+  private static void assertNonDocumentContractRejectsRecipientEdits(String contractName,
+      CommandCustomizer customizer) throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    customizer.apply(command);
+    command.put(EmailContractCommandSupport.FIELD_RECIPIENT_EDITS,
+        new JSONObject("{\"to\":{\"add\":[\"external@example.com\"]}}"));
+
+    NeoResponse response = service.send(contractName, command);
+
+    JSONObject data = responseData(response);
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
+    assertEquals("recipientEdits is not accepted by this contract", data.getString("message"));
+    assertEquals(0, adapter.getSendCount());
+  }
+
+  @FunctionalInterface
+  private interface CommandCustomizer {
+    void apply(JSONObject command) throws JSONException;
   }
 
   private static TransactionalEmailService service(FakeProviderAdapter adapter) {

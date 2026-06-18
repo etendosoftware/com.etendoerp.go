@@ -27,6 +27,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
+import java.util.Arrays;
+import java.util.Collections;
+
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
@@ -125,6 +129,56 @@ public class EmailFrameworkValueObjectsTest {
     assertEquals("Missing", rejected.getMessage());
     assertOBException(() -> EmailRecipientResolution.serverResolved(" "));
     assertOBException(() -> EmailRecipientResolution.callerProvided(null));
+  }
+
+  @Test
+  public void serverResolvedStringCarriesSingleToRecipientSet() {
+    EmailRecipientResolution resolution = EmailRecipientResolution.serverResolved("a@x.com");
+
+    assertEquals(Collections.singletonList("a@x.com"), resolution.getRecipientSet().getTo());
+    assertTrue(resolution.getRecipientSet().getCc().isEmpty());
+    assertFalse(resolution.isNoRecipient());
+  }
+
+  @Test
+  public void serverResolvedSetKeepsFirstToAsLegacyRecipient() {
+    EmailRecipientSet set = EmailRecipientSet.of(
+        Arrays.asList("ap@x.com", "billing@x.com"), Collections.singletonList("pm@x.com"));
+    EmailRecipientResolution resolution = EmailRecipientResolution.serverResolved(set);
+
+    assertTrue(resolution.isResolved());
+    assertEquals("ap@x.com", resolution.getRecipient());
+    assertEquals(set.recipientSetHash(), resolution.getRecipientSet().recipientSetHash());
+    assertOBException(() -> EmailRecipientResolution.serverResolved(
+        EmailRecipientSet.of(Collections.emptyList(), Collections.singletonList("cc@x.com"))));
+  }
+
+  @Test
+  public void noRecipientResolutionSignalsDedicatedStatus() {
+    EmailRecipientResolution resolution = EmailRecipientResolution.noRecipient("no recipient");
+
+    assertFalse(resolution.isResolved());
+    assertTrue(resolution.isNoRecipient());
+    assertEquals(422, resolution.getHttpStatus());
+    assertEquals("no recipient", resolution.getMessage());
+  }
+
+  @Test
+  public void providerRequestEmitsArraysForMultipleRecipientsAndCc() throws Exception {
+    EmailRecipientSet set = EmailRecipientSet.of(
+        Arrays.asList("ap@x.com", "billing@x.com"), Collections.singletonList("pm@x.com"));
+    EmailProviderRequest request = new EmailProviderRequest(set, "invoice", new JSONObject(), null);
+
+    JSONObject payload = request.toProviderPayload();
+    JSONArray to = payload.getJSONArray("to");
+    JSONArray cc = payload.getJSONArray("cc");
+
+    assertEquals("ap@x.com", request.getRecipient());
+    assertEquals(2, to.length());
+    assertEquals("ap@x.com", to.getString(0));
+    assertEquals("billing@x.com", to.getString(1));
+    assertEquals(1, cc.length());
+    assertEquals("pm@x.com", cc.getString(0));
   }
 
   @Test
@@ -324,6 +378,51 @@ public class EmailFrameworkValueObjectsTest {
     assertEquals(Integer.valueOf(202), auditRecord.getProviderStatus());
     assertTrue(auditRecord.isDuplicate());
     assertTrue(auditRecord.getCreatedAtMillis() > 0);
+  }
+
+  @Test
+  public void auditRecordCapturesMultiChannelHashListsWithoutRawAddresses() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put(EmailContractCommandSupport.FIELD_TENANT_ID, "tenant-1");
+    EmailRecipientSet set = EmailRecipientSet.of(
+        Arrays.asList("ap@example.com", "billing@example.com"),
+        Collections.singletonList("pm@partner.com"));
+    EmailSendContext context = new EmailSendContext(
+        new EmailContractCommand("sales-invoice-send", body),
+        EmailRecipientResolution.serverResolved(set),
+        new EmailProviderRequest(set, "invoice", new JSONObject(), null));
+
+    EmailAuditRecord auditRecord = EmailAuditRecord.create(context,
+        "sales-invoice-send:tenant-1:record-1:send:v1:hash", 200,
+        TransactionalEmailService.STATUS_SENT, null, Integer.valueOf(202), false);
+
+    assertEquals(2, auditRecord.getFinalToRecipientHashes().size());
+    assertEquals(1, auditRecord.getFinalCcRecipientHashes().size());
+    assertTrue(auditRecord.getFinalRecipientDomains().contains("example.com"));
+    assertTrue(auditRecord.getFinalRecipientDomains().contains("partner.com"));
+    for (String hash : auditRecord.getFinalToRecipientHashes()) {
+      assertFalse(hash.contains("@"));
+      assertFalse(hash.contains("example.com"));
+    }
+  }
+
+  @Test
+  public void deliveryPolicyServerDerivedIgnoresCallerKey() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put(EmailContractCommandSupport.FIELD_IDEMPOTENCY_KEY, "caller-key");
+    EmailSendContext context = new EmailSendContext(
+        new EmailContractCommand("sales-invoice-send", body),
+        EmailRecipientResolution.serverResolved("person@example.com"),
+        new EmailProviderRequest("person@example.com", "invoice", new JSONObject(), null));
+
+    EmailDeliveryPolicy serverDerived = EmailDeliveryPolicy.serverDerived("server-key",
+        Collections.emptyList());
+    EmailDeliveryPolicy serverDerivedNoKey = EmailDeliveryPolicy.serverDerived(null,
+        Collections.emptyList());
+
+    assertTrue(serverDerived.isServerDerivedIdempotency());
+    assertEquals("server-key", serverDerived.resolveIdempotencyKey(context));
+    assertNull(serverDerivedNoKey.resolveIdempotencyKey(context));
   }
 
   @Test
