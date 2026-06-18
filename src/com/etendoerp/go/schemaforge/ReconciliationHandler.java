@@ -176,6 +176,7 @@ public class ReconciliationHandler implements NeoHandler {
           + "       COALESCE(bp.name, NULLIF(bsl.bpartnername, ''), '') AS partner_name,"
           + "       COALESCE(bsl.referenceno, '') AS reference_no,"
           + "       CASE WHEN bsl.fin_finacc_transaction_id IS NULL THEN 'pending' ELSE 'reconciled' END AS line_status,"
+          + "       COALESCE(bsl.em_etgo_match_group_id, '') AS match_group_id,"
           + "       COALESCE(bsl.cramount, 0) - COALESCE(bsl.dramount, 0) AS amount"
           + "  FROM fin_bankstatementline bsl"
           + "  JOIN fin_bankstatement bs ON bs.fin_bankstatement_id = bsl.fin_bankstatement_id"
@@ -188,6 +189,9 @@ public class ReconciliationHandler implements NeoHandler {
 
   /** Status filter codes accepted by {@code pendingLines}. */
   private static final String STATUS_RECONCILED = "reconciled";
+
+  /** Module extension column holding the 1:N reconciliation group id (option B). */
+  private static final String COL_MATCH_GROUP = "EM_ETGO_Match_Group_ID";
 
   private static final String PENDING_LINES_ORDER =
       " ORDER BY bsl.datetrx ASC, bsl.line ASC";
@@ -323,6 +327,8 @@ public class ReconciliationHandler implements NeoHandler {
           row.put("referenceNo", StringUtils.trimToEmpty(rs.getString("reference_no")));
           // Per-row state derived in SQL: 'pending' (unmatched) or 'reconciled'.
           row.put(KEY_STATUS, StringUtils.defaultIfBlank(rs.getString("line_status"), STATUS_PENDING));
+          // 1:N group id (option B): sub-lines of the same reconcile group share this value.
+          row.put("matchGroupId", StringUtils.trimToEmpty(rs.getString("match_group_id")));
           row.put(KEY_AMOUNT, amount);
           lines.put(row);
           total = total.add(amount);
@@ -546,6 +552,13 @@ public class ReconciliationHandler implements NeoHandler {
   private NeoResponse compose(FIN_FinancialAccount account, FIN_BankStatementLine line,
       List<String> operationIds) throws Exception {
     FIN_Reconciliation rec = addNewDraftReconciliation(account);
+    // 1:N grouping (option B): tag the original line with a fresh match-group id BEFORE the
+    // match so the split sub-lines inherit it (DalUtil.copy copies all EM_ properties). The
+    // UI re-groups the resulting sub-lines by this id. Only needed when more than one operation
+    // is linked (a single operation produces no split worth grouping).
+    if (operationIds.size() > 1) {
+      tagMatchGroup(line);
+    }
     matchBankStatementLine(line, operationIds, rec);
     OBError result = processReconciliation(rec);
     if (result != null && "Error".equalsIgnoreCase(result.getType())) {
@@ -874,6 +887,31 @@ public class ReconciliationHandler implements NeoHandler {
 
   void doRollbackAndClose() {
     OBDal.getInstance().rollbackAndClose();
+  }
+
+  /**
+   * Tags the bank-statement line with a fresh match-group id on the
+   * {@code EM_ETGO_Match_Group_ID} extension column. Resolves the DAL property by column name at
+   * runtime (no dependency on the generated entity accessor) and degrades gracefully when the
+   * model has not yet loaded the column. Must run BEFORE the line is split so the clones inherit
+   * the value. Package-private for testability.
+   */
+  void tagMatchGroup(FIN_BankStatementLine line) {
+    try {
+      org.openbravo.base.model.Entity entity = org.openbravo.base.model.ModelProvider.getInstance()
+          .getEntity(FIN_BankStatementLine.ENTITY_NAME);
+      org.openbravo.base.model.Property prop =
+          entity.getPropertyByColumnName(COL_MATCH_GROUP, false);
+      if (prop != null) {
+        line.set(prop.getName(), org.openbravo.erpCommon.utility.SequenceIdData.getUUID());
+        OBDal.getInstance().save(line);
+        OBDal.getInstance().flush();
+      } else {
+        log.warn("Column {} not yet in the model; skipping match-group tag", COL_MATCH_GROUP);
+      }
+    } catch (Exception e) {
+      log.warn("Could not tag match group on line {}", line.getId(), e);
+    }
   }
 
   /**

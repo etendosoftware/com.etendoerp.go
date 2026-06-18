@@ -387,6 +387,8 @@ public class ReconciliationHandlerTest {
     assertEquals("rec-1", data.getString("reconciliationId"));
     assertEquals(1, data.getJSONArray("lineIds").length());
     verify(handler).matchBankStatementLine(eq(line), any(), eq(rec));
+    // A single operation produces no split worth grouping → no match-group tag.
+    verify(handler, never()).tagMatchGroup(any());
   }
 
   /** A 1:N match whose operations sum exactly to the line amount returns 201. */
@@ -403,11 +405,14 @@ public class ReconciliationHandlerTest {
     doReturn(line).when(handler).loadLine(LINE_ID);
     doReturn(t1).when(handler).loadTransaction("t1");
     doReturn(t2).when(handler).loadTransaction("t2");
+    doNothing().when(handler).tagMatchGroup(any());
     stubReconciliationCompose(rec, "Success");
 
     NeoResponse response = handler.reconcileGroup(reconcileBody(ACC_ID, LINE_ID, "t1", "t2"));
 
     assertEquals(201, response.getHttpStatus());
+    // 1:N reconcile tags the original line so the split sub-lines inherit the group id.
+    verify(handler).tagMatchGroup(line);
   }
 
   /** An operation that belongs to another account is rejected with a 400. */
