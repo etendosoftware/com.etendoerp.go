@@ -796,18 +796,23 @@ public class NeoCalloutService {
     }
     DateTimeFormatter formatter = DateTimeFormatter.ofPattern(pattern);
     for (String field : dateFields) {
-      JSONObject entry = updates.optJSONObject(field);
-      if (entry == null) {
-        continue;
-      }
-      String iso = etendoToIsoDate(entry.optString(VALUE_KEY, null), formatter);
-      if (iso != null) {
-        try {
-          entry.put(VALUE_KEY, iso);
-        } catch (Exception e) {
-          log4j.error("Failed to normalize date field {}: {}", field, e.getMessage());
-        }
-      }
+      normalizeField(updates, field, formatter);
+    }
+  }
+
+  private static void normalizeField(JSONObject updates, String field, DateTimeFormatter formatter) {
+    JSONObject entry = updates.optJSONObject(field);
+    if (entry == null) {
+      return;
+    }
+    String iso = etendoToIsoDate(entry.optString(VALUE_KEY, null), formatter);
+    if (iso == null) {
+      return;
+    }
+    try {
+      entry.put(VALUE_KEY, iso);
+    } catch (Exception e) {
+      log4j.error("Failed to normalize date field {}: {}", field, e.getMessage());
     }
   }
 
