@@ -791,17 +791,21 @@ public class NeoCalloutService {
       return;
     }
     String pattern = CalloutRequestBuilder.getCalloutDatePattern();
+    if (pattern == null) {
+      return;
+    }
+    DateTimeFormatter formatter = DateTimeFormatter.ofPattern(pattern);
     for (String field : dateFields) {
       JSONObject entry = updates.optJSONObject(field);
       if (entry == null) {
         continue;
       }
-      String iso = etendoToIsoDate(entry.optString(VALUE_KEY, null), pattern);
+      String iso = etendoToIsoDate(entry.optString(VALUE_KEY, null), formatter);
       if (iso != null) {
         try {
           entry.put(VALUE_KEY, iso);
-        } catch (Exception ignored) {
-          // Leave the original value if the JSON write fails.
+        } catch (Exception e) {
+          log4j.error("Failed to normalize date field {}: {}", field, e.getMessage());
         }
       }
     }
@@ -813,11 +817,15 @@ public class NeoCalloutService {
    * as-is — idempotent if the value is already ISO).
    */
   static String etendoToIsoDate(String value, String etendoPattern) {
+    return etendoToIsoDate(value, DateTimeFormatter.ofPattern(etendoPattern));
+  }
+
+  static String etendoToIsoDate(String value, DateTimeFormatter formatter) {
     if (value == null || value.trim().isEmpty()) {
       return null;
     }
     try {
-      LocalDate parsed = LocalDate.parse(value.trim(), DateTimeFormatter.ofPattern(etendoPattern));
+      LocalDate parsed = LocalDate.parse(value.trim(), formatter);
       return parsed.format(DateTimeFormatter.ISO_LOCAL_DATE);
     } catch (DateTimeParseException e) {
       return null; // not in the Etendo format — leave untouched

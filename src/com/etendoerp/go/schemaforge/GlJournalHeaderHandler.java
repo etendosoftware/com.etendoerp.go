@@ -146,6 +146,10 @@ public class GlJournalHeaderHandler implements NeoHandler {
       bundle.setParams(params);
       new FIN_AddPaymentFromJournal().execute(bundle);
       Process process = OBDal.getInstance().get(Process.class, COMPLETE_PROCESS_ID);
+      if (process == null) {
+        log.error("[GL-JOURNAL] Process record {} not found", COMPLETE_PROCESS_ID);
+        return NeoResponse.error(500, "Completion process configuration missing");
+      }
       return NeoProcessService.translateClassicResult(bundle.getResult(), process);
     } catch (Exception e) {
       log.error("[GL-JOURNAL] Completion failed for id={}: {}", journalId, e.getMessage(), e);
