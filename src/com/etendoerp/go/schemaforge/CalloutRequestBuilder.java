@@ -165,10 +165,9 @@ class CalloutRequestBuilder {
       }
       String inpName = NeoCalloutService.toInpName(col.getDBColumnName());
       String[] holder = params.get(inpName);
-      if (holder == null || holder.length == 0 || holder[0] == null || holder[0].isEmpty()) {
-        continue;
-      }
-      String reformatted = isoToEtendoDate(holder[0], targetPattern);
+      String originalValue = (holder != null && holder.length > 0) ? holder[0] : null;
+      String reformatted = (originalValue != null && !originalValue.isEmpty())
+          ? isoToEtendoDate(originalValue, targetPattern) : null;
       if (reformatted != null) {
         params.put(inpName, new String[]{ reformatted });
       }
