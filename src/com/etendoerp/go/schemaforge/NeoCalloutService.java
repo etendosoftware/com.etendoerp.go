@@ -812,7 +812,7 @@ public class NeoCalloutService {
     try {
       entry.put(VALUE_KEY, iso);
     } catch (Exception e) {
-      log4j.error("Failed to normalize date field {}: {}", field, e.getMessage());
+      log.error("Failed to normalize date field {}: {}", field, e.getMessage());
     }
   }
 
