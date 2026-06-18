@@ -27,9 +27,14 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+import org.hibernate.criterion.SimpleExpression;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
@@ -437,6 +442,17 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
       NeoResponse result = handler.handle(ctx);
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
+
+      // ETP-4036: findReturnDocTypeForOrg fix — when requireReturn=false the criteria
+      // must explicitly filter by PROPERTY_RETURN = false (not skip the restriction).
+      // Verify that criteria.add() was called at least once with a SimpleExpression
+      // whose property name is "return" and value is Boolean.FALSE.
+      verify(criteria, atLeastOnce()).add(argThat(criterion -> {
+        if (!(criterion instanceof SimpleExpression)) return false;
+        SimpleExpression expr = (SimpleExpression) criterion;
+        return "return".equals(expr.getPropertyName())
+            && Boolean.FALSE.equals(expr.getValue());
+      }));
     }
   }
 

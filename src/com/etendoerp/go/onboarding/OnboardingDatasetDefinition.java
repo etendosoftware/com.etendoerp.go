@@ -73,6 +73,7 @@ public final class OnboardingDatasetDefinition {
       // OnboardingAccountingWiringService against the system taxes.
       "C_VALIDCOMBINATION",
       "C_YEAR",
+      "ETGO_TRANSACTION_TYPE",
       "FIN_FINACC_PAYMENTMETHOD",
       "FIN_FINANCIAL_ACCOUNT",
       "FIN_MATCHING_ALGORITHM",
