@@ -48,7 +48,6 @@ import org.openbravo.advpaymentmngt.dao.MatchTransactionDao;
 import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.advpaymentmngt.utility.APRM_MatchingUtility;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
-import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
 import org.openbravo.advpaymentmngt.utility.FIN_Utility;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.secureApp.VariablesSecureApp;
@@ -58,7 +57,6 @@ import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
-import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
@@ -622,22 +620,29 @@ public class ReconciliationHandler implements NeoHandler {
     List<FIN_BankStatementLine> pendingLines = loadPendingLines(accountId);
 
     JSONArray groups = new JSONArray();
-    List<FIN_FinaccTransaction> excluded = new ArrayList<>();
+    Set<String> usedTxnIds = new HashSet<>();
     int opsToLink = 0;
     int willCreate = 0;
 
     for (FIN_BankStatementLine line : pendingLines) {
-      // Pasada 1: standard algorithm.
-      FIN_MatchedTransaction matched = runStandardMatch(account, line, excluded);
-      if (matched != null && matched.getTransaction() != null) {
-        excluded.add(matched.getTransaction());
-        JSONObject group = AutoMatchSupport.buildStandardGroup(line, matched.getTransaction(), matched.getMatchLevel());
-        groups.put(group);
-        opsToLink++;
-        continue;
+      // Pasada 1: use the same MatchTransactionDao path as the candidates panel.
+      // This does not require the account to have a MatchingAlgorithm configured in AD.
+      Set<String> suggested = suggestedTransactionIds(accountId, line.getId());
+      // Skip transactions already claimed by a previous line in this preview run.
+      suggested.removeAll(usedTxnIds);
+      if (!suggested.isEmpty()) {
+        String txnId = suggested.iterator().next();
+        FIN_FinaccTransaction txn = loadTransaction(txnId);
+        if (txn != null) {
+          usedTxnIds.add(txnId);
+          JSONObject group = AutoMatchSupport.buildStandardGroup(line, txn, FIN_MatchedTransaction.STRONG);
+          groups.put(group);
+          opsToLink++;
+          continue;
+        }
       }
 
-      // Pasada 2: rule engine (only for lines not matched by standard algorithm).
+      // Pasada 2: rule engine for lines without a standard match.
       String desc = StringUtils.trimToEmpty(line.getDescription());
       String ref = StringUtils.trimToEmpty(line.getReferenceNo());
       String partner = StringUtils.trimToEmpty(line.getBpartnername());
@@ -888,26 +893,6 @@ public class ReconciliationHandler implements NeoHandler {
         .createQuery(hql, FIN_BankStatementLine.class)
         .setParameter("accountId", accountId)
         .list();
-  }
-
-  /**
-   * Runs the account's configured standard matching algorithm against one bank-statement line.
-   * Returns the match result, or a NOMATCH result if the algorithm fails or is not configured.
-   * Package-private for testability.
-   */
-  FIN_MatchedTransaction runStandardMatch(FIN_FinancialAccount account,
-      FIN_BankStatementLine line, List<FIN_FinaccTransaction> excluded) {
-    try {
-      MatchingAlgorithm ma = account.getMatchingAlgorithm();
-      if (ma == null || StringUtils.isBlank(ma.getJavaClassName())) {
-        return new FIN_MatchedTransaction(null, FIN_MatchedTransaction.NOMATCH);
-      }
-      FIN_MatchingTransaction mt = new FIN_MatchingTransaction(ma.getJavaClassName());
-      return mt.match(line, excluded);
-    } catch (Exception e) {
-      log.debug("Standard match failed for line {}: {}", line.getId(), e.getMessage());
-      return new FIN_MatchedTransaction(null, FIN_MatchedTransaction.NOMATCH);
-    }
   }
 
   /**
