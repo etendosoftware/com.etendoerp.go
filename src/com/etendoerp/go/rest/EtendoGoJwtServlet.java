@@ -1124,6 +1124,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Final action before commitDalChanges: stamp the tenant's data-fix baseline so it lands in the
     // same atomic onboarding commit. A genuine SQL error propagates (not caught here) so the outer
     // handleOnboarding catch rolls back cleanly; the expected ON CONFLICT->0-rows case is benign.
+    //
+    // The baseline applied_utc is a hardcoded CUT (ONBOARDING_PROVISIONED_THROUGH in
+    // OnboardingBaselineService), NOT now(). It represents the last corrective data-fix that
+    // this version of onboarding already provisions natively, so the runner skips all fixes
+    // at-or-before that cutoff for freshly-onboarded tenants.
+    //
+    // WHEN ADDING A NEW ONBOARDING SERVICE (gap fix): bump ONBOARDING_PROVISIONED_THROUGH to the
+    // timestamp of the corresponding .sql fix in cli/src/data-fixes/sql/. See the gap-closing
+    // workflow in docs/etendo-ad/onboarding-and-datafixes-map.md §0.
     return registerBaseline(writer, clientId);
   }
 

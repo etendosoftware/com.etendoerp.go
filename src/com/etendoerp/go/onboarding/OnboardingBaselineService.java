@@ -18,6 +18,8 @@ package com.etendoerp.go.onboarding;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.Timestamp;
+import java.time.Instant;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -38,7 +40,9 @@ import org.openbravo.dal.service.OBDal;
  * {@code ad_client_id='0'}, {@code ad_org_id='0'} (the ledger is System-owned so only the System
  * Administrator sees every tenant's history in one grid), the new tenant in the dedicated
  * {@code remediated_client_id} FK, {@code fix_id='__baseline__'}, {@code status='BASELINE'},
- * {@code applied_utc=now()}. PK generated DB-side via {@code get_uuid()} — never hand-typed.
+ * {@code applied_utc=ONBOARDING_PROVISIONED_THROUGH} (a hardcoded CUT — NOT {@code now()} — that
+ * represents the last data-fix already incorporated into this version of onboarding; bump it when
+ * a new gap is closed on the preventive front). PK generated DB-side via {@code get_uuid()} — never hand-typed.
  *
  * <h3>Idempotency &amp; DETECTED conservation</h3>
  * The insert uses {@code ON CONFLICT ON CONSTRAINT etgo_dfh_tenant_fix_un DO NOTHING}. If a baseline
@@ -72,6 +76,21 @@ public class OnboardingBaselineService {
   /** System owner shape — the ledger is System-owned regardless of the tenant being created. */
   private static final String SYSTEM_ID = "0";
 
+  /**
+   * The timestamp of the last data-fix that this version of onboarding already provisions natively.
+   * New tenants get this as their BASELINE applied_utc, so the corrective runner skips every fix
+   * at-or-before this cutoff (they were never needed — onboarding was already correct when the
+   * tenant was created).
+   *
+   * <p><b>BUMP THIS</b> each time a new gap is closed on the preventive front (i.e. a new
+   * Onboarding*Service is added that provisions the same data as the corresponding corrective fix).
+   * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
+   * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
+   *
+   * Current watermark: R7 tax-accounts (2026-06-17).
+   */
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-06-17T12:00:00Z");
+
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("
       + "  etgo_data_fix_history_id, ad_client_id, ad_org_id, isactive,"
@@ -80,7 +99,7 @@ public class OnboardingBaselineService {
       + ") VALUES ("
       + "  get_uuid(), ?, ?, 'Y',"
       + "  now(), ?, now(), ?,"
-      + "  ?, ?, ?, now(), 0, NULL"
+      + "  ?, ?, ?, ?, 0, NULL"
       + ") ON CONFLICT ON CONSTRAINT etgo_dfh_tenant_fix_un DO NOTHING";
 
   /**
@@ -103,13 +122,14 @@ public class OnboardingBaselineService {
       Connection conn = OBDal.getInstance().getConnection();
       int inserted;
       try (PreparedStatement ps = conn.prepareStatement(SQL_INSERT_BASELINE)) {
-        ps.setString(1, SYSTEM_ID);   // ad_client_id — System-owned
-        ps.setString(2, SYSTEM_ID);   // ad_org_id    — System
-        ps.setString(3, SYSTEM_ID);   // createdby    — System
-        ps.setString(4, SYSTEM_ID);   // updatedby    — System
-        ps.setString(5, clientId);    // remediated_client_id — the new tenant
-        ps.setString(6, BASELINE_FIX_ID);
-        ps.setString(7, BASELINE_STATUS);
+        ps.setString(   1, SYSTEM_ID);   // ad_client_id — System-owned
+        ps.setString(   2, SYSTEM_ID);   // ad_org_id    — System
+        ps.setString(   3, SYSTEM_ID);   // createdby    — System
+        ps.setString(   4, SYSTEM_ID);   // updatedby    — System
+        ps.setString(   5, clientId);    // remediated_client_id — the new tenant
+        ps.setString(   6, BASELINE_FIX_ID);
+        ps.setString(   7, BASELINE_STATUS);
+        ps.setTimestamp(8, Timestamp.from(ONBOARDING_PROVISIONED_THROUGH)); // applied_utc — fixed CUT
         inserted = ps.executeUpdate();
       }
 
