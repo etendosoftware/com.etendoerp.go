@@ -1044,7 +1044,7 @@ public class NeoProcessServiceValidationTest {
     // We access the inner class via reflection.
     Class<?> scopeClass = null;
     for (Class<?> inner : NeoProcessService.class.getDeclaredClasses()) {
-      if (inner.getSimpleName().equals("RequestContextScope")) {
+      if ("RequestContextScope".equals(inner.getSimpleName())) {
         scopeClass = inner;
         break;
       }

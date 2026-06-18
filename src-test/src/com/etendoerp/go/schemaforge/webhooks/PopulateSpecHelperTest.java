@@ -705,7 +705,7 @@ public class PopulateSpecHelperTest {
   }
 
   @SuppressWarnings("unchecked")
-  private void stubColumnCriteria(Tab tab, List<Column> columns) {
+  private void stubColumnCriteria(@SuppressWarnings("unused") Tab tab, List<Column> columns) {
     OBCriteria<Column> colCrit = mock(OBCriteria.class);
     when(colCrit.list()).thenReturn(columns);
     when(mockDal.createCriteria(Column.class)).thenReturn(colCrit);

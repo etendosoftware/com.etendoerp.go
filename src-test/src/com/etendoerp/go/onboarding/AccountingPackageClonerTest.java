@@ -629,8 +629,7 @@ public class AccountingPackageClonerTest {
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
       dalUtilStatic.when(() -> DalUtil.copy(sourceTax, false)).thenReturn(clonedTax);
 
-      @SuppressWarnings("unchecked")
-      Map<String, TaxRate> result = (Map<String, TaxRate>) invokePrivateMethod(
+      invokePrivateMethod(
           "cloneTaxes",
           new Class<?>[] { AccountingPackageCandidate.class, Organization.class, Map.class,
               Map.class },

@@ -431,7 +431,7 @@ public class NeoCertificateHelperTest {
     assertEquals("certificate.p12", result);
   }
 
-  // ── getOrgNif (private) ───────────────────────────────────────────────────
+  // getOrgNif (private)
 
   @Test
   public void getOrgNifReturnsNullWhenOrgInfoNotFound() throws Exception {
