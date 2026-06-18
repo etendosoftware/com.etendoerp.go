@@ -37,7 +37,7 @@ import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
-import org.hibernate.ScrollableResults;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -869,31 +869,25 @@ public class ReconciliationHandler implements NeoHandler {
   }
 
   /**
-   * Loads unreconciled bank-statement lines for the given account (pasada 1 / pasada 2 source).
+   * Loads unreconciled bank-statement lines for the given account.
+   * Uses the same criteria as the {@code pendingLines} action: active lines with no linked
+   * transaction, regardless of the bank-statement processed flag (which would exclude C43-imported
+   * or manually-entered statements that are still in draft status).
    * Package-private for testability.
    */
+  @SuppressWarnings("unchecked")
   List<FIN_BankStatementLine> loadPendingLines(String accountId) {
-    List<FIN_BankStatementLine> result = new ArrayList<>();
-    ScrollableResults sr = APRM_MatchingUtility
-        .getPendingToBeMatchedBankStatementLines(accountId, null);
-    try {
-      List<String> ids = new ArrayList<>();
-      while (sr.next()) {
-        FIN_BankStatementLine bsl = (FIN_BankStatementLine) sr.get(0);
-        ids.add(bsl.getId());
-      }
-      sr.close();
-      for (String id : ids) {
-        FIN_BankStatementLine bsl = OBDal.getInstance().get(FIN_BankStatementLine.class, id);
-        if (bsl != null) {
-          result.add(bsl);
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Error loading pending lines for account {}", accountId, e);
-      sr.close();
-    }
-    return result;
+    String hql = "select bsl from FIN_BankStatementLine as bsl"
+        + "  join bsl.bankStatement as bs"
+        + " where bs.account.id = :accountId"
+        + "   and bsl.financialAccountTransaction is null"
+        + "   and bsl.active = true"
+        + "   and bs.active = true"
+        + " order by bsl.transactionDate asc, bsl.line asc";
+    return OBDal.getInstance().getSession()
+        .createQuery(hql, FIN_BankStatementLine.class)
+        .setParameter("accountId", accountId)
+        .list();
   }
 
   /**
