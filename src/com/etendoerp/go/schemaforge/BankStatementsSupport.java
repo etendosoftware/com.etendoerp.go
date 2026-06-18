@@ -45,6 +45,9 @@ public final class BankStatementsSupport {
 
   private static final Logger log = LogManager.getLogger(BankStatementsSupport.class);
 
+  /** JSON/SQL key for the bank-statement-line description field. */
+  static final String FIELD_DESCRIPTION = "description";
+
   // Cached result of the C43 column existence check (null = not yet checked).
   private static volatile Boolean c43DescColumn;
 
@@ -94,7 +97,7 @@ public final class BankStatementsSupport {
     row.put("id", rs.getString("fin_bankstatementline_id"));
     row.put("lineNo", rs.getLong("line"));
     row.put("date", formatDate(rs.getTimestamp("datetrx")));
-    row.put("description",    StringUtils.trimToEmpty(rs.getString("description")));
+    row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
     row.put("reference",      StringUtils.trimToEmpty(rs.getString("referenceno")));
     row.put("bpartnerName",   StringUtils.trimToEmpty(rs.getString("bpartnername")));
     row.put("bpartnerId",     StringUtils.trimToEmpty(rs.getString("c_bpartner_id")));
@@ -243,7 +246,7 @@ public final class BankStatementsSupport {
    * @return whether the line is effectively empty
    */
   public static boolean isBlankLine(JSONObject l) {
-    return StringUtils.isBlank(l.optString("description", null))
+    return StringUtils.isBlank(l.optString(FIELD_DESCRIPTION, null))
         && StringUtils.isBlank(l.optString("bpartnerName", null))
         && StringUtils.isBlank(l.optString("bpartnerId", null))
         && StringUtils.isBlank(l.optString("glItemId", null))
@@ -272,7 +275,7 @@ public final class BankStatementsSupport {
     t.put("documentNo", StringUtils.trimToEmpty(rs.getString("txn_documentno")));
     t.put("date", formatDate(rs.getTimestamp("txn_date")));
     t.put("contact", StringUtils.trimToEmpty(rs.getString("txn_contact")));
-    t.put("description", StringUtils.trimToEmpty(rs.getString("txn_description")));
+    t.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString("txn_description")));
     t.put("trxType", StringUtils.trimToEmpty(rs.getString("txn_trxtype")));
     t.put("paymentStatus", StringUtils.trimToEmpty(rs.getString("txn_status")));
     t.put("amount", nullSafeBigDecimal(rs.getBigDecimal("txn_amount")));

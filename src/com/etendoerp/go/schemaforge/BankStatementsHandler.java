@@ -297,7 +297,7 @@ public class BankStatementsHandler implements NeoHandler {
 
   /** Builds {@link #LINES_SQL_HEAD} with the runtime-resolved description column. */
   private static String linesSqlHead() {
-    return String.format(LINES_SQL_HEAD, BankStatementsSupport.descriptionExpr());
+    return String.format(LINES_SQL_HEAD, BankStatementsSupport.descriptionExpr()); // NOSONAR java:S2077 — value is a hardcoded SQL expression, never user input
   }
 
   @Override
@@ -1161,7 +1161,7 @@ public class BankStatementsHandler implements NeoHandler {
     Connection conn = OBDal.getInstance().getConnection();
     String sql = linesSqlHead()
         + " WHERE bsl.isactive = 'Y'"
-        + "   AND bsl.fin_bankstatement_id IN (" + placeholders + ")"
+        + "   AND bsl.fin_bankstatement_id IN (" + placeholders + ")" // NOSONAR java:S2077 — placeholders are only "?" markers
         + " ORDER BY bsl.fin_bankstatement_id, bsl.line ASC";
     try (PreparedStatement ps = conn.prepareStatement(sql)) { // NOSONAR java:S2077 — placeholders are only "?" markers
       for (int i = 0; i < statementIds.size(); i++) {
