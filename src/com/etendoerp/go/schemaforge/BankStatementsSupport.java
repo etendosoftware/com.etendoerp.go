@@ -25,12 +25,15 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.ModelProvider;
 
@@ -109,8 +112,64 @@ public final class BankStatementsSupport {
     row.put("amount", credit.subtract(debit));
     boolean matched = rs.getString("fin_finacc_transaction_id") != null;
     row.put("matched", matched);
+    // 1:N reconcile group (option B): split sub-lines share this id so they can be re-grouped.
+    row.put("matchGroupId", StringUtils.trimToEmpty(rs.getString("em_etgo_match_group_id")));
     row.put("txns", buildLineTxns(rs, matched));
     return row;
+  }
+
+  /**
+   * Collapses the split sub-lines of a 1:N reconciliation back into a single display line.
+   * Sub-lines that share a non-blank {@code matchGroupId} are merged into the first occurrence:
+   * their {@code txns[]} are concatenated and their {@code in}/{@code out}/{@code amount} summed,
+   * so the line shows the original amount and ALL the transactions it was reconciled against.
+   * Lines without a match group pass through unchanged, preserving order.
+   */
+  public static JSONArray mergeMatchGroups(JSONArray lines) throws JSONException {
+    JSONArray result = new JSONArray();
+    Map<String, JSONObject> heads = new LinkedHashMap<>();
+    for (int i = 0; i < lines.length(); i++) {
+      JSONObject line = lines.getJSONObject(i);
+      String groupId = line.optString("matchGroupId", "");
+      if (StringUtils.isBlank(groupId)) {
+        result.put(line);
+        continue;
+      }
+      JSONObject head = heads.get(groupId);
+      if (head == null) {
+        heads.put(groupId, line);
+        result.put(line);
+        continue;
+      }
+      JSONArray headTxns = head.optJSONArray("txns");
+      if (headTxns == null) {
+        headTxns = new JSONArray();
+        head.put("txns", headTxns);
+      }
+      JSONArray lineTxns = line.optJSONArray("txns");
+      if (lineTxns != null) {
+        for (int j = 0; j < lineTxns.length(); j++) {
+          headTxns.put(lineTxns.get(j));
+        }
+      }
+      head.put("in", jsonBigDecimal(head, "in").add(jsonBigDecimal(line, "in")));
+      head.put("out", jsonBigDecimal(head, "out").add(jsonBigDecimal(line, "out")));
+      head.put("amount", jsonBigDecimal(head, "amount").add(jsonBigDecimal(line, "amount")));
+      head.put("matched", true);
+    }
+    return result;
+  }
+
+  private static BigDecimal jsonBigDecimal(JSONObject o, String key) {
+    Object v = o.opt(key);
+    if (v == null) {
+      return BigDecimal.ZERO;
+    }
+    try {
+      return new BigDecimal(v.toString());
+    } catch (NumberFormatException e) {
+      return BigDecimal.ZERO;
+    }
   }
 
   private static final DateTimeFormatter ISO_UTC =
@@ -272,6 +331,7 @@ public final class BankStatementsSupport {
       return txns;
     }
     JSONObject t = new JSONObject();
+    t.put("transactionId", StringUtils.trimToEmpty(rs.getString("fin_finacc_transaction_id")));
     t.put("documentNo", StringUtils.trimToEmpty(rs.getString("txn_documentno")));
     t.put("date", formatDate(rs.getTimestamp("txn_date")));
     t.put("contact", StringUtils.trimToEmpty(rs.getString("txn_contact")));

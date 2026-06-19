@@ -23,6 +23,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
@@ -525,6 +526,42 @@ public class ReconciliationHandlerTest {
 
     assertEquals(400, response.getHttpStatus());
     verify(handler).doRollbackAndClose();
+  }
+
+  // ── applySuggestions ─────────────────────────────────────────────────────────
+
+  /**
+   * A rule-origin group carrying a createPayment spec materializes the GL-item transaction via
+   * {@code createTransactionForRule} and reconciles the resulting transaction against the line.
+   */
+  @Test
+  public void testApplySuggestionsCreatesTransactionForRuleGroup() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatementLine line = lineFor(ACC_ID, BigDecimal.ZERO, new BigDecimal("12.50"), null);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-9");
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    doReturn("T-NEW").when(handler).createTransactionForRule(eq(account), eq(line), any());
+    stubReconciliationCompose(rec, "Success");
+
+    JSONObject createPayment = new JSONObject()
+        .put("glItemId", "GL-1").put("ruleId", "R1").put("amount", "-12.50");
+    JSONObject group = new JSONObject()
+        .put("statementLineId", LINE_ID)
+        .put("operationIds", new JSONArray())
+        .put("createPayment", createPayment);
+    JSONObject body = new JSONObject()
+        .put("financialAccountId", ACC_ID)
+        .put("groups", new JSONArray().put(group));
+
+    NeoResponse response = handler.applySuggestions(body);
+
+    assertEquals(201, response.getHttpStatus());
+    verify(handler).createTransactionForRule(eq(account), eq(line), any());
+    // The created transaction id is the one reconciled against the line.
+    verify(handler).matchBankStatementLine(eq(line), argThat(ops -> ops.contains("T-NEW")), eq(rec));
   }
 
   // ── nullSafe helper ──────────────────────────────────────────────────────────

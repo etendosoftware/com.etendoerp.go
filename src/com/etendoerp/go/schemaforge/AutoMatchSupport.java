@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -37,14 +38,12 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.base.exception.OBException;
+import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
+import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
-import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
-import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 
 /**
  * Static helpers for the {@code autoMatch} and {@code applySuggestions} actions of
@@ -278,32 +277,101 @@ final class AutoMatchSupport {
   }
 
   // ---------------------------------------------------------------------------
-  // Payment helpers
+  // Line classification (left-panel state + counts)
   // ---------------------------------------------------------------------------
 
-  static void failOnError(OBError result) {
-    if (result != null && "Error".equalsIgnoreCase(result.getType())) {
-      throw new OBException(result.getMessage());
-    }
-  }
+  static final String STATE_SUGGESTED = "suggested";
+  static final String STATE_BY_RULE = "byRule";
+  static final String STATE_DIFFERENCE = "difference";
+  static final String STATE_PENDING = "pending";
 
   /**
-   * Resolves the default payment method for the account and direction (in/out).
-   * Returns {@code null} if none is configured.
+   * Classifies a pending bank-statement line as if the matching engine had run:
+   * <ul>
+   *   <li>{@code suggested} — the standard algorithm returns a STRONG match</li>
+   *   <li>{@code difference} — the standard algorithm returns a weaker match (a suggestion that
+   *       is not a perfect/strong match)</li>
+   *   <li>{@code byRule} — no standard match, but a matching rule applies</li>
+   *   <li>{@code pending} — nothing matches</li>
+   * </ul>
    */
-  static FIN_PaymentMethod resolveDefaultPaymentMethod(FIN_FinancialAccount account,
-      boolean isReceipt) {
-    List<FinAccPaymentMethod> methods = account.getFinancialMgmtFinAccPaymentMethodList();
-    if (methods == null || methods.isEmpty()) {
+  /** Zeroed per-state counters for the left-panel filter (insertion-ordered). */
+  static Map<String, Integer> newCounts() {
+    Map<String, Integer> counts = new LinkedHashMap<>();
+    counts.put("all", 0);
+    counts.put(STATE_PENDING, 0);
+    counts.put(STATE_SUGGESTED, 0);
+    counts.put(STATE_BY_RULE, 0);
+    counts.put(STATE_DIFFERENCE, 0);
+    counts.put("reconciled", 0);
+    return counts;
+  }
+
+  /** Loads the line by id and classifies it; returns {@code pending} when the line is gone. */
+  static String classifyPendingLine(FIN_FinancialAccount account, String lineId,
+      List<MatchRuleEngine.Rule> rules) {
+    FIN_BankStatementLine line = OBDal.getInstance().get(FIN_BankStatementLine.class, lineId);
+    if (line == null) {
+      return STATE_PENDING;
+    }
+    return classifyPendingLine(account, line, rules);
+  }
+
+  static String classifyPendingLine(FIN_FinancialAccount account, FIN_BankStatementLine line,
+      List<MatchRuleEngine.Rule> rules) {
+    String level = standardMatchLevel(account, line);
+    if (FIN_MatchedTransaction.STRONG.equals(level)) {
+      return STATE_SUGGESTED;
+    }
+    if (level != null) {
+      return STATE_DIFFERENCE;
+    }
+    String desc = StringUtils.trimToEmpty(line.getDescription());
+    String ref = StringUtils.trimToEmpty(line.getReferenceNo());
+    String partner = StringUtils.trimToEmpty(line.getBpartnername());
+    if (MatchRuleEngine.evaluate(desc, ref, partner, rules).isMatched()) {
+      return STATE_BY_RULE;
+    }
+    return STATE_PENDING;
+  }
+
+  /** Match level the account's standard algorithm assigns to the line, or {@code null} if none. */
+  static String standardMatchLevel(FIN_FinancialAccount account, FIN_BankStatementLine line) {
+    if (account == null || account.getMatchingAlgorithm() == null
+        || StringUtils.isBlank(account.getMatchingAlgorithm().getJavaClassName())) {
       return null;
     }
-    for (FinAccPaymentMethod fapm : methods) {
-      if (isReceipt && Boolean.TRUE.equals(fapm.isPayinAllow())
-          || !isReceipt && Boolean.TRUE.equals(fapm.isPayoutAllow())) {
-        return fapm.getPaymentMethod();
+    try {
+      FIN_MatchingTransaction matcher =
+          new FIN_MatchingTransaction(account.getMatchingAlgorithm().getJavaClassName());
+      FIN_MatchedTransaction matched = matcher.match(line, new ArrayList<>());
+      if (matched != null && matched.getTransaction() != null
+          && !FIN_MatchedTransaction.NOMATCH.equals(matched.getMatchLevel())) {
+        return matched.getMatchLevel();
       }
+    } catch (Exception e) {
+      log.debug("Standard match level failed for line {}: {}", line.getId(), e.getMessage());
     }
-    return methods.get(0).getPaymentMethod();
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Transaction helpers
+  // ---------------------------------------------------------------------------
+
+  /** Next line number for a new transaction of the account (max + 10). */
+  static long nextTransactionLineNo(String accountId) {
+    String sql = "SELECT COALESCE(MAX(line), 0) + 10 FROM fin_finacc_transaction"
+        + " WHERE fin_financial_account_id = ?"; // NOSONAR java:S2077
+    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
+      ps.setString(1, accountId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getLong(1) : 10L;
+      }
+    } catch (Exception e) {
+      log.warn("Could not compute next transaction line for account {}", accountId, e);
+      return 10L;
+    }
   }
 
   /** Increments {@code ETGO_MATCH_RULE.matchcount} for the given rule id. Best-effort (non-fatal). */

@@ -43,31 +43,23 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.advpaymentmngt.dao.AdvPaymentMngtDao;
-import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
+import org.openbravo.advpaymentmngt.process.FIN_TransactionProcess;
 import org.openbravo.advpaymentmngt.utility.APRM_MatchingUtility;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
-import org.openbravo.advpaymentmngt.utility.FIN_Utility;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.base.secureApp.VariablesSecureApp;
-import org.openbravo.client.kernel.RequestContext;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
-import org.openbravo.model.common.currency.Currency;
-import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
-import org.openbravo.model.financialmgmt.payment.FIN_Payment;
-import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
-import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * NeoHandler that powers the manual bank-reconciliation split panel introduced by
@@ -131,7 +123,6 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String PARAM_ACCOUNT_ID = "accountId";
   private static final String PARAM_LINE_ID = "lineId";
   private static final String PARAM_DOC_TYPE = "docType";
-  private static final String PARAM_STATUS = "status";
   private static final String PARAM_DATE_FROM = "dateFrom";
   private static final String PARAM_DATE_TO = "dateTo";
   private static final String PARAM_Q = "q";
@@ -146,6 +137,9 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String MATCH_LEVEL_MANUAL = "MANUALMATCH";
   /** Action code for {@link APRM_MatchingUtility#processReconciliation} (P = process). */
   private static final String PROCESS_ACTION = "P";
+  /** GL-item transaction types: BP Deposit (Cobro / money in) and BP Withdrawal (Pago / money out). */
+  private static final String TRX_TYPE_DEPOSIT = "BPD";
+  private static final String TRX_TYPE_WITHDRAWAL = "BPW";
   /** Tolerance applied when comparing the line amount to the sum of operations. */
   private static final BigDecimal TOLERANCE = new BigDecimal("0.01");
 
@@ -271,21 +265,15 @@ public class ReconciliationHandler implements NeoHandler {
 
   NeoResponse buildPendingLines(String accountId, String clientId, Set<String> orgs,
       Map<String, String> filters) throws Exception {
-    String status = filters != null ? filters.get(PARAM_STATUS) : null;
     String dateFrom = filters != null ? filters.get(PARAM_DATE_FROM) : null;
     String dateTo = filters != null ? filters.get(PARAM_DATE_TO) : null;
     String q = filters != null ? filters.get(PARAM_Q) : null;
 
-    // Resolve the description expression once (ModelProvider-based, no DB round-trip).
+    // The status parameter is no longer used to filter at SQL level: every line is returned with
+    // its computed `state` and the per-state `counts`, and the frontend filters client-side. This
+    // keeps the matching engine running once per panel load instead of once per filter change.
     String descExpr = descriptionExpr();
     StringBuilder sql = new StringBuilder(String.format(PENDING_LINES_SQL, descExpr));
-    // Status filter: 'pending' (default) → unmatched lines; 'reconciled' → matched
-    // lines; blank / any other (e.g. "all") → both.
-    if (STATUS_RECONCILED.equalsIgnoreCase(status)) {
-      sql.append(" AND bsl.fin_finacc_transaction_id IS NOT NULL");
-    } else if (STATUS_PENDING.equalsIgnoreCase(status)) {
-      sql.append(" AND bsl.fin_finacc_transaction_id IS NULL");
-    }
     if (StringUtils.isNotBlank(dateFrom)) {
       sql.append(" AND bsl.datetrx >= ?");
     }
@@ -298,10 +286,13 @@ public class ReconciliationHandler implements NeoHandler {
     }
     sql.append(PENDING_LINES_ORDER);
 
+    FIN_FinancialAccount account = loadAccount(accountId);
     JSONArray lines = new JSONArray();
     BigDecimal total = BigDecimal.ZERO;
+    Map<String, Integer> counts = AutoMatchSupport.newCounts();
     // Connection is managed by the DAL's Hibernate Session; don't close it.
     Connection conn = OBDal.getInstance().getConnection();
+    List<MatchRuleEngine.Rule> rules = loadRules(conn, accountId);
     try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
       int idx = 1;
       ps.setString(idx++, accountId);
@@ -319,27 +310,43 @@ public class ReconciliationHandler implements NeoHandler {
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           BigDecimal amount = nullSafe(rs.getBigDecimal(KEY_AMOUNT));
+          String lineId = rs.getString("fin_bankstatementline_id");
+          boolean reconciled = STATUS_RECONCILED
+              .equalsIgnoreCase(StringUtils.trimToEmpty(rs.getString("line_status")));
+          String state = reconciled ? STATUS_RECONCILED
+              : AutoMatchSupport.classifyPendingLine(account, lineId, rules);
+
           JSONObject row = new JSONObject();
-          row.put(KEY_ID, rs.getString("fin_bankstatementline_id"));
+          row.put(KEY_ID, lineId);
           row.put(KEY_DATE, formatDate(rs.getTimestamp("datetrx")));
           row.put("description", StringUtils.trimToEmpty(rs.getString("description")));
           row.put("partnerName", StringUtils.trimToEmpty(rs.getString("partner_name")));
           row.put("referenceNo", StringUtils.trimToEmpty(rs.getString("reference_no")));
-          // Per-row state derived in SQL: 'pending' (unmatched) or 'reconciled'.
-          row.put(KEY_STATUS, StringUtils.defaultIfBlank(rs.getString("line_status"), STATUS_PENDING));
+          // Coarse status kept for backward compatibility (pending|reconciled).
+          row.put(KEY_STATUS, reconciled ? STATUS_RECONCILED : STATUS_PENDING);
+          // Fine-grained state for the left-panel filter (pending|suggested|byRule|difference|reconciled).
+          row.put("state", state);
           // 1:N group id (option B): sub-lines of the same reconcile group share this value.
           row.put("matchGroupId", StringUtils.trimToEmpty(rs.getString("match_group_id")));
           row.put(KEY_AMOUNT, amount);
           lines.put(row);
           total = total.add(amount);
+          counts.put("all", counts.get("all") + 1);
+          counts.put(state, counts.getOrDefault(state, 0) + 1);
         }
       }
+    }
+    JSONObject countsJson = new JSONObject();
+    for (Map.Entry<String, Integer> entry : counts.entrySet()) {
+      countsJson.put(entry.getKey(), entry.getValue());
     }
     JSONObject data = new JSONObject();
     data.put("lines", lines);
     data.put("total", total);
+    data.put("counts", countsJson);
     return envelope(data);
   }
+
 
   // ---------------------------------------------------------------------------
   // GET candidates
@@ -784,10 +791,10 @@ public class ReconciliationHandler implements NeoHandler {
 
     List<String> operationIds = readOperationIds(groupEntry);
 
-    // When a rule group requires creating a new payment, do that first.
+    // When a rule group requires creating a new transaction, do that first.
     JSONObject createPaymentSpec = groupEntry.optJSONObject("createPayment");
     if (createPaymentSpec != null && StringUtils.isNotBlank(createPaymentSpec.optString("glItemId", null))) {
-      String newTxnId = createPaymentForRule(account, line, createPaymentSpec);
+      String newTxnId = createTransactionForRule(account, line, createPaymentSpec);
       if (StringUtils.isNotBlank(newTxnId)) {
         operationIds = new ArrayList<>(operationIds);
         operationIds.add(newTxnId);
@@ -808,11 +815,13 @@ public class ReconciliationHandler implements NeoHandler {
   }
 
   /**
-   * Creates a GL-item based payment for a rule-origin group and returns the
-   * id of the resulting {@code FIN_FinaccTransaction}. Mirrors the sequence in
-   * {@link AddPaymentService}: create payment → add GL item → process with action "P".
+   * Creates a GL-item financial-account transaction (Cobro {@code BPD} / Pago {@code BPW}) for a
+   * rule-origin group and returns its id. The transaction carries the rule's accounting concept
+   * (GL item) directly in its own GL Item field — no payment is created. Mirrors the New Movement
+   * wizard ({@link FinancialAccountTransactionsHandler}) and processes the transaction so it is
+   * reconcilable.
    */
-  String createPaymentForRule(FIN_FinancialAccount account, FIN_BankStatementLine line,
+  String createTransactionForRule(FIN_FinancialAccount account, FIN_BankStatementLine line,
       JSONObject spec) throws Exception {
     String glItemId = spec.optString("glItemId", null);
     String bpartnerId = spec.optString("bpartnerId", null);
@@ -827,49 +836,42 @@ public class ReconciliationHandler implements NeoHandler {
       throw new OBException("GL item not found: " + glItemId);
     }
 
-    Organization org = account.getOrganization();
-    boolean isReceipt = amount.signum() >= 0;
-    DocumentType docType = FIN_Utility.getDocumentType(org, isReceipt ? "ARR" : "APP");
-    if (docType == null) {
-      throw new OBException("Document type not found for org " + org.getId());
-    }
-
-    BusinessPartner bp = StringUtils.isNotBlank(bpartnerId)
-        ? OBDal.getInstance().get(BusinessPartner.class, bpartnerId) : null;
-
-    FIN_PaymentMethod paymentMethod = AutoMatchSupport.resolveDefaultPaymentMethod(account, isReceipt);
-    if (paymentMethod == null) {
-      throw new OBException("No payment method configured for financial account " + account.getId());
-    }
-
-    VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
-    RequestContext.get().setVariableSecureApp(vars);
-    DalConnectionProvider conn = new DalConnectionProvider(false);
-    AdvPaymentMngtDao dao = new AdvPaymentMngtDao();
-
+    // Use the statement line's organization (always concrete) — the account org may be the
+    // generic '*' org, which cannot own documents/transactions.
+    Organization org = line.getOrganization() != null
+        ? line.getOrganization() : account.getOrganization();
     BigDecimal absAmount = amount.abs();
-    String docNo = FIN_Utility.getDocumentNo(docType, "FIN_Payment");
-    Currency currency = account.getCurrency();
-    FIN_Payment payment = dao.getNewPayment(isReceipt, org, docType, docNo, bp, paymentMethod,
-        account, "0", line.getTransactionDate(), StringUtils.trimToEmpty(line.getReferenceNo()),
-        currency, BigDecimal.ONE, absAmount);
-    payment.setAmount(absAmount);
-    FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, BigDecimal.ONE, absAmount);
-    OBDal.getInstance().save(payment);
-    OBDal.getInstance().flush();
+    boolean isDeposit = amount.signum() >= 0;
 
-    FIN_AddPayment.saveGLItem(payment, absAmount, glItem);
-
-    AutoMatchSupport.failOnError(FIN_AddPayment.processPayment(vars, conn, "P", payment, ""));
-    OBDal.getInstance().flush();
-    OBDal.getInstance().refresh(payment);
-
-    // The processed payment auto-creates a FIN_FinaccTransaction.
-    if (payment.getFINFinaccTransactionList() != null
-        && !payment.getFINFinaccTransactionList().isEmpty()) {
-      return payment.getFINFinaccTransactionList().get(0).getId();
+    FIN_FinaccTransaction trx = OBProvider.getInstance().get(FIN_FinaccTransaction.class);
+    trx.setClient(account.getClient());
+    trx.setOrganization(org);
+    trx.setActive(true);
+    trx.setAccount(account);
+    trx.setCurrency(account.getCurrency());
+    // Cobro (BPD) when money comes in, Pago (BPW) when money goes out — carries the GL item.
+    trx.setTransactionType(isDeposit ? TRX_TYPE_DEPOSIT : TRX_TYPE_WITHDRAWAL);
+    trx.setTransactionDate(line.getTransactionDate());
+    trx.setDateAcct(line.getTransactionDate());
+    trx.setDescription(StringUtils.trimToEmpty(line.getDescription()));
+    trx.setLineNo(AutoMatchSupport.nextTransactionLineNo(account.getId()));
+    trx.setDepositAmount(isDeposit ? absAmount : BigDecimal.ZERO);
+    trx.setPaymentAmount(isDeposit ? BigDecimal.ZERO : absAmount);
+    trx.setStatus(isDeposit ? "RPAE" : "RPAP");
+    trx.setGLItem(glItem);
+    if (StringUtils.isNotBlank(bpartnerId)) {
+      BusinessPartner bp = OBDal.getInstance().get(BusinessPartner.class, bpartnerId);
+      if (bp != null) {
+        trx.setBusinessPartner(bp);
+      }
     }
-    return null;
+    OBDal.getInstance().save(trx);
+    OBDal.getInstance().flush();
+
+    // Process the transaction (sets processed = Y) so it can be reconciled.
+    FIN_TransactionProcess.doTransactionProcess(PROCESS_ACTION, trx);
+    OBDal.getInstance().flush();
+    return trx.getId();
   }
 
   // ---------------------------------------------------------------------------
