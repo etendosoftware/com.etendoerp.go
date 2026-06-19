@@ -174,7 +174,7 @@ public class PopulateSpecHelperTest {
 
     Column col1 = createMockColumn("C_Order_ID");
     Column col2 = createMockColumn("DocumentNo");
-    stubColumnCriteria(tab, List.of(col1, col2));
+    stubColumnCriteria(List.of(col1, col2));
 
     SFEntity mockEntity = mock(SFEntity.class);
     SFField mockField1 = mock(SFField.class);
@@ -208,7 +208,7 @@ public class PopulateSpecHelperTest {
     Column colIsActive = createMockColumn("IsActive");
     Column colAdClient = createMockColumn("AD_Client_ID");
     Column colAdOrg = createMockColumn("AD_Org_ID");
-    stubColumnCriteria(tab, List.of(colRegular, colCreated, colUpdated,
+    stubColumnCriteria(List.of(colRegular, colCreated, colUpdated,
         colCreatedBy, colUpdatedBy, colIsActive, colAdClient, colAdOrg));
 
     SFEntity mockEntity = mock(SFEntity.class);
@@ -232,7 +232,7 @@ public class PopulateSpecHelperTest {
 
     Column colRegular = createMockColumn("DocumentNo");
     Column colCreated = createMockColumn("Created");
-    stubColumnCriteria(tab, List.of(colRegular, colCreated));
+    stubColumnCriteria(List.of(colRegular, colCreated));
 
     SFEntity mockEntity = mock(SFEntity.class);
     SFField mockField1 = mock(SFField.class);
@@ -255,7 +255,7 @@ public class PopulateSpecHelperTest {
 
     Tab tab = createMockTab("tab-1", "Order", 10L);
     stubTabCriteria(Collections.singletonList(tab));
-    stubColumnCriteria(tab, Collections.emptyList());
+    stubColumnCriteria(Collections.emptyList());
 
     SFEntity mockEntity = mock(SFEntity.class);
     when(mockProvider.get(SFEntity.class)).thenReturn(mockEntity);
@@ -277,7 +277,7 @@ public class PopulateSpecHelperTest {
 
     Tab tab = createMockTab("tab-1", "Order", 10L);
     stubTabCriteria(Collections.singletonList(tab));
-    stubColumnCriteria(tab, Collections.emptyList());
+    stubColumnCriteria(Collections.emptyList());
 
     SFEntity mockEntity = mock(SFEntity.class);
     when(mockProvider.get(SFEntity.class)).thenReturn(mockEntity);
@@ -333,7 +333,7 @@ public class PopulateSpecHelperTest {
     for (int i = 1; i <= 11; i++) {
       Tab tab = createMockTab("tab-" + i, "Tab" + i, (long) i * 10);
       tabs.add(tab);
-      stubColumnCriteria(tab, Collections.emptyList());
+      stubColumnCriteria(Collections.emptyList());
     }
     stubTabCriteria(tabs);
 
@@ -540,7 +540,7 @@ public class PopulateSpecHelperTest {
 
     Tab tab = createMockTab("tab-1", "Order", 10L);
     stubTabCriteria(Collections.singletonList(tab));
-    stubColumnCriteria(tab, Collections.emptyList());
+    stubColumnCriteria(Collections.emptyList());
 
     SFEntity mockEntity = mock(SFEntity.class);
     when(mockProvider.get(SFEntity.class)).thenReturn(mockEntity);
@@ -564,7 +564,7 @@ public class PopulateSpecHelperTest {
     stubTabCriteria(Collections.singletonList(tab));
 
     Column col = createMockColumn("DocumentNo");
-    stubColumnCriteria(tab, Collections.singletonList(col));
+    stubColumnCriteria(Collections.singletonList(col));
 
     SFEntity mockEntity = mock(SFEntity.class);
     SFField mockField = mock(SFField.class);
@@ -593,7 +593,7 @@ public class PopulateSpecHelperTest {
 
     Tab tab = createMockTab("tab-1", "Sales Order", 30L);
     stubTabCriteria(Collections.singletonList(tab));
-    stubColumnCriteria(tab, Collections.emptyList());
+    stubColumnCriteria(Collections.emptyList());
 
     SFEntity mockEntity = mock(SFEntity.class);
     when(mockProvider.get(SFEntity.class)).thenReturn(mockEntity);
@@ -624,7 +624,7 @@ public class PopulateSpecHelperTest {
     // Lowercase system column names should still be excluded
     Column colCreated = createMockColumn("created");
     Column colRegular = createMockColumn("MyField");
-    stubColumnCriteria(tab, List.of(colCreated, colRegular));
+    stubColumnCriteria(List.of(colCreated, colRegular));
 
     SFEntity mockEntity = mock(SFEntity.class);
     SFField mockField = mock(SFField.class);
@@ -650,7 +650,7 @@ public class PopulateSpecHelperTest {
     Column col1 = createMockColumn("Col1");
     Column col2 = createMockColumn("Col2");
     Column col3 = createMockColumn("Col3");
-    stubColumnCriteria(tab, List.of(col1, col2, col3));
+    stubColumnCriteria(List.of(col1, col2, col3));
 
     SFEntity mockEntity = mock(SFEntity.class);
     SFField field1 = mock(SFField.class);
@@ -705,7 +705,7 @@ public class PopulateSpecHelperTest {
   }
 
   @SuppressWarnings("unchecked")
-  private void stubColumnCriteria(@SuppressWarnings("unused") Tab tab, List<Column> columns) {
+  private void stubColumnCriteria(List<Column> columns) {
     OBCriteria<Column> colCrit = mock(OBCriteria.class);
     when(colCrit.list()).thenReturn(columns);
     when(mockDal.createCriteria(Column.class)).thenReturn(colCrit);

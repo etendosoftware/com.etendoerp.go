@@ -431,8 +431,6 @@ public class NeoCertificateHelperTest {
     assertEquals("certificate.p12", result);
   }
 
-  // getOrgNif (private)
-
   @Test
   public void getOrgNifReturnsNullWhenOrgInfoNotFound() throws Exception {
     OBDal obDal = mock(OBDal.class);
