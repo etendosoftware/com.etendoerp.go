@@ -618,8 +618,10 @@ public class McpToolRouter {
 
     Map<String, String> visibilityByColumnId =
       McpToolRouterSupport.loadVisibilityByColumnId(sfEntity);
+    Map<String, String> promptByColumnId =
+      McpToolRouterSupport.loadPromptByColumnId(sfEntity);
     JSONArray fieldsArray = McpToolRouterSupport.buildSchemaFieldsArray(adTab, dalEntity,
-      visibilityByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
+      visibilityByColumnId, promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
 
     // Build entity schema
     JSONObject entitySchema = new JSONObject();
