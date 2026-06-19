@@ -17,10 +17,15 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.commons.lang3.StringUtils;
@@ -742,6 +747,12 @@ public class NeoCalloutService {
       // can compute grossAmount in real-time without an extra round-trip.
       NeoCommercialLinePolicy.injectTaxRateIfPresent(updates);
 
+      // Callout params are sent to legacy callouts in the Etendo UI date format
+      // (DD-MM-YYYY) so SQL to_date() works; callouts that echo a date back would
+      // otherwise return DD-MM-YYYY to the frontend, which expects ISO. Convert any
+      // Date-typed update value back to ISO (ETP-4244).
+      normalizeUpdateDatesToIso(updates, adTab);
+
       response.put(KEY_UPDATES, updates);
       response.put(KEY_COMBOS, combos);
       response.put(KEY_MESSAGES, messages);
@@ -756,6 +767,74 @@ public class NeoCalloutService {
     }
 
     return response;
+  }
+
+  /**
+   * Convert Date-typed update values from the Etendo UI date format (DD-MM-YYYY) back
+   * to ISO (yyyy-MM-dd) for the frontend. This is the symmetric counterpart to the
+   * input-side reformatting in {@link CalloutRequestBuilder}: callouts that echo or
+   * derive a date return it in the format we fed them, but the REST/JSON contract uses
+   * ISO. Only Date columns (AD reference 15) are touched; values that are not in the
+   * Etendo format (e.g. already ISO) are left untouched (ETP-4244).
+   */
+  private static void normalizeUpdateDatesToIso(JSONObject updates, Tab adTab) {
+    if (updates == null || updates.length() == 0 || adTab == null || adTab.getTable() == null) {
+      return;
+    }
+    Set<String> dateFields = new HashSet<>();
+    for (Column col : CalloutRequestBuilder.buildColumnLookupMaps(adTab).columns) {
+      if (col.getReference() != null && "15".equals(col.getReference().getId())) {
+        dateFields.add(inpToCleanName(toInpName(col.getDBColumnName()), adTab));
+      }
+    }
+    if (dateFields.isEmpty()) {
+      return;
+    }
+    String pattern = CalloutRequestBuilder.getCalloutDatePattern();
+    if (pattern == null) {
+      return;
+    }
+    DateTimeFormatter formatter = DateTimeFormatter.ofPattern(pattern);
+    for (String field : dateFields) {
+      normalizeField(updates, field, formatter);
+    }
+  }
+
+  private static void normalizeField(JSONObject updates, String field, DateTimeFormatter formatter) {
+    JSONObject entry = updates.optJSONObject(field);
+    if (entry == null) {
+      return;
+    }
+    String iso = etendoToIsoDate(entry.optString(VALUE_KEY, null), formatter);
+    if (iso == null) {
+      return;
+    }
+    try {
+      entry.put(VALUE_KEY, iso);
+    } catch (Exception e) {
+      log.error("Failed to normalize date field {}: {}", field, e.getMessage());
+    }
+  }
+
+  /**
+   * Convert a date string in {@code etendoPattern} (e.g. dd-MM-yyyy) to ISO yyyy-MM-dd.
+   * Returns {@code null} when the value is not in that format (so the caller leaves it
+   * as-is — idempotent if the value is already ISO).
+   */
+  static String etendoToIsoDate(String value, String etendoPattern) {
+    return etendoToIsoDate(value, DateTimeFormatter.ofPattern(etendoPattern));
+  }
+
+  static String etendoToIsoDate(String value, DateTimeFormatter formatter) {
+    if (value == null || value.trim().isEmpty()) {
+      return null;
+    }
+    try {
+      LocalDate parsed = LocalDate.parse(value.trim(), formatter);
+      return parsed.format(DateTimeFormatter.ISO_LOCAL_DATE);
+    } catch (DateTimeParseException e) {
+      return null; // not in the Etendo format — leave untouched
+    }
   }
 
   /**
