@@ -271,6 +271,51 @@ public class MatchRuleHandlerTest {
     assertNull(spyHandler.handle(ctx));
   }
 
+  // ── accountingConcept validation (T7) ────────────────────────────────────────
+
+  /**
+   * A POST body that omits {@code accountingConcept} entirely must be rejected with 400 —
+   * the GL item is mandatory for the automatch payment-creation step.
+   */
+  @Test
+  public void rejectsPostWithoutAccountingConcept() throws Exception {
+    assertStatus(BAD_REQUEST, handler.validateContent(
+        body("name", "Fee Rule", "textCondition", "C", "textPattern", "fee")));
+  }
+
+  /**
+   * A POST body that provides a blank (whitespace-only) {@code accountingConcept} must also be
+   * rejected with 400.
+   */
+  @Test
+  public void rejectsPostWithBlankAccountingConcept() throws Exception {
+    assertStatus(BAD_REQUEST, handler.validateContent(
+        body("name", "Fee Rule", "textCondition", "C", "textPattern", "fee",
+            "accountingConcept", "   ")));
+  }
+
+  /**
+   * A PATCH body that does NOT carry any content fields (no name / textCondition / textPattern)
+   * must bypass the full content validation, so the absence of {@code accountingConcept} in
+   * the body is NOT treated as an error.
+   */
+  @Test
+  public void patchWithoutContentFieldsBypassesAccountingConceptRequirement() throws Exception {
+    MatchRuleHandler spyHandler = spy(new MatchRuleHandler());
+    doNothing().when(spyHandler).enterAdminMode();
+    doNothing().when(spyHandler).exitAdminMode();
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn("match-rule");
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRecordId()).thenReturn("RULE-1");
+    // Partial PATCH: no name / textCondition / textPattern → full validation must be skipped.
+    when(ctx.getRequestBody()).thenReturn(body("priority", 20));
+
+    // Expect null (valid — passes to CRUD).
+    assertNull(spyHandler.handle(ctx));
+  }
+
   private static String repeat(String s, int n) {
     StringBuilder sb = new StringBuilder(s.length() * n);
     for (int i = 0; i < n; i++) {

@@ -21,21 +21,32 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.function.Function;
 
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.MockedConstruction;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
+import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
+import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
- * Unit tests for {@link AutoMatchSupport#matchByKey} — the 1:N signal-grouping core. Pure logic,
- * driven with mocked transactions and a simple in-memory key function.
+ * Unit tests for {@link AutoMatchSupport} — covers {@link AutoMatchSupport#matchByKey} (the 1:N
+ * signal-grouping core), {@link AutoMatchSupport#classifyPendingLine} (state classification for
+ * the left-panel filter), and {@link BankStatementsSupport#mergeMatchGroups} (sub-line collapsing
+ * for the statement-lines panel).
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class AutoMatchSupportTest {
@@ -136,5 +147,224 @@ public class AutoMatchSupportTest {
         AutoMatchSupport.matchByKey(pool, new BigDecimal("150.00"), TOL, KEY_FN);
 
     assertTrue(result.isEmpty());
+  }
+
+  // ---------------------------------------------------------------------------
+  // classifyPendingLine
+  // ---------------------------------------------------------------------------
+
+  /** A null matching algorithm on the account → standardMatchLevel returns null → check rules. */
+  @Test
+  public void classifyPendingLine_noAlgorithm_noRuleMatch_returnsPending() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getMatchingAlgorithm()).thenReturn(null);
+    FIN_BankStatementLine line = pendingLine("Bank fee May", "", "");
+
+    String state = AutoMatchSupport.classifyPendingLine(account, line, Collections.emptyList());
+
+    assertEquals(AutoMatchSupport.STATE_PENDING, state);
+  }
+
+  /**
+   * Account has no algorithm configured (null) and a matching rule exists: the engine returns a
+   * rule match → state must be {@code byRule}.
+   */
+  @Test
+  public void classifyPendingLine_noAlgorithm_ruleMatches_returnsByRule() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getMatchingAlgorithm()).thenReturn(null);
+    FIN_BankStatementLine line = pendingLine("Bank commission fee", "", "");
+    List<MatchRuleEngine.Rule> rules = Collections.singletonList(
+        new MatchRuleEngine.Rule("R1", "Fee Rule", 10,
+            MatchRuleEngine.COND_CONTAINS, "commission",
+            "GL-001", "BP-001", null, null, null, null, 0L));
+
+    String state = AutoMatchSupport.classifyPendingLine(account, line, rules);
+
+    assertEquals(AutoMatchSupport.STATE_BY_RULE, state);
+  }
+
+  /**
+   * Standard algorithm returns a STRONG match → state must be {@code suggested}.
+   */
+  @Test
+  public void classifyPendingLine_standardAlgorithmStrongMatch_returnsSuggested() {
+    FIN_FinancialAccount account = accountWithAlgorithm("com.example.DummyAlgo");
+    FIN_BankStatementLine line = pendingLine("Transfer ACME", "", "");
+
+    FIN_MatchedTransaction matched = mock(FIN_MatchedTransaction.class);
+    // Use a non-null mock transaction so the null guard passes.
+    when(matched.getTransaction()).thenReturn(mock(FIN_FinaccTransaction.class));
+    when(matched.getMatchLevel()).thenReturn(FIN_MatchedTransaction.STRONG);
+
+    try (MockedConstruction<FIN_MatchingTransaction> mc =
+        mockConstruction(FIN_MatchingTransaction.class, (m, ctx) ->
+            when(m.match(line, new java.util.ArrayList<>())).thenReturn(matched))) {
+      String state = AutoMatchSupport.classifyPendingLine(
+          account, line, Collections.emptyList());
+      assertEquals(AutoMatchSupport.STATE_SUGGESTED, state);
+    }
+  }
+
+  /**
+   * Standard algorithm returns a non-STRONG, non-NOMATCH level → state must be {@code difference}.
+   */
+  @Test
+  public void classifyPendingLine_standardAlgorithmWeakMatch_returnsDifference() {
+    FIN_FinancialAccount account = accountWithAlgorithm("com.example.DummyAlgo");
+    FIN_BankStatementLine line = pendingLine("Transfer ACME", "", "");
+
+    FIN_MatchedTransaction matched = mock(FIN_MatchedTransaction.class);
+    when(matched.getTransaction()).thenReturn(mock(FIN_FinaccTransaction.class));
+    // Any level that is not STRONG and not NOMATCH → difference path.
+    when(matched.getMatchLevel()).thenReturn("WEAK");
+
+    try (MockedConstruction<FIN_MatchingTransaction> mc =
+        mockConstruction(FIN_MatchingTransaction.class, (m, ctx) ->
+            when(m.match(line, new java.util.ArrayList<>())).thenReturn(matched))) {
+      String state = AutoMatchSupport.classifyPendingLine(
+          account, line, Collections.emptyList());
+      assertEquals(AutoMatchSupport.STATE_DIFFERENCE, state);
+    }
+  }
+
+  /**
+   * Standard algorithm finds no match (NOMATCH level) and no rule applies → {@code pending}.
+   */
+  @Test
+  public void classifyPendingLine_noStandardMatchNoRule_returnsPending() {
+    FIN_FinancialAccount account = accountWithAlgorithm("com.example.DummyAlgo");
+    FIN_BankStatementLine line = pendingLine("Unknown txn", "", "");
+
+    FIN_MatchedTransaction matched = mock(FIN_MatchedTransaction.class);
+    when(matched.getTransaction()).thenReturn(mock(FIN_FinaccTransaction.class));
+    when(matched.getMatchLevel()).thenReturn(FIN_MatchedTransaction.NOMATCH);
+
+    try (MockedConstruction<FIN_MatchingTransaction> mc =
+        mockConstruction(FIN_MatchingTransaction.class, (m, ctx) ->
+            when(m.match(line, new java.util.ArrayList<>())).thenReturn(matched))) {
+      String state = AutoMatchSupport.classifyPendingLine(
+          account, line, Collections.emptyList());
+      assertEquals(AutoMatchSupport.STATE_PENDING, state);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // mergeMatchGroups (BankStatementsSupport)
+  // ---------------------------------------------------------------------------
+
+  /** Lines with a blank or missing matchGroupId pass through unchanged. */
+  @Test
+  public void mergeMatchGroups_blankGroupId_passThrough() throws Exception {
+    JSONObject l1 = line("L1", "", "100.00", "100.00", "0.00");
+    JSONObject l2 = line("L2", "", "50.00", "0.00", "50.00");
+    JSONArray input = new JSONArray();
+    input.put(l1);
+    input.put(l2);
+
+    JSONArray result = BankStatementsSupport.mergeMatchGroups(input);
+
+    assertEquals(2, result.length());
+    assertEquals("L1", result.getJSONObject(0).getString("id"));
+    assertEquals("L2", result.getJSONObject(1).getString("id"));
+  }
+
+  /**
+   * Two sub-lines sharing the same matchGroupId: the second is absorbed into the first.
+   * The result has one entry whose {@code txns} contains both transactions and whose
+   * {@code in}/{@code out}/{@code amount} are summed.
+   */
+  @Test
+  public void mergeMatchGroups_twoSubLines_mergeIntoOne() throws Exception {
+    JSONObject txnA = new JSONObject().put("id", "T1").put("amount", "100.00");
+    JSONObject txnB = new JSONObject().put("id", "T2").put("amount", "50.00");
+
+    JSONObject l1 = line("L1", "GRP-1", "100.00", "100.00", "0.00");
+    l1.put("txns", new JSONArray().put(txnA));
+
+    JSONObject l2 = line("L2", "GRP-1", "50.00", "50.00", "0.00");
+    l2.put("txns", new JSONArray().put(txnB));
+
+    JSONArray input = new JSONArray();
+    input.put(l1);
+    input.put(l2);
+
+    JSONArray result = BankStatementsSupport.mergeMatchGroups(input);
+
+    assertEquals(1, result.length());
+    JSONObject merged = result.getJSONObject(0);
+    // The head line is l1; the amounts are the sum of both sub-lines.
+    assertEquals(0, new BigDecimal("150.00").compareTo(new BigDecimal(merged.getString("in"))));
+    assertEquals(0, new BigDecimal("150.00").compareTo(new BigDecimal(merged.getString("amount"))));
+    // Both transactions are present in the merged txns array.
+    JSONArray txns = merged.getJSONArray("txns");
+    assertEquals(2, txns.length());
+  }
+
+  /**
+   * Three sub-lines sharing the same matchGroupId: all three collapse into a single merged line
+   * with three entries in {@code txns} and the summed amounts.
+   */
+  @Test
+  public void mergeMatchGroups_threeSubLines_allMerge() throws Exception {
+    JSONObject l1 = line("L1", "GRP-X", "40.00", "40.00", "0.00");
+    l1.put("txns", new JSONArray().put(new JSONObject().put("id", "T1")));
+    JSONObject l2 = line("L2", "GRP-X", "30.00", "30.00", "0.00");
+    l2.put("txns", new JSONArray().put(new JSONObject().put("id", "T2")));
+    JSONObject l3 = line("L3", "GRP-X", "30.00", "30.00", "0.00");
+    l3.put("txns", new JSONArray().put(new JSONObject().put("id", "T3")));
+
+    JSONArray input = new JSONArray();
+    input.put(l1);
+    input.put(l2);
+    input.put(l3);
+
+    JSONArray result = BankStatementsSupport.mergeMatchGroups(input);
+
+    assertEquals(1, result.length());
+    JSONObject merged = result.getJSONObject(0);
+    assertEquals(0, new BigDecimal("100.00").compareTo(new BigDecimal(merged.getString("in"))));
+    assertEquals(0, new BigDecimal("100.00").compareTo(new BigDecimal(merged.getString("amount"))));
+    assertEquals(3, merged.getJSONArray("txns").length());
+    assertTrue(merged.getBoolean("matched"));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Private helpers for classifyPendingLine tests
+  // ---------------------------------------------------------------------------
+
+  private static FIN_BankStatementLine pendingLine(String description, String referenceNo,
+      String bpartnerName) {
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    lenient().when(line.getId()).thenReturn("L-TEST");
+    lenient().when(line.getDescription()).thenReturn(description);
+    lenient().when(line.getReferenceNo()).thenReturn(referenceNo);
+    lenient().when(line.getBpartnername()).thenReturn(bpartnerName);
+    lenient().when(line.getCramount()).thenReturn(BigDecimal.ZERO);
+    lenient().when(line.getDramount()).thenReturn(BigDecimal.ZERO);
+    return line;
+  }
+
+  private static FIN_FinancialAccount accountWithAlgorithm(String javaClassName) {
+    org.openbravo.model.financialmgmt.payment.MatchingAlgorithm algo =
+        mock(org.openbravo.model.financialmgmt.payment.MatchingAlgorithm.class);
+    lenient().when(algo.getJavaClassName()).thenReturn(javaClassName);
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    lenient().when(account.getMatchingAlgorithm()).thenReturn(algo);
+    return account;
+  }
+
+  /** Builds a minimal statement-line JSONObject for mergeMatchGroups tests. */
+  private static JSONObject line(String id, String groupId, String amount, String in, String out)
+      throws Exception {
+    JSONObject o = new JSONObject();
+    o.put("id", id);
+    o.put("matchGroupId", groupId);
+    o.put("amount", amount);
+    o.put("in", in);
+    o.put("out", out);
+    o.put("matched", false);
+    o.put("txns", new JSONArray());
+    return o;
   }
 }

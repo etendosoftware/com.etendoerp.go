@@ -54,8 +54,12 @@ import org.junit.runner.RunWith;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.advpaymentmngt.process.FIN_TransactionProcess;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
@@ -571,5 +575,200 @@ public class ReconciliationHandlerTest {
   public void testNullSafe() {
     assertEquals(0, ReconciliationHandler.nullSafe(null).compareTo(BigDecimal.ZERO));
     assertEquals(0, ReconciliationHandler.nullSafe(new BigDecimal("5")).compareTo(new BigDecimal("5")));
+  }
+
+  // ── buildPendingLines: state + counts (T7) ────────────────────────────────────
+
+  /**
+   * Each line row must include a {@code state} field and the response must include a {@code counts}
+   * object with per-state tallies. Two pending lines → counts.pending == 2, counts.all == 2.
+   */
+  @Test
+  public void testBuildPendingLinesIncludesStateAndCounts() throws Exception {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenReturn(true, true, false);
+    when(rs.getString("fin_bankstatementline_id")).thenReturn("l1", "l2");
+    when(rs.getTimestamp("datetrx")).thenReturn(null);
+    when(rs.getString("description")).thenReturn("DESC1", "DESC2");
+    when(rs.getBigDecimal("amount")).thenReturn(new BigDecimal("100.00"), new BigDecimal("50.00"));
+    // Not reconciled → state is driven by classifyPendingLine (no algorithm → no rule → pending).
+    when(rs.getString("line_status")).thenReturn("PENDING", "PENDING");
+    when(rs.getString("partner_name")).thenReturn("", "");
+    when(rs.getString("reference_no")).thenReturn("", "");
+    when(rs.getString("match_group_id")).thenReturn("", "");
+
+    // classifyPendingLine calls OBDal.get for the line, then checks the account's algorithm.
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getMatchingAlgorithm()).thenReturn(null);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubConnection(dal, ps, rs);
+
+      // loadAccount is a seam on the spy — return our mock account.
+      doReturn(account).when(handler).loadAccount(ACC_ID);
+
+      // classifyPendingLine(account, lineId, rules) calls OBDal.get for the line.
+      FIN_BankStatementLine line1 = mock(FIN_BankStatementLine.class);
+      FIN_BankStatementLine line2 = mock(FIN_BankStatementLine.class);
+      when(dal.get(FIN_BankStatementLine.class, "l1")).thenReturn(line1);
+      when(dal.get(FIN_BankStatementLine.class, "l2")).thenReturn(line2);
+      when(line1.getDescription()).thenReturn("DESC1");
+      when(line1.getReferenceNo()).thenReturn("");
+      when(line1.getBpartnername()).thenReturn("");
+      when(line2.getDescription()).thenReturn("DESC2");
+      when(line2.getReferenceNo()).thenReturn("");
+      when(line2.getBpartnername()).thenReturn("");
+
+      // loadRules — stub the connection to return empty ResultSet for the rules query.
+      Connection conn2 = mock(Connection.class);
+      PreparedStatement rulePs = mock(PreparedStatement.class);
+      ResultSet ruleRs = mock(ResultSet.class);
+      when(ruleRs.next()).thenReturn(false);
+      when(rulePs.executeQuery()).thenReturn(ruleRs);
+      when(conn2.prepareStatement(anyString())).thenReturn(ps, rulePs);
+      when(conn2.createArrayOf(anyString(), any())).thenReturn(null);
+      when(dal.getConnection()).thenReturn(conn2);
+
+      NeoResponse response = handler.buildPendingLines(ACC_ID, CLIENT_ID,
+          new HashSet<>(Arrays.asList(ORG_ID)), Collections.emptyMap());
+
+      assertEquals(200, response.getHttpStatus());
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+
+      // Every row must carry a "state" field.
+      JSONArray lines = data.getJSONArray("lines");
+      assertEquals(2, lines.length());
+      assertTrue(lines.getJSONObject(0).has("state"));
+      assertTrue(lines.getJSONObject(1).has("state"));
+
+      // counts object must be present with at least "all" and "pending" tallies.
+      JSONObject counts = data.getJSONObject("counts");
+      assertEquals(2, counts.getInt("all"));
+      assertEquals(2, counts.getInt("pending"));
+    }
+  }
+
+  // ── createTransactionForRule (T7) ─────────────────────────────────────────────
+
+  /**
+   * A positive (deposit) amount → the transaction type must be BPD (Cobro). The handler should
+   * set depositAmount = abs(amount) and paymentAmount = 0.
+   */
+  @Test
+  public void testCreateTransactionForRulePositiveAmountUsesBPD() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    Organization org = mock(Organization.class);
+    when(line.getOrganization()).thenReturn(org);
+    when(line.getDescription()).thenReturn("Bank fee");
+    when(line.getTransactionDate()).thenReturn(null);
+    when(line.getCramount()).thenReturn(new BigDecimal("100.00"));
+    when(line.getDramount()).thenReturn(BigDecimal.ZERO);
+
+    GLItem glItem = mock(GLItem.class);
+    FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
+    when(trx.getId()).thenReturn("TRX-NEW-1");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
+        MockedStatic<FIN_TransactionProcess> trxProcess =
+            mockStatic(FIN_TransactionProcess.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(GLItem.class, "GL-001")).thenReturn(glItem);
+
+      OBProvider provider = mock(OBProvider.class);
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_FinaccTransaction.class)).thenReturn(trx);
+
+      // AutoMatchSupport.nextTransactionLineNo uses OBDal.getConnection().
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true);
+      when(rs.getLong(1)).thenReturn(10L);
+
+      trxProcess.when(() ->
+          FIN_TransactionProcess.doTransactionProcess(anyString(), eq(trx)))
+          .thenAnswer(inv -> null);
+
+      JSONObject spec = new JSONObject()
+          .put("glItemId", "GL-001")
+          .put("bpartnerId", "")
+          .put("amount", "100.00");
+
+      String txnId = handler.createTransactionForRule(account, line, spec);
+
+      assertEquals("TRX-NEW-1", txnId);
+      // Verify the transaction was configured as a deposit (BPD).
+      verify(trx).setTransactionType("BPD");
+      verify(trx).setDepositAmount(new BigDecimal("100.00"));
+      verify(trx).setPaymentAmount(BigDecimal.ZERO);
+    }
+  }
+
+  /**
+   * A negative amount → the transaction type must be BPW (Pago). The handler should set
+   * paymentAmount = abs(amount) and depositAmount = 0.
+   */
+  @Test
+  public void testCreateTransactionForRuleNegativeAmountUsesBPW() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    Organization org = mock(Organization.class);
+    when(line.getOrganization()).thenReturn(org);
+    when(line.getDescription()).thenReturn("Fee payment");
+    when(line.getTransactionDate()).thenReturn(null);
+    when(line.getCramount()).thenReturn(BigDecimal.ZERO);
+    when(line.getDramount()).thenReturn(new BigDecimal("50.00"));
+
+    GLItem glItem = mock(GLItem.class);
+    FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
+    when(trx.getId()).thenReturn("TRX-NEW-2");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
+        MockedStatic<FIN_TransactionProcess> trxProcess =
+            mockStatic(FIN_TransactionProcess.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(GLItem.class, "GL-002")).thenReturn(glItem);
+
+      OBProvider provider = mock(OBProvider.class);
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_FinaccTransaction.class)).thenReturn(trx);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true);
+      when(rs.getLong(1)).thenReturn(10L);
+
+      trxProcess.when(() ->
+          FIN_TransactionProcess.doTransactionProcess(anyString(), eq(trx)))
+          .thenAnswer(inv -> null);
+
+      JSONObject spec = new JSONObject()
+          .put("glItemId", "GL-002")
+          .put("bpartnerId", "")
+          .put("amount", "-50.00");
+
+      String txnId = handler.createTransactionForRule(account, line, spec);
+
+      assertEquals("TRX-NEW-2", txnId);
+      // Negative amount → withdrawal (BPW).
+      verify(trx).setTransactionType("BPW");
+      verify(trx).setPaymentAmount(new BigDecimal("50.00"));
+      verify(trx).setDepositAmount(BigDecimal.ZERO);
+    }
   }
 }
