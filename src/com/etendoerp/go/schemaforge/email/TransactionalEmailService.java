@@ -189,18 +189,10 @@ public class TransactionalEmailService {
     }
 
     EmailRecipientResolution recipient = contract.get().resolveRecipient(command);
-    if (recipient != null && recipient.isNoRecipient()) {
-      return observedResponse(startedAtNanos, command, null,
-          ResponseOutcome.of(HTTP_UNPROCESSABLE_ENTITY, STATUS_NO_RECIPIENT, normalizedContract,
-              recipient.getMessage(), null));
-    }
-    String recipientError = validateRecipientResolution(recipient, contract.get());
-    if (recipientError != null) {
-      int status = recipient != null && !recipient.isResolved() ? recipient.getHttpStatus()
-          : HttpServletResponse.SC_BAD_REQUEST;
-      return observedResponse(startedAtNanos, command, null,
-          ResponseOutcome.of(status, STATUS_VALIDATION_FAILED, normalizedContract, recipientError,
-              null));
+    NeoResponse recipientRejection = validateRecipientStep(startedAtNanos, command, recipient,
+        contract.get(), normalizedContract);
+    if (recipientRejection != null) {
+      return recipientRejection;
     }
 
     EmailContractResolution resolution = contract.get().resolve(command, recipient);
@@ -236,6 +228,24 @@ public class TransactionalEmailService {
         contract.get().deliveryPolicy(command, recipient, providerRequest),
         "Email delivery policy cannot be null");
     return enforceSafetyAndSubmit(startedAtNanos, sendContext, deliveryPolicy);
+  }
+
+  private NeoResponse validateRecipientStep(long startedAtNanos, EmailContractCommand command,
+      EmailRecipientResolution recipient, EmailContract contract, String normalizedContract) {
+    if (recipient != null && recipient.isNoRecipient()) {
+      return observedResponse(startedAtNanos, command, null,
+          ResponseOutcome.of(HTTP_UNPROCESSABLE_ENTITY, STATUS_NO_RECIPIENT, normalizedContract,
+              recipient.getMessage(), null));
+    }
+    String recipientError = validateRecipientResolution(recipient, contract);
+    if (recipientError != null) {
+      int status = recipient != null && !recipient.isResolved() ? recipient.getHttpStatus()
+          : HttpServletResponse.SC_BAD_REQUEST;
+      return observedResponse(startedAtNanos, command, null,
+          ResponseOutcome.of(status, STATUS_VALIDATION_FAILED, normalizedContract, recipientError,
+              null));
+    }
+    return null;
   }
 
   private static String authorizationFailureStatus(int httpStatus) {
