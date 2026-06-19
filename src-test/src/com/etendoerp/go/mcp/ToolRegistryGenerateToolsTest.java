@@ -1127,6 +1127,75 @@ class ToolRegistryGenerateToolsTest {
     }
   }
 
+  // ── docs tool registration ────────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("generateTools — docs tool")
+  class DocsToolTests {
+
+    @Test
+    @DisplayName("neo:read scope registers the docs tool")
+    void readScopeRegistersDocs() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+
+      assertTrue(toolNames(tools).contains("docs"), "docs should be registered with read scope");
+    }
+
+    @Test
+    @DisplayName("neo:* scope registers the docs tool")
+    void wildcardScopeRegistersDocs() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
+
+      assertTrue(toolNames(tools).contains("docs"), "docs should be registered with wildcard scope");
+    }
+
+    @Test
+    @DisplayName("scope without read access (only neo:process) does not register the docs tool")
+    void noReadScopeDoesNotRegisterDocs() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:process"));
+
+      assertFalse(toolNames(tools).contains("docs"),
+          "docs should NOT be registered without read access");
+    }
+
+    @Test
+    @DisplayName("docs tool has required topic field")
+    @SuppressWarnings("unchecked")
+    void docsToolHasRequiredTopic() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+
+      McpToolDefinition docsTool = tools.stream()
+          .filter(t -> "docs".equals(t.getName()))
+          .findFirst()
+          .orElse(null);
+      assertNotNull(docsTool, "docs tool should be present");
+
+      Map<String, Object> schema = docsTool.getInputSchema();
+      List<String> required = (List<String>) schema.get("required");
+      assertNotNull(required);
+      assertTrue(required.contains("topic"));
+
+      Map<String, Object> props = (Map<String, Object>) schema.get("properties");
+      assertTrue(props.containsKey("topic"));
+      assertTrue(props.containsKey("tokens"));
+      assertTrue(props.containsKey("type"));
+    }
+
+    @Test
+    @DisplayName("resolveSpecName returns null for the docs tool")
+    void resolveSpecNameReturnsNullForDocs() {
+      assertNull(ToolRegistry.resolveSpecName("docs", null));
+    }
+  }
+
   // ── neo_action registration ──────────────────────────────────────────────
 
   @Nested
