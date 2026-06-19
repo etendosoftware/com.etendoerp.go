@@ -387,6 +387,69 @@ class McpToolRouterSupportTest {
       JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
       assertFalse(result.has("isReport"));
     }
+
+    @Test
+    void agentPromptIsIncludedWhenPresent() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("purchase-order");
+      when(spec.getDescription()).thenReturn(null);
+      when(spec.getAgentPrompt()).thenReturn("Always confirm before completing the order.");
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      assertEquals("Always confirm before completing the order.", result.getString("agentPrompt"));
+    }
+
+    @Test
+    void blankAgentPromptIsOmitted() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("purchase-order");
+      when(spec.getDescription()).thenReturn(null);
+      when(spec.getAgentPrompt()).thenReturn("   ");
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      assertFalse(result.has("agentPrompt"));
+    }
+
+    @Test
+    void nullAgentPromptIsOmitted() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("purchase-order");
+      when(spec.getDescription()).thenReturn(null);
+      when(spec.getAgentPrompt()).thenReturn(null);
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      assertFalse(result.has("agentPrompt"));
+    }
+  }
+
+  @Test
+  void schemaFieldsIncludeAgentPromptWhenProvided() throws Exception {
+    org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
+    org.openbravo.model.ad.datamodel.Table table = mock(org.openbravo.model.ad.datamodel.Table.class);
+    org.openbravo.model.ad.datamodel.Column col =
+        mock(org.openbravo.model.ad.datamodel.Column.class);
+
+    when(tab.getTable()).thenReturn(table);
+    when(table.getDBTableName()).thenReturn("C_Order");
+    when(table.getADColumnList()).thenReturn(java.util.List.of(col));
+    when(col.getId()).thenReturn("COL1");
+    when(col.isActive()).thenReturn(true);
+    when(col.getDBColumnName()).thenReturn("C_BPartner_ID");
+    when(col.getName()).thenReturn("Business Partner");
+    when(col.isMandatory()).thenReturn(false);
+    when(col.isUseAutomaticSequence()).thenReturn(false);
+    when(col.getDefaultValue()).thenReturn(null);
+
+    JSONArray fields = McpToolRouterSupport.buildSchemaFieldsArray(
+        tab,
+        null,
+        java.util.Map.of(),
+        java.util.Map.of("COL1", "  Pick the correct customer.  "),
+        java.util.Set.of(),
+        java.util.Set.of());
+
+    JSONObject field = fields.getJSONObject(0);
+    assertEquals("Pick the correct customer.", field.getString("agentPrompt"));
   }
 
   // ─── isMandatoryValueMissing ────────────────────────────────────────

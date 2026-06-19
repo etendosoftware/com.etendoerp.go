@@ -192,6 +192,10 @@ final class McpToolRouterSupport {
     if (spec.getDescription() != null) {
       specObj.put(McpConstants.KEY_DESCRIPTION, spec.getDescription());
     }
+    String agentPrompt = spec.getAgentPrompt();
+    if (agentPrompt != null && !agentPrompt.trim().isEmpty()) {
+      specObj.put("agentPrompt", agentPrompt.trim());
+    }
     if (entities != null) {
       specObj.put("entities", entities);
     }
@@ -261,14 +265,30 @@ final class McpToolRouterSupport {
     }
   }
 
+  static Map<String, String> loadPromptByColumnId(SFEntity sfEntity) {
+    Map<String, String> promptByColumnId = new HashMap<>();
+    OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
+    fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
+    fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
+    for (SFField sfField : fieldCrit.list()) {
+      Column adCol = sfField.getADColumn();
+      String prompt = sfField.getAgentPrompt();
+      if (adCol != null && prompt != null && !prompt.trim().isEmpty()) {
+        promptByColumnId.put((String) adCol.getId(), prompt.trim());
+      }
+    }
+    return promptByColumnId;
+  }
+
   static JSONArray buildSchemaFieldsArray(Tab adTab, Entity dalEntity,
       Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
+      Map<String, String> promptByColumnId,
       java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs) throws JSONException {
     JSONArray fieldsArray = new JSONArray();
     for (Column col : adTab.getTable().getADColumnList()) {
       if (shouldIncludeSchemaColumn(col, systemColumns)) {
         fieldsArray.put(buildSchemaField(col, adTab, dalEntity, visibilityByColumnId,
-            businessCriticalByColumnId, selectorRefs));
+            businessCriticalByColumnId, promptByColumnId, selectorRefs));
       }
     }
     return fieldsArray;
@@ -280,6 +300,7 @@ final class McpToolRouterSupport {
 
   private static JSONObject buildSchemaField(Column col, Tab adTab, Entity dalEntity,
       Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
+      Map<String, String> promptByColumnId,
       java.util.Set<String> selectorRefs) throws JSONException {
     String dbColName = col.getDBColumnName();
     String refId = col.getReference() != null ? (String) col.getReference().getId() : null;
@@ -296,11 +317,18 @@ final class McpToolRouterSupport {
     boolean isBusinessCritical = Boolean.TRUE.equals(
         businessCriticalByColumnId.get((String) col.getId()));
     fieldObj.put("businessCritical", isBusinessCritical);
+    addAgentPrompt(fieldObj, promptByColumnId.get((String) col.getId()));
     addSelectorInfo(fieldObj, refId, selectorRefs);
     if ("button".equals(type)) {
       addButtonInfo(fieldObj, col);
     }
     return fieldObj;
+  }
+
+  private static void addAgentPrompt(JSONObject fieldObj, String agentPrompt) throws JSONException {
+    if (agentPrompt != null && !agentPrompt.trim().isEmpty()) {
+      fieldObj.put("agentPrompt", agentPrompt.trim());
+    }
   }
 
   private static void addButtonInfo(JSONObject fieldObj, Column col) throws JSONException {
