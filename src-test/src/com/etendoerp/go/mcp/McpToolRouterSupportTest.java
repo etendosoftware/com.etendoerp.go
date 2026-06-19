@@ -29,6 +29,9 @@ import java.lang.reflect.Modifier;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -49,11 +52,15 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
@@ -1174,8 +1181,10 @@ class McpToolRouterSupportTest {
               org.openbravo.model.ad.ui.Tab.class,
               org.openbravo.base.model.Entity.class,
               java.util.Map.class,
+              java.util.Map.class,
               java.util.Set.class },
           col, tab, null,
+          new java.util.HashMap<>(),
           new java.util.HashMap<>(),
           new java.util.HashSet<>());
 
@@ -1183,6 +1192,193 @@ class McpToolRouterSupportTest {
       assertEquals("Y", result.getString("triggerValue"));
       assertEquals("Processed", result.getString("action"));
       assertEquals("neo_action", result.getString("invokeVia"));
+    }
+  }
+
+  // ─── buildSchemaField — businessCritical flag ───────────────────────
+
+  @Nested
+  @DisplayName("buildSchemaField — businessCritical flag")
+  class BuildSchemaFieldBusinessCritical {
+
+    private MockedStatic<NeoAccessHelper> accessHelperMock;
+
+    @BeforeEach
+    void setUp() {
+      accessHelperMock = mockStatic(NeoAccessHelper.class);
+    }
+
+    @AfterEach
+    void tearDown() {
+      accessHelperMock.close();
+    }
+
+    private org.openbravo.model.ad.datamodel.Column buildStringColumn(String colId) {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      org.openbravo.model.ad.domain.Reference ref = mock(
+          org.openbravo.model.ad.domain.Reference.class);
+      when(ref.getId()).thenReturn("10"); // string
+      when(col.getReference()).thenReturn(ref);
+      when(col.getDBColumnName()).thenReturn("Description");
+      when(col.getName()).thenReturn("Description");
+      when(col.isMandatory()).thenReturn(false);
+      when(col.isUseAutomaticSequence()).thenReturn(false);
+      when(col.getDefaultValue()).thenReturn(null);
+      when(col.getId()).thenReturn(colId);
+      return col;
+    }
+
+    private org.openbravo.model.ad.ui.Tab buildTab() {
+      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
+      org.openbravo.model.ad.datamodel.Table table = mock(
+          org.openbravo.model.ad.datamodel.Table.class);
+      when(tab.getTable()).thenReturn(table);
+      when(table.getDBTableName()).thenReturn("C_Order");
+      return tab;
+    }
+
+    @Test
+    @DisplayName("businessCritical true when flag set in map")
+    void businessCriticalTrueWhenFlagSet() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = buildStringColumn("col-desc-1");
+      org.openbravo.model.ad.ui.Tab tab = buildTab();
+
+      Map<String, Boolean> businessCriticalMap = new HashMap<>();
+      businessCriticalMap.put("col-desc-1", true);
+
+      JSONObject result = (JSONObject) invokeStatic("buildSchemaField",
+          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
+              org.openbravo.model.ad.ui.Tab.class,
+              org.openbravo.base.model.Entity.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Set.class },
+          col, tab, null,
+          new java.util.HashMap<>(),
+          businessCriticalMap,
+          new java.util.HashSet<>());
+
+      assertTrue(result.getBoolean("businessCritical"));
+    }
+
+    @Test
+    @DisplayName("businessCritical false when flag absent from map — no NPE")
+    void businessCriticalFalseWhenFlagAbsent() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = buildStringColumn("col-desc-2");
+      org.openbravo.model.ad.ui.Tab tab = buildTab();
+
+      JSONObject result = (JSONObject) invokeStatic("buildSchemaField",
+          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
+              org.openbravo.model.ad.ui.Tab.class,
+              org.openbravo.base.model.Entity.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Set.class },
+          col, tab, null,
+          new java.util.HashMap<>(),
+          new java.util.HashMap<>(),
+          new java.util.HashSet<>());
+
+      assertFalse(result.getBoolean("businessCritical"));
+    }
+
+    @Test
+    @DisplayName("businessCritical false when map contains explicit false")
+    void businessCriticalFalseWhenExplicitFalse() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = buildStringColumn("col-desc-3");
+      org.openbravo.model.ad.ui.Tab tab = buildTab();
+
+      Map<String, Boolean> businessCriticalMap = new HashMap<>();
+      businessCriticalMap.put("col-desc-3", false);
+
+      JSONObject result = (JSONObject) invokeStatic("buildSchemaField",
+          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
+              org.openbravo.model.ad.ui.Tab.class,
+              org.openbravo.base.model.Entity.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Set.class },
+          col, tab, null,
+          new java.util.HashMap<>(),
+          businessCriticalMap,
+          new java.util.HashSet<>());
+
+      assertFalse(result.getBoolean("businessCritical"));
+    }
+  }
+
+  // ─── loadFieldMetadata — businessCritical mapping ───────────────────
+
+  @Nested
+  @DisplayName("loadFieldMetadata — businessCritical mapping")
+  class LoadFieldMetadata {
+
+    @Mock private OBDal mockOBDal;
+    private MockedStatic<OBDal> obDalMock;
+
+    @BeforeEach
+    void setUp() {
+      obDalMock = mockStatic(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(mockOBDal);
+    }
+
+    @AfterEach
+    void tearDown() {
+      obDalMock.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    private OBCriteria<SFField> mockFieldCriteria(List<SFField> fields) {
+      OBCriteria<SFField> crit = mock(OBCriteria.class);
+      when(mockOBDal.createCriteria(SFField.class)).thenReturn(crit);
+      when(crit.list()).thenReturn(fields);
+      return crit;
+    }
+
+    private SFField buildSFField(String columnId, Boolean businessCritical) {
+      SFField field = mock(SFField.class);
+      Column col = mock(Column.class);
+      when(col.getId()).thenReturn(columnId);
+      when(field.getADColumn()).thenReturn(col);
+      when(field.isBusinessCritical()).thenReturn(businessCritical);
+      return field;
+    }
+
+    @Test
+    @DisplayName("field with isBusinessCritical=true maps to true in result map")
+    void fieldWithTrueMapsToTrue() {
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getId()).thenReturn("entity-1");
+      mockFieldCriteria(List.of(buildSFField("col-1", true)));
+
+      McpToolRouterSupport.FieldMetadata meta = McpToolRouterSupport.loadFieldMetadata(sfEntity);
+
+      assertTrue(meta.businessCriticalByColumnId.get("col-1"));
+    }
+
+    @Test
+    @DisplayName("field with isBusinessCritical=false maps to false in result map")
+    void fieldWithFalseMapsToFalse() {
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getId()).thenReturn("entity-2");
+      mockFieldCriteria(List.of(buildSFField("col-2", false)));
+
+      McpToolRouterSupport.FieldMetadata meta = McpToolRouterSupport.loadFieldMetadata(sfEntity);
+
+      assertFalse(meta.businessCriticalByColumnId.get("col-2"));
+    }
+
+    @Test
+    @DisplayName("field with isBusinessCritical=null maps to false — no NPE")
+    void fieldWithNullMapsToFalse() {
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getId()).thenReturn("entity-3");
+      mockFieldCriteria(List.of(buildSFField("col-3", null)));
+
+      McpToolRouterSupport.FieldMetadata meta = McpToolRouterSupport.loadFieldMetadata(sfEntity);
+
+      assertFalse(meta.businessCriticalByColumnId.get("col-3"));
     }
   }
 

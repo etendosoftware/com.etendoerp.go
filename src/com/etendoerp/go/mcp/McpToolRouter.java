@@ -619,10 +619,11 @@ public class McpToolRouter {
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
 
-    Map<String, String> visibilityByColumnId =
-      McpToolRouterSupport.loadVisibilityByColumnId(sfEntity);
+    McpToolRouterSupport.FieldMetadata fieldMetadata =
+        McpToolRouterSupport.loadFieldMetadata(sfEntity);
     JSONArray fieldsArray = McpToolRouterSupport.buildSchemaFieldsArray(adTab, dalEntity,
-      visibilityByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
+        fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
+        SYSTEM_COLUMNS, SELECTOR_REFS);
 
     // Build entity schema
     JSONObject entitySchema = new JSONObject();
@@ -654,7 +655,10 @@ public class McpToolRouter {
         + "Fields with visibility=system are auto-derived by Etendo callouts — omit them. "
         + "Fields with visibility=discarded are excluded — do not send them. "
         + "Fields with readOnly=true are auto-generated (DocumentNo, IDs). "
-        + "Use neo_selectors for FK fields with hasSelector=true.");
+        + "Use neo_selectors for FK fields with hasSelector=true. "
+        + "Fields with businessCritical=true carry core business data (amounts, categories, "
+        + "key dates) — you MUST confirm these values with the user before creating or "
+        + "modifying records.");
 
     return wrapAsTextContent(entitySchema.toString(2));
   }

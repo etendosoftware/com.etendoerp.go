@@ -223,28 +223,52 @@ final class McpToolRouterSupport {
     return null;
   }
 
-  static Map<String, String> loadVisibilityByColumnId(SFEntity sfEntity) {
+  /**
+   * Loads all SFField rows for the given entity in a single query and returns
+   * both the visibility map and the businessCritical map, keyed by AD_COLUMN_ID.
+   * Callers that need both maps should use this to avoid a second DB round-trip.
+   */
+  static FieldMetadata loadFieldMetadata(SFEntity sfEntity) {
     Map<String, String> visibilityByColumnId = new HashMap<>();
+    Map<String, Boolean> businessCriticalByColumnId = new HashMap<>();
     OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
     fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
     fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
     for (SFField sfField : fieldCrit.list()) {
       Column adCol = sfField.getADColumn();
-      String visibility = (String) sfField.get("visibility");
-      if (adCol != null && visibility != null && !visibility.trim().isEmpty()) {
-        visibilityByColumnId.put((String) adCol.getId(), visibility.trim());
+      if (adCol == null) {
+        continue;
       }
+      String colId = (String) adCol.getId();
+      String visibility = (String) sfField.get("visibility");
+      if (visibility != null && !visibility.trim().isEmpty()) {
+        visibilityByColumnId.put(colId, visibility.trim());
+      }
+      Boolean isBusinessCritical = sfField.isBusinessCritical();
+      businessCriticalByColumnId.put(colId, Boolean.TRUE.equals(isBusinessCritical));
     }
-    return visibilityByColumnId;
+    return new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId);
+  }
+
+  static final class FieldMetadata {
+    final Map<String, String> visibilityByColumnId;
+    final Map<String, Boolean> businessCriticalByColumnId;
+
+    FieldMetadata(Map<String, String> visibilityByColumnId,
+        Map<String, Boolean> businessCriticalByColumnId) {
+      this.visibilityByColumnId = visibilityByColumnId;
+      this.businessCriticalByColumnId = businessCriticalByColumnId;
+    }
   }
 
   static JSONArray buildSchemaFieldsArray(Tab adTab, Entity dalEntity,
-      Map<String, String> visibilityByColumnId, java.util.Set<String> systemColumns,
-      java.util.Set<String> selectorRefs) throws JSONException {
+      Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
+      java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs) throws JSONException {
     JSONArray fieldsArray = new JSONArray();
     for (Column col : adTab.getTable().getADColumnList()) {
       if (shouldIncludeSchemaColumn(col, systemColumns)) {
-        fieldsArray.put(buildSchemaField(col, adTab, dalEntity, visibilityByColumnId, selectorRefs));
+        fieldsArray.put(buildSchemaField(col, adTab, dalEntity, visibilityByColumnId,
+            businessCriticalByColumnId, selectorRefs));
       }
     }
     return fieldsArray;
@@ -255,8 +279,8 @@ final class McpToolRouterSupport {
   }
 
   private static JSONObject buildSchemaField(Column col, Tab adTab, Entity dalEntity,
-      Map<String, String> visibilityByColumnId, java.util.Set<String> selectorRefs)
-      throws JSONException {
+      Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
+      java.util.Set<String> selectorRefs) throws JSONException {
     String dbColName = col.getDBColumnName();
     String refId = col.getReference() != null ? (String) col.getReference().getId() : null;
     String type = mapColumnType(refId);
@@ -269,6 +293,9 @@ final class McpToolRouterSupport {
     fieldObj.put("readOnly", isReadOnlyColumn(adTab, col));
     addDefaultExpression(fieldObj, col);
     addVisibility(fieldObj, visibilityByColumnId.get((String) col.getId()), col.isMandatory());
+    boolean isBusinessCritical = Boolean.TRUE.equals(
+        businessCriticalByColumnId.get((String) col.getId()));
+    fieldObj.put("businessCritical", isBusinessCritical);
     addSelectorInfo(fieldObj, refId, selectorRefs);
     if ("button".equals(type)) {
       addButtonInfo(fieldObj, col);
