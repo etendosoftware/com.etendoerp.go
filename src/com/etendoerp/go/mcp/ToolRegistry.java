@@ -154,6 +154,7 @@ public class ToolRegistry {
       tools.add(buildUpdateTool(accessibleWindowSpecs));
       tools.add(buildDeleteTool(accessibleWindowSpecs));
       tools.add(buildBatchTool());
+      tools.add(buildActionTool(accessibleWindowSpecs));
     }
   }
 
@@ -203,6 +204,7 @@ public class ToolRegistry {
       case "neo_defaults":
       case "neo_schema":
       case "neo_batch":
+      case "neo_action":
         return true;
       default:
         return false;
@@ -329,6 +331,9 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME_WITH_EXAMPLE));
     props.put(McpConstants.PARAM_PARENT_ID, stringProp(
         "Optional parent record ID for child entities (e.g. order ID when getting line defaults)"));
+    props.put(McpConstants.PARAM_ASSET_ID, stringProp(
+        "Optional asset ID for computing dynamic defaults that depend on a specific asset "
+            + "(e.g. the amortization header name derived from the asset name and start date)"));
 
     return new McpToolDefinition(
         "neo_defaults",
@@ -428,6 +433,27 @@ public class ToolRegistry {
         buildObjectSchema(props, List.of("spec", "entity")));
   }
 
+  // ── Action tool ────────────────────────────────────────────────────────
+
+  private McpToolDefinition buildActionTool(List<String> specNames) {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
+    props.put("id", stringProp("Record ID to act upon"));
+    props.put("action", stringProp(
+        "Column name of the button field to trigger (e.g. 'Processed', 'Processing')"));
+    props.put(McpConstants.PARAM_PARAMETERS, objectProp(
+        "Optional JSON parameters to pass to the process (e.g. docAction value)"));
+
+    return new McpToolDefinition(
+        "neo_action",
+        "Fire a type:button action on a record and return the process result. "
+            + "Use neo_schema to discover available button fields and their action names. "
+            + "Returns {processResult: success|error|warning, processMessage: ...}.",
+        buildObjectSchema(props,
+            List.of("spec", McpConstants.PARAM_ENTITY, "id", "action")));
+  }
+
   // ── Process tool ───────────────────────────────────────────────────────
 
   private McpToolDefinition buildProcessTool(String specName, SFSpec spec) {
@@ -441,7 +467,7 @@ public class ToolRegistry {
     Map<String, Object> paramProps = buildProcessParamSchema(spec);
 
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put("parameters", objectPropWithProperties("Process input parameters", paramProps));
+    props.put(McpConstants.PARAM_PARAMETERS, objectPropWithProperties("Process input parameters", paramProps));
 
     return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
   }
@@ -458,7 +484,7 @@ public class ToolRegistry {
     Map<String, Object> paramProps = buildProcessParamSchema(spec);
 
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put("parameters", objectPropWithProperties("Report input parameters", paramProps));
+    props.put(McpConstants.PARAM_PARAMETERS, objectPropWithProperties("Report input parameters", paramProps));
     props.put("format", stringProp("Output format: pdf, xlsx, csv (default: pdf)", false));
 
     return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));

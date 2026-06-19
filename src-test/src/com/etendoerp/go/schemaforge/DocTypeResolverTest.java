@@ -28,6 +28,8 @@ import java.lang.reflect.Modifier;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.util.Collections;
+import java.util.List;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
@@ -37,7 +39,13 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -277,6 +285,100 @@ class DocTypeResolverTest {
       when(col.getDBColumnName()).thenReturn("DocType_Name");
 
       assertNull(DocTypeResolver.resolveDefaultDocTypeId(col, mock(NeoContext.class)));
+    }
+  }
+
+  @Nested
+  @DisplayName("reapplyDocTypeFromTabFilter — 4-param overload clientSubmittedFields skip logic")
+  class FourParamClientSubmittedFields {
+
+    private Tab tabWithDocTypeColumn() {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      Column col = mock(Column.class);
+      when(adTab.getTable()).thenReturn(table);
+      when(col.getDBColumnName()).thenReturn("C_DocTypeTarget_ID");
+      when(table.getADColumnList()).thenReturn(List.of(col));
+      when(table.getId()).thenReturn("TABLE_001");
+      return adTab;
+    }
+
+    @Test
+    @DisplayName("null clientSubmittedFields bypasses skip check (no-op on empty tab columns)")
+    void nullClientSubmittedFieldsBypassesSkipCheck() {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      when(adTab.getTable()).thenReturn(table);
+      when(table.getADColumnList()).thenReturn(Collections.emptyList());
+      JSONObject body = new JSONObject();
+      DocTypeResolver.reapplyDocTypeFromTabFilter(body, adTab, mock(NeoContext.class), null);
+      assertEquals(0, body.length());
+    }
+
+    @Test
+    @DisplayName("empty clientSubmittedFields bypasses skip check")
+    void emptyClientSubmittedFieldsBypassesSkipCheck() {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      when(adTab.getTable()).thenReturn(table);
+      when(table.getADColumnList()).thenReturn(Collections.emptyList());
+      JSONObject body = new JSONObject();
+      DocTypeResolver.reapplyDocTypeFromTabFilter(body, adTab, mock(NeoContext.class), Collections.emptySet());
+      assertEquals(0, body.length());
+    }
+
+    @Test
+    @DisplayName("clientSubmittedFields non-empty but ModelProvider returns null entity — no skip")
+    void nonEmptyClientSubmittedFieldsNullEntityNoSkip() {
+      Tab adTab = tabWithDocTypeColumn();
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class)) {
+        ModelProvider instance = mock(ModelProvider.class);
+        mp.when(ModelProvider::getInstance).thenReturn(instance);
+        when(instance.getEntityByTableId("TABLE_001")).thenReturn(null);
+
+        JSONObject body = new JSONObject();
+        DocTypeResolver.reapplyDocTypeFromTabFilter(body, adTab, mock(NeoContext.class), Set.of("anyField"));
+        assertEquals(0, body.length());
+      }
+    }
+
+    @Test
+    @DisplayName("clientSubmittedFields contains target property name — skip reapply")
+    void clientSubmittedContainsTargetPropertySkips() {
+      Tab adTab = tabWithDocTypeColumn();
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class)) {
+        ModelProvider instance = mock(ModelProvider.class);
+        Entity dalEntity = mock(Entity.class);
+        Property targetProp = mock(Property.class);
+        mp.when(ModelProvider::getInstance).thenReturn(instance);
+        when(instance.getEntityByTableId("TABLE_001")).thenReturn(dalEntity);
+        when(dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID")).thenReturn(targetProp);
+        when(targetProp.getName()).thenReturn("transactionDocument");
+
+        JSONObject body = new JSONObject();
+        DocTypeResolver.reapplyDocTypeFromTabFilter(body, adTab, mock(NeoContext.class), Set.of("transactionDocument"));
+        assertEquals(0, body.length());
+      }
+    }
+
+    @Test
+    @DisplayName("clientSubmittedFields does not contain target property — proceeds past skip")
+    void clientSubmittedMissesTargetPropertyProceeds() {
+      Tab adTab = tabWithDocTypeColumn();
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class)) {
+        ModelProvider instance = mock(ModelProvider.class);
+        Entity dalEntity = mock(Entity.class);
+        Property targetProp = mock(Property.class);
+        mp.when(ModelProvider::getInstance).thenReturn(instance);
+        when(instance.getEntityByTableId("TABLE_001")).thenReturn(dalEntity);
+        when(dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID")).thenReturn(targetProp);
+        when(targetProp.getName()).thenReturn("transactionDocument");
+
+        JSONObject body = new JSONObject();
+        // "otherField" is not "transactionDocument" — skip is NOT triggered
+        DocTypeResolver.reapplyDocTypeFromTabFilter(body, adTab, mock(NeoContext.class), Set.of("otherField"));
+        assertEquals(0, body.length()); // resolve fails silently (no OBContext), body unchanged
+      }
     }
   }
 }

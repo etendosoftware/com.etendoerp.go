@@ -325,6 +325,40 @@ class SFUpsertFieldTest extends BaseWebhookTest {
         verify(existingField).setJavaQualifier("com.example.Qualifier");
     }
 
+    /** Verifies AgentPrompt is trimmed before it is stored. */
+    @Test
+    @DisplayName("AgentPrompt is trimmed and applied")
+    void testAgentPromptIsTrimmedAndSet() {
+        parameters.put(FIELD_ID, "field1");
+        setupValidRequestParams();
+        stubSuccessfulLookups();
+        parameters.put("AgentPrompt", "  Pick the correct customer.  ");
+
+        SFField existingField = stubExistingField("field1");
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        verify(existingField).setAgentPrompt("Pick the correct customer.");
+    }
+
+    /** Verifies a blank AgentPrompt clears any existing value. */
+    @Test
+    @DisplayName("Blank AgentPrompt clears value")
+    void testBlankAgentPromptClearsValue() {
+        parameters.put(FIELD_ID, "field1");
+        setupValidRequestParams();
+        stubSuccessfulLookups();
+        parameters.put("AgentPrompt", "   ");
+
+        SFField existingField = stubExistingField("field1");
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        verify(existingField).setAgentPrompt(null);
+    }
+
     /** Verifies SeqNo is parsed as Long and set. */
     @Test
     @DisplayName("SeqNo is parsed and applied")
@@ -358,6 +392,7 @@ class SFUpsertFieldTest extends BaseWebhookTest {
         verify(existingField, never()).setIncluded(anyBoolean());
         verify(existingField, never()).setReadOnly(anyBoolean());
         verify(existingField, never()).setDefaultValue(any());
+        verify(existingField, never()).setAgentPrompt(any());
         verify(existingField, never()).setJavaQualifier(any());
         verify(existingField, never()).setSeqNo(any(Long.class));
     }

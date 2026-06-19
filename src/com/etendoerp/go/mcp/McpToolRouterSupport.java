@@ -36,10 +36,12 @@ import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 final class McpToolRouterSupport {
 
@@ -190,6 +192,10 @@ final class McpToolRouterSupport {
     if (spec.getDescription() != null) {
       specObj.put(McpConstants.KEY_DESCRIPTION, spec.getDescription());
     }
+    String agentPrompt = spec.getAgentPrompt();
+    if (agentPrompt != null && !agentPrompt.trim().isEmpty()) {
+      specObj.put("agentPrompt", agentPrompt.trim());
+    }
     if (entities != null) {
       specObj.put("entities", entities);
     }
@@ -236,13 +242,30 @@ final class McpToolRouterSupport {
     return visibilityByColumnId;
   }
 
+  static Map<String, String> loadPromptByColumnId(SFEntity sfEntity) {
+    Map<String, String> promptByColumnId = new HashMap<>();
+    OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
+    fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
+    fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
+    for (SFField sfField : fieldCrit.list()) {
+      Column adCol = sfField.getADColumn();
+      String prompt = sfField.getAgentPrompt();
+      if (adCol != null && prompt != null && !prompt.trim().isEmpty()) {
+        promptByColumnId.put((String) adCol.getId(), prompt.trim());
+      }
+    }
+    return promptByColumnId;
+  }
+
   static JSONArray buildSchemaFieldsArray(Tab adTab, Entity dalEntity,
-      Map<String, String> visibilityByColumnId, java.util.Set<String> systemColumns,
-      java.util.Set<String> selectorRefs) throws JSONException {
+      Map<String, String> visibilityByColumnId, Map<String, String> promptByColumnId,
+      java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs)
+      throws JSONException {
     JSONArray fieldsArray = new JSONArray();
     for (Column col : adTab.getTable().getADColumnList()) {
       if (shouldIncludeSchemaColumn(col, systemColumns)) {
-        fieldsArray.put(buildSchemaField(col, adTab, dalEntity, visibilityByColumnId, selectorRefs));
+        fieldsArray.put(buildSchemaField(col, adTab, dalEntity, visibilityByColumnId,
+            promptByColumnId, selectorRefs));
       }
     }
     return fieldsArray;
@@ -253,21 +276,57 @@ final class McpToolRouterSupport {
   }
 
   private static JSONObject buildSchemaField(Column col, Tab adTab, Entity dalEntity,
-      Map<String, String> visibilityByColumnId, java.util.Set<String> selectorRefs)
+      Map<String, String> visibilityByColumnId, Map<String, String> promptByColumnId,
+      java.util.Set<String> selectorRefs)
       throws JSONException {
     String dbColName = col.getDBColumnName();
     String refId = col.getReference() != null ? (String) col.getReference().getId() : null;
+    String type = mapColumnType(refId);
     JSONObject fieldObj = new JSONObject();
     fieldObj.put("name", resolvePropertyName(dalEntity, dbColName));
     fieldObj.put("column", dbColName);
     fieldObj.put("label", col.getName());
-    fieldObj.put("type", mapColumnType(refId));
+    fieldObj.put("type", type);
     fieldObj.put("required", col.isMandatory());
     fieldObj.put("readOnly", isReadOnlyColumn(adTab, col));
     addDefaultExpression(fieldObj, col);
     addVisibility(fieldObj, visibilityByColumnId.get((String) col.getId()), col.isMandatory());
+    addAgentPrompt(fieldObj, promptByColumnId.get((String) col.getId()));
     addSelectorInfo(fieldObj, refId, selectorRefs);
+    if ("button".equals(type)) {
+      addButtonInfo(fieldObj, col);
+    }
     return fieldObj;
+  }
+
+  private static void addAgentPrompt(JSONObject fieldObj, String agentPrompt) throws JSONException {
+    if (agentPrompt != null && !agentPrompt.trim().isEmpty()) {
+      fieldObj.put("agentPrompt", agentPrompt.trim());
+    }
+  }
+
+  private static void addButtonInfo(JSONObject fieldObj, Column col) throws JSONException {
+    fieldObj.put("triggerValue", "Y");
+    fieldObj.put("action", col.getDBColumnName());
+    fieldObj.put("invokeVia", "neo_action");
+    // Resolve process info — mirror NeoButtonActionHelper / NeoProcessService logic
+    Process classicProcess = col.getProcess();
+    org.openbravo.client.application.Process obuiappProcess = col.getOBUIAPPProcess();
+    if (classicProcess == null && obuiappProcess == null) {
+      obuiappProcess = NeoAccessHelper.resolveFallbackObuiappProcess(col);
+    }
+    if (obuiappProcess != null) {
+      fieldObj.put("processType", "OBUIAPP");
+      String name = obuiappProcess.getName();
+      fieldObj.put("processName", name != null ? name : "");
+      fieldObj.put("processId", obuiappProcess.getId());
+    } else if (classicProcess != null) {
+      fieldObj.put("processType", "Classic");
+      String name = classicProcess.getName();
+      fieldObj.put("processName", name != null ? name : "");
+      fieldObj.put("processId", classicProcess.getId());
+    }
+    // If no process resolved: triggerValue/action/invokeVia already set, omit process fields
   }
 
   private static String resolvePropertyName(Entity dalEntity, String dbColName) {
@@ -376,5 +435,65 @@ final class McpToolRouterSupport {
     } catch (Exception e) {
       log.debug("Could not coerce field {} value '{}': {}", key, strVal, e.getMessage());
     }
+  }
+
+  // ── Action result mapping (kept here to stay within McpToolRouter method-count limit) ─
+
+  /**
+   * Maps a {@link NeoResponse} body to the structured MCP action result keys.
+   * Handles both top-level {@code {status, message}} bodies (from
+   * {@code NeoProcessService.translate*Result}) and nested
+   * {@code {"error":{status, message}}} bodies (from {@code NeoResponse.error()}).
+   * Extra keys from the process result are passed through unchanged.
+   */
+  static JSONObject mapNeoResponseToActionResult(NeoResponse neoResponse) throws JSONException {
+    JSONObject actionResult = new JSONObject();
+    JSONObject body = neoResponse.getBody();
+    if (body == null) {
+      return actionResult;
+    }
+    String status = body.optString(McpConstants.KEY_STATUS, null);
+    String message = body.optString(McpConstants.KEY_MESSAGE, null);
+
+    if (status == null && message == null) {
+      status = resolveStatusFromErrorBody(body);
+      JSONObject errorObj = body.optJSONObject(McpConstants.KEY_ERROR);
+      if (errorObj != null) {
+        message = errorObj.optString(McpConstants.KEY_MESSAGE, null);
+      }
+    }
+
+    if (status != null) {
+      actionResult.put(McpConstants.KEY_PROCESS_RESULT, status);
+    }
+    if (message != null) {
+      actionResult.put(McpConstants.KEY_PROCESS_MESSAGE, message);
+    }
+    java.util.Iterator<String> keys = body.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if (!McpConstants.KEY_STATUS.equals(key) && !McpConstants.KEY_MESSAGE.equals(key)
+          && !McpConstants.KEY_ERROR.equals(key)) {
+        actionResult.put(key, body.get(key));
+      }
+    }
+    return actionResult;
+  }
+
+  /**
+   * Resolves the status string from a nested error body produced by
+   * {@code NeoResponse.error(int, String)}.
+   */
+  static String resolveStatusFromErrorBody(JSONObject body) {
+    JSONObject errorObj = body.optJSONObject(McpConstants.KEY_ERROR);
+    if (errorObj == null) {
+      return null;
+    }
+    String status = errorObj.optString(McpConstants.KEY_STATUS, null);
+    if (status != null) {
+      return status;
+    }
+    int errorStatus = errorObj.optInt(McpConstants.KEY_STATUS, -1);
+    return errorStatus > 0 ? String.valueOf(errorStatus) : null;
   }
 }
