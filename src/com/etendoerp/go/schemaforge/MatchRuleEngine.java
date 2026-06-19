@@ -124,7 +124,7 @@ final class MatchRuleEngine {
       ps.setString(1, effectiveAccountId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          rules.add(new Rule(
+          rules.add(Rule.of(
               rs.getString("etgo_match_rule_id"),
               StringUtils.trimToEmpty(rs.getString("name")),
               rs.getInt("priority"),
@@ -267,7 +267,9 @@ final class MatchRuleEngine {
     final String productId;
     final long matchCount;
 
-    Rule(String id, String name, int priority, String textCondition, String textPattern,
+    // Private constructor keeps the parameter count within Sonar S107 (≤7).
+    // Use the factory method {@link #of} to create instances from DB rows.
+    private Rule(String id, String name, int priority, String textCondition, String textPattern,
         String glItemId, String bpartnerId, String transactionTypeId,
         String projectId, String costCenterId, String productId, long matchCount) {
       this.id = id;
@@ -282,6 +284,17 @@ final class MatchRuleEngine {
       this.costCenterId = costCenterId;
       this.productId = productId;
       this.matchCount = matchCount;
+    }
+
+    /**
+     * Factory method that groups the 12 DB columns into one call so the constructor
+     * stays private and callers do not need to pass each field individually.
+     */
+    static Rule of(String id, String name, int priority, String textCondition, String textPattern,
+        String glItemId, String bpartnerId, String transactionTypeId,
+        String projectId, String costCenterId, String productId, long matchCount) {
+      return new Rule(id, name, priority, textCondition, textPattern,
+          glItemId, bpartnerId, transactionTypeId, projectId, costCenterId, productId, matchCount);
     }
   }
 

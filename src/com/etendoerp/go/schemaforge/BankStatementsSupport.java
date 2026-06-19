@@ -48,6 +48,8 @@ public final class BankStatementsSupport {
 
   private static final Logger log = LogManager.getLogger(BankStatementsSupport.class);
 
+  private static final String FIELD_AMOUNT = "amount";
+
   /** JSON/SQL key for the bank-statement-line description field. */
   static final String FIELD_DESCRIPTION = "description";
 
@@ -109,7 +111,7 @@ public final class BankStatementsSupport {
     row.put("glItemName",     StringUtils.trimToEmpty(rs.getString("glitem_name")));
     row.put("in",     credit);
     row.put("out",    debit);
-    row.put("amount", credit.subtract(debit));
+    row.put(FIELD_AMOUNT, credit.subtract(debit));
     boolean matched = rs.getString("fin_finacc_transaction_id") != null;
     row.put("matched", matched);
     // 1:N reconcile group (option B): split sub-lines share this id so they can be re-grouped.
@@ -124,6 +126,10 @@ public final class BankStatementsSupport {
    * their {@code txns[]} are concatenated and their {@code in}/{@code out}/{@code amount} summed,
    * so the line shows the original amount and ALL the transactions it was reconciled against.
    * Lines without a match group pass through unchanged, preserving order.
+   *
+   * @param lines the raw lines array from the statement-lines query
+   * @return a new array with 1:N split sub-lines collapsed into their group head
+   * @throws JSONException if JSON access fails
    */
   public static JSONArray mergeMatchGroups(JSONArray lines) throws JSONException {
     JSONArray result = new JSONArray();
@@ -131,31 +137,31 @@ public final class BankStatementsSupport {
     for (int i = 0; i < lines.length(); i++) {
       JSONObject line = lines.getJSONObject(i);
       String groupId = line.optString("matchGroupId", "");
-      if (StringUtils.isBlank(groupId)) {
-        result.put(line);
-        continue;
-      }
-      JSONObject head = heads.get(groupId);
-      if (head == null) {
-        heads.put(groupId, line);
-        result.put(line);
-        continue;
-      }
-      JSONArray headTxns = head.optJSONArray("txns");
-      if (headTxns == null) {
-        headTxns = new JSONArray();
-        head.put("txns", headTxns);
-      }
-      JSONArray lineTxns = line.optJSONArray("txns");
-      if (lineTxns != null) {
-        for (int j = 0; j < lineTxns.length(); j++) {
-          headTxns.put(lineTxns.get(j));
+      JSONObject head = StringUtils.isBlank(groupId) ? null : heads.get(groupId);
+      if (StringUtils.isBlank(groupId) || head == null) {
+        // Lines without a group, or the first occurrence of a group, pass through as-is.
+        if (StringUtils.isNotBlank(groupId)) {
+          heads.put(groupId, line);
         }
+        result.put(line);
+      } else {
+        // Subsequent sub-lines of the same group: merge txns and accumulate amounts into head.
+        JSONArray headTxns = head.optJSONArray("txns");
+        if (headTxns == null) {
+          headTxns = new JSONArray();
+          head.put("txns", headTxns);
+        }
+        JSONArray lineTxns = line.optJSONArray("txns");
+        if (lineTxns != null) {
+          for (int j = 0; j < lineTxns.length(); j++) {
+            headTxns.put(lineTxns.get(j));
+          }
+        }
+        head.put("in", jsonBigDecimal(head, "in").add(jsonBigDecimal(line, "in")));
+        head.put("out", jsonBigDecimal(head, "out").add(jsonBigDecimal(line, "out")));
+        head.put(FIELD_AMOUNT, jsonBigDecimal(head, FIELD_AMOUNT).add(jsonBigDecimal(line, FIELD_AMOUNT)));
+        head.put("matched", true);
       }
-      head.put("in", jsonBigDecimal(head, "in").add(jsonBigDecimal(line, "in")));
-      head.put("out", jsonBigDecimal(head, "out").add(jsonBigDecimal(line, "out")));
-      head.put("amount", jsonBigDecimal(head, "amount").add(jsonBigDecimal(line, "amount")));
-      head.put("matched", true);
     }
     return result;
   }
@@ -338,7 +344,7 @@ public final class BankStatementsSupport {
     t.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString("txn_description")));
     t.put("trxType", StringUtils.trimToEmpty(rs.getString("txn_trxtype")));
     t.put("paymentStatus", StringUtils.trimToEmpty(rs.getString("txn_status")));
-    t.put("amount", nullSafeBigDecimal(rs.getBigDecimal("txn_amount")));
+    t.put(FIELD_AMOUNT, nullSafeBigDecimal(rs.getBigDecimal("txn_amount")));
     t.put("paymentId", StringUtils.trimToEmpty(rs.getString("txn_payment_id")));
     t.put("paymentIsReceipt", StringUtils.trimToEmpty(rs.getString("txn_payment_isreceipt")));
     txns.put(t);

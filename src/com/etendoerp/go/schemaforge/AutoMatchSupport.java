@@ -58,6 +58,10 @@ final class AutoMatchSupport {
   private static final String KEY_DATE = "date";
   private static final String KEY_AMOUNT = "amount";
   private static final String KEY_IS_NEW = "isNew";
+  private static final String KEY_GROUP_KEY = "groupKey";
+  private static final String KEY_STATEMENT_LINE = "statementLine";
+  private static final String KEY_OPERATIONS = "operations";
+  private static final String KEY_ORIGIN = "origin";
 
   private static final DateTimeFormatter ISO_UTC =
       DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
@@ -176,12 +180,12 @@ final class AutoMatchSupport {
       ops.put(txnToJson(t));
       opSum = opSum.add(nullSafe(t.getDepositAmount()).subtract(nullSafe(t.getPaymentAmount())));
     }
-    group.put("groupKey", key.toString());
-    group.put("statementLine", lineToJson(line));
-    group.put("operations", ops);
-    group.put("origin", "standard");
+    group.put(KEY_GROUP_KEY, key.toString());
+    group.put(KEY_STATEMENT_LINE, lineToJson(line));
+    group.put(KEY_OPERATIONS, ops);
+    group.put(KEY_ORIGIN, "standard");
     BigDecimal lineAmt = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
-    group.put("difference", lineAmt.subtract(opSum));
+    group.put(STATE_DIFFERENCE, lineAmt.subtract(opSum));
     group.put(KEY_IS_NEW, false);
     return group;
   }
@@ -193,16 +197,16 @@ final class AutoMatchSupport {
   static JSONObject buildStandardGroup(FIN_BankStatementLine line,
       FIN_FinaccTransaction txn, String matchLevel) throws JSONException {
     JSONObject group = new JSONObject();
-    group.put("groupKey", line.getId() + "-" + txn.getId());
-    group.put("statementLine", lineToJson(line));
+    group.put(KEY_GROUP_KEY, line.getId() + "-" + txn.getId());
+    group.put(KEY_STATEMENT_LINE, lineToJson(line));
     JSONArray ops = new JSONArray();
     ops.put(txnToJson(txn));
-    group.put("operations", ops);
-    group.put("origin", "standard");
+    group.put(KEY_OPERATIONS, ops);
+    group.put(KEY_ORIGIN, "standard");
     group.put("matchLevel", StringUtils.defaultIfBlank(matchLevel, ""));
     BigDecimal lineAmt = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
     BigDecimal opAmt = nullSafe(txn.getDepositAmount()).subtract(nullSafe(txn.getPaymentAmount()));
-    group.put("difference", lineAmt.subtract(opAmt));
+    group.put(STATE_DIFFERENCE, lineAmt.subtract(opAmt));
     group.put(KEY_IS_NEW, false);
     return group;
   }
@@ -210,14 +214,14 @@ final class AutoMatchSupport {
   static JSONObject buildRuleGroup(FIN_BankStatementLine line,
       MatchRuleEngine.Rule rule, List<MatchRuleEngine.Rule> alternatives) throws JSONException {
     JSONObject group = new JSONObject();
-    group.put("groupKey", line.getId() + "-rule-" + rule.id);
-    group.put("statementLine", lineToJson(line));
+    group.put(KEY_GROUP_KEY, line.getId() + "-rule-" + rule.id);
+    group.put(KEY_STATEMENT_LINE, lineToJson(line));
     boolean isNew = StringUtils.isNotBlank(rule.glItemId);
     group.put(KEY_IS_NEW, isNew);
-    group.put("origin", "rule");
+    group.put(KEY_ORIGIN, "rule");
     group.put("ruleName", rule.name);
     BigDecimal lineAmt = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
-    group.put("difference", BigDecimal.ZERO);
+    group.put(STATE_DIFFERENCE, BigDecimal.ZERO);
 
     JSONArray ops = new JSONArray();
     if (isNew) {
@@ -229,7 +233,7 @@ final class AutoMatchSupport {
       proposedOp.put(KEY_IS_NEW, true);
       ops.put(proposedOp);
     }
-    group.put("operations", ops);
+    group.put(KEY_OPERATIONS, ops);
 
     JSONArray altArray = new JSONArray();
     for (MatchRuleEngine.Rule alt : alternatives) {

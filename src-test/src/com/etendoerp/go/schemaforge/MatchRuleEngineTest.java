@@ -45,7 +45,7 @@ public class MatchRuleEngineTest {
 
   private static MatchRuleEngine.Rule rule(String id, String condition, String pattern,
       int priority) {
-    return new MatchRuleEngine.Rule(id, "Rule " + id, priority, condition, pattern,
+    return MatchRuleEngine.Rule.of(id, "Rule " + id, priority, condition, pattern,
         "GL-001", "BP-001", null, null, null, null, 0L);
   }
 

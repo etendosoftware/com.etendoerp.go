@@ -144,6 +144,8 @@ public class ReconciliationHandler implements NeoHandler {
   private static final BigDecimal TOLERANCE = new BigDecimal("0.01");
 
   /** JSON keys reused across rows — extracted to satisfy Sonar S1192. */
+  private static final String MSG_MISSING_PARAM = "Missing required parameter: ";
+  private static final String MSG_ACCOUNT_NOT_FOUND = "Financial account not found: ";
   private static final String KEY_RESPONSE = "response";
   private static final String KEY_DATA = "data";
   private static final String KEY_ID = "id";
@@ -248,7 +250,7 @@ public class ReconciliationHandler implements NeoHandler {
     String accountId = qp != null ? qp.get(PARAM_ACCOUNT_ID) : null;
     if (StringUtils.isBlank(accountId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Missing required parameter: " + PARAM_ACCOUNT_ID);
+          MSG_MISSING_PARAM + PARAM_ACCOUNT_ID);
     }
     try {
       OBContext.setAdminMode(true);
@@ -357,7 +359,7 @@ public class ReconciliationHandler implements NeoHandler {
     String accountId = qp != null ? qp.get(PARAM_ACCOUNT_ID) : null;
     if (StringUtils.isBlank(accountId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Missing required parameter: " + PARAM_ACCOUNT_ID);
+          MSG_MISSING_PARAM + PARAM_ACCOUNT_ID);
     }
     String lineId = qp != null ? qp.get(PARAM_LINE_ID) : null;
     String docType = qp != null ? qp.get(PARAM_DOC_TYPE) : null;
@@ -498,7 +500,7 @@ public class ReconciliationHandler implements NeoHandler {
     FIN_FinancialAccount account = loadAccount(accountId);
     if (account == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Financial account not found: " + accountId);
+          MSG_ACCOUNT_NOT_FOUND + accountId);
     }
 
     FIN_BankStatementLine line = loadLine(statementLineId);
@@ -624,7 +626,7 @@ public class ReconciliationHandler implements NeoHandler {
     String accountId = qp != null ? qp.get(PARAM_ACCOUNT_ID) : null;
     if (StringUtils.isBlank(accountId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Missing required parameter: " + PARAM_ACCOUNT_ID);
+          MSG_MISSING_PARAM + PARAM_ACCOUNT_ID);
     }
     try {
       OBContext.setAdminMode(true);
@@ -641,7 +643,7 @@ public class ReconciliationHandler implements NeoHandler {
     FIN_FinancialAccount account = loadAccount(accountId);
     if (account == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Financial account not found: " + accountId);
+          MSG_ACCOUNT_NOT_FOUND + accountId);
     }
 
     Connection conn = OBDal.getInstance().getConnection();
@@ -656,53 +658,45 @@ public class ReconciliationHandler implements NeoHandler {
     int willCreate = 0;
 
     for (FIN_BankStatementLine line : pendingLines) {
-      // Pass 1 (1:1): the standard Etendo matching algorithm suggests at most one transaction.
+      // Pass 1 (1:1): standard algorithm — uses lazy evaluation so findSignalGroup is not called
+      // when a 1:1 match is already found, avoiding an unnecessary DB query.
       Set<String> suggested = suggestedTransactionIds(accountId, line.getId());
-      // Skip transactions already claimed by a previous line in this preview run.
       suggested.removeAll(usedTxnIds);
-      if (!suggested.isEmpty()) {
-        String txnId = suggested.iterator().next();
-        FIN_FinaccTransaction txn = loadTransaction(txnId);
-        if (txn != null) {
-          usedTxnIds.add(txnId);
-          JSONObject group = AutoMatchSupport.buildStandardGroup(line, txn, FIN_MatchedTransaction.STRONG);
-          groups.put(group);
-          opsToLink++;
-          continue;
-        }
-      }
-
-      // Pass 1b (1:N): group unreconciled transactions that share a signal (partner / reference)
-      // and whose amounts sum to the line. The split sub-lines inherit the group id on apply.
-      List<FIN_FinaccTransaction> signalGroup =
-          AutoMatchSupport.findSignalGroup(accountId, line, usedTxnIds, TOLERANCE);
-      if (!signalGroup.isEmpty()) {
-        for (FIN_FinaccTransaction t : signalGroup) {
-          usedTxnIds.add(t.getId());
-        }
-        groups.put(AutoMatchSupport.buildMultiGroup(line, signalGroup));
-        opsToLink += signalGroup.size();
-        continue;
-      }
-
-      // Pass 2: rule engine for lines without a standard match.
-      String desc = StringUtils.trimToEmpty(line.getDescription());
-      String ref = StringUtils.trimToEmpty(line.getReferenceNo());
-      String partner = StringUtils.trimToEmpty(line.getBpartnername());
-      MatchRuleEngine.MatchResult ruleResult = MatchRuleEngine.evaluate(desc, ref, partner, rules);
-      if (ruleResult.isMatched()) {
-        JSONObject group = AutoMatchSupport.buildRuleGroup(line, ruleResult.primary, ruleResult.alternatives);
-        groups.put(group);
-        if (Boolean.TRUE.equals(group.opt(KEY_IS_NEW))) {
-          willCreate++;
+      FIN_FinaccTransaction txn1to1 = suggested.isEmpty() ? null : loadTransaction(suggested.iterator().next());
+      if (txn1to1 != null) {
+        usedTxnIds.add(txn1to1.getId());
+        groups.put(AutoMatchSupport.buildStandardGroup(line, txn1to1, FIN_MatchedTransaction.STRONG));
+        opsToLink++;
+      } else {
+        // Pass 1b (1:N): signal grouping — only evaluated when 1:1 did not match.
+        List<FIN_FinaccTransaction> signalGroup =
+            AutoMatchSupport.findSignalGroup(accountId, line, usedTxnIds, TOLERANCE);
+        if (!signalGroup.isEmpty()) {
+          signalGroup.forEach(t -> usedTxnIds.add(t.getId()));
+          groups.put(AutoMatchSupport.buildMultiGroup(line, signalGroup));
+          opsToLink += signalGroup.size();
         } else {
-          opsToLink++;
+          // Pass 2: rule engine — only evaluated when neither 1:1 nor 1:N matched.
+          MatchRuleEngine.MatchResult ruleResult = MatchRuleEngine.evaluate(
+              StringUtils.trimToEmpty(line.getDescription()),
+              StringUtils.trimToEmpty(line.getReferenceNo()),
+              StringUtils.trimToEmpty(line.getBpartnername()), rules);
+          if (ruleResult.isMatched()) {
+            JSONObject ruleGroup = AutoMatchSupport.buildRuleGroup(
+                line, ruleResult.primary, ruleResult.alternatives);
+            groups.put(ruleGroup);
+            if (Boolean.TRUE.equals(ruleGroup.opt(KEY_IS_NEW))) {
+              willCreate++;
+            } else {
+              opsToLink++;
+            }
+          }
         }
       }
     }
 
     JSONObject kpis = new JSONObject();
-    kpis.put("pendingLines", pendingLines.size());
+    kpis.put(ACTION_PENDING_LINES, pendingLines.size());
     kpis.put("groupsFound", groups.length());
     kpis.put("opsToLink", opsToLink);
     kpis.put("willCreate", willCreate);
@@ -748,7 +742,7 @@ public class ReconciliationHandler implements NeoHandler {
     FIN_FinancialAccount account = loadAccount(accountId);
     if (account == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "Financial account not found: " + accountId);
+          MSG_ACCOUNT_NOT_FOUND + accountId);
     }
 
     JSONArray groupsJson = body.optJSONArray(KEY_GROUPS);
@@ -759,11 +753,9 @@ public class ReconciliationHandler implements NeoHandler {
     JSONArray results = new JSONArray();
     for (int i = 0; i < groupsJson.length(); i++) {
       JSONObject groupEntry = groupsJson.optJSONObject(i);
-      if (groupEntry == null) {
-        continue;
+      if (groupEntry != null) {
+        results.put(applyGroup(account, groupEntry).getBody());
       }
-      NeoResponse groupResult = applyGroup(account, groupEntry);
-      results.put(groupResult.getBody());
     }
 
     JSONObject data = new JSONObject();
@@ -954,7 +946,7 @@ public class ReconciliationHandler implements NeoHandler {
         + " order by bsl.transactionDate asc, bsl.lineNo asc";
     return OBDal.getInstance().getSession()
         .createQuery(hql, FIN_BankStatementLine.class)
-        .setParameter("accountId", accountId)
+        .setParameter(PARAM_ACCOUNT_ID, accountId)
         .list();
   }
 
