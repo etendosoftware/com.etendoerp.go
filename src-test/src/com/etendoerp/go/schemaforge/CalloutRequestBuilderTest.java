@@ -50,6 +50,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
@@ -982,5 +983,54 @@ public class CalloutRequestBuilderTest {
     assertTrue(maps.cleanNameToInp.isEmpty());
     assertTrue(maps.dbNameToInp.isEmpty());
     assertTrue(maps.columns.isEmpty());
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // reformatDateParams + getCalloutDatePattern (via buildRequestParams)
+  // ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Exercises {@link CalloutRequestBuilder#reformatDateParams} and
+   * {@link CalloutRequestBuilder#getCalloutDatePattern} end-to-end.
+   *
+   * <p>The column list returned by OBDal contains a Date column (AD reference 15).
+   * The form state provides the date in ISO format; after {@code buildRequestParams}
+   * the param for that column must be in the Etendo UI date format (dd-MM-yyyy).</p>
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void buildRequestParams_reformatsDateColumnFromIsoToEtendo() throws Exception {
+    // Date column: "DateAcct" → inpdateacct, AD reference 15
+    Column dateCol = mock(Column.class);
+    when(dateCol.getDBColumnName()).thenReturn("DateAcct");
+    Reference dateRef = mock(Reference.class);
+    when(dateRef.getId()).thenReturn("15");
+    when(dateCol.getReference()).thenReturn(dateRef);
+    when(dateCol.getDefaultValue()).thenReturn(null);
+
+    Tab tab = mock(Tab.class);
+    Table table = mock(Table.class);
+    when(tab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("GL_JOURNAL");
+    when(tab.getId()).thenReturn("GL-TAB-001");
+    when(tab.getWindow()).thenReturn(null);
+    when(tab.getTabLevel()).thenReturn(0L);
+
+    OBCriteria<Column> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Column.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(dateCol));
+    when(modelProvider.getEntityByTableId("GL_JOURNAL")).thenReturn(null);
+
+    // formState carries the date in ISO format; "inpfield" is the trigger → not overwritten
+    JSONObject formState = new JSONObject();
+    formState.put("inpdateacct", "2026-06-16");
+
+    Map<String, String[]> params = CalloutRequestBuilder.buildRequestParams(
+        tab, "VALUE", formState, "inpfield", null);
+
+    // reformatDateParams converts "2026-06-16" → "16-06-2026" (Etendo dd-MM-yyyy fallback)
+    assertNotNull(params.get("inpdateacct"));
+    assertEquals("16-06-2026", params.get("inpdateacct")[0]);
   }
 }
