@@ -668,30 +668,9 @@ public class ReconciliationHandler implements NeoHandler {
         groups.put(AutoMatchSupport.buildStandardGroup(line, txn1to1, FIN_MatchedTransaction.STRONG));
         opsToLink++;
       } else {
-        // Pass 1b (1:N): signal grouping — only evaluated when 1:1 did not match.
-        List<FIN_FinaccTransaction> signalGroup =
-            AutoMatchSupport.findSignalGroup(accountId, line, usedTxnIds, TOLERANCE);
-        if (!signalGroup.isEmpty()) {
-          signalGroup.forEach(t -> usedTxnIds.add(t.getId()));
-          groups.put(AutoMatchSupport.buildMultiGroup(line, signalGroup));
-          opsToLink += signalGroup.size();
-        } else {
-          // Pass 2: rule engine — only evaluated when neither 1:1 nor 1:N matched.
-          MatchRuleEngine.MatchResult ruleResult = MatchRuleEngine.evaluate(
-              StringUtils.trimToEmpty(line.getDescription()),
-              StringUtils.trimToEmpty(line.getReferenceNo()),
-              StringUtils.trimToEmpty(line.getBpartnername()), rules);
-          if (ruleResult.isMatched()) {
-            JSONObject ruleGroup = AutoMatchSupport.buildRuleGroup(
-                line, ruleResult.primary, ruleResult.alternatives);
-            groups.put(ruleGroup);
-            if (Boolean.TRUE.equals(ruleGroup.opt(KEY_IS_NEW))) {
-              willCreate++;
-            } else {
-              opsToLink++;
-            }
-          }
-        }
+        int[] delta = matchFallback(accountId, line, usedTxnIds, rules, groups);
+        opsToLink += delta[0];
+        willCreate += delta[1];
       }
     }
 
@@ -864,6 +843,35 @@ public class ReconciliationHandler implements NeoHandler {
     FIN_TransactionProcess.doTransactionProcess(PROCESS_ACTION, trx);
     OBDal.getInstance().flush();
     return trx.getId();
+  }
+
+  /**
+   * Passes 1b (1:N signal grouping) and 2 (rule engine) — evaluated only when 1:1 did not match.
+   *
+   * @return int[2] where [0] = opsToLink increment, [1] = willCreate increment
+   */
+  private int[] matchFallback(String accountId, FIN_BankStatementLine line,
+      Set<String> usedTxnIds, List<MatchRuleEngine.Rule> rules, JSONArray groups)
+      throws org.codehaus.jettison.json.JSONException {
+    List<FIN_FinaccTransaction> signalGroup =
+        AutoMatchSupport.findSignalGroup(accountId, line, usedTxnIds, TOLERANCE);
+    if (!signalGroup.isEmpty()) {
+      signalGroup.forEach(t -> usedTxnIds.add(t.getId()));
+      groups.put(AutoMatchSupport.buildMultiGroup(line, signalGroup));
+      return new int[]{signalGroup.size(), 0};
+    }
+    MatchRuleEngine.MatchResult ruleResult = MatchRuleEngine.evaluate(
+        StringUtils.trimToEmpty(line.getDescription()),
+        StringUtils.trimToEmpty(line.getReferenceNo()),
+        StringUtils.trimToEmpty(line.getBpartnername()), rules);
+    if (ruleResult.isMatched()) {
+      JSONObject ruleGroup = AutoMatchSupport.buildRuleGroup(
+          line, ruleResult.primary, ruleResult.alternatives);
+      groups.put(ruleGroup);
+      return Boolean.TRUE.equals(ruleGroup.opt(KEY_IS_NEW))
+          ? new int[]{0, 1} : new int[]{1, 0};
+    }
+    return new int[]{0, 0};
   }
 
   // ---------------------------------------------------------------------------

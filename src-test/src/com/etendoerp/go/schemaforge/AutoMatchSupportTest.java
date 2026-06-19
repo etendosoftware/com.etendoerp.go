@@ -175,9 +175,9 @@ public class AutoMatchSupportTest {
     when(account.getMatchingAlgorithm()).thenReturn(null);
     FIN_BankStatementLine line = pendingLine("Bank commission fee", "", "");
     List<MatchRuleEngine.Rule> rules = Collections.singletonList(
-        MatchRuleEngine.Rule.of("R1", "Fee Rule", 10,
-            MatchRuleEngine.COND_CONTAINS, "commission",
-            "GL-001", "BP-001", null, null, null, null, 0L));
+        new MatchRuleEngine.Rule("R1", "Fee Rule", 10,
+            MatchRuleEngine.COND_CONTAINS, "commission", "GL-001",
+            new MatchRuleEngine.RuleOptions("BP-001", null, null, null, null), 0L));
 
     String state = AutoMatchSupport.classifyPendingLine(account, line, rules);
 

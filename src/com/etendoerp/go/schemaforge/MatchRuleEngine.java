@@ -124,18 +124,20 @@ final class MatchRuleEngine {
       ps.setString(1, effectiveAccountId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          rules.add(Rule.of(
+          RuleOptions opts = new RuleOptions(
+              rs.getString("c_bpartner_id"),
+              rs.getString("etgo_transaction_type_id"),
+              rs.getString("c_project_id"),
+              rs.getString("c_costcenter_id"),
+              rs.getString("m_product_id"));
+          rules.add(new Rule(
               rs.getString("etgo_match_rule_id"),
               StringUtils.trimToEmpty(rs.getString("name")),
               rs.getInt("priority"),
               StringUtils.trimToEmpty(rs.getString("textcondition")),
               StringUtils.trimToEmpty(rs.getString("textpattern")),
               rs.getString("c_glitem_id"),
-              rs.getString("c_bpartner_id"),
-              rs.getString("etgo_transaction_type_id"),
-              rs.getString("c_project_id"),
-              rs.getString("c_costcenter_id"),
-              rs.getString("m_product_id"),
+              opts,
               rs.getLong("matchcount")));
         }
       }
@@ -253,6 +255,27 @@ final class MatchRuleEngine {
    * An active matching rule loaded from {@code ETGO_MATCH_RULE}.
    * All optional FK fields (glItemId, bpartnerId, etc.) may be {@code null}.
    */
+  /**
+   * Optional FK references attached to a rule (business partner, transaction type, dimensions).
+   * Grouped into a value object so {@link Rule}'s constructor stays within the 7-parameter limit.
+   */
+  static final class RuleOptions {
+    final String bpartnerId;
+    final String transactionTypeId;
+    final String projectId;
+    final String costCenterId;
+    final String productId;
+
+    RuleOptions(String bpartnerId, String transactionTypeId,
+        String projectId, String costCenterId, String productId) {
+      this.bpartnerId = bpartnerId;
+      this.transactionTypeId = transactionTypeId;
+      this.projectId = projectId;
+      this.costCenterId = costCenterId;
+      this.productId = productId;
+    }
+  }
+
   static final class Rule {
     final String id;
     final String name;
@@ -267,34 +290,20 @@ final class MatchRuleEngine {
     final String productId;
     final long matchCount;
 
-    // Private constructor keeps the parameter count within Sonar S107 (≤7).
-    // Use the factory method {@link #of} to create instances from DB rows.
-    private Rule(String id, String name, int priority, String textCondition, String textPattern,
-        String glItemId, String bpartnerId, String transactionTypeId,
-        String projectId, String costCenterId, String productId, long matchCount) {
+    Rule(String id, String name, int priority, String textCondition, String textPattern,
+        String glItemId, RuleOptions options, long matchCount) {
       this.id = id;
       this.name = name;
       this.priority = priority;
       this.textCondition = textCondition;
       this.textPattern = textPattern;
       this.glItemId = glItemId;
-      this.bpartnerId = bpartnerId;
-      this.transactionTypeId = transactionTypeId;
-      this.projectId = projectId;
-      this.costCenterId = costCenterId;
-      this.productId = productId;
+      this.bpartnerId = options != null ? options.bpartnerId : null;
+      this.transactionTypeId = options != null ? options.transactionTypeId : null;
+      this.projectId = options != null ? options.projectId : null;
+      this.costCenterId = options != null ? options.costCenterId : null;
+      this.productId = options != null ? options.productId : null;
       this.matchCount = matchCount;
-    }
-
-    /**
-     * Factory method that groups the 12 DB columns into one call so the constructor
-     * stays private and callers do not need to pass each field individually.
-     */
-    static Rule of(String id, String name, int priority, String textCondition, String textPattern,
-        String glItemId, String bpartnerId, String transactionTypeId,
-        String projectId, String costCenterId, String productId, long matchCount) {
-      return new Rule(id, name, priority, textCondition, textPattern,
-          glItemId, bpartnerId, transactionTypeId, projectId, costCenterId, productId, matchCount);
     }
   }
 
