@@ -125,6 +125,7 @@ final class MatchRuleEngine {
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           RuleOptions opts = new RuleOptions(
+              rs.getString("c_glitem_id"),
               rs.getString("c_bpartner_id"),
               rs.getString("etgo_transaction_type_id"),
               rs.getString("c_project_id"),
@@ -136,7 +137,6 @@ final class MatchRuleEngine {
               rs.getInt("priority"),
               StringUtils.trimToEmpty(rs.getString("textcondition")),
               StringUtils.trimToEmpty(rs.getString("textpattern")),
-              rs.getString("c_glitem_id"),
               opts,
               rs.getLong("matchcount")));
         }
@@ -259,15 +259,21 @@ final class MatchRuleEngine {
    * Optional FK references attached to a rule (business partner, transaction type, dimensions).
    * Grouped into a value object so {@link Rule}'s constructor stays within the 7-parameter limit.
    */
+  /**
+   * Optional FK references attached to a rule (GL item, business partner, dimensions).
+   * Grouped so {@link Rule}'s constructor stays within the 7-parameter limit.
+   */
   static final class RuleOptions {
+    final String glItemId;
     final String bpartnerId;
     final String transactionTypeId;
     final String projectId;
     final String costCenterId;
     final String productId;
 
-    RuleOptions(String bpartnerId, String transactionTypeId,
+    RuleOptions(String glItemId, String bpartnerId, String transactionTypeId,
         String projectId, String costCenterId, String productId) {
+      this.glItemId = glItemId;
       this.bpartnerId = bpartnerId;
       this.transactionTypeId = transactionTypeId;
       this.projectId = projectId;
@@ -291,13 +297,13 @@ final class MatchRuleEngine {
     final long matchCount;
 
     Rule(String id, String name, int priority, String textCondition, String textPattern,
-        String glItemId, RuleOptions options, long matchCount) {
+        RuleOptions options, long matchCount) {
       this.id = id;
       this.name = name;
       this.priority = priority;
       this.textCondition = textCondition;
       this.textPattern = textPattern;
-      this.glItemId = glItemId;
+      this.glItemId = options != null ? options.glItemId : null;
       this.bpartnerId = options != null ? options.bpartnerId : null;
       this.transactionTypeId = options != null ? options.transactionTypeId : null;
       this.projectId = options != null ? options.projectId : null;
