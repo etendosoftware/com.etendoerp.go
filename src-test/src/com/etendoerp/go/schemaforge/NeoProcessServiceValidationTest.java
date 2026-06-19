@@ -1042,13 +1042,10 @@ public class NeoProcessServiceValidationTest {
   public void requestContextScopeCloseDoesNotThrow() throws Exception {
     // Test that RequestContextScope.close() handles exceptions gracefully.
     // We access the inner class via reflection.
-    Class<?> scopeClass = null;
-    for (Class<?> inner : NeoProcessService.class.getDeclaredClasses()) {
-      if ("RequestContextScope".equals(inner.getSimpleName())) {
-        scopeClass = inner;
-        break;
-      }
-    }
+    Class<?> scopeClass = java.util.Arrays.stream(NeoProcessService.class.getDeclaredClasses())
+        .filter(AutoCloseable.class::isAssignableFrom)
+        .findFirst()
+        .orElse(null);
     assertNotNull("RequestContextScope inner class should exist", scopeClass);
 
     // Create instance via the private constructor
