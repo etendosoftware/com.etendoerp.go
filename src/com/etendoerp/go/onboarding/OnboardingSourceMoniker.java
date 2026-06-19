@@ -28,10 +28,11 @@ package com.etendoerp.go.onboarding;
 final class OnboardingSourceMoniker {
 
   /**
-   * Source monikers in match order. The longer moniker is listed first so it is matched before its
-   * "GO" prefix (e.g. "GOOrg" is not partially replaced into "&lt;client&gt;Org").
+   * Source monikers in match order. Longer monikers are listed first so each is matched before its
+   * "GO" prefix (e.g. "GOClient"/"GOOrg" are not partially replaced into "&lt;client&gt;Client" /
+   * "&lt;client&gt;Org" by the bare "GO" entry).
    */
-  private static final String[] MONIKERS = { "GOOrg", "GO" };
+  private static final String[] MONIKERS = { "GOClient", "GOOrg", "GO" };
 
   private OnboardingSourceMoniker() {
   }

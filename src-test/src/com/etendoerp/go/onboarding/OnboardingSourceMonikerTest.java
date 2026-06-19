@@ -62,8 +62,12 @@ public class OnboardingSourceMonikerTest {
   }
 
   @Test
-  public void testReplaceSubstitutesGoPrefixInsideCompoundToken() {
-    assertEquals("AcmeClient Calendar", OnboardingSourceMoniker.replace("GOClient Calendar", CLIENT));
+  public void testReplaceSubstitutesGoClientWholesaleBeforeGoPrefix() {
+    // "GOClient" is the template-client token and must be replaced as a whole; if "GO" were applied
+    // first the result would be the mangled "AcmeClient Calendar". Real sample data carries this
+    // token in account-element descriptions ("GOClient Account"), which must rebrand to
+    // "<Client> Account", so "GOClient" is listed before the bare "GO" entry in the moniker order.
+    assertEquals("Acme Calendar", OnboardingSourceMoniker.replace("GOClient Calendar", CLIENT));
   }
 
   @Test

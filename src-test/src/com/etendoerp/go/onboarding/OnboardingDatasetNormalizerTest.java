@@ -49,6 +49,21 @@ import org.openbravo.model.ad.system.Language;
  */
 public class OnboardingDatasetNormalizerTest {
 
+  /**
+   * Returns true when {@code throwable} or any of its causes carries a message containing
+   * {@code expected}. Row-level guards in the normalizer are wrapped with source-file context by
+   * {@link OnboardingDatasetNormalizer} (see appendEntities), so the original message lives on the
+   * cause rather than the top-level throwable.
+   */
+  private static boolean causeChainContains(Throwable throwable, String expected) {
+    for (Throwable t = throwable; t != null; t = t.getCause()) {
+      if (t.getMessage() != null && t.getMessage().contains(expected)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /** Verifies that the bootstrap exclusion list contains the expected tenant-definition tables. */
   @Test
   public void testDefinitionExcludesBootstrapTables() {
@@ -340,7 +355,10 @@ public class OnboardingDatasetNormalizerTest {
       new OnboardingDatasetNormalizer(sampleDir, this::mockEntityForTable).buildDatasetXml();
       fail("Expected OBException for missing ID");
     } catch (OBException e) {
-      assertTrue(e.getMessage().contains("Missing ID for entity"));
+      // appendEntities() wraps the row-level guard in an OnboardingDatasetNormalizationException
+      // that adds the offending file name; the original "Missing ID for entity" message is kept as
+      // the cause, so assert against the full cause chain.
+      assertTrue(causeChainContains(e, "Missing ID for entity"));
     }
   }
 
@@ -453,7 +471,9 @@ public class OnboardingDatasetNormalizerTest {
           .buildDatasetXml();
       fail("Expected OBException for uninstalled language");
     } catch (OBException e) {
-      assertTrue(e.getMessage().contains("not installed"));
+      // The language guard fires inside convertRow() and is wrapped with the source-file context by
+      // appendEntities(); the "not installed" message is preserved as the cause.
+      assertTrue(causeChainContains(e, "not installed"));
     }
   }
 
