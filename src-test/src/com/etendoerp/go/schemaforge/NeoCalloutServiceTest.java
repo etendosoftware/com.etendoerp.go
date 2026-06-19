@@ -54,6 +54,7 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.domain.Callout;
 import org.openbravo.model.ad.domain.ModelImplementation;
+import org.openbravo.model.ad.domain.Reference;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.ad.ui.Tab;
@@ -695,6 +696,63 @@ public class NeoCalloutServiceTest {
    *       snapshot is reused across tabs.</li>
    * </ol>
    */
+  // ── normalizeUpdateDatesToIso / normalizeField ────────────────────────
+
+  /**
+   * Exercises {@code normalizeUpdateDatesToIso} and {@code normalizeField} via
+   * {@link NeoCalloutService#transformResponse}.
+   *
+   * <p>A non-null adTab with a Date column (AD reference 15) is provided.
+   * The callout result carries the date in Etendo format (dd-MM-yyyy); after
+   * transformation the update value must be in ISO format (yyyy-MM-dd).</p>
+   */
+  @Test
+  public void testTransformResponseNormalizesDateUpdatesToIso() throws Exception {
+    NeoCalloutService.clearMetadataCache();
+
+    Tab adTab = mock(Tab.class);
+    Table table = mock(Table.class);
+    when(adTab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("GL_JOURNAL_DATE");
+
+    Column dateCol = mock(Column.class);
+    when(dateCol.getDBColumnName()).thenReturn("DateAcct");
+    Reference dateRef = mock(Reference.class);
+    when(dateRef.getId()).thenReturn("15");
+    when(dateCol.getReference()).thenReturn(dateRef);
+    when(dateCol.getCallout()).thenReturn(null);
+
+    OBDal obDal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<Column> criteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(Column.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(dateCol));
+
+    ModelProvider mp = mock(ModelProvider.class);
+    when(mp.getEntityByTableId("GL_JOURNAL_DATE")).thenReturn(null);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<ModelProvider> mpMock = mockStatic(ModelProvider.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+
+      // Callout result: date field in Etendo format ("inpdateacct" → classifed as "dateacct")
+      JSONObject calloutResult = new JSONObject();
+      JSONObject dateEntry = new JSONObject();
+      dateEntry.put("value", "16-06-2026");
+      calloutResult.put("inpdateacct", dateEntry);
+
+      JSONObject result = NeoCalloutService.transformResponse(calloutResult, adTab);
+
+      JSONObject updates = result.getJSONObject("updates");
+      // inpToCleanName("inpdateacct", adTab) falls back to stripping "inp" → "dateacct"
+      assertTrue("Expected 'dateacct' in updates", updates.has("dateacct"));
+      // normalizeField converts "16-06-2026" → "2026-06-16" (ISO)
+      assertEquals("2026-06-16", updates.getJSONObject("dateacct").getString("value"));
+    }
+  }
+
   @Test
   public void testBuildVarsAppliesIsSOTrxPerTabOnSharedCacheSnapshot() {
     NeoSessionVarsCache.clear();

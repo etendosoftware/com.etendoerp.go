@@ -28,8 +28,11 @@ import java.util.Date;
 import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.model.ModelProvider;
 
 /**
  * Stateless helpers shared across {@link BankStatementsHandler}: statement
@@ -39,6 +42,76 @@ import org.codehaus.jettison.json.JSONObject;
  * limit; every method here is pure (no DB, no OBContext) and trivially testable.
  */
 public final class BankStatementsSupport {
+
+  private static final Logger log = LogManager.getLogger(BankStatementsSupport.class);
+
+  /** JSON/SQL key for the bank-statement-line description field. */
+  static final String FIELD_DESCRIPTION = "description";
+
+  // Cached result of the C43 column existence check (null = not yet checked).
+  private static volatile Boolean c43DescColumn;
+
+  /**
+   * SQL expression for the description column of {@code FIN_BankStatementLine}.
+   * Prefers {@code bsl.description}; when the optional C43 module column
+   * {@code bsl.em_c43_description} exists (detected via {@link ModelProvider},
+   * database-agnostic), falls back to it so C43-imported statements show the
+   * concept text that Classic stores in that extension column.
+   *
+   * <p>Result is cached after the first call (the module set is fixed at runtime).
+   *
+   * @return SQL expression string, never {@code null}
+   */
+  public static String descriptionExpr() {
+    Boolean cached = c43DescColumn;
+    if (cached == null) {
+      try {
+        org.openbravo.base.model.Entity entity =
+            ModelProvider.getInstance().getEntityByTableName("FIN_BankStatementLine");
+        cached = entity != null && entity.getProperties().stream()
+            .anyMatch(p -> "em_c43_description".equalsIgnoreCase(p.getColumnName()));
+      } catch (Exception e) {
+        log.debug("Could not check C43 column existence via ModelProvider; defaulting to false", e);
+        cached = Boolean.FALSE;
+      }
+      c43DescColumn = cached;
+    }
+    return Boolean.TRUE.equals(cached)
+        ? "COALESCE(NULLIF(TRIM(bsl.description), ''), NULLIF(TRIM(bsl.em_c43_description), ''), '')"
+        : "COALESCE(bsl.description, '')";
+  }
+
+  /**
+   * Maps one {@code LINES_SQL_HEAD} result row to the line JSON contract.
+   * Extracted here (away from BankStatementsHandler) to keep the handler
+   * within the per-class method-count limit.
+   *
+   * @param rs an open {@link java.sql.ResultSet} positioned on the current row
+   * @return a JSON object representing the bank-statement line
+   * @throws Exception if any ResultSet accessor throws
+   */
+  public static JSONObject mapLineRow(ResultSet rs) throws Exception {
+    BigDecimal credit = nullSafeBigDecimal(rs.getBigDecimal("cramount"));
+    BigDecimal debit  = nullSafeBigDecimal(rs.getBigDecimal("dramount"));
+    JSONObject row = new JSONObject();
+    row.put("id", rs.getString("fin_bankstatementline_id"));
+    row.put("lineNo", rs.getLong("line"));
+    row.put("date", formatDate(rs.getTimestamp("datetrx")));
+    row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
+    row.put("reference",      StringUtils.trimToEmpty(rs.getString("referenceno")));
+    row.put("bpartnerName",   StringUtils.trimToEmpty(rs.getString("bpartnername")));
+    row.put("bpartnerId",     StringUtils.trimToEmpty(rs.getString("c_bpartner_id")));
+    row.put("bpartnerFkName", StringUtils.trimToEmpty(rs.getString("bpartner_fk_name")));
+    row.put("glItemId",       StringUtils.trimToEmpty(rs.getString("c_glitem_id")));
+    row.put("glItemName",     StringUtils.trimToEmpty(rs.getString("glitem_name")));
+    row.put("in",     credit);
+    row.put("out",    debit);
+    row.put("amount", credit.subtract(debit));
+    boolean matched = rs.getString("fin_finacc_transaction_id") != null;
+    row.put("matched", matched);
+    row.put("txns", buildLineTxns(rs, matched));
+    return row;
+  }
 
   private static final DateTimeFormatter ISO_UTC =
       DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
@@ -173,7 +246,7 @@ public final class BankStatementsSupport {
    * @return whether the line is effectively empty
    */
   public static boolean isBlankLine(JSONObject l) {
-    return StringUtils.isBlank(l.optString("description", null))
+    return StringUtils.isBlank(l.optString(FIELD_DESCRIPTION, null))
         && StringUtils.isBlank(l.optString("bpartnerName", null))
         && StringUtils.isBlank(l.optString("bpartnerId", null))
         && StringUtils.isBlank(l.optString("glItemId", null))
@@ -202,7 +275,7 @@ public final class BankStatementsSupport {
     t.put("documentNo", StringUtils.trimToEmpty(rs.getString("txn_documentno")));
     t.put("date", formatDate(rs.getTimestamp("txn_date")));
     t.put("contact", StringUtils.trimToEmpty(rs.getString("txn_contact")));
-    t.put("description", StringUtils.trimToEmpty(rs.getString("txn_description")));
+    t.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString("txn_description")));
     t.put("trxType", StringUtils.trimToEmpty(rs.getString("txn_trxtype")));
     t.put("paymentStatus", StringUtils.trimToEmpty(rs.getString("txn_status")));
     t.put("amount", nullSafeBigDecimal(rs.getBigDecimal("txn_amount")));

@@ -378,6 +378,50 @@ class SFUpsertSpecTest extends BaseWebhookTest {
         assertNull(captor.getValue().getDescription());
     }
 
+    /** Verifies AgentPrompt is trimmed before it is stored. */
+    @Test
+    @DisplayName("AgentPrompt is trimmed and applied")
+    void testAgentPromptIsTrimmedAndSet() {
+        parameters.put(SPEC_ID, TEST_ID_1);
+        parameters.put(NAME, TEST_NAME);
+        parameters.put(MODULE_ID, "mod1");
+        parameters.put(WINDOW_ID, "win1");
+        parameters.put("AgentPrompt", "  Guide the assistant for this spec.  ");
+
+        SFSpec existingSpec = mock(SFSpec.class);
+        when(existingSpec.getId()).thenReturn(TEST_ID_1);
+        when(obDal.get(SFSpec.class, TEST_ID_1)).thenReturn(existingSpec);
+        when(obDal.get(Window.class, "win1")).thenReturn(mockWindow);
+        when(obDal.get(Module.class, "mod1")).thenReturn(mockModule);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        verify(existingSpec).setAgentPrompt("Guide the assistant for this spec.");
+    }
+
+    /** Verifies a blank AgentPrompt clears any existing value. */
+    @Test
+    @DisplayName("Blank AgentPrompt clears value")
+    void testBlankAgentPromptClearsValue() {
+        parameters.put(SPEC_ID, TEST_ID_1);
+        parameters.put(NAME, TEST_NAME);
+        parameters.put(MODULE_ID, "mod1");
+        parameters.put(WINDOW_ID, "win1");
+        parameters.put("AgentPrompt", "   ");
+
+        SFSpec existingSpec = mock(SFSpec.class);
+        when(existingSpec.getId()).thenReturn(TEST_ID_1);
+        when(obDal.get(SFSpec.class, TEST_ID_1)).thenReturn(existingSpec);
+        when(obDal.get(Window.class, "win1")).thenReturn(mockWindow);
+        when(obDal.get(Module.class, "mod1")).thenReturn(mockModule);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        verify(existingSpec).setAgentPrompt(null);
+    }
+
     // ── cross-type clearing ─────────────────────────────────────────────
 
     /** Verifies Process spec clears window reference. */
