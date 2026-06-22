@@ -45,20 +45,27 @@ public class EtendoGoJwtServletHeartbeatTest {
   private final EtendoGoJwtServlet servlet = new EtendoGoJwtServlet();
 
   /**
-   * A heartbeat must emit a line that keeps the connection alive but that the frontend
-   * discards. The frontend skips empty lines (onboardingApi processLines:
-   * {@code if (!line.trim()) continue}), so the heartbeat line must be blank once trimmed.
+   * A heartbeat must emit a self-describing {@code type=heartbeat} NDJSON object that keeps
+   * the connection alive yet stays invisible to the client: the frontend only reacts to
+   * {@code type=progress} and {@code type=result} (onboardingApi onMessage), so a heartbeat
+   * is parsed and then ignored. Being a real object (not a blank line) makes it visible in
+   * raw stream captures and logs for debugging.
    */
   @Test
-  public void sendHeartbeatWritesFrontendSafeBlankLine() {
+  public void sendHeartbeatEmitsIgnorableHeartbeatObject() throws Exception {
     StringWriter sink = new StringWriter();
     PrintWriter writer = new PrintWriter(sink);
 
     servlet.sendHeartbeat(writer);
 
-    String output = sink.toString();
+    String output = sink.toString().trim();
     assertFalse("heartbeat must push bytes to keep the connection alive", output.isEmpty());
-    assertTrue("heartbeat line must be blank so the frontend skips it", output.trim().isEmpty());
+    JSONObject parsed = new JSONObject(output); // throws if the heartbeat is not valid JSON
+    assertEquals("heartbeat must be a self-describing object", "heartbeat", parsed.getString("type"));
+    assertFalse("heartbeat must not be treated as a result by the frontend",
+        "result".equals(parsed.optString("type")));
+    assertFalse("heartbeat must not be treated as progress by the frontend",
+        "progress".equals(parsed.optString("type")));
   }
 
   /**
@@ -138,10 +145,10 @@ public class EtendoGoJwtServletHeartbeatTest {
   }
 
   /**
-   * Heartbeats interleaved with real progress lines must not corrupt the stream: every
-   * non-blank line stays parseable NDJSON and the blank heartbeat lines are the only ones
-   * the frontend skips. This mirrors the production stream where a slow step emits a
-   * heartbeat between two progress events.
+   * Heartbeats interleaved with real progress lines must not corrupt the stream: every line
+   * stays parseable NDJSON, the heartbeat lines carry {@code type=heartbeat} (ignored by the
+   * frontend), and the progress/result lines remain intact. This mirrors the production
+   * stream where a slow step emits a heartbeat between two progress events.
    */
   @Test
   public void heartbeatsInterleavedWithProgressKeepStreamValidNdjson() throws Exception {
@@ -154,23 +161,25 @@ public class EtendoGoJwtServletHeartbeatTest {
     servlet.sendHeartbeat(writer);
     servlet.sendFinalResult(writer, true, "Environment created successfully");
 
-    int blankLines = 0;
+    int heartbeatLines = 0;
     int progressLines = 0;
     boolean sawResult = false;
     for (String line : sink.toString().split("\n")) {
       if (line.trim().isEmpty()) {
-        blankLines++;
         continue;
       }
       JSONObject parsed = new JSONObject(line); // throws if a heartbeat broke the JSON framing
-      if ("progress".equals(parsed.optString("type"))) {
+      String type = parsed.optString("type");
+      if ("heartbeat".equals(type)) {
+        heartbeatLines++;
+      } else if ("progress".equals(type)) {
         progressLines++;
-      } else if ("result".equals(parsed.optString("type"))) {
+      } else if ("result".equals(type)) {
         sawResult = true;
       }
     }
 
-    assertEquals("both heartbeats must surface as skippable blank lines", 2, blankLines);
+    assertEquals("both heartbeats must surface as ignorable heartbeat objects", 2, heartbeatLines);
     assertEquals("both progress events must remain parseable", 2, progressLines);
     assertTrue("the final result line must remain parseable", sawResult);
   }

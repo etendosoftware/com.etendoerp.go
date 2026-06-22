@@ -932,14 +932,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Writes a single blank line to the stream to keep the connection alive. PrintWriter
-   * is internally synchronized, so concurrent writes from this heartbeat and the main
-   * onboarding thread each emit whole lines without corrupting the NDJSON output. The
-   * frontend skips empty lines, so heartbeats are invisible to the client.
+   * Writes a NDJSON heartbeat line to keep the connection alive during slow steps. It is a
+   * self-describing {@code {"type":"heartbeat"}} object (not a blank line) so it is visible
+   * in raw stream captures and logs while still being ignored by the frontend, which only
+   * reacts to {@code type=progress} and {@code type=result}. PrintWriter is internally
+   * synchronized, so concurrent writes from this heartbeat and the main onboarding thread
+   * each emit whole lines without corrupting the NDJSON output.
    */
   void sendHeartbeat(PrintWriter writer) {
-    writer.println();
-    writer.flush();
+    try {
+      JSONObject heartbeat = new JSONObject();
+      heartbeat.put("type", "heartbeat");
+      heartbeat.put("timestamp", Instant.now().toString());
+      writer.println(heartbeat.toString());
+      writer.flush();
+    } catch (JSONException e) {
+      log.warn("Error writing heartbeat", e);
+    }
   }
 
   private String resolveOnboardingAccountEmail(String token, HttpServletResponse response)
