@@ -228,6 +228,19 @@ final class EtendoGoJwtDalHelper {
     flushAndCommitDalChanges();
   }
 
+  static String getOnboardingDraft(Account account) {
+    return account == null ? null : account.getOnboardingDraft();
+  }
+
+  static void updateOnboardingDraft(Account account, String draftJson) {
+    if (account == null) {
+      return;
+    }
+    account.setOnboardingDraft(draftJson);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+  }
+
   static List<User> findEnvironmentUsersByAccountEmail(String accountEmail) {
     OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
         "as user where (user.username = :" + PARAM_ACCOUNT_EMAIL

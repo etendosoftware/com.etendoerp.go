@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge.email;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.Objects;
 
@@ -80,16 +82,60 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
         : EmailAuthorizationResult.rejected(404, DOCUMENT_RECORD_NOT_FOUND);
   }
 
+  /**
+   * Per-contract hook: the document-send family accepts recipient edits by default.
+   *
+   * @return {@code true} when {@code recipientEdits} is accepted
+   */
+  protected boolean isRecipientEditingEnabled() {
+    return true;
+  }
+
+  /**
+   * Per-contract hook: maximum number of recipients across the to and cc channels.
+   *
+   * @return maximum total recipient count
+   */
+  protected int maxRecipientsTotal() {
+    return 10;
+  }
+
   @Override
   public EmailRecipientResolution resolveRecipient(EmailContractCommand command) {
     Optional<EmailDocumentRecord> document = resolveDocument(command);
     if (!document.isPresent()) {
       return EmailRecipientResolution.rejected(404, DOCUMENT_RECORD_NOT_FOUND);
     }
-    if (!EmailContractCommandSupport.isValidEmail(document.get().getRecipientEmail())) {
-      return EmailContractCommandSupport.invalidRecipient();
+    Optional<EmailRecipientEdits> edits;
+    try {
+      edits = EmailRecipientEdits.fromBody(command.getBody());
+    } catch (EmailRecipientEdits.InvalidRecipientEditsException e) {
+      return EmailRecipientResolution.rejected(400, e.getMessage());
     }
-    return EmailRecipientResolution.serverResolved(document.get().getRecipientEmail());
+    if (edits.isPresent() && !isRecipientEditingEnabled()) {
+      return EmailRecipientResolution.rejected(400,
+          "recipientEdits is not accepted by this contract");
+    }
+    List<String> baseTo = new ArrayList<>();
+    String baseEmail = document.get().getRecipientEmail();
+    if (EmailContractCommandSupport.isValidEmail(baseEmail)) {
+      baseTo.add(baseEmail);
+    }
+    if (!edits.isPresent()) {
+      if (baseTo.isEmpty()) {
+        return EmailRecipientResolution.noRecipient("Document has no recipient email");
+      }
+      return EmailRecipientResolution.serverResolved(baseTo.get(0));
+    }
+    EmailRecipientSet finalSet = edits.get().applyTo(baseTo);
+    if (finalSet.isToEmpty()) {
+      return EmailRecipientResolution.noRecipient("Final recipient list is empty");
+    }
+    if (finalSet.totalCount() > maxRecipientsTotal()) {
+      return EmailRecipientResolution.rejected(400,
+          "Recipient count exceeds the maximum of " + maxRecipientsTotal());
+    }
+    return EmailRecipientResolution.serverResolved(finalSet);
   }
 
   @Override
@@ -108,7 +154,10 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
           "Document download link is not configured");
     }
     try {
-      return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipient(),
+      EmailRecipientSet recipients = recipient.getRecipientSet() != null
+          ? recipient.getRecipientSet()
+          : EmailRecipientSet.singleTo(recipient.getRecipient());
+      return EmailContractResolution.ready(new EmailProviderRequest(recipients,
           template, buildTemplateData(document.get(), downloadLink.get()), null));
     } catch (JSONException e) {
       throw new OBException("Could not build document email payload for " + name, e);
@@ -123,13 +172,18 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     Optional<EmailDocumentRecord> document = resolveDocument(command);
     String tenantId = document.map(EmailDocumentRecord::getClientId).orElse(null);
     String documentRecordId = resolveEffectiveRecordId(document.orElse(null), recordId);
-    return EmailContractCommandSupport.deliveryPolicy(
-        resolveSendIdempotencyKey(command, tenantId, documentRecordId),
-        EmailThrottleRule.perTenant(100, 3600),
-        EmailThrottleRule.perRecord(3, 3600),
-        EmailThrottleRule.perRecipient(20, 3600),
-        EmailThrottleRule.perDomain(200, 3600),
-        EmailThrottleRule.global(2000, 60));
+    EmailRecipientSet finalRecipients = recipient.getRecipientSet() != null
+        ? recipient.getRecipientSet()
+        : providerRequest.getRecipients();
+    return EmailDeliveryPolicy.serverDerived(
+        resolveSendIdempotencyKey(tenantId, documentRecordId, finalRecipients),
+        java.util.Arrays.asList(
+            EmailThrottleRule.perTenant(100, 3600),
+            EmailThrottleRule.perUser(50, 3600),
+            EmailThrottleRule.perRecord(3, 3600),
+            EmailThrottleRule.perRecipient(20, 3600),
+            EmailThrottleRule.perDomain(200, 3600),
+            EmailThrottleRule.global(2000, 60)));
   }
 
   private JSONObject buildTemplateData(EmailDocumentRecord document, String downloadLink)
@@ -161,25 +215,26 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     String recordId = EmailContractCommandSupport.text(command,
         EmailContractCommandSupport.FIELD_RECORD_ID);
     String documentRecordId = resolveEffectiveRecordId(document, recordId);
-    String idempotencyKey = resolveSendIdempotencyKey(command, document.getClientId(),
-        documentRecordId);
-    if (StringUtils.isAnyBlank(documentRecordId, document.getClientId(), idempotencyKey)) {
+    // The download-link token key stays stable per record so re-sends with edited recipients do
+    // not mint new tokens; it must not depend on the recipient-set hash.
+    String downloadTokenKey = EmailContractCommandSupport.idempotencyKey(name,
+        document.getClientId(), documentRecordId);
+    if (StringUtils.isAnyBlank(documentRecordId, document.getClientId(), downloadTokenKey)) {
       return Optional.empty();
     }
     return DocumentDownloadTokenService.createDownloadLink(name, inferSpecName(), documentRecordId,
-        document.getClientId(), idempotencyKey);
+        document.getClientId(), downloadTokenKey);
   }
 
   /**
-   * Uses the caller idempotency key when provided, otherwise derives a stable key from the trusted
-   * tenant and document record.
+   * Server-derived send idempotency key: {@code {contract}:{tenant}:{record}:send:v1:
+   * {recipientSetHash}}. The caller-supplied idempotency key is ignored for document sends.
    */
-  private String resolveSendIdempotencyKey(EmailContractCommand command, String tenantId,
-      String recordId) {
-    return EmailContractCommandSupport.firstNonBlank(
-        EmailContractCommandSupport.text(command,
-            EmailContractCommandSupport.FIELD_IDEMPOTENCY_KEY),
-        EmailContractCommandSupport.idempotencyKey(name, tenantId, recordId));
+  private String resolveSendIdempotencyKey(String tenantId, String recordId,
+      EmailRecipientSet finalRecipients) {
+    String normalizedTenant = StringUtils.defaultIfBlank(tenantId, "global");
+    return name + ":" + normalizedTenant + ":" + recordId + ":send:"
+        + EmailContractCommandSupport.VERSION + ":" + finalRecipients.recipientSetHash();
   }
 
   private String resolveEffectiveRecordId(EmailDocumentRecord document, String fallbackRecordId) {

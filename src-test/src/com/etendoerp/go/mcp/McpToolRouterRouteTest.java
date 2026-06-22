@@ -53,6 +53,7 @@ import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoReportService;
@@ -817,7 +818,7 @@ class McpToolRouterRouteTest {
     private static final String RECORD_ID = "record-001";
     private static final String ACTION_NAME = "Processed";
 
-    @org.junit.jupiter.api.BeforeEach
+    @BeforeEach
     void setupActionSupport() {
       supportMock.when(() -> McpToolRouterSupport.mapNeoResponseToActionResult(any()))
           .thenCallRealMethod();
@@ -944,6 +945,116 @@ class McpToolRouterRouteTest {
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       JSONObject body = new JSONObject(text);
       assertEquals("warning", body.getString("processResult"));
+    }
+  }
+
+  // ── neo_generate_amortization_plan (ETP-4232) ─────────────────────────────
+
+  @Nested
+  @DisplayName("route — neo_generate_amortization_plan (ETP-4232)")
+  class GenerateAmortizationPlanTests {
+
+    private static final Set<String> PROCESS_SCOPES_LOCAL = Set.of("neo:process");
+    private MockedStatic<AmortizationPlanService> amortMock;
+
+    @BeforeEach
+    void setUpAmort() {
+      amortMock = mockStatic(AmortizationPlanService.class);
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    void tearDownAmort() {
+      if (amortMock != null) {
+        amortMock.close();
+      }
+    }
+
+    @Test
+    @DisplayName("routes neo_generate_amortization_plan to handleGenerateAmortizationPlan and returns success")
+    void routesAmortizationToolToHandler() throws Exception {
+      JSONObject planBody = new JSONObject();
+      planBody.put("success", true);
+      planBody.put("amortizationId", "AMORT-001");
+      planBody.put("periodsGenerated", 12);
+      NeoResponse successResp = NeoResponse.ok(planBody);
+
+      amortMock.when(() -> AmortizationPlanService.generatePlan(eq("ASSET-001"))).thenReturn(successResp);
+
+      JSONObject args = new JSONObject();
+      args.put("assetId", "ASSET-001");
+
+      JSONObject result = router.route(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN,
+          args, PROCESS_SCOPES_LOCAL);
+
+      assertFalse(result.has("isError"), "Successful plan generation must not be an error");
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("AMORT-001"));
+    }
+
+    @Test
+    @DisplayName("neo_generate_amortization_plan propagates 400 error as isError")
+    void amortizationToolPropagates400() throws Exception {
+      NeoResponse errorResp = NeoResponse.error(400, "assetId is required");
+
+      amortMock.when(() -> AmortizationPlanService.generatePlan(isNull())).thenReturn(errorResp);
+
+      JSONObject result = router.route(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN,
+          null, PROCESS_SCOPES_LOCAL);
+
+      assertTrue(result.getBoolean("isError"), "Error response must set isError=true");
+    }
+
+    @Test
+    @DisplayName("neo_generate_amortization_plan propagates 404 as isError")
+    void amortizationToolPropagates404() throws Exception {
+      NeoResponse notFoundResp = NeoResponse.error(404, "Asset not found: UNKNOWN");
+
+      amortMock.when(() -> AmortizationPlanService.generatePlan(eq("UNKNOWN"))).thenReturn(notFoundResp);
+
+      JSONObject args = new JSONObject();
+      args.put("assetId", "UNKNOWN");
+
+      JSONObject result = router.route(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN,
+          args, PROCESS_SCOPES_LOCAL);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("Asset not found"));
+    }
+
+    @Test
+    @DisplayName("neo_generate_amortization_plan propagates 409 as isError")
+    void amortizationToolPropagates409() throws Exception {
+      NeoResponse conflictResp = NeoResponse.error(409,
+          "Asset already has a generated amortization plan");
+
+      amortMock.when(() -> AmortizationPlanService.generatePlan(eq("ASSET-001"))).thenReturn(conflictResp);
+
+      JSONObject args = new JSONObject();
+      args.put("assetId", "ASSET-001");
+
+      JSONObject result = router.route(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN,
+          args, PROCESS_SCOPES_LOCAL);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("already has a generated amortization plan"));
+    }
+
+    @Test
+    @DisplayName("neo_generate_amortization_plan with missing assetId arg delegates null to service")
+    void amortizationToolMissingAssetIdDelegatesToService() throws Exception {
+      // When args has no assetId, the handler passes null to the service.
+      NeoResponse errorResp = NeoResponse.error(400, "assetId is required");
+
+      amortMock.when(() -> AmortizationPlanService.generatePlan(isNull())).thenReturn(errorResp);
+
+      // Pass args without assetId
+      JSONObject args = new JSONObject();
+      JSONObject result = router.route(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN,
+          args, PROCESS_SCOPES_LOCAL);
+
+      assertTrue(result.getBoolean("isError"));
     }
   }
 }

@@ -49,6 +49,9 @@ public class DalEmailSafetyStore implements EmailSafetyStore {
   private static final String RECORD_AUDIT = "AUDIT";
   private static final String RECORD_THROTTLE = "THROTTLE";
   private static final String RECORD_KILL_SWITCH = "KILL_SWITCH";
+  private static final String RECORD_SUPPRESSION = "SUPPRESSION";
+  static final String SCOPE_ADDRESS = "ADDRESS";
+  static final String SCOPE_DOMAIN = "DOMAIN";
   private static final String GLOBAL_TENANT = "global";
   private static final String ZERO_ID = "0";
 
@@ -172,30 +175,56 @@ public class DalEmailSafetyStore implements EmailSafetyStore {
       }
     }
 
-    for (EmailThrottleRule rule : rules) {
-      String key = StringUtils.trimToNull(rule.resolveKey(context));
-      if (key != null) {
-        incrementThrottle(rule, key, context, now);
+    // Writing client-0 throttle records from a user request requires admin mode.
+    OBContext.setAdminMode();
+    try {
+      for (EmailThrottleRule rule : rules) {
+        String key = StringUtils.trimToNull(rule.resolveKey(context));
+        if (key != null) {
+          incrementThrottle(rule, key, context, now);
+        }
       }
+      OBDal.getInstance().flush();
+    } finally {
+      OBContext.restorePreviousMode();
     }
-    OBDal.getInstance().flush();
     return EmailThrottleResult.allowed();
+  }
+
+  @Override
+  public boolean isRecipientSuppressed(String tenantId, String emailAddress) {
+    String normalized = EmailRecipientSet.normalizeAddress(emailAddress);
+    if (normalized == null) {
+      return false;
+    }
+    String addressHash = hashAddress(normalized);
+    if (addressHash != null && findSuppression(SCOPE_ADDRESS, addressHash).isPresent()) {
+      return true;
+    }
+    String domain = domainOf(normalized);
+    return domain != null && findSuppression(SCOPE_DOMAIN, domain).isPresent();
   }
 
   @Override
   public void recordAudit(EmailAuditRecord auditRecord) {
     Objects.requireNonNull(auditRecord, "Email audit record cannot be null");
-    BaseOBObject auditEntry = newRecord(auditRecord.getTenantId());
-    auditEntry.set(PROP_RECORD_TYPE, RECORD_AUDIT);
-    auditEntry.set(PROP_CONTRACT_NAME, auditRecord.getContractName());
-    auditEntry.set(PROP_TEMPLATE, auditRecord.getTemplate());
-    auditEntry.set(PROP_TENANT_ID, tenantKey(auditRecord.getTenantId()));
-    auditEntry.set(PROP_IDEMPOTENCY_KEY, auditRecord.getIdempotencyKey());
-    auditEntry.set(PROP_STATUS, auditRecord.getStatus());
-    auditEntry.set(PROP_AUDIT_TIME, new Date(auditRecord.getCreatedAtMillis()));
-    auditEntry.set(PROP_PAYLOAD, auditPayload(auditRecord).toString());
-    OBDal.getInstance().save(auditEntry);
-    OBDal.getInstance().flush();
+    // Writing a client-0 record from a user request requires admin mode (see checkWriteAccess).
+    OBContext.setAdminMode();
+    try {
+      BaseOBObject auditEntry = newRecord();
+      auditEntry.set(PROP_RECORD_TYPE, RECORD_AUDIT);
+      auditEntry.set(PROP_CONTRACT_NAME, auditRecord.getContractName());
+      auditEntry.set(PROP_TEMPLATE, auditRecord.getTemplate());
+      auditEntry.set(PROP_TENANT_ID, tenantKey(auditRecord.getTenantId()));
+      auditEntry.set(PROP_IDEMPOTENCY_KEY, auditRecord.getIdempotencyKey());
+      auditEntry.set(PROP_STATUS, auditRecord.getStatus());
+      auditEntry.set(PROP_AUDIT_TIME, new Date(auditRecord.getCreatedAtMillis()));
+      auditEntry.set(PROP_PAYLOAD, auditPayload(auditRecord).toString());
+      OBDal.getInstance().save(auditEntry);
+      OBDal.getInstance().flush();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   private Optional<BaseOBObject> findKillSwitch(String scope, String key) {
@@ -212,6 +241,22 @@ public class DalEmailSafetyStore implements EmailSafetyStore {
     query.setNamedParameter(PARAM_RECORD_TYPE, RECORD_KILL_SWITCH);
     query.setNamedParameter(PARAM_SCOPE, scope);
     query.setNamedParameter(PARAM_BUCKET_KEY, normalizedKey);
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    query.setMaxResult(1);
+    List<BaseOBObject> records = query.list();
+    return records.isEmpty() ? Optional.empty() : Optional.of(records.get(0));
+  }
+
+  private Optional<BaseOBObject> findSuppression(String scope, String bucketKey) {
+    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_EMAIL_SAFETY,
+        QUERY_PREFIX + PROP_RECORD_TYPE + " = :" + PARAM_RECORD_TYPE
+            + QUERY_AND + PROP_SCOPE + " = :" + PARAM_SCOPE
+            + QUERY_AND + PROP_BUCKET_KEY + " = :" + PARAM_BUCKET_KEY
+            + QUERY_AND + PROP_ACTIVE + " = true");
+    query.setNamedParameter(PARAM_RECORD_TYPE, RECORD_SUPPRESSION);
+    query.setNamedParameter(PARAM_SCOPE, scope);
+    query.setNamedParameter(PARAM_BUCKET_KEY, bucketKey);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     query.setMaxResult(1);
@@ -242,7 +287,7 @@ public class DalEmailSafetyStore implements EmailSafetyStore {
   private void incrementThrottle(EmailThrottleRule rule, String key, EmailSendContext context,
       long now) {
     BaseOBObject throttleEntry = findThrottle(rule, key).orElseGet(() -> {
-      BaseOBObject created = newRecord(context.getTenantId());
+      BaseOBObject created = newRecord();
       created.set(PROP_RECORD_TYPE, RECORD_THROTTLE);
       created.set(PROP_SCOPE, rule.getScope());
       created.set(PROP_BUCKET_KEY, key);
@@ -259,33 +304,14 @@ public class DalEmailSafetyStore implements EmailSafetyStore {
     OBDal.getInstance().save(throttleEntry);
   }
 
-  private BaseOBObject newRecord(String tenantId) {
+  private BaseOBObject newRecord() {
     BaseOBObject safetyRecord = recordSupplier.get();
-    safetyRecord.set(PROP_CLIENT, resolveClient(tenantId));
+    // ETGO_Email_Safety is a SYSTEM-level table (AD access level 4): every record must be owned
+    // by client 0. Per-tenant scoping is tracked in the tenantId column, not via the client.
+    safetyRecord.set(PROP_CLIENT, OBDal.getInstance().get(Client.class, ZERO_ID));
     safetyRecord.set(PROP_ORGANIZATION, OBDal.getInstance().get(Organization.class, ZERO_ID));
     safetyRecord.set(PROP_ACTIVE, true);
     return safetyRecord;
-  }
-
-  private Client resolveClient(String tenantId) {
-    String clientId = currentClientId();
-    Client client = StringUtils.isBlank(clientId) ? null : OBDal.getInstance().get(Client.class,
-        clientId);
-    if (client == null && StringUtils.isNotBlank(tenantId) && !GLOBAL_TENANT.equals(tenantId)) {
-      client = OBDal.getInstance().get(Client.class, tenantId);
-    }
-    return client != null ? client : OBDal.getInstance().get(Client.class, ZERO_ID);
-  }
-
-  private static String currentClientId() {
-    try {
-      OBContext context = OBContext.getOBContext();
-      return context == null || context.getCurrentClient() == null
-          ? null
-          : StringUtils.trimToNull(context.getCurrentClient().getId());
-    } catch (Exception e) {
-      return null;
-    }
   }
 
   private static BaseOBObject newSafetyRecord() {
@@ -379,6 +405,18 @@ public class DalEmailSafetyStore implements EmailSafetyStore {
 
   private static Object nullToJson(String value) {
     return value == null ? JSONObject.NULL : value;
+  }
+
+  private static String hashAddress(String normalizedAddress) {
+    return hash(normalizedAddress);
+  }
+
+  private static String domainOf(String normalizedAddress) {
+    int at = normalizedAddress.lastIndexOf('@');
+    if (at < 0 || at == normalizedAddress.length() - 1) {
+      return null;
+    }
+    return normalizedAddress.substring(at + 1).toLowerCase();
   }
 
   private static String hash(String value) {
