@@ -79,7 +79,7 @@ public class EtendoGoJwtServletCoverageTest {
   public void registerDatabaseErrorReturnsServerError() throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = jsonRequest("/register",
-        "{\"email\":\"new@test.com\",\"password\":\"pass123\",\"name\":\"New User\"}");
+        "{\"email\":\"new@test.com\",\"password\":\"Str0ng!Pass1\",\"name\":\"New User\"}");
 
     try (var ctxMock = mockStatic(OBContext.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
@@ -303,7 +303,7 @@ public class EtendoGoJwtServletCoverageTest {
   public void changePasswordInvalidTokenReturnsUnauthorized() throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = jsonRequest("/change-password",
-        "{\"currentPassword\":\"a\",\"newPassword\":\"b\"}");
+        "{\"currentPassword\":\"a\",\"newPassword\":\"Str0ng!Pass1\"}");
     when(req.getHeader("Authorization")).thenReturn("Bearer bad-token");
 
     try (var ctxMock = mockStatic(OBContext.class);
@@ -341,7 +341,7 @@ public class EtendoGoJwtServletCoverageTest {
   public void changePasswordDatabaseErrorReturnsServerError() throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = jsonRequest("/change-password",
-        "{\"currentPassword\":\"a\",\"newPassword\":\"b\"}");
+        "{\"currentPassword\":\"a\",\"newPassword\":\"Str0ng!Pass1\"}");
     when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
 
     try (var ctxMock = mockStatic(OBContext.class);
@@ -468,7 +468,7 @@ public class EtendoGoJwtServletCoverageTest {
   public void passwordResetConfirmDatabaseErrorReturnsServerError() throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = jsonRequest("/password-reset/confirm",
-        "{\"token\":\"valid-token\",\"password\":\"new-pass\"}");
+        "{\"token\":\"valid-token\",\"password\":\"Str0ng!Pass1\"}");
 
     try (var ctxMock = mockStatic(OBContext.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
