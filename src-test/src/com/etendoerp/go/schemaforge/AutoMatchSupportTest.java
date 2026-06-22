@@ -72,8 +72,9 @@ public class AutoMatchSupportTest {
   private static final java.util.Map<FIN_FinaccTransaction, String> KEYS = new java.util.HashMap<>();
   private static final Function<FIN_FinaccTransaction, String> KEY_FN = KEYS::get;
 
+  /** A partner group whose members sum to the target amount is returned in full. */
   @Test
-  public void matchByKey_fullPartnerGroupSums_returnsGroup() {
+  public void testMatchByKeyFullPartnerGroupSumsReturnsGroup() {
     FIN_FinaccTransaction a = txn("a", "100.00", "bp:1");
     FIN_FinaccTransaction b = txn("b", "50.00", "bp:1");
     List<FIN_FinaccTransaction> pool = Arrays.asList(a, b);
@@ -86,8 +87,9 @@ public class AutoMatchSupportTest {
     assertTrue(result.contains(b));
   }
 
+  /** A partner group whose members do not sum to the target amount yields no match. */
   @Test
-  public void matchByKey_groupSumDoesNotMatch_returnsEmpty() {
+  public void testMatchByKeyGroupSumDoesNotMatchReturnsEmpty() {
     FIN_FinaccTransaction a = txn("a", "100.00", "bp:1");
     FIN_FinaccTransaction b = txn("b", "30.00", "bp:1");
     List<FIN_FinaccTransaction> pool = Arrays.asList(a, b);
@@ -98,8 +100,9 @@ public class AutoMatchSupportTest {
     assertTrue(result.isEmpty());
   }
 
+  /** A single-member group is a 1:1 case and is ignored even when it matches the amount. */
   @Test
-  public void matchByKey_singletonGroupIgnored() {
+  public void testMatchByKeySingletonGroupIgnored() {
     // A single transaction is a 1:1 case, not a 1:N group — must be ignored even if it matches.
     FIN_FinaccTransaction a = txn("a", "150.00", "bp:1");
     List<FIN_FinaccTransaction> pool = Arrays.asList(a);
@@ -110,8 +113,9 @@ public class AutoMatchSupportTest {
     assertTrue(result.isEmpty());
   }
 
+  /** Among several partner partitions, only the one that sums to the target is returned. */
   @Test
-  public void matchByKey_picksTheMatchingPartitionAmongSeveral() {
+  public void testMatchByKeyPicksTheMatchingPartitionAmongSeveral() {
     FIN_FinaccTransaction a = txn("a", "100.00", "bp:1");   // bp:1 sums 100, no match alone
     FIN_FinaccTransaction b = txn("b", "70.00", "bp:2");
     FIN_FinaccTransaction c = txn("c", "30.00", "bp:2");    // bp:2 sums 100 → match
@@ -125,8 +129,9 @@ public class AutoMatchSupportTest {
     assertTrue(result.contains(c));
   }
 
+  /** A group sum within the tolerance band is treated as a match. */
   @Test
-  public void matchByKey_withinTolerance() {
+  public void testMatchByKeyWithinTolerance() {
     FIN_FinaccTransaction a = txn("a", "100.00", "bp:1");
     FIN_FinaccTransaction b = txn("b", "50.005", "bp:1");
     List<FIN_FinaccTransaction> pool = Arrays.asList(a, b);
@@ -137,8 +142,9 @@ public class AutoMatchSupportTest {
     assertEquals(2, result.size());
   }
 
+  /** Transactions with a blank/null signal key are skipped (never grouped). */
   @Test
-  public void matchByKey_blankKeySkipped() {
+  public void testMatchByKeyBlankKeySkipped() {
     FIN_FinaccTransaction a = txn("a", "100.00", null);
     FIN_FinaccTransaction b = txn("b", "50.00", null);
     List<FIN_FinaccTransaction> pool = Arrays.asList(a, b);
@@ -155,7 +161,7 @@ public class AutoMatchSupportTest {
 
   /** A null matching algorithm on the account → standardMatchLevel returns null → check rules. */
   @Test
-  public void classifyPendingLine_noAlgorithm_noRuleMatch_returnsPending() {
+  public void testClassifyPendingLineNoAlgorithmNoRuleMatchReturnsPending() {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     when(account.getMatchingAlgorithm()).thenReturn(null);
     FIN_BankStatementLine line = pendingLine("Bank fee May", "", "");
@@ -170,7 +176,7 @@ public class AutoMatchSupportTest {
    * rule match → state must be {@code byRule}.
    */
   @Test
-  public void classifyPendingLine_noAlgorithm_ruleMatches_returnsByRule() {
+  public void testClassifyPendingLineNoAlgorithmRuleMatchesReturnsByRule() {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     when(account.getMatchingAlgorithm()).thenReturn(null);
     FIN_BankStatementLine line = pendingLine("Bank commission fee", "", "");
@@ -188,7 +194,7 @@ public class AutoMatchSupportTest {
    * Standard algorithm returns a STRONG match → state must be {@code suggested}.
    */
   @Test
-  public void classifyPendingLine_standardAlgorithmStrongMatch_returnsSuggested() {
+  public void testClassifyPendingLineStandardAlgorithmStrongMatchReturnsSuggested() {
     FIN_FinancialAccount account = accountWithAlgorithm("com.example.DummyAlgo");
     FIN_BankStatementLine line = pendingLine("Transfer ACME", "", "");
 
@@ -210,7 +216,7 @@ public class AutoMatchSupportTest {
    * Standard algorithm returns a non-STRONG, non-NOMATCH level → state must be {@code difference}.
    */
   @Test
-  public void classifyPendingLine_standardAlgorithmWeakMatch_returnsDifference() {
+  public void testClassifyPendingLineStandardAlgorithmWeakMatchReturnsDifference() {
     FIN_FinancialAccount account = accountWithAlgorithm("com.example.DummyAlgo");
     FIN_BankStatementLine line = pendingLine("Transfer ACME", "", "");
 
@@ -232,7 +238,7 @@ public class AutoMatchSupportTest {
    * Standard algorithm finds no match (NOMATCH level) and no rule applies → {@code pending}.
    */
   @Test
-  public void classifyPendingLine_noStandardMatchNoRule_returnsPending() {
+  public void testClassifyPendingLineNoStandardMatchNoRuleReturnsPending() {
     FIN_FinancialAccount account = accountWithAlgorithm("com.example.DummyAlgo");
     FIN_BankStatementLine line = pendingLine("Unknown txn", "", "");
 
@@ -253,9 +259,13 @@ public class AutoMatchSupportTest {
   // mergeMatchGroups (BankStatementsSupport)
   // ---------------------------------------------------------------------------
 
-  /** Lines with a blank or missing matchGroupId pass through unchanged. */
+  /**
+   * Lines with a blank or missing matchGroupId pass through unchanged.
+   *
+   * @throws Exception if building the JSON line objects fails
+   */
   @Test
-  public void mergeMatchGroups_blankGroupId_passThrough() throws Exception {
+  public void testMergeMatchGroupsBlankGroupIdPassThrough() throws Exception {
     JSONObject l1 = line("L1", "", "100.00", "100.00", "0.00");
     JSONObject l2 = line("L2", "", "50.00", "0.00", "50.00");
     JSONArray input = new JSONArray();
@@ -273,9 +283,11 @@ public class AutoMatchSupportTest {
    * Two sub-lines sharing the same matchGroupId: the second is absorbed into the first.
    * The result has one entry whose {@code txns} contains both transactions and whose
    * {@code in}/{@code out}/{@code amount} are summed.
+   *
+   * @throws Exception if building the JSON line objects fails
    */
   @Test
-  public void mergeMatchGroups_twoSubLines_mergeIntoOne() throws Exception {
+  public void testMergeMatchGroupsTwoSubLinesMergeIntoOne() throws Exception {
     JSONObject txnA = new JSONObject().put("id", "T1").put("amount", "100.00");
     JSONObject txnB = new JSONObject().put("id", "T2").put("amount", "50.00");
 
@@ -304,9 +316,11 @@ public class AutoMatchSupportTest {
   /**
    * Three sub-lines sharing the same matchGroupId: all three collapse into a single merged line
    * with three entries in {@code txns} and the summed amounts.
+   *
+   * @throws Exception if building the JSON line objects fails
    */
   @Test
-  public void mergeMatchGroups_threeSubLines_allMerge() throws Exception {
+  public void testMergeMatchGroupsThreeSubLinesAllMerge() throws Exception {
     JSONObject l1 = line("L1", "GRP-X", "40.00", "40.00", "0.00");
     l1.put("txns", new JSONArray().put(new JSONObject().put("id", "T1")));
     JSONObject l2 = line("L2", "GRP-X", "30.00", "30.00", "0.00");

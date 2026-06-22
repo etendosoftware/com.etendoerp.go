@@ -53,18 +53,21 @@ public class MatchRuleEngineTest {
   // buildSearchText
   // ---------------------------------------------------------------------------
 
+  /** An all-blank input builds an empty search text. */
   @Test
-  public void buildSearchText_allBlank_returnsEmpty() {
+  public void testBuildSearchTextAllBlankReturnsEmpty() {
     assertEquals("", MatchRuleEngine.buildSearchText("", "", ""));
   }
 
+  /** A description-only input is trimmed and lower-cased. */
   @Test
-  public void buildSearchText_descOnly_returnsTrimmedLower() {
+  public void testBuildSearchTextDescOnlyReturnsTrimmedLower() {
     assertEquals("commission fee", MatchRuleEngine.buildSearchText("COMMISSION FEE", "", ""));
   }
 
+  /** All three fields concatenate with single spaces and lower-case. */
   @Test
-  public void buildSearchText_allFields_concatenatedWithSpaces() {
+  public void testBuildSearchTextAllFieldsConcatenatedWithSpaces() {
     String result = MatchRuleEngine.buildSearchText("COMMISSION FEE", "REF-001", "ACME");
     assertEquals("commission fee ref-001 acme", result);
   }
@@ -73,20 +76,23 @@ public class MatchRuleEngineTest {
   // matches — Contains
   // ---------------------------------------------------------------------------
 
+  /** A Contains rule matches text that includes the pattern. */
   @Test
-  public void matches_contains_hit() {
+  public void testMatchesContainsHit() {
     MatchRuleEngine.Rule r = rule("1", MatchRuleEngine.COND_CONTAINS, "commission");
     assertTrue(MatchRuleEngine.matches(r, "bank commission fee may"));
   }
 
+  /** A Contains rule does not match text without the pattern. */
   @Test
-  public void matches_contains_miss() {
+  public void testMatchesContainsMiss() {
     MatchRuleEngine.Rule r = rule("1", MatchRuleEngine.COND_CONTAINS, "commission");
     assertFalse(MatchRuleEngine.matches(r, "bank transfer fee may"));
   }
 
+  /** A Contains rule is case-insensitive. */
   @Test
-  public void matches_contains_caseInsensitive() {
+  public void testMatchesContainsCaseInsensitive() {
     MatchRuleEngine.Rule r = rule("1", MatchRuleEngine.COND_CONTAINS, "COMMISSION");
     assertTrue(MatchRuleEngine.matches(r, "bank commission fee"));
   }
@@ -95,14 +101,16 @@ public class MatchRuleEngineTest {
   // matches — Starts with
   // ---------------------------------------------------------------------------
 
+  /** A Starts-with rule matches text that begins with the pattern. */
   @Test
-  public void matches_starts_hit() {
+  public void testMatchesStartsHit() {
     MatchRuleEngine.Rule r = rule("2", MatchRuleEngine.COND_STARTS, "bank fee");
     assertTrue(MatchRuleEngine.matches(r, "bank fee may 2026"));
   }
 
+  /** A Starts-with rule does not match when the pattern is mid-string. */
   @Test
-  public void matches_starts_miss() {
+  public void testMatchesStartsMiss() {
     MatchRuleEngine.Rule r = rule("2", MatchRuleEngine.COND_STARTS, "bank fee");
     assertFalse(MatchRuleEngine.matches(r, "monthly bank fee"));
   }
@@ -111,28 +119,36 @@ public class MatchRuleEngineTest {
   // matches — Regex
   // ---------------------------------------------------------------------------
 
+  /** A Regex rule matches text that satisfies the anchored pattern. */
   @Test
-  public void matches_regex_hit() {
+  public void testMatchesRegexHit() {
     MatchRuleEngine.Rule r = rule("3", MatchRuleEngine.COND_REGEX, "^commission.*fee$");
     assertTrue(MatchRuleEngine.matches(r, "commission maintenance fee"));
   }
 
+  /** A Regex rule does not match text that fails the anchored pattern. */
   @Test
-  public void matches_regex_miss() {
+  public void testMatchesRegexMiss() {
     MatchRuleEngine.Rule r = rule("3", MatchRuleEngine.COND_REGEX, "^commission.*fee$");
     assertFalse(MatchRuleEngine.matches(r, "bank transfer 2026"));
   }
 
+  /**
+   * A catastrophic-backtracking pattern (end-anchored nested quantifier against a trailing
+   * non-matching char) must time out under the 200ms cap and return false.
+   */
   @Test
-  public void matches_regex_catastrophicBacktracking_returnsFalse() {
-    // Pattern known to cause catastrophic backtracking — engine should time out and return false.
-    MatchRuleEngine.Rule r = rule("4", MatchRuleEngine.COND_REGEX, "(a+)+");
+  public void testMatchesRegexCatastrophicBacktrackingReturnsFalse() {
+    // The end anchor + trailing '!' force the engine to explore every partition under .find();
+    // the 200ms guard times out and matches() returns false.
+    MatchRuleEngine.Rule r = rule("4", MatchRuleEngine.COND_REGEX, "(a+)+$");
     assertFalse(MatchRuleEngine.matches(r,
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"));
   }
 
+  /** An invalid regex pattern returns false (never throws). */
   @Test
-  public void matches_regex_invalidPattern_returnsFalse() {
+  public void testMatchesRegexInvalidPatternReturnsFalse() {
     MatchRuleEngine.Rule r = rule("5", MatchRuleEngine.COND_REGEX, "[invalid(");
     assertFalse(MatchRuleEngine.matches(r, "anything"));
   }
@@ -141,20 +157,23 @@ public class MatchRuleEngineTest {
   // matches — edge cases
   // ---------------------------------------------------------------------------
 
+  /** Blank text never matches. */
   @Test
-  public void matches_blankText_returnsFalse() {
+  public void testMatchesBlankTextReturnsFalse() {
     MatchRuleEngine.Rule r = rule("6", MatchRuleEngine.COND_CONTAINS, "fee");
     assertFalse(MatchRuleEngine.matches(r, ""));
   }
 
+  /** A blank pattern never matches. */
   @Test
-  public void matches_blankPattern_returnsFalse() {
+  public void testMatchesBlankPatternReturnsFalse() {
     MatchRuleEngine.Rule r = rule("7", MatchRuleEngine.COND_CONTAINS, "");
     assertFalse(MatchRuleEngine.matches(r, "bank fee"));
   }
 
+  /** An unknown text condition never matches. */
   @Test
-  public void matches_unknownCondition_returnsFalse() {
+  public void testMatchesUnknownConditionReturnsFalse() {
     MatchRuleEngine.Rule r = rule("8", "X", "fee");
     assertFalse(MatchRuleEngine.matches(r, "bank fee"));
   }
@@ -163,8 +182,9 @@ public class MatchRuleEngineTest {
   // evaluate — priority ordering
   // ---------------------------------------------------------------------------
 
+  /** Evaluating against an empty rule set yields no match. */
   @Test
-  public void evaluate_noRules_noMatch() {
+  public void testEvaluateNoRulesNoMatch() {
     MatchRuleEngine.MatchResult result = MatchRuleEngine.evaluate(
         "commission fee", "", "", Collections.emptyList());
     assertFalse(result.isMatched());
@@ -172,8 +192,9 @@ public class MatchRuleEngineTest {
     assertTrue(result.alternatives.isEmpty());
   }
 
+  /** A single matching rule becomes the primary with no alternatives. */
   @Test
-  public void evaluate_singleMatch_primarySet() {
+  public void testEvaluateSingleMatchPrimarySet() {
     List<MatchRuleEngine.Rule> rules = Arrays.asList(
         rule("R1", MatchRuleEngine.COND_CONTAINS, "commission"),
         rule("R2", MatchRuleEngine.COND_CONTAINS, "transfer"));
@@ -183,8 +204,9 @@ public class MatchRuleEngineTest {
     assertTrue(result.alternatives.isEmpty());
   }
 
+  /** When several rules match, the lowest priority value wins and the rest are alternatives. */
   @Test
-  public void evaluate_multipleMatches_lowestPriorityWinsAlternativesListed() {
+  public void testEvaluateMultipleMatchesLowestPriorityWinsAlternativesListed() {
     // Both rules match; R1 has lower priority value (= higher priority) → primary.
     List<MatchRuleEngine.Rule> rules = Arrays.asList(
         rule("R1", MatchRuleEngine.COND_CONTAINS, "fee", 10),
@@ -196,16 +218,18 @@ public class MatchRuleEngineTest {
     assertEquals("R2", result.alternatives.get(0).id);
   }
 
+  /** An inactive rule (simulated by exclusion from the list) yields no match. */
   @Test
-  public void evaluate_inactiveRuleNotEvaluated_noMatch() {
+  public void testEvaluateInactiveRuleNotEvaluatedNoMatch() {
     // An inactive rule should not even be loaded; we simulate by not including it.
     List<MatchRuleEngine.Rule> rules = Collections.emptyList();
     MatchRuleEngine.MatchResult result = MatchRuleEngine.evaluate("commission fee", "", "", rules);
     assertFalse(result.isMatched());
   }
 
+  /** The description field is used in the search text. */
   @Test
-  public void evaluate_descriptionUsed() {
+  public void testEvaluateDescriptionUsed() {
     List<MatchRuleEngine.Rule> rules = Arrays.asList(
         rule("R1", MatchRuleEngine.COND_CONTAINS, "impuestos"));
     MatchRuleEngine.MatchResult result = MatchRuleEngine.evaluate("PAGO IMPUESTOS MAY", "", "", rules);
@@ -213,24 +237,27 @@ public class MatchRuleEngineTest {
     assertEquals("R1", result.primary.id);
   }
 
+  /** The reference field is used in the search text. */
   @Test
-  public void evaluate_referenceUsed() {
+  public void testEvaluateReferenceUsed() {
     List<MatchRuleEngine.Rule> rules = Arrays.asList(
         rule("R1", MatchRuleEngine.COND_CONTAINS, "ref-999"));
     MatchRuleEngine.MatchResult result = MatchRuleEngine.evaluate("", "REF-999", "", rules);
     assertTrue(result.isMatched());
   }
 
+  /** The partner name field is used in the search text. */
   @Test
-  public void evaluate_partnerNameUsed() {
+  public void testEvaluatePartnerNameUsed() {
     List<MatchRuleEngine.Rule> rules = Arrays.asList(
         rule("R1", MatchRuleEngine.COND_CONTAINS, "acme"));
     MatchRuleEngine.MatchResult result = MatchRuleEngine.evaluate("", "", "ACME CORP", rules);
     assertTrue(result.isMatched());
   }
 
+  /** When no rule matches, the result reports no match and a null primary. */
   @Test
-  public void evaluate_noMatch_returnsNoMatchResult() {
+  public void testEvaluateNoMatchReturnsNoMatchResult() {
     List<MatchRuleEngine.Rule> rules = Arrays.asList(
         rule("R1", MatchRuleEngine.COND_CONTAINS, "commission"));
     MatchRuleEngine.MatchResult result = MatchRuleEngine.evaluate("bank transfer", "", "", rules);
@@ -238,8 +265,9 @@ public class MatchRuleEngineTest {
     assertNull(result.primary);
   }
 
+  /** The alternatives list returned by evaluate is unmodifiable. */
   @Test
-  public void evaluate_alternativesListIsUnmodifiable() {
+  public void testEvaluateAlternativesListIsUnmodifiable() {
     List<MatchRuleEngine.Rule> rules = Arrays.asList(
         rule("R1", MatchRuleEngine.COND_CONTAINS, "fee", 10),
         rule("R2", MatchRuleEngine.COND_CONTAINS, "bank", 20));

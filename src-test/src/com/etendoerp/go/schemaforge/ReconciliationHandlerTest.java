@@ -153,12 +153,20 @@ public class ReconciliationHandlerTest {
     when(ps.executeQuery()).thenReturn(rs);
   }
 
-  /** pendingLines with no rows returns an empty list and a zero total. */
+  /**
+   * pendingLines with no rows returns an empty list and a zero total.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
   @Test
   public void testPendingLinesEmpty() throws Exception {
     PreparedStatement ps = mock(PreparedStatement.class);
     ResultSet rs = mock(ResultSet.class);
     when(rs.next()).thenReturn(false);
+
+    // loadRules runs its OWN prepareStatement against the same mocked connection; stub the spy
+    // seam so setString(1, ACC_ID) is only invoked once (by the main query).
+    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
@@ -178,7 +186,11 @@ public class ReconciliationHandlerTest {
     }
   }
 
-  /** pendingLines with two rows returns both and sums their amounts. */
+  /**
+   * pendingLines with two rows returns both and sums their amounts.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
   @Test
   public void testPendingLinesNonEmptySumsTotal() throws Exception {
     PreparedStatement ps = mock(PreparedStatement.class);
@@ -188,6 +200,10 @@ public class ReconciliationHandlerTest {
     when(rs.getTimestamp("datetrx")).thenReturn(null);
     when(rs.getString("description")).thenReturn("DESC1", "DESC2");
     when(rs.getBigDecimal("amount")).thenReturn(new BigDecimal("100.00"), new BigDecimal("19.51"));
+
+    // loadRules runs its OWN prepareStatement against the same mocked connection; stub the spy
+    // seam so it does not consume the shared rs.next() sequence reserved for the main query.
+    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
@@ -205,7 +221,63 @@ public class ReconciliationHandlerTest {
     }
   }
 
-  /** Optional dateFrom/dateTo/q filters bind extra params after the base three. */
+  /**
+   * The split sub-lines of a single 1:N reconciliation share a {@code match_group_id}; the handler
+   * must collapse them into ONE line (amounts summed) and count the group as a single reconciled
+   * entry. Both rows are reconciled, so the matching engine is short-circuited and never invoked.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testPendingLinesMergesMatchGroup() throws Exception {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    // Two split sub-lines of the SAME 1:N reconcile group.
+    when(rs.next()).thenReturn(true, true, false);
+    when(rs.getString("fin_bankstatementline_id")).thenReturn("l1", "l2");
+    when(rs.getTimestamp("datetrx")).thenReturn(null);
+    when(rs.getString("description")).thenReturn("Pago", "Pago");
+    when(rs.getBigDecimal("amount")).thenReturn(new BigDecimal("25.30"), new BigDecimal("25.30"));
+    // Both reconciled → state short-circuits to "reconciled" (no classifyPendingLine call).
+    when(rs.getString("line_status")).thenReturn("reconciled", "reconciled");
+    // Same non-blank group id → the two rows must merge into the first occurrence.
+    when(rs.getString("match_group_id")).thenReturn("G1", "G1");
+
+    // loadRules runs its OWN prepareStatement against the same mocked connection; stub the spy
+    // seam so it does not consume the shared rs.next() sequence reserved for the main query.
+    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubConnection(dal, ps, rs);
+
+      NeoResponse response = handler.buildPendingLines(ACC_ID, CLIENT_ID,
+          new HashSet<>(Arrays.asList(ORG_ID)), Collections.emptyMap());
+
+      assertEquals(200, response.getHttpStatus());
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+
+      // The two sub-lines collapse into a single merged line.
+      JSONArray lines = data.getJSONArray("lines");
+      assertEquals(1, lines.length());
+
+      // Amounts summed: 25.30 + 25.30 == 50.60 (both on the merged line and on the response total).
+      JSONObject merged = lines.getJSONObject(0);
+      assertEquals(0, new BigDecimal("50.60").compareTo(new BigDecimal(merged.getString("amount"))));
+      assertEquals(0, new BigDecimal("50.60").compareTo(new BigDecimal(data.getString("total"))));
+
+      // The group is counted once as reconciled, not twice.
+      assertEquals(1, data.getJSONObject("counts").getInt("reconciled"));
+      assertEquals("reconciled", merged.getString("status"));
+    }
+  }
+
+  /**
+   * Optional dateFrom/dateTo/q filters bind extra params after the base three.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
   @Test
   public void testPendingLinesBindsOptionalFilters() throws Exception {
     PreparedStatement ps = mock(PreparedStatement.class);
@@ -233,7 +305,11 @@ public class ReconciliationHandlerTest {
 
   // ── candidates ─────────────────────────────────────────────────────────────
 
-  /** candidates marks the transactions the DAO suggests for the selected line. */
+  /**
+   * candidates marks the transactions the DAO suggests for the selected line.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
   @Test
   public void testCandidatesMarksSuggested() throws Exception {
     PreparedStatement ps = mock(PreparedStatement.class);
@@ -264,7 +340,11 @@ public class ReconciliationHandlerTest {
     }
   }
 
-  /** A docType filter binds the isreceipt flag as an extra SQL parameter. */
+  /**
+   * A docType filter binds the isreceipt flag as an extra SQL parameter.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
   @Test
   public void testCandidatesDocTypeFilterBindsIsReceipt() throws Exception {
     PreparedStatement ps = mock(PreparedStatement.class);
@@ -363,7 +443,11 @@ public class ReconciliationHandlerTest {
     doReturn(result).when(handler).processReconciliation(rec);
   }
 
-  /** A 1:1 match whose amounts agree composes the services and returns 201. */
+  /**
+   * A 1:1 match whose amounts agree composes the services and returns 201.
+   *
+   * @throws Exception if building the reconcile body or stubbing the seams fails
+   */
   @Test
   public void testReconcileGroupHappy1to1() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
@@ -389,7 +473,11 @@ public class ReconciliationHandlerTest {
     verify(handler, never()).tagMatchGroup(any());
   }
 
-  /** A 1:N match whose operations sum exactly to the line amount returns 201. */
+  /**
+   * A 1:N match whose operations sum exactly to the line amount returns 201.
+   *
+   * @throws Exception if building the reconcile body or stubbing the seams fails
+   */
   @Test
   public void testReconcileGroupHappy1toN() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
@@ -413,7 +501,11 @@ public class ReconciliationHandlerTest {
     verify(handler).tagMatchGroup(line);
   }
 
-  /** An operation that belongs to another account is rejected with a 400. */
+  /**
+   * An operation that belongs to another account is rejected with a 400.
+   *
+   * @throws Exception if building the reconcile body or stubbing the seams fails
+   */
   @Test
   public void testReconcileGroupWrongAccountReturns400() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
@@ -430,7 +522,11 @@ public class ReconciliationHandlerTest {
     verify(handler, never()).addNewDraftReconciliation(any());
   }
 
-  /** When the operations do not sum to the line amount the request is a 400. */
+  /**
+   * When the operations do not sum to the line amount the request is a 400.
+   *
+   * @throws Exception if building the reconcile body or stubbing the seams fails
+   */
   @Test
   public void testReconcileGroupSumMismatchReturns400() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
@@ -449,7 +545,11 @@ public class ReconciliationHandlerTest {
     verify(handler, never()).addNewDraftReconciliation(any());
   }
 
-  /** An operation already linked to a reconciliation is rejected with a 409. */
+  /**
+   * An operation already linked to a reconciliation is rejected with a 409.
+   *
+   * @throws Exception if building the reconcile body or stubbing the seams fails
+   */
   @Test
   public void testReconcileGroupAlreadyReconciledReturns409() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
@@ -466,7 +566,11 @@ public class ReconciliationHandlerTest {
     assertEquals(409, response.getHttpStatus());
   }
 
-  /** A statement line that is already reconciled is rejected with a 409. */
+  /**
+   * A statement line that is already reconciled is rejected with a 409.
+   *
+   * @throws Exception if building the reconcile body or stubbing the seams fails
+   */
   @Test
   public void testReconcileGroupLineAlreadyReconciledReturns409() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
@@ -482,7 +586,11 @@ public class ReconciliationHandlerTest {
     assertEquals(409, response.getHttpStatus());
   }
 
-  /** An unknown statement line yields a 404. */
+  /**
+   * An unknown statement line yields a 404.
+   *
+   * @throws Exception if building the reconcile body or stubbing the seams fails
+   */
   @Test
   public void testReconcileGroupMissingLineReturns404() throws Exception {
     doReturn(mock(FIN_FinancialAccount.class)).when(handler).loadAccount(ACC_ID);
@@ -493,7 +601,11 @@ public class ReconciliationHandlerTest {
     assertEquals(404, response.getHttpStatus());
   }
 
-  /** A line belonging to a different account is rejected with a 400. */
+  /**
+   * A line belonging to a different account is rejected with a 400.
+   *
+   * @throws Exception if building the reconcile body or stubbing the seams fails
+   */
   @Test
   public void testReconcileGroupLineWrongAccountReturns400() throws Exception {
     FIN_BankStatementLine line = lineFor(OTHER_ACC, new BigDecimal("100.00"), BigDecimal.ZERO, null);
@@ -505,7 +617,11 @@ public class ReconciliationHandlerTest {
     assertEquals(400, response.getHttpStatus());
   }
 
-  /** An empty operationIds list is rejected with a 400 before any lookup. */
+  /**
+   * An empty operationIds list is rejected with a 400 before any lookup.
+   *
+   * @throws Exception if building the reconcile body fails
+   */
   @Test
   public void testReconcileGroupEmptyOperationsReturns400() throws Exception {
     NeoResponse response = handler.reconcileGroup(reconcileBody(ACC_ID, LINE_ID));
@@ -513,7 +629,11 @@ public class ReconciliationHandlerTest {
     verify(handler, never()).loadAccount(any());
   }
 
-  /** A processReconciliation error rolls back and surfaces a 400 with the message. */
+  /**
+   * A processReconciliation error rolls back and surfaces a 400 with the message.
+   *
+   * @throws Exception if building the reconcile body or stubbing the seams fails
+   */
   @Test
   public void testReconcileGroupProcessErrorRollsBackTo400() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
@@ -537,6 +657,8 @@ public class ReconciliationHandlerTest {
   /**
    * A rule-origin group carrying a createPayment spec materializes the GL-item transaction via
    * {@code createTransactionForRule} and reconciles the resulting transaction against the line.
+   *
+   * @throws Exception if building the request body or stubbing the seams fails
    */
   @Test
   public void testApplySuggestionsCreatesTransactionForRuleGroup() throws Exception {
@@ -582,6 +704,8 @@ public class ReconciliationHandlerTest {
   /**
    * Each line row must include a {@code state} field and the response must include a {@code counts}
    * object with per-state tallies. Two pending lines → counts.pending == 2, counts.all == 2.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
    */
   @Test
   public void testBuildPendingLinesIncludesStateAndCounts() throws Exception {
@@ -602,6 +726,10 @@ public class ReconciliationHandlerTest {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     when(account.getMatchingAlgorithm()).thenReturn(null);
 
+    // loadRules runs its OWN prepareStatement against the same mocked connection; stub the spy
+    // seam so it does not consume the shared rs.next() sequence reserved for the main query.
+    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
@@ -621,16 +749,6 @@ public class ReconciliationHandlerTest {
       when(line2.getDescription()).thenReturn("DESC2");
       when(line2.getReferenceNo()).thenReturn("");
       when(line2.getBpartnername()).thenReturn("");
-
-      // loadRules — stub the connection to return empty ResultSet for the rules query.
-      Connection conn2 = mock(Connection.class);
-      PreparedStatement rulePs = mock(PreparedStatement.class);
-      ResultSet ruleRs = mock(ResultSet.class);
-      when(ruleRs.next()).thenReturn(false);
-      when(rulePs.executeQuery()).thenReturn(ruleRs);
-      when(conn2.prepareStatement(anyString())).thenReturn(ps, rulePs);
-      when(conn2.createArrayOf(anyString(), any())).thenReturn(null);
-      when(dal.getConnection()).thenReturn(conn2);
 
       NeoResponse response = handler.buildPendingLines(ACC_ID, CLIENT_ID,
           new HashSet<>(Arrays.asList(ORG_ID)), Collections.emptyMap());
@@ -656,6 +774,8 @@ public class ReconciliationHandlerTest {
   /**
    * A positive (deposit) amount → the transaction type must be BPD (Cobro). The handler should
    * set depositAmount = abs(amount) and paymentAmount = 0.
+   *
+   * @throws Exception if building the spec or stubbing the static mocks fails
    */
   @Test
   public void testCreateTransactionForRulePositiveAmountUsesBPD() throws Exception {
@@ -716,6 +836,8 @@ public class ReconciliationHandlerTest {
   /**
    * A negative amount → the transaction type must be BPW (Pago). The handler should set
    * paymentAmount = abs(amount) and depositAmount = 0.
+   *
+   * @throws Exception if building the spec or stubbing the static mocks fails
    */
   @Test
   public void testCreateTransactionForRuleNegativeAmountUsesBPW() throws Exception {

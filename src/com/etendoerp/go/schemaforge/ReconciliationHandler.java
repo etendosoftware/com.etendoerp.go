@@ -289,9 +289,7 @@ public class ReconciliationHandler implements NeoHandler {
     sql.append(PENDING_LINES_ORDER);
 
     FIN_FinancialAccount account = loadAccount(accountId);
-    JSONArray lines = new JSONArray();
-    BigDecimal total = BigDecimal.ZERO;
-    Map<String, Integer> counts = AutoMatchSupport.newCounts();
+    JSONArray rawLines = new JSONArray();
     // Connection is managed by the DAL's Hibernate Session; don't close it.
     Connection conn = OBDal.getInstance().getConnection();
     List<MatchRuleEngine.Rule> rules = loadRules(conn, accountId);
@@ -331,12 +329,22 @@ public class ReconciliationHandler implements NeoHandler {
           // 1:N group id (option B): sub-lines of the same reconcile group share this value.
           row.put("matchGroupId", StringUtils.trimToEmpty(rs.getString("match_group_id")));
           row.put(KEY_AMOUNT, amount);
-          lines.put(row);
-          total = total.add(amount);
-          counts.put("all", counts.get("all") + 1);
-          counts.put(state, counts.getOrDefault(state, 0) + 1);
+          rawLines.put(row);
         }
       }
+    }
+
+    // Collapse the split sub-lines of a 1:N reconciliation into a single line, so a group shows as
+    // one reconciled entry (same as the imported-statements view) instead of N separate sub-lines.
+    JSONArray lines = BankStatementsSupport.mergeMatchGroups(rawLines);
+    BigDecimal total = BigDecimal.ZERO;
+    Map<String, Integer> counts = AutoMatchSupport.newCounts();
+    for (int i = 0; i < lines.length(); i++) {
+      JSONObject row = lines.getJSONObject(i);
+      total = total.add(nullSafe(new BigDecimal(row.optString(KEY_AMOUNT, "0"))));
+      String state = row.optString("state", STATUS_PENDING);
+      counts.put("all", counts.get("all") + 1);
+      counts.put(state, counts.getOrDefault(state, 0) + 1);
     }
     JSONObject countsJson = new JSONObject();
     for (Map.Entry<String, Integer> entry : counts.entrySet()) {
@@ -376,6 +384,17 @@ public class ReconciliationHandler implements NeoHandler {
 
   NeoResponse buildCandidates(String accountId, String lineId, String docType) throws Exception {
     Set<String> suggestedIds = suggestedTransactionIds(accountId, lineId);
+    // 1:N: if the selected line amount equals the sum of a signal group (same logic the automatch
+    // uses), pre-mark ALL of its operations as suggested — not only a single 1:1 standard match.
+    if (StringUtils.isNotBlank(lineId)) {
+      FIN_BankStatementLine selectedLine = loadLine(lineId);
+      if (selectedLine != null) {
+        for (FIN_FinaccTransaction t : AutoMatchSupport.findSignalGroup(
+            accountId, selectedLine, new HashSet<>(), TOLERANCE)) {
+          suggestedIds.add(t.getId());
+        }
+      }
+    }
 
     JSONArray candidates = new JSONArray();
     Connection conn = OBDal.getInstance().getConnection();
