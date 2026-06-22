@@ -34,6 +34,24 @@ public interface EmailProviderAdapter {
   boolean isConfigured();
 
   /**
+   * Indicates whether the provider can deliver to more than one recipient in one send.
+   *
+   * @return {@code true} only when the provider fans out to multiple recipients
+   */
+  default boolean supportsMultipleRecipients() {
+    return false;
+  }
+
+  /**
+   * Indicates whether the provider can deliver a CC channel.
+   *
+   * @return {@code true} only when the provider delivers CC recipients
+   */
+  default boolean supportsCcChannel() {
+    return false;
+  }
+
+  /**
    * Sends a server-resolved provider request.
    *
    * @param request provider request produced by an email contract

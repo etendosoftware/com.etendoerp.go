@@ -18,9 +18,11 @@
 package com.etendoerp.go.schemaforge.email;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -51,6 +53,8 @@ public class TransactionalEmailService {
   public static final String STATUS_DUPLICATE = "DUPLICATE";
   public static final String STATUS_THROTTLED = "THROTTLED";
   public static final String STATUS_SUPPRESSED = "SUPPRESSED";
+  public static final String STATUS_NO_RECIPIENT = "NO_RECIPIENT";
+  static final int HTTP_UNPROCESSABLE_ENTITY = 422;
 
   private static final String MESSAGE_RECIPIENT_NOT_RESOLVED =
       "Email contract did not resolve a recipient";
@@ -185,13 +189,10 @@ public class TransactionalEmailService {
     }
 
     EmailRecipientResolution recipient = contract.get().resolveRecipient(command);
-    String recipientError = validateRecipientResolution(recipient, contract.get());
-    if (recipientError != null) {
-      int status = recipient != null && !recipient.isResolved() ? recipient.getHttpStatus()
-          : HttpServletResponse.SC_BAD_REQUEST;
-      return observedResponse(startedAtNanos, command, null,
-          ResponseOutcome.of(status, STATUS_VALIDATION_FAILED, normalizedContract, recipientError,
-              null));
+    NeoResponse recipientRejection = validateRecipientStep(startedAtNanos, command, recipient,
+        contract.get(), normalizedContract);
+    if (recipientRejection != null) {
+      return recipientRejection;
     }
 
     EmailContractResolution resolution = contract.get().resolve(command, recipient);
@@ -211,10 +212,40 @@ public class TransactionalEmailService {
     }
 
     EmailSendContext sendContext = new EmailSendContext(command, recipient, providerRequest);
+
+    NeoResponse capabilityRejection = validateProviderCapabilities(normalizedContract, command,
+        providerRequest, startedAtNanos);
+    if (capabilityRejection != null) {
+      return capabilityRejection;
+    }
+    NeoResponse suppressionRejection = enforceRecipientSuppression(startedAtNanos, sendContext,
+        providerRequest);
+    if (suppressionRejection != null) {
+      return suppressionRejection;
+    }
+
     EmailDeliveryPolicy deliveryPolicy = Objects.requireNonNull(
         contract.get().deliveryPolicy(command, recipient, providerRequest),
         "Email delivery policy cannot be null");
     return enforceSafetyAndSubmit(startedAtNanos, sendContext, deliveryPolicy);
+  }
+
+  private NeoResponse validateRecipientStep(long startedAtNanos, EmailContractCommand command,
+      EmailRecipientResolution recipient, EmailContract contract, String normalizedContract) {
+    if (recipient != null && recipient.isNoRecipient()) {
+      return observedResponse(startedAtNanos, command, null,
+          ResponseOutcome.of(HTTP_UNPROCESSABLE_ENTITY, STATUS_NO_RECIPIENT, normalizedContract,
+              recipient.getMessage(), null));
+    }
+    String recipientError = validateRecipientResolution(recipient, contract);
+    if (recipientError != null) {
+      int status = recipient != null && !recipient.isResolved() ? recipient.getHttpStatus()
+          : HttpServletResponse.SC_BAD_REQUEST;
+      return observedResponse(startedAtNanos, command, null,
+          ResponseOutcome.of(status, STATUS_VALIDATION_FAILED, normalizedContract, recipientError,
+              null));
+    }
+    return null;
   }
 
   private static String authorizationFailureStatus(int httpStatus) {
@@ -296,6 +327,44 @@ public class TransactionalEmailService {
           ResponseOutcome.of(HttpServletResponse.SC_BAD_REQUEST, STATUS_VALIDATION_FAILED,
               normalizedContract,
               "Email contract provider request recipient must match recipient resolution", null));
+    }
+    return null;
+  }
+
+  private NeoResponse validateProviderCapabilities(String normalizedContract,
+      EmailContractCommand command, EmailProviderRequest providerRequest, long startedAtNanos) {
+    EmailRecipientSet recipients = providerRequest.getRecipients();
+    if (recipients.totalCount() > 1 && !providerAdapter.supportsMultipleRecipients()) {
+      return observedResponse(startedAtNanos, command, null,
+          ResponseOutcome.of(HttpServletResponse.SC_BAD_REQUEST, STATUS_VALIDATION_FAILED,
+              normalizedContract,
+              "Email provider does not support multiple recipients", null));
+    }
+    if (!recipients.getCc().isEmpty() && !providerAdapter.supportsCcChannel()) {
+      return observedResponse(startedAtNanos, command, null,
+          ResponseOutcome.of(HttpServletResponse.SC_BAD_REQUEST, STATUS_VALIDATION_FAILED,
+              normalizedContract,
+              "Email provider does not support CC recipients", null));
+    }
+    return null;
+  }
+
+  private NeoResponse enforceRecipientSuppression(long startedAtNanos, EmailSendContext context,
+      EmailProviderRequest providerRequest) {
+    String tenantId = context.getTenantId();
+    EmailRecipientSet recipients = providerRequest.getRecipients();
+    List<String> all = new ArrayList<>(recipients.getTo());
+    all.addAll(recipients.getCc());
+    for (String address : all) {
+      if (safetyStore.isRecipientSuppressed(tenantId, address)) {
+        String message = "Email recipient is suppressed";
+        recordAudit(context, null, HttpServletResponse.SC_FORBIDDEN, STATUS_SUPPRESSED, message,
+            null, false);
+        return observedResponse(startedAtNanos, context.getCommand(), context,
+            ResponseOutcome.of(HttpServletResponse.SC_FORBIDDEN, STATUS_SUPPRESSED,
+                context.getContractName(), message, null,
+                ObservationFields.killSwitch(EmailThrottleRule.SCOPE_RECIPIENT)));
+      }
     }
     return null;
   }

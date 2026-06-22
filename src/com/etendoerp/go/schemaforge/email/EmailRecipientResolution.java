@@ -33,14 +33,18 @@ public final class EmailRecipientResolution {
   private final String source;
   private final int httpStatus;
   private final String message;
+  private final boolean noRecipient;
+  private final EmailRecipientSet recipientSet;
 
   private EmailRecipientResolution(boolean resolved, String recipient, String source,
-      int httpStatus, String message) {
+      int httpStatus, String message, boolean noRecipient, EmailRecipientSet recipientSet) {
     this.resolved = resolved;
     this.recipient = StringUtils.trimToNull(recipient);
     this.source = source;
     this.httpStatus = httpStatus;
     this.message = message;
+    this.noRecipient = noRecipient;
+    this.recipientSet = recipientSet;
   }
 
   /**
@@ -50,8 +54,23 @@ public final class EmailRecipientResolution {
    * @return server-side recipient resolution
    */
   public static EmailRecipientResolution serverResolved(String recipient) {
-    return new EmailRecipientResolution(true, requireRecipient(recipient), SOURCE_SERVER, 200,
-        null);
+    String normalized = requireRecipient(recipient);
+    return new EmailRecipientResolution(true, normalized, SOURCE_SERVER, 200, null, false,
+        EmailRecipientSet.singleTo(normalized));
+  }
+
+  /**
+   * Creates a recipient derived from a trusted server-side multi-channel set.
+   *
+   * @param recipients server-resolved recipient set, with at least one to address
+   * @return server-side recipient resolution
+   */
+  public static EmailRecipientResolution serverResolved(EmailRecipientSet recipients) {
+    if (recipients == null || recipients.isToEmpty()) {
+      throw new OBException("Recipient set must contain at least one to recipient");
+    }
+    return new EmailRecipientResolution(true, recipients.getTo().get(0), SOURCE_SERVER, 200, null,
+        false, recipients);
   }
 
   /**
@@ -61,8 +80,9 @@ public final class EmailRecipientResolution {
    * @return caller-provided recipient resolution
    */
   public static EmailRecipientResolution callerProvided(String recipient) {
-    return new EmailRecipientResolution(true, requireRecipient(recipient), SOURCE_CALLER, 200,
-        null);
+    String normalized = requireRecipient(recipient);
+    return new EmailRecipientResolution(true, normalized, SOURCE_CALLER, 200, null, false,
+        EmailRecipientSet.singleTo(normalized));
   }
 
   /**
@@ -73,7 +93,17 @@ public final class EmailRecipientResolution {
    * @return rejected recipient resolution
    */
   public static EmailRecipientResolution rejected(int httpStatus, String message) {
-    return new EmailRecipientResolution(false, null, null, httpStatus, message);
+    return new EmailRecipientResolution(false, null, null, httpStatus, message, false, null);
+  }
+
+  /**
+   * Creates a rejection signaling that no deliverable recipient exists.
+   *
+   * @param message client-visible rejection message
+   * @return no-recipient resolution mapped by the service to {@code NO_RECIPIENT}
+   */
+  public static EmailRecipientResolution noRecipient(String message) {
+    return new EmailRecipientResolution(false, null, null, 422, message, true, null);
   }
 
   private static String requireRecipient(String recipient) {
@@ -100,6 +130,24 @@ public final class EmailRecipientResolution {
    */
   public String getRecipient() {
     return recipient;
+  }
+
+  /**
+   * Returns the resolved multi-channel recipient set when available.
+   *
+   * @return recipient set, or {@code null} for rejections
+   */
+  public EmailRecipientSet getRecipientSet() {
+    return recipientSet;
+  }
+
+  /**
+   * Indicates whether this rejection means no deliverable recipient exists.
+   *
+   * @return {@code true} when the service must respond {@code NO_RECIPIENT}
+   */
+  public boolean isNoRecipient() {
+    return noRecipient;
   }
 
   /**
