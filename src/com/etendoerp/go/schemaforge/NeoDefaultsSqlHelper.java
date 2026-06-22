@@ -101,8 +101,10 @@ final class NeoDefaultsSqlHelper {
       }
       return null;
     } catch (Exception e) {
+      // adColumn is null when resolving a tab auxiliary input's @SQL= code (which is
+      // column-independent), so guard the dereference before logging.
       log.debug("Could not resolve SQL default for column {}: {}",
-          adColumn.getDBColumnName(), e.getMessage());
+          adColumn != null ? adColumn.getDBColumnName() : "<auxiliary-input>", e.getMessage());
       return null;
     }
   }
