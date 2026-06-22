@@ -17,9 +17,11 @@
 
 package com.etendoerp.go.schemaforge.email;
 
+import java.util.List;
 import java.util.Objects;
 
 import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
@@ -28,13 +30,14 @@ import org.codehaus.jettison.json.JSONObject;
  */
 public final class EmailProviderRequest {
 
+  private final EmailRecipientSet recipients;
   private final String recipient;
   private final String template;
   private final JSONObject data;
   private final String replyTo;
 
   /**
-   * Creates a provider request resolved by a trusted email contract.
+   * Creates a single-recipient provider request resolved by a trusted email contract.
    *
    * @param recipient server-resolved destination address
    * @param template provider template identifier
@@ -42,8 +45,26 @@ public final class EmailProviderRequest {
    * @param replyTo optional reply-to address approved by the contract
    */
   public EmailProviderRequest(String recipient, String template, JSONObject data, String replyTo) {
-    this.recipient = Objects.requireNonNull(StringUtils.trimToNull(recipient),
-        "Recipient address is mandatory");
+    this(EmailRecipientSet.singleTo(Objects.requireNonNull(StringUtils.trimToNull(recipient),
+        "Recipient address is mandatory")), template, data, replyTo);
+  }
+
+  /**
+   * Creates a multi-channel provider request resolved by a trusted email contract.
+   *
+   * @param recipients server-resolved recipient set, with at least one to address
+   * @param template provider template identifier
+   * @param data provider template variables
+   * @param replyTo optional reply-to address approved by the contract
+   */
+  public EmailProviderRequest(EmailRecipientSet recipients, String template, JSONObject data,
+      String replyTo) {
+    Objects.requireNonNull(recipients, "Recipient set is mandatory");
+    if (recipients.isToEmpty()) {
+      throw new NullPointerException("Recipient address is mandatory");
+    }
+    this.recipients = recipients;
+    this.recipient = recipients.getTo().get(0);
     this.template = Objects.requireNonNull(StringUtils.trimToNull(template),
         "Template identifier is mandatory");
     this.data = data;
@@ -52,6 +73,15 @@ public final class EmailProviderRequest {
 
   public String getRecipient() {
     return recipient;
+  }
+
+  /**
+   * Returns the resolved multi-channel recipient set.
+   *
+   * @return recipient set carried by this request
+   */
+  public EmailRecipientSet getRecipients() {
+    return recipients;
   }
 
   public String getTemplate() {
@@ -74,7 +104,17 @@ public final class EmailProviderRequest {
    */
   JSONObject toProviderPayload() throws JSONException {
     JSONObject payload = new JSONObject();
-    payload.put("to", recipient);
+    List<String> to = recipients.getTo();
+    List<String> cc = recipients.getCc();
+    if (to.size() == 1 && cc.isEmpty()) {
+      // Single-recipient compatibility: emit "to" as a plain string.
+      payload.put("to", to.get(0));
+    } else {
+      payload.put("to", new JSONArray(to));
+      if (!cc.isEmpty()) {
+        payload.put("cc", new JSONArray(cc));
+      }
+    }
     payload.put("template", template);
     payload.put("data", data == null ? new JSONObject() : new JSONObject(data.toString()));
     if (replyTo != null) {

@@ -21,6 +21,9 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.net.URI;
@@ -28,11 +31,14 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
+import java.util.Properties;
 
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.base.session.OBPropertiesProvider;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -435,7 +441,9 @@ public class InitialEmailContractsTest {
   }
 
   @Test
-  public void documentContractRejectsInvalidResolvedRecipient() throws Exception {
+  public void documentContractReturnsNoRecipientForInvalidBaseEmailWithoutEdits() throws Exception {
+    // Edge case 4 (ETP-4226): with editable recipients, a base contact without a usable email
+    // and no caller edits now resolves to NO_RECIPIENT instead of VALIDATION_FAILED.
     FakeProviderAdapter adapter = new FakeProviderAdapter();
     TransactionalEmailService service = service(adapter);
 
@@ -445,9 +453,9 @@ public class InitialEmailContractsTest {
     NeoResponse response = service.send("sales-order-send", command);
 
     JSONObject data = responseData(response);
-    assertEquals(400, response.getHttpStatus());
-    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
-    assertEquals("Email recipient is invalid", data.getString("message"));
+    assertEquals(422, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_NO_RECIPIENT, data.getString("status"));
+    assertEquals("Document has no recipient email", data.getString("message"));
     assertEquals(0, adapter.getSendCount());
   }
 
@@ -459,13 +467,19 @@ public class InitialEmailContractsTest {
     JSONObject command = baseCommand();
     command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "order-invalid-link");
 
-    NeoResponse response = service.send("sales-order-send", command);
+    // Make the test hermetic: the download link is resolved via System property -> env var ->
+    // Openbravo.properties. Clear the System properties for this test and mock
+    // OBPropertiesProvider so the Openbravo.properties fallback never supplies the keys, forcing
+    // the "missing download link" path regardless of the ambient Openbravo.properties contents.
+    withoutDocumentDownloadConfig(() -> {
+      NeoResponse response = service.send("sales-order-send", command);
 
-    JSONObject data = responseData(response);
-    assertEquals(400, response.getHttpStatus());
-    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
-    assertEquals("Document download link is not configured", data.getString("message"));
-    assertEquals(0, adapter.getSendCount());
+      JSONObject data = responseData(response);
+      assertEquals(400, response.getHttpStatus());
+      assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
+      assertEquals("Document download link is not configured", data.getString("message"));
+      assertEquals(0, adapter.getSendCount());
+    });
   }
 
   @Test
@@ -572,6 +586,26 @@ public class InitialEmailContractsTest {
   }
 
   @Test
+  public void accountLinkContractRejectsRecipientEdits() throws Exception {
+    assertNonDocumentContractRejectsRecipientEdits("reset-password", command -> {
+      command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1");
+      command.put(EmailContractCommandSupport.FIELD_LINK, "https://app.example.test/reset");
+    });
+  }
+
+  @Test
+  public void accountNoticeContractRejectsRecipientEdits() throws Exception {
+    assertNonDocumentContractRejectsRecipientEdits("password-changed", command ->
+        command.put(EmailContractCommandSupport.FIELD_ACCOUNT_ID, "account-1"));
+  }
+
+  @Test
+  public void loginAlertContractRejectsRecipientEdits() throws Exception {
+    assertNonDocumentContractRejectsRecipientEdits("login-alert", command ->
+        command.put(EmailContractCommandSupport.FIELD_USER_ID, "user-1"));
+  }
+
+  @Test
   public void keepsCustomContractDisabledByDefault() throws Exception {
     FakeProviderAdapter adapter = new FakeProviderAdapter();
     TransactionalEmailService service = service(adapter);
@@ -595,6 +629,30 @@ public class InitialEmailContractsTest {
     assertEquals(first.hashCode(), second.hashCode());
     assertNotEquals(first, different);
     assertNotEquals(first, "Lucas");
+  }
+
+  private static void assertNonDocumentContractRejectsRecipientEdits(String contractName,
+      CommandCustomizer customizer) throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter();
+    TransactionalEmailService service = service(adapter);
+
+    JSONObject command = baseCommand();
+    customizer.apply(command);
+    command.put(EmailContractCommandSupport.FIELD_RECIPIENT_EDITS,
+        new JSONObject("{\"to\":{\"add\":[\"external@example.com\"]}}"));
+
+    NeoResponse response = service.send(contractName, command);
+
+    JSONObject data = responseData(response);
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
+    assertEquals("recipientEdits is not accepted by this contract", data.getString("message"));
+    assertEquals(0, adapter.getSendCount());
+  }
+
+  @FunctionalInterface
+  private interface CommandCustomizer {
+    void apply(JSONObject command) throws JSONException;
   }
 
   private static TransactionalEmailService service(FakeProviderAdapter adapter) {
@@ -637,6 +695,33 @@ public class InitialEmailContractsTest {
       System.setProperty(DocumentDownloadTokenService.PROP_DOWNLOAD_BASE_URL, baseUrl);
       System.setProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET, secret);
       runnable.run();
+    } finally {
+      restoreProperty(DocumentDownloadTokenService.PROP_DOWNLOAD_BASE_URL, previousBaseUrl);
+      restoreProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET, previousSecret);
+    }
+  }
+
+  /**
+   * Runs the given block with no document-download configuration resolvable. Clears the System
+   * properties and mocks {@link OBPropertiesProvider} so the Openbravo.properties fallback returns
+   * empty properties, making the "missing download link" assertions deterministic regardless of the
+   * ambient Openbravo.properties. Environment variables cannot be set in-process and are assumed
+   * absent in the test environment.
+   */
+  private static void withoutDocumentDownloadConfig(ThrowingRunnable runnable) throws Exception {
+    String previousBaseUrl = System.getProperty(
+        DocumentDownloadTokenService.PROP_DOWNLOAD_BASE_URL);
+    String previousSecret = System.getProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET);
+    try {
+      System.clearProperty(DocumentDownloadTokenService.PROP_DOWNLOAD_BASE_URL);
+      System.clearProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET);
+      OBPropertiesProvider provider = mock(OBPropertiesProvider.class);
+      when(provider.getOpenbravoProperties()).thenReturn(new Properties());
+      try (MockedStatic<OBPropertiesProvider> propertiesMock =
+          mockStatic(OBPropertiesProvider.class)) {
+        propertiesMock.when(OBPropertiesProvider::getInstance).thenReturn(provider);
+        runnable.run();
+      }
     } finally {
       restoreProperty(DocumentDownloadTokenService.PROP_DOWNLOAD_BASE_URL, previousBaseUrl);
       restoreProperty(DocumentDownloadTokenService.PROP_TOKEN_SECRET, previousSecret);

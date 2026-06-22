@@ -66,6 +66,11 @@ final class AccountNoticeEmailContract implements EmailContract {
 
   @Override
   public EmailAuthorizationResult authorize(EmailContractCommand command) {
+    EmailAuthorizationResult editsRejection =
+        EmailContractCommandSupport.rejectRecipientEditsIfPresent(command);
+    if (!editsRejection.isAllowed()) {
+      return editsRejection;
+    }
     EmailAuthorizationResult validation = EmailContractCommandSupport.validateCommand(command,
         EmailContractCommandSupport.FIELD_ACCOUNT_ID);
     if (!validation.isAllowed()) {

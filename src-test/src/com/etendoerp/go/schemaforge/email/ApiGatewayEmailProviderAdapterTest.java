@@ -63,6 +63,17 @@ public class ApiGatewayEmailProviderAdapterTest {
   }
 
   @Test
+  public void doesNotAdvertiseMultiRecipientOrCcCapabilityUntilVerified() {
+    EmailProviderConfig config = new EmailProviderConfig("https://provider.example/send", "secret",
+        true, 1200);
+    ApiGatewayEmailProviderAdapter adapter = new ApiGatewayEmailProviderAdapter(config,
+        new CapturingTransport(new EmailProviderResponse(202, "{}")));
+
+    assertFalse(adapter.supportsMultipleRecipients());
+    assertFalse(adapter.supportsCcChannel());
+  }
+
+  @Test
   public void rejectsSendWhenProviderConfigIsIncomplete() throws Exception {
     CapturingTransport transport = new CapturingTransport(new EmailProviderResponse(202, "{}"));
     EmailProviderConfig config = new EmailProviderConfig(null, null, true, 1200);

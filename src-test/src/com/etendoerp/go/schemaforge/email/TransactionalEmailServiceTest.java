@@ -515,6 +515,70 @@ public class TransactionalEmailServiceTest {
     assertEquals("record-1", EmailThrottleRule.perRecord(1, 60).resolveKey(context));
   }
 
+  @Test
+  public void returnsNoRecipientWhenContractResolvesNoRecipient() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}"));
+    TransactionalEmailService service = service(new NoRecipientContract(), adapter);
+
+    NeoResponse response = service.send("no-recipient", new JSONObject());
+
+    JSONObject data = responseData(response);
+    assertEquals(TransactionalEmailService.HTTP_UNPROCESSABLE_ENTITY, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_NO_RECIPIENT, data.getString("status"));
+    assertEquals("Final recipient list is empty", data.getString("message"));
+    assertFalse(adapter.wasSendCalled());
+  }
+
+  @Test
+  public void rejectsMultiRecipientSendWhenAdapterLacksCapability() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}"));
+    TransactionalEmailService service = service(new MultiRecipientContract(), adapter);
+
+    NeoResponse response = service.send("multi-recipient", new JSONObject());
+
+    JSONObject data = responseData(response);
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
+    assertTrue(data.getString("message").contains("multiple recipients"));
+    assertFalse(adapter.wasSendCalled());
+  }
+
+  @Test
+  public void sendsMultiRecipientSetWhenAdapterIsCapable() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}")).withMultiRecipientCapabilities();
+    TransactionalEmailService service = service(new MultiRecipientContract(), adapter);
+
+    NeoResponse response = service.send("multi-recipient", new JSONObject());
+
+    JSONObject data = responseData(response);
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_SENT, data.getString("status"));
+    EmailRecipientSet sent = adapter.getLastRequest().getRecipients();
+    assertEquals(Arrays.asList("ap@example.com", "billing@example.com"), sent.getTo());
+    assertEquals(java.util.Collections.singletonList("pm@example.com"), sent.getCc());
+  }
+
+  @Test
+  public void suppressesSendWhenCcAddressIsSuppressed() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}")).withMultiRecipientCapabilities();
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    safetyStore.suppressAddress("pm@example.com");
+    TransactionalEmailService service = service(new MultiRecipientContract(), adapter, safetyStore);
+
+    NeoResponse response = service.send("multi-recipient", new JSONObject());
+
+    JSONObject data = responseData(response);
+    assertEquals(403, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_SUPPRESSED, data.getString("status"));
+    assertFalse(adapter.wasSendCalled());
+    assertEquals(TransactionalEmailService.STATUS_SUPPRESSED,
+        safetyStore.getAuditRecords().get(0).getStatus());
+  }
+
   private static JSONObject responseData(NeoResponse response) throws JSONException {
     assertNotNull("Response body should not be null", response.getBody());
     return response.getBody().getJSONObject("response").getJSONObject("data");
@@ -751,21 +815,89 @@ public class TransactionalEmailServiceTest {
     }
   }
 
+  private static class NoRecipientContract implements EmailContract {
+    @Override
+    public String getName() {
+      return "no-recipient";
+    }
+
+    @Override
+    public EmailAuthorizationResult authorize(EmailContractCommand command) {
+      return EmailAuthorizationResult.allowed();
+    }
+
+    @Override
+    public EmailRecipientResolution resolveRecipient(EmailContractCommand command) {
+      return EmailRecipientResolution.noRecipient("Final recipient list is empty");
+    }
+
+    @Override
+    public EmailContractResolution resolve(EmailContractCommand command,
+        EmailRecipientResolution recipient) {
+      return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipient(),
+          "fixture-template", new JSONObject(), null));
+    }
+  }
+
+  private static class MultiRecipientContract implements EmailContract {
+    @Override
+    public String getName() {
+      return "multi-recipient";
+    }
+
+    @Override
+    public EmailAuthorizationResult authorize(EmailContractCommand command) {
+      return EmailAuthorizationResult.allowed();
+    }
+
+    @Override
+    public EmailRecipientResolution resolveRecipient(EmailContractCommand command) {
+      return EmailRecipientResolution.serverResolved(EmailRecipientSet.of(
+          Arrays.asList("ap@example.com", "billing@example.com"),
+          Arrays.asList("pm@example.com")));
+    }
+
+    @Override
+    public EmailContractResolution resolve(EmailContractCommand command,
+        EmailRecipientResolution recipient) {
+      return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipientSet(),
+          "fixture-template", new JSONObject(), null));
+    }
+  }
+
   private static class FakeProviderAdapter implements EmailProviderAdapter {
     private final boolean configured;
     private final EmailProviderResponse response;
     private boolean sendCalled;
     private int sendCount;
     private EmailProviderRequest lastRequest;
+    private boolean supportsMultipleRecipients;
+    private boolean supportsCcChannel;
 
     FakeProviderAdapter(boolean configured, EmailProviderResponse response) {
       this.configured = configured;
       this.response = response;
     }
 
+    FakeProviderAdapter withMultiRecipientCapabilities() {
+      this.supportsMultipleRecipients = true;
+      this.supportsCcChannel = true;
+      return this;
+    }
+
     @Override
     public boolean isConfigured() {
       return configured;
+    }
+
+    @Override
+    public boolean supportsMultipleRecipients() {
+      return supportsMultipleRecipients;
+    }
+
+    @Override
+    public boolean supportsCcChannel() {
+      return supportsCcChannel;
     }
 
     @Override

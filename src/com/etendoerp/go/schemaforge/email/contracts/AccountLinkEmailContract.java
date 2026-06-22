@@ -80,6 +80,11 @@ final class AccountLinkEmailContract implements EmailContract {
 
   @Override
   public EmailAuthorizationResult authorize(EmailContractCommand command) {
+    EmailAuthorizationResult editsRejection =
+        EmailContractCommandSupport.rejectRecipientEditsIfPresent(command);
+    if (!editsRejection.isAllowed()) {
+      return editsRejection;
+    }
     EmailAuthorizationResult validation = configuredLinkPath == null
         ? EmailContractCommandSupport.validateCommand(command,
             EmailContractCommandSupport.FIELD_ACCOUNT_ID,
