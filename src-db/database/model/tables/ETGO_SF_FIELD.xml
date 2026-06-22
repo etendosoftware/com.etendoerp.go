@@ -69,6 +69,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="ISBUSINESSCRITICAL" primaryKey="false" required="false" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
       <column name="AGENT_PROMPT" primaryKey="false" required="false" type="VARCHAR" size="2000" autoIncrement="false">
         <default/>
         <onCreateDefault/>
@@ -90,6 +94,7 @@
         <unique-column name="AD_COLUMN_ID"/>
       </unique>
       <check name="ETGO_SF_FLD_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="ETGO_SF_FLD_ISBIZC"><![CDATA[ISBUSINESSCRITICAL IN ('Y', 'N')]]></check>
       <check name="ETGO_SF_FLD_ISINCL"><![CDATA[ISINCLUDED IN ('Y', 'N')]]></check>
       <check name="ETGO_SF_FLD_ISRO"><![CDATA[ISREADONLY IN ('Y', 'N')]]></check>
     </table>
