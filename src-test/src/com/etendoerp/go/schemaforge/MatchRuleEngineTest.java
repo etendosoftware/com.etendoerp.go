@@ -139,8 +139,8 @@ public class MatchRuleEngineTest {
    */
   @Test
   public void testMatchesRegexCatastrophicBacktrackingReturnsFalse() {
-    // The end anchor + trailing '!' force the engine to explore every partition under .find();
-    // the 200ms guard times out and matches() returns false.
+    // The end anchor plus the trailing '!' force the engine to explore every
+    // partition while searching, so the 200ms guard times out and the result is false.
     MatchRuleEngine.Rule r = rule("4", MatchRuleEngine.COND_REGEX, "(a+)+$");
     assertFalse(MatchRuleEngine.matches(r,
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"));

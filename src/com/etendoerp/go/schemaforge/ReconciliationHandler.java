@@ -28,6 +28,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -267,9 +268,10 @@ public class ReconciliationHandler implements NeoHandler {
 
   NeoResponse buildPendingLines(String accountId, String clientId, Set<String> orgs,
       Map<String, String> filters) throws Exception {
-    String dateFrom = filters != null ? filters.get(PARAM_DATE_FROM) : null;
-    String dateTo = filters != null ? filters.get(PARAM_DATE_TO) : null;
-    String q = filters != null ? filters.get(PARAM_Q) : null;
+    Map<String, String> filterMap = filters != null ? filters : Collections.emptyMap();
+    String dateFrom = filterMap.get(PARAM_DATE_FROM);
+    String dateTo = filterMap.get(PARAM_DATE_TO);
+    String q = filterMap.get(PARAM_Q);
 
     // The status parameter is no longer used to filter at SQL level: every line is returned with
     // its computed `state` and the per-state `counts`, and the frontend filters client-side. This
