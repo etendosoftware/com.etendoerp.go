@@ -29,7 +29,7 @@ import org.openbravo.module.sii.data.AEATSIIDescription;
 /**
  * Seeds SII descriptions for a newly created client.
  */
-public class OnboardingFiscalDataSetupService {
+public class OnboardingFiscalDataSetupService extends OnboardingContextSupport {
 
   private static final String SII_VENTAS = "Ventas";
   private static final String SII_COMPRAS = "Compras";
@@ -108,52 +108,12 @@ public class OnboardingFiscalDataSetupService {
     return OBDal.getInstance().get(Client.class, clientId);
   }
 
-  protected Organization resolveOrganization(String orgId) {
-    return OBDal.getInstance().get(Organization.class, orgId);
-  }
-
   protected void saveSiiDescription(AEATSIIDescription desc) {
     OBDal.getInstance().save(desc);
   }
 
-  protected void flushChanges() {
-    OBDal.getInstance().flush();
-  }
-
-  protected OBContext captureCurrentContext() {
-    return OBContext.getOBContext();
-  }
-
-  protected void applyExecutionContext(String adminUserId, String adminRoleId,
-      String clientId, String orgId) {
-    OBContext.setOBContext(adminUserId, adminRoleId, clientId, orgId);
-  }
-
-  protected void restoreExecutionContext(OBContext previousContext) {
-    OBContext.setOBContext(previousContext);
-  }
-
-  protected void enterAdminMode() {
-    OBContext.setAdminMode(true);
-  }
-
-  protected void exitAdminMode() {
-    OBContext.restorePreviousMode();
-  }
-
-  private void validateContext(String clientId, String orgId, String adminUserId,
-      String adminRoleId) {
-    if (clientId == null || clientId.isEmpty()) {
-      throw new OBException("Missing client for fiscal data setup");
-    }
-    if (orgId == null || orgId.isEmpty()) {
-      throw new OBException("Missing organization for fiscal data setup");
-    }
-    if (adminUserId == null || adminUserId.isEmpty()) {
-      throw new OBException("Missing admin user for fiscal data setup");
-    }
-    if (adminRoleId == null || adminRoleId.isEmpty()) {
-      throw new OBException("Missing admin role for fiscal data setup");
-    }
+  @Override
+  protected String contextSubject() {
+    return "fiscal data setup";
   }
 }
