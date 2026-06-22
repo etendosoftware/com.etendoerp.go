@@ -29,6 +29,9 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.time.Instant;
 
 import javax.servlet.http.HttpServletRequest;
@@ -94,6 +97,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private static final String HASH_ALGORITHM = "SHA-256";
   private static final int SALT_BYTES = 16;
+  // Heartbeat cadence for the onboarding NDJSON stream. Must stay well below the
+  // CloudFront/proxy origin-response (inter-byte) timeout — default 30s — so a slow
+  // step never leaves the connection idle long enough to be dropped mid-stream.
+  private static final int ONBOARDING_HEARTBEAT_SECONDS = 10;
   private static final String UTF_8 = "UTF-8";
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_CLIENT_NAME = "clientName";
@@ -825,6 +832,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Generate a random password for the admin user
     String adminPassword = UUID.randomUUID().toString().substring(0, 12);
 
+    // Keepalive: a background thread emits a blank NDJSON line on a fixed cadence so the
+    // gap between bytes never exceeds the CloudFront/proxy inter-byte timeout while a slow
+    // step runs. The frontend skips empty lines (processLines), so this needs no UI change.
+    ScheduledExecutorService heartbeat = startOnboardingHeartbeat(writer);
+
     try {
       VariablesSecureApp vars = prepareAdminContext(writer, onboardingRequest.language);
       String clientId = resolveOrCreateClient(writer, vars, accountEmail, onboardingRequest, currencyId,
@@ -874,6 +886,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           "Onboarding failed: " + e.getMessage());
       sendFinalResult(writer, false, "Onboarding failed: " + e.getMessage());
     } finally {
+      // Stop the keepalive before the final flush so no heartbeat races the result line.
+      heartbeat.shutdownNow();
       OBContext.restorePreviousMode();
       writer.flush();
       // PrintWriter swallows IOExceptions (broken pipe): when CloudFront or any proxy
@@ -887,6 +901,45 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             + "accountEmail={}", accountEmail);
       }
     }
+  }
+
+  /**
+   * Starts a daemon scheduler that emits a blank NDJSON line every
+   * {@link #ONBOARDING_HEARTBEAT_SECONDS} seconds. This keeps bytes flowing on the
+   * streaming response so a long-running onboarding step never leaves the connection
+   * idle past the CloudFront/proxy inter-byte timeout (which would silently drop the
+   * client mid-stream and make the UI report a false failure).
+   *
+   * <p>The caller MUST call {@code shutdownNow()} on the returned executor in a
+   * {@code finally} block.
+   */
+  private ScheduledExecutorService startOnboardingHeartbeat(PrintWriter writer) {
+    return startOnboardingHeartbeat(writer, ONBOARDING_HEARTBEAT_SECONDS, TimeUnit.SECONDS);
+  }
+
+  /**
+   * Interval-injectable variant (package-private for tests so they do not have to wait
+   * the production {@link #ONBOARDING_HEARTBEAT_SECONDS} cadence).
+   */
+  ScheduledExecutorService startOnboardingHeartbeat(PrintWriter writer, long interval, TimeUnit unit) {
+    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
+      Thread thread = new Thread(runnable, "onboarding-heartbeat");
+      thread.setDaemon(true);
+      return thread;
+    });
+    scheduler.scheduleAtFixedRate(() -> sendHeartbeat(writer), interval, interval, unit);
+    return scheduler;
+  }
+
+  /**
+   * Writes a single blank line to the stream to keep the connection alive. PrintWriter
+   * is internally synchronized, so concurrent writes from this heartbeat and the main
+   * onboarding thread each emit whole lines without corrupting the NDJSON output. The
+   * frontend skips empty lines, so heartbeats are invisible to the client.
+   */
+  void sendHeartbeat(PrintWriter writer) {
+    writer.println();
+    writer.flush();
   }
 
   private String resolveOnboardingAccountEmail(String token, HttpServletResponse response)
