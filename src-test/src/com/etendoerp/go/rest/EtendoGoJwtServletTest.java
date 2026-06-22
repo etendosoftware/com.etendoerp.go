@@ -133,13 +133,33 @@ public class EtendoGoJwtServletTest {
   }
 
   @Test
+  public void registerWeakPasswordReturnsWeakPasswordError() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/register");
+    when(req.getContentType()).thenReturn("application/json");
+    JSONObject body = new JSONObject();
+    body.put("email", "weak@test.com");
+    body.put("password", "weak");
+    body.put("name", "Weak User");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("WEAK_PASSWORD", respBody.getJSONObject("error").getString("code"));
+  }
+
+  @Test
   public void registerExistingEmailReturnsBadRequest() throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = mockRequest("/register");
     when(req.getContentType()).thenReturn("application/json");
     JSONObject body = new JSONObject();
     body.put("email", "exists@test.com");
-    body.put("password", "pass123");
+    body.put("password", "Str0ng!Pass1");
     body.put("name", "Test User");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
 
@@ -167,7 +187,7 @@ public class EtendoGoJwtServletTest {
     when(req.getContentType()).thenReturn("application/json");
     JSONObject body = new JSONObject();
     body.put("email", "new@test.com");
-    body.put("password", "pass123");
+    body.put("password", "Str0ng!Pass1");
     body.put("name", "New User");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
 
@@ -203,7 +223,7 @@ public class EtendoGoJwtServletTest {
     when(req.getContentType()).thenReturn("application/json");
     JSONObject body = new JSONObject();
     body.put("email", "localized@test.com");
-    body.put("password", "pass123");
+    body.put("password", "Str0ng!Pass1");
     body.put("name", "Localized User");
     body.put("language", " es_ES ");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
@@ -237,7 +257,7 @@ public class EtendoGoJwtServletTest {
     when(req.getContentType()).thenReturn("application/json");
     JSONObject body = new JSONObject();
     body.put("email", "new@test.com");
-    body.put("password", "pass123");
+    body.put("password", "Str0ng!Pass1");
     body.put("name", "New User");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
 
@@ -686,7 +706,7 @@ public class EtendoGoJwtServletTest {
     HttpServletRequest req = mockRequest("/password-reset/confirm");
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
-        "{\"token\":\"bad-token\",\"password\":\"new-pass\"}")));
+        "{\"token\":\"bad-token\",\"password\":\"Str0ng!Pass1\"}")));
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
@@ -705,7 +725,7 @@ public class EtendoGoJwtServletTest {
     HttpServletRequest req = mockRequest("/password-reset/confirm");
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
-        "{\"token\":\"valid-token\",\"password\":\"new-pass\"}")));
+        "{\"token\":\"valid-token\",\"password\":\"Str0ng!Pass1\"}")));
 
     Account account = mock(Account.class);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
@@ -733,7 +753,7 @@ public class EtendoGoJwtServletTest {
     when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
-        "{\"currentPassword\":\"wrong\",\"newPassword\":\"new-pass\"}")));
+        "{\"currentPassword\":\"wrong\",\"newPassword\":\"Str0ng!Pass1\"}")));
 
     Account account = mock(Account.class);
     when(account.getPasswordHash()).thenReturn(testPasswordHash("old-pass"));
@@ -758,7 +778,7 @@ public class EtendoGoJwtServletTest {
     when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
-        "{\"currentPassword\":\"old-pass\",\"newPassword\":\"new-pass\"}")));
+        "{\"currentPassword\":\"old-pass\",\"newPassword\":\"Str0ng!Pass1\"}")));
 
     Account account = mock(Account.class);
     when(account.getId()).thenReturn("acct-1");
