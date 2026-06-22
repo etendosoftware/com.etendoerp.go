@@ -876,6 +876,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } finally {
       OBContext.restorePreviousMode();
       writer.flush();
+      // PrintWriter swallows IOExceptions (broken pipe): when CloudFront or any proxy
+      // hits its response timeout it silently drops the client mid-stream while the
+      // backend keeps running to completion (and commits). checkError() is the only
+      // way to detect it. Surface it explicitly so it stops being invisible in the logs.
+      if (writer.checkError()) {
+        log.warn("Onboarding stream to client was lost before the result line was delivered "
+            + "(likely a CloudFront/proxy response timeout). The environment may have been "
+            + "created successfully server-side, but the UI will report a false failure. "
+            + "accountEmail={}", accountEmail);
+      }
     }
   }
 
@@ -1310,7 +1320,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * Write a NDJSON progress line.
    */
-  private void sendProgress(PrintWriter writer, String step, String status, String message) {
+  void sendProgress(PrintWriter writer, String step, String status, String message) {
     try {
       JSONObject progress = new JSONObject();
       progress.put("type", "progress");
@@ -1320,6 +1330,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       progress.put("timestamp", Instant.now().toString());
       writer.println(progress.toString());
       writer.flush();
+      // If the flush failed the client is already gone (broken pipe, swallowed by
+      // PrintWriter). Log at DEBUG which step was streaming so the cut point is
+      // identifiable when onboarding-stream logging is enabled.
+      if (writer.checkError()) {
+        log.debug("Client connection lost while streaming onboarding step '{}' (status={})",
+            step, status);
+      }
     } catch (JSONException e) {
       log.warn("Error writing progress", e);
     }
@@ -1328,7 +1345,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * Write the final NDJSON result line.
    */
-  private void sendFinalResult(PrintWriter writer, boolean success, String message) {
+  void sendFinalResult(PrintWriter writer, boolean success, String message) {
     try {
       JSONObject result = new JSONObject();
       result.put("type", "result");
@@ -1337,6 +1354,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put("timestamp", Instant.now().toString());
       writer.println(result.toString());
       writer.flush();
+      // The final result line is what the UI waits for. If the flush failed the client
+      // never received it (broken pipe swallowed by PrintWriter) — the UI will report a
+      // false failure even though the backend finished. Make that explicit.
+      if (writer.checkError()) {
+        log.warn("Onboarding final result (success={}) could not be delivered to the client; "
+            + "the connection was already closed (likely a CloudFront/proxy stream timeout).",
+            success);
+      }
     } catch (JSONException e) {
       log.warn("Error writing final result", e);
     }
