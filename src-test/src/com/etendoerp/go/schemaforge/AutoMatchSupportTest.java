@@ -18,15 +18,27 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
 import java.util.function.Function;
 
@@ -35,12 +47,16 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.MockedConstruction;
+import org.mockito.MockedStatic;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 
 /**
  * Unit tests for {@link AutoMatchSupport} — covers {@link AutoMatchSupport#matchByKey} (the 1:N
@@ -380,5 +396,467 @@ public class AutoMatchSupportTest {
     o.put("matched", false);
     o.put("txns", new JSONArray());
     return o;
+  }
+
+  // ---------------------------------------------------------------------------
+  // nullSafe
+  // ---------------------------------------------------------------------------
+
+  /** nullSafe maps a null amount to zero and preserves a present value. */
+  @Test
+  public void testNullSafe() {
+    assertEquals(0, AutoMatchSupport.nullSafe(null).compareTo(BigDecimal.ZERO));
+    assertEquals(0, AutoMatchSupport.nullSafe(new BigDecimal("7.5")).compareTo(new BigDecimal("7.5")));
+  }
+
+  // ---------------------------------------------------------------------------
+  // newCounts
+  // ---------------------------------------------------------------------------
+
+  /** newCounts returns all expected zeroed buckets in insertion order. */
+  @Test
+  public void testNewCountsAllZeroed() {
+    java.util.Map<String, Integer> counts = AutoMatchSupport.newCounts();
+    assertEquals(Integer.valueOf(0), counts.get("all"));
+    assertEquals(Integer.valueOf(0), counts.get(AutoMatchSupport.STATE_PENDING));
+    assertEquals(Integer.valueOf(0), counts.get(AutoMatchSupport.STATE_SUGGESTED));
+    assertEquals(Integer.valueOf(0), counts.get(AutoMatchSupport.STATE_BY_RULE));
+    assertEquals(Integer.valueOf(0), counts.get(AutoMatchSupport.STATE_DIFFERENCE));
+    assertEquals(Integer.valueOf(0), counts.get("reconciled"));
+  }
+
+  // ---------------------------------------------------------------------------
+  // lineToJson / txnToJson (pure JSON builders)
+  // ---------------------------------------------------------------------------
+
+  /** lineToJson serializes id, trimmed text fields, a signed amount, and a formatted UTC date. */
+  @Test
+  public void testLineToJsonSerializesFields() throws Exception {
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    when(line.getId()).thenReturn("L1");
+    when(line.getDescription()).thenReturn("  Bank fee  ");
+    when(line.getReferenceNo()).thenReturn(" REF-1 ");
+    when(line.getCramount()).thenReturn(new BigDecimal("100.00"));
+    when(line.getDramount()).thenReturn(new BigDecimal("0.00"));
+    when(line.getTransactionDate()).thenReturn(new Date(0L));
+
+    JSONObject json = AutoMatchSupport.lineToJson(line);
+
+    assertEquals("L1", json.getString("id"));
+    assertEquals("Bank fee", json.getString("description"));
+    assertEquals("REF-1", json.getString("referenceNo"));
+    assertEquals(0, new BigDecimal("100.00").compareTo(new BigDecimal(json.getString("amount"))));
+    assertEquals("1970-01-01T00:00:00Z", json.getString("date"));
+  }
+
+  /** lineToJson with a null transaction date produces an empty date string. */
+  @Test
+  public void testLineToJsonNullDateProducesEmptyString() throws Exception {
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    when(line.getId()).thenReturn("L2");
+    when(line.getDescription()).thenReturn(null);
+    when(line.getReferenceNo()).thenReturn(null);
+    when(line.getCramount()).thenReturn(BigDecimal.ZERO);
+    when(line.getDramount()).thenReturn(new BigDecimal("40.00"));
+    when(line.getTransactionDate()).thenReturn(null);
+
+    JSONObject json = AutoMatchSupport.lineToJson(line);
+
+    assertEquals("", json.getString("date"));
+    assertEquals("", json.getString("description"));
+    assertEquals(0, new BigDecimal("-40.00").compareTo(new BigDecimal(json.getString("amount"))));
+  }
+
+  /** txnToJson serializes the transaction id, document number, net amount, and isNew=false. */
+  @Test
+  public void testTxnToJsonWithPaymentSerializesDocumentNo() throws Exception {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getDocumentNo()).thenReturn(" PAY-9 ");
+    FIN_FinaccTransaction t = mock(FIN_FinaccTransaction.class);
+    when(t.getId()).thenReturn("T9");
+    when(t.getFinPayment()).thenReturn(payment);
+    when(t.getDepositAmount()).thenReturn(new BigDecimal("75.00"));
+    when(t.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    when(t.getTransactionDate()).thenReturn(new Date(0L));
+
+    JSONObject json = AutoMatchSupport.txnToJson(t);
+
+    assertEquals("T9", json.getString("id"));
+    assertEquals("PAY-9", json.getString("documentNo"));
+    assertEquals(0, new BigDecimal("75.00").compareTo(new BigDecimal(json.getString("amount"))));
+    assertFalse(json.getBoolean("isNew"));
+  }
+
+  /** txnToJson with no payment yields an empty documentNo (no NPE). */
+  @Test
+  public void testTxnToJsonNoPaymentEmptyDocumentNo() throws Exception {
+    FIN_FinaccTransaction t = mock(FIN_FinaccTransaction.class);
+    when(t.getId()).thenReturn("T0");
+    when(t.getFinPayment()).thenReturn(null);
+    when(t.getDepositAmount()).thenReturn(BigDecimal.ZERO);
+    when(t.getPaymentAmount()).thenReturn(new BigDecimal("20.00"));
+    when(t.getTransactionDate()).thenReturn(null);
+
+    JSONObject json = AutoMatchSupport.txnToJson(t);
+
+    assertEquals("", json.getString("documentNo"));
+    assertEquals(0, new BigDecimal("-20.00").compareTo(new BigDecimal(json.getString("amount"))));
+  }
+
+  // ---------------------------------------------------------------------------
+  // buildStandardGroup
+  // ---------------------------------------------------------------------------
+
+  /** buildStandardGroup composes the group key, single operation, match level, and difference. */
+  @Test
+  public void testBuildStandardGroup() throws Exception {
+    FIN_BankStatementLine line = bslLine("L1", "100.00", "0.00");
+    FIN_FinaccTransaction txn = txnWithPayment("T1", "100.00", "0.00", "DOC-1");
+
+    JSONObject group = AutoMatchSupport.buildStandardGroup(line, txn, FIN_MatchedTransaction.STRONG);
+
+    assertEquals("L1-T1", group.getString("groupKey"));
+    assertEquals("standard", group.getString("origin"));
+    assertEquals(FIN_MatchedTransaction.STRONG, group.getString("matchLevel"));
+    assertFalse(group.getBoolean("isNew"));
+    assertEquals(1, group.getJSONArray("operations").length());
+    // line 100, op 100 → difference 0.
+    assertEquals(0, BigDecimal.ZERO.compareTo(new BigDecimal(group.getString("difference"))));
+  }
+
+  /** buildStandardGroup with a blank match level falls back to an empty string. */
+  @Test
+  public void testBuildStandardGroupBlankMatchLevel() throws Exception {
+    FIN_BankStatementLine line = bslLine("L1", "100.00", "0.00");
+    FIN_FinaccTransaction txn = txnWithPayment("T1", "90.00", "0.00", "DOC-1");
+
+    JSONObject group = AutoMatchSupport.buildStandardGroup(line, txn, null);
+
+    assertEquals("", group.getString("matchLevel"));
+    // line 100, op 90 → difference 10.
+    assertEquals(0, new BigDecimal("10.00").compareTo(new BigDecimal(group.getString("difference"))));
+  }
+
+  // ---------------------------------------------------------------------------
+  // buildMultiGroup (1:N)
+  // ---------------------------------------------------------------------------
+
+  /** buildMultiGroup concatenates a composite key, lists every operation, and sums the difference. */
+  @Test
+  public void testBuildMultiGroup() throws Exception {
+    FIN_BankStatementLine line = bslLine("L5", "150.00", "0.00");
+    FIN_FinaccTransaction t1 = txnWithPayment("T1", "100.00", "0.00", "DOC-1");
+    FIN_FinaccTransaction t2 = txnWithPayment("T2", "50.00", "0.00", "DOC-2");
+
+    JSONObject group = AutoMatchSupport.buildMultiGroup(line, Arrays.asList(t1, t2));
+
+    assertEquals("L5-T1-T2", group.getString("groupKey"));
+    assertEquals("standard", group.getString("origin"));
+    assertFalse(group.getBoolean("isNew"));
+    assertEquals(2, group.getJSONArray("operations").length());
+    // line 150, ops sum 150 → difference 0.
+    assertEquals(0, BigDecimal.ZERO.compareTo(new BigDecimal(group.getString("difference"))));
+  }
+
+  // ---------------------------------------------------------------------------
+  // buildRuleGroup
+  // ---------------------------------------------------------------------------
+
+  /**
+   * A rule carrying a GL item produces a "new" group with a proposed operation, a createPayment
+   * spec, and the listed alternatives.
+   */
+  @Test
+  public void testBuildRuleGroupWithGlItemIsNew() throws Exception {
+    FIN_BankStatementLine line = bslLine("L7", "0.00", "12.50");
+    MatchRuleEngine.Rule rule = new MatchRuleEngine.Rule("R1", "Fee Rule", 10,
+        MatchRuleEngine.COND_CONTAINS, "fee",
+        new MatchRuleEngine.RuleOptions("GL-1", "BP-1", "TT-1", null, null, null), 0L);
+    MatchRuleEngine.Rule alt = new MatchRuleEngine.Rule("R2", "Alt Rule", 20,
+        MatchRuleEngine.COND_CONTAINS, "bank",
+        new MatchRuleEngine.RuleOptions(null, null, null, null, null, null), 0L);
+
+    JSONObject group = AutoMatchSupport.buildRuleGroup(line, rule, Collections.singletonList(alt));
+
+    assertEquals("L7-rule-R1", group.getString("groupKey"));
+    assertEquals("rule", group.getString("origin"));
+    assertEquals("Fee Rule", group.getString("ruleName"));
+    assertTrue(group.getBoolean("isNew"));
+    assertEquals(1, group.getJSONArray("operations").length());
+    assertTrue(group.getJSONArray("operations").getJSONObject(0).getBoolean("isNew"));
+    assertEquals(1, group.getJSONArray("alternatives").length());
+    assertEquals("R2", group.getJSONArray("alternatives").getJSONObject(0).getString("id"));
+    JSONObject cp = group.getJSONObject("createPayment");
+    assertEquals("R1", cp.getString("ruleId"));
+    assertEquals("GL-1", cp.getString("glItemId"));
+  }
+
+  /** A rule with no GL item produces a non-new group with no operations and no createPayment. */
+  @Test
+  public void testBuildRuleGroupWithoutGlItemNotNew() throws Exception {
+    FIN_BankStatementLine line = bslLine("L8", "0.00", "12.50");
+    MatchRuleEngine.Rule rule = new MatchRuleEngine.Rule("R3", "Plain Rule", 10,
+        MatchRuleEngine.COND_CONTAINS, "fee",
+        new MatchRuleEngine.RuleOptions(null, null, null, null, null, null), 0L);
+
+    JSONObject group = AutoMatchSupport.buildRuleGroup(line, rule, Collections.emptyList());
+
+    assertFalse(group.getBoolean("isNew"));
+    assertEquals(0, group.getJSONArray("operations").length());
+    assertFalse(group.has("createPayment"));
+    assertEquals(0, group.getJSONArray("alternatives").length());
+  }
+
+  // ---------------------------------------------------------------------------
+  // standardMatchLevel — exception path
+  // ---------------------------------------------------------------------------
+
+  /** When the matching algorithm throws, standardMatchLevel swallows it and returns null. */
+  @Test
+  public void testStandardMatchLevelAlgorithmThrowsReturnsNull() {
+    FIN_FinancialAccount account = accountWithAlgorithm("com.example.BoomAlgo");
+    FIN_BankStatementLine line = pendingLine("Transfer", "", "");
+
+    try (MockedConstruction<FIN_MatchingTransaction> mc =
+        mockConstruction(FIN_MatchingTransaction.class, (m, ctx) ->
+            when(m.match(any(), any())).thenThrow(new RuntimeException("boom")))) {
+      assertNull(AutoMatchSupport.standardMatchLevel(account, line));
+    }
+  }
+
+  /** A null account yields a null standard match level (no algorithm configured). */
+  @Test
+  public void testStandardMatchLevelNullAccountReturnsNull() {
+    assertNull(AutoMatchSupport.standardMatchLevel(null, pendingLine("x", "", "")));
+  }
+
+  // ---------------------------------------------------------------------------
+  // nextTransactionLineNo / incrementMatchCount — JDBC paths
+  // ---------------------------------------------------------------------------
+
+  /** nextTransactionLineNo returns the value computed by the SQL (max + 10). */
+  @Test
+  public void testNextTransactionLineNoReturnsComputedValue() throws Exception {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true);
+      when(rs.getLong(1)).thenReturn(30L);
+
+      assertEquals(30L, AutoMatchSupport.nextTransactionLineNo("ACC-1"));
+      verify(ps).setString(1, "ACC-1");
+    }
+  }
+
+  /** When the line-number query throws, nextTransactionLineNo degrades to the default of 10. */
+  @Test
+  public void testNextTransactionLineNoOnErrorReturnsDefault() throws Exception {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenThrow(new java.sql.SQLException("boom"));
+
+      assertEquals(10L, AutoMatchSupport.nextTransactionLineNo("ACC-1"));
+    }
+  }
+
+  /** incrementMatchCount issues the UPDATE bound to the rule id. */
+  @Test
+  public void testIncrementMatchCountExecutesUpdate() throws Exception {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+
+      AutoMatchSupport.incrementMatchCount("R1");
+
+      verify(ps).setString(1, "R1");
+      verify(ps).executeUpdate();
+    }
+  }
+
+  /** incrementMatchCount swallows DB errors (best-effort, never throws). */
+  @Test
+  public void testIncrementMatchCountSwallowsError() throws Exception {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenThrow(new java.sql.SQLException("boom"));
+
+      // Must not throw.
+      AutoMatchSupport.incrementMatchCount("R1");
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // findSignalGroup — orchestration over the unreconciled pool
+  // ---------------------------------------------------------------------------
+
+  /** A zero-amount statement line short-circuits findSignalGroup to an empty list. */
+  @Test
+  public void testFindSignalGroupZeroAmountReturnsEmpty() {
+    FIN_BankStatementLine line = bslLine("L1", "50.00", "50.00");
+    List<FIN_FinaccTransaction> result =
+        AutoMatchSupport.findSignalGroup("ACC-1", line, new HashSet<>(), TOL);
+    assertTrue(result.isEmpty());
+  }
+
+  /**
+   * Two same-partner unreconciled transactions whose signed amounts sum to the line amount are
+   * returned as a 1:N partner group; the used-txn set is honoured.
+   */
+  @Test
+  public void testFindSignalGroupPartnerGroupMatches() {
+    FIN_BankStatementLine line = bslLine("L1", "150.00", "0.00");
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    lenient().when(bp.getId()).thenReturn("BP-1");
+    FIN_FinaccTransaction t1 = txnWithPartner("T1", "100.00", bp);
+    FIN_FinaccTransaction t2 = txnWithPartner("T2", "50.00", bp);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+      @SuppressWarnings("unchecked")
+      org.hibernate.query.Query<FIN_FinaccTransaction> query = mock(org.hibernate.query.Query.class);
+      when(session.createQuery(anyString(), eq(FIN_FinaccTransaction.class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.list()).thenReturn(Arrays.asList(t1, t2));
+
+      List<FIN_FinaccTransaction> result =
+          AutoMatchSupport.findSignalGroup("ACC-1", line, new HashSet<>(), TOL);
+
+      assertEquals(2, result.size());
+      assertTrue(result.contains(t1));
+      assertTrue(result.contains(t2));
+    }
+  }
+
+  /**
+   * When no partner key groups, findSignalGroup falls back to the payment reference signal and
+   * returns the reference group that sums to the target.
+   */
+  @Test
+  public void testFindSignalGroupFallsBackToReferenceKey() {
+    FIN_BankStatementLine line = bslLine("L1", "150.00", "0.00");
+
+    FIN_FinaccTransaction t1 = txnWithReference("T1", "100.00", "INV-77");
+    FIN_FinaccTransaction t2 = txnWithReference("T2", "50.00", "INV-77");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+      @SuppressWarnings("unchecked")
+      org.hibernate.query.Query<FIN_FinaccTransaction> query = mock(org.hibernate.query.Query.class);
+      when(session.createQuery(anyString(), eq(FIN_FinaccTransaction.class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.list()).thenReturn(Arrays.asList(t1, t2));
+
+      List<FIN_FinaccTransaction> result =
+          AutoMatchSupport.findSignalGroup("ACC-1", line, new HashSet<>(), TOL);
+
+      assertEquals(2, result.size());
+    }
+  }
+
+  /** A transaction already in the used-txn set is excluded from the candidate pool. */
+  @Test
+  public void testFindSignalGroupSkipsUsedTransactions() {
+    FIN_BankStatementLine line = bslLine("L1", "150.00", "0.00");
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    lenient().when(bp.getId()).thenReturn("BP-1");
+    FIN_FinaccTransaction t1 = txnWithPartner("T1", "100.00", bp);
+    FIN_FinaccTransaction t2 = txnWithPartner("T2", "50.00", bp);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+      @SuppressWarnings("unchecked")
+      org.hibernate.query.Query<FIN_FinaccTransaction> query = mock(org.hibernate.query.Query.class);
+      when(session.createQuery(anyString(), eq(FIN_FinaccTransaction.class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.list()).thenReturn(Arrays.asList(t1, t2));
+
+      // T1 is already used → only T2 remains → no 1:N group.
+      List<FIN_FinaccTransaction> result =
+          AutoMatchSupport.findSignalGroup("ACC-1", line, new HashSet<>(Arrays.asList("T1")), TOL);
+
+      assertTrue(result.isEmpty());
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Builders for the new tests
+  // ---------------------------------------------------------------------------
+
+  /** A bank-statement line mock with a credit/debit amount and a fixed id (no date). */
+  private static FIN_BankStatementLine bslLine(String id, String credit, String debit) {
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    lenient().when(line.getId()).thenReturn(id);
+    lenient().when(line.getCramount()).thenReturn(new BigDecimal(credit));
+    lenient().when(line.getDramount()).thenReturn(new BigDecimal(debit));
+    lenient().when(line.getDescription()).thenReturn("desc");
+    lenient().when(line.getReferenceNo()).thenReturn("");
+    lenient().when(line.getTransactionDate()).thenReturn(null);
+    return line;
+  }
+
+  /** A transaction mock carrying a FIN_Payment with the given documentNo. */
+  private static FIN_FinaccTransaction txnWithPayment(String id, String deposit, String payment,
+      String documentNo) {
+    FIN_Payment p = mock(FIN_Payment.class);
+    lenient().when(p.getDocumentNo()).thenReturn(documentNo);
+    FIN_FinaccTransaction t = mock(FIN_FinaccTransaction.class);
+    lenient().when(t.getId()).thenReturn(id);
+    lenient().when(t.getFinPayment()).thenReturn(p);
+    lenient().when(t.getDepositAmount()).thenReturn(new BigDecimal(deposit));
+    lenient().when(t.getPaymentAmount()).thenReturn(new BigDecimal(payment));
+    lenient().when(t.getTransactionDate()).thenReturn(null);
+    return t;
+  }
+
+  /** A positive-amount transaction mock attached to a business partner (partner signal). */
+  private static FIN_FinaccTransaction txnWithPartner(String id, String amount, BusinessPartner bp) {
+    FIN_FinaccTransaction t = mock(FIN_FinaccTransaction.class);
+    lenient().when(t.getId()).thenReturn(id);
+    lenient().when(t.getBusinessPartner()).thenReturn(bp);
+    lenient().when(t.getFinPayment()).thenReturn(null);
+    lenient().when(t.getDepositAmount()).thenReturn(new BigDecimal(amount));
+    lenient().when(t.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    return t;
+  }
+
+  /** A positive-amount transaction mock attached to a payment with a reference number. */
+  private static FIN_FinaccTransaction txnWithReference(String id, String amount, String reference) {
+    FIN_Payment p = mock(FIN_Payment.class);
+    lenient().when(p.getBusinessPartner()).thenReturn(null);
+    lenient().when(p.getReferenceNo()).thenReturn(reference);
+    FIN_FinaccTransaction t = mock(FIN_FinaccTransaction.class);
+    lenient().when(t.getId()).thenReturn(id);
+    lenient().when(t.getBusinessPartner()).thenReturn(null);
+    lenient().when(t.getFinPayment()).thenReturn(p);
+    lenient().when(t.getDepositAmount()).thenReturn(new BigDecimal(amount));
+    lenient().when(t.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    return t;
   }
 }

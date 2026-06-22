@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -38,10 +39,12 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -51,10 +54,13 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.advpaymentmngt.process.FIN_TransactionProcess;
+import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
+import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
@@ -65,6 +71,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
+import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
 /**
  * Mockito-driven unit tests for {@link ReconciliationHandler} (T6).
@@ -891,6 +898,427 @@ public class ReconciliationHandlerTest {
       verify(trx).setTransactionType("BPW");
       verify(trx).setPaymentAmount(new BigDecimal("50.00"));
       verify(trx).setDepositAmount(BigDecimal.ZERO);
+    }
+  }
+
+  // ── routing: autoMatch + applySuggestions ────────────────────────────────────
+
+  /** A POST applySuggestions with no body returns a 400 (body required). */
+  @Test
+  public void testHandleApplySuggestionsNoBodyReturns400() {
+    NeoContext context = mock(NeoContext.class);
+    when(context.getHttpMethod()).thenReturn("POST");
+    Map<String, String> qp = new HashMap<>();
+    qp.put("action", "applySuggestions");
+    when(context.getQueryParams()).thenReturn(qp);
+    when(context.getRequestBody()).thenReturn(null);
+    NeoResponse response = handler.handle(context);
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  /** A POST reconcileGroup with no body returns a 400 (body required). */
+  @Test
+  public void testHandleReconcileGroupNoBodyReturns400() {
+    NeoContext context = mock(NeoContext.class);
+    when(context.getHttpMethod()).thenReturn("POST");
+    Map<String, String> qp = new HashMap<>();
+    qp.put("action", "reconcileGroup");
+    when(context.getQueryParams()).thenReturn(qp);
+    when(context.getRequestBody()).thenReturn(null);
+    NeoResponse response = handler.handle(context);
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  /** autoMatch without an accountId is rejected with a 400 before touching the DB. */
+  @Test
+  public void testAutoMatchMissingAccountReturns400() {
+    NeoResponse response = handler.handle(getContext("autoMatch", null));
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  /** candidates without an accountId is rejected with a 400. */
+  @Test
+  public void testCandidatesMissingAccountReturns400() {
+    NeoResponse response = handler.handle(getContext("candidates", null));
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  /** pendingLines without an accountId is rejected with a 400. */
+  @Test
+  public void testPendingLinesMissingAccountReturns400() {
+    NeoResponse response = handler.handle(getContext("pendingLines", null));
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  // ── suggestedTransactionIds: full standard-algorithm path ─────────────────────
+
+  /**
+   * When the account's matching algorithm returns a STRONG match, suggestedTransactionIds returns
+   * the matched transaction id (the standard Classic algorithm is used as-is).
+   */
+  @Test
+  public void testSuggestedTransactionIdsStrongMatchReturnsId() {
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    MatchingAlgorithm algo = mock(MatchingAlgorithm.class);
+    when(algo.getJavaClassName()).thenReturn("com.example.Algo");
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getMatchingAlgorithm()).thenReturn(algo);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    FIN_FinaccTransaction matchedTxn = mock(FIN_FinaccTransaction.class);
+    when(matchedTxn.getId()).thenReturn("T-MATCH");
+    FIN_MatchedTransaction matched = mock(FIN_MatchedTransaction.class);
+    when(matched.getTransaction()).thenReturn(matchedTxn);
+    when(matched.getMatchLevel()).thenReturn(FIN_MatchedTransaction.STRONG);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedConstruction<FIN_MatchingTransaction> mc =
+            mockConstruction(FIN_MatchingTransaction.class, (m, ctx) ->
+                when(m.match(eq(line), any())).thenReturn(matched))) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_BankStatementLine.class, LINE_ID)).thenReturn(line);
+
+      Set<String> ids = handler.suggestedTransactionIds(ACC_ID, LINE_ID);
+
+      assertTrue(ids.contains("T-MATCH"));
+    }
+  }
+
+  /** A missing statement line yields an empty suggestion set. */
+  @Test
+  public void testSuggestedTransactionIdsMissingLineReturnsEmpty() {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_BankStatementLine.class, LINE_ID)).thenReturn(null);
+
+      assertTrue(handler.suggestedTransactionIds(ACC_ID, LINE_ID).isEmpty());
+    }
+  }
+
+  // ── buildCandidates: 1:N signal-group pre-marking ─────────────────────────────
+
+  /**
+   * When the selected line equals a signal group's sum, buildCandidates pre-marks every operation
+   * of that group as suggested (not only a single 1:1 standard match).
+   */
+  @Test
+  public void testBuildCandidatesPreMarksSignalGroup() throws Exception {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenReturn(true, false);
+    when(rs.getString("fin_finacc_transaction_id")).thenReturn("g1");
+    when(rs.getTimestamp("statementdate")).thenReturn(null);
+    when(rs.getString("document_no")).thenReturn("PAY-G");
+    when(rs.getString("partner_name")).thenReturn("ACME");
+    when(rs.getBigDecimal("amount")).thenReturn(new BigDecimal("60.00"));
+
+    doReturn(new HashSet<String>()).when(handler).suggestedTransactionIds(ACC_ID, LINE_ID);
+    FIN_BankStatementLine selectedLine = mock(FIN_BankStatementLine.class);
+    doReturn(selectedLine).when(handler).loadLine(LINE_ID);
+
+    FIN_FinaccTransaction g1 = mock(FIN_FinaccTransaction.class);
+    when(g1.getId()).thenReturn("g1");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<AutoMatchSupport> ams = mockStatic(AutoMatchSupport.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubConnection(dal, ps, rs);
+      ams.when(() -> AutoMatchSupport.findSignalGroup(eq(ACC_ID), eq(selectedLine), any(), any()))
+          .thenReturn(Arrays.asList(g1));
+
+      NeoResponse response = handler.buildCandidates(ACC_ID, LINE_ID, null);
+
+      JSONArray candidates =
+          response.getBody().getJSONObject("response").getJSONObject("data").getJSONArray("candidates");
+      assertEquals(1, candidates.length());
+      assertTrue(candidates.getJSONObject(0).getBoolean("suggested"));
+    }
+  }
+
+  // ── buildAutoMatch: preview over pending lines ────────────────────────────────
+
+  /** An autoMatch over a missing account returns a 400. */
+  @Test
+  public void testBuildAutoMatchMissingAccountReturns400() throws Exception {
+    doReturn(null).when(handler).loadAccount(ACC_ID);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      NeoResponse response = handler.buildAutoMatch(ACC_ID);
+      assertEquals(400, response.getHttpStatus());
+    }
+  }
+
+  /**
+   * buildAutoMatch produces a 1:1 standard group for a line whose standard algorithm suggests a
+   * transaction, and reports the KPIs (one line, one group, one op to link).
+   */
+  @Test
+  public void testBuildAutoMatch1to1StandardGroup() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    when(line.getId()).thenReturn("l1");
+    when(line.getCramount()).thenReturn(new BigDecimal("100.00"));
+    when(line.getDramount()).thenReturn(BigDecimal.ZERO);
+    when(line.getDescription()).thenReturn("Transfer");
+    when(line.getReferenceNo()).thenReturn("");
+    when(line.getTransactionDate()).thenReturn(null);
+    doReturn(Collections.singletonList(line)).when(handler).loadPendingLines(ACC_ID);
+
+    doReturn(new HashSet<>(Arrays.asList("t1"))).when(handler).suggestedTransactionIds(ACC_ID, "l1");
+    FIN_FinaccTransaction t1 = mock(FIN_FinaccTransaction.class);
+    when(t1.getId()).thenReturn("t1");
+    when(t1.getDepositAmount()).thenReturn(new BigDecimal("100.00"));
+    when(t1.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    when(t1.getTransactionDate()).thenReturn(null);
+    when(t1.getFinPayment()).thenReturn(null);
+    doReturn(t1).when(handler).loadTransaction("t1");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+
+      NeoResponse response = handler.buildAutoMatch(ACC_ID);
+
+      assertEquals(200, response.getHttpStatus());
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals(1, data.getJSONArray("groups").length());
+      JSONObject kpis = data.getJSONObject("kpis");
+      assertEquals(1, kpis.getInt("pendingLines"));
+      assertEquals(1, kpis.getInt("groupsFound"));
+      assertEquals(1, kpis.getInt("opsToLink"));
+      assertEquals(0, kpis.getInt("willCreate"));
+    }
+  }
+
+  /**
+   * buildAutoMatch falls back to a rule-origin "new" group (createPayment) when neither the 1:1
+   * standard algorithm nor a 1:N signal group matches; the willCreate KPI is incremented.
+   */
+  @Test
+  public void testBuildAutoMatchRuleFallbackCreatesGroup() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    MatchRuleEngine.Rule rule = new MatchRuleEngine.Rule("R1", "Fee Rule", 10,
+        MatchRuleEngine.COND_CONTAINS, "commission",
+        new MatchRuleEngine.RuleOptions("GL-1", "BP-1", null, null, null, null), 0L);
+    doReturn(Collections.singletonList(rule)).when(handler).loadRules(any(), eq(ACC_ID));
+
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    when(line.getId()).thenReturn("l1");
+    when(line.getCramount()).thenReturn(BigDecimal.ZERO);
+    when(line.getDramount()).thenReturn(new BigDecimal("12.50"));
+    when(line.getDescription()).thenReturn("Bank commission fee");
+    when(line.getReferenceNo()).thenReturn("");
+    when(line.getBpartnername()).thenReturn("");
+    when(line.getTransactionDate()).thenReturn(null);
+    doReturn(Collections.singletonList(line)).when(handler).loadPendingLines(ACC_ID);
+
+    // No 1:1 standard suggestion.
+    doReturn(new HashSet<String>()).when(handler).suggestedTransactionIds(ACC_ID, "l1");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<AutoMatchSupport> ams = mockStatic(AutoMatchSupport.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      // No 1:N signal group → forces the rule-engine branch.
+      ams.when(() -> AutoMatchSupport.findSignalGroup(any(), any(), any(), any()))
+          .thenReturn(Collections.emptyList());
+      ams.when(() -> AutoMatchSupport.buildRuleGroup(eq(line), eq(rule), any()))
+          .thenReturn(new JSONObject().put("isNew", true).put("groupKey", "l1-rule-R1"));
+
+      NeoResponse response = handler.buildAutoMatch(ACC_ID);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals(1, data.getJSONArray("groups").length());
+      assertEquals(1, data.getJSONObject("kpis").getInt("willCreate"));
+      assertEquals(0, data.getJSONObject("kpis").getInt("opsToLink"));
+    }
+  }
+
+  // ── applySuggestions: validation branches ─────────────────────────────────────
+
+  /** applySuggestions without a financialAccountId returns a 400. */
+  @Test
+  public void testApplySuggestionsMissingAccountReturns400() throws Exception {
+    NeoResponse response = handler.applySuggestions(new JSONObject());
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  /** applySuggestions for an unknown account returns a 400. */
+  @Test
+  public void testApplySuggestionsUnknownAccountReturns400() throws Exception {
+    doReturn(null).when(handler).loadAccount(ACC_ID);
+    JSONObject body = new JSONObject().put("financialAccountId", ACC_ID);
+    NeoResponse response = handler.applySuggestions(body);
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  /** applySuggestions with an empty groups array returns a 400. */
+  @Test
+  public void testApplySuggestionsEmptyGroupsReturns400() throws Exception {
+    doReturn(mock(FIN_FinancialAccount.class)).when(handler).loadAccount(ACC_ID);
+    JSONObject body = new JSONObject()
+        .put("financialAccountId", ACC_ID)
+        .put("groups", new JSONArray());
+    NeoResponse response = handler.applySuggestions(body);
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  /**
+   * applySuggestions with a plain 1:N operationIds group (no createPayment) composes the standard
+   * reconciliation services and returns 201.
+   */
+  @Test
+  public void testApplySuggestionsPlainGroupReconciles() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("150.00"), BigDecimal.ZERO, null);
+    FIN_FinaccTransaction t1 = trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    FIN_FinaccTransaction t2 = trxFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, null);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-5");
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    doReturn(t1).when(handler).loadTransaction("t1");
+    doReturn(t2).when(handler).loadTransaction("t2");
+    doNothing().when(handler).tagMatchGroup(any());
+    stubReconciliationCompose(rec, "Success");
+
+    JSONObject group = new JSONObject()
+        .put("statementLineId", LINE_ID)
+        .put("operationIds", new JSONArray().put("t1").put("t2"));
+    JSONObject body = new JSONObject()
+        .put("financialAccountId", ACC_ID)
+        .put("groups", new JSONArray().put(group));
+
+    NeoResponse response = handler.applySuggestions(body);
+
+    assertEquals(201, response.getHttpStatus());
+    verify(handler).matchBankStatementLine(eq(line), argThat(ops ->
+        ops.contains("t1") && ops.contains("t2")), eq(rec));
+  }
+
+  /**
+   * A group whose statement line is already reconciled is reported as a 409 in the per-group
+   * results, while the overall response is still 201 (best-effort batch apply).
+   */
+  @Test
+  public void testApplySuggestionsGroupLineAlreadyReconciledRecorded() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_FinaccTransaction already = mock(FIN_FinaccTransaction.class);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("10.00"), BigDecimal.ZERO, already);
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+
+    JSONObject group = new JSONObject()
+        .put("statementLineId", LINE_ID)
+        .put("operationIds", new JSONArray().put("t1"));
+    JSONObject body = new JSONObject()
+        .put("financialAccountId", ACC_ID)
+        .put("groups", new JSONArray().put(group));
+
+    NeoResponse response = handler.applySuggestions(body);
+
+    assertEquals(201, response.getHttpStatus());
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    assertEquals(1, data.getInt("applied"));
+    // The single result records the 409 line-already-reconciled error.
+    JSONObject result = data.getJSONArray("results").getJSONObject(0);
+    assertTrue(result.getJSONObject("error").getString("message").contains("already reconciled"));
+  }
+
+  /** A group with no statementLineId records a 400 error in the results. */
+  @Test
+  public void testApplySuggestionsGroupMissingLineIdRecordsError() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    JSONObject group = new JSONObject().put("operationIds", new JSONArray().put("t1"));
+    JSONObject body = new JSONObject()
+        .put("financialAccountId", ACC_ID)
+        .put("groups", new JSONArray().put(group));
+
+    NeoResponse response = handler.applySuggestions(body);
+
+    assertEquals(201, response.getHttpStatus());
+    JSONObject result = response.getBody().getJSONObject("response").getJSONObject("data")
+        .getJSONArray("results").getJSONObject(0);
+    assertTrue(result.getJSONObject("error").getString("message").contains("statementLineId"));
+  }
+
+  /** A group with no operations and no createPayment records a 400 error in the results. */
+  @Test
+  public void testApplySuggestionsGroupNoOperationsRecordsError() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("10.00"), BigDecimal.ZERO, null);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+
+    JSONObject group = new JSONObject()
+        .put("statementLineId", LINE_ID)
+        .put("operationIds", new JSONArray());
+    JSONObject body = new JSONObject()
+        .put("financialAccountId", ACC_ID)
+        .put("groups", new JSONArray().put(group));
+
+    NeoResponse response = handler.applySuggestions(body);
+
+    JSONObject result = response.getBody().getJSONObject("response").getJSONObject("data")
+        .getJSONArray("results").getJSONObject(0);
+    assertTrue(result.getJSONObject("error").getString("message").contains("At least one operation"));
+  }
+
+  // ── loadPendingLines / loadRules seams ────────────────────────────────────────
+
+  /** loadRules delegates to the engine and returns its rules. */
+  @Test
+  public void testLoadRulesDelegatesToEngine() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    List<MatchRuleEngine.Rule> rules = handler.loadRules(conn, ACC_ID);
+
+    assertTrue(rules.isEmpty());
+    verify(ps).setString(1, ACC_ID);
+  }
+
+  /** loadPendingLines binds the account id and returns the session query results. */
+  @Test
+  public void testLoadPendingLinesQueriesSession() {
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+      @SuppressWarnings("unchecked")
+      org.hibernate.query.Query<FIN_BankStatementLine> query =
+          mock(org.hibernate.query.Query.class);
+      when(session.createQuery(anyString(), eq(FIN_BankStatementLine.class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.list()).thenReturn(new ArrayList<>(Arrays.asList(line)));
+
+      List<FIN_BankStatementLine> result = handler.loadPendingLines(ACC_ID);
+
+      assertEquals(1, result.size());
+      verify(query).setParameter("accountId", ACC_ID);
     }
   }
 }

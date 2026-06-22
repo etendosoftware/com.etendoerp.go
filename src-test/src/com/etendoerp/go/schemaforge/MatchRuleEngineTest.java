@@ -22,7 +22,14 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -280,5 +287,104 @@ public class MatchRuleEngineTest {
     } catch (UnsupportedOperationException e) {
       // expected
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // matchesRegex — direct calls (timeout, syntax-error, plain hit/miss)
+  // ---------------------------------------------------------------------------
+
+  /** A valid regex that matches the text returns true through the executor path. */
+  @Test
+  public void testMatchesRegexDirectHit() {
+    assertTrue(MatchRuleEngine.matchesRegex("comm.*fee", "commission fee"));
+  }
+
+  /** A valid regex that does not match the text returns false. */
+  @Test
+  public void testMatchesRegexDirectMiss() {
+    assertFalse(MatchRuleEngine.matchesRegex("^xyz$", "commission fee"));
+  }
+
+  /** An invalid pattern raises a PatternSyntaxException inside the worker and returns false. */
+  @Test
+  public void testMatchesRegexDirectInvalidPatternReturnsFalse() {
+    assertFalse(MatchRuleEngine.matchesRegex("[unterminated(", "anything"));
+  }
+
+  /**
+   * A catastrophic-backtracking pattern evaluated directly must trip the 200ms timeout guard and
+   * return false instead of hanging.
+   */
+  @Test
+  public void testMatchesRegexDirectCatastrophicTimeoutReturnsFalse() {
+    assertFalse(MatchRuleEngine.matchesRegex("(a+)+$",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"));
+  }
+
+  // ---------------------------------------------------------------------------
+  // loadRules — JDBC ResultSet mapping
+  // ---------------------------------------------------------------------------
+
+  /**
+   * loadRules maps each ResultSet row into a Rule, trims text fields, binds the account id, and
+   * preserves the DB fetch order.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testLoadRulesMapsRowsAndBindsAccount() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, true, false);
+    when(rs.getString("etgo_match_rule_id")).thenReturn("R1", "R2");
+    when(rs.getString("name")).thenReturn("  Fee Rule  ", "Transfer Rule");
+    when(rs.getInt("priority")).thenReturn(10, 20);
+    when(rs.getString("textcondition")).thenReturn(" C ", "S");
+    when(rs.getString("textpattern")).thenReturn(" commission ", "transfer");
+    when(rs.getString("c_glitem_id")).thenReturn("GL-1", null);
+    when(rs.getString("c_bpartner_id")).thenReturn("BP-1", null);
+    when(rs.getString("etgo_transaction_type_id")).thenReturn(null, null);
+    when(rs.getString("c_project_id")).thenReturn(null, null);
+    when(rs.getString("c_costcenter_id")).thenReturn(null, null);
+    when(rs.getString("m_product_id")).thenReturn(null, null);
+    when(rs.getLong("matchcount")).thenReturn(3L, 0L);
+
+    List<MatchRuleEngine.Rule> rules = MatchRuleEngine.loadRules(conn, "ACC-1");
+
+    assertEquals(2, rules.size());
+    assertEquals("R1", rules.get(0).id);
+    assertEquals("Fee Rule", rules.get(0).name);
+    assertEquals("C", rules.get(0).textCondition);
+    assertEquals("commission", rules.get(0).textPattern);
+    assertEquals("GL-1", rules.get(0).glItemId);
+    assertEquals("BP-1", rules.get(0).bpartnerId);
+    assertEquals(3L, rules.get(0).matchCount);
+    assertEquals("R2", rules.get(1).id);
+    assertEquals(20, rules.get(1).priority);
+    verify(ps).setString(1, "ACC-1");
+  }
+
+  /**
+   * A blank account id is bound as an empty string (global-only rule load) and an empty ResultSet
+   * yields an empty list.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testLoadRulesBlankAccountBindsEmptyStringAndEmptyResultSet() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(false);
+
+    List<MatchRuleEngine.Rule> rules = MatchRuleEngine.loadRules(conn, "  ");
+
+    assertTrue(rules.isEmpty());
+    verify(ps).setString(1, "");
   }
 }
