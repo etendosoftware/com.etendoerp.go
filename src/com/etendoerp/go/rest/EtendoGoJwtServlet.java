@@ -53,10 +53,14 @@ import org.openbravo.model.common.enterprise.Organization;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.onboarding.OnboardingBaselineService;
+import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingDefaultCustomerService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
+import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
+import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -115,10 +119,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_ERROR = "error";
   private static final String PROGRESS_ORGANIZATION = "organization";
   private static final String PROGRESS_DATASET = "dataset";
+  private static final String PROGRESS_ACCOUNTING = "accounting";
+  private static final String PROGRESS_PERIOD_CONTROL = "periodControl";
   private static final String PROGRESS_SEQUENCES = "sequences";
   private static final String PROGRESS_FISCAL = "fiscal";
   private static final String PROGRESS_ORG_READY = "orgReady";
   private static final String PROGRESS_CUSTOMER = "customer";
+  private static final String PROGRESS_ORG_INFO = "orgInfo";
+  private static final String PROGRESS_BASELINE = "baseline";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
   private static final long PASSWORD_RESET_TTL_SECONDS = 30 * 60L;
   private static final String PASSWORD_RESET_NEUTRAL_MESSAGE =
@@ -136,14 +144,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       "fiscalIdValue", "address", "sector" };
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
+  OnboardingAccountingWiringService onboardingAccountingWiringService =
+      new OnboardingAccountingWiringService();
+  OnboardingPeriodControlService onboardingPeriodControlService =
+      new OnboardingPeriodControlService();
   OnboardingSequenceGeneratorService onboardingSequenceGeneratorService =
       new OnboardingSequenceGeneratorService();
   OnboardingMarkOrgReadyService onboardingMarkOrgReadyService =
       new OnboardingMarkOrgReadyService();
   OnboardingFiscalDataSetupService onboardingFiscalDataSetupService =
       new OnboardingFiscalDataSetupService();
+  OnboardingOrgInfoService onboardingOrgInfoService =
+      new OnboardingOrgInfoService();
   OnboardingDefaultCustomerService onboardingDefaultCustomerService =
       new OnboardingDefaultCustomerService();
+  OnboardingBaselineService onboardingBaselineService =
+      new OnboardingBaselineService();
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
 
@@ -1023,7 +1039,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
 
       if (!ensureOnboardingDataset(writer, clientId, orgId, organizationCreated,
-          adminContext.adminUserId, adminContext.adminRoleId)) {
+          adminContext.adminUserId, adminContext.adminRoleId, onboardingRequest)) {
         return;
       }
 
@@ -1109,6 +1125,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.clientName = clientName;
       data.currencyIso = body.optString("currency", "EUR").trim();
       data.language = body.optString(FIELD_LANGUAGE, "en_US").trim();
+      // Country drives the org's tax resolution; default to Spain (ES) when the form omits it.
+      data.countryCode = body.optString("countryCode", "ES").trim();
+      data.address = body.optString("address", "").trim();
       return data;
     } catch (JSONException e) {
         String message = e.getMessage() != null && e.getMessage().contains(FIELD_CLIENT_NAME)
@@ -1259,13 +1278,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   boolean ensureOnboardingDataset(PrintWriter writer, String clientId, String orgId,
-      boolean importRequired, String adminUserId, String adminRoleId) {
+      boolean importRequired, String adminUserId, String adminRoleId,
+      OnboardingRequestData requestData) {
     if (importRequired && !importOnboardingDataset(writer, clientId, orgId)) {
       return false;
     }
     if (!importRequired) {
       sendProgress(writer, PROGRESS_DATASET, "done",
           "Existing organization detected, skipping onboarding dataset import");
+    }
+    if (importRequired && !wireAccounting(writer, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
+    }
+    if (importRequired && !wirePeriodControl(writer, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
     }
     if (!generateOnboardingSequences(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
@@ -1276,7 +1302,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!setupFiscalData(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
-    return ensureDefaultCustomer(writer, clientId, orgId, adminUserId, adminRoleId);
+    if (!wireOrgInfo(writer, clientId, orgId, adminUserId, adminRoleId, requestData)) {
+      return false;
+    }
+    if (!ensureDefaultCustomer(writer, clientId, orgId, adminUserId, adminRoleId, importRequired)) {
+      return false;
+    }
+    // Final action before commitDalChanges: stamp the tenant's data-fix baseline so it lands in the
+    // same atomic onboarding commit. A genuine SQL error propagates (not caught here) so the outer
+    // handleOnboarding catch rolls back cleanly; the expected ON CONFLICT->0-rows case is benign.
+    //
+    // The baseline applied_utc is a hardcoded CUT (ONBOARDING_PROVISIONED_THROUGH in
+    // OnboardingBaselineService), NOT now(). It represents the last corrective data-fix that
+    // this version of onboarding already provisions natively, so the runner skips all fixes
+    // at-or-before that cutoff for freshly-onboarded tenants.
+    //
+    // WHEN ADDING A NEW ONBOARDING SERVICE (gap fix): bump ONBOARDING_PROVISIONED_THROUGH to the
+    // timestamp of the corresponding .sql fix in cli/src/data-fixes/sql/. See the gap-closing
+    // workflow in docs/etendo-ad/onboarding-and-datafixes-map.md §0.
+    return registerBaseline(writer, clientId);
   }
 
   boolean importOnboardingDataset(PrintWriter writer, String clientId, String orgId) {
@@ -1291,6 +1335,42 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Onboarding dataset import failed";
       sendProgress(writer, PROGRESS_DATASET, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  boolean wireAccounting(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, PROGRESS_ACCOUNTING, PROGRESS_IN_PROGRESS,
+        "Wiring organization general ledger...");
+    try {
+      onboardingAccountingWiringService.wire(clientId, orgId, adminUserId, adminRoleId);
+      sendProgress(writer, PROGRESS_ACCOUNTING, "done", "Organization general ledger wired");
+      return true;
+    } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding accounting wiring", e, log);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Organization accounting wiring failed";
+      sendProgress(writer, PROGRESS_ACCOUNTING, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  boolean wirePeriodControl(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, PROGRESS_PERIOD_CONTROL, PROGRESS_IN_PROGRESS,
+        "Enabling fiscal period control...");
+    try {
+      onboardingPeriodControlService.wire(clientId, orgId, adminUserId, adminRoleId);
+      sendProgress(writer, PROGRESS_PERIOD_CONTROL, "done", "Fiscal period control enabled");
+      return true;
+    } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding period-control wiring", e, log);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Organization period-control wiring failed";
+      sendProgress(writer, PROGRESS_PERIOD_CONTROL, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);
       return false;
     }
@@ -1349,13 +1429,41 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
+  boolean wireOrgInfo(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId, OnboardingRequestData requestData) {
+    sendProgress(writer, PROGRESS_ORG_INFO, PROGRESS_IN_PROGRESS,
+        "Setting up organization address...");
+    try {
+      String countryCode = requestData != null ? requestData.countryCode : null;
+      String address = requestData != null ? requestData.address : null;
+      onboardingOrgInfoService.ensureOrgInfo(clientId, orgId, adminUserId, adminRoleId,
+          countryCode, address);
+      sendProgress(writer, PROGRESS_ORG_INFO, "done", "Organization address ready");
+      return true;
+    } catch (Exception e) {
+      log.error("Error during organization info setup", e);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Organization info setup failed";
+      sendProgress(writer, PROGRESS_ORG_INFO, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
   boolean ensureDefaultCustomer(PrintWriter writer, String clientId, String orgId,
-      String adminUserId, String adminRoleId) {
+      String adminUserId, String adminRoleId, boolean importRequired) {
     sendProgress(writer, PROGRESS_CUSTOMER, PROGRESS_IN_PROGRESS,
         "Creating default customer...");
     try {
       onboardingDefaultCustomerService.ensureDefaultCustomer(clientId, orgId, adminUserId,
           adminRoleId);
+      // A2: provision the per-BP posting accounts now that the default customer exists. wireAccounting
+      // ran earlier (before any business partner existed), so C_BP_CUSTOMER_ACCT would otherwise stay
+      // empty. Gated on importRequired because the ledger it copies defaults from comes from the import.
+      if (importRequired) {
+        onboardingAccountingWiringService.wireBusinessPartnerAccounts(clientId, orgId, adminUserId,
+            adminRoleId);
+      }
       sendProgress(writer, PROGRESS_CUSTOMER, "done", "Default customer ready");
       return true;
     } catch (Exception e) {
@@ -1365,6 +1473,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendFinalResult(writer, false, errorMessage);
       return false;
     }
+  }
+
+  /**
+   * Registers the tenant's data-fix baseline row (the LIVE preventive counterpart of the corrective
+   * runner's DETECTED sweep) as the final onboarding action before the commit.
+   *
+   * <p>Unlike the other steps, a genuine SQL failure here is NOT caught-and-returned-false: it
+   * propagates so {@code handleOnboarding}'s catch performs a clean {@code rollbackDalChanges}.
+   * Swallowing it would poison the shared transaction and abort the otherwise-successful commit.
+   * The expected {@code ON CONFLICT DO NOTHING} → 0-rows outcome never throws (DETECTED conserved).</p>
+   */
+  boolean registerBaseline(PrintWriter writer, String clientId) {
+    sendProgress(writer, PROGRESS_BASELINE, PROGRESS_IN_PROGRESS,
+        "Registering data-fix baseline...");
+    onboardingBaselineService.registerBaseline(clientId);
+    sendProgress(writer, PROGRESS_BASELINE, "done", "Data-fix baseline registered");
+    return true;
   }
 
 
@@ -1602,6 +1727,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     private String clientName;
     private String currencyIso;
     private String language;
+    private String countryCode;
+    private String address;
   }
 
   private static class AdminContextData {
