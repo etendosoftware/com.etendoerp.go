@@ -163,31 +163,11 @@ public class CreateInvoiceShipmentHandler implements NeoHandler {
   }
 
   private DocumentType findShipmentDocType(Invoice invoice) {
-    List<DocumentType> results = OBDal.getInstance().createCriteria(DocumentType.class)
-        .add(Restrictions.eq(DocumentType.PROPERTY_CLIENT, invoice.getClient()))
-        .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, "MMS"))
-        .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, true))
-        .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true))
-        .setMaxResults(1)
-        .list();
-    return results.isEmpty() ? null : results.get(0);
+    return NeoCommercialDocumentFactory.findShipmentDocType(invoice.getClient());
   }
 
   private Locator resolveDefaultLocator(Warehouse warehouse) {
-    List<Locator> defaults = OBDal.getInstance().createCriteria(Locator.class)
-        .add(Restrictions.eq(Locator.PROPERTY_WAREHOUSE, warehouse))
-        .add(Restrictions.eq(Locator.PROPERTY_DEFAULT, true))
-        .add(Restrictions.eq(Locator.PROPERTY_ACTIVE, true))
-        .setMaxResults(1)
-        .list();
-    if (!defaults.isEmpty()) return defaults.get(0);
-
-    List<Locator> any = OBDal.getInstance().createCriteria(Locator.class)
-        .add(Restrictions.eq(Locator.PROPERTY_WAREHOUSE, warehouse))
-        .add(Restrictions.eq(Locator.PROPERTY_ACTIVE, true))
-        .setMaxResults(1)
-        .list();
-    return any.isEmpty() ? null : any.get(0);
+    return NeoCommercialDocumentFactory.findDefaultLocator(warehouse);
   }
 
   private void createShipmentLines(ShipmentInOut shipment, Invoice invoice, Locator locator) {

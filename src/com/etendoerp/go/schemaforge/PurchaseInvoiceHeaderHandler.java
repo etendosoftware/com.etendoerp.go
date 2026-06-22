@@ -135,36 +135,12 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   // AP-specific subtype resolution
   // ---------------------------------------------------------------------------
 
-  /**
-   * {@inheritDoc}
-   *
-   * <p>AP invoice subtype rules:
-   * <ul>
-   *   <li>{@code APC} → {@code NC}</li>
-   *   <li>{@code API} + isReturn=true → {@code DEV}</li>
-   *   <li>otherwise → {@code FAC}</li>
-   * </ul>
-   */
+  /** {@inheritDoc} AP: APC → NC, API+isReturn → DEV, otherwise FAC. */
   @Override
-  protected String resolveSubtype(String docTypeId) {
-    if (StringUtils.isBlank(docTypeId)) {
-      return SUBTYPE_FAC;
-    }
-    try {
-      DocumentType dt = OBDal.getInstance().get(DocumentType.class, docTypeId);
-      if (dt == null) {
-        return SUBTYPE_FAC;
-      }
-      String category = dt.getDocumentCategory();
-      if ("APC".equals(category)) {
-        return SUBTYPE_NC;
-      }
-      if ("API".equals(category) && Boolean.TRUE.equals(dt.isReturn())) {
-        return SUBTYPE_DEV;
-      }
-    } catch (Exception e) {
-      log.debug("Could not resolve subtype for docType {}: {}", docTypeId, e.getMessage());
-    }
+  protected String classifyDocType(DocumentType dt) {
+    String category = dt.getDocumentCategory();
+    if ("APC".equals(category)) return SUBTYPE_NC;
+    if ("API".equals(category) && Boolean.TRUE.equals(dt.isReturn())) return SUBTYPE_DEV;
     return SUBTYPE_FAC;
   }
 

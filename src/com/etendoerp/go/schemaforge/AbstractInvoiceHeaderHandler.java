@@ -61,13 +61,35 @@ public abstract class AbstractInvoiceHeaderHandler {
 
   /**
    * Returns the invoice subtype ("FAC", "NC", or "DEV") for the given document-type ID.
-   * AP invoices use APC/API categories; AR invoices use ARC/ARI categories.
+   * Handles null/blank IDs and DB lookup errors; delegates category-to-subtype mapping
+   * to {@link #classifyDocType(DocumentType)}.
    *
-   * @param docTypeId
-   *     the ID of the selected document type, may be null/blank
+   * @param docTypeId the ID of the selected document type, may be null/blank
    * @return one of {@code SUBTYPE_FAC}, {@code SUBTYPE_NC}, {@code SUBTYPE_DEV}
    */
-  protected abstract String resolveSubtype(String docTypeId);
+  protected final String resolveSubtype(String docTypeId) {
+    if (StringUtils.isBlank(docTypeId)) {
+      return SUBTYPE_FAC;
+    }
+    try {
+      DocumentType dt = OBDal.getInstance().get(DocumentType.class, docTypeId);
+      if (dt == null) {
+        return SUBTYPE_FAC;
+      }
+      return classifyDocType(dt);
+    } catch (Exception e) {
+      return SUBTYPE_FAC;
+    }
+  }
+
+  /**
+   * Maps the resolved {@link DocumentType} to a subtype constant.
+   * AR invoices check ARC/ARI_RM; AP invoices check APC/API+isReturn.
+   *
+   * @param dt the loaded document type (never null)
+   * @return one of {@code SUBTYPE_FAC}, {@code SUBTYPE_NC}, {@code SUBTYPE_DEV}
+   */
+  protected abstract String classifyDocType(DocumentType dt);
 
   /**
    * Returns the virtual-field key used to store the subtype in the response JSON.

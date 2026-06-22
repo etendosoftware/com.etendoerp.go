@@ -140,36 +140,12 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   // AR-specific subtype resolution
   // ---------------------------------------------------------------------------
 
-  /**
-   * {@inheritDoc}
-   *
-   * <p>AR invoice subtype rules:
-   * <ul>
-   *   <li>{@code ARC} → {@code NC}</li>
-   *   <li>{@code ARI_RM} → {@code DEV}</li>
-   *   <li>otherwise → {@code FAC}</li>
-   * </ul>
-   */
+  /** {@inheritDoc} AR: ARC → NC, ARI_RM → DEV, otherwise FAC. */
   @Override
-  protected String resolveSubtype(String docTypeId) {
-    if (StringUtils.isBlank(docTypeId)) {
-      return SUBTYPE_FAC;
-    }
-    try {
-      DocumentType dt = OBDal.getInstance().get(DocumentType.class, docTypeId);
-      if (dt == null) {
-        return SUBTYPE_FAC;
-      }
-      String category = dt.getDocumentCategory();
-      if ("ARC".equals(category)) {
-        return SUBTYPE_NC;
-      }
-      if ("ARI_RM".equals(category)) {
-        return SUBTYPE_DEV;
-      }
-    } catch (Exception e) {
-      log.debug("Could not resolve AR subtype for docType {}: {}", docTypeId, e.getMessage());
-    }
+  protected String classifyDocType(DocumentType dt) {
+    String category = dt.getDocumentCategory();
+    if ("ARC".equals(category)) return SUBTYPE_NC;
+    if ("ARI_RM".equals(category)) return SUBTYPE_DEV;
     return SUBTYPE_FAC;
   }
 
