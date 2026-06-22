@@ -17,10 +17,14 @@
 
 package com.etendoerp.go.schemaforge.email;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -28,6 +32,7 @@ import java.util.Set;
 import java.util.function.LongSupplier;
 
 import org.apache.commons.lang3.StringUtils;
+import org.openbravo.base.exception.OBException;
 
 /**
  * In-memory safety store used until a persistent DAL-backed store is configured.
@@ -41,6 +46,8 @@ public class InMemoryEmailSafetyStore implements EmailSafetyStore {
   private final Map<String, EmailAuditRecord> sentByIdempotencyKey = new HashMap<>();
   private final Map<String, WindowCounter> throttleCounters = new HashMap<>();
   private final Set<String> killSwitches = new HashSet<>();
+  private final Set<String> suppressedAddressHashes = new HashSet<>();
+  private final Set<String> suppressedDomains = new HashSet<>();
   private final List<EmailAuditRecord> auditRecords = new ArrayList<>();
 
   /**
@@ -85,12 +92,50 @@ public class InMemoryEmailSafetyStore implements EmailSafetyStore {
   }
 
   /**
+   * Suppresses a specific recipient address (stored as a SHA-256 hash, never raw).
+   *
+   * @param emailAddress address to suppress
+   */
+  public synchronized void suppressAddress(String emailAddress) {
+    String hash = hashAddress(emailAddress);
+    if (hash != null) {
+      suppressedAddressHashes.add(hash);
+    }
+  }
+
+  /**
+   * Suppresses an entire recipient domain (stored lower-cased in plaintext).
+   *
+   * @param domain domain to suppress
+   */
+  public synchronized void suppressDomain(String domain) {
+    String normalized = StringUtils.trimToNull(domain);
+    if (normalized != null) {
+      suppressedDomains.add(normalized.toLowerCase(Locale.ROOT));
+    }
+  }
+
+  /**
    * Returns the audit records captured by this store.
    *
    * @return audit record snapshot
    */
   public synchronized List<EmailAuditRecord> getAuditRecords() {
     return new ArrayList<>(auditRecords);
+  }
+
+  @Override
+  public synchronized boolean isRecipientSuppressed(String tenantId, String emailAddress) {
+    String normalized = EmailRecipientSet.normalizeAddress(emailAddress);
+    if (normalized == null) {
+      return false;
+    }
+    String hash = hashAddress(normalized);
+    if (hash != null && suppressedAddressHashes.contains(hash)) {
+      return true;
+    }
+    String domain = domainOf(normalized);
+    return domain != null && suppressedDomains.contains(domain);
   }
 
   @Override
@@ -184,6 +229,33 @@ public class InMemoryEmailSafetyStore implements EmailSafetyStore {
       throttleCounters.put(counterKey, counter);
     }
     return counter;
+  }
+
+  private static String hashAddress(String emailAddress) {
+    String normalized = EmailRecipientSet.normalizeAddress(emailAddress);
+    if (normalized == null) {
+      return null;
+    }
+    try {
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      byte[] bytes = digest.digest(normalized.toLowerCase(Locale.ROOT)
+          .getBytes(StandardCharsets.UTF_8));
+      StringBuilder hex = new StringBuilder(bytes.length * 2);
+      for (byte b : bytes) {
+        hex.append(String.format("%02x", b));
+      }
+      return hex.toString();
+    } catch (NoSuchAlgorithmException e) {
+      throw new OBException("SHA-256 unavailable", e);
+    }
+  }
+
+  private static String domainOf(String normalizedAddress) {
+    int at = normalizedAddress.lastIndexOf('@');
+    if (at < 0 || at == normalizedAddress.length() - 1) {
+      return null;
+    }
+    return normalizedAddress.substring(at + 1).toLowerCase(Locale.ROOT);
   }
 
   private static String killSwitchKey(String scope, String key) {
