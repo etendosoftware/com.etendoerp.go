@@ -16,6 +16,8 @@
  */
 package com.etendoerp.go.rest;
 
+import java.util.regex.Pattern;
+
 /**
  * Shared password strength policy for local credential endpoints (register,
  * password-reset confirm, change-password). The backend is the security
@@ -41,6 +43,12 @@ public final class PasswordPolicy {
       "Password must include at least 8 characters, uppercase and lowercase letters, "
           + "a number, and a special character.";
 
+  private static final Pattern UPPERCASE = Pattern.compile("[A-Z]");
+  private static final Pattern LOWERCASE = Pattern.compile("[a-z]");
+  private static final Pattern DIGIT = Pattern.compile("[0-9]");
+  // Any character that is neither ASCII alphanumeric nor whitespace counts as "special".
+  private static final Pattern SPECIAL = Pattern.compile("[^A-Za-z0-9\\s]");
+
   private PasswordPolicy() {
   }
 
@@ -53,25 +61,11 @@ public final class PasswordPolicy {
    * @return whether the password is strong enough to be accepted
    */
   public static boolean isStrong(String password) {
-    if (password == null || password.length() < MIN_LENGTH) {
-      return false;
-    }
-    boolean hasUpper = false;
-    boolean hasLower = false;
-    boolean hasDigit = false;
-    boolean hasSpecial = false;
-    for (int i = 0; i < password.length(); i++) {
-      char c = password.charAt(i);
-      if (Character.isUpperCase(c)) {
-        hasUpper = true;
-      } else if (Character.isLowerCase(c)) {
-        hasLower = true;
-      } else if (Character.isDigit(c)) {
-        hasDigit = true;
-      } else if (!Character.isWhitespace(c)) {
-        hasSpecial = true;
-      }
-    }
-    return hasUpper && hasLower && hasDigit && hasSpecial;
+    return password != null
+        && password.length() >= MIN_LENGTH
+        && UPPERCASE.matcher(password).find()
+        && LOWERCASE.matcher(password).find()
+        && DIGIT.matcher(password).find()
+        && SPECIAL.matcher(password).find();
   }
 }
