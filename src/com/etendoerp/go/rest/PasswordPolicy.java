@@ -45,7 +45,7 @@ public final class PasswordPolicy {
 
   private static final Pattern UPPERCASE = Pattern.compile("[A-Z]");
   private static final Pattern LOWERCASE = Pattern.compile("[a-z]");
-  private static final Pattern DIGIT = Pattern.compile("[0-9]");
+  private static final Pattern DIGIT = Pattern.compile("\\d");
   // Any character that is neither ASCII alphanumeric nor whitespace counts as "special".
   private static final Pattern SPECIAL = Pattern.compile("[^A-Za-z0-9\\s]");
 
