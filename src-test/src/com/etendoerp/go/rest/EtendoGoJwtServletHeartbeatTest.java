@@ -137,6 +137,44 @@ public class EtendoGoJwtServletHeartbeatTest {
     assertTrue("result must report success", result.getBoolean("success"));
   }
 
+  /**
+   * Heartbeats interleaved with real progress lines must not corrupt the stream: every
+   * non-blank line stays parseable NDJSON and the blank heartbeat lines are the only ones
+   * the frontend skips. This mirrors the production stream where a slow step emits a
+   * heartbeat between two progress events.
+   */
+  @Test
+  public void heartbeatsInterleavedWithProgressKeepStreamValidNdjson() throws Exception {
+    StringWriter sink = new StringWriter();
+    PrintWriter writer = new PrintWriter(sink);
+
+    servlet.sendProgress(writer, "organization", "in_progress", "Creating organization...");
+    servlet.sendHeartbeat(writer);
+    servlet.sendProgress(writer, "dataset", "in_progress", "Loading company data...");
+    servlet.sendHeartbeat(writer);
+    servlet.sendFinalResult(writer, true, "Environment created successfully");
+
+    int blankLines = 0;
+    int progressLines = 0;
+    boolean sawResult = false;
+    for (String line : sink.toString().split("\n")) {
+      if (line.trim().isEmpty()) {
+        blankLines++;
+        continue;
+      }
+      JSONObject parsed = new JSONObject(line); // throws if a heartbeat broke the JSON framing
+      if ("progress".equals(parsed.optString("type"))) {
+        progressLines++;
+      } else if ("result".equals(parsed.optString("type"))) {
+        sawResult = true;
+      }
+    }
+
+    assertEquals("both heartbeats must surface as skippable blank lines", 2, blankLines);
+    assertEquals("both progress events must remain parseable", 2, progressLines);
+    assertTrue("the final result line must remain parseable", sawResult);
+  }
+
   private static void waitUntil(BooleanSupplierWithTimeout condition, long timeoutMillis)
       throws InterruptedException {
     long deadline = System.currentTimeMillis() + timeoutMillis;
