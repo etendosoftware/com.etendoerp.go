@@ -993,7 +993,12 @@ public class EtendoGoJwtServletTest {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = mockRequest("/onboarding/draft");
 
-    servlet.doGet(req, resp.response);
+    // Mock OBContext so the admin-context setup in resolveAuthenticatedAccount is a
+    // no-op (as in the sibling draft tests); without a Bearer header the request must
+    // still short-circuit to 401 before any account lookup.
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      servlet.doGet(req, resp.response);
+    }
 
     assertEquals(401, resp.status);
   }
