@@ -702,6 +702,91 @@ class ToolRegistryGenerateToolsTest {
     void emptyStringReturnsFalse() {
       assertFalse(ToolRegistry.isCrudTool(""));
     }
+
+    @Test
+    @DisplayName("neo_generate_amortization_plan returns true (ETP-4232)")
+    void generateAmortizationPlanIsCrudTool() {
+      assertTrue(ToolRegistry.isCrudTool(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN));
+    }
+  }
+
+  // ── neo_generate_amortization_plan tool (ETP-4232) ────────────────────────
+
+  @Nested
+  @DisplayName("generateTools — neo_generate_amortization_plan (ETP-4232)")
+  class GenerateAmortizationPlanToolTests {
+
+    @Test
+    @DisplayName("neo:process scope registers neo_generate_amortization_plan even with no window specs")
+    void processScopeRegistersAmortizationTool() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:process"));
+
+      List<String> names = toolNames(tools);
+      assertTrue(names.contains(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN),
+          "neo_generate_amortization_plan must be registered with neo:process scope");
+    }
+
+    @Test
+    @DisplayName("neo:read scope does NOT register neo_generate_amortization_plan")
+    void readScopeDoesNotRegisterAmortizationTool() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+
+      assertFalse(toolNames(tools).contains(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN),
+          "neo_generate_amortization_plan must NOT be registered with read-only scope");
+    }
+
+    @Test
+    @DisplayName("neo:* scope registers neo_generate_amortization_plan")
+    void wildcardScopeRegistersAmortizationTool() {
+      SFSpec windowSpec = createWindowSpec(SPEC_SALES_ORDER);
+      when(windowSpec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(windowSpec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
+
+      assertTrue(toolNames(tools).contains(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN));
+    }
+
+    @Test
+    @DisplayName("neo_generate_amortization_plan tool has assetId as required property")
+    @SuppressWarnings("unchecked")
+    void amortizationToolHasAssetIdRequired() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:process"));
+
+      McpToolDefinition tool = tools.stream()
+          .filter(t -> McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN.equals(t.getName()))
+          .findFirst()
+          .orElse(null);
+      assertNotNull(tool, "Tool must be present");
+
+      Map<String, Object> schema = tool.getInputSchema();
+      List<String> required = (List<String>) schema.get("required");
+      assertNotNull(required);
+      assertTrue(required.contains("assetId"), "assetId must be in required list");
+
+      Map<String, Object> props = (Map<String, Object>) schema.get("properties");
+      assertNotNull(props);
+      assertTrue(props.containsKey("assetId"), "assetId must be in properties");
+    }
+
+    @Test
+    @DisplayName("resolveSpecName returns null for neo_generate_amortization_plan (CRUD tool)")
+    void resolveSpecNameReturnNullForAmortizationTool() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("assetId", "ASSET-001");
+
+      String result = ToolRegistry.resolveSpecName(
+          McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN, args);
+
+      // isCrudTool == true, so it reads "spec" from args — which is absent, returning null
+      assertNull(result, "resolveSpecName must return null for amortization tool (no spec arg)");
+    }
   }
 
   // ── kebabToSnake / snakeToKebab ───────────────────────────────────────
