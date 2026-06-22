@@ -39,6 +39,8 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
+import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+
 /**
  * Post-hook for the Goods Shipment header entity.
  *
@@ -74,8 +76,20 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   @Inject
   private CreateReturnReceiptHandler createReturnReceiptHandler;
 
+  @Inject
+  private DocumentPostingService postingService;
+
+  /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
+  void setPostingService(DocumentPostingService postingService) {
+    this.postingService = postingService;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
+    if (posting != null) {
+      return posting;
+    }
     return NeoHeaderActionRouter.dispatch(context,
         createDraftInvoiceHandler, neoCloneRecordHandler, createReturnReceiptHandler);
   }
