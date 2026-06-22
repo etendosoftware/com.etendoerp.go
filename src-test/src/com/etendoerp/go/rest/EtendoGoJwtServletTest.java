@@ -986,6 +986,199 @@ public class EtendoGoJwtServletTest {
     assertEquals(401, resp.status);
   }
 
+  // ===================== GET/POST /onboarding/draft =====================
+
+  @Test
+  public void onboardingDraftGetMissingTokenReturnsUnauthorized() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/onboarding/draft");
+
+    // Mock OBContext so the admin-context setup in resolveAuthenticatedAccount is a
+    // no-op (as in the sibling draft tests); without a Bearer header the request must
+    // still short-circuit to 401 before any account lookup.
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(401, resp.status);
+  }
+
+  @Test
+  public void onboardingDraftGetReturnsStoredDraft() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/onboarding/draft", "valid-token");
+    Account account = mock(Account.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.getOnboardingDraft(account))
+          .thenReturn("{\"step\":2,\"form\":{\"fullName\":\"Jane\"}}");
+
+      servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("success", respBody.getString("status"));
+    assertEquals(2, respBody.getJSONObject("draft").getInt("step"));
+    assertEquals("Jane", respBody.getJSONObject("draft").getJSONObject("form")
+        .getString("fullName"));
+  }
+
+  @Test
+  public void onboardingDraftGetIgnoresInvalidStoredJson() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/onboarding/draft", "valid-token");
+    Account account = mock(Account.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.getOnboardingDraft(account)).thenReturn("not json");
+
+      servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertTrue(respBody.isNull("draft"));
+  }
+
+  @Test
+  public void onboardingDraftSaveSanitizesAllowedFieldsAndClampsStep() throws Exception {
+    ResponseCapture resp = mockResponse();
+    JSONObject body = onboardingDraftBody(99, "Jane", "secret");
+    HttpServletRequest req = authenticatedJsonRequest("/onboarding/draft", "valid-token", body);
+    Account account = mock(Account.class);
+    ArgumentCaptor<String> storedDraftCaptor = ArgumentCaptor.forClass(String.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.updateOnboardingDraft(eq(account),
+          storedDraftCaptor.capture()));
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject storedDraft = new JSONObject(storedDraftCaptor.getValue());
+    assertEquals(2, storedDraft.getInt("step"));
+    assertEquals("Jane", storedDraft.getJSONObject("form").getString("fullName"));
+    assertTrue(!storedDraft.getJSONObject("form").has("password"));
+  }
+
+  @Test
+  public void onboardingDraftSaveNullDraftClearsStoredDraft() throws Exception {
+    ResponseCapture resp = mockResponse();
+    JSONObject body = new JSONObject();
+    body.put("draft", JSONObject.NULL);
+    HttpServletRequest req = authenticatedJsonRequest("/onboarding/draft", "valid-token", body);
+    Account account = mock(Account.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.updateOnboardingDraft(eq(account),
+          eq((String) null)));
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("success", respBody.getString("status"));
+  }
+
+  @Test
+  public void onboardingDraftSaveInvalidJsonReturnsBadRequestWithoutPersisting() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/onboarding/draft", "valid-token");
+    when(req.getContentType()).thenReturn("application/json");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader("not json")));
+    Account account = mock(Account.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.updateOnboardingDraft(any(Account.class),
+          anyString()), never());
+    }
+
+    assertEquals(400, resp.status);
+  }
+
+  @Test
+  public void onboardingDraftSaveOversizedDraftReturnsBadRequestWithoutPersisting()
+      throws Exception {
+    ResponseCapture resp = mockResponse();
+    JSONObject body = onboardingDraftBody(1, repeated("A", 4_050), null);
+    HttpServletRequest req = authenticatedJsonRequest("/onboarding/draft", "valid-token", body);
+    Account account = mock(Account.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.updateOnboardingDraft(any(Account.class),
+          anyString()), never());
+    }
+
+    assertEquals(400, resp.status);
+  }
+
+  @Test
+  public void environmentsSuccessExpandsEachNonStarOrganization() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/environments", "valid-token");
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("user@test.com");
+    User environmentUser = mock(User.class);
+    Client client = mock(Client.class);
+    Organization firstOrg = mockOrganization("ORG-1", "Main Org");
+    Organization secondOrg = mockOrganization("ORG-2", "Second Org");
+    when(environmentUser.getClient()).thenReturn(client);
+    when(environmentUser.getId()).thenReturn("USER-1");
+    when(environmentUser.getUsername()).thenReturn("admin@test.com");
+    when(environmentUser.getName()).thenReturn("Admin User");
+    when(client.getId()).thenReturn("CLIENT-1");
+    when(client.getName()).thenReturn("Client One");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail("user@test.com"))
+          .thenReturn(List.of(environmentUser));
+      dalMock.when(() -> EtendoGoJwtDalHelper.findNonStarOrganizations("CLIENT-1"))
+          .thenReturn(List.of(firstOrg, secondOrg));
+      dalMock.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(any(Client.class),
+          any(Organization.class), any(User.class))).thenCallRealMethod();
+
+      servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    JSONArray environments = new JSONObject(resp.body()).getJSONArray("environments");
+    assertEquals(2, environments.length());
+    assertEquals("ORG-1", environments.getJSONObject(0).getString("orgId"));
+    assertEquals("ORG-2", environments.getJSONObject(1).getString("orgId"));
+  }
+
   // ===================== Helpers =====================
 
   private static String testPasswordHash(String password) throws Exception {
@@ -1001,6 +1194,51 @@ public class EtendoGoJwtServletTest {
     HttpServletRequest request = mock(HttpServletRequest.class);
     when(request.getPathInfo()).thenReturn(pathInfo);
     return request;
+  }
+
+  private static HttpServletRequest authenticatedRequest(String pathInfo, String token) {
+    HttpServletRequest request = mockRequest(pathInfo);
+    when(request.getHeader("Authorization")).thenReturn("Bearer " + token);
+    return request;
+  }
+
+  private static HttpServletRequest authenticatedJsonRequest(String pathInfo, String token,
+      JSONObject body) throws Exception {
+    HttpServletRequest request = authenticatedRequest(pathInfo, token);
+    when(request.getContentType()).thenReturn("application/json");
+    when(request.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
+    return request;
+  }
+
+  private static JSONObject onboardingDraftBody(int step, String fullName, String disallowedValue)
+      throws Exception {
+    JSONObject form = new JSONObject();
+    form.put("fullName", fullName);
+    form.put("currency", "EUR");
+    if (disallowedValue != null) {
+      form.put("password", disallowedValue);
+    }
+    JSONObject draft = new JSONObject();
+    draft.put("step", step);
+    draft.put("form", form);
+    JSONObject body = new JSONObject();
+    body.put("draft", draft);
+    return body;
+  }
+
+  private static String repeated(String value, int count) {
+    StringBuilder builder = new StringBuilder(value.length() * count);
+    for (int i = 0; i < count; i++) {
+      builder.append(value);
+    }
+    return builder.toString();
+  }
+
+  private static Organization mockOrganization(String id, String name) {
+    Organization organization = mock(Organization.class);
+    when(organization.getId()).thenReturn(id);
+    when(organization.getName()).thenReturn(name);
+    return organization;
   }
 
   private static ResponseCapture mockResponse() throws Exception {

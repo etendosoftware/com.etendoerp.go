@@ -62,6 +62,34 @@ public class ApiGatewayEmailProviderAdapter implements EmailProviderAdapter {
   }
 
   /**
+   * Indicates whether the API Gateway endpoint fans out to multiple recipients.
+   * <p>
+   * The current gateway contract is verified only for a single {@code to} string. Multi-recipient
+   * fan-out has not been confirmed, so this returns {@code false}; the service turns a multi
+   * recipient request into {@code VALIDATION_FAILED} rather than silently truncating it. Flip to
+   * {@code true} once the gateway contract is verified to deliver every recipient.
+   *
+   * @return {@code false} until multi-recipient delivery is verified
+   */
+  @Override
+  public boolean supportsMultipleRecipients() {
+    return false;
+  }
+
+  /**
+   * Indicates whether the API Gateway endpoint delivers a CC channel.
+   * <p>
+   * CC delivery is not part of the verified gateway contract, so this returns {@code false}; the
+   * service rejects a request carrying CC recipients with {@code VALIDATION_FAILED}.
+   *
+   * @return {@code false} until CC delivery is verified
+   */
+  @Override
+  public boolean supportsCcChannel() {
+    return false;
+  }
+
+  /**
    * Sends a resolved provider request to the configured API Gateway endpoint.
    *
    * @param request provider payload resolved by a contract

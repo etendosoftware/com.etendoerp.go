@@ -44,6 +44,7 @@ import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.schemaforge.AmortizationPlanService;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -129,6 +130,8 @@ public class McpToolRouter {
             return handleBatch(arguments);
           case "neo_action":
             return handleAction(specName, arguments);
+          case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
+            return handleGenerateAmortizationPlan(arguments);
           default:
             // Check if it's a report tool (generate_*)
             if (toolName.startsWith(McpConstants.GENERATE_PREFIX)) {
@@ -616,12 +619,13 @@ public class McpToolRouter {
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
 
-    Map<String, String> visibilityByColumnId =
-      McpToolRouterSupport.loadVisibilityByColumnId(sfEntity);
+    McpToolRouterSupport.FieldMetadata fieldMetadata =
+        McpToolRouterSupport.loadFieldMetadata(sfEntity);
     Map<String, String> promptByColumnId =
-      McpToolRouterSupport.loadPromptByColumnId(sfEntity);
+        McpToolRouterSupport.loadPromptByColumnId(sfEntity);
     JSONArray fieldsArray = McpToolRouterSupport.buildSchemaFieldsArray(adTab, dalEntity,
-      visibilityByColumnId, promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
+        fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
+        promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
 
     // Build entity schema
     JSONObject entitySchema = new JSONObject();
@@ -653,7 +657,10 @@ public class McpToolRouter {
         + "Fields with visibility=system are auto-derived by Etendo callouts — omit them. "
         + "Fields with visibility=discarded are excluded — do not send them. "
         + "Fields with readOnly=true are auto-generated (DocumentNo, IDs). "
-        + "Use neo_selectors for FK fields with hasSelector=true.");
+        + "Use neo_selectors for FK fields with hasSelector=true. "
+        + "Fields with businessCritical=true carry core business data (amounts, categories, "
+        + "key dates) — you MUST confirm these values with the user before creating or "
+        + "modifying records.");
 
     return wrapAsTextContent(entitySchema.toString(2));
   }
@@ -760,6 +767,29 @@ public class McpToolRouter {
     }
 
     return wrapAsTextContent(actionResult.toString(2));
+  }
+
+  // ── neo_generate_amortization_plan ────────────────────────────────────
+
+  /**
+   * Handles the {@code neo_generate_amortization_plan} MCP tool call.
+   * Delegates to {@link AmortizationPlanService#generatePlan(String)}.
+   *
+   * @param arguments tool arguments containing {@code assetId}
+   * @return MCP result object
+   */
+  private JSONObject handleGenerateAmortizationPlan(JSONObject arguments) throws Exception {
+    String assetId = arguments != null ? arguments.optString("assetId", null) : null;
+    NeoResponse response = AmortizationPlanService.generatePlan(assetId);
+    if (response == null) {
+      return wrapAsErrorContent("Internal error: service returned a null response");
+    }
+    if (response.getHttpStatus() >= 400) {
+      return wrapAsErrorContent(
+          response.getBody() != null ? response.getBody().toString() : "Error generating amortization plan");
+    }
+    return wrapAsTextContent(
+        response.getBody() != null ? response.getBody().toString(2) : "{}");
   }
 
   // ── Process execution ─────────────────────────────────────────────────
