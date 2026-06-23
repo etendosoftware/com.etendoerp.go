@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
@@ -38,7 +37,6 @@ import org.openbravo.dal.service.OBDal;
  * ({@code etvfac_c_invoice_verifactu_id}) to C_Invoice via a native SQL lookup and updates
  * the flag with an HQL UPDATE to avoid a compile-time dependency on the verifactu module.
  */
-@ApplicationScoped
 @Named("mark-subsanation-handler")
 public class MarkSubsanationHandler implements NeoHandler {
 
@@ -48,9 +46,8 @@ public class MarkSubsanationHandler implements NeoHandler {
       "SELECT c_invoice_id FROM etvfac_c_invoice_verifactu "
           + "WHERE etvfac_c_invoice_verifactu_id = :id";
 
-  private static final String SET_SUBSANATION_HQL =
-      "UPDATE org.openbravo.model.common.invoice.Invoice "
-          + "SET etvfacIsSubsanation = true WHERE id = :id";
+  private static final String SET_SUBSANATION_SQL =
+      "UPDATE c_invoice SET em_etvfac_issubsanation = 'Y' WHERE c_invoice_id = :id";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -90,7 +87,7 @@ public class MarkSubsanationHandler implements NeoHandler {
         }
 
         int updated = OBDal.getInstance().getSession()
-            .createQuery(SET_SUBSANATION_HQL)
+            .createNativeQuery(SET_SUBSANATION_SQL)
             .setParameter("id", cInvoiceId)
             .executeUpdate();
 
