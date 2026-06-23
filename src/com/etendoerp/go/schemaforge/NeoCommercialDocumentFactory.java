@@ -18,15 +18,21 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.Date;
+import java.util.List;
 
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Locator;
+import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.PaymentTerm;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.pricing.pricelist.PriceList;
+import org.openbravo.model.ad.system.Client;
 
 /**
  * Shared commercial document projection helpers for order-driven documents.
@@ -53,6 +59,35 @@ final class NeoCommercialDocumentFactory {
   }
 
   private NeoCommercialDocumentFactory() {
+  }
+
+  /** Returns the first active MMS (Goods Shipment) document type for the given client, or null. */
+  static DocumentType findShipmentDocType(Client client) {
+    List<DocumentType> results = OBDal.getInstance().createCriteria(DocumentType.class)
+        .add(Restrictions.eq(DocumentType.PROPERTY_CLIENT, client))
+        .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, "MMS"))
+        .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, true))
+        .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true))
+        .setMaxResults(1)
+        .list();
+    return results.isEmpty() ? null : results.get(0);
+  }
+
+  /** Returns the default active locator for the given warehouse, falling back to any active one. */
+  static Locator findDefaultLocator(Warehouse warehouse) {
+    List<Locator> defaults = OBDal.getInstance().createCriteria(Locator.class)
+        .add(Restrictions.eq(Locator.PROPERTY_WAREHOUSE, warehouse))
+        .add(Restrictions.eq(Locator.PROPERTY_DEFAULT, true))
+        .add(Restrictions.eq(Locator.PROPERTY_ACTIVE, true))
+        .setMaxResults(1)
+        .list();
+    if (!defaults.isEmpty()) return defaults.get(0);
+    List<Locator> any = OBDal.getInstance().createCriteria(Locator.class)
+        .add(Restrictions.eq(Locator.PROPERTY_WAREHOUSE, warehouse))
+        .add(Restrictions.eq(Locator.PROPERTY_ACTIVE, true))
+        .setMaxResults(1)
+        .list();
+    return any.isEmpty() ? null : any.get(0);
   }
 
   static ShipmentInOut createShipmentReceiptHeader(Order order, DocumentType docType,
@@ -96,6 +131,25 @@ final class NeoCommercialDocumentFactory {
     return shipment;
   }
 
+  static ShipmentInOut createShipmentFromInvoiceHeader(Invoice invoice, DocumentType docType,
+      boolean salesTransaction, String movementType, org.openbravo.model.common.enterprise.Warehouse warehouse) {
+    ShipmentInOut shipment = OBProvider.getInstance().get(ShipmentInOut.class);
+    shipment.setClient(invoice.getClient());
+    shipment.setOrganization(invoice.getOrganization());
+    shipment.setBusinessPartner(invoice.getBusinessPartner());
+    shipment.setPartnerAddress(invoice.getPartnerAddress());
+    shipment.setWarehouse(warehouse);
+    shipment.setMovementDate(new Date());
+    shipment.setAccountingDate(new Date());
+    shipment.setDocumentType(docType);
+    shipment.setDocumentNo("<*>");
+    shipment.setSalesTransaction(salesTransaction);
+    shipment.setProcessed(false);
+    shipment.setDocumentStatus("DR");
+    shipment.setMovementType(movementType);
+    return shipment;
+  }
+
   /**
    * Builds a draft AP Invoice header from a goods receipt that has no linked purchase order.
    * Financial fields (price list, payment terms, payment method) come from the
@@ -126,6 +180,7 @@ final class NeoCommercialDocumentFactory {
     invoice.setDocumentNo("<*>");
     return invoice;
   }
+
 
   static Invoice createInvoiceFromOrderHeader(Order order, DocumentType invoiceDocType,
       boolean salesTransaction) {

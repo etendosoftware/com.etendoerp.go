@@ -33,12 +33,10 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
-import org.openbravo.model.common.invoice.ReversedInvoice;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
@@ -293,9 +291,6 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
         Invoice invoice = ReturnShipmentUtils.buildReturnInvoiceHeader(receipt, docType, sourceInvoice, true);
         OBDal.getInstance().save(invoice);
         OBDal.getInstance().flush();
-        if (sourceInvoice != null) {
-          linkReversedInvoice(invoice, sourceInvoice);
-        }
         return ReturnShipmentUtils.finalizeReturnInvoice(invoice, lines, createDraftInvoiceHandler);
 
       } finally {
@@ -309,15 +304,6 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the return invoice");
     }
-  }
-
-  private void linkReversedInvoice(Invoice creditNote, Invoice originalInvoice) {
-    ReversedInvoice link = OBProvider.getInstance().get(ReversedInvoice.class);
-    link.setClient(creditNote.getClient());
-    link.setOrganization(creditNote.getOrganization());
-    link.setInvoice(creditNote);
-    link.setReversedInvoice(originalInvoice);
-    OBDal.getInstance().save(link);
   }
 
   @Override
