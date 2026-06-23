@@ -30,6 +30,7 @@ import java.sql.ResultSet;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.junit.Rule;
 import org.junit.Test;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
@@ -37,8 +38,8 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
-import org.junit.Rule;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.DocumentType;
 
 /**
  * Unit tests for {@link PurchaseInvoiceHeaderHandler}.
@@ -164,6 +165,112 @@ public class PurchaseInvoiceHeaderHandlerTest {
       JSONArray receipts = enrichedRec.getJSONArray("linkedReceipts");
       assertEquals(1, receipts.length());
       assertEquals("receipt-001", receipts.getJSONObject(0).getString("id"));
+    }
+  }
+
+  // ── classifyDocType (via resolveSubtype) ─────────────────────────────────
+
+  /**
+   * Test accessor subclass that exposes resolveSubtype for direct testing.
+   */
+  private static class TestablePurchaseHandler extends PurchaseInvoiceHeaderHandler {
+    public String callResolveSubtype(String docTypeId) {
+      return resolveSubtype(docTypeId);
+    }
+  }
+
+  @Test
+  public void resolveSubtype_blankDocTypeId_returnsFac() {
+    TestablePurchaseHandler h = new TestablePurchaseHandler();
+    assertEquals("FAC", h.callResolveSubtype(null));
+    assertEquals("FAC", h.callResolveSubtype(""));
+    assertEquals("FAC", h.callResolveSubtype("   "));
+  }
+
+  @Test
+  public void resolveSubtype_docTypeNotFound_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(DocumentType.class, "dt-unknown")).thenReturn(null);
+
+      TestablePurchaseHandler h = new TestablePurchaseHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-unknown"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_apcCategory_returnsNc() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("APC");
+      when(dal.get(DocumentType.class, "dt-apc")).thenReturn(dt);
+
+      TestablePurchaseHandler h = new TestablePurchaseHandler();
+      assertEquals("NC", h.callResolveSubtype("dt-apc"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_apiWithIsReturn_returnsDev() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("API");
+      when(dt.isReturn()).thenReturn(true);
+      when(dal.get(DocumentType.class, "dt-api-return")).thenReturn(dt);
+
+      TestablePurchaseHandler h = new TestablePurchaseHandler();
+      assertEquals("DEV", h.callResolveSubtype("dt-api-return"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_apiWithoutIsReturn_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("API");
+      when(dt.isReturn()).thenReturn(false);
+      when(dal.get(DocumentType.class, "dt-api")).thenReturn(dt);
+
+      TestablePurchaseHandler h = new TestablePurchaseHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-api"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_otherCategory_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARO");
+      when(dal.get(DocumentType.class, "dt-other")).thenReturn(dt);
+
+      TestablePurchaseHandler h = new TestablePurchaseHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-other"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_dbException_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(DocumentType.class, "dt-fail"))
+          .thenThrow(new RuntimeException("DB error"));
+
+      TestablePurchaseHandler h = new TestablePurchaseHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-fail"));
     }
   }
 

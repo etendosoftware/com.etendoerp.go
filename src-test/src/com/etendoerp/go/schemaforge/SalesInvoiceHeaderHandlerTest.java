@@ -39,6 +39,7 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.DocumentType;
 
 /**
  * Unit tests for {@link SalesInvoiceHeaderHandler}.
@@ -479,6 +480,110 @@ public class SalesInvoiceHeaderHandlerTest {
 
     assertFalse(rec.has("sourceReturnReceipt"));
     assertFalse(rec.has("sourceInvoice"));
+  }
+
+  // ── classifyDocType (via resolveSubtype) ──────────────────────────────────
+
+  /**
+   * Test accessor subclass that exposes resolveSubtype for direct testing.
+   */
+  private static class TestableSalesHandler extends SalesInvoiceHeaderHandler {
+    public String callResolveSubtype(String docTypeId) {
+      return resolveSubtype(docTypeId);
+    }
+  }
+
+  @Test
+  public void resolveSubtype_blankDocTypeId_returnsFac() {
+    TestableSalesHandler h = new TestableSalesHandler();
+    assertEquals("FAC", h.callResolveSubtype(null));
+    assertEquals("FAC", h.callResolveSubtype(""));
+    assertEquals("FAC", h.callResolveSubtype("   "));
+  }
+
+  @Test
+  public void resolveSubtype_docTypeNotFound_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(DocumentType.class, "dt-missing")).thenReturn(null);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-missing"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_arcCategory_returnsNc() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARC");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("NC", h.callResolveSubtype("dt-arc"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_ariRmCategory_returnsDev() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI_RM");
+      when(dal.get(DocumentType.class, "dt-ari-rm")).thenReturn(dt);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("DEV", h.callResolveSubtype("dt-ari-rm"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_ariCategory_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI");
+      when(dal.get(DocumentType.class, "dt-ari")).thenReturn(dt);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-ari"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_otherCategory_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("MMO");
+      when(dal.get(DocumentType.class, "dt-other")).thenReturn(dt);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-other"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_dbException_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(DocumentType.class, "dt-err"))
+          .thenThrow(new RuntimeException("DB error"));
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-err"));
+    }
   }
 
   /**

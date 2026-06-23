@@ -28,11 +28,13 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 
@@ -128,5 +130,10 @@ final class ReconciliationSupport {
   /** Signed amount of a transaction: {@code depositAmount - paymentAmount}. */
   static BigDecimal signedAmount(FIN_FinaccTransaction trx) {
     return nullSafe(trx.getDepositAmount()).subtract(nullSafe(trx.getPaymentAmount()));
+  }
+
+  /** Organizations accessible from {@code orgId} (its child tree, including itself). */
+  static Set<String> accessibleOrgs(String orgId) {
+    return new OrganizationStructureProvider().getChildTree(orgId, true);
   }
 }

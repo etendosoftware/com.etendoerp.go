@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE FIN_FINACC_TRANSACTION">
+    <table name="FIN_FINACC_TRANSACTION" primaryKey="FIN_FINACC_TRANSACTION_KEY">
+      <column name="EM_ETGO_AUTO_CREATED" primaryKey="false" required="false" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+    </table>
+  </database>
