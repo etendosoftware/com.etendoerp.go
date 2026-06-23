@@ -134,10 +134,16 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     return NeoResponse.ok(body);
   }
 
+  /** Thin subclass that promotes {@code getData} from protected to package-accessible. */
+  private static class AccessibleDS extends NoPostedDocumentDS {
+    List<Map<String, Object>> fetchAll(Map<String, String> p) {
+      return getData(p, 0, Integer.MAX_VALUE);
+    }
+  }
+
   private NeoResponse buildDocumentGrid(Map<String, String> params) throws Exception {
     Map<String, String> dsParams = buildDsParams(params);
-    NoPostedDocumentDS ds = new NoPostedDocumentDS();
-    List<Map<String, Object>> rows = ds.getData(dsParams, 0, -1);
+    List<Map<String, Object>> rows = new AccessibleDS().fetchAll(dsParams);
 
     JSONArray array = new JSONArray();
     for (Map<String, Object> row : rows) {
