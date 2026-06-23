@@ -1170,6 +1170,10 @@ public class ReconciliationHandlerTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
+      // matchFallback composes the (stubbed) leaf helpers below; run its real body so the
+      // orchestration is exercised while findSignalGroup/buildRuleGroup stay stubbed.
+      ams.when(() -> AutoMatchSupport.matchFallback(any(), any(), any(), any(), any()))
+          .thenCallRealMethod();
       // No 1:N signal group → forces the rule-engine branch.
       ams.when(() -> AutoMatchSupport.findSignalGroup(any(), any(), any(), any()))
           .thenReturn(Collections.emptyList());
