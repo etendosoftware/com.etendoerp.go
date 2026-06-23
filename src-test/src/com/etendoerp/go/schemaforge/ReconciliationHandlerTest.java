@@ -2003,4 +2003,84 @@ public class ReconciliationHandlerTest {
       assertFalse(handler.isAutoCreated(trx));
     }
   }
+
+  // ── undoReconciliation: restoreNotClearedStatus by direction ──────────────────
+
+  /**
+   * Regression: the payment.removal module's {@code reactivateAndRemoveReconciliation} leaves a kept
+   * (non-auto-created) DEPOSIT transaction in {@code PWNC} ("Withdrawn not cleared") instead of
+   * {@code RDNC} ("Deposited not cleared"). {@code undoReconciliation} must re-set every kept
+   * transaction's status by DIRECTION via {@code restoreNotClearedStatus}: inflow
+   * (depositAmount &ge; paymentAmount) → {@code RDNC}; outflow → {@code PWNC}. The fix must be
+   * idempotent — a transaction already in the correct status is NOT re-written.
+   *
+   * <p>Confirmed empirically with a 26.40 line reconciled against two 13.20 receipts.
+   *
+   * @throws Exception if the mocked seams fail
+   */
+  @Test
+  public void testUndoReconciliationRestoresNotClearedStatusByDirection() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+
+    // 1) inflow stuck wrong: deposit 25.30, payment 0, status PWNC → must be re-set to RDNC.
+    FIN_FinaccTransaction inflowWrong = mock(FIN_FinaccTransaction.class);
+    when(inflowWrong.getDepositAmount()).thenReturn(new BigDecimal("25.30"));
+    when(inflowWrong.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    when(inflowWrong.getStatus()).thenReturn("PWNC");
+
+    // 2) outflow stuck wrong: deposit 0, payment 10.00, status RDNC → must be re-set to PWNC.
+    FIN_FinaccTransaction outflowWrong = mock(FIN_FinaccTransaction.class);
+    when(outflowWrong.getDepositAmount()).thenReturn(BigDecimal.ZERO);
+    when(outflowWrong.getPaymentAmount()).thenReturn(new BigDecimal("10.00"));
+    when(outflowWrong.getStatus()).thenReturn("RDNC");
+
+    // 3) inflow already correct: deposit 5.00, payment 0, status RDNC → no redundant write.
+    FIN_FinaccTransaction inflowOk = mock(FIN_FinaccTransaction.class);
+    when(inflowOk.getDepositAmount()).thenReturn(new BigDecimal("5.00"));
+    when(inflowOk.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    when(inflowOk.getStatus()).thenReturn("RDNC");
+
+    List<FIN_FinaccTransaction> matched =
+        Arrays.asList(inflowWrong, outflowWrong, inflowOk);
+
+    // All three are kept (manually matched), so the loop routes them to restoreNotClearedStatus.
+    doReturn(false).when(handler).isAutoCreated(any());
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil =
+            mockStatic(ReconciliationRemovalUtil.class)) {
+      // The reconciliation-level undo seams are no-ops (their behavior is the module's, not ours).
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+      recUtil.when(() -> ReconciliationRemovalUtil.processAllReconciliationInDraft(any()))
+          .thenAnswer(inv -> null);
+      recUtil.when(() -> ReconciliationRemovalUtil.reactivateAndRemoveReconciliation(any()))
+          .thenAnswer(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      // unmatchBankStatementLine: createCriteria(...).add(...).setMaxResults(...).uniqueResult() → null.
+      @SuppressWarnings("unchecked")
+      org.openbravo.dal.service.OBCriteria<FIN_BankStatementLine> crit =
+          mock(org.openbravo.dal.service.OBCriteria.class);
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.setMaxResults(eq(1))).thenReturn(crit);
+      when(crit.uniqueResult()).thenReturn(null);
+
+      // OBDal.getInstance().save(...) is a no-op.
+      doNothing().when(dal).save(any());
+
+      handler.undoReconciliation(account, rec, matched);
+
+      // 1) inflow stuck wrong → restored to RDNC.
+      verify(inflowWrong).setStatus("RDNC");
+      // 2) outflow stuck wrong → restored to PWNC.
+      verify(outflowWrong).setStatus("PWNC");
+      // 3) inflow already correct → never re-written (idempotent).
+      verify(inflowOk, never()).setStatus(anyString());
+    }
+  }
 }
