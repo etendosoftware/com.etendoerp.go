@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,8 +30,8 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.domain.ListTrl;
 import org.openbravo.model.ad.domain.Reference;
-import org.openbravo.model.ad.domain.ReferencedItem;
 
 import com.etendoerp.bulk.posting.datasource.NoPostedDocumentDS;
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -284,7 +283,7 @@ public class NotPostedDocumentsHandler implements NeoHandler {
       return options;
     }
     String lang = OBContext.getOBContext().getLanguage().getLanguage();
-    for (ReferencedItem item : ref.getADReferenceValueList()) {
+    for (org.openbravo.model.ad.domain.List item : ref.getADListList()) {
       if (!item.isActive()) {
         continue;
       }
@@ -297,9 +296,9 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     return options;
   }
 
-  private String getTranslatedName(ReferencedItem item, String lang) {
+  private String getTranslatedName(org.openbravo.model.ad.domain.List item, String lang) {
     try {
-      for (var trl : item.getADRefListTrlList()) {
+      for (ListTrl trl : item.getADListTrlList()) {
         if (lang.equals(trl.getLanguage().getLanguage())) {
           String name = trl.getName();
           if (name != null && !name.isEmpty()) {
