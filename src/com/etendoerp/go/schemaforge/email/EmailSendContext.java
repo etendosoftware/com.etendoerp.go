@@ -167,6 +167,15 @@ public final class EmailSendContext {
   }
 
   /**
+   * Returns the resolved multi-channel recipient set.
+   *
+   * @return recipient set carried by the provider request
+   */
+  public EmailRecipientSet getRecipientSet() {
+    return providerRequest.getRecipients();
+  }
+
+  /**
    * Returns the lowercase recipient domain when available.
    *
    * @return recipient domain

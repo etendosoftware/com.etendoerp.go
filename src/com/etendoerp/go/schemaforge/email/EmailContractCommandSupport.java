@@ -38,6 +38,7 @@ public final class EmailContractCommandSupport {
   public static final String FIELD_LOGIN_EVENT_ID = "loginEventId";
   public static final String FIELD_RECORD_ID = "recordId";
   public static final String FIELD_RECIPIENT = "recipient";
+  public static final String FIELD_RECIPIENT_EDITS = "recipientEdits";
   public static final String FIELD_TENANT_ID = "tenantId";
   public static final String FIELD_USER_ID = "userId";
   public static final String FIELD_VERSION = "version";
@@ -120,6 +121,23 @@ public final class EmailContractCommandSupport {
     return normalized != null
         && (StringUtils.startsWithIgnoreCase(normalized, "https://")
         || StringUtils.startsWithIgnoreCase(normalized, "http://"));
+  }
+
+  /**
+   * Rejects a command carrying {@code recipientEdits} for contracts outside the document-send
+   * family (and document contracts with editing disabled).
+   *
+   * @param command contract command received by the service
+   * @return rejection when {@code recipientEdits} is present, otherwise an allowed result
+   */
+  public static EmailAuthorizationResult rejectRecipientEditsIfPresent(
+      EmailContractCommand command) {
+    JSONObject body = command == null ? null : command.getBody();
+    if (body != null && body.has(FIELD_RECIPIENT_EDITS)) {
+      return EmailAuthorizationResult.rejected(400,
+          "recipientEdits is not accepted by this contract");
+    }
+    return EmailAuthorizationResult.allowed();
   }
 
   /**

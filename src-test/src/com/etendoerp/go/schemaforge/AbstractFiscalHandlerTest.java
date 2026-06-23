@@ -121,9 +121,14 @@ public class AbstractFiscalHandlerTest {
     when(resp.getWriter()).thenReturn(new java.io.PrintWriter(new java.io.StringWriter()));
 
     StubHandler handler = new StubHandler(servlet, false);
-    // "declarations" is handled before isKnownEntity; FiscalDeclCrudHandler will
-    // fail because servlet is a mock with no real behaviour → exception is caught.
-    handler.handle("declarations", "GET", req, resp);
+    // "declarations" is handled before isKnownEntity and delegates to
+    // FiscalDeclCrudHandler, whose first action reads OBContext. Force that to
+    // fail deterministically so the base class catch → sendError(500) path is
+    // exercised regardless of test ordering or ambient static state.
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      ctxMock.when(OBContext::getOBContext).thenThrow(new OBException("no context"));
+      handler.handle("declarations", "GET", req, resp);
+    }
 
     verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR),
         anyString());

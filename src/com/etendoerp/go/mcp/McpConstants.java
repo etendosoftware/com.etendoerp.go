@@ -48,6 +48,9 @@ final class McpConstants {
   static final String LABEL_ENTITY_NAME_WITH_EXAMPLE =
       "Entity name within the spec (e.g. 'header', 'lines')";
 
+  /** Tool name for the amortization plan generation tool. */
+  static final String TOOL_GENERATE_AMORTIZATION_PLAN = "neo_generate_amortization_plan";
+
   private McpConstants() {
   }
 }

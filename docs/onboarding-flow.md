@@ -138,3 +138,28 @@ accounts are auto-linked by email only when the provider-specific verifier marks
 that email as authoritative. The Google implementation does this for any email
 verified by Google (where the `email_verified` claim is `true`). No email
 verification fields or login gates are added.
+
+## Onboarding Draft (resume support)
+
+The create-environment wizard can be resumed after a re-login. The in-progress
+wizard state is persisted server-side in `ETGO_ACCOUNT.ONBOARDING_DRAFT`
+(nullable `VARCHAR(4000)` JSON blob: `{ "step": 1|2, "form": { ... } }`).
+
+Endpoints (session-token auth, same Bearer model as `/me`):
+
+- `GET  /sws/go/onboarding/draft` — returns `{ status, draft }`; `draft` is the
+  stored object or `null`. Invalid stored JSON is ignored and reported as `null`.
+- `POST /sws/go/onboarding/draft` — body `{ "draft": { "step", "form" } }` saves;
+  `{ "draft": null }` clears. Only whitelisted wizard form fields are persisted
+  (`fullName`, `businessType`, `clientName`, `currency`, `language`,
+  `countryCode`, `fiscalIdType`, `fiscalIdValue`, `address`, `sector`) and the
+  serialized draft is capped at 4000 chars (400 otherwise).
+
+The draft is cleared automatically (best-effort, non-blocking) by
+`POST /sws/go/onboarding` right after the environment commit succeeds, so a
+completed onboarding never resurrects a stale wizard.
+
+The frontend (`OnboardingPage.jsx`) fetches the draft when an authenticated
+account has zero environments, restores step + form, shows a one-time
+"progress restored" banner, and autosaves changes debounced (1.5 s) while the
+wizard is visible and not running.
