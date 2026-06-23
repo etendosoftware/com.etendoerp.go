@@ -24,6 +24,8 @@ import java.sql.Connection;
 import java.sql.Date;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Types;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -56,10 +58,13 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_Payment;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 
 /**
@@ -124,6 +129,8 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String PARAM_ACCOUNT_ID = "accountId";
   private static final String PARAM_LINE_ID = "lineId";
   private static final String PARAM_DOC_TYPE = "docType";
+  private static final String PARAM_KIND = "kind";
+  private static final String KIND_INVOICES = "invoices";
   private static final String PARAM_DATE_FROM = "dateFrom";
   private static final String PARAM_DATE_TO = "dateTo";
   private static final String PARAM_Q = "q";
@@ -153,6 +160,16 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String KEY_DATE = "date";
   private static final String KEY_AMOUNT = "amount";
   private static final String KEY_STATUS = "status";
+  private static final String KEY_DOCUMENT_NO = "documentNo";
+  private static final String KEY_PARTNER_NAME = "partnerName";
+  private static final String KEY_PENDING_BALANCE = "pendingBalance";
+  private static final String KEY_SUGGESTED = "suggested";
+  private static final String COL_PARTNER_NAME = "partner_name";
+  private static final String KEY_COUNTS = "counts";
+  private static final String CNT_RECEIPTS = "receipts";
+  private static final String CNT_PAYMENTS = "payments";
+  private static final String CNT_SALES_INVOICES = "salesInvoices";
+  private static final String CNT_PURCHASE_INVOICES = "purchaseInvoices";
   private static final String KEY_GROUPS = "groups";
   private static final String KEY_IS_NEW = "isNew";
   private static final String STATUS_PENDING = "pending";
@@ -180,6 +197,9 @@ public class ReconciliationHandler implements NeoHandler {
           + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = bsl.c_bpartner_id"
           + " WHERE bsl.isactive = 'Y'"
           + "   AND bs.isactive = 'Y'"
+          // Draft statements (processed = 'N') are not reconcilable yet, so their
+          // lines must not show in the reconciliation left panel.
+          + "   AND bs.processed = 'Y'"
           + "   AND bs.fin_financial_account_id = ?"
           + "   AND bs.ad_client_id = ?"
           + "   AND bs.ad_org_id = ANY (?)";
@@ -212,10 +232,96 @@ public class ReconciliationHandler implements NeoHandler {
           + " WHERE ft.fin_reconciliation_id IS NULL"
           + "   AND ft.processed = 'Y'"
           + "   AND ft.status <> 'RPPC'"
-          + "   AND ft.fin_financial_account_id = ?";
+          + "   AND ft.fin_financial_account_id = ?"
+          + "   AND (CAST(? AS date) IS NULL OR ft.statementdate >= ?)"
+          + "   AND (CAST(? AS date) IS NULL OR ft.statementdate <= ?)";
 
   private static final String CANDIDATES_ORDER =
       " ORDER BY ft.statementdate ASC, ft.line ASC";
+
+  /**
+   * Movements already linked to a reconciled statement line (panel right, read-only). Returns the
+   * line's own transaction (1:1) plus every transaction of its 1:N match group, so the merged
+   * reconciled line shows exactly the movements it groups — and nothing else. {@code lineId} is
+   * bound twice (the line itself, and the group sub-query).
+   */
+  private static final String LINKED_TXNS_SQL =
+      "SELECT ft.fin_finacc_transaction_id,"
+          + "       ft.statementdate,"
+          + "       COALESCE(fp.documentno, '') AS document_no,"
+          + "       COALESCE(bp.name, '') AS partner_name,"
+          + "       COALESCE(ft.depositamt, 0) - COALESCE(ft.paymentamt, 0) AS amount"
+          + "  FROM fin_bankstatementline bsl"
+          + "  JOIN fin_finacc_transaction ft ON ft.fin_finacc_transaction_id = bsl.fin_finacc_transaction_id"
+          + "  LEFT JOIN fin_payment fp ON fp.fin_payment_id = ft.fin_payment_id"
+          + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = COALESCE(ft.c_bpartner_id, fp.c_bpartner_id)"
+          + " WHERE bsl.fin_finacc_transaction_id IS NOT NULL"
+          + "   AND ( bsl.fin_bankstatementline_id = ?"
+          + "         OR ( COALESCE(bsl.em_etgo_match_group_id, '') <> ''"
+          + "              AND bsl.em_etgo_match_group_id ="
+          + "                  (SELECT em_etgo_match_group_id FROM fin_bankstatementline"
+          + "                    WHERE fin_bankstatementline_id = ?) ) )"
+          + " ORDER BY ft.statementdate ASC";
+
+  /**
+   * Unpaid invoice installments (panel right, "invoices" mode). One row per
+   * {@code FIN_PaymentSchedule} with a positive outstanding (= SUM of its pending
+   * {@code FIN_PaymentScheduleDetail} rows, i.e. those not yet linked to a payment detail). Filtered
+   * by document direction ({@code issotrx}) so it lists sales invoices for an inflow line or
+   * purchase invoices for an outflow line. Bind order: issotrx, clientId, org-array.
+   */
+  private static final String INVOICE_CANDIDATES_SQL =
+      "SELECT ps.fin_payment_schedule_id,"
+          + "       inv.c_invoice_id,"
+          + "       COALESCE(inv.documentno, '') AS documentno,"
+          + "       inv.dateinvoiced AS invoicedate,"
+          + "       COALESCE(bp.name, '') AS partner_name,"
+          + "       SUM(psd.amount) AS outstanding"
+          + "  FROM fin_payment_scheduledetail psd"
+          + "  JOIN fin_payment_schedule ps ON ps.fin_payment_schedule_id = psd.fin_payment_schedule_invoice"
+          + "  JOIN c_invoice inv ON inv.c_invoice_id = ps.c_invoice_id"
+          + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = inv.c_bpartner_id"
+          + " WHERE psd.fin_payment_detail_id IS NULL"
+          + "   AND inv.docstatus = 'CO'"
+          + "   AND inv.issotrx = ?"
+          + "   AND inv.ad_client_id = ?"
+          + "   AND inv.ad_org_id = ANY (?)"
+          + "   AND (CAST(? AS date) IS NULL OR inv.dateinvoiced >= ?)"
+          + "   AND (CAST(? AS date) IS NULL OR inv.dateinvoiced <= ?)"
+          + " GROUP BY ps.fin_payment_schedule_id, inv.c_invoice_id, inv.documentno,"
+          + "          inv.dateinvoiced, bp.name"
+          + " HAVING SUM(psd.amount) > 0"
+          + " ORDER BY inv.dateinvoiced ASC, inv.documentno ASC";
+
+  /** Per-isreceipt count of reconcilable transactions of the account (for the type selector). */
+  private static final String TXN_COUNTS_SQL =
+      "SELECT COALESCE(fp.isreceipt, '') AS is_receipt, COUNT(*) AS cnt"
+          + "  FROM fin_finacc_transaction ft"
+          + "  LEFT JOIN fin_payment fp ON fp.fin_payment_id = ft.fin_payment_id"
+          + " WHERE ft.fin_reconciliation_id IS NULL"
+          + "   AND ft.processed = 'Y'"
+          + "   AND ft.status <> 'RPPC'"
+          + "   AND ft.fin_financial_account_id = ?"
+          + "   AND (CAST(? AS date) IS NULL OR ft.statementdate >= ?)"
+          + "   AND (CAST(? AS date) IS NULL OR ft.statementdate <= ?)"
+          + " GROUP BY fp.isreceipt";
+
+  /** Per-issotrx count of unpaid invoice installments (for the type selector). */
+  private static final String INVOICE_COUNTS_SQL =
+      "SELECT t.issotrx, COUNT(*) AS cnt FROM ("
+          + "  SELECT ps.fin_payment_schedule_id, inv.issotrx"
+          + "    FROM fin_payment_scheduledetail psd"
+          + "    JOIN fin_payment_schedule ps ON ps.fin_payment_schedule_id = psd.fin_payment_schedule_invoice"
+          + "    JOIN c_invoice inv ON inv.c_invoice_id = ps.c_invoice_id"
+          + "   WHERE psd.fin_payment_detail_id IS NULL"
+          + "     AND inv.docstatus = 'CO'"
+          + "     AND inv.ad_client_id = ?"
+          + "     AND inv.ad_org_id = ANY (?)"
+          + "     AND (CAST(? AS date) IS NULL OR inv.dateinvoiced >= ?)"
+          + "     AND (CAST(? AS date) IS NULL OR inv.dateinvoiced <= ?)"
+          + "   GROUP BY ps.fin_payment_schedule_id, inv.issotrx"
+          + "   HAVING SUM(psd.amount) > 0"
+          + " ) t GROUP BY t.issotrx";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -322,7 +428,7 @@ public class ReconciliationHandler implements NeoHandler {
           row.put(KEY_ID, lineId);
           row.put(KEY_DATE, formatDate(rs.getTimestamp("datetrx")));
           row.put("description", StringUtils.trimToEmpty(rs.getString("description")));
-          row.put("partnerName", StringUtils.trimToEmpty(rs.getString("partner_name")));
+          row.put(KEY_PARTNER_NAME, StringUtils.trimToEmpty(rs.getString(COL_PARTNER_NAME)));
           row.put("referenceNo", StringUtils.trimToEmpty(rs.getString("reference_no")));
           // Coarse status kept for backward compatibility (pending|reconciled).
           row.put(KEY_STATUS, reconciled ? STATUS_RECONCILED : STATUS_PENDING);
@@ -373,9 +479,15 @@ public class ReconciliationHandler implements NeoHandler {
     }
     String lineId = qp != null ? qp.get(PARAM_LINE_ID) : null;
     String docType = qp != null ? qp.get(PARAM_DOC_TYPE) : null;
+    String kind = qp != null ? qp.get(PARAM_KIND) : null;
+    String dateFrom = qp != null ? qp.get(PARAM_DATE_FROM) : null;
+    String dateTo = qp != null ? qp.get(PARAM_DATE_TO) : null;
     try {
       OBContext.setAdminMode(true);
-      return buildCandidates(accountId, lineId, docType);
+      if (KIND_INVOICES.equalsIgnoreCase(kind)) {
+        return buildInvoiceCandidates(accountId, lineId, docType, dateFrom, dateTo);
+      }
+      return buildCandidates(accountId, lineId, docType, dateFrom, dateTo);
     } catch (Exception e) {
       log.error("Error building candidates for account {}", accountId, e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_SERVER_ERROR);
@@ -384,17 +496,23 @@ public class ReconciliationHandler implements NeoHandler {
     }
   }
 
-  NeoResponse buildCandidates(String accountId, String lineId, String docType) throws Exception {
+  NeoResponse buildCandidates(String accountId, String lineId, String docType,
+      String dateFrom, String dateTo) throws Exception {
+    FIN_BankStatementLine selectedLine =
+        StringUtils.isNotBlank(lineId) ? loadLine(lineId) : null;
+    // A reconciled line is read-only: return ONLY the movement(s) already linked to it (its 1:1
+    // transaction, or every transaction of its 1:N match group) — never the unreconciled pool.
+    if (selectedLine != null && selectedLine.getFinancialAccountTransaction() != null) {
+      return buildLinkedTransactions(lineId);
+    }
+
     Set<String> suggestedIds = suggestedTransactionIds(accountId, lineId);
     // 1:N: if the selected line amount equals the sum of a signal group (same logic the automatch
     // uses), pre-mark ALL of its operations as suggested — not only a single 1:1 standard match.
-    if (StringUtils.isNotBlank(lineId)) {
-      FIN_BankStatementLine selectedLine = loadLine(lineId);
-      if (selectedLine != null) {
-        for (FIN_FinaccTransaction t : AutoMatchSupport.findSignalGroup(
-            accountId, selectedLine, new HashSet<>(), TOLERANCE)) {
-          suggestedIds.add(t.getId());
-        }
+    if (selectedLine != null) {
+      for (FIN_FinaccTransaction t : AutoMatchSupport.findSignalGroup(
+          accountId, selectedLine, new HashSet<>(), TOLERANCE)) {
+        suggestedIds.add(t.getId());
       }
     }
 
@@ -410,6 +528,7 @@ public class ReconciliationHandler implements NeoHandler {
     try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
       int idx = 1;
       ps.setString(idx++, accountId);
+      idx = bindDateRange(ps, idx, dateFrom, dateTo);
       if (filterDocType) {
         ps.setString(idx++, docTypeToIsReceipt(docType));
       }
@@ -420,14 +539,48 @@ public class ReconciliationHandler implements NeoHandler {
           JSONObject row = new JSONObject();
           row.put(KEY_ID, id);
           row.put(KEY_DATE, formatDate(rs.getTimestamp("statementdate")));
-          row.put("documentNo", StringUtils.trimToEmpty(rs.getString("document_no")));
-          row.put("partnerName", StringUtils.trimToEmpty(rs.getString("partner_name")));
+          row.put(KEY_DOCUMENT_NO, StringUtils.trimToEmpty(rs.getString("document_no")));
+          row.put(KEY_PARTNER_NAME, StringUtils.trimToEmpty(rs.getString(COL_PARTNER_NAME)));
           row.put(KEY_AMOUNT, amount);
           // Pending balance equals the transaction amount for now (partial
           // allocations against invoices are a follow-up).
-          row.put("pendingBalance", amount);
+          row.put(KEY_PENDING_BALANCE, amount);
           row.put(KEY_STATUS, STATUS_PENDING);
-          row.put("suggested", suggestedIds.contains(id));
+          row.put(KEY_SUGGESTED, suggestedIds.contains(id));
+          candidates.put(row);
+        }
+      }
+    }
+    JSONObject data = new JSONObject();
+    data.put(ACTION_CANDIDATES, candidates);
+    data.put(KEY_COUNTS, candidateCounts(accountId, dateFrom, dateTo));
+    return envelope(data);
+  }
+
+  /**
+   * Read-only "linked movements" list for a reconciled line: its 1:1 transaction, or every
+   * transaction of its 1:N match group. Same row shape as {@link #buildCandidates}, flagged
+   * {@code linked} with a reconciled status so the UI renders the panel read-only.
+   */
+  private NeoResponse buildLinkedTransactions(String lineId) throws Exception {
+    JSONArray candidates = new JSONArray();
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(LINKED_TXNS_SQL)) {
+      ps.setString(1, lineId);
+      ps.setString(2, lineId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          BigDecimal amount = nullSafe(rs.getBigDecimal(KEY_AMOUNT));
+          JSONObject row = new JSONObject();
+          row.put(KEY_ID, rs.getString("fin_finacc_transaction_id"));
+          row.put(KEY_DATE, formatDate(rs.getTimestamp("statementdate")));
+          row.put(KEY_DOCUMENT_NO, StringUtils.trimToEmpty(rs.getString("document_no")));
+          row.put(KEY_PARTNER_NAME, StringUtils.trimToEmpty(rs.getString(COL_PARTNER_NAME)));
+          row.put(KEY_AMOUNT, amount);
+          row.put(KEY_PENDING_BALANCE, amount);
+          row.put(KEY_STATUS, STATUS_RECONCILED);
+          row.put(KEY_SUGGESTED, false);
+          row.put("linked", true);
           candidates.put(row);
         }
       }
@@ -435,6 +588,135 @@ public class ReconciliationHandler implements NeoHandler {
     JSONObject data = new JSONObject();
     data.put(ACTION_CANDIDATES, candidates);
     return envelope(data);
+  }
+
+  /**
+   * Unpaid-invoice candidates for the selected line ("invoices" mode of the right panel). The
+   * line's flow direction (sign of cramount-dramount) selects sales invoices (inflow → receipts)
+   * or purchase invoices (outflow → payments); the candidate {@code amount} carries the line's
+   * sign so the panel's sign filter and the reconcile guard treat it like a transaction. Each row
+   * also carries {@code kind:"invoice"}, {@code invoiceId}, {@code scheduleId} and {@code isReceipt}
+   * for the "create payment" reconcile path.
+   */
+  NeoResponse buildInvoiceCandidates(String accountId, String lineId, String docType,
+      String dateFrom, String dateTo) throws Exception {
+    JSONArray candidates = new JSONArray();
+    FIN_FinancialAccount account = loadAccount(accountId);
+    // Direction: the UI's transaction-type selector passes docType (receipts → sales/Y,
+    // payments → purchase/N). Fall back to the selected line's sign when no docType is given.
+    Boolean receipt;
+    if (StringUtils.isNotBlank(docType)) {
+      receipt = "Y".equals(docTypeToIsReceipt(docType));
+    } else {
+      FIN_BankStatementLine line = StringUtils.isNotBlank(lineId) ? loadLine(lineId) : null;
+      int sign = line != null
+          ? nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount())).signum() : 0;
+      receipt = sign == 0 ? null : sign > 0;
+    }
+    if (account == null || receipt == null) {
+      JSONObject empty = new JSONObject();
+      empty.put(ACTION_CANDIDATES, candidates);
+      empty.put(KEY_COUNTS, candidateCounts(accountId, dateFrom, dateTo));
+      return envelope(empty);
+    }
+    boolean isReceipt = receipt;
+    String issotrx = isReceipt ? "Y" : "N";
+    OrganizationStructureProvider osp = OBContext.getOBContext()
+        .getOrganizationStructureProvider(account.getClient().getId());
+    Set<String> orgs = osp.getNaturalTree(account.getOrganization().getId());
+
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(INVOICE_CANDIDATES_SQL)) {
+      int idx = 1;
+      ps.setString(idx++, issotrx);
+      ps.setString(idx++, account.getClient().getId());
+      ps.setArray(idx++, conn.createArrayOf("varchar", orgs.toArray(new String[0])));
+      bindDateRange(ps, idx, dateFrom, dateTo);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          BigDecimal outstanding = nullSafe(rs.getBigDecimal("outstanding"));
+          BigDecimal signed = isReceipt ? outstanding : outstanding.negate();
+          JSONObject row = new JSONObject();
+          row.put(KEY_ID, rs.getString("fin_payment_schedule_id"));
+          row.put(KEY_DATE, formatDate(rs.getTimestamp("invoicedate")));
+          row.put(KEY_DOCUMENT_NO, StringUtils.trimToEmpty(rs.getString("documentno")));
+          row.put(KEY_PARTNER_NAME, StringUtils.trimToEmpty(rs.getString(COL_PARTNER_NAME)));
+          row.put(KEY_AMOUNT, signed);
+          row.put(KEY_PENDING_BALANCE, signed);
+          row.put(KEY_STATUS, STATUS_PENDING);
+          row.put(KEY_SUGGESTED, false);
+          row.put("kind", "invoice");
+          row.put("invoiceId", rs.getString("c_invoice_id"));
+          row.put("scheduleId", rs.getString("fin_payment_schedule_id"));
+          row.put("isReceipt", isReceipt);
+          candidates.put(row);
+        }
+      }
+    }
+    JSONObject data = new JSONObject();
+    data.put(ACTION_CANDIDATES, candidates);
+    data.put(KEY_COUNTS, candidateCounts(accountId, dateFrom, dateTo));
+    return envelope(data);
+  }
+
+  /**
+   * Per-type counts for the right-panel "Tipo de transacción" selector: reconcilable transactions
+   * split by receipt/payment, plus unpaid sales/purchase invoice installments (account org tree).
+   */
+  private JSONObject candidateCounts(String accountId, String dateFrom, String dateTo) {
+    JSONObject counts = new JSONObject();
+    try {
+      counts.put(CNT_RECEIPTS, 0);
+      counts.put(CNT_PAYMENTS, 0);
+      counts.put(CNT_SALES_INVOICES, 0);
+      counts.put(CNT_PURCHASE_INVOICES, 0);
+      FIN_FinancialAccount account = loadAccount(accountId);
+      if (account == null) {
+        return counts;
+      }
+      computeCandidateCounts(counts, account, dateFrom, dateTo);
+    } catch (Exception e) {
+      // Counts are decorative; never fail the candidates response over them.
+      log.debug("Could not compute candidate counts for {}: {}", accountId, e.getMessage());
+    }
+    return counts;
+  }
+
+  private void computeCandidateCounts(JSONObject counts, FIN_FinancialAccount account,
+      String dateFrom, String dateTo) throws Exception {
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(TXN_COUNTS_SQL)) {
+      ps.setString(1, account.getId());
+      bindDateRange(ps, 2, dateFrom, dateTo);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String receipt = rs.getString("is_receipt");
+          if ("Y".equals(receipt)) {
+            counts.put(CNT_RECEIPTS, rs.getInt("cnt"));
+          } else if ("N".equals(receipt)) {
+            counts.put(CNT_PAYMENTS, rs.getInt("cnt"));
+          }
+        }
+      }
+    }
+    OrganizationStructureProvider osp = OBContext.getOBContext()
+        .getOrganizationStructureProvider(account.getClient().getId());
+    Set<String> orgs = osp.getNaturalTree(account.getOrganization().getId());
+    try (PreparedStatement ps = conn.prepareStatement(INVOICE_COUNTS_SQL)) {
+      ps.setString(1, account.getClient().getId());
+      ps.setArray(2, conn.createArrayOf("varchar", orgs.toArray(new String[0])));
+      bindDateRange(ps, 3, dateFrom, dateTo);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String issotrx = rs.getString("issotrx");
+          if ("Y".equals(issotrx)) {
+            counts.put(CNT_SALES_INVOICES, rs.getInt("cnt"));
+          } else if ("N".equals(issotrx)) {
+            counts.put(CNT_PURCHASE_INVOICES, rs.getInt("cnt"));
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -508,14 +790,16 @@ public class ReconciliationHandler implements NeoHandler {
     String accountId = body.optString("financialAccountId", null);
     String statementLineId = body.optString("statementLineId", null);
     List<String> operationIds = readOperationIds(body);
+    JSONArray invoiceSpecs = body.optJSONArray("invoices");
+    boolean hasInvoices = invoiceSpecs != null && invoiceSpecs.length() > 0;
 
     if (StringUtils.isBlank(accountId) || StringUtils.isBlank(statementLineId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "financialAccountId and statementLineId are required");
     }
-    if (operationIds.isEmpty()) {
+    if (operationIds.isEmpty() && !hasInvoices) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "At least one operation is required");
+          "At least one operation or invoice is required");
     }
 
     FIN_FinancialAccount account = loadAccount(accountId);
@@ -538,12 +822,77 @@ public class ReconciliationHandler implements NeoHandler {
           "Statement line is already reconciled");
     }
 
+    // Pay each selected unpaid invoice (creates payment + auto-creates its transaction); the new
+    // transaction ids join operationIds so the standard reconcile below matches them to the line.
+    if (hasInvoices) {
+      NeoResponse invError = createInvoicePayments(account, line, invoiceSpecs, operationIds);
+      if (invError != null) {
+        return invError;
+      }
+    }
+
     NeoResponse opError = validateOperations(operationIds, accountId, line);
     if (opError != null) {
       return opError;
     }
 
     return compose(account, line, operationIds);
+  }
+
+  /**
+   * Creates one payment per selected unpaid invoice, distributing the statement line amount across
+   * them (capped at each installment's outstanding; the last may be partial). Each payment is
+   * processed via {@link PaymentRegistrationService#registerPaymentCore} — which auto-creates the
+   * finacc transaction (BPD/BPW) — and the resulting transaction id is appended to
+   * {@code operationIds} for the standard reconcile. Rejects when the invoices cannot cover the
+   * line amount.
+   *
+   * @return {@code null} when every payment was created, or a {@link NeoResponse} error
+   */
+  private NeoResponse createInvoicePayments(FIN_FinancialAccount account,
+      FIN_BankStatementLine line, JSONArray invoiceSpecs, List<String> operationIds)
+      throws Exception {
+    BigDecimal lineAmount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
+    boolean isReceipt = lineAmount.signum() >= 0;
+    BigDecimal remaining = lineAmount.abs();
+    for (int i = 0; i < invoiceSpecs.length(); i++) {
+      if (remaining.compareTo(TOLERANCE) <= 0) {
+        break;
+      }
+      JSONObject spec = invoiceSpecs.getJSONObject(i);
+      String invoiceId = spec.optString("invoiceId", null);
+      String scheduleId = spec.optString("scheduleId", null);
+      if (StringUtils.isBlank(invoiceId) || StringUtils.isBlank(scheduleId)) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+            "invoiceId and scheduleId are required for each invoice");
+      }
+      Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+      FIN_PaymentSchedule schedule = OBDal.getInstance().get(FIN_PaymentSchedule.class, scheduleId);
+      if (invoice == null || schedule == null) {
+        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+            "Invoice or payment schedule not found: " + invoiceId);
+      }
+      BigDecimal outstanding = nullSafe(schedule.getOutstandingAmount()).abs();
+      BigDecimal allocate = remaining.min(outstanding);
+      if (allocate.compareTo(TOLERANCE) <= 0) {
+        continue;
+      }
+      FIN_Payment payment = PaymentRegistrationService.registerPaymentCore(
+          invoice, schedule, allocate, line.getTransactionDate(), account, isReceipt);
+      List<FIN_FinaccTransaction> txns = payment.getFINFinaccTransactionList();
+      if (txns.isEmpty()) {
+        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Payment did not produce a transaction: " + payment.getId());
+      }
+      operationIds.add(txns.get(0).getId());
+      remaining = remaining.subtract(allocate);
+    }
+    if (remaining.compareTo(TOLERANCE) > 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "The selected invoices do not cover the statement line amount. Remaining: "
+              + remaining.toPlainString());
+    }
+    return null;
   }
 
   /**
@@ -573,12 +922,18 @@ public class ReconciliationHandler implements NeoHandler {
       opSum = opSum.add(signedAmount(trx));
     }
     BigDecimal lineAmount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
-    BigDecimal diff = lineAmount.subtract(opSum);
-    if (diff.abs().compareTo(TOLERANCE) > 0) {
+    int lineSign = lineAmount.signum();
+    // Operations may match PART of the line — Etendo's matchBankStatementLine splits the line and
+    // leaves a remainder line (e.g. a 500 line matched to 300 reconciles 300 and leaves 200
+    // pending). They must NOT exceed the line amount, nor run in the opposite direction
+    // (over-reconciliation is not supported).
+    boolean sameDirection = opSum.signum() == 0 || lineSign == 0 || opSum.signum() == lineSign;
+    boolean withinLine = opSum.abs().compareTo(lineAmount.abs().add(TOLERANCE)) <= 0;
+    if (!sameDirection || !withinLine) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "The sum of the selected operations (" + opSum.toPlainString()
-              + ") does not match the statement line amount (" + lineAmount.toPlainString()
-              + "). Difference: " + diff.toPlainString());
+          "The selected operations (" + opSum.toPlainString()
+              + ") exceed the statement line amount (" + lineAmount.toPlainString()
+              + "). Operations can match part of the line but not exceed it.");
     }
     return null;
   }
@@ -803,6 +1158,13 @@ public class ReconciliationHandler implements NeoHandler {
           "At least one operation is required for line: " + statementLineId);
     }
 
+    // Operations (including any just-created rule transaction) may match part of the line but must
+    // not EXCEED it — the same over-reconciliation guard the manual reconcileGroup path applies.
+    NeoResponse opError = validateOperations(operationIds, account.getId(), line);
+    if (opError != null) {
+      return opError;
+    }
+
     return compose(account, line, operationIds);
   }
 
@@ -1004,5 +1366,29 @@ public class ReconciliationHandler implements NeoHandler {
 
   static BigDecimal nullSafe(BigDecimal value) {
     return value == null ? BigDecimal.ZERO : value;
+  }
+
+  /**
+   * Binds the four parameters of the two optional date-range clauses
+   * ({@code (CAST(? AS date) IS NULL OR col >= ?)} and the {@code <=} twin): dateFrom, dateFrom,
+   * dateTo, dateTo. Blank bounds are bound as SQL NULL, which makes the clause a no-op.
+   *
+   * @return the next free parameter index
+   */
+  private static int bindDateRange(PreparedStatement ps, int idx, String dateFrom, String dateTo)
+      throws SQLException {
+    setDateOrNull(ps, idx++, dateFrom);
+    setDateOrNull(ps, idx++, dateFrom);
+    setDateOrNull(ps, idx++, dateTo);
+    setDateOrNull(ps, idx++, dateTo);
+    return idx;
+  }
+
+  private static void setDateOrNull(PreparedStatement ps, int idx, String date) throws SQLException {
+    if (StringUtils.isBlank(date)) {
+      ps.setNull(idx, Types.DATE);
+    } else {
+      ps.setDate(idx, Date.valueOf(date));
+    }
   }
 }

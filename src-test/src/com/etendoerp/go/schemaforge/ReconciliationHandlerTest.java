@@ -62,14 +62,20 @@ import org.openbravo.advpaymentmngt.process.FIN_TransactionProcess;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_Payment;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
@@ -336,7 +342,7 @@ public class ReconciliationHandlerTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
       stubConnection(dal, ps, rs);
 
-      NeoResponse response = handler.buildCandidates(ACC_ID, LINE_ID, null);
+      NeoResponse response = handler.buildCandidates(ACC_ID, LINE_ID, null, null, null);
 
       JSONArray candidates =
           response.getBody().getJSONObject("response").getJSONObject("data").getJSONArray("candidates");
@@ -364,11 +370,11 @@ public class ReconciliationHandlerTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
       stubConnection(dal, ps, rs);
 
-      handler.buildCandidates(ACC_ID, LINE_ID, "payments");
+      handler.buildCandidates(ACC_ID, LINE_ID, "payments", null, null);
 
-      // account(1) then the docType flag(2) = 'N' for payments.
+      // account(1), the optional date-range binds(2-5, NULL here), then the docType flag(6) = 'N'.
       verify(ps).setString(1, ACC_ID);
-      verify(ps).setString(2, "N");
+      verify(ps).setString(6, "N");
     }
   }
 
@@ -530,16 +536,18 @@ public class ReconciliationHandlerTest {
   }
 
   /**
-   * When the operations do not sum to the line amount the request is a 400.
+   * Operations that EXCEED the line amount are rejected with a 400 (over-reconciliation is not
+   * supported). Operations summing to LESS than the line are allowed as a partial match.
    *
    * @throws Exception if building the reconcile body or stubbing the seams fails
    */
   @Test
   public void testReconcileGroupSumMismatchReturns400() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
-    // Operation is 91.69 → diff 8.31, well beyond the 0.01 tolerance.
-    FIN_FinaccTransaction trx = trxFor(ACC_ID, new BigDecimal("91.69"), BigDecimal.ZERO, null);
+    // Operation is 130.00 → exceeds the 100.00 line → reject (over-reconciliation).
+    FIN_FinaccTransaction trx = trxFor(ACC_ID, new BigDecimal("130.00"), BigDecimal.ZERO, null);
 
     doReturn(account).when(handler).loadAccount(ACC_ID);
     doReturn(line).when(handler).loadLine(LINE_ID);
@@ -548,7 +556,8 @@ public class ReconciliationHandlerTest {
     NeoResponse response = handler.reconcileGroup(reconcileBody(ACC_ID, LINE_ID, "t1"));
 
     assertEquals(400, response.getHttpStatus());
-    assertTrue(response.getBody().getJSONObject("error").getString("message").contains("8.31"));
+    assertTrue(response.getBody().getJSONObject("error").getString("message")
+        .contains("exceed the statement line amount"));
     verify(handler, never()).addNewDraftReconciliation(any());
   }
 
@@ -670,6 +679,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testApplySuggestionsCreatesTransactionForRuleGroup() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = lineFor(ACC_ID, BigDecimal.ZERO, new BigDecimal("12.50"), null);
     FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
     when(rec.getId()).thenReturn("rec-9");
@@ -677,6 +687,9 @@ public class ReconciliationHandlerTest {
     doReturn(account).when(handler).loadAccount(ACC_ID);
     doReturn(line).when(handler).loadLine(LINE_ID);
     doReturn("T-NEW").when(handler).createTransactionForRule(eq(account), eq(line), any());
+    // The created transaction must balance the line (-12.50) so validateOperations passes.
+    doReturn(trxFor(ACC_ID, BigDecimal.ZERO, new BigDecimal("12.50"), null))
+        .when(handler).loadTransaction("T-NEW");
     stubReconciliationCompose(rec, "Success");
 
     JSONObject createPayment = new JSONObject()
@@ -1029,7 +1042,7 @@ public class ReconciliationHandlerTest {
       ams.when(() -> AutoMatchSupport.findSignalGroup(eq(ACC_ID), eq(selectedLine), any(), any()))
           .thenReturn(Arrays.asList(g1));
 
-      NeoResponse response = handler.buildCandidates(ACC_ID, LINE_ID, null);
+      NeoResponse response = handler.buildCandidates(ACC_ID, LINE_ID, null, null, null);
 
       JSONArray candidates =
           response.getBody().getJSONObject("response").getJSONObject("data").getJSONArray("candidates");
@@ -1183,6 +1196,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testApplySuggestionsPlainGroupReconciles() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("150.00"), BigDecimal.ZERO, null);
     FIN_FinaccTransaction t1 = trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     FIN_FinaccTransaction t2 = trxFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, null);
@@ -1320,5 +1334,329 @@ public class ReconciliationHandlerTest {
       assertEquals(1, result.size());
       verify(query).setParameter("accountId", ACC_ID);
     }
+  }
+
+  // ── buildInvoiceCandidates: invoice-mode right panel ──────────────────────────
+
+  /**
+   * Builds a {@link FIN_FinancialAccount} mock carrying a client + organization, as the invoice
+   * candidates query needs both to scope the SQL by client and natural org tree.
+   */
+  private FIN_FinancialAccount accountWithClientOrg(String clientId, String orgId) {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(clientId);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(orgId);
+    when(account.getClient()).thenReturn(client);
+    when(account.getOrganization()).thenReturn(org);
+    return account;
+  }
+
+  /**
+   * Stubs {@code OBContext.getOBContext().getOrganizationStructureProvider(client).getNaturalTree(org)}
+   * so {@code buildInvoiceCandidates} can resolve the accessible org tree without a live context.
+   */
+  private void stubNaturalTree(MockedStatic<OBContext> obContext, String clientId, String orgId,
+      Set<String> tree) {
+    OBContext ctx = mock(OBContext.class);
+    OrganizationStructureProvider osp = mock(OrganizationStructureProvider.class);
+    when(osp.getNaturalTree(orgId)).thenReturn(tree);
+    when(ctx.getOrganizationStructureProvider(clientId)).thenReturn(osp);
+    obContext.when(OBContext::getOBContext).thenReturn(ctx);
+  }
+
+  /**
+   * An inflow line (positive amount) lists sales invoices: the query binds {@code issotrx='Y'} and
+   * each candidate carries {@code kind="invoice"}, its ids and a positively-signed amount that
+   * matches the line direction (a receipt).
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testBuildInvoiceCandidatesInflowBindsSalesAndSignsPositive() throws Exception {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenReturn(true, false);
+    when(rs.getString("fin_payment_schedule_id")).thenReturn("PS-1");
+    when(rs.getString("c_invoice_id")).thenReturn("INV-1");
+    when(rs.getString("documentno")).thenReturn("DOC-1");
+    when(rs.getTimestamp("invoicedate")).thenReturn(null);
+    when(rs.getString("partner_name")).thenReturn("ACME");
+    when(rs.getBigDecimal("outstanding")).thenReturn(new BigDecimal("100.00"));
+
+    // Inflow line: cramount > dramount → positive direction (receipt / sales invoices).
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    FIN_FinancialAccount account = accountWithClientOrg(CLIENT_ID, ORG_ID);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubConnection(dal, ps, rs);
+      stubNaturalTree(obContext, CLIENT_ID, ORG_ID, new HashSet<>(Arrays.asList(ORG_ID)));
+
+      NeoResponse response = handler.buildInvoiceCandidates(ACC_ID, LINE_ID, null, null, null);
+
+      assertEquals(200, response.getHttpStatus());
+      JSONArray candidates = response.getBody().getJSONObject("response")
+          .getJSONObject("data").getJSONArray("candidates");
+      assertEquals(1, candidates.length());
+      JSONObject row = candidates.getJSONObject(0);
+      assertEquals("invoice", row.getString("kind"));
+      assertEquals("INV-1", row.getString("invoiceId"));
+      assertEquals("PS-1", row.getString("scheduleId"));
+      assertTrue(row.getBoolean("isReceipt"));
+      // Inflow → amount keeps the line's positive sign.
+      assertEquals(0, new BigDecimal("100.00").compareTo(new BigDecimal(row.getString("amount"))));
+      // A sales invoice query binds issotrx = 'Y' first, then the client id.
+      verify(ps).setString(1, "Y");
+      verify(ps).setString(2, CLIENT_ID);
+    }
+  }
+
+  /**
+   * An outflow line (negative amount) lists purchase invoices: the query binds {@code issotrx='N'}
+   * and the candidate amount is negatively signed (a payment), matching the line direction.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testBuildInvoiceCandidatesOutflowBindsPurchaseAndSignsNegative() throws Exception {
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(rs.next()).thenReturn(true, false);
+    when(rs.getString("fin_payment_schedule_id")).thenReturn("PS-2");
+    when(rs.getString("c_invoice_id")).thenReturn("INV-2");
+    when(rs.getString("documentno")).thenReturn("DOC-2");
+    when(rs.getTimestamp("invoicedate")).thenReturn(null);
+    when(rs.getString("partner_name")).thenReturn("SUPPLIER");
+    when(rs.getBigDecimal("outstanding")).thenReturn(new BigDecimal("75.00"));
+
+    // Outflow line: dramount > cramount → negative direction (payment / purchase invoices).
+    FIN_BankStatementLine line = lineFor(ACC_ID, BigDecimal.ZERO, new BigDecimal("75.00"), null);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    FIN_FinancialAccount account = accountWithClientOrg(CLIENT_ID, ORG_ID);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubConnection(dal, ps, rs);
+      stubNaturalTree(obContext, CLIENT_ID, ORG_ID, new HashSet<>(Arrays.asList(ORG_ID)));
+
+      NeoResponse response = handler.buildInvoiceCandidates(ACC_ID, LINE_ID, null, null, null);
+
+      JSONObject row = response.getBody().getJSONObject("response")
+          .getJSONObject("data").getJSONArray("candidates").getJSONObject(0);
+      assertFalse(row.getBoolean("isReceipt"));
+      // Outflow → amount carries the line's negative sign.
+      assertEquals(0, new BigDecimal("-75.00").compareTo(new BigDecimal(row.getString("amount"))));
+      // A purchase invoice query binds issotrx = 'N'.
+      verify(ps).setString(1, "N");
+    }
+  }
+
+  /**
+   * A zero-amount line has no determinable direction, so no invoice candidates are listed (and the
+   * query is never executed).
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testBuildInvoiceCandidatesZeroAmountReturnsEmpty() throws Exception {
+    FIN_BankStatementLine line = lineFor(ACC_ID, BigDecimal.ZERO, BigDecimal.ZERO, null);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    FIN_FinancialAccount account = accountWithClientOrg(CLIENT_ID, ORG_ID);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = handler.buildInvoiceCandidates(ACC_ID, LINE_ID, null, null, null);
+
+      assertEquals(200, response.getHttpStatus());
+      JSONArray candidates = response.getBody().getJSONObject("response")
+          .getJSONObject("data").getJSONArray("candidates");
+      assertEquals(0, candidates.length());
+    }
+  }
+
+  /**
+   * With no selected line the direction is unknown, so no invoice candidates are listed.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testBuildInvoiceCandidatesNullLineReturnsEmpty() throws Exception {
+    FIN_FinancialAccount account = accountWithClientOrg(CLIENT_ID, ORG_ID);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = handler.buildInvoiceCandidates(ACC_ID, null, null, null, null);
+
+      assertEquals(200, response.getHttpStatus());
+      assertEquals(0, response.getBody().getJSONObject("response")
+          .getJSONObject("data").getJSONArray("candidates").length());
+    }
+  }
+
+  // ── reconcileGroup with invoices: create payment then reconcile ───────────────
+
+  /**
+   * Builds an invoice {@code reconcileGroup} body: {@code { financialAccountId, statementLineId,
+   * invoices:[{invoiceId, scheduleId}] }}.
+   */
+  private JSONObject invoiceReconcileBody(String accountId, String lineId, String invoiceId,
+      String scheduleId) throws Exception {
+    JSONArray invoices = new JSONArray()
+        .put(new JSONObject().put("invoiceId", invoiceId).put("scheduleId", scheduleId));
+    return new JSONObject()
+        .put("financialAccountId", accountId)
+        .put("statementLineId", lineId)
+        .put("invoices", invoices);
+  }
+
+  /**
+   * A reconcileGroup carrying an invoice whose outstanding covers the line registers a payment
+   * (which auto-creates a finacc transaction), then reconciles that new transaction against the
+   * line and returns 201.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReconcileGroupWithInvoiceCreatesPaymentAndReconciles() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    when(line.getTransactionDate()).thenReturn(null);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-inv");
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+
+    // The payment auto-creates a transaction (T-INV) that balances the line (+100.00).
+    FIN_FinaccTransaction createdTxn = trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    when(createdTxn.getId()).thenReturn("T-INV");
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getFINFinaccTransactionList()).thenReturn(Collections.singletonList(createdTxn));
+    doReturn(createdTxn).when(handler).loadTransaction("T-INV");
+    stubReconciliationCompose(rec, "Success");
+
+    Invoice invoice = mock(Invoice.class);
+    FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
+    when(schedule.getOutstandingAmount()).thenReturn(new BigDecimal("100.00"));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<PaymentRegistrationService> prs =
+            mockStatic(PaymentRegistrationService.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "INV-1")).thenReturn(invoice);
+      when(dal.get(FIN_PaymentSchedule.class, "PS-1")).thenReturn(schedule);
+      prs.when(() -> PaymentRegistrationService.registerPaymentCore(
+          eq(invoice), eq(schedule), any(), any(), eq(account), eq(true))).thenReturn(payment);
+
+      NeoResponse response = handler.reconcileGroup(invoiceReconcileBody(ACC_ID, LINE_ID,
+          "INV-1", "PS-1"));
+
+      assertEquals(201, response.getHttpStatus());
+      // The auto-created transaction id is the one reconciled against the line.
+      verify(handler).matchBankStatementLine(eq(line),
+          argThat(ops -> ops.contains("T-INV")), eq(rec));
+    }
+  }
+
+  /**
+   * A reconcileGroup whose selected invoices do not cover the statement line amount is rejected
+   * with a 400 ("do not cover").
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReconcileGroupWithInvoiceInsufficientOutstandingReturns400() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    // Line needs 100.00 but the invoice only covers 40.00 → 60.00 remaining → reject.
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    when(line.getTransactionDate()).thenReturn(null);
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+
+    FIN_FinaccTransaction createdTxn = trxFor(ACC_ID, new BigDecimal("40.00"), BigDecimal.ZERO, null);
+    when(createdTxn.getId()).thenReturn("T-INV");
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getFINFinaccTransactionList()).thenReturn(Collections.singletonList(createdTxn));
+
+    Invoice invoice = mock(Invoice.class);
+    FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
+    when(schedule.getOutstandingAmount()).thenReturn(new BigDecimal("40.00"));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<PaymentRegistrationService> prs =
+            mockStatic(PaymentRegistrationService.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "INV-1")).thenReturn(invoice);
+      when(dal.get(FIN_PaymentSchedule.class, "PS-1")).thenReturn(schedule);
+      prs.when(() -> PaymentRegistrationService.registerPaymentCore(
+          eq(invoice), eq(schedule), any(), any(), eq(account), eq(true))).thenReturn(payment);
+
+      NeoResponse response = handler.reconcileGroup(invoiceReconcileBody(ACC_ID, LINE_ID,
+          "INV-1", "PS-1"));
+
+      assertEquals(400, response.getHttpStatus());
+      assertTrue(response.getBody().getJSONObject("error").getString("message").contains("do not cover"));
+      // The line is never reconciled when the invoices are insufficient.
+      verify(handler, never()).addNewDraftReconciliation(any());
+    }
+  }
+
+  /**
+   * applyGroup amount guard: a plain operations group whose signed amounts EXCEED the statement
+   * line amount records a 400 ("exceed the statement line amount") in the per-group result (same
+   * over-reconciliation guard the manual reconcileGroup path applies). Operations that sum to LESS
+   * than the line are allowed (partial match), so the rejected case must over-shoot the line.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testApplySuggestionsPlainGroupAmountMismatchRecordsError() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
+    // Line is 150.00 but the operations sum to 180.00 (100 + 80) → exceeds the line → reject.
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("150.00"), BigDecimal.ZERO, null);
+    FIN_FinaccTransaction t1 = trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    FIN_FinaccTransaction t2 = trxFor(ACC_ID, new BigDecimal("80.00"), BigDecimal.ZERO, null);
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    doReturn(t1).when(handler).loadTransaction("t1");
+    doReturn(t2).when(handler).loadTransaction("t2");
+
+    JSONObject group = new JSONObject()
+        .put("statementLineId", LINE_ID)
+        .put("operationIds", new JSONArray().put("t1").put("t2"));
+    JSONObject body = new JSONObject()
+        .put("financialAccountId", ACC_ID)
+        .put("groups", new JSONArray().put(group));
+
+    NeoResponse response = handler.applySuggestions(body);
+
+    // Batch apply is best-effort → overall 201, but the per-group result carries the 400.
+    assertEquals(201, response.getHttpStatus());
+    JSONObject result = response.getBody().getJSONObject("response").getJSONObject("data")
+        .getJSONArray("results").getJSONObject(0);
+    assertTrue(result.getJSONObject("error").getString("message")
+        .contains("exceed the statement line amount"));
+    // The over-reconciling group is never reconciled.
+    verify(handler, never()).addNewDraftReconciliation(any());
   }
 }
