@@ -55,8 +55,8 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static final String SUBTYPE_NC  = "NC";
   protected static final String SUBTYPE_DEV = "DEV";
 
-  protected static final String FIELD_ORIGIN_INVOICE       = FIELD_ORIGIN_INVOICE;
-  protected static final String FIELD_TRANSACTION_DOCUMENT = FIELD_TRANSACTION_DOCUMENT;
+  protected static final String FIELD_ORIGIN_INVOICE       = "originInvoice";
+  protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
 
   // ---------------------------------------------------------------------------
   // Abstract contract

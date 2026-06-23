@@ -62,8 +62,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   private static final Logger log = LogManager.getLogger(SalesInvoiceHeaderHandler.class);
 
-  private static final String FIELD_GRAND_TOTAL_AMOUNT = FIELD_GRAND_TOTAL_AMOUNT;
-  private static final String FIELD_OUTSTANDING_AMOUNT = FIELD_OUTSTANDING_AMOUNT;
+  private static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
+  private static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
