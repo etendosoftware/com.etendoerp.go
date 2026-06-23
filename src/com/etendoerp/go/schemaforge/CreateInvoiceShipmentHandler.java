@@ -174,9 +174,11 @@ public class CreateInvoiceShipmentHandler implements NeoHandler {
     long lineNo = 10;
     int added = 0;
     for (InvoiceLine invLine : invoice.getInvoiceLineList()) {
-      if (invLine.getProduct() == null || invLine.getUOM() == null) continue;
       BigDecimal qty = invLine.getInvoicedQuantity();
-      if (qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) continue;
+      if (invLine.getProduct() == null || invLine.getUOM() == null
+          || qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) {
+        continue;
+      }
 
       ShipmentInOutLine shipLine = OBProvider.getInstance().get(ShipmentInOutLine.class);
       shipLine.setClient(invoice.getClient());

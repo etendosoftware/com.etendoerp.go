@@ -62,6 +62,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   private static final Logger log = LogManager.getLogger(SalesInvoiceHeaderHandler.class);
 
+  private static final String FIELD_GRAND_TOTAL_AMOUNT = FIELD_GRAND_TOTAL_AMOUNT;
+  private static final String FIELD_OUTSTANDING_AMOUNT = FIELD_OUTSTANDING_AMOUNT;
+
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
 
@@ -173,13 +176,13 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     if (!SUBTYPE_NC.equals(subtype) && !SUBTYPE_DEV.equals(subtype)) {
       return;
     }
-    double grand = rec.optDouble("grandTotalAmount", 0.0);
+    double grand = rec.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
     if (grand > 0) {
-      rec.put("grandTotalAmount", -grand);
+      rec.put(FIELD_GRAND_TOTAL_AMOUNT, -grand);
     }
-    double outstanding = rec.optDouble("outstandingAmount", 0.0);
+    double outstanding = rec.optDouble(FIELD_OUTSTANDING_AMOUNT, 0.0);
     if (outstanding > 0) {
-      rec.put("outstandingAmount", -outstanding);
+      rec.put(FIELD_OUTSTANDING_AMOUNT, -outstanding);
     }
   }
 
@@ -243,10 +246,10 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
       return;
     }
     double factor = 1.0 - discountPct / 100.0;
-    double grand = invoice.optDouble("grandTotalAmount", 0.0);
-    invoice.put("grandTotalAmount", roundHalfUp(grand * factor));
-    double outstanding = invoice.optDouble("outstandingAmount", 0.0);
-    invoice.put("outstandingAmount", roundHalfUp(outstanding * factor));
+    double grand = invoice.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
+    invoice.put(FIELD_GRAND_TOTAL_AMOUNT, roundHalfUp(grand * factor));
+    double outstanding = invoice.optDouble(FIELD_OUTSTANDING_AMOUNT, 0.0);
+    invoice.put(FIELD_OUTSTANDING_AMOUNT, roundHalfUp(outstanding * factor));
   }
 
   private static double roundHalfUp(double value) {

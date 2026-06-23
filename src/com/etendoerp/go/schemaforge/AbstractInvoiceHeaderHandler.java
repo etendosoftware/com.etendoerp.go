@@ -55,6 +55,9 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static final String SUBTYPE_NC  = "NC";
   protected static final String SUBTYPE_DEV = "DEV";
 
+  protected static final String FIELD_ORIGIN_INVOICE       = FIELD_ORIGIN_INVOICE;
+  protected static final String FIELD_TRANSACTION_DOCUMENT = FIELD_TRANSACTION_DOCUMENT;
+
   // ---------------------------------------------------------------------------
   // Abstract contract
   // ---------------------------------------------------------------------------
@@ -117,10 +120,10 @@ public abstract class AbstractInvoiceHeaderHandler {
     }
     try {
       JSONObject body = context.getRequestBody();
-      if (body == null || !body.has("transactionDocument")) {
+      if (body == null || !body.has(FIELD_TRANSACTION_DOCUMENT)) {
         return null;
       }
-      String newDocTypeId = body.optString("transactionDocument", null);
+      String newDocTypeId = body.optString(FIELD_TRANSACTION_DOCUMENT, null);
       if (StringUtils.isBlank(newDocTypeId)) {
         return null;
       }
@@ -157,7 +160,7 @@ public abstract class AbstractInvoiceHeaderHandler {
       if (body == null) {
         return null;
       }
-      String docTypeId = body.optString("transactionDocument", null);
+      String docTypeId = body.optString(FIELD_TRANSACTION_DOCUMENT, null);
       if (StringUtils.isBlank(docTypeId)) {
         return null;
       }
@@ -165,7 +168,7 @@ public abstract class AbstractInvoiceHeaderHandler {
       if (SUBTYPE_FAC.equals(subtype)) {
         return null; // Factura: origin invoice not required
       }
-      String originId = body.optString("originInvoice", null);
+      String originId = body.optString(FIELD_ORIGIN_INVOICE, null);
       if (StringUtils.isBlank(originId)) {
         String label = SUBTYPE_NC.equals(subtype) ? "Credit Note" : "Return Invoice";
         return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
@@ -196,7 +199,7 @@ public abstract class AbstractInvoiceHeaderHandler {
       if (body == null) {
         return;
       }
-      String originInvoiceId = body.optString("originInvoice", null);
+      String originInvoiceId = body.optString(FIELD_ORIGIN_INVOICE, null);
 
       String invoiceId = resolveInvoiceIdFromContext(context);
       if (StringUtils.isBlank(invoiceId)) {
@@ -299,10 +302,10 @@ public abstract class AbstractInvoiceHeaderHandler {
       ps.setString(1, invoiceId);
       try (ResultSet rs = ps.executeQuery()) {
         if (rs.next()) {
-          rec.put("originInvoice", rs.getString(1));
+          rec.put(FIELD_ORIGIN_INVOICE, rs.getString(1));
           rec.put("originInvoice$_identifier", rs.getString(2));
         } else {
-          rec.put("originInvoice", JSONObject.NULL);
+          rec.put(FIELD_ORIGIN_INVOICE, JSONObject.NULL);
           rec.put("originInvoice$_identifier", JSONObject.NULL);
         }
       }
@@ -323,7 +326,7 @@ public abstract class AbstractInvoiceHeaderHandler {
    *     if a JSON operation fails
    */
   protected void enrichInvoiceSubtype(JSONObject rec, String key) throws Exception {
-    String docTypeId = rec.optString("transactionDocument", null);
+    String docTypeId = rec.optString(FIELD_TRANSACTION_DOCUMENT, null);
     rec.put(key, resolveSubtype(docTypeId));
   }
 
