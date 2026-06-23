@@ -57,13 +57,11 @@ final class CandidatesSupport {
   private static final String KEY_PENDING_BALANCE = "pendingBalance";
   private static final String KEY_SUGGESTED = "suggested";
   private static final String COL_PARTNER_NAME = "partner_name";
-  private static final String KEY_COUNTS = "counts";
   private static final String SQL_VARCHAR = "varchar";
   private static final String CNT_RECEIPTS = "receipts";
   private static final String CNT_PAYMENTS = "payments";
   private static final String CNT_SALES_INVOICES = "salesInvoices";
   private static final String CNT_PURCHASE_INVOICES = "purchaseInvoices";
-  private static final String STATUS_PENDING = "pending";
   private static final String STATUS_RECONCILED = "reconciled";
   private static final String ACTION_CANDIDATES = "candidates";
 
