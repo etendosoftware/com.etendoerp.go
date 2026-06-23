@@ -172,13 +172,14 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   @SuppressWarnings("java:S2077")
   private void enrichLinkedReceipts(JSONObject rec, String invoiceId) {
     String sql =
-        "SELECT DISTINCT io.m_inout_id, io.documentno, io.docstatus "
+        "SELECT DISTINCT io.m_inout_id, io.documentno, io.docstatus, dt.isreturn "
         + "FROM c_invoiceline il "
         + "JOIN m_inoutline iol ON ("
         + "  iol.m_inoutline_id = il.m_inoutline_id "
-        + "  OR (il.c_orderline_id IS NOT NULL AND iol.c_orderline_id = il.c_orderline_id)"
+        + "  OR (il.m_inoutline_id IS NULL AND il.c_orderline_id IS NOT NULL AND iol.c_orderline_id = il.c_orderline_id)"
         + ") "
         + "JOIN m_inout io ON io.m_inout_id = iol.m_inout_id "
+        + "JOIN c_doctype dt ON dt.c_doctype_id = io.c_doctype_id "
         + "WHERE il.c_invoice_id = ? AND il.isactive = 'Y' "
         + "  AND io.isactive = 'Y' AND io.docstatus NOT IN ('VO','CL') "
         + "  AND io.issotrx = 'N'";
@@ -192,6 +193,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
           receipt.put("id", rs.getString(1));
           receipt.put("documentNo", rs.getString(2));
           receipt.put("documentStatus", rs.getString(3));
+          receipt.put("isReturn", "Y".equals(rs.getString(4)));
           receipts.put(receipt);
         }
       }
