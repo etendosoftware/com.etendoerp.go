@@ -18,17 +18,20 @@
 package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.descriptionExpr;
+import static com.etendoerp.go.schemaforge.ReconciliationSupport.belongsToAccount;
+import static com.etendoerp.go.schemaforge.ReconciliationSupport.bindDateRange;
+import static com.etendoerp.go.schemaforge.ReconciliationSupport.docTypeToIsReceipt;
+import static com.etendoerp.go.schemaforge.ReconciliationSupport.envelope;
+import static com.etendoerp.go.schemaforge.ReconciliationSupport.formatDate;
+import static com.etendoerp.go.schemaforge.ReconciliationSupport.nullSafe;
+import static com.etendoerp.go.schemaforge.ReconciliationSupport.readOperationIds;
+import static com.etendoerp.go.schemaforge.ReconciliationSupport.signedAmount;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.Date;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Types;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -44,7 +47,6 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
-import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.advpaymentmngt.process.FIN_TransactionProcess;
 import org.openbravo.advpaymentmngt.utility.APRM_MatchingUtility;
@@ -154,8 +156,6 @@ public class ReconciliationHandler implements NeoHandler {
   /** JSON keys reused across rows — extracted to satisfy Sonar S1192. */
   private static final String MSG_MISSING_PARAM = "Missing required parameter: ";
   private static final String MSG_ACCOUNT_NOT_FOUND = "Financial account not found: ";
-  private static final String KEY_RESPONSE = "response";
-  private static final String KEY_DATA = "data";
   private static final String KEY_ID = "id";
   private static final String KEY_DATE = "date";
   private static final String KEY_AMOUNT = "amount";
@@ -166,6 +166,7 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String KEY_SUGGESTED = "suggested";
   private static final String COL_PARTNER_NAME = "partner_name";
   private static final String KEY_COUNTS = "counts";
+  private static final String SQL_VARCHAR = "varchar";
   private static final String CNT_RECEIPTS = "receipts";
   private static final String CNT_PAYMENTS = "payments";
   private static final String CNT_SALES_INVOICES = "salesInvoices";
@@ -174,9 +175,6 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String KEY_IS_NEW = "isNew";
   private static final String STATUS_PENDING = "pending";
   private static final String MSG_INTERNAL_SERVER_ERROR = "Internal Server Error";
-
-  private static final DateTimeFormatter ISO_UTC =
-      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
 
   /**
    * Pending bank-statement lines (panel left): unmatched lines of the account,
@@ -405,7 +403,7 @@ public class ReconciliationHandler implements NeoHandler {
       int idx = 1;
       ps.setString(idx++, accountId);
       ps.setString(idx++, clientId);
-      ps.setArray(idx++, conn.createArrayOf("varchar", orgs.toArray(new String[0])));
+      ps.setArray(idx++, conn.createArrayOf(SQL_VARCHAR, orgs.toArray(new String[0])));
       if (StringUtils.isNotBlank(dateFrom)) {
         ps.setDate(idx++, Date.valueOf(dateFrom));
       }
@@ -461,7 +459,7 @@ public class ReconciliationHandler implements NeoHandler {
     JSONObject data = new JSONObject();
     data.put("lines", lines);
     data.put("total", total);
-    data.put("counts", countsJson);
+    data.put(KEY_COUNTS, countsJson);
     return envelope(data);
   }
 
@@ -630,7 +628,7 @@ public class ReconciliationHandler implements NeoHandler {
       int idx = 1;
       ps.setString(idx++, issotrx);
       ps.setString(idx++, account.getClient().getId());
-      ps.setArray(idx++, conn.createArrayOf("varchar", orgs.toArray(new String[0])));
+      ps.setArray(idx++, conn.createArrayOf(SQL_VARCHAR, orgs.toArray(new String[0])));
       bindDateRange(ps, idx, dateFrom, dateTo);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
@@ -704,7 +702,7 @@ public class ReconciliationHandler implements NeoHandler {
     Set<String> orgs = osp.getNaturalTree(account.getOrganization().getId());
     try (PreparedStatement ps = conn.prepareStatement(INVOICE_COUNTS_SQL)) {
       ps.setString(1, account.getClient().getId());
-      ps.setArray(2, conn.createArrayOf("varchar", orgs.toArray(new String[0])));
+      ps.setArray(2, conn.createArrayOf(SQL_VARCHAR, orgs.toArray(new String[0])));
       bindDateRange(ps, 3, dateFrom, dateTo);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
@@ -755,12 +753,6 @@ public class ReconciliationHandler implements NeoHandler {
     return ids;
   }
 
-  /** Maps the UI docType filter to the FIN_Payment.isreceipt flag. */
-  private static String docTypeToIsReceipt(String docType) {
-    // Collections / sales invoices arrive as receipts ('Y'); payments as 'N'.
-    return "payments".equalsIgnoreCase(docType) ? "N" : "Y";
-  }
-
   // ---------------------------------------------------------------------------
   // POST reconcileGroup
   // ---------------------------------------------------------------------------
@@ -790,7 +782,7 @@ public class ReconciliationHandler implements NeoHandler {
     String accountId = body.optString("financialAccountId", null);
     String statementLineId = body.optString("statementLineId", null);
     List<String> operationIds = readOperationIds(body);
-    JSONArray invoiceSpecs = body.optJSONArray("invoices");
+    JSONArray invoiceSpecs = body.optJSONArray(KIND_INVOICES);
     boolean hasInvoices = invoiceSpecs != null && invoiceSpecs.length() > 0;
 
     if (StringUtils.isBlank(accountId) || StringUtils.isBlank(statementLineId)) {
@@ -874,18 +866,17 @@ public class ReconciliationHandler implements NeoHandler {
       }
       BigDecimal outstanding = nullSafe(schedule.getOutstandingAmount()).abs();
       BigDecimal allocate = remaining.min(outstanding);
-      if (allocate.compareTo(TOLERANCE) <= 0) {
-        continue;
+      if (allocate.compareTo(TOLERANCE) > 0) {
+        FIN_Payment payment = PaymentRegistrationService.registerPaymentCore(
+            invoice, schedule, allocate, line.getTransactionDate(), account, isReceipt);
+        List<FIN_FinaccTransaction> txns = payment.getFINFinaccTransactionList();
+        if (txns.isEmpty()) {
+          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+              "Payment did not produce a transaction: " + payment.getId());
+        }
+        operationIds.add(txns.get(0).getId());
+        remaining = remaining.subtract(allocate);
       }
-      FIN_Payment payment = PaymentRegistrationService.registerPaymentCore(
-          invoice, schedule, allocate, line.getTransactionDate(), account, isReceipt);
-      List<FIN_FinaccTransaction> txns = payment.getFINFinaccTransactionList();
-      if (txns.isEmpty()) {
-        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-            "Payment did not produce a transaction: " + payment.getId());
-      }
-      operationIds.add(txns.get(0).getId());
-      remaining = remaining.subtract(allocate);
     }
     if (remaining.compareTo(TOLERANCE) > 0) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
@@ -966,31 +957,6 @@ public class ReconciliationHandler implements NeoHandler {
     data.put("lineIds", lineIds);
     data.put("updatedBalance", nullSafe(rec.getEndingBalance()));
     return NeoResponse.createdWithData(data);
-  }
-
-  private static List<String> readOperationIds(JSONObject body) throws JSONException {
-    List<String> ids = new ArrayList<>();
-    JSONArray arr = body.optJSONArray("operationIds");
-    if (arr == null) {
-      return ids;
-    }
-    for (int i = 0; i < arr.length(); i++) {
-      String id = arr.optString(i, null);
-      if (StringUtils.isNotBlank(id)) {
-        ids.add(id);
-      }
-    }
-    return ids;
-  }
-
-  private static boolean belongsToAccount(FIN_BankStatementLine line, String accountId) {
-    return line.getBankStatement() != null
-        && line.getBankStatement().getAccount() != null
-        && accountId.equals(line.getBankStatement().getAccount().getId());
-  }
-
-  private static BigDecimal signedAmount(FIN_FinaccTransaction trx) {
-    return nullSafe(trx.getDepositAmount()).subtract(nullSafe(trx.getPaymentAmount()));
   }
 
   // ---------------------------------------------------------------------------
@@ -1348,47 +1314,4 @@ public class ReconciliationHandler implements NeoHandler {
     return MatchRuleEngine.loadRules(conn, accountId);
   }
 
-  // ---------------------------------------------------------------------------
-  // Helpers
-  // ---------------------------------------------------------------------------
-
-  private static NeoResponse envelope(JSONObject data) throws JSONException {
-    JSONObject responseData = new JSONObject();
-    responseData.put(KEY_DATA, data);
-    JSONObject wrapper = new JSONObject();
-    wrapper.put(KEY_RESPONSE, responseData);
-    return NeoResponse.ok(wrapper);
-  }
-
-  private static String formatDate(java.sql.Timestamp ts) {
-    return ts == null ? "" : ISO_UTC.format(Instant.ofEpochMilli(ts.getTime()));
-  }
-
-  static BigDecimal nullSafe(BigDecimal value) {
-    return value == null ? BigDecimal.ZERO : value;
-  }
-
-  /**
-   * Binds the four parameters of the two optional date-range clauses
-   * ({@code (CAST(? AS date) IS NULL OR col >= ?)} and the {@code <=} twin): dateFrom, dateFrom,
-   * dateTo, dateTo. Blank bounds are bound as SQL NULL, which makes the clause a no-op.
-   *
-   * @return the next free parameter index
-   */
-  private static int bindDateRange(PreparedStatement ps, int idx, String dateFrom, String dateTo)
-      throws SQLException {
-    setDateOrNull(ps, idx++, dateFrom);
-    setDateOrNull(ps, idx++, dateFrom);
-    setDateOrNull(ps, idx++, dateTo);
-    setDateOrNull(ps, idx++, dateTo);
-    return idx;
-  }
-
-  private static void setDateOrNull(PreparedStatement ps, int idx, String date) throws SQLException {
-    if (StringUtils.isBlank(date)) {
-      ps.setNull(idx, Types.DATE);
-    } else {
-      ps.setDate(idx, Date.valueOf(date));
-    }
-  }
 }

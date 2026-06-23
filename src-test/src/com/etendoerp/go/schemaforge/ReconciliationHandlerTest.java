@@ -710,15 +710,6 @@ public class ReconciliationHandlerTest {
     verify(handler).matchBankStatementLine(eq(line), argThat(ops -> ops.contains("T-NEW")), eq(rec));
   }
 
-  // ── nullSafe helper ──────────────────────────────────────────────────────────
-
-  /** nullSafe maps null to zero and keeps a present value. */
-  @Test
-  public void testNullSafe() {
-    assertEquals(0, ReconciliationHandler.nullSafe(null).compareTo(BigDecimal.ZERO));
-    assertEquals(0, ReconciliationHandler.nullSafe(new BigDecimal("5")).compareTo(new BigDecimal("5")));
-  }
-
   // ── buildPendingLines: state + counts (T7) ────────────────────────────────────
 
   /**
