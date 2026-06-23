@@ -1994,7 +1994,7 @@ public class ReconciliationHandlerTest {
       when(provider.getEntity(FIN_FinaccTransaction.ENTITY_NAME)).thenReturn(entity);
 
       // markAutoCreated sets the flag via the resolved property name.
-      handler.markAutoCreated(trx);
+      ReactivationSupport.markAutoCreated(trx);
       verify(trx).set("eTGOAutoCreated", Boolean.TRUE);
 
       // isAutoCreated reads the same property back.

@@ -31,6 +31,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 
 import org.apache.commons.lang3.StringUtils;
@@ -474,5 +475,36 @@ final class AutoMatchSupport {
 
   static BigDecimal nullSafe(BigDecimal value) {
     return value == null ? BigDecimal.ZERO : value;
+  }
+
+  /**
+   * Passes 1b (1:N signal grouping) and 2 (rule engine) of the autoMatch preview — evaluated only
+   * when the standard 1:1 algorithm did not match. Appends any group it finds to {@code groups} and
+   * marks the consumed transactions in {@code usedTxnIds}.
+   *
+   * @return int[2] where [0] = opsToLink increment, [1] = willCreate increment
+   */
+  static int[] matchFallback(String accountId, FIN_BankStatementLine line,
+      Set<String> usedTxnIds, List<MatchRuleEngine.Rule> rules, JSONArray groups)
+      throws JSONException {
+    List<FIN_FinaccTransaction> signalGroup =
+        findSignalGroup(accountId, line, usedTxnIds, SIGNAL_MATCH_TOLERANCE);
+    if (!signalGroup.isEmpty()) {
+      signalGroup.forEach(t -> usedTxnIds.add(t.getId()));
+      groups.put(buildMultiGroup(line, signalGroup));
+      return new int[]{signalGroup.size(), 0};
+    }
+    MatchRuleEngine.MatchResult ruleResult = MatchRuleEngine.evaluate(
+        StringUtils.trimToEmpty(line.getDescription()),
+        StringUtils.trimToEmpty(line.getReferenceNo()),
+        StringUtils.trimToEmpty(line.getBpartnername()), rules);
+    if (ruleResult.isMatched()) {
+      JSONObject ruleGroup = buildRuleGroup(
+          line, ruleResult.primary, ruleResult.alternatives);
+      groups.put(ruleGroup);
+      return Boolean.TRUE.equals(ruleGroup.opt(KEY_IS_NEW))
+          ? new int[]{0, 1} : new int[]{1, 0};
+    }
+    return new int[]{0, 0};
   }
 }
