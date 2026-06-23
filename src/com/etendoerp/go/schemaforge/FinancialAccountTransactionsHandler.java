@@ -40,8 +40,10 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.advpaymentmngt.actionHandler.FundsTransferActionHandler;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
@@ -104,10 +106,15 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String PARAM_ACTION = "action";
   private static final String ACTION_CREATE = "create";
   private static final String ACTION_CREATE_PAYMENT = "create-payment";
+  private static final String ACTION_TRANSFER = "transfer";
   private static final String ACTION_BP_LOOKUP = "bpartner-lookup";
   private static final String ACTION_GL_LOOKUP = "glitem-lookup";
   private static final String ACTION_DIM_VALUES = "dimension-values";
   private static final String ACTION_OUTSTANDING = "outstanding-invoices";
+  /** Default description applied to the funds-transfer transactions when none is given. */
+  private static final String DEFAULT_TRANSFER_DESCRIPTION = "Funds Transfer Transaction";
+  /** Reused error message (Sonar S1192 — appears across create / create-payment / transfer). */
+  private static final String MSG_BODY_REQUIRED = "Request body is required";
   private static final int LOOKUP_LIMIT = 25;
   /** Document base type of finacc transactions — used to resolve header dimensions. */
   private static final String DOCBASETYPE_FAT = "FAT";
@@ -234,6 +241,9 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     }
     if (METHOD_POST.equals(method) && ACTION_CREATE_PAYMENT.equals(action)) {
       return handleCreatePayment(context);
+    }
+    if (METHOD_POST.equals(method) && ACTION_TRANSFER.equals(action)) {
+      return handleTransfer(context);
     }
     return NeoResponse.error(405, "Method not allowed.");
   }
@@ -592,7 +602,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    */
   private NeoResponse handleCreate(NeoContext context) {
     JSONObject body = context.getRequestBody();
-    if (body == null) return NeoResponse.error(400, "Request body is required");
+    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try {
       OBContext.setAdminMode(true);
 
@@ -638,7 +648,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    */
   private NeoResponse handleCreatePayment(NeoContext context) {
     JSONObject body = context.getRequestBody();
-    if (body == null) return NeoResponse.error(400, "Request body is required");
+    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
     try {
       OBContext.setAdminMode(true);
       return AddPaymentService.doAddPayment(body);
@@ -653,6 +663,136 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Handles {@code POST ?action=transfer} — transfers funds between two financial accounts of the
+   * organization. Validates the request and delegates ALL the transaction creation to Etendo
+   * Classic's {@link FundsTransferActionHandler#createTransfer}: this handler never reimplements the
+   * paired-transaction / conversion-rate / processing logic.
+   */
+  private NeoResponse handleTransfer(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) return NeoResponse.error(400, MSG_BODY_REQUIRED);
+    try {
+      OBContext.setAdminMode(true);
+      return transfer(body);
+    } catch (org.openbravo.base.exception.OBException e) {
+      log.warn("Funds transfer business error: {}", e.getMessage());
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(400, e.getMessage());
+    } catch (Exception e) {
+      log.error("Funds transfer failed", e);
+      OBDal.getInstance().rollbackAndClose();
+      return NeoResponse.error(500, "Could not transfer the funds. Please check logs for details.");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Validates inputs and runs the funds transfer. On confirm Classic creates two atomic
+   * transactions — a withdrawal ({@code BPW}) in the source account and a deposit ({@code BPD}) in
+   * the destination — plus an optional bank-fee ({@code BF}) expense in the source; all left Pending
+   * (PWNC / RDNC) until reconciled. Body:
+   * {@code { sourceAccountId, destinationAccountId, amount, glItemId?, transferDate?, conversionRate?,
+   * bankFee?, bankFeeAmount?, description? }}.
+   *
+   * @return {@code null}-free {@link NeoResponse}: 400 on a validation failure, 404 on a missing
+   *     account, or 201 with {@code transferred:true} on success.
+   */
+  NeoResponse transfer(JSONObject body) throws Exception {
+    String sourceId = body.optString("sourceAccountId", null);
+    String destId = body.optString("destinationAccountId", null);
+    if (StringUtils.isBlank(sourceId) || StringUtils.isBlank(destId)) {
+      return NeoResponse.error(400, "sourceAccountId and destinationAccountId are required");
+    }
+    if (sourceId.equals(destId)) {
+      return NeoResponse.error(400, "Source and destination accounts must be different");
+    }
+    BigDecimal amount = nullSafeBigDecimal(optBigDecimal(body, "amount"));
+    if (amount.signum() <= 0) {
+      return NeoResponse.error(400, "Amount must be greater than zero");
+    }
+    FIN_FinancialAccount source = loadAccount(sourceId);
+    FIN_FinancialAccount dest = loadAccount(destId);
+    if (source == null || dest == null) {
+      return NeoResponse.error(404, "Source or destination account not found");
+    }
+    if (!sameOrgScope(source, dest)) {
+      return NeoResponse.error(400,
+          "Source and destination accounts must belong to the same organization tree");
+    }
+    if (amount.compareTo(availableBalance(source)) > 0) {
+      return NeoResponse.error(400, "Amount exceeds the available balance of the source account");
+    }
+
+    GLItem glItem = null;
+    String glItemId = body.optString("glItemId", null);
+    if (StringUtils.isNotBlank(glItemId)) {
+      glItem = OBDal.getInstance().get(GLItem.class, glItemId);
+    }
+    BigDecimal conversionRate = resolveConversionRate(source, dest, optBigDecimal(body, "conversionRate"));
+    BigDecimal bankFeeFrom = body.optBoolean("bankFee", false)
+        ? nullSafeBigDecimal(optBigDecimal(body, "bankFeeAmount"))
+        : BigDecimal.ZERO;
+    String description = body.optString("description", null);
+    if (StringUtils.isBlank(description)) description = DEFAULT_TRANSFER_DESCRIPTION;
+    Date transferDate = parseDate(body.optString("transferDate", null), null);
+
+    doTransfer(transferDate, source, dest, glItem, amount, conversionRate, bankFeeFrom,
+        BigDecimal.ZERO, description);
+
+    JSONObject data = new JSONObject();
+    data.put("transferred", true);
+    data.put("sourceAccountId", sourceId);
+    data.put("destinationAccountId", destId);
+    return NeoResponse.createdWithData(data);
+  }
+
+  /**
+   * Conversion rate to pass to {@link FundsTransferActionHandler#createTransfer}: {@code 1} for a
+   * same-currency transfer; the user-provided rate when currencies differ; or {@code null} to let
+   * Classic resolve the system rate.
+   */
+  private static BigDecimal resolveConversionRate(FIN_FinancialAccount source,
+      FIN_FinancialAccount dest, BigDecimal provided) {
+    if (source.getCurrency().getId().equalsIgnoreCase(dest.getCurrency().getId())) {
+      return BigDecimal.ONE;
+    }
+    return provided;
+  }
+
+  // ── transfer seams (package-private so unit tests can stub the DAL / Classic layer) ──
+
+  FIN_FinancialAccount loadAccount(String accountId) {
+    return OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+  }
+
+  /** Current available balance of the account (the guard rejects transfers above it). */
+  BigDecimal availableBalance(FIN_FinancialAccount account) {
+    return nullSafeBigDecimal(account.getCurrentBalance());
+  }
+
+  /** True when both accounts share a client and the destination org is in the source's natural tree. */
+  boolean sameOrgScope(FIN_FinancialAccount source, FIN_FinancialAccount dest) {
+    if (!source.getClient().getId().equals(dest.getClient().getId())) {
+      return false;
+    }
+    return orgNaturalTree(source.getClient().getId(), source.getOrganization().getId())
+        .contains(dest.getOrganization().getId());
+  }
+
+  Set<String> orgNaturalTree(String clientId, String orgId) {
+    return OBContext.getOBContext().getOrganizationStructureProvider(clientId).getNaturalTree(orgId);
+  }
+
+  /** Delegates to Etendo Classic's funds-transfer flow (9-arg overload). Package-private test seam. */
+  void doTransfer(Date date, FIN_FinancialAccount from, FIN_FinancialAccount to, GLItem glItem,
+      BigDecimal amount, BigDecimal conversionRate, BigDecimal bankFeeFrom, BigDecimal bankFeeTo,
+      String description) {
+    FundsTransferActionHandler.createTransfer(date, from, to, glItem, amount, conversionRate,
+        bankFeeFrom, bankFeeTo, description);
   }
 
   /**
