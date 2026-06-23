@@ -128,6 +128,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String DIM_BPARTNER = "bpartner";
   private static final String DIM_PROJECT = "project";
   private static final String DIM_COSTCENTER = "costcenter";
+  private static final String DIM_PRODUCT = "product";
   private static final String DIM_ACTIVITY = "activity";
   private static final String DIM_CAMPAIGN = "campaign";
   private static final String DIM_SALESREGION = "salesregion";
@@ -160,6 +161,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           + "       COALESCE(dimbp.name, '')   AS dim_bpartner,"
           + "       COALESCE(dimproj.name, '') AS dim_project,"
           + "       COALESCE(dimcc.name, '')   AS dim_costcenter,"
+          + "       COALESCE(dimprod.name, '') AS dim_product,"
           + "       COALESCE(dimact.name, '')  AS dim_activity,"
           + "       COALESCE(dimcamp.name, '') AS dim_campaign,"
           + "       COALESCE(dimsr.name, '')   AS dim_salesregion,"
@@ -183,6 +185,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           + "  LEFT JOIN c_bpartner dimbp ON dimbp.c_bpartner_id = ft.c_bpartner_id"
           + "  LEFT JOIN c_project dimproj ON dimproj.c_project_id = ft.c_project_id"
           + "  LEFT JOIN c_costcenter dimcc ON dimcc.c_costcenter_id = ft.c_costcenter_id"
+          + "  LEFT JOIN m_product dimprod ON dimprod.m_product_id = ft.m_product_id"
           + "  LEFT JOIN c_activity dimact ON dimact.c_activity_id = ft.c_activity_id"
           + "  LEFT JOIN c_campaign dimcamp ON dimcamp.c_campaign_id = ft.c_campaign_id"
           + "  LEFT JOIN c_salesregion dimsr ON dimsr.c_salesregion_id = ft.c_salesregion_id"
@@ -328,6 +331,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           dims.put(DIM_BPARTNER, StringUtils.trimToEmpty(rs.getString("dim_bpartner")));
           dims.put(DIM_PROJECT, StringUtils.trimToEmpty(rs.getString("dim_project")));
           dims.put(DIM_COSTCENTER, StringUtils.trimToEmpty(rs.getString("dim_costcenter")));
+          dims.put(DIM_PRODUCT, StringUtils.trimToEmpty(rs.getString("dim_product")));
           dims.put(DIM_ACTIVITY, StringUtils.trimToEmpty(rs.getString("dim_activity")));
           dims.put(DIM_CAMPAIGN, StringUtils.trimToEmpty(rs.getString("dim_campaign")));
           dims.put(DIM_SALESREGION, StringUtils.trimToEmpty(rs.getString("dim_salesregion")));
