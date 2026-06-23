@@ -109,6 +109,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_MESSAGE = "message";
   private static final String FIELD_PASSWORD = "password";
   private static final String FIELD_SUCCESS = "success";
+  private static final String FIELD_TIMESTAMP = "timestamp";
   private static final String FIELD_ACCOUNT = "account";
   private static final String FIELD_AUTH_METHOD = "authMethod";
   private static final String STATUS_SUCCESS = FIELD_SUCCESS;
@@ -943,7 +944,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       JSONObject heartbeat = new JSONObject();
       heartbeat.put("type", "heartbeat");
-      heartbeat.put("timestamp", Instant.now().toString());
+      heartbeat.put(FIELD_TIMESTAMP, Instant.now().toString());
       writer.println(heartbeat.toString());
       writer.flush();
     } catch (JSONException e) {
@@ -1389,7 +1390,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       progress.put("step", step);
       progress.put(FIELD_STATUS, status);
       progress.put(FIELD_MESSAGE, message);
-      progress.put("timestamp", Instant.now().toString());
+      progress.put(FIELD_TIMESTAMP, Instant.now().toString());
       writer.println(progress.toString());
       writer.flush();
       // If the flush failed the client is already gone (broken pipe, swallowed by
@@ -1413,7 +1414,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put("type", "result");
       result.put(FIELD_SUCCESS, success);
       result.put(FIELD_MESSAGE, message);
-      result.put("timestamp", Instant.now().toString());
+      result.put(FIELD_TIMESTAMP, Instant.now().toString());
       writer.println(result.toString());
       writer.flush();
       // The final result line is what the UI waits for. If the flush failed the client

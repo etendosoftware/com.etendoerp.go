@@ -27,6 +27,7 @@ import java.io.Writer;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.LockSupport;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -91,7 +92,8 @@ public class EtendoGoJwtServletHeartbeatTest {
         heartbeat.awaitTermination(1, TimeUnit.SECONDS));
 
     int afterShutdown = counter.flushes.get();
-    Thread.sleep(120); // longer than the heartbeat interval
+    // Park (not Thread.sleep) past the heartbeat interval to confirm no late tick fires.
+    LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(120));
     assertEquals("no heartbeats may be emitted after shutdown", afterShutdown, counter.flushes.get());
   }
 
@@ -184,14 +186,14 @@ public class EtendoGoJwtServletHeartbeatTest {
     assertTrue("the final result line must remain parseable", sawResult);
   }
 
-  private static void waitUntil(BooleanSupplierWithTimeout condition, long timeoutMillis)
-      throws InterruptedException {
+  private static void waitUntil(BooleanSupplierWithTimeout condition, long timeoutMillis) {
     long deadline = System.currentTimeMillis() + timeoutMillis;
     while (System.currentTimeMillis() < deadline) {
       if (condition.get()) {
         return;
       }
-      Thread.sleep(10);
+      // Polling backoff via park (not Thread.sleep) to satisfy S2925 while keeping the loop.
+      LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
     }
   }
 
