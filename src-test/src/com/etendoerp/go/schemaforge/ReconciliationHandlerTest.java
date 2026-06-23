@@ -1897,6 +1897,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testNormalizeReactivatedMatchGroupMergesSiblings() throws Exception {
     FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    when(statement.getId()).thenReturn("BST-1");
     when(statement.isProcessed()).thenReturn(Boolean.TRUE);
     FIN_BankStatementLine anchor = groupedLine("L1", statement, "GRP-1",
         new BigDecimal("25.30"), BigDecimal.ZERO, null);
@@ -1928,6 +1929,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testNormalizeReactivatedMatchGroupSkipsWhenSiblingStillLinked() throws Exception {
     FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    when(statement.getId()).thenReturn("BST-1");
     FIN_FinaccTransaction linked = mock(FIN_FinaccTransaction.class);
     when(linked.getId()).thenReturn("T-LINKED");
     FIN_BankStatementLine anchor = groupedLine("L1", statement, "GRP-1",
