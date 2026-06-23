@@ -93,6 +93,7 @@ NeoServlet (/sws/neo/*)
 | `schemaforge.selector.policy` | SPI/registry para filtros por contexto, overrides, columnas virtuales y enriquecimiento post-query. |
 | `NeoCalloutService` | Ejecucion de AD_Callouts via REST. Construye request sintetico. |
 | `NeoDefaultsService` | Resolucion de valores por defecto (literals, context vars, SQL, sequences). |
+| `NeoAuxiliaryInputResolver` | Evalua los auxiliary inputs del tab e inyecta sus valores en sesion (`windowId\|nombre`) antes de resolver defaults, para que defaults tipo `@DESCRIPTION1@` resuelvan desde el padre. |
 | `NeoProcessService` | Ejecucion de procesos (OBUIAPP, Classic, scheduling, DB procedure). Validacion de parametros. |
 | `NeoReportService` | Generacion de reportes Jasper (PDF, XLS, XLSX, HTML, CSV). |
 | `NeoFieldFilter` | Filtra JSON basado en config ETGO_SF_FIELD (IsIncluded, IsReadOnly). |
@@ -732,6 +733,8 @@ GET /sws/neo/{specName}/{entityName}/defaults?parentId=PARENT-RECORD-ID
 ```
 
 ### Pipeline de resolucion
+
+**Paso previo — Auxiliary inputs:** antes de resolver los campos, `NeoAuxiliaryInputResolver` evalua los auxiliary inputs activos del tab y los inyecta en sesion como `windowId|<nombre>`, replicando `FormInitializationComponent.computeAuxiliaryInputs`. Esto permite que un default de columna que referencia un auxiliary input por nombre se resuelva correctamente. Ejemplo: la linea de GL Journal tiene `Description` con default `@DESCRIPTION1@`, donde `DESCRIPTION1` es un auxiliary input del tab Lines con codigo `@SQL=SELECT description FROM gl_journal WHERE gl_journal_id=@GL_Journal_ID@`. El resolver ejecuta ese SQL (tomando `@GL_Journal_ID@` de los valores del registro padre cargados via `NeoParentValuesLoader`) y guarda el resultado en sesion, de modo que `@DESCRIPTION1@` resuelve a la descripcion del journal padre — igual que en classic, sin configuracion por ventana. Los codigos `@SQL=...` se evaluan via `NeoDefaultsSqlHelper.resolveSQLDefault`; los `@token@` via `Utility.getContext`; el resto como literal.
 
 Para cada campo incluido (IsIncluded=Y) de la entity, resuelve en este orden:
 

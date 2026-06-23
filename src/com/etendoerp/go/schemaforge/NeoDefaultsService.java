@@ -102,6 +102,17 @@ public class NeoDefaultsService {
         // Resolve window ID from SFSpec -> AD_Window (needed by Utility.getDefault)
         String windowId = resolveWindowId(ctx.getSfEntity());
 
+        // Evaluate the tab's auxiliary inputs into the session BEFORE resolving column defaults.
+        // A column default may reference an auxiliary input by name — e.g. the GL Journal line
+        // Description defaults to @DESCRIPTION1@, where the Lines tab's DESCRIPTION1 aux input
+        // selects the parent journal's description. Classic does this in
+        // FormInitializationComponent.computeAuxiliaryInputs; without it @DESCRIPTION1@ resolves
+        // to empty in NEO. Loading parent values here also lets @ParentColumn@ tokens inside the
+        // aux SQL (e.g. @GL_Journal_ID@) resolve from the parent record.
+        Map<String, Object> auxParentValues = NeoParentValuesLoader.load(ctx.getAdTab(), parentId);
+        NeoAuxiliaryInputResolver.injectAuxiliaryInputs(ctx.getAdTab(), windowId, vars, conn,
+            auxParentValues);
+
         // Load all active, included SFField records for this entity
         OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
         fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id",

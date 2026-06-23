@@ -29,6 +29,9 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.time.Instant;
 
 import javax.servlet.http.HttpServletRequest;
@@ -96,14 +99,21 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private static final String HASH_ALGORITHM = "SHA-256";
   private static final int SALT_BYTES = 16;
+  // Heartbeat cadence for the onboarding NDJSON stream. Must stay well below the
+  // CloudFront/proxy origin-response (inter-byte) timeout — default 30s — so a slow
+  // step never leaves the connection idle long enough to be dropped mid-stream.
+  private static final int ONBOARDING_HEARTBEAT_SECONDS = 10;
   private static final String UTF_8 = "UTF-8";
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_CLIENT_NAME = "clientName";
   private static final String FIELD_STATUS = "status";
   private static final String FIELD_TOKEN = "token";
   private static final String FIELD_MESSAGE = "message";
+  private static final String FIELD_CODE = "code";
+  private static final String FIELD_USER_MESSAGE = "userMessage";
   private static final String FIELD_PASSWORD = "password";
   private static final String FIELD_SUCCESS = "success";
+  private static final String FIELD_TIMESTAMP = "timestamp";
   private static final String FIELD_ACCOUNT = "account";
   private static final String FIELD_AUTH_METHOD = "authMethod";
   private static final String FIELD_LANGUAGE = "language";
@@ -271,6 +281,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (email.isEmpty() || password.isEmpty() || name.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Fields email, password, and name must not be empty");
+      return;
+    }
+    if (!PasswordPolicy.isStrong(password)) {
+      writeWeakPasswordError(response);
       return;
     }
 
@@ -540,6 +554,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           "Fields token and password must not be empty");
       return;
     }
+    if (!PasswordPolicy.isStrong(password)) {
+      writeWeakPasswordError(response);
+      return;
+    }
 
     try {
       OBContext.setOBContext("0", "0", "0", "0");
@@ -602,6 +620,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (currentPassword.isEmpty() || newPassword.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Fields currentPassword and newPassword must not be empty");
+      return;
+    }
+    if (!PasswordPolicy.isStrong(newPassword)) {
+      writeWeakPasswordError(response);
       return;
     }
 
@@ -1011,6 +1033,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Generate a random password for the admin user
     String adminPassword = UUID.randomUUID().toString().substring(0, 12);
 
+    // Keepalive: a background thread emits a blank NDJSON line on a fixed cadence so the
+    // gap between bytes never exceeds the CloudFront/proxy inter-byte timeout while a slow
+    // step runs. The frontend skips empty lines (processLines), so this needs no UI change.
+    ScheduledExecutorService heartbeat = startOnboardingHeartbeat(writer);
+
     try {
       VariablesSecureApp vars = prepareAdminContext(writer, onboardingRequest.language);
       String clientId = resolveOrCreateClient(writer, vars, accountEmail, onboardingRequest, currencyId,
@@ -1061,8 +1088,68 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           "Onboarding failed: " + e.getMessage());
       sendFinalResult(writer, false, "Onboarding failed: " + e.getMessage());
     } finally {
+      // Stop the keepalive before the final flush so no heartbeat races the result line.
+      heartbeat.shutdownNow();
       OBContext.restorePreviousMode();
       writer.flush();
+      // PrintWriter swallows IOExceptions (broken pipe): when CloudFront or any proxy
+      // hits its response timeout it silently drops the client mid-stream while the
+      // backend keeps running to completion (and commits). checkError() is the only
+      // way to detect it. Surface it explicitly so it stops being invisible in the logs.
+      if (writer.checkError()) {
+        log.warn("Onboarding stream to client was lost before the result line was delivered "
+            + "(likely a CloudFront/proxy response timeout). The environment may have been "
+            + "created successfully server-side, but the UI will report a false failure. "
+            + "accountEmail={}", accountEmail);
+      }
+    }
+  }
+
+  /**
+   * Starts a daemon scheduler that emits a blank NDJSON line every
+   * {@link #ONBOARDING_HEARTBEAT_SECONDS} seconds. This keeps bytes flowing on the
+   * streaming response so a long-running onboarding step never leaves the connection
+   * idle past the CloudFront/proxy inter-byte timeout (which would silently drop the
+   * client mid-stream and make the UI report a false failure).
+   *
+   * <p>The caller MUST call {@code shutdownNow()} on the returned executor in a
+   * {@code finally} block.
+   */
+  private ScheduledExecutorService startOnboardingHeartbeat(PrintWriter writer) {
+    return startOnboardingHeartbeat(writer, ONBOARDING_HEARTBEAT_SECONDS, TimeUnit.SECONDS);
+  }
+
+  /**
+   * Interval-injectable variant (package-private for tests so they do not have to wait
+   * the production {@link #ONBOARDING_HEARTBEAT_SECONDS} cadence).
+   */
+  ScheduledExecutorService startOnboardingHeartbeat(PrintWriter writer, long interval, TimeUnit unit) {
+    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
+      Thread thread = new Thread(runnable, "onboarding-heartbeat");
+      thread.setDaemon(true);
+      return thread;
+    });
+    scheduler.scheduleAtFixedRate(() -> sendHeartbeat(writer), interval, interval, unit);
+    return scheduler;
+  }
+
+  /**
+   * Writes a NDJSON heartbeat line to keep the connection alive during slow steps. It is a
+   * self-describing {@code {"type":"heartbeat"}} object (not a blank line) so it is visible
+   * in raw stream captures and logs while still being ignored by the frontend, which only
+   * reacts to {@code type=progress} and {@code type=result}. PrintWriter is internally
+   * synchronized, so concurrent writes from this heartbeat and the main onboarding thread
+   * each emit whole lines without corrupting the NDJSON output.
+   */
+  void sendHeartbeat(PrintWriter writer) {
+    try {
+      JSONObject heartbeat = new JSONObject();
+      heartbeat.put("type", "heartbeat");
+      heartbeat.put(FIELD_TIMESTAMP, Instant.now().toString());
+      writer.println(heartbeat.toString());
+      writer.flush();
+    } catch (JSONException e) {
+      log.warn("Error writing heartbeat", e);
     }
   }
 
@@ -1497,16 +1584,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * Write a NDJSON progress line.
    */
-  private void sendProgress(PrintWriter writer, String step, String status, String message) {
+  void sendProgress(PrintWriter writer, String step, String status, String message) {
     try {
       JSONObject progress = new JSONObject();
       progress.put("type", "progress");
       progress.put("step", step);
       progress.put(FIELD_STATUS, status);
       progress.put(FIELD_MESSAGE, message);
-      progress.put("timestamp", Instant.now().toString());
+      progress.put(FIELD_TIMESTAMP, Instant.now().toString());
       writer.println(progress.toString());
       writer.flush();
+      // If the flush failed the client is already gone (broken pipe, swallowed by
+      // PrintWriter). Log at DEBUG which step was streaming so the cut point is
+      // identifiable when onboarding-stream logging is enabled.
+      if (writer.checkError()) {
+        log.debug("Client connection lost while streaming onboarding step '{}' (status={})",
+            step, status);
+      }
     } catch (JSONException e) {
       log.warn("Error writing progress", e);
     }
@@ -1515,15 +1609,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * Write the final NDJSON result line.
    */
-  private void sendFinalResult(PrintWriter writer, boolean success, String message) {
+  void sendFinalResult(PrintWriter writer, boolean success, String message) {
     try {
       JSONObject result = new JSONObject();
       result.put("type", "result");
       result.put(FIELD_SUCCESS, success);
       result.put(FIELD_MESSAGE, message);
-      result.put("timestamp", Instant.now().toString());
+      result.put(FIELD_TIMESTAMP, Instant.now().toString());
       writer.println(result.toString());
       writer.flush();
+      // The final result line is what the UI waits for. If the flush failed the client
+      // never received it (broken pipe swallowed by PrintWriter) — the UI will report a
+      // false failure even though the backend finished. Make that explicit.
+      if (writer.checkError()) {
+        log.warn("Onboarding final result (success={}) could not be delivered to the client; "
+            + "the connection was already closed (likely a CloudFront/proxy stream timeout).",
+            success);
+      }
     } catch (JSONException e) {
       log.warn("Error writing final result", e);
     }
@@ -1721,6 +1823,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         FIELD_MESSAGE,
         FIELD_STATUS,
         PROGRESS_ERROR);
+  }
+
+  /**
+   * Write the weak-password rejection as HTTP 400 with a stable, machine-readable
+   * envelope: {@code { "error": { "code": "WEAK_PASSWORD", "message": "...",
+   * "userMessage": "..." } } }.
+   */
+  private void writeWeakPasswordError(HttpServletResponse response) throws IOException {
+    try {
+      JSONObject error = new JSONObject();
+      error.put(FIELD_CODE, PasswordPolicy.ERROR_CODE);
+      error.put(FIELD_MESSAGE, PasswordPolicy.MESSAGE);
+      error.put(FIELD_USER_MESSAGE, PasswordPolicy.USER_MESSAGE);
+      JSONObject envelope = new JSONObject();
+      envelope.put(PROGRESS_ERROR, error);
+      writeResponse(response, HttpServletResponse.SC_BAD_REQUEST, envelope);
+    } catch (JSONException e) {
+      log.error("JSON error building weak-password response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
   }
 
   private static class OnboardingRequestData {
