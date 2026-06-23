@@ -44,10 +44,17 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
 
+import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
+import com.etendoerp.payment.removal.util.ReconciliationRemovalUtil;
+import com.etendoerp.payment.removal.util.TransactionRemovalUtil;
+import com.etendoerp.payment.removal.util.Utilities;
+
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Order;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.advpaymentmngt.process.FIN_TransactionProcess;
 import org.openbravo.advpaymentmngt.utility.APRM_MatchingUtility;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
@@ -56,12 +63,14 @@ import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.gl.GLItem;
+import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
@@ -142,6 +151,7 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String ACTION_RECONCILE_GROUP = "reconcileGroup";
   private static final String ACTION_AUTO_MATCH = "autoMatch";
   private static final String ACTION_APPLY_SUGGESTIONS = "applySuggestions";
+  private static final String ACTION_REACTIVATE = "reactivate";
 
   /** Match level recorded on the reconciliation lines produced by this handler. */
   private static final String MATCH_LEVEL_MANUAL = "MANUALMATCH";
@@ -207,6 +217,9 @@ public class ReconciliationHandler implements NeoHandler {
 
   /** Module extension column holding the 1:N reconciliation group id (option B). */
   private static final String COL_MATCH_GROUP = "EM_ETGO_Match_Group_ID";
+
+  /** Module extension column flagging finacc transactions auto-created by the reconcile flow. */
+  private static final String COL_AUTO_CREATED = "EM_ETGO_Auto_Created";
 
   private static final String PENDING_LINES_ORDER =
       " ORDER BY bsl.datetrx ASC, bsl.line ASC";
@@ -341,6 +354,9 @@ public class ReconciliationHandler implements NeoHandler {
     }
     if (METHOD_POST.equals(method) && ACTION_APPLY_SUGGESTIONS.equals(action)) {
       return handleApplySuggestions(context);
+    }
+    if (METHOD_POST.equals(method) && ACTION_REACTIVATE.equals(action)) {
+      return handleReactivate(context);
     }
     // Any other request (generic list / getById of the W spec) flows through.
     return null;
@@ -874,6 +890,9 @@ public class ReconciliationHandler implements NeoHandler {
           return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
               "Payment did not produce a transaction: " + payment.getId());
         }
+        // The transaction was auto-created by registerPaymentCore — flag it so the reactivate
+        // flow knows it must be fully undone (payment removed, invoice back to unpaid).
+        markAutoCreated(txns.get(0));
         operationIds.add(txns.get(0).getId());
         remaining = remaining.subtract(allocate);
       }
@@ -1134,6 +1153,341 @@ public class ReconciliationHandler implements NeoHandler {
     return compose(account, line, operationIds);
   }
 
+  // ---------------------------------------------------------------------------
+  // POST reactivate (undo a reconciliation for a single statement line)
+  // ---------------------------------------------------------------------------
+
+  private NeoResponse handleReactivate(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Request body is required");
+    }
+    try {
+      OBContext.setAdminMode(true);
+      return reactivate(body);
+    } catch (OBException e) {
+      log.warn("reactivate business error: {}", e.getMessage());
+      doRollbackAndClose();
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+    } catch (Exception e) {
+      log.error("reactivate failed", e);
+      doRollbackAndClose();
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_SERVER_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Reactivates (undoes) the reconciliation that links a single statement line. Delegates ALL
+   * reactivation logic to the {@code com.etendoerp.payment.removal} module — this handler never
+   * reimplements it. Body: {@code { financialAccountId, statementLineId }}.
+   *
+   * <p>Sequence:
+   * <ol>
+   *   <li>validate inputs + load account/line + ownership check;</li>
+   *   <li>resolve the line's transaction and its reconciliation (409 when the line is not
+   *       reconciled);</li>
+   *   <li>accounting-period guard via
+   *       {@link Utilities#checkPeriod(String, String, String, java.util.Date)} on the
+   *       reconciliation's accounting date (409 when the period is closed);</li>
+   *   <li>snapshot the reconciliation's transactions (one reconciliation per statement-line group)
+   *       and undo the whole reconciliation via {@link #undoReconciliation(FIN_FinancialAccount,
+   *       FIN_Reconciliation, List)}: every transaction returns to its pre-reconciliation state in a
+   *       single pass, the statement line's {@code financialAccountTransaction} is cleared (so it
+   *       returns to pending), and auto-created movements (invoice payments / rule transactions) are
+   *       deleted, restoring the invoice. Pre-existing transactions are kept.</li>
+   * </ol>
+   */
+  NeoResponse reactivate(JSONObject body) throws Exception {
+    String accountId = body.optString("financialAccountId", null);
+    String statementLineId = body.optString("statementLineId", null);
+    if (StringUtils.isBlank(accountId) || StringUtils.isBlank(statementLineId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "financialAccountId and statementLineId are required");
+    }
+
+    FIN_FinancialAccount account = loadAccount(accountId);
+    if (account == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          MSG_ACCOUNT_NOT_FOUND + accountId);
+    }
+    FIN_BankStatementLine line = loadLine(statementLineId);
+    if (line == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          "Statement line not found: " + statementLineId);
+    }
+    if (!belongsToAccount(line, accountId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Statement line does not belong to the financial account");
+    }
+
+    FIN_FinaccTransaction trx = line.getFinancialAccountTransaction();
+    if (trx == null) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          "Statement line is not reconciled");
+    }
+    FIN_Reconciliation rec = trx.getReconciliation();
+    if (rec == null) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          "Statement line transaction is not linked to a reconciliation");
+    }
+
+    // Accounting-period guard: refuse to undo into a closed period. checkPeriod throws an
+    // OBException (mapped to 409 below) when the period of the reconciliation date is closed.
+    java.util.Date acctDate = rec.getTransactionDate();
+    try {
+      checkPeriod(rec.getClient().getId(), rec.getOrganization().getId(),
+          rec.getEntity().getTableId(), acctDate);
+    } catch (OBException e) {
+      log.warn("reactivate blocked by closed period for reconciliation {}: {}", rec.getId(),
+          e.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          "The accounting period is closed and the reconciliation cannot be reactivated: "
+              + e.getMessage());
+    }
+
+    // Snapshot the matched transactions BEFORE mutating: removing the reconciliation clears its
+    // transaction list. Etendo Go creates one reconciliation per statement-line group, so every
+    // transaction in it belongs to this line.
+    List<FIN_FinaccTransaction> matched = new ArrayList<>(rec.getFINFinaccTransactionList());
+    undoReconciliation(account, rec, matched);
+    line = normalizeReactivatedMatchGroup(line);
+
+    BigDecimal updatedBalance = currentBalance(account);
+    JSONObject data = new JSONObject();
+    data.put("reactivated", true);
+    data.put("statementLineId", statementLineId);
+    data.put("updatedBalance", updatedBalance);
+    return envelope(data);
+  }
+
+  /**
+   * Undoes the reconciliation as a UNIT, then cleans up the bank-statement match and the
+   * auto-created movements. Doing it per-transaction (an earlier approach) re-processed the
+   * reconciliation once per matched transaction; in a 1:N group that left the transactions in mixed
+   * states (one {@code RDNC}, the next {@code PWNC}) because each re-process changed the status the
+   * next removal keyed off. Instead:
+   * <ol>
+   *   <li>process the account's draft reconciliations first (Etendo only lets you reactivate the
+   *       latest completed one — ordering pre-step);</li>
+   *   <li>{@link ReconciliationRemovalUtil#reactivateAndRemoveReconciliation(FIN_Reconciliation)} —
+   *       one {@code processReconciliation("R")} pass returns EVERY transaction to its
+   *       pre-reconciliation "not cleared" state by direction (inflow → {@code RDNC}, outflow →
+   *       {@code PWNC}) consistently, and deletes the reconciliation;</li>
+   *   <li>{@link #unmatchBankStatementLine(FIN_FinaccTransaction)} for each transaction — clears the
+   *       line's {@code financialAccountTransaction}, the step the module's reconciliation-level undo
+   *       skips (it detaches the transaction but leaves the statement line pointing at it, so the
+   *       line would still read "reconciled");</li>
+   *   <li>delete the auto-created movements: invoice payments via
+   *       {@link PaymentRemovalUtil#reactivateAndRemove(FIN_Payment)} (restoring the invoice), rule
+   *       transactions via {@link TransactionRemovalUtil#reactivateAndRemove(String)}.</li>
+   * </ol>
+   * Pre-existing (manually matched) transactions are kept — un-reconciled, un-matched, and their
+   * "not cleared" status restored by direction via {@link #restoreNotClearedStatus(FIN_FinaccTransaction)}.
+   * Package-private test seam.
+   */
+  void undoReconciliation(FIN_FinancialAccount account, FIN_Reconciliation rec,
+      List<FIN_FinaccTransaction> matched) throws Exception {
+    List<FIN_Reconciliation> drafts = ReconciliationRemovalUtil.getDraftReconciliation(account);
+    ReconciliationRemovalUtil.processAllReconciliationInDraft(drafts);
+    ReconciliationRemovalUtil.reactivateAndRemoveReconciliation(rec);
+    for (FIN_FinaccTransaction t : matched) {
+      unmatchBankStatementLine(t);
+    }
+    for (FIN_FinaccTransaction t : matched) {
+      if (isAutoCreated(t)) {
+        FIN_Payment payment = t.getFinPayment();
+        if (payment != null) {
+          PaymentRemovalUtil.reactivateAndRemove(payment);
+        } else {
+          TransactionRemovalUtil.reactivateAndRemove(t.getId());
+        }
+      } else {
+        restoreNotClearedStatus(t);
+      }
+    }
+  }
+
+  /**
+   * Re-sets a kept transaction's "not cleared" status by DIRECTION. Confirmed empirically: the
+   * module's {@code reactivateAndRemoveReconciliation} leaves deposits (receipts) in {@code PWNC}
+   * instead of {@code RDNC} — its {@code unMachTransactionFromReconciliation} only keeps {@code RDNC}
+   * when the status is still {@code RPPC}, but {@code reactivate(rec)} already moved it off
+   * {@code RPPC}. A money inflow must return to {@code RDNC} (Deposited not cleared); an outflow to
+   * {@code PWNC} (Withdrawn not cleared).
+   */
+  private void restoreNotClearedStatus(FIN_FinaccTransaction t) {
+    boolean inflow = nullSafe(t.getDepositAmount()).compareTo(nullSafe(t.getPaymentAmount())) >= 0;
+    String expected = inflow ? "RDNC" : "PWNC";
+    if (!expected.equals(t.getStatus())) {
+      t.setStatus(expected);
+      OBDal.getInstance().save(t);
+    }
+  }
+
+  /**
+   * Clears the {@code financialAccountTransaction} link of the bank-statement line matched to
+   * {@code trx}, returning the line to "not reconciled". Mirrors the module's private
+   * {@code removeTransactionFromBankStatementLine} (not exposed publicly), which the
+   * reconciliation-level undo does not run.
+   */
+  private void unmatchBankStatementLine(FIN_FinaccTransaction trx) {
+    OBCriteria<FIN_BankStatementLine> c =
+        OBDal.getInstance().createCriteria(FIN_BankStatementLine.class);
+    c.add(Restrictions.eq(FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION, trx));
+    c.setMaxResults(1);
+    FIN_BankStatementLine bsl = (FIN_BankStatementLine) c.uniqueResult();
+    if (bsl != null) {
+      bsl.setFinancialAccountTransaction(null);
+      OBDal.getInstance().save(bsl);
+    }
+  }
+
+  /**
+   * Current balance of the account after the reactivation: the ending balance of its most recent
+   * remaining reconciliation, or {@code 0} when none remains. Decorative — never fails the response.
+   */
+  private BigDecimal currentBalance(FIN_FinancialAccount account) {
+    try {
+      List<FIN_Reconciliation> remaining =
+          ReconciliationRemovalUtil.getDraftReconciliation(account);
+      if (remaining != null && !remaining.isEmpty()) {
+        return nullSafe(remaining.get(0).getEndingBalance());
+      }
+    } catch (Exception e) {
+      log.debug("Could not compute updated balance for account {}: {}", account.getId(),
+          e.getMessage());
+    }
+    return BigDecimal.ZERO;
+  }
+
+  /**
+   * After a group reconciliation is reactivated, its split sub-lines remain physically duplicated
+   * in FIN_BankStatementLine while the UI only re-groups them visually. That leaves the matching
+   * engine operating on one residual sub-line amount (for example 25.30) instead of the original
+   * unsplit amount (50.60). When the line carries ETGO's {@code matchGroupId}, collapse every
+   * unmatched sibling in that same bank statement back into a single physical row and clear the
+   * marker so the line returns to the normal pending pool.
+   *
+   * <p>Safety rules:
+   * <ul>
+   *   <li>Only ETGO-tagged groups are normalized (never plain duplicate line numbers).</li>
+   *   <li>All siblings must be in the same bank statement and still unmatched.</li>
+   *   <li>The selected line is the anchor; its metadata is preserved, only the amounts are summed.</li>
+   * </ul>
+   */
+  FIN_BankStatementLine normalizeReactivatedMatchGroup(FIN_BankStatementLine line) throws Exception {
+    if (line == null || line.getBankStatement() == null) {
+      return line;
+    }
+    String groupId = readMatchGroupId(line);
+    if (StringUtils.isBlank(groupId)) {
+      return line;
+    }
+
+    List<FIN_BankStatementLine> siblings = loadMatchGroupLines(line.getBankStatement(), groupId);
+    if (siblings.isEmpty()) {
+      return line;
+    }
+
+    FIN_BankStatementLine anchor = line;
+    for (FIN_BankStatementLine sibling : siblings) {
+      if (line.getId().equals(sibling.getId())) {
+        anchor = sibling;
+        break;
+      }
+    }
+
+    if (siblings.size() == 1) {
+      clearMatchGroupId(anchor);
+      OBDal.getInstance().save(anchor);
+      OBDal.getInstance().flush();
+      return anchor;
+    }
+
+    for (FIN_BankStatementLine sibling : siblings) {
+      if (sibling.getBankStatement() == null
+          || !line.getBankStatement().getId().equals(sibling.getBankStatement().getId())) {
+        log.warn("Skipping match-group normalization for line {}: sibling {} belongs to another statement",
+            line.getId(), sibling.getId());
+        return line;
+      }
+      if (sibling.getFinancialAccountTransaction() != null) {
+        log.warn("Skipping match-group normalization for line {}: sibling {} is still linked to transaction {}",
+            line.getId(), sibling.getId(), sibling.getFinancialAccountTransaction().getId());
+        return line;
+      }
+    }
+
+    FIN_BankStatement statement = anchor.getBankStatement();
+    boolean wasProcessed = Boolean.TRUE.equals(statement.isProcessed());
+    statement.setProcessed(false);
+    OBDal.getInstance().save(statement);
+    OBDal.getInstance().flush();
+
+    BigDecimal totalCredit = BigDecimal.ZERO;
+    BigDecimal totalDebit = BigDecimal.ZERO;
+    for (FIN_BankStatementLine sibling : siblings) {
+      totalCredit = totalCredit.add(nullSafe(sibling.getCramount()));
+      totalDebit = totalDebit.add(nullSafe(sibling.getDramount()));
+    }
+    for (FIN_BankStatementLine sibling : siblings) {
+      if (!anchor.getId().equals(sibling.getId())) {
+        OBDal.getInstance().remove(sibling);
+      }
+    }
+
+    applyBankStatementAmounts(anchor, totalCredit, totalDebit);
+    anchor.setFinancialAccountTransaction(null);
+    anchor.setMatchingtype(null);
+    anchor.setMatchedDocument(null);
+    clearMatchGroupId(anchor);
+    OBDal.getInstance().save(anchor);
+    OBDal.getInstance().flush();
+
+    statement.setProcessed(wasProcessed);
+    OBDal.getInstance().save(statement);
+    OBDal.getInstance().flush();
+    return anchor;
+  }
+
+  /** Loads every ETGO-tagged sibling of the same bank-statement match group. */
+  List<FIN_BankStatementLine> loadMatchGroupLines(FIN_BankStatement statement, String groupId) {
+    org.openbravo.base.model.Property prop = matchGroupProperty();
+    if (statement == null || StringUtils.isBlank(groupId) || prop == null) {
+      return Collections.emptyList();
+    }
+    OBCriteria<FIN_BankStatementLine> c =
+        OBDal.getInstance().createCriteria(FIN_BankStatementLine.class);
+    c.add(Restrictions.eq(FIN_BankStatementLine.PROPERTY_BANKSTATEMENT, statement));
+    c.add(Restrictions.eq(prop.getName(), groupId));
+    c.addOrder(Order.asc(FIN_BankStatementLine.PROPERTY_LINENO));
+    c.addOrder(Order.asc(FIN_BankStatementLine.PROPERTY_CREATIONDATE));
+    c.addOrder(Order.asc(FIN_BankStatementLine.PROPERTY_ID));
+    @SuppressWarnings("unchecked")
+    List<FIN_BankStatementLine> rows = c.list();
+    return rows;
+  }
+
+  /** Applies the summed credit/debit back into a single line using Classic's sign normalization. */
+  private void applyBankStatementAmounts(FIN_BankStatementLine line, BigDecimal totalCredit,
+      BigDecimal totalDebit) {
+    if (totalCredit.compareTo(BigDecimal.ZERO) != 0 && totalDebit.compareTo(BigDecimal.ZERO) != 0) {
+      BigDecimal total = totalCredit.subtract(totalDebit);
+      if (total.compareTo(BigDecimal.ZERO) < 0) {
+        line.setCramount(BigDecimal.ZERO);
+        line.setDramount(total.abs());
+      } else {
+        line.setCramount(total);
+        line.setDramount(BigDecimal.ZERO);
+      }
+    } else {
+      line.setCramount(totalCredit);
+      line.setDramount(totalDebit);
+    }
+  }
+
   /**
    * Creates a GL-item financial-account transaction (Cobro {@code BPD} / Pago {@code BPW}) for a
    * rule-origin group and returns its id. The transaction carries the rule's accounting concept
@@ -1185,6 +1539,8 @@ public class ReconciliationHandler implements NeoHandler {
         trx.setBusinessPartner(bp);
       }
     }
+    // Rule-origin transaction is auto-created — flag it so the reactivate flow deletes it.
+    markAutoCreated(trx);
     OBDal.getInstance().save(trx);
     OBDal.getInstance().flush();
 
@@ -1256,6 +1612,16 @@ public class ReconciliationHandler implements NeoHandler {
     return APRM_MatchingUtility.processReconciliation(PROCESS_ACTION, rec);
   }
 
+  /**
+   * Accounting-period guard, delegated to {@code com.etendoerp.payment.removal}'s
+   * {@link Utilities#checkPeriod(String, String, String, java.util.Date)}: throws an
+   * {@link OBException} when
+   * the period of {@code date} is closed for the given client/org/table. Package-private test seam.
+   */
+  void checkPeriod(String clientId, String orgId, String tableId, java.util.Date date) {
+    Utilities.checkPeriod(clientId, orgId, tableId, date);
+  }
+
   void doRollbackAndClose() {
     OBDal.getInstance().rollbackAndClose();
   }
@@ -1283,6 +1649,88 @@ public class ReconciliationHandler implements NeoHandler {
     } catch (Exception e) {
       log.warn("Could not tag match group on line {}", line.getId(), e);
     }
+  }
+
+  /** Reads the ETGO 1:N split marker from the bank-statement line, or {@code null} when absent. */
+  String readMatchGroupId(FIN_BankStatementLine line) {
+    try {
+      org.openbravo.base.model.Property prop = matchGroupProperty();
+      if (prop == null || line == null) {
+        return null;
+      }
+      Object value = line.get(prop.getName());
+      return value != null ? StringUtils.trimToNull(String.valueOf(value)) : null;
+    } catch (Exception e) {
+      log.debug("Could not read match-group id on line {}: {}",
+          line != null ? line.getId() : "<null>", e.getMessage());
+      return null;
+    }
+  }
+
+  /** Clears the ETGO 1:N split marker from the line so it returns to the normal pending pool. */
+  void clearMatchGroupId(FIN_BankStatementLine line) {
+    try {
+      org.openbravo.base.model.Property prop = matchGroupProperty();
+      if (prop != null && line != null) {
+        line.set(prop.getName(), null);
+      }
+    } catch (Exception e) {
+      log.warn("Could not clear match-group id on line {}", line != null ? line.getId() : "<null>", e);
+    }
+  }
+
+  /** Resolves the {@code EM_ETGO_Match_Group_ID} DAL property, or {@code null} when not in the model. */
+  private org.openbravo.base.model.Property matchGroupProperty() {
+    org.openbravo.base.model.Entity entity = org.openbravo.base.model.ModelProvider.getInstance()
+        .getEntity(FIN_BankStatementLine.ENTITY_NAME);
+    return entity.getPropertyByColumnName(COL_MATCH_GROUP, false);
+  }
+
+  /**
+   * Flags a finacc transaction as auto-created by the reconcile flow on the
+   * {@code EM_ETGO_Auto_Created} extension column. Resolves the DAL property by column name at
+   * runtime (no dependency on the generated entity accessor) and degrades gracefully when the
+   * model has not yet loaded the column — mirrors {@link #tagMatchGroup(FIN_BankStatementLine)}.
+   * Package-private for testability.
+   */
+  void markAutoCreated(FIN_FinaccTransaction trx) {
+    try {
+      org.openbravo.base.model.Property prop = autoCreatedProperty();
+      if (prop != null) {
+        trx.set(prop.getName(), Boolean.TRUE);
+      } else {
+        log.warn("Column {} not yet in the model; skipping auto-created flag", COL_AUTO_CREATED);
+      }
+    } catch (Exception e) {
+      log.warn("Could not flag transaction {} as auto-created", trx.getId(), e);
+    }
+  }
+
+  /**
+   * True when the transaction carries the {@code EM_ETGO_Auto_Created} flag set to {@code true}.
+   * Resolves the property by column name and degrades to {@code false} when the column is not in
+   * the model yet. Package-private for testability.
+   */
+  boolean isAutoCreated(FIN_FinaccTransaction trx) {
+    try {
+      org.openbravo.base.model.Property prop = autoCreatedProperty();
+      if (prop == null) {
+        return false;
+      }
+      Object value = trx.get(prop.getName());
+      return Boolean.TRUE.equals(value);
+    } catch (Exception e) {
+      log.debug("Could not read auto-created flag on transaction {}: {}", trx.getId(),
+          e.getMessage());
+      return false;
+    }
+  }
+
+  /** Resolves the {@code EM_ETGO_Auto_Created} DAL property, or {@code null} when not in the model. */
+  private org.openbravo.base.model.Property autoCreatedProperty() {
+    org.openbravo.base.model.Entity entity = org.openbravo.base.model.ModelProvider.getInstance()
+        .getEntity(FIN_FinaccTransaction.ENTITY_NAME);
+    return entity.getPropertyByColumnName(COL_AUTO_CREATED, false);
   }
 
   /**

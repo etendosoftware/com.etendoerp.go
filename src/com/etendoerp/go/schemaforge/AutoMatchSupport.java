@@ -27,6 +27,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -66,6 +67,10 @@ final class AutoMatchSupport {
   private static final DateTimeFormatter ISO_UTC =
       DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
 
+  /** Caps the partner/reference subset search to keep the preview predictable and bounded. */
+  private static final int MAX_SIGNAL_SUBSET_SIZE = 12;
+  private static final BigDecimal SIGNAL_MATCH_TOLERANCE = new BigDecimal("0.01");
+
   private AutoMatchSupport() {
   }
 
@@ -76,9 +81,10 @@ final class AutoMatchSupport {
   /**
    * Finds a 1:N group of unreconciled transactions that share a signal and whose signed amounts
    * sum to the bank-statement line amount within {@code tolerance}. The signal is tried in order:
-   * business partner first, then payment reference. Only a signal-group whose <b>full</b> set of
-   * same-signed transactions sums to the line is proposed (no subset-sum), which keeps the result
-   * predictable and low on false positives for a money-mutating surface.
+   * business partner first, then payment reference. Within each signal block, the matcher first
+   * accepts a whole-group exact sum; if that fails, it tries a bounded subset search inside that
+   * same partner/reference block. This still avoids arbitrary cross-partner combinations while
+   * covering common cases like two same-partner payments of 13.20 matching a 26.40 bank line.
    *
    * @return the matching transactions (size &gt;= 2), or an empty list when none qualifies
    */
@@ -124,7 +130,8 @@ final class AutoMatchSupport {
 
   /**
    * Partitions {@code pool} by the given signal key and returns the first partition with at least
-   * two transactions whose signed amounts sum to {@code target} within {@code tolerance}.
+   * two transactions whose signed amounts sum to {@code target} within {@code tolerance}. If the
+   * full partition does not match, tries a bounded subset search inside that same partition.
    */
   static List<FIN_FinaccTransaction> matchByKey(List<FIN_FinaccTransaction> pool,
       BigDecimal target, BigDecimal tolerance, Function<FIN_FinaccTransaction, String> keyFn) {
@@ -147,8 +154,69 @@ final class AutoMatchSupport {
       if (target.subtract(sum).abs().compareTo(tolerance) <= 0) {
         return group;
       }
+      List<FIN_FinaccTransaction> subset = subsetMatch(group, target, tolerance);
+      if (!subset.isEmpty()) {
+        return subset;
+      }
     }
     return Collections.emptyList();
+  }
+
+  /**
+   * Finds a subset of {@code group} whose signed amounts sum to the target within tolerance.
+   * Search is bounded so automatch stays fast and predictable on large partner/reference pools.
+   */
+  private static List<FIN_FinaccTransaction> subsetMatch(List<FIN_FinaccTransaction> group,
+      BigDecimal target, BigDecimal tolerance) {
+    if (group.size() < 2 || group.size() > MAX_SIGNAL_SUBSET_SIZE) {
+      return Collections.emptyList();
+    }
+    BigDecimal targetAbs = target.abs();
+    BigDecimal totalRemainingAbs = BigDecimal.ZERO;
+    for (FIN_FinaccTransaction t : group) {
+      totalRemainingAbs = totalRemainingAbs.add(txnSignedAmount(t).abs());
+    }
+    List<FIN_FinaccTransaction> picked = new ArrayList<>();
+    if (subsetMatchDfs(group, 0, targetAbs, tolerance, BigDecimal.ZERO, totalRemainingAbs, picked)) {
+      return new ArrayList<>(picked);
+    }
+    return Collections.emptyList();
+  }
+
+  /** Depth-first bounded subset search over one same-signal group. */
+  private static boolean subsetMatchDfs(List<FIN_FinaccTransaction> group, int index,
+      BigDecimal targetAbs, BigDecimal tolerance, BigDecimal pickedAbs, BigDecimal remainingAbs,
+      List<FIN_FinaccTransaction> picked) {
+    if (picked.size() >= 2 && targetAbs.subtract(pickedAbs).abs().compareTo(tolerance) <= 0) {
+      return true;
+    }
+    if (index >= group.size()) {
+      return false;
+    }
+    if (pickedAbs.compareTo(targetAbs.add(tolerance)) > 0) {
+      return false;
+    }
+    if (pickedAbs.add(remainingAbs).compareTo(targetAbs.subtract(tolerance)) < 0) {
+      return false;
+    }
+
+    FIN_FinaccTransaction current = group.get(index);
+    BigDecimal amtAbs = txnSignedAmount(current).abs();
+    BigDecimal nextRemainingAbs = remainingAbs.subtract(amtAbs);
+
+    picked.add(current);
+    if (subsetMatchDfs(group, index + 1, targetAbs, tolerance, pickedAbs.add(amtAbs),
+        nextRemainingAbs, picked)) {
+      return true;
+    }
+    picked.remove(picked.size() - 1);
+
+    return subsetMatchDfs(group, index + 1, targetAbs, tolerance, pickedAbs,
+        nextRemainingAbs, picked);
+  }
+
+  private static BigDecimal txnSignedAmount(FIN_FinaccTransaction t) {
+    return nullSafe(t.getDepositAmount()).subtract(nullSafe(t.getPaymentAmount()));
   }
 
   private static String partnerKey(FIN_FinaccTransaction t) {
@@ -325,6 +393,10 @@ final class AutoMatchSupport {
       List<MatchRuleEngine.Rule> rules) {
     String level = standardMatchLevel(account, line);
     if (FIN_MatchedTransaction.STRONG.equals(level)) {
+      return STATE_SUGGESTED;
+    }
+    if (account != null && StringUtils.isNotBlank(account.getId())
+        && !findSignalGroup(account.getId(), line, new HashSet<>(), SIGNAL_MATCH_TOLERANCE).isEmpty()) {
       return STATE_SUGGESTED;
     }
     if (level != null) {
