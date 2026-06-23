@@ -268,6 +268,7 @@ public class BankStatementsHandler implements NeoHandler {
           + "       gl.name AS glitem_name,"
           + "       bsl.cramount,"
           + "       bsl.dramount,"
+          + "       bsl.em_etgo_match_group_id,"
           + "       bsl.fin_finacc_transaction_id,"
           // Linked financial-account transaction (1:1 today; the frontend models it
           // as a txns[] array so a future 1:N only changes this query). Same field
@@ -1140,7 +1141,8 @@ public class BankStatementsHandler implements NeoHandler {
         }
       }
     }
-    return arr;
+    // Collapse 1:N split sub-lines into a single line carrying all its transactions.
+    return BankStatementsSupport.mergeMatchGroups(arr);
   }
 
   /**
