@@ -100,11 +100,6 @@ final class NeoReturnReceiptService {
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "No lines specified");
         }
 
-        if (hasExistingReturn(source)) {
-          return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-              "A return already exists for this shipment");
-        }
-
         DocumentType docType = findReturnDocType(source, salesTransaction);
         if (docType == null) {
           throw new OBException(
@@ -229,27 +224,6 @@ final class NeoReturnReceiptService {
         .setMaxResults(1)
         .list();
     return results.isEmpty() ? null : results.get(0);
-  }
-
-  @SuppressWarnings("java:S2077")
-  private static boolean hasExistingReturn(ShipmentInOut source) {
-    String sql =
-        "SELECT COUNT(*) FROM m_inoutline ril " +
-        "JOIN m_inout rio ON rio.m_inout_id = ril.m_inout_id " +
-        "WHERE ril.canceled_inoutline_id IN (" +
-        "  SELECT sil.m_inoutline_id FROM m_inoutline sil " +
-        "  WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'" +
-        ") AND ril.isactive = 'Y' AND rio.isactive = 'Y' AND rio.docstatus NOT IN ('VO', 'CL')";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, source.getId());
-      try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() && rs.getInt(1) > 0;
-      }
-    } catch (Exception e) {
-      log.warn("Error checking existing return for {}: {}", source.getId(), e.getMessage());
-      return false;
-    }
   }
 
   private static DocumentType findReturnDocType(ShipmentInOut source, boolean salesTransaction) {

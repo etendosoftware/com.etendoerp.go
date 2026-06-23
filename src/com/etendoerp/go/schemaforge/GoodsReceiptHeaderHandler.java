@@ -33,7 +33,11 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.businesspartner.Location;
 
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 
@@ -77,8 +81,58 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     if (posting != null) {
       return posting;
     }
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && "POST".equals(context.getHttpMethod())
+        && context.getRecordId() == null) {
+      injectPartnerAddressIfMissing(context);
+    }
     return NeoHeaderActionRouter.dispatch(context,
         cloneRecordHandler, createPurchaseInvoiceHandler, createPurchaseReturnHandler);
+  }
+
+  private void injectPartnerAddressIfMissing(NeoContext context) {
+    try {
+      JSONObject body = context.getRequestBody();
+      if (body == null || body.has("partnerAddress")) {
+        return;
+      }
+      String bpId = body.optString("businessPartner", null);
+      if (bpId == null || bpId.isEmpty()) {
+        return;
+      }
+      OBContext.setAdminMode(true);
+      try {
+        Location loc = findShipToLocation(bpId);
+        if (loc == null) {
+          loc = findAnyActiveLocation(bpId);
+        }
+        if (loc != null) {
+          body.put("partnerAddress", loc.getId());
+          log.debug("Injected partnerAddress {} for BP {} on goods receipt create", loc.getId(), bpId);
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.debug("Could not inject partnerAddress for goods receipt: {}", e.getMessage());
+    }
+  }
+
+  private Location findShipToLocation(String bpId) {
+    OBCriteria<Location> crit = OBDal.getInstance().createCriteria(Location.class);
+    crit.add(Restrictions.eq(Location.PROPERTY_BUSINESSPARTNER + ".id", bpId));
+    crit.add(Restrictions.eq(Location.PROPERTY_SHIPTOADDRESS, true));
+    crit.add(Restrictions.eq(Location.PROPERTY_ACTIVE, true));
+    crit.setMaxResults(1);
+    return (Location) crit.uniqueResult();
+  }
+
+  private Location findAnyActiveLocation(String bpId) {
+    OBCriteria<Location> crit = OBDal.getInstance().createCriteria(Location.class);
+    crit.add(Restrictions.eq(Location.PROPERTY_BUSINESSPARTNER + ".id", bpId));
+    crit.add(Restrictions.eq(Location.PROPERTY_ACTIVE, true));
+    crit.setMaxResults(1);
+    return (Location) crit.uniqueResult();
   }
 
   @Override
