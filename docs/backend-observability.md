@@ -15,12 +15,24 @@ event exists.
 Current constants:
 
 - `backend_accounting_entry_generated`
+- `backend_accounting_entry_created`
+- `backend_accounting_entry_validated`
+- `backend_accounting_link_validated`
+- `backend_acceptance_integrity_check_completed`
 - `backend_ocr_field_accuracy`
+- `backend_ocr_extraction_evaluated`
 - `backend_bank_match_attempted`
+- `backend_bank_reconciliation_match_evaluated`
 - `backend_asset_created`
+- `backend_depreciation_calculation_validated`
 - `backend_email_invoice_ingested`
+- `backend_invoice_ingestion_completed`
+- `backend_master_data_quality_evaluated`
 - `backend_monthly_close_started`
 - `backend_monthly_close_completed`
+- `backend_role_assignment_validated`
+- `backend_stock_count_reconciled`
+- `backend_stock_movement_validated`
 - `backend_write_operation_completed`
 
 `backend_write_operation_completed` is emitted by NEO CRUD for write methods
@@ -34,24 +46,35 @@ Payloads are allowlisted before reaching the sink.
 Allowed low-cardinality keys:
 
 - `category`
+- `channel`
 - `entity`
+- `entityType`
+- `flow`
+- `kpiId`
+- `module`
 - `operation`
 - `source`
 - `specName`
 - `status`
-- `supportRequested`
 - `type`
+
+Allowed boolean keys:
+
+- `critical`
+- `supportRequested`
 
 Allowed numeric keys:
 
 - `accuracy`
 - `attempt`
 - `count`
+- `correctCount`
 - `durationMs`
 - `httpStatus`
 - `position`
 - `score`
 - `step`
+- `total`
 - `value`
 
 Numeric keys must receive finite numeric values within their configured bounds.
@@ -91,8 +114,12 @@ Example:
 
 ```java
 telemetryService.emit(NeoTelemetryEvents.BACKEND_ASSET_CREATED, Map.of(
+    "kpiId", "kpi_adopt_fixed_asset_from_purchase_invoice",
+    "module", "fixed_assets",
     "source", "purchase_invoice",
     "entity", "asset",
+    "entityType", "fixed_asset",
+    "channel", "purchase_invoice",
     "operation", "create",
     "status", "success",
     "value", 1));

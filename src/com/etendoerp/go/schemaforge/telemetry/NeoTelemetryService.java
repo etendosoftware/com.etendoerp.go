@@ -42,8 +42,11 @@ public class NeoTelemetryService {
 
   private static final Logger log = LogManager.getLogger(NeoTelemetryService.class);
   private static final String BACKEND_PREFIX = "backend_";
+  private static final String PROP_CORRECT_COUNT = "correctCount";
+  private static final String PROP_CRITICAL = "critical";
   private static final String PROP_DURATION_MS = "durationMs";
   private static final String PROP_HTTP_STATUS = "httpStatus";
+  private static final String PROP_TOTAL = "total";
   private static final String STATUS_FAILED = "failed";
   private static final String STATUS_SUCCESS = "success";
 
@@ -72,10 +75,17 @@ public class NeoTelemetryService {
       "accuracy",
       "attempt",
       "category",
+      "channel",
       "count",
+      PROP_CORRECT_COUNT,
+      PROP_CRITICAL,
       PROP_DURATION_MS,
       "entity",
+      "entityType",
+      "flow",
       PROP_HTTP_STATUS,
+      "kpiId",
+      "module",
       "operation",
       "position",
       "score",
@@ -84,8 +94,13 @@ public class NeoTelemetryService {
       "status",
       "step",
       "supportRequested",
+      PROP_TOTAL,
       "type",
       "value"));
+
+  private static final Set<String> BOOLEAN_PROPERTY_KEYS = new HashSet<>(Arrays.asList(
+      PROP_CRITICAL,
+      "supportRequested"));
 
   private static final Map<String, NumericBounds> NUMERIC_PROPERTY_BOUNDS =
       buildNumericBounds();
@@ -247,6 +262,9 @@ public class NeoTelemetryService {
     if (NUMERIC_PROPERTY_BOUNDS.containsKey(key)) {
       return isSafeNumber(key, value) ? value : null;
     }
+    if (BOOLEAN_PROPERTY_KEYS.contains(key)) {
+      return value instanceof Boolean ? value : null;
+    }
     if (value instanceof Number) {
       return isSafeNumber(key, value) ? value : null;
     }
@@ -271,14 +289,16 @@ public class NeoTelemetryService {
   private static Map<String, NumericBounds> buildNumericBounds() {
     Map<String, NumericBounds> bounds = new HashMap<>();
     bounds.put("accuracy", new NumericBounds(0, 100));
-    bounds.put("attempt", new NumericBounds(0, 100));
-    bounds.put("count", new NumericBounds(0, 100000));
+    bounds.put("attempt", new NumericBounds(0, 1000));
+    bounds.put("count", new NumericBounds(0, 1000000000));
+    bounds.put(PROP_CORRECT_COUNT, new NumericBounds(0, 1000000000));
     bounds.put(PROP_DURATION_MS, new NumericBounds(0, 86400000));
     bounds.put(PROP_HTTP_STATUS, new NumericBounds(100, 599));
-    bounds.put("position", new NumericBounds(0, 100));
-    bounds.put("score", new NumericBounds(0, 10));
-    bounds.put("step", new NumericBounds(0, 100));
-    bounds.put("value", new NumericBounds(0, 1000000));
+    bounds.put("position", new NumericBounds(0, 1000000));
+    bounds.put("score", new NumericBounds(0, 100));
+    bounds.put("step", new NumericBounds(0, 1000));
+    bounds.put(PROP_TOTAL, new NumericBounds(0, 1000000000));
+    bounds.put("value", new NumericBounds(-1000000000, 1000000000));
     return bounds;
   }
 
