@@ -18,6 +18,8 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -64,6 +66,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(CreatePurchaseInvoiceHandler.class);
   private static final String ACTION_NAME = "createPurchaseInvoice";
+  private static final String CHECK_ACTION = "checkPurchaseInvoice";
   private static final String SPEC_PURCHASE_ORDER = "purchase-order";
   private static final String SPEC_GOODS_RECEIPT = "goods-receipt";
   private static final String FIELD_ORDERED_QUANTITY = "orderedQuantity";
@@ -79,11 +82,18 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     if (!NeoEndpointType.ACTION.equals(context.getEndpointType())) {
       return null;
     }
-    if (!ACTION_NAME.equals(context.getFieldName()) || !"POST".equals(context.getHttpMethod())) {
-      return null;
-    }
     String specName = context.getSpecName();
     if (!SPEC_PURCHASE_ORDER.equals(specName) && !SPEC_GOODS_RECEIPT.equals(specName)) {
+      return null;
+    }
+
+    // GET checkPurchaseInvoice — returns existing draft info + whether pending lines remain
+    if (CHECK_ACTION.equals(context.getFieldName()) && "GET".equals(context.getHttpMethod())
+        && SPEC_GOODS_RECEIPT.equals(specName)) {
+      return handleCheck(context);
+    }
+
+    if (!ACTION_NAME.equals(context.getFieldName()) || !"POST".equals(context.getHttpMethod())) {
       return null;
     }
 
@@ -162,6 +172,71 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     invoice.setDocumentNo(docNo);
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
+  }
+
+  /**
+   * Returns the draft-invoice state for a goods receipt:
+   * <ul>
+   *   <li>{@code draftExists} — at least one draft AP invoice exists for this receipt's lines</li>
+   *   <li>{@code pendingExists} — there are still lines not yet covered by any draft/completed invoice</li>
+   *   <li>{@code draftId} / {@code draftDocNo} — first draft's ID and document number (when {@code draftExists})</li>
+   * </ul>
+   * The frontend uses this to decide whether to show "create invoice" (pendingExists) or
+   * navigate to the existing draft ({@code !pendingExists && draftExists}).
+   */
+  protected NeoResponse handleCheck(NeoContext context) {
+    String recordId = context.getRecordId();
+    if (StringUtils.isBlank(recordId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Record ID is required");
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        ShipmentInOut receipt = OBDal.getInstance().get(ShipmentInOut.class, recordId);
+        if (receipt == null) {
+          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Receipt not found: " + recordId);
+        }
+        // Collect order line IDs from this receipt's lines — used to find linked draft invoices.
+        List<String> orderLineIds = new ArrayList<>();
+        for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
+          if (rl.isActive() && rl.getSalesOrderLine() != null) {
+            orderLineIds.add(rl.getSalesOrderLine().getId());
+          }
+        }
+        List<Invoice> drafts = Collections.emptyList();
+        if (!orderLineIds.isEmpty()) {
+          drafts = OBDal.getInstance().getSession()
+              .createQuery(
+                  "SELECT DISTINCT i FROM Invoice i JOIN i.invoiceLineList il "
+                  + "WHERE il.salesOrderLine.id IN :olIds "
+                  + "AND i.documentStatus = 'DR' AND i.salesTransaction = false "
+                  + "ORDER BY i.creationDate DESC",
+                  Invoice.class)
+              .setParameterList("olIds", orderLineIds)
+              .setMaxResults(5)
+              .list();
+        }
+        boolean pendingExists = !NeoInvoiceSupport.computePendingQtyPerLine(recordId, true).isEmpty();
+        JSONObject data = new JSONObject();
+        data.put("draftExists", !drafts.isEmpty());
+        data.put("pendingExists", pendingExists);
+        if (!drafts.isEmpty()) {
+          Invoice first = drafts.get(0);
+          data.put("draftId", first.getId());
+          data.put("draftDocNo", first.getDocumentNo());
+        }
+        JSONObject responseData = new JSONObject();
+        responseData.put("data", data);
+        JSONObject wrapper = new JSONObject();
+        wrapper.put("response", responseData);
+        return new NeoResponse(200, wrapper);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("Error checking purchase invoice for receipt {}: {}", recordId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    }
   }
 
   InvoiceFromOrderSupport getSupport() {
@@ -283,12 +358,19 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       throw new OBException("Goods receipt not found: " + receiptId);
     }
 
-    // Explicit overrides from the request take precedence; missing lines fall back to pending qty.
-    // includeDrafts=true so existing draft invoices are counted toward the pending threshold,
-    // preventing creation of duplicate drafts for lines already committed in a draft.
-    Map<String, BigDecimal> qtyOverrides = parseLineOverrides(body);
-    if (qtyOverrides.isEmpty()) {
+    // Explicit overrides from the request take precedence.
+    // When none are present, compute pending quantities counting draft invoices so that
+    // lines already committed in a draft are excluded — preventing duplicate drafts.
+    // If every line is already covered by a draft, reject creation immediately.
+    Map<String, BigDecimal> explicitOverrides = parseLineOverrides(body);
+    Map<String, BigDecimal> qtyOverrides;
+    if (!explicitOverrides.isEmpty()) {
+      qtyOverrides = explicitOverrides;
+    } else {
       qtyOverrides = NeoInvoiceSupport.computePendingQtyPerLine(receipt.getId(), true);
+      if (qtyOverrides.isEmpty()) {
+        throw new OBException("No hay líneas pendientes de facturar en este albarán de compra");
+      }
     }
 
     Order linkedOrder = receipt.getSalesOrder();
