@@ -54,40 +54,93 @@ final class NeoInvoiceSupport {
     return computePendingQtyPerLine(inOutId, false);
   }
 
-  // statusFilter is a hardcoded literal derived from a boolean — no injection risk.
+  // SQL literals derived from trusted booleans — no injection risk.
   @SuppressWarnings("java:S2077")
   static Map<String, BigDecimal> computePendingQtyPerLine(String inOutId, boolean includeDrafts) {
-    String statusFilter = includeDrafts ? "'VO','CL'" : "'VO','CL','DR'";
-    String sql =
-        "SELECT sil.m_inoutline_id, "
-        + "  ABS(sil.movementqty) AS movement_qty, "
-        + "  COALESCE(GREATEST("
-        + "    COALESCE(msi_qty.qtymatched, 0), "
-        + "    COALESCE(direct_qty.qtyinvoiced, 0) "
-        + "  ), 0) AS invoiced_qty "
-        + "FROM m_inoutline sil "
-        + "LEFT JOIN ("
-        + "  SELECT msi.m_inoutline_id, SUM(ABS(msi.qty)) AS qtymatched "
-        + "  FROM m_matchsi msi "
-        + "  JOIN c_invoiceline il ON il.c_invoiceline_id = msi.c_invoiceline_id "
-        + "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
-        + "  WHERE i.docstatus NOT IN (" + statusFilter + ") AND i.isactive = 'Y' "
-        + "  GROUP BY msi.m_inoutline_id "
-        + ") msi_qty ON msi_qty.m_inoutline_id = sil.m_inoutline_id "
-        + "LEFT JOIN ("
-        + "  SELECT il2.m_inoutline_id, SUM(ABS(il2.qtyinvoiced)) AS qtyinvoiced "
-        + "  FROM c_invoiceline il2 "
-        + "  JOIN c_invoice i2 ON i2.c_invoice_id = il2.c_invoice_id "
-        + "  WHERE i2.docstatus NOT IN (" + statusFilter + ") AND i2.isactive = 'Y' "
-        + "  GROUP BY il2.m_inoutline_id "
-        + ") direct_qty ON direct_qty.m_inoutline_id = sil.m_inoutline_id "
-        + "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'";
+    // When includeDrafts=false: original two-path query (m_matchsi + direct m_inoutline_id link),
+    // excluding draft invoices. Used for the billing-status badge.
+    //
+    // When includeDrafts=true: adds a third path (draft_unlinked) that detects draft invoice
+    // lines where M_InOutLine_ID is not yet set, falling back to C_OrderLine_ID scoped to this
+    // shipment. This prevents a second draft from being created for already-committed quantities
+    // even when InvoiceLineLinker has not yet run for the existing draft.
+    String sql;
+    int paramCount;
+    if (!includeDrafts) {
+      sql =
+          "SELECT sil.m_inoutline_id, "
+          + "  ABS(sil.movementqty) AS movement_qty, "
+          + "  COALESCE(GREATEST("
+          + "    COALESCE(msi_qty.qtymatched, 0), "
+          + "    COALESCE(direct_qty.qtyinvoiced, 0) "
+          + "  ), 0) AS invoiced_qty "
+          + "FROM m_inoutline sil "
+          + "LEFT JOIN ("
+          + "  SELECT msi.m_inoutline_id, SUM(ABS(msi.qty)) AS qtymatched "
+          + "  FROM m_matchsi msi "
+          + "  JOIN c_invoiceline il ON il.c_invoiceline_id = msi.c_invoiceline_id "
+          + "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
+          + "  WHERE i.docstatus NOT IN ('VO','CL','DR') AND i.isactive = 'Y' "
+          + "  GROUP BY msi.m_inoutline_id "
+          + ") msi_qty ON msi_qty.m_inoutline_id = sil.m_inoutline_id "
+          + "LEFT JOIN ("
+          + "  SELECT il2.m_inoutline_id, SUM(ABS(il2.qtyinvoiced)) AS qtyinvoiced "
+          + "  FROM c_invoiceline il2 "
+          + "  JOIN c_invoice i2 ON i2.c_invoice_id = il2.c_invoice_id "
+          + "  WHERE i2.docstatus NOT IN ('VO','CL','DR') AND i2.isactive = 'Y' "
+          + "  GROUP BY il2.m_inoutline_id "
+          + ") direct_qty ON direct_qty.m_inoutline_id = sil.m_inoutline_id "
+          + "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'";
+      paramCount = 1;
+    } else {
+      // draft_unlinked: draft invoices whose lines have no M_InOutLine_ID yet — find
+      // the matching shipment line via C_OrderLine_ID, scoped to this exact shipment.
+      sql =
+          "SELECT sil.m_inoutline_id, "
+          + "  ABS(sil.movementqty) AS movement_qty, "
+          + "  COALESCE(GREATEST("
+          + "    COALESCE(msi_qty.qtymatched, 0), "
+          + "    COALESCE(direct_qty.qtyinvoiced, 0) "
+          + "  ), 0) + COALESCE(draft_unlinked.qtydraft, 0) AS invoiced_qty "
+          + "FROM m_inoutline sil "
+          + "LEFT JOIN ("
+          + "  SELECT msi.m_inoutline_id, SUM(ABS(msi.qty)) AS qtymatched "
+          + "  FROM m_matchsi msi "
+          + "  JOIN c_invoiceline il ON il.c_invoiceline_id = msi.c_invoiceline_id "
+          + "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
+          + "  WHERE i.docstatus NOT IN ('VO','CL','DR') AND i.isactive = 'Y' "
+          + "  GROUP BY msi.m_inoutline_id "
+          + ") msi_qty ON msi_qty.m_inoutline_id = sil.m_inoutline_id "
+          + "LEFT JOIN ("
+          + "  SELECT il2.m_inoutline_id, SUM(ABS(il2.qtyinvoiced)) AS qtyinvoiced "
+          + "  FROM c_invoiceline il2 "
+          + "  JOIN c_invoice i2 ON i2.c_invoice_id = il2.c_invoice_id "
+          + "  WHERE i2.docstatus NOT IN ('VO','CL') AND i2.isactive = 'Y' "
+          + "    AND il2.m_inoutline_id IS NOT NULL "
+          + "  GROUP BY il2.m_inoutline_id "
+          + ") direct_qty ON direct_qty.m_inoutline_id = sil.m_inoutline_id "
+          + "LEFT JOIN ("
+          + "  SELECT iol.m_inoutline_id, SUM(ABS(il3.qtyinvoiced)) AS qtydraft "
+          + "  FROM c_invoiceline il3 "
+          + "  JOIN c_invoice i3 ON i3.c_invoice_id = il3.c_invoice_id "
+          + "  JOIN m_inoutline iol ON iol.c_orderline_id = il3.c_orderline_id "
+          + "                      AND iol.m_inout_id = ? "
+          + "  WHERE i3.docstatus = 'DR' AND i3.isactive = 'Y' "
+          + "    AND il3.m_inoutline_id IS NULL "
+          + "    AND il3.c_orderline_id IS NOT NULL "
+          + "  GROUP BY iol.m_inoutline_id "
+          + ") draft_unlinked ON draft_unlinked.m_inoutline_id = sil.m_inoutline_id "
+          + "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'";
+      paramCount = 2;  // first ? = inOutId (draft_unlinked scope), second ? = inOutId (WHERE)
+    }
 
     Map<String, BigDecimal> result = new HashMap<>();
     try {
       Connection conn = OBDal.getInstance().getConnection();
       try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, inOutId);
+        for (int i = 1; i <= paramCount; i++) {
+          ps.setString(i, inOutId);
+        }
         try (ResultSet rs = ps.executeQuery()) {
           while (rs.next()) {
             String lineId = rs.getString(1);
