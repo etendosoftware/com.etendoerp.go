@@ -66,14 +66,25 @@ public class DocTypeResolver {
         return;
       }
       if (clientSubmittedFields != null && !clientSubmittedFields.isEmpty()) {
-        Entity dalEntity = ModelProvider.getInstance()
-            .getEntityByTableId(adTab.getTable().getId());
-        if (dalEntity != null) {
-          Property targetProp = dalEntity.getPropertyByColumnName(COL_DOC_TYPE_TARGET_ID);
-          if (targetProp != null && clientSubmittedFields.contains(targetProp.getName())) {
-            log.debug("Skipping doctype reapply — client explicitly submitted {}={}",
-                targetProp.getName(), body.optString(targetProp.getName()));
-            return;
+        // When the tab has a subtype filter (e.g. sOSubType LIKE 'OB' for quotations), the filter
+        // is authoritative — always reapply so the correct doctype is enforced regardless of what
+        // the client sent. Only skip for tabs with no subtype constraint, where the user's explicit
+        // choice should be preserved (e.g. a sales-order tab that allows multiple doc types).
+        String tabWhere = ctx.getSfEntity() != null && ctx.getSfEntity().getADTab() != null
+            ? ctx.getSfEntity().getADTab().getHqlwhereclause() : null;
+        boolean hasSubTypeConstraint = tabWhere != null && (
+            PAT_SUBTYPE_LIKE.matcher(tabWhere).find() ||
+            PAT_SUBTYPE_NOT_LIKE.matcher(tabWhere).find());
+        if (!hasSubTypeConstraint) {
+          Entity dalEntity = ModelProvider.getInstance()
+              .getEntityByTableId(adTab.getTable().getId());
+          if (dalEntity != null) {
+            Property targetProp = dalEntity.getPropertyByColumnName(COL_DOC_TYPE_TARGET_ID);
+            if (targetProp != null && clientSubmittedFields.contains(targetProp.getName())) {
+              log.debug("Skipping doctype reapply — no tab subtype constraint, client submitted {}={}",
+                  targetProp.getName(), body.optString(targetProp.getName()));
+              return;
+            }
           }
         }
       }
