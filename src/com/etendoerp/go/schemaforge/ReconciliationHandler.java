@@ -388,7 +388,7 @@ public class ReconciliationHandler implements NeoHandler {
           JSONObject row = new JSONObject();
           row.put(KEY_ID, lineId);
           row.put(KEY_DATE, formatDate(rs.getTimestamp("datetrx")));
-          row.put(KEY_DESCRIPTION, StringUtils.trimToEmpty(rs.getString("description")));
+          row.put(KEY_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(KEY_DESCRIPTION)));
           row.put(KEY_PARTNER_NAME, StringUtils.trimToEmpty(rs.getString(COL_PARTNER_NAME)));
           row.put("referenceNo", StringUtils.trimToEmpty(rs.getString("reference_no")));
           // Coarse status kept for backward compatibility (pending|reconciled).
@@ -506,7 +506,7 @@ public class ReconciliationHandler implements NeoHandler {
           row.put(KEY_DATE, formatDate(rs.getTimestamp("statementdate")));
           row.put(KEY_DOCUMENT_NO, StringUtils.trimToEmpty(rs.getString("document_no")));
           row.put(KEY_PARTNER_NAME, StringUtils.trimToEmpty(rs.getString(COL_PARTNER_NAME)));
-          row.put(KEY_DESCRIPTION, StringUtils.trimToEmpty(rs.getString("description")));
+          row.put(KEY_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(KEY_DESCRIPTION)));
           row.put(KEY_AMOUNT, amount);
           // Pending balance equals the transaction amount for now (partial
           // allocations against invoices are a follow-up).
