@@ -438,9 +438,9 @@ public class AmortizationHeaderHandlerTest {
     NeoResponse sentinel = NeoResponse.ok(new JSONObject());
     when(service.handleAction(context)).thenReturn(sentinel);
 
-    AmortizationHeaderHandler handler = new AmortizationHeaderHandler();
-    handler.setPostingService(service);
+    AmortizationHeaderHandler postingHandler = new AmortizationHeaderHandler();
+    postingHandler.setPostingService(service);
 
-    assertSame(sentinel, handler.handle(context));
+    assertSame(sentinel, postingHandler.handle(context));
   }
 }
