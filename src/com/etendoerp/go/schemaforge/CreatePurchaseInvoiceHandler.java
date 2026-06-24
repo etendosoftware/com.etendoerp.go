@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -283,9 +284,11 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     }
 
     // Explicit overrides from the request take precedence; missing lines fall back to pending qty.
+    // includeDrafts=true so existing draft invoices are counted toward the pending threshold,
+    // preventing creation of duplicate drafts for lines already committed in a draft.
     Map<String, BigDecimal> qtyOverrides = parseLineOverrides(body);
     if (qtyOverrides.isEmpty()) {
-      qtyOverrides = NeoInvoiceSupport.computePendingQtyPerLine(receipt.getId());
+      qtyOverrides = NeoInvoiceSupport.computePendingQtyPerLine(receipt.getId(), true);
     }
 
     Order linkedOrder = receipt.getSalesOrder();
@@ -343,19 +346,55 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
    *       but the header still carries {@code C_Order_ID}).</li>
    * </ol>
    *
+   * <p>Quantities are accumulated per order line ID so that multiple receipt lines
+   * mapping to the same order line produce a single entry instead of duplicates.
+   * Receipt lines absent from {@code qtyOverrides} are skipped when the map is
+   * non-empty: a missing entry means the line has zero pending qty.
+   *
    * @param linkedOrder the purchase order linked to the receipt header; may be null
    */
   protected JSONArray buildSelectedLinesFromReceipt(ShipmentInOut receipt,
       Map<String, BigDecimal> qtyOverrides, Order linkedOrder) {
     Map<String, OrderLine> orderLineByProduct = buildOrderLineByProduct(linkedOrder);
-    JSONArray selectedLines = new JSONArray();
+    // Accumulate by order line ID: multiple receipt lines for the same product / order line
+    // must not produce duplicate selectedLines entries — CreateInvoiceLinesFromProcess
+    // creates one invoice line per entry and does not deduplicate.
+    Map<String, BigDecimal> accumulated = new LinkedHashMap<>();
     for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
-      JSONObject entry = buildLineEntry(rl, orderLineByProduct, qtyOverrides);
-      if (entry != null) {
+      if (!rl.isActive() || rl.getProduct() == null) continue;
+      OrderLine ol = rl.getSalesOrderLine();
+      if (ol == null) ol = orderLineByProduct.get(rl.getProduct().getId());
+      if (ol == null) continue;
+      BigDecimal qty = resolveReceiptLineQty(rl, qtyOverrides);
+      if (qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) continue;
+      accumulated.merge(ol.getId(), qty, BigDecimal::add);
+    }
+    JSONArray selectedLines = new JSONArray();
+    for (Map.Entry<String, BigDecimal> e : accumulated.entrySet()) {
+      try {
+        JSONObject entry = new JSONObject();
+        entry.put("id", e.getKey());
+        entry.put(FIELD_ORDERED_QUANTITY, e.getValue().toPlainString());
         selectedLines.put(entry);
+      } catch (Exception ex) {
+        log.warn("Failed to build selectedLine entry for order line {}: {}", e.getKey(), ex.getMessage());
       }
     }
     return selectedLines;
+  }
+
+  /**
+   * Resolves the quantity to invoice for a single receipt line.
+   * When {@code qtyOverrides} is non-empty (populated from {@code computePendingQtyPerLine}
+   * or from explicit request overrides) only lines present in the map are invoiced —
+   * an absent entry means pending qty is zero and the line must be skipped.
+   * When {@code qtyOverrides} is empty the full movement quantity is used.
+   */
+  private BigDecimal resolveReceiptLineQty(ShipmentInOutLine rl, Map<String, BigDecimal> qtyOverrides) {
+    if (!qtyOverrides.isEmpty()) {
+      return qtyOverrides.get(rl.getId()); // null → skip (pending = 0)
+    }
+    return rl.getMovementQuantity();
   }
 
   private Map<String, OrderLine> buildOrderLineByProduct(Order linkedOrder) {
@@ -368,35 +407,6 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       }
     }
     return result;
-  }
-
-  private JSONObject buildLineEntry(ShipmentInOutLine rl,
-      Map<String, OrderLine> orderLineByProduct, Map<String, BigDecimal> qtyOverrides) {
-    if (!rl.isActive() || rl.getProduct() == null) {
-      return null;
-    }
-    OrderLine ol = rl.getSalesOrderLine();
-    if (ol == null) {
-      ol = orderLineByProduct.get(rl.getProduct().getId());
-    }
-    if (ol == null) {
-      return null;
-    }
-    BigDecimal qty = qtyOverrides.containsKey(rl.getId())
-        ? qtyOverrides.get(rl.getId())
-        : rl.getMovementQuantity();
-    if (qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) {
-      return null;
-    }
-    try {
-      JSONObject entry = new JSONObject();
-      entry.put("id", ol.getId());
-      entry.put(FIELD_ORDERED_QUANTITY, qty.toPlainString());
-      return entry;
-    } catch (Exception e) {
-      log.warn("Failed to add receipt line {} to selectedLines: {}", rl.getId(), e.getMessage());
-      return null;
-    }
   }
 
   /**
