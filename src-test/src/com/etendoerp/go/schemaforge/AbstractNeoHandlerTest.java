@@ -51,10 +51,12 @@ public class AbstractNeoHandlerTest {
 
     @Override
     protected void enterAdminMode() {
+      // no-op: suppresses OBContext side-effects in unit tests
     }
 
     @Override
     protected void exitAdminMode() {
+      // no-op: suppresses OBContext side-effects in unit tests
     }
   }
 
