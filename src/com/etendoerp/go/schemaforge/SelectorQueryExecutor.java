@@ -90,6 +90,17 @@ final class SelectorQueryExecutor {
 
     String whereStr = NeoSelectorExecutionHelper.buildSimpleWhereClause(hql);
 
+    // Guard: selectors whose filter contains outer-query table aliases (e.g. td0.c_uom_id) cannot
+    // be executed as standalone HQL — doing so throws InvalidPathException which marks the
+    // Hibernate session as rollback-only and aborts the enclosing transaction. Return empty
+    // results instead so injectMandatoryDefaults can continue safely.
+    if (whereStr != null && whereStr.contains("td0.")) {
+      log.warn("[SELECTOR] Skipping selector with outer-context reference (td0.) for entity {}: {}",
+          meta.entityName, whereStr);
+      return SelectorResponseSupport.buildSelectorResponse(
+          new JSONArray(), new JSONArray(), 0, limit, offset);
+    }
+
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance().createQuery(meta.entityName, whereStr);
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, queryParams);
     if (StringUtils.isNotBlank(search)) {
