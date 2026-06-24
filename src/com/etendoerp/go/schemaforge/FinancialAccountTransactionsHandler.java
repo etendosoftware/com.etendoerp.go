@@ -693,9 +693,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       return NeoResponse.error(400,
           "Source and destination accounts must belong to the same organization tree");
     }
-    if (amount.compareTo(availableBalance(source)) > 0) {
-      return NeoResponse.error(400, "Amount exceeds the available balance of the source account");
-    }
+    // No balance guard on purpose: Etendo Classic never blocks a funds transfer on the source's
+    // available balance (it allows overdrawing the account), so we match that behaviour here.
 
     GLItem glItem = null;
     String glItemId = body.optString("glItemId", null);
@@ -725,11 +724,6 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
 
   FIN_FinancialAccount loadAccount(String accountId) {
     return OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
-  }
-
-  /** Current available balance of the account (the guard rejects transfers above it). */
-  BigDecimal availableBalance(FIN_FinancialAccount account) {
-    return nullSafeBigDecimal(account.getCurrentBalance());
   }
 
   /** True when both accounts share a client and the destination org is in the source's natural tree. */

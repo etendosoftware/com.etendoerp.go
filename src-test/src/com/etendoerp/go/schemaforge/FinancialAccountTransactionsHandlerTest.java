@@ -1322,9 +1322,7 @@ public class FinancialAccountTransactionsHandlerTest {
     FIN_FinancialAccount dest = accountWithCurrency("DST", "EUR");
     doReturn(source).when(h).loadAccount("SRC");
     doReturn(dest).when(h).loadAccount("DST");
-    doReturn(true).when(h).sameOrgScope(source, dest);
-    doReturn(new BigDecimal("1000")).when(h).availableBalance(source);
-    doNothing().when(h).doTransfer(any(), any(), any(), any(), any(), any(), any(), any(), any());
+    doReturn(true).when(h).sameOrgScope(source, dest);    doNothing().when(h).doTransfer(any(), any(), any(), any(), any(), any(), any(), any(), any());
 
     NeoResponse response = h.transfer(transferBody("SRC", "DST", "100"));
 
@@ -1375,24 +1373,6 @@ public class FinancialAccountTransactionsHandlerTest {
     assertEquals(404, response.getHttpStatus());
   }
 
-  /** An amount above the source's available balance is rejected with a 400. */
-  @Test
-  public void testTransferOverBalanceReturns400() throws Exception {
-    FinancialAccountTransactionsHandler h = spy(new FinancialAccountTransactionsHandler());
-    FIN_FinancialAccount source = accountWithCurrency("SRC", "EUR");
-    FIN_FinancialAccount dest = accountWithCurrency("DST", "EUR");
-    doReturn(source).when(h).loadAccount("SRC");
-    doReturn(dest).when(h).loadAccount("DST");
-    doReturn(true).when(h).sameOrgScope(source, dest);
-    doReturn(new BigDecimal("50")).when(h).availableBalance(source);
-
-    NeoResponse response = h.transfer(transferBody("SRC", "DST", "100"));
-
-    assertEquals(400, response.getHttpStatus());
-    assertTrue(response.getBody().getJSONObject("error").getString("message").contains("balance"));
-    verify(h, never()).doTransfer(any(), any(), any(), any(), any(), any(), any(), any(), any());
-  }
-
   /** Accounts outside the same organization tree are rejected with a 400. */
   @Test
   public void testTransferDifferentOrgReturns400() throws Exception {
@@ -1418,9 +1398,7 @@ public class FinancialAccountTransactionsHandlerTest {
     FIN_FinancialAccount dest = accountWithCurrency("DST", "USD");
     doReturn(source).when(h).loadAccount("SRC");
     doReturn(dest).when(h).loadAccount("DST");
-    doReturn(true).when(h).sameOrgScope(source, dest);
-    doReturn(new BigDecimal("1000")).when(h).availableBalance(source);
-    doNothing().when(h).doTransfer(any(), any(), any(), any(), any(), any(), any(), any(), any());
+    doReturn(true).when(h).sameOrgScope(source, dest);    doNothing().when(h).doTransfer(any(), any(), any(), any(), any(), any(), any(), any(), any());
 
     JSONObject body = transferBody("SRC", "DST", "100").put("conversionRate", "1.1");
     h.transfer(body);
@@ -1437,9 +1415,7 @@ public class FinancialAccountTransactionsHandlerTest {
     FIN_FinancialAccount dest = accountWithCurrency("DST", "EUR");
     doReturn(source).when(h).loadAccount("SRC");
     doReturn(dest).when(h).loadAccount("DST");
-    doReturn(true).when(h).sameOrgScope(source, dest);
-    doReturn(new BigDecimal("1000")).when(h).availableBalance(source);
-    doNothing().when(h).doTransfer(any(), any(), any(), any(), any(), any(), any(), any(), any());
+    doReturn(true).when(h).sameOrgScope(source, dest);    doNothing().when(h).doTransfer(any(), any(), any(), any(), any(), any(), any(), any(), any());
 
     JSONObject body = transferBody("SRC", "DST", "100")
         .put("bankFee", true).put("bankFeeFrom", "5").put("bankFeeTo", "3");
@@ -1457,9 +1433,7 @@ public class FinancialAccountTransactionsHandlerTest {
     FIN_FinancialAccount dest = accountWithCurrency("DST", "EUR");
     doReturn(source).when(h).loadAccount("SRC");
     doReturn(dest).when(h).loadAccount("DST");
-    doReturn(true).when(h).sameOrgScope(source, dest);
-    doReturn(new BigDecimal("1000")).when(h).availableBalance(source);
-    doThrow(new RuntimeException("boom")).when(h)
+    doReturn(true).when(h).sameOrgScope(source, dest);    doThrow(new RuntimeException("boom")).when(h)
         .doTransfer(any(), any(), any(), any(), any(), any(), any(), any(), any());
 
     NeoContext ctx = mock(NeoContext.class);
