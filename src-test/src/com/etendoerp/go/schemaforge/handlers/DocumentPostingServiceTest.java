@@ -17,7 +17,9 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -45,6 +47,10 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoResponse;
+
+import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.ui.Tab;
 
 /**
  * Unit tests for {@link DocumentPostingService}.
@@ -154,5 +160,130 @@ public class DocumentPostingServiceTest {
     when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
 
     assertNull(svc.handleAction(ctx));
+  }
+
+  @Test
+  public void postReturnsFailureWhenAcctServerIsNull() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(null);
+
+      DocumentPostingService.PostResult r = svc.post("999", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message().contains("No accounting engine"));
+    }
+  }
+
+  @Test
+  public void postReturnsFailureOnConnectionException() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    when(conn.getTransactionConnection()).thenThrow(new RuntimeException("DB down"));
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class)) {
+      stubObContext(obc);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+    }
+  }
+
+  @Test
+  public void handleActionReturnsNullForUnknownActionName() {
+    DocumentPostingService svc = new DocumentPostingService();
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+    when(ctx.getFieldName()).thenReturn("delete");
+
+    assertNull(svc.handleAction(ctx));
+  }
+
+  @Test
+  public void handleActionDelegatesPostAndReturns200() {
+    DocumentPostingService svc = new DocumentPostingService() {
+      @Override
+      public PostResult post(String tableId, String recordId) {
+        return new PostResult(true, "posted");
+      }
+    };
+
+    Tab tab = mock(Tab.class);
+    Table table = mock(Table.class);
+    when(table.getId()).thenReturn("318");
+    when(tab.getTable()).thenReturn(table);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+    when(ctx.getFieldName()).thenReturn("post");
+    when(ctx.getAdTab()).thenReturn(tab);
+    when(ctx.getRecordId()).thenReturn("rec-1");
+
+    NeoResponse resp = svc.handleAction(ctx);
+
+    assertNotNull(resp);
+    assertEquals(200, resp.getHttpStatus());
+  }
+
+  @Test
+  public void handleActionDelegatesUnpostAndReturns200() {
+    DocumentPostingService svc = new DocumentPostingService() {
+      @Override
+      public PostResult unpost(String tableId, String recordId) {
+        return new PostResult(true, "unposted");
+      }
+    };
+
+    Tab tab = mock(Tab.class);
+    Table table = mock(Table.class);
+    when(table.getId()).thenReturn("318");
+    when(tab.getTable()).thenReturn(table);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+    when(ctx.getFieldName()).thenReturn("unpost");
+    when(ctx.getAdTab()).thenReturn(tab);
+    when(ctx.getRecordId()).thenReturn("rec-1");
+
+    NeoResponse resp = svc.handleAction(ctx);
+
+    assertNotNull(resp);
+    assertEquals(200, resp.getHttpStatus());
+  }
+
+  @Test
+  public void handleActionReturns422WhenPostFails() {
+    DocumentPostingService svc = new DocumentPostingService() {
+      @Override
+      public PostResult post(String tableId, String recordId) {
+        return new PostResult(false, "Posting failed");
+      }
+    };
+
+    Tab tab = mock(Tab.class);
+    Table table = mock(Table.class);
+    when(table.getId()).thenReturn("318");
+    when(tab.getTable()).thenReturn(table);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+    when(ctx.getFieldName()).thenReturn("post");
+    when(ctx.getAdTab()).thenReturn(tab);
+    when(ctx.getRecordId()).thenReturn("rec-1");
+
+    NeoResponse resp = svc.handleAction(ctx);
+
+    assertNotNull(resp);
+    assertEquals(422, resp.getHttpStatus());
   }
 }
