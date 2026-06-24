@@ -105,6 +105,31 @@ Properties:
 The event intentionally excludes `recordId`, request body, response body,
 document numbers, labels, and backend error messages.
 
+## Bank Reconciliation KPIs
+
+`ReconciliationHandler` emits authoritative aggregate telemetry for the bank
+reconciliation matching flow:
+
+- `backend_bank_match_attempted`: emitted by `GET action=autoMatch` after the
+  preview engine evaluates pending bank-statement lines.
+- `backend_bank_reconciliation_match_evaluated`: emitted by
+  `POST action=applySuggestions` after accepted suggestion groups are applied.
+
+Properties:
+
+- `source`: `neo`
+- `kpiId`: `bank_reconciliation_match_rate`
+- `module`: `bank-reconciliation`
+- `entityType`: `bankStatementLine`
+- `flow`: `auto-match` or `apply-suggestions`
+- `total`: pending lines evaluated, or suggestion groups requested
+- `count`: groups found, or groups attempted
+- `correctCount`: operations proposed by preview, or groups successfully applied
+
+The events intentionally exclude financial-account ids, statement-line ids,
+transaction ids, document numbers, descriptions, partner names, and raw
+statement text.
+
 ## Adding Authoritative Backend KPIs
 
 Use `NeoTelemetryService.emit()` from a `NeoHandler.afterHandle()` hook only
