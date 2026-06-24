@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
@@ -48,12 +49,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import com.etendoerp.payment.removal.util.ReconciliationRemovalUtil;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.InOrder;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -61,6 +65,10 @@ import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.advpaymentmngt.process.FIN_TransactionProcess;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
+import org.openbravo.base.exception.OBException;
+import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
+import org.openbravo.base.model.Property;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
@@ -82,8 +90,8 @@ import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 /**
  * Mockito-driven unit tests for {@link ReconciliationHandler} (T6).
  *
- * <p>The handler exposes three custom action routes
- * ({@code pendingLines}, {@code candidates}, {@code reconcileGroup}) and falls
+ * <p>The handler exposes four custom action routes
+ * ({@code pendingLines}, {@code candidates}, {@code reconcileGroup}, {@code reactivate}) and falls
  * through to the generic CRUD for any other request. Strategy: spy the handler
  * and stub the package-private DAL / Classic seams ({@code loadAccount},
  * {@code loadLine}, {@code loadTransaction}, {@code addNewDraftReconciliation},
@@ -100,6 +108,8 @@ import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
  *   <li>candidates: suggested flag from the DAO; docType filter; no lineId → no
  *       suggestions.</li>
  *   <li>reconcileGroup: 1:1 + 1:N happy paths; wrong-account 400; sum-mismatch
+ *       rejection; error rollback.</li>
+ *   <li>reactivate: happy path; not-reconciled / closed-period / missing-body
  *       400; already-reconciled 409.</li>
  * </ul>
  */
@@ -421,6 +431,30 @@ public class ReconciliationHandlerTest {
     when(line.getDramount()).thenReturn(debit);
     when(line.getFinancialAccountTransaction()).thenReturn(matched);
     return line;
+  }
+
+  private FIN_BankStatementLine groupedLine(String id, FIN_BankStatement statement, String groupId,
+      BigDecimal credit, BigDecimal debit, FIN_FinaccTransaction matched) {
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    when(line.getId()).thenReturn(id);
+    when(line.getBankStatement()).thenReturn(statement);
+    when(line.getCramount()).thenReturn(credit);
+    when(line.getDramount()).thenReturn(debit);
+    when(line.getFinancialAccountTransaction()).thenReturn(matched);
+    when(line.get("matchGroupId")).thenReturn(groupId);
+    return line;
+  }
+
+  private MockedStatic<ModelProvider> mockMatchGroupProperty() {
+    MockedStatic<ModelProvider> mp = mockStatic(ModelProvider.class);
+    ModelProvider provider = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    mp.when(ModelProvider::getInstance).thenReturn(provider);
+    when(provider.getEntity(FIN_BankStatementLine.ENTITY_NAME)).thenReturn(entity);
+    when(entity.getPropertyByColumnName(eq("EM_ETGO_Match_Group_ID"), eq(false))).thenReturn(prop);
+    when(prop.getName()).thenReturn("matchGroupId");
+    return mp;
   }
 
   private FIN_FinaccTransaction trxFor(String accountId, BigDecimal deposit, BigDecimal payment,
@@ -1136,6 +1170,10 @@ public class ReconciliationHandlerTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
+      // matchFallback composes the (stubbed) leaf helpers below; run its real body so the
+      // orchestration is exercised while findSignalGroup/buildRuleGroup stay stubbed.
+      ams.when(() -> AutoMatchSupport.matchFallback(any(), any(), any(), any(), any()))
+          .thenCallRealMethod();
       // No 1:N signal group → forces the rule-engine branch.
       ams.when(() -> AutoMatchSupport.findSignalGroup(any(), any(), any(), any()))
           .thenReturn(Collections.emptyList());
@@ -1649,5 +1687,406 @@ public class ReconciliationHandlerTest {
         .contains("exceed the statement line amount"));
     // The over-reconciling group is never reconciled.
     verify(handler, never()).addNewDraftReconciliation(any());
+  }
+
+  // ── reactivate (un-reconcile a single statement line, T8 part 1) ──────────────
+
+  /** Builds a reactivate body: {@code { financialAccountId, statementLineId }}. */
+  private JSONObject reactivateBody(String accountId, String lineId) throws Exception {
+    return new JSONObject()
+        .put("financialAccountId", accountId)
+        .put("statementLineId", lineId);
+  }
+
+  /**
+   * Builds a reconciliation that is reachable from the line's transaction and carries the metadata
+   * the period guard and balance helpers read ({@code client}, {@code organization},
+   * {@code entity.tableId}, {@code transactionDate}). The line's bank statement belongs to
+   * {@link #ACC_ID} so {@code belongsToAccount} passes. The reconciliation's transaction list is
+   * stubbed so {@code reactivate} can snapshot it and hand it to {@code undoReconciliation}.
+   */
+  private FIN_Reconciliation reconciledLineSetup() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-react");
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(ORG_ID);
+    when(rec.getClient()).thenReturn(client);
+    when(rec.getOrganization()).thenReturn(org);
+    when(rec.getTransactionDate()).thenReturn(null);
+    Entity entity = mock(Entity.class);
+    when(entity.getTableId()).thenReturn("TBL-1");
+    when(rec.getEntity()).thenReturn(entity);
+
+    // line.financialAccountTransaction → trx → reconciliation chain.
+    FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
+    when(trx.getReconciliation()).thenReturn(rec);
+    // The reconciliation groups exactly this line's transaction — the snapshot reactivate undoes.
+    when(rec.getFINFinaccTransactionList()).thenReturn(Collections.singletonList(trx));
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, trx);
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    return rec;
+  }
+
+  /**
+   * Happy path: a reconciled line resolves its reconciliation from the line's transaction, snapshots
+   * the reconciliation's transaction list and hands it to the single undo seam
+   * {@code undoReconciliation}, then returns a 200 envelope with {@code reactivated:true}. The
+   * flow order is checkPeriod (success) → undoReconciliation.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReactivateHappyPathRunsUndoSeam() throws Exception {
+    FIN_Reconciliation rec = reconciledLineSetup();
+    List<FIN_FinaccTransaction> snapshot = rec.getFINFinaccTransactionList();
+    FIN_BankStatementLine normalized = mock(FIN_BankStatementLine.class);
+    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
+    doNothing().when(handler).undoReconciliation(any(), any(), any());
+    doReturn(normalized).when(handler).normalizeReactivatedMatchGroup(any());
+
+    NeoResponse response;
+    // currentBalance reads the account's remaining draft reconciliations — keep it side-effect free.
+    try (MockedStatic<ReconciliationRemovalUtil> recUtil =
+        mockStatic(ReconciliationRemovalUtil.class)) {
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+      response = handler.reactivate(reactivateBody(ACC_ID, LINE_ID));
+    }
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    assertTrue(data.getBoolean("reactivated"));
+    assertEquals(LINE_ID, data.getString("statementLineId"));
+
+    // undoReconciliation is invoked exactly once with the snapshot of the reconciliation list.
+    verify(handler).undoReconciliation(any(), eq(rec), eq(snapshot));
+    // Order: the period guard runs before the undo. InOrder only over seams that still exist.
+    InOrder inOrder = Mockito.inOrder(handler);
+    inOrder.verify(handler).checkPeriod(any(), any(), any(), any());
+    inOrder.verify(handler).undoReconciliation(any(), any(), any());
+    inOrder.verify(handler).normalizeReactivatedMatchGroup(any());
+    verify(handler, never()).doRollbackAndClose();
+  }
+
+  /** A line with no linked transaction (not reconciled) is rejected with a 409, no undo. */
+  @Test
+  public void testReactivateLineNotReconciledReturns409() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    // matched == null → line is not reconciled.
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+
+    NeoResponse response = handler.reactivate(reactivateBody(ACC_ID, LINE_ID));
+
+    assertEquals(409, response.getHttpStatus());
+    assertTrue(response.getBody().getJSONObject("error").getString("message")
+        .contains("not reconciled"));
+    verify(handler, never()).undoReconciliation(any(), any(), any());
+  }
+
+  /**
+   * Regression: the line IS reconciled (carries a transaction) but that transaction has no
+   * reconciliation. This is exactly the second-attempt error: the first reactivate left the line
+   * pointing at a transaction whose reconciliation was already undone. The handler returns a 409 and
+   * never runs the undo seam.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReactivateLineNotLinkedToReconciliationReturns409() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    // trx != null but trx.getReconciliation() == null.
+    FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
+    when(trx.getReconciliation()).thenReturn(null);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, trx);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+
+    NeoResponse response = handler.reactivate(reactivateBody(ACC_ID, LINE_ID));
+
+    assertEquals(409, response.getHttpStatus());
+    assertTrue(response.getBody().getJSONObject("error").getString("message")
+        .contains("not linked to a reconciliation"));
+    verify(handler, never()).undoReconciliation(any(), any(), any());
+  }
+
+  /**
+   * When the accounting period is closed, the {@code checkPeriod} seam throws an OBException; the
+   * handler maps it to a 409 and never runs the undo seam.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReactivateClosedPeriodReturns409() throws Exception {
+    reconciledLineSetup();
+    doThrow(new OBException("Period closed"))
+        .when(handler).checkPeriod(any(), any(), any(), any());
+
+    NeoResponse response = handler.reactivate(reactivateBody(ACC_ID, LINE_ID));
+
+    assertEquals(409, response.getHttpStatus());
+    assertTrue(response.getBody().getJSONObject("error").getString("message")
+        .contains("period is closed"));
+    verify(handler, never()).undoReconciliation(any(), any(), any());
+  }
+
+  /**
+   * An error mid-flow (the undo seam throws) propagates out of {@code reactivate}; the route wrapper
+   * {@code handleReactivate} rolls back via {@code doRollbackAndClose} and returns a 500.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReactivateErrorMidFlowRollsBack() throws Exception {
+    reconciledLineSetup();
+    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
+    doThrow(new RuntimeException("boom")).when(handler).undoReconciliation(any(), any(), any());
+
+    NeoContext context = mock(NeoContext.class);
+    when(context.getHttpMethod()).thenReturn("POST");
+    Map<String, String> qp = new HashMap<>();
+    qp.put("action", "reactivate");
+    when(context.getQueryParams()).thenReturn(qp);
+    JSONObject body = new JSONObject();
+    try {
+      body.put("financialAccountId", ACC_ID).put("statementLineId", LINE_ID);
+    } catch (Exception e) {
+      throw new IllegalStateException(e);
+    }
+    when(context.getRequestBody()).thenReturn(body);
+
+    NeoResponse response = handler.handle(context);
+
+    assertEquals(500, response.getHttpStatus());
+    verify(handler).doRollbackAndClose();
+  }
+
+  /** reactivate without financialAccountId/statementLineId is rejected with a 400 before any load. */
+  @Test
+  public void testReactivateMissingParamsReturns400() throws Exception {
+    NeoResponse response = handler.reactivate(new JSONObject());
+    assertEquals(400, response.getHttpStatus());
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /** A POST reactivate with no body returns a 400 (body required). */
+  @Test
+  public void testHandleReactivateNoBodyReturns400() {
+    NeoContext context = mock(NeoContext.class);
+    when(context.getHttpMethod()).thenReturn("POST");
+    Map<String, String> qp = new HashMap<>();
+    qp.put("action", "reactivate");
+    when(context.getQueryParams()).thenReturn(qp);
+    when(context.getRequestBody()).thenReturn(null);
+    NeoResponse response = handler.handle(context);
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  /** An unknown statement line on reactivate yields a 404. */
+  @Test
+  public void testReactivateMissingLineReturns404() throws Exception {
+    doReturn(mock(FIN_FinancialAccount.class)).when(handler).loadAccount(ACC_ID);
+    doReturn(null).when(handler).loadLine(LINE_ID);
+    NeoResponse response = handler.reactivate(reactivateBody(ACC_ID, LINE_ID));
+    assertEquals(404, response.getHttpStatus());
+  }
+
+  /** Reactivating an ETGO split group merges its unmatched siblings back into one physical line. */
+  @Test
+  public void testNormalizeReactivatedMatchGroupMergesSiblings() throws Exception {
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    when(statement.getId()).thenReturn("BST-1");
+    when(statement.isProcessed()).thenReturn(Boolean.TRUE);
+    FIN_BankStatementLine anchor = groupedLine("L1", statement, "GRP-1",
+        new BigDecimal("25.30"), BigDecimal.ZERO, null);
+    FIN_BankStatementLine sibling = groupedLine("L2", statement, "GRP-1",
+        new BigDecimal("25.30"), BigDecimal.ZERO, null);
+    doReturn(Arrays.asList(anchor, sibling)).when(handler).loadMatchGroupLines(statement, "GRP-1");
+
+    try (MockedStatic<ModelProvider> mp = mockMatchGroupProperty();
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      FIN_BankStatementLine result = handler.normalizeReactivatedMatchGroup(anchor);
+
+      assertEquals(anchor, result);
+      verify(statement).setProcessed(false);
+      verify(statement).setProcessed(true);
+      verify(dal).remove(sibling);
+      verify(anchor).setCramount(new BigDecimal("50.60"));
+      verify(anchor).setDramount(BigDecimal.ZERO);
+      verify(anchor).setFinancialAccountTransaction(null);
+      verify(anchor).setMatchingtype(null);
+      verify(anchor).setMatchedDocument(null);
+      verify(anchor).set("matchGroupId", null);
+    }
+  }
+
+  /** A split group is left untouched when any sibling still points at a transaction. */
+  @Test
+  public void testNormalizeReactivatedMatchGroupSkipsWhenSiblingStillLinked() throws Exception {
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    when(statement.getId()).thenReturn("BST-1");
+    FIN_FinaccTransaction linked = mock(FIN_FinaccTransaction.class);
+    when(linked.getId()).thenReturn("T-LINKED");
+    FIN_BankStatementLine anchor = groupedLine("L1", statement, "GRP-1",
+        new BigDecimal("25.30"), BigDecimal.ZERO, null);
+    FIN_BankStatementLine sibling = groupedLine("L2", statement, "GRP-1",
+        new BigDecimal("25.30"), BigDecimal.ZERO, linked);
+    doReturn(Arrays.asList(anchor, sibling)).when(handler).loadMatchGroupLines(statement, "GRP-1");
+
+    try (MockedStatic<ModelProvider> mp = mockMatchGroupProperty();
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      FIN_BankStatementLine result = handler.normalizeReactivatedMatchGroup(anchor);
+
+      assertEquals(anchor, result);
+      verify(statement, never()).setProcessed(false);
+      verify(dal, never()).remove(any(FIN_BankStatementLine.class));
+      verify(anchor, never()).setCramount(any());
+      verify(anchor, never()).set("matchGroupId", null);
+    }
+  }
+
+  /** A lone residual matchGroupId is harmless: the line is kept and the marker cleared. */
+  @Test
+  public void testNormalizeReactivatedMatchGroupSingletonClearsMarker() throws Exception {
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    FIN_BankStatementLine anchor = groupedLine("L1", statement, "GRP-1",
+        new BigDecimal("50.60"), BigDecimal.ZERO, null);
+    doReturn(Collections.singletonList(anchor)).when(handler).loadMatchGroupLines(statement, "GRP-1");
+
+    try (MockedStatic<ModelProvider> mp = mockMatchGroupProperty();
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      FIN_BankStatementLine result = handler.normalizeReactivatedMatchGroup(anchor);
+
+      assertEquals(anchor, result);
+      verify(anchor).set("matchGroupId", null);
+      verify(dal).save(anchor);
+      verify(statement, never()).setProcessed(false);
+      verify(dal, never()).remove(any(FIN_BankStatementLine.class));
+    }
+  }
+
+  /**
+   * {@code markAutoCreated} sets the runtime-resolved {@code EM_ETGO_Auto_Created} property to
+   * {@code true}, and {@code isAutoCreated} reads it back via the same property.
+   */
+  @Test
+  public void testMarkAndIsAutoCreatedRoundTrip() {
+    FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(prop.getName()).thenReturn("eTGOAutoCreated");
+    when(entity.getPropertyByColumnName(eq("EM_ETGO_Auto_Created"), eq(false))).thenReturn(prop);
+
+    try (MockedStatic<ModelProvider> mp = mockStatic(ModelProvider.class)) {
+      ModelProvider provider = mock(ModelProvider.class);
+      mp.when(ModelProvider::getInstance).thenReturn(provider);
+      when(provider.getEntity(FIN_FinaccTransaction.ENTITY_NAME)).thenReturn(entity);
+
+      // markAutoCreated sets the flag via the resolved property name.
+      ReactivationSupport.markAutoCreated(trx);
+      verify(trx).set("eTGOAutoCreated", Boolean.TRUE);
+
+      // isAutoCreated reads the same property back.
+      when(trx.get("eTGOAutoCreated")).thenReturn(Boolean.TRUE);
+      assertTrue(handler.isAutoCreated(trx));
+
+      when(trx.get("eTGOAutoCreated")).thenReturn(Boolean.FALSE);
+      assertFalse(handler.isAutoCreated(trx));
+    }
+  }
+
+  // ── undoReconciliation: restoreNotClearedStatus by direction ──────────────────
+
+  /**
+   * Regression: the payment.removal module's {@code reactivateAndRemoveReconciliation} leaves a kept
+   * (non-auto-created) DEPOSIT transaction in {@code PWNC} ("Withdrawn not cleared") instead of
+   * {@code RDNC} ("Deposited not cleared"). {@code undoReconciliation} must re-set every kept
+   * transaction's status by DIRECTION via {@code restoreNotClearedStatus}: inflow
+   * (depositAmount &ge; paymentAmount) → {@code RDNC}; outflow → {@code PWNC}. The fix must be
+   * idempotent — a transaction already in the correct status is NOT re-written.
+   *
+   * <p>Confirmed empirically with a 26.40 line reconciled against two 13.20 receipts.
+   *
+   * @throws Exception if the mocked seams fail
+   */
+  @Test
+  public void testUndoReconciliationRestoresNotClearedStatusByDirection() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+
+    // 1) inflow stuck wrong: deposit 25.30, payment 0, status PWNC → must be re-set to RDNC.
+    FIN_FinaccTransaction inflowWrong = mock(FIN_FinaccTransaction.class);
+    when(inflowWrong.getDepositAmount()).thenReturn(new BigDecimal("25.30"));
+    when(inflowWrong.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    when(inflowWrong.getStatus()).thenReturn("PWNC");
+
+    // 2) outflow stuck wrong: deposit 0, payment 10.00, status RDNC → must be re-set to PWNC.
+    FIN_FinaccTransaction outflowWrong = mock(FIN_FinaccTransaction.class);
+    when(outflowWrong.getDepositAmount()).thenReturn(BigDecimal.ZERO);
+    when(outflowWrong.getPaymentAmount()).thenReturn(new BigDecimal("10.00"));
+    when(outflowWrong.getStatus()).thenReturn("RDNC");
+
+    // 3) inflow already correct: deposit 5.00, payment 0, status RDNC → no redundant write.
+    FIN_FinaccTransaction inflowOk = mock(FIN_FinaccTransaction.class);
+    when(inflowOk.getDepositAmount()).thenReturn(new BigDecimal("5.00"));
+    when(inflowOk.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    when(inflowOk.getStatus()).thenReturn("RDNC");
+
+    List<FIN_FinaccTransaction> matched =
+        Arrays.asList(inflowWrong, outflowWrong, inflowOk);
+
+    // All three are kept (manually matched), so the loop routes them to restoreNotClearedStatus.
+    doReturn(false).when(handler).isAutoCreated(any());
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil =
+            mockStatic(ReconciliationRemovalUtil.class)) {
+      // The reconciliation-level undo seams are no-ops (their behavior is the module's, not ours).
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+      recUtil.when(() -> ReconciliationRemovalUtil.processAllReconciliationInDraft(any()))
+          .thenAnswer(inv -> null);
+      recUtil.when(() -> ReconciliationRemovalUtil.reactivateAndRemoveReconciliation(any()))
+          .thenAnswer(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      // unmatchBankStatementLine: createCriteria(...).add(...).setMaxResults(...).uniqueResult() → null.
+      @SuppressWarnings("unchecked")
+      org.openbravo.dal.service.OBCriteria<FIN_BankStatementLine> crit =
+          mock(org.openbravo.dal.service.OBCriteria.class);
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.setMaxResults(eq(1))).thenReturn(crit);
+      when(crit.uniqueResult()).thenReturn(null);
+
+      // OBDal.getInstance().save(...) is a no-op.
+      doNothing().when(dal).save(any());
+
+      handler.undoReconciliation(account, rec, matched);
+
+      // 1) inflow stuck wrong → restored to RDNC.
+      verify(inflowWrong).setStatus("RDNC");
+      // 2) outflow stuck wrong → restored to PWNC.
+      verify(outflowWrong).setStatus("PWNC");
+      // 3) inflow already correct → never re-written (idempotent).
+      verify(inflowOk, never()).setStatus(anyString());
+    }
   }
 }

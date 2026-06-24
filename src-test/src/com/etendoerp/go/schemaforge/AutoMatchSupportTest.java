@@ -116,6 +116,25 @@ public class AutoMatchSupportTest {
     assertTrue(result.isEmpty());
   }
 
+  /**
+   * When the full same-key partition over-shoots the target, matchByKey may still return an exact
+   * subset from that same partition.
+   */
+  @Test
+  public void testMatchByKeyFindsExactSubsetInsidePartition() {
+    FIN_FinaccTransaction a = txn("a", "95.59", "bp:1");
+    FIN_FinaccTransaction b = txn("b", "13.20", "bp:1");
+    FIN_FinaccTransaction c = txn("c", "13.20", "bp:1");
+    List<FIN_FinaccTransaction> pool = Arrays.asList(a, b, c);
+
+    List<FIN_FinaccTransaction> result =
+        AutoMatchSupport.matchByKey(pool, new BigDecimal("26.40"), TOL, KEY_FN);
+
+    assertEquals(2, result.size());
+    assertTrue(result.contains(b));
+    assertTrue(result.contains(c));
+  }
+
   /** A single-member group is a 1:1 case and is ignored even when it matches the amount. */
   @Test
   public void testMatchByKeySingletonGroupIgnored() {
@@ -224,6 +243,46 @@ public class AutoMatchSupportTest {
             when(m.match(line, new java.util.ArrayList<>())).thenReturn(matched))) {
       String state = AutoMatchSupport.classifyPendingLine(
           account, line, Collections.emptyList());
+      assertEquals(AutoMatchSupport.STATE_SUGGESTED, state);
+    }
+  }
+
+  /**
+   * Even without a 1:1 strong match, a line is classified as suggested when the 1:N signal matcher
+   * finds an exact same-partner subset for it.
+   */
+  @Test
+  public void testClassifyPendingLineSignalGroupReturnsSuggested() {
+    FIN_FinancialAccount account = accountWithAlgorithm("com.example.DummyAlgo");
+    when(account.getId()).thenReturn("ACC-1");
+    FIN_BankStatementLine line = bslLine("L1", "26.40", "0.00");
+
+    FIN_MatchedTransaction matched = mock(FIN_MatchedTransaction.class);
+    when(matched.getTransaction()).thenReturn(mock(FIN_FinaccTransaction.class));
+    when(matched.getMatchLevel()).thenReturn(FIN_MatchedTransaction.NOMATCH);
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    lenient().when(bp.getId()).thenReturn("BP-1");
+    FIN_FinaccTransaction t1 = txnWithPartner("T1", "95.59", bp);
+    FIN_FinaccTransaction t2 = txnWithPartner("T2", "13.20", bp);
+    FIN_FinaccTransaction t3 = txnWithPartner("T3", "13.20", bp);
+
+    try (MockedConstruction<FIN_MatchingTransaction> mc =
+            mockConstruction(FIN_MatchingTransaction.class, (m, ctx) ->
+                when(m.match(line, new java.util.ArrayList<>())).thenReturn(matched));
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+      @SuppressWarnings("unchecked")
+      org.hibernate.query.Query<FIN_FinaccTransaction> query = mock(org.hibernate.query.Query.class);
+      when(session.createQuery(anyString(), eq(FIN_FinaccTransaction.class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.list()).thenReturn(Arrays.asList(t1, t2, t3));
+
+      String state = AutoMatchSupport.classifyPendingLine(account, line, Collections.emptyList());
+
       assertEquals(AutoMatchSupport.STATE_SUGGESTED, state);
     }
   }
@@ -773,6 +832,40 @@ public class AutoMatchSupportTest {
           AutoMatchSupport.findSignalGroup("ACC-1", line, new HashSet<>(), TOL);
 
       assertEquals(2, result.size());
+    }
+  }
+
+  /**
+   * A same-partner pool may contain extra transactions; findSignalGroup should still return the
+   * exact same-partner subset that balances the line.
+   */
+  @Test
+  public void testFindSignalGroupPartnerSubsetMatchesInsideLargerPool() {
+    FIN_BankStatementLine line = bslLine("L1", "26.40", "0.00");
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    lenient().when(bp.getId()).thenReturn("BP-1");
+    FIN_FinaccTransaction t1 = txnWithPartner("T1", "95.59", bp);
+    FIN_FinaccTransaction t2 = txnWithPartner("T2", "13.20", bp);
+    FIN_FinaccTransaction t3 = txnWithPartner("T3", "13.20", bp);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+      @SuppressWarnings("unchecked")
+      org.hibernate.query.Query<FIN_FinaccTransaction> query = mock(org.hibernate.query.Query.class);
+      when(session.createQuery(anyString(), eq(FIN_FinaccTransaction.class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.list()).thenReturn(Arrays.asList(t1, t2, t3));
+
+      List<FIN_FinaccTransaction> result =
+          AutoMatchSupport.findSignalGroup("ACC-1", line, new HashSet<>(), TOL);
+
+      assertEquals(2, result.size());
+      assertTrue(result.contains(t2));
+      assertTrue(result.contains(t3));
     }
   }
 

@@ -167,7 +167,10 @@ public final class BankStatementsSupport {
     head.put("in", jsonBigDecimal(head, "in").add(jsonBigDecimal(line, "in")));
     head.put("out", jsonBigDecimal(head, "out").add(jsonBigDecimal(line, "out")));
     head.put(FIELD_AMOUNT, jsonBigDecimal(head, FIELD_AMOUNT).add(jsonBigDecimal(line, FIELD_AMOUNT)));
-    head.put("matched", true);
+    // The merged group is reconciled only while it still carries transactions. After a reactivate
+    // the sub-lines keep the match-group tag but lose their transaction, so deriving "matched" from
+    // the accumulated txns (instead of forcing true) lets the line fall back to "not reconciled".
+    head.put("matched", headTxns.length() > 0);
   }
 
   private static BigDecimal jsonBigDecimal(JSONObject o, String key) {
