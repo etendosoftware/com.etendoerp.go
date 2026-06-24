@@ -388,7 +388,7 @@ public class ReconciliationHandler implements NeoHandler {
           JSONObject row = new JSONObject();
           row.put(KEY_ID, lineId);
           row.put(KEY_DATE, formatDate(rs.getTimestamp("datetrx")));
-          row.put("description", StringUtils.trimToEmpty(rs.getString("description")));
+          row.put(KEY_DESCRIPTION, StringUtils.trimToEmpty(rs.getString("description")));
           row.put(KEY_PARTNER_NAME, StringUtils.trimToEmpty(rs.getString(COL_PARTNER_NAME)));
           row.put("referenceNo", StringUtils.trimToEmpty(rs.getString("reference_no")));
           // Coarse status kept for backward compatibility (pending|reconciled).

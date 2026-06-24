@@ -17,6 +17,17 @@
 
 package com.etendoerp.go.schemaforge;
 
+import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.attachOptional;
+import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.bpartnerRoleFilter;
+import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.buildPaymentLabel;
+import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.daysUntil;
+import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.formatDmy;
+import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.optBigDecimal;
+import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.parseDate;
+import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.resolveConversionRate;
+import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.statusClassicLabel;
+import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.trxTypeClassicLabel;
+
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -129,6 +140,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String FIELD_TRX_TYPE = "trxType";
   private static final String FIELD_DESCRIPTION = "description";
   private static final String FIELD_DEPOSIT_AMOUNT = "depositAmount";
+  private static final String FIELD_AMOUNT = "amount";
 
   /** Accounting-dimension UI keys, reused across marshalling, mapping and ordering. */
   private static final String DIM_ORGANIZATION = "organization";
@@ -230,21 +242,28 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
         : null;
 
     if (METHOD_GET.equals(method)) {
-      if (ACTION_BP_LOOKUP.equals(action)) return handleBpartnerLookup(context);
-      if (ACTION_GL_LOOKUP.equals(action)) return handleGlItemLookup(context);
-      if (ACTION_DIM_VALUES.equals(action)) return handleDimensionValues(context);
-      if (ACTION_OUTSTANDING.equals(action)) return handleOutstandingInvoices(context);
-      return handleList(context);
+      return handleGet(action, context);
     }
-    if (METHOD_POST.equals(method) && ACTION_CREATE.equals(action)) {
-      return handleCreate(context);
+    if (METHOD_POST.equals(method)) {
+      return handlePost(action, context);
     }
-    if (METHOD_POST.equals(method) && ACTION_CREATE_PAYMENT.equals(action)) {
-      return handleCreatePayment(context);
-    }
-    if (METHOD_POST.equals(method) && ACTION_TRANSFER.equals(action)) {
-      return handleTransfer(context);
-    }
+    return NeoResponse.error(405, "Method not allowed.");
+  }
+
+  /** Routes the read-only {@code GET} actions; defaults to the transactions list. */
+  private NeoResponse handleGet(String action, NeoContext context) {
+    if (ACTION_BP_LOOKUP.equals(action)) return handleBpartnerLookup(context);
+    if (ACTION_GL_LOOKUP.equals(action)) return handleGlItemLookup(context);
+    if (ACTION_DIM_VALUES.equals(action)) return handleDimensionValues(context);
+    if (ACTION_OUTSTANDING.equals(action)) return handleOutstandingInvoices(context);
+    return handleList(context);
+  }
+
+  /** Routes the mutating {@code POST} actions. */
+  private NeoResponse handlePost(String action, NeoContext context) {
+    if (ACTION_CREATE.equals(action)) return handleCreate(context);
+    if (ACTION_CREATE_PAYMENT.equals(action)) return handleCreatePayment(context);
+    if (ACTION_TRANSFER.equals(action)) return handleTransfer(context);
     return NeoResponse.error(405, "Method not allowed.");
   }
 
@@ -303,14 +322,14 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           Timestamp dateTs = rs.getTimestamp("statementdate");
           String status = StringUtils.trimToEmpty(rs.getString("status"));
           String trxType = StringUtils.trimToEmpty(rs.getString("trxtype"));
-          BigDecimal amount = nullSafeBigDecimal(rs.getBigDecimal("amount"));
+          BigDecimal amount = nullSafeBigDecimal(rs.getBigDecimal(FIELD_AMOUNT));
           String documentNo = StringUtils.trimToEmpty(rs.getString("document_no"));
           String contact = StringUtils.trimToEmpty(rs.getString("contact"));
           row.put("id", rs.getString("fin_finacc_transaction_id"));
           row.put("date", formatDate(dateTs));
           row.put("paymentStatus", status);
           row.put(FIELD_TRX_TYPE, trxType);
-          row.put("amount", amount);
+          row.put(FIELD_AMOUNT, amount);
           row.put(KEY_BALANCE, nullSafeBigDecimal(rs.getBigDecimal(KEY_BALANCE)));
           row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
           row.put("posted", StringUtils.trimToEmpty(rs.getString("posted")));
@@ -545,55 +564,6 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     return value == null ? BigDecimal.ZERO : value;
   }
 
-  // ---------------------------------------------------------------------------
-  // CSV-export helpers — Classic-parity labels for the generic export=csv path.
-  // The Movements tab used to build this CSV client-side; that logic now lives
-  // here so large lists stream from the server.
-  // ---------------------------------------------------------------------------
-
-  private static final DateTimeFormatter DMY_DASH =
-      DateTimeFormatter.ofPattern("dd-MM-yyyy").withZone(ZoneOffset.UTC);
-
-  /** trxType code → Classic "Transaction Type" label (unknown codes pass through). */
-  private static final Map<String, String> TRX_TYPE_CLASSIC = Map.of(
-      "BPD", "BP Deposit",
-      "BPW", "BP Withdrawal");
-
-  private static String trxTypeClassicLabel(String code) {
-    return StringUtils.isBlank(code) ? "" : TRX_TYPE_CLASSIC.getOrDefault(code, code);
-  }
-
-  /** payment status code → long Classic label (dual of movementStatusConfig). */
-  private static final Map<String, String> STATUS_CLASSIC = Map.of(
-      "RPAP", "Awaiting Payment",
-      "RPAE", "Awaiting Execution",
-      "RPVOID", "Voided",
-      "RPR", "Payment Received",
-      "PPM", "Payment Made",
-      "PWNC", "Withdrawn not Cleared",
-      "RDNC", "Deposited not Cleared",
-      "RPPC", "Payment Cleared");
-
-  private static String statusClassicLabel(String code) {
-    return StringUtils.isBlank(code) ? "" : STATUS_CLASSIC.getOrDefault(code, code);
-  }
-
-  /** Synthetic "Payment" column: {@code docNo - dd-MM-yyyy - contact - |amount|}. */
-  private static String buildPaymentLabel(String docNo, Timestamp date, String contact,
-      BigDecimal amount) {
-    String dateStr = date == null ? "" : DMY_DASH.format(Instant.ofEpochMilli(date.getTime()));
-    String amt = (amount == null ? BigDecimal.ZERO : amount.abs())
-        .stripTrailingZeros().toPlainString();
-    StringBuilder sb = new StringBuilder();
-    for (String part : new String[] { docNo, dateStr, contact, amt }) {
-      if (StringUtils.isNotBlank(part)) {
-        if (sb.length() > 0) sb.append(" - ");
-        sb.append(part);
-      }
-    }
-    return sb.toString();
-  }
-
   /**
    * Handles {@code POST ?action=create} — inserts a new {@code FIN_FinaccTransaction}
    * row for the requested account. Validation is delegated to
@@ -710,7 +680,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     if (sourceId.equals(destId)) {
       return NeoResponse.error(400, "Source and destination accounts must be different");
     }
-    BigDecimal amount = nullSafeBigDecimal(optBigDecimal(body, "amount"));
+    BigDecimal amount = nullSafeBigDecimal(optBigDecimal(body, FIELD_AMOUNT));
     if (amount.signum() <= 0) {
       return NeoResponse.error(400, "Amount must be greater than zero");
     }
@@ -737,7 +707,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     boolean withFee = body.optBoolean("bankFee", false);
     BigDecimal bankFeeFrom = withFee ? nullSafeBigDecimal(optBigDecimal(body, "bankFeeFrom")) : BigDecimal.ZERO;
     BigDecimal bankFeeTo = withFee ? nullSafeBigDecimal(optBigDecimal(body, "bankFeeTo")) : BigDecimal.ZERO;
-    String description = body.optString("description", null);
+    String description = body.optString(FIELD_DESCRIPTION, null);
     if (StringUtils.isBlank(description)) description = DEFAULT_TRANSFER_DESCRIPTION;
     Date transferDate = parseDate(body.optString("transferDate", null), null);
 
@@ -749,19 +719,6 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     data.put("sourceAccountId", sourceId);
     data.put("destinationAccountId", destId);
     return NeoResponse.createdWithData(data);
-  }
-
-  /**
-   * Conversion rate to pass to {@link FundsTransferActionHandler#createTransfer}: {@code 1} for a
-   * same-currency transfer; the user-provided rate when currencies differ; or {@code null} to let
-   * Classic resolve the system rate.
-   */
-  private static BigDecimal resolveConversionRate(FIN_FinancialAccount source,
-      FIN_FinancialAccount dest, BigDecimal provided) {
-    if (source.getCurrency().getId().equalsIgnoreCase(dest.getCurrency().getId())) {
-      return BigDecimal.ONE;
-    }
-    return provided;
   }
 
   // ── transfer seams (package-private so unit tests can stub the DAL / Classic layer) ──
@@ -859,35 +816,6 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     return trx;
   }
 
-  private static <T extends org.openbravo.base.structure.BaseOBObject> void attachOptional(
-      String id, Class<T> entityClass, java.util.function.Consumer<T> setter) {
-    if (StringUtils.isBlank(id)) return;
-    T ref = OBDal.getInstance().get(entityClass, id);
-    if (ref != null) setter.accept(ref);
-  }
-
-  private static BigDecimal optBigDecimal(JSONObject body, String key) {
-    if (!body.has(key) || body.isNull(key)) return null;
-    try {
-      return new BigDecimal(body.getString(key));
-    } catch (Exception e) {
-      try {
-        return BigDecimal.valueOf(body.getDouble(key));
-      } catch (Exception ex) {
-        return null;
-      }
-    }
-  }
-
-  private static Date parseDate(String iso, Date fallback) {
-    if (StringUtils.isBlank(iso)) return fallback;
-    try {
-      return Date.from(Instant.parse(iso));
-    } catch (Exception e) {
-      return fallback;
-    }
-  }
-
   long nextLineNo(FIN_FinancialAccount account) {
     String sql = "SELECT COALESCE(MAX(line), 0) + 10 AS next_line"
         + "  FROM fin_finacc_transaction"
@@ -901,17 +829,6 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       log.warn("Failed to compute next line for account {}, defaulting to 10", account.getId(), e);
     }
     return 10L;
-  }
-
-  /** SQL fragment restricting bpartners by role (customer / vendor / any). */
-  private static String bpartnerRoleFilter(String role) {
-    if ("customer".equals(role)) {
-      return " AND iscustomer='Y'";
-    }
-    if ("vendor".equals(role)) {
-      return " AND isvendor='Y'";
-    }
-    return "";
   }
 
   /**
@@ -976,10 +893,6 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
         + " LIMIT 200";
     return runLookup(sql, q, "values");
   }
-
-  /** Date formatter for invoice/due dates returned to the UI (matches the
-   * client-side dd/MM/yyyy parser used by the invoice filters). */
-  private static final DateTimeFormatter DMY = DateTimeFormatter.ofPattern("dd/MM/yyyy");
 
   /**
    * Outstanding (unpaid) invoice payment-schedule details for a business
@@ -1091,15 +1004,6 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     row.put("expected", nullSafeBigDecimal(rs.getBigDecimal("expected_amount")));
     row.put("pend", nullSafeBigDecimal(rs.getBigDecimal("outstanding_amount")));
     return row;
-  }
-
-  private static String formatDmy(java.sql.Date d) {
-    return d == null ? "" : DMY.format(d.toLocalDate());
-  }
-
-  /** Signed days from today to the due date: negative = overdue, 0 = due today. */
-  private static int daysUntil(java.sql.Date dueDate, LocalDate today) {
-    return dueDate == null ? 0 : (int) ChronoUnit.DAYS.between(today, dueDate.toLocalDate());
   }
 
   private NeoResponse runLookup(String sql, String q, String resultKey) {
