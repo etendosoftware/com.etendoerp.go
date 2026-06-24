@@ -35,6 +35,9 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.order.Order;
+import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.pricing.pricelist.PriceList;
 
 /**
@@ -388,6 +391,7 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    syncLineCurrenciesOnCurrencyPatch(context);
     if (!"GET".equals(context.getHttpMethod())) {
       return null;
     }
@@ -477,6 +481,62 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
     } catch (Exception e) {
       log.error("DB error querying linked documents for order {}", orderId, e);
       return false;
+    }
+  }
+
+  /**
+   * After a successful header PATCH, aligns all order-line currencies to the saved
+   * header currency. This runs whenever the PATCH body contains a {@code currency} field.
+   *
+   * <p>Rationale (ETP-4027): when the user changes the header currency and saves, every
+   * existing line must reflect that choice — the user consciously accepts that the whole
+   * order moves to the new currency. Line amounts are left unchanged; only
+   * {@code C_CURRENCY_ID} is updated on mismatched lines.
+   *
+   * <p>No-op when no lines are mismatched (ordinary saves without a currency change).
+   */
+  private void syncLineCurrenciesOnCurrencyPatch(NeoContext context) {
+    String method = context.getHttpMethod();
+    if (!"PATCH".equals(method) && !"PUT".equals(method)) {
+      return;
+    }
+    JSONObject reqBody = context.getRequestBody();
+    if (reqBody == null || !reqBody.has("currency")) {
+      return;
+    }
+    String recordId = context.getRecordId();
+    if (recordId == null || recordId.isEmpty()) {
+      return;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        Order order = OBDal.getInstance().get(Order.class, recordId);
+        if (order == null || order.getCurrency() == null) {
+          return;
+        }
+        Currency headerCurrency = order.getCurrency();
+        String headerCurrencyId = headerCurrency.getId();
+        int updated = 0;
+        for (OrderLine line : order.getOrderLineList()) {
+          if (line.getCurrency() == null
+              || !headerCurrencyId.equals(line.getCurrency().getId())) {
+            line.setCurrency(headerCurrency);
+            OBDal.getInstance().save(line);
+            updated++;
+          }
+        }
+        if (updated > 0) {
+          OBDal.getInstance().flush();
+          log.info("[ETP-4027] Synced {} order-line currencies → {} on order {}",
+              updated, headerCurrencyId, recordId);
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("[ETP-4027] syncLineCurrenciesOnCurrencyPatch failed for {}: {}",
+          recordId, e.getMessage());
     }
   }
 }

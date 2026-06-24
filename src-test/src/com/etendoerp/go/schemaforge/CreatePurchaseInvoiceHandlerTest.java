@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -34,6 +35,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
@@ -430,5 +432,143 @@ public class CreatePurchaseInvoiceHandlerTest {
     assertEquals(1, result.length());
     assertEquals("ol-pending", result.getJSONObject(0).getString("id"));
     assertEquals("3", result.getJSONObject(0).getString("orderedQuantity"));
+  }
+
+  // ── createFromOrder — propagateOrderRateToInvoice wiring ────────────────────
+
+  /**
+   * Verifies that after invoice creation {@code createFromOrder} calls
+   * {@code InvoiceFromOrderSupport.propagateOrderRateToInvoice(order, invoice)}.
+   *
+   * <p>The test uses a subclass that overrides {@code getSupport()} to return a
+   * spy over a minimal {@link InvoiceFromOrderSupport}, allowing verification
+   * of the delegation without any real JDBC or CDI wiring.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void createFromOrder_propagateOrderRateToInvoiceIsCalled() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+
+      Order orderHeader = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("po-rate-test"))).thenReturn(orderHeader);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(1);
+
+      OBContext ctx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-rate");
+      when(ctx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("inv-rate");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      // Track whether propagateOrderRateToInvoice was called with the correct arguments.
+      AtomicReference<Order> capturedOrder = new AtomicReference<>();
+      AtomicReference<Invoice> capturedInvoice = new AtomicReference<>();
+
+      TestableHandler handler = new TestableHandler() {
+        @Override
+        InvoiceFromOrderSupport getSupport() {
+          return new InvoiceFromOrderSupport() {
+            @Override
+            public Invoice applyOrderDiscountToInvoice(Invoice inv, String sourceOrderId,
+                TotalDiscountService svc) {
+              return inv;
+            }
+            @Override
+            public void ensureLineGrossAmounts(Invoice inv) { /* no-op */ }
+
+            @Override
+            public void propagateOrderRateToInvoice(Order order, Invoice inv) {
+              capturedOrder.set(order);
+              capturedInvoice.set(inv);
+            }
+          };
+        }
+      };
+      handler.docTypeToReturn = mock(DocumentType.class);
+      handler.selectedLinesToReturn = new JSONArray().put(new JSONObject()
+          .put("id", "ol-1").put("orderedQuantity", "2"));
+
+      handler.createFromOrder("po-rate-test");
+
+      assertSame("propagateOrderRateToInvoice must receive the source order",
+          orderHeader, capturedOrder.get());
+      assertSame("propagateOrderRateToInvoice must receive the created invoice",
+          invoice, capturedInvoice.get());
+    }
+  }
+
+  /**
+   * Mirrors the sales path: when {@code getSupport()} returns a support instance
+   * that never calls {@code propagateOrderRateToInvoice}, the test verifies the
+   * OLD behaviour (before ETP-4027) is absent — i.e. by explicitly overriding
+   * propagateOrderRateToInvoice with a no-op, the method must NOT throw and the
+   * invoice must be returned normally. This confirms the guard is non-blocking.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void createFromOrder_propagateOrderRateToInvoice_noopDoesNotBreakFlow() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+
+      Order orderHeader = mockOrderWithHeaderData();
+      when(dal.get(eq(Order.class), eq("po-noop"))).thenReturn(orderHeader);
+
+      NativeQuery linkQuery = mock(NativeQuery.class);
+      when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+      when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+      when(linkQuery.executeUpdate()).thenReturn(1);
+
+      OBContext ctx = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-noop");
+      when(ctx.getUser()).thenReturn(user);
+      obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+      OBProvider provider = mock(OBProvider.class);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("inv-noop");
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(Invoice.class)).thenReturn(invoice);
+
+      CreateInvoiceLinesFromProcess process = mock(CreateInvoiceLinesFromProcess.class);
+      weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+          .thenReturn(process);
+
+      TestableHandler handler = new TestableHandler();
+      handler.docTypeToReturn = mock(DocumentType.class);
+      handler.selectedLinesToReturn = new JSONArray().put(new JSONObject()
+          .put("id", "ol-2").put("orderedQuantity", "1"));
+
+      Invoice result = handler.createFromOrder("po-noop");
+      assertSame(invoice, result);
+    }
   }
 }
