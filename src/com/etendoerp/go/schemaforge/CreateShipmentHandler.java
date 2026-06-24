@@ -17,8 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.util.List;
-
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
@@ -26,7 +24,6 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -156,35 +153,13 @@ public class CreateShipmentHandler implements NeoHandler {
   }
 
   private DocumentType findShipmentDocType(Order order) {
-    List<DocumentType> results = OBDal.getInstance().createCriteria(DocumentType.class)
-        .add(Restrictions.eq(DocumentType.PROPERTY_CLIENT, order.getClient()))
-        .add(Restrictions.eq(DocumentType.PROPERTY_DOCUMENTCATEGORY, "MMS"))
-        .add(Restrictions.eq(DocumentType.PROPERTY_SALESTRANSACTION, true))
-        .add(Restrictions.eq(DocumentType.PROPERTY_ACTIVE, true))
-        .setMaxResults(1)
-        .list();
-    return results.isEmpty() ? null : results.get(0);
+    return NeoCommercialDocumentFactory.findShipmentDocType(order.getClient());
   }
 
   protected Locator findDefaultLocator(Order order) {
     if (order.getWarehouse() == null) {
       return null;
     }
-    List<Locator> defaults = OBDal.getInstance().createCriteria(Locator.class)
-        .add(Restrictions.eq(Locator.PROPERTY_WAREHOUSE, order.getWarehouse()))
-        .add(Restrictions.eq(Locator.PROPERTY_DEFAULT, true))
-        .add(Restrictions.eq(Locator.PROPERTY_ACTIVE, true))
-        .setMaxResults(1)
-        .list();
-    if (!defaults.isEmpty()) {
-      return defaults.get(0);
-    }
-
-    List<Locator> any = OBDal.getInstance().createCriteria(Locator.class)
-        .add(Restrictions.eq(Locator.PROPERTY_WAREHOUSE, order.getWarehouse()))
-        .add(Restrictions.eq(Locator.PROPERTY_ACTIVE, true))
-        .setMaxResults(1)
-        .list();
-    return any.isEmpty() ? null : any.get(0);
+    return NeoCommercialDocumentFactory.findDefaultLocator(order.getWarehouse());
   }
 }
