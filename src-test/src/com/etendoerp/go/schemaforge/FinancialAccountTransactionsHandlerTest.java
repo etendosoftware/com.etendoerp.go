@@ -1429,9 +1429,9 @@ public class FinancialAccountTransactionsHandlerTest {
         eq(new BigDecimal("1.1")), eq(BigDecimal.ZERO), eq(BigDecimal.ZERO), anyString());
   }
 
-  /** A checked bank fee is forwarded as the source-side fee (bankFeeFrom). */
+  /** A checked bank fee forwards both the source-side (bankFeeFrom) and destination-side (bankFeeTo) fees. */
   @Test
-  public void testTransferBankFeeMapsToFeeFrom() throws Exception {
+  public void testTransferBankFeeMapsBothSides() throws Exception {
     FinancialAccountTransactionsHandler h = spy(new FinancialAccountTransactionsHandler());
     FIN_FinancialAccount source = accountWithCurrency("SRC", "EUR");
     FIN_FinancialAccount dest = accountWithCurrency("DST", "EUR");
@@ -1441,11 +1441,12 @@ public class FinancialAccountTransactionsHandlerTest {
     doReturn(new BigDecimal("1000")).when(h).availableBalance(source);
     doNothing().when(h).doTransfer(any(), any(), any(), any(), any(), any(), any(), any(), any());
 
-    JSONObject body = transferBody("SRC", "DST", "100").put("bankFee", true).put("bankFeeAmount", "5");
+    JSONObject body = transferBody("SRC", "DST", "100")
+        .put("bankFee", true).put("bankFeeFrom", "5").put("bankFeeTo", "3");
     h.transfer(body);
 
     verify(h).doTransfer(any(), eq(source), eq(dest), isNull(), eq(new BigDecimal("100")),
-        eq(BigDecimal.ONE), eq(new BigDecimal("5")), eq(BigDecimal.ZERO), anyString());
+        eq(BigDecimal.ONE), eq(new BigDecimal("5")), eq(new BigDecimal("3")), anyString());
   }
 
   /** An error mid-transfer (the Classic seam throws) rolls back and returns a 500 via handle(). */

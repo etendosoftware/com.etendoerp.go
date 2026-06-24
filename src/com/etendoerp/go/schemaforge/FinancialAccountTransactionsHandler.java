@@ -693,10 +693,10 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   /**
    * Validates inputs and runs the funds transfer. On confirm Classic creates two atomic
    * transactions — a withdrawal ({@code BPW}) in the source account and a deposit ({@code BPD}) in
-   * the destination — plus an optional bank-fee ({@code BF}) expense in the source; all left Pending
-   * (PWNC / RDNC) until reconciled. Body:
+   * the destination — plus optional bank-fee ({@code BF}) expenses on the source and/or destination;
+   * all left Pending (PWNC / RDNC) until reconciled. Body:
    * {@code { sourceAccountId, destinationAccountId, amount, glItemId?, transferDate?, conversionRate?,
-   * bankFee?, bankFeeAmount?, description? }}.
+   * bankFee?, bankFeeFrom?, bankFeeTo?, description? }}.
    *
    * @return {@code null}-free {@link NeoResponse}: 400 on a validation failure, 404 on a missing
    *     account, or 201 with {@code transferred:true} on success.
@@ -733,15 +733,16 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       glItem = OBDal.getInstance().get(GLItem.class, glItemId);
     }
     BigDecimal conversionRate = resolveConversionRate(source, dest, optBigDecimal(body, "conversionRate"));
-    BigDecimal bankFeeFrom = body.optBoolean("bankFee", false)
-        ? nullSafeBigDecimal(optBigDecimal(body, "bankFeeAmount"))
-        : BigDecimal.ZERO;
+    // Bank fee mirrors Classic: an optional fee on the source bank AND on the destination bank.
+    boolean withFee = body.optBoolean("bankFee", false);
+    BigDecimal bankFeeFrom = withFee ? nullSafeBigDecimal(optBigDecimal(body, "bankFeeFrom")) : BigDecimal.ZERO;
+    BigDecimal bankFeeTo = withFee ? nullSafeBigDecimal(optBigDecimal(body, "bankFeeTo")) : BigDecimal.ZERO;
     String description = body.optString("description", null);
     if (StringUtils.isBlank(description)) description = DEFAULT_TRANSFER_DESCRIPTION;
     Date transferDate = parseDate(body.optString("transferDate", null), null);
 
     doTransfer(transferDate, source, dest, glItem, amount, conversionRate, bankFeeFrom,
-        BigDecimal.ZERO, description);
+        bankFeeTo, description);
 
     JSONObject data = new JSONObject();
     data.put("transferred", true);

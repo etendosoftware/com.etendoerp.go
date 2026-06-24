@@ -176,6 +176,7 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String KEY_STATUS = "status";
   private static final String KEY_DOCUMENT_NO = "documentNo";
   private static final String KEY_PARTNER_NAME = "partnerName";
+  private static final String KEY_DESCRIPTION = "description";
   private static final String KEY_PENDING_BALANCE = "pendingBalance";
   private static final String KEY_SUGGESTED = "suggested";
   private static final String COL_PARTNER_NAME = "partner_name";
@@ -228,8 +229,14 @@ public class ReconciliationHandler implements NeoHandler {
           + "       ft.statementdate,"
           + "       COALESCE(fp.documentno, '') AS document_no,"
           + "       COALESCE(bp.name, '') AS partner_name,"
+          + "       COALESCE(ft.description, '') AS description,"
           + "       COALESCE(ft.depositamt, 0) - COALESCE(ft.paymentamt, 0) AS amount,"
-          + "       COALESCE(fp.isreceipt, 'N') AS is_receipt"
+          // Funds transfers / bank fees are GL-item transactions with no FIN_Payment, so
+          // fp.isreceipt is NULL. Derive the direction from the transaction amount instead
+          // (deposit >= payment → collection) so payment-less transactions still get bucketed.
+          + "       COALESCE(fp.isreceipt,"
+          + "                CASE WHEN COALESCE(ft.depositamt, 0) >= COALESCE(ft.paymentamt, 0)"
+          + "                     THEN 'Y' ELSE 'N' END) AS is_receipt"
           + "  FROM fin_finacc_transaction ft"
           + "  LEFT JOIN fin_payment fp ON fp.fin_payment_id = ft.fin_payment_id"
           + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = COALESCE(ft.c_bpartner_id, fp.c_bpartner_id)"
@@ -476,7 +483,11 @@ public class ReconciliationHandler implements NeoHandler {
     boolean filterDocType = StringUtils.isNotBlank(docType);
     if (filterDocType) {
       // docType maps to the payment direction: receipts (collections) vs payments.
-      sql.append(" AND fp.isreceipt = ?");
+      // Mirror the SELECT's derivation so payment-less transactions (transfers, bank
+      // fees) are matched by their amount direction instead of being dropped on NULL.
+      sql.append(" AND COALESCE(fp.isreceipt,"
+          + " CASE WHEN COALESCE(ft.depositamt, 0) >= COALESCE(ft.paymentamt, 0)"
+          + " THEN 'Y' ELSE 'N' END) = ?");
     }
     sql.append(CANDIDATES_ORDER);
     try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
@@ -495,6 +506,7 @@ public class ReconciliationHandler implements NeoHandler {
           row.put(KEY_DATE, formatDate(rs.getTimestamp("statementdate")));
           row.put(KEY_DOCUMENT_NO, StringUtils.trimToEmpty(rs.getString("document_no")));
           row.put(KEY_PARTNER_NAME, StringUtils.trimToEmpty(rs.getString(COL_PARTNER_NAME)));
+          row.put(KEY_DESCRIPTION, StringUtils.trimToEmpty(rs.getString("description")));
           row.put(KEY_AMOUNT, amount);
           // Pending balance equals the transaction amount for now (partial
           // allocations against invoices are a follow-up).
