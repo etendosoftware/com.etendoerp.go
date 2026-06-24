@@ -69,6 +69,7 @@ public class NeoSessionService {
   private static final String FALLBACK_CURRENCY = "USD";
   private static final String KEY_CURRENCY_CODE = "currencyCode";
   private static final String KEY_CURRENCY_ID = "currencyId";
+  private static final String KEY_CURRENCY_STANDARD_PRECISION = "currencyStandardPrecision";
   private static final String KEY_YOUR_COMPANY_DOCUMENT_IMAGE_ID = "yourCompanyDocumentImageId";
   private static final String KEY_ORGANIZATION = "organization";
   private static final String KEY_ORG_NAME = "name";
@@ -92,12 +93,19 @@ public class NeoSessionService {
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
     String currencyCode = FALLBACK_CURRENCY;
     String currencyId = null;
+    int standardPrecision = 2;
     String yourCompanyDocumentImageId = null;
     JSONObject organization = null;
 
     try {
       OBContext.setAdminMode(true);
       currencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+      if (currencyId != null) {
+        Currency currency = OBDal.getReadOnlyInstance().get(Currency.class, currencyId);
+        if (currency != null && currency.getStandardPrecision() != null) {
+          standardPrecision = currency.getStandardPrecision().intValue();
+        }
+      }
       currencyCode = resolveCurrencyCode(orgId);
       yourCompanyDocumentImageId = resolveYourCompanyDocumentImageId(clientId);
       organization = resolveOrganization(orgId);
@@ -112,6 +120,7 @@ public class NeoSessionService {
       JSONObject body = new JSONObject();
       body.put(KEY_CURRENCY_CODE, currencyCode);
       body.put(KEY_CURRENCY_ID, currencyId != null ? currencyId : JSONObject.NULL);
+      body.put(KEY_CURRENCY_STANDARD_PRECISION, standardPrecision);
       body.put(KEY_YOUR_COMPANY_DOCUMENT_IMAGE_ID,
           yourCompanyDocumentImageId != null ? yourCompanyDocumentImageId : JSONObject.NULL);
       body.put(KEY_ORGANIZATION, organization != null ? organization : JSONObject.NULL);

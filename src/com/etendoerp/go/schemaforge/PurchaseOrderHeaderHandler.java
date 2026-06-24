@@ -50,6 +50,9 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
   private CreatePurchaseInvoiceHandler createPurchaseInvoiceHandler;
 
   @Inject
+  private CurrencyOptionsHandler currencyOptionsHandler;
+
+  @Inject
   private TotalDiscountService totalDiscountService;
 
   @Override
@@ -64,6 +67,7 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
         context,
         cloneRecordHandler,
         createGoodsReceiptHandler,
-        createPurchaseInvoiceHandler);
+        createPurchaseInvoiceHandler,
+        currencyOptionsHandler);
   }
 }
