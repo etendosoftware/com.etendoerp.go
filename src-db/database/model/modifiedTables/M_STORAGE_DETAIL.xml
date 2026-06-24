@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE M_STORAGE_DETAIL">
+    <table name="M_STORAGE_DETAIL" primaryKey="M_STORAGE_DETAIL_KEY">
+      <column name="EM_ETGO_VALUATION" primaryKey="false" required="false" type="DECIMAL" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+    </table>
+  </database>

@@ -57,6 +57,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
@@ -92,9 +93,16 @@ class NeoCrudHandler {
           "vendorBlocking"));
 
   private final NeoServlet servlet;
+  private final NeoTelemetryService telemetryService;
 
   NeoCrudHandler(NeoServlet servlet) {
+    this(servlet, NeoTelemetryService.logging());
+  }
+
+  NeoCrudHandler(NeoServlet servlet, NeoTelemetryService telemetryService) {
     this.servlet = servlet;
+    this.telemetryService = telemetryService == null ? NeoTelemetryService.logging()
+        : telemetryService;
   }
 
   /**
@@ -193,6 +201,15 @@ class NeoCrudHandler {
    * Dispatches a CRUD request to the appropriate handler (hooked or default).
    */
   private NeoResponse dispatchCrudRequest(SFEntity entity, NeoContext neoContext,
+      HttpServletRequest request, HttpServletResponse response) {
+    if (NeoTelemetryService.isWriteMethod(neoContext.getHttpMethod())) {
+      return telemetryService.measureBackendOperation(neoContext,
+          () -> dispatchCrudRequestInternal(entity, neoContext, request, response));
+    }
+    return dispatchCrudRequestInternal(entity, neoContext, request, response);
+  }
+
+  private NeoResponse dispatchCrudRequestInternal(SFEntity entity, NeoContext neoContext,
       HttpServletRequest request, HttpServletResponse response) {
     String javaQualifier = entity.getJavaQualifier();
     if (StringUtils.isNotBlank(javaQualifier)) {
