@@ -87,12 +87,6 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       return null;
     }
 
-    // GET checkPurchaseInvoice — returns existing draft info + whether pending lines remain
-    if (CHECK_ACTION.equals(context.getFieldName()) && "GET".equals(context.getHttpMethod())
-        && SPEC_GOODS_RECEIPT.equals(specName)) {
-      return handleCheck(context);
-    }
-
     if (!ACTION_NAME.equals(context.getFieldName()) || !"POST".equals(context.getHttpMethod())) {
       return null;
     }
@@ -358,20 +352,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       throw new OBException("Goods receipt not found: " + receiptId);
     }
 
-    // Explicit overrides from the request take precedence.
-    // When none are present, compute pending quantities counting draft invoices so that
-    // lines already committed in a draft are excluded — preventing duplicate drafts.
-    // If every line is already covered by a draft, reject creation immediately.
-    Map<String, BigDecimal> explicitOverrides = parseLineOverrides(body);
-    Map<String, BigDecimal> qtyOverrides;
-    if (!explicitOverrides.isEmpty()) {
-      qtyOverrides = explicitOverrides;
-    } else {
-      qtyOverrides = NeoInvoiceSupport.computePendingQtyPerLine(receipt.getId(), true);
-      if (qtyOverrides.isEmpty()) {
-        throw new OBException("No hay líneas pendientes de facturar en este albarán de compra");
-      }
-    }
+    Map<String, BigDecimal> qtyOverrides = parseLineOverrides(body);
 
     Order linkedOrder = receipt.getSalesOrder();
     if (linkedOrder == null) {
