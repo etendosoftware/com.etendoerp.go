@@ -72,6 +72,11 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   /** AD_Reference ID for the Accounting status selector. */
   static final String ACCOUNTING_STATUS_REF_ID = "D674E22A40DE4CEE931AB96F4CD914F9";
 
+  private static final String KEY_TABLE_ID = "tableId";
+  private static final String KEY_ACCOUNTING_STATUS = "accountingStatus";
+  private static final String KEY_RECORD_ID = "recordId";
+  private static final String KEY_SUCCESS = "success";
+
   /**
    * Maps the {@code documentType} string returned by {@link NoPostedDocumentDS} to the
    * corresponding {@code AD_Table_ID}. Used to enrich grid rows so the frontend can call
@@ -155,7 +160,7 @@ public class NotPostedDocumentsHandler implements NeoHandler {
       Object docType = row.get("documentType");
       if (docType instanceof String) {
         String tableId = DOCUMENT_TYPE_TO_TABLE_ID.get(docType);
-        j.put("tableId", tableId != null ? tableId : JSONObject.NULL);
+        j.put(KEY_TABLE_ID, tableId != null ? tableId : JSONObject.NULL);
       }
       array.put(j);
     }
@@ -181,18 +186,18 @@ public class NotPostedDocumentsHandler implements NeoHandler {
       criteria.put(criterion("document", "iEquals", document));
     }
 
-    String accountingStatus = params.get("accountingStatus");
+    String accountingStatus = params.get(KEY_ACCOUNTING_STATUS);
     if (accountingStatus != null && !accountingStatus.isEmpty()) {
       // May be a comma-separated list from multi-select
       String[] statuses = accountingStatus.split(",");
       if (statuses.length == 1) {
-        criteria.put(criterion("accountingStatus", "iEquals", accountingStatus.trim()));
+        criteria.put(criterion(KEY_ACCOUNTING_STATUS, "iEquals", accountingStatus.trim()));
       } else {
         JSONArray values = new JSONArray();
         for (String s : statuses) {
           values.put(s.trim());
         }
-        criteria.put(criterion("accountingStatus", "inSet", values));
+        criteria.put(criterion(KEY_ACCOUNTING_STATUS, "inSet", values));
       }
     }
 
@@ -241,11 +246,11 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   }
 
   private NeoResponse handleSinglePost(JSONObject body) throws Exception {
-    String tableId = body.getString("tableId");
-    String recordId = body.getString("recordId");
+    String tableId = body.getString(KEY_TABLE_ID);
+    String recordId = body.getString(KEY_RECORD_ID);
     DocumentPostingService.PostResult result = postingService.post(tableId, recordId);
     JSONObject resp = new JSONObject();
-    resp.put("success", result.ok());
+    resp.put(KEY_SUCCESS, result.ok());
     resp.put("message", result.message());
     return result.ok() ? NeoResponse.ok(resp) : NeoResponse.error(422, resp.toString());
   }
@@ -258,16 +263,16 @@ public class NotPostedDocumentsHandler implements NeoHandler {
 
     for (int i = 0; i < total; i++) {
       JSONObject row = rows.getJSONObject(i);
-      String tableId = row.getString("tableId");
-      String recordId = row.getString("recordId");
+      String tableId = row.getString(KEY_TABLE_ID);
+      String recordId = row.getString(KEY_RECORD_ID);
       DocumentPostingService.PostResult result = postingService.post(tableId, recordId);
       if (result.ok()) {
         ok++;
       }
       JSONObject rowResult = new JSONObject();
-      rowResult.put("recordId", recordId);
-      rowResult.put("tableId", tableId);
-      rowResult.put("success", result.ok());
+      rowResult.put(KEY_RECORD_ID, recordId);
+      rowResult.put(KEY_TABLE_ID, tableId);
+      rowResult.put(KEY_SUCCESS, result.ok());
       rowResult.put("message", result.message());
       results.put(rowResult);
     }
@@ -276,7 +281,7 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     resp.put("ok", ok);
     resp.put("total", total);
     resp.put("results", results);
-    resp.put("success", ok == total);
+    resp.put(KEY_SUCCESS, ok == total);
     return NeoResponse.ok(resp);
   }
 

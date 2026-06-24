@@ -44,7 +44,6 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * <p>Posting always runs with {@code force = false} so an already-posted document is never
  * force-reposted.</p>
  *
- * <p>TODO(roles): Post=financiero+admin; Unpost=admin — gate when GO gains a role model.</p>
  */
 public class DocumentPostingService {
 
