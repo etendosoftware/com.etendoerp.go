@@ -93,15 +93,18 @@ final class NeoInvoiceSupport {
           + "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'";
       paramCount = 1;
     } else {
-      // draft_unlinked: draft invoices whose lines have no M_InOutLine_ID yet — find
-      // the matching shipment line via C_OrderLine_ID, scoped to this exact shipment.
+      // draft_all: ANY draft invoice linked to the same order line as the receipt line,
+      // regardless of whether m_inoutline_id is NULL (created from PO) or points to a
+      // different receipt (InvoiceLineLinker already ran for a prior receipt).
+      // GREATEST across all three paths — no additive double-counting.
       sql =
           "SELECT sil.m_inoutline_id, "
           + "  ABS(sil.movementqty) AS movement_qty, "
           + "  COALESCE(GREATEST("
           + "    COALESCE(msi_qty.qtymatched, 0), "
-          + "    COALESCE(direct_qty.qtyinvoiced, 0) "
-          + "  ), 0) + COALESCE(draft_unlinked.qtydraft, 0) AS invoiced_qty "
+          + "    COALESCE(direct_qty.qtyinvoiced, 0), "
+          + "    COALESCE(draft_all.qtydraft, 0) "
+          + "  ), 0) AS invoiced_qty "
           + "FROM m_inoutline sil "
           + "LEFT JOIN ("
           + "  SELECT msi.m_inoutline_id, SUM(ABS(msi.qty)) AS qtymatched "
@@ -126,12 +129,11 @@ final class NeoInvoiceSupport {
           + "  JOIN m_inoutline iol ON iol.c_orderline_id = il3.c_orderline_id "
           + "                      AND iol.m_inout_id = ? "
           + "  WHERE i3.docstatus = 'DR' AND i3.isactive = 'Y' "
-          + "    AND il3.m_inoutline_id IS NULL "
           + "    AND il3.c_orderline_id IS NOT NULL "
           + "  GROUP BY iol.m_inoutline_id "
-          + ") draft_unlinked ON draft_unlinked.m_inoutline_id = sil.m_inoutline_id "
+          + ") draft_all ON draft_all.m_inoutline_id = sil.m_inoutline_id "
           + "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'";
-      paramCount = 2;  // first ? = inOutId (draft_unlinked scope), second ? = inOutId (WHERE)
+      paramCount = 2;  // first ? = inOutId (draft_all scope), second ? = inOutId (WHERE)
     }
 
     Map<String, BigDecimal> result = new HashMap<>();
