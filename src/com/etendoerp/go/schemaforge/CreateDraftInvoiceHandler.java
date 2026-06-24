@@ -358,7 +358,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     try {
       OBContext.setAdminMode(true);
       try {
-        Map<String, BigDecimal> pendingMap = computePendingQtyPerLine(recordId);
+        Map<String, BigDecimal> pendingMap = computePendingQtyPerLine(recordId, true);
         JSONArray arr = new JSONArray();
         for (Map.Entry<String, BigDecimal> entry : pendingMap.entrySet()) {
           JSONObject item = new JSONObject();
@@ -811,8 +811,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     // Single shipment with a linked order: delegate to createFromOrder so that
     // CreateInvoiceLinesFromProcess handles price-list lookups, taxes, and pending
     // quantity exactly as Etendo core does — avoiding the manual pricelist=0 issue.
+    // Cap overrides by draft-aware pending so a second draft cannot be created for
+    // quantities already committed in an existing draft invoice.
     if (shipments.size() == 1 && first.getSalesOrder() != null) {
-      Map<String, BigDecimal> orderLineOverrides = translateToOrderLineOverrides(first, lineOverrides);
+      Map<String, BigDecimal> draftCapped = capShipmentLineOverrides(first, lineOverrides);
+      Map<String, BigDecimal> orderLineOverrides = translateToOrderLineOverrides(first, draftCapped);
       return createFromOrder(first.getSalesOrder().getId(), orderLineOverrides);
     }
 
@@ -821,6 +824,33 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     OBDal.getInstance().flush();
     addShipmentLinesToInvoice(invoice, shipments, lineOverrides);
     return invoice;
+  }
+
+  /**
+   * Reduces each shipment-line override by the draft-aware pending quantity so that
+   * quantities already committed in a draft invoice cannot be re-invoiced by a second
+   * draft. Lines whose remaining pending qty ≤ 0 are dropped from the result, causing
+   * {@link #createFromOrder} to skip them. When {@code lineOverrides} is empty (no
+   * per-line selection from the frontend) the method returns it unchanged.
+   */
+  private Map<String, BigDecimal> capShipmentLineOverrides(ShipmentInOut shipment,
+      Map<String, BigDecimal> lineOverrides) {
+    if (lineOverrides.isEmpty()) {
+      return lineOverrides;
+    }
+    Map<String, BigDecimal> pending = computePendingQtyPerLine(shipment.getId(), true);
+    Map<String, BigDecimal> capped = new HashMap<>();
+    for (Map.Entry<String, BigDecimal> entry : lineOverrides.entrySet()) {
+      BigDecimal pendingQty = pending.getOrDefault(entry.getKey(), BigDecimal.ZERO);
+      BigDecimal cappedQty = entry.getValue().min(pendingQty);
+      if (cappedQty.compareTo(BigDecimal.ZERO) > 0) {
+        capped.put(entry.getKey(), cappedQty);
+      }
+    }
+    if (capped.isEmpty()) {
+      throw new OBException("No hay líneas pendientes de facturar en este albarán");
+    }
+    return capped;
   }
 
   /**
@@ -966,7 +996,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     // Etendo Core's C_Invoice_Create behaviour (pending = ordered - invoiced).
     Map<String, BigDecimal> pendingQtyMap = new HashMap<>();
     for (ShipmentInOut shipment : shipments) {
-      pendingQtyMap.putAll(computePendingQtyPerLine(shipment.getId()));
+      pendingQtyMap.putAll(computePendingQtyPerLine(shipment.getId(), true));
     }
 
     boolean hasOverrides = !lineOverrides.isEmpty();

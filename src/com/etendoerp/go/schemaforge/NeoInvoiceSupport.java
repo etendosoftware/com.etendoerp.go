@@ -40,14 +40,24 @@ final class NeoInvoiceSupport {
   /**
    * Returns the pending (not yet invoiced) quantity for every active line of the
    * given shipment or goods receipt. Uses GREATEST(M_MatchSI, direct C_InvoiceLine)
-   * to avoid double-counting, and excludes voided, closed, and draft invoices.
+   * to avoid double-counting, and excludes voided and closed invoices.
+   * Draft invoices are excluded by default (pass {@code true} to include them).
    *
-   * @param inOutId the M_InOut_ID of the shipment or receipt
+   * @param inOutId        the M_InOut_ID of the shipment or receipt
+   * @param includeDrafts  when {@code true} draft invoices count toward invoiced qty,
+   *                       preventing duplicate drafts; when {@code false} (default)
+   *                       drafts are excluded so the billing-status badge is unaffected
    * @return map of M_InOutLine_ID → pending quantity (lines with pending ≤ 0 are omitted)
    */
-  // placeholders / WHERE clause built from a trusted internal ID — no injection risk.
-  @SuppressWarnings("java:S2077")
+  /** Delegates to {@link #computePendingQtyPerLine(String, boolean)} with {@code includeDrafts=false}. */
   static Map<String, BigDecimal> computePendingQtyPerLine(String inOutId) {
+    return computePendingQtyPerLine(inOutId, false);
+  }
+
+  // statusFilter is a hardcoded literal derived from a boolean — no injection risk.
+  @SuppressWarnings("java:S2077")
+  static Map<String, BigDecimal> computePendingQtyPerLine(String inOutId, boolean includeDrafts) {
+    String statusFilter = includeDrafts ? "'VO','CL'" : "'VO','CL','DR'";
     String sql =
         "SELECT sil.m_inoutline_id, "
         + "  ABS(sil.movementqty) AS movement_qty, "
@@ -61,14 +71,14 @@ final class NeoInvoiceSupport {
         + "  FROM m_matchsi msi "
         + "  JOIN c_invoiceline il ON il.c_invoiceline_id = msi.c_invoiceline_id "
         + "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
-        + "  WHERE i.docstatus NOT IN ('VO','CL','DR') AND i.isactive = 'Y' "
+        + "  WHERE i.docstatus NOT IN (" + statusFilter + ") AND i.isactive = 'Y' "
         + "  GROUP BY msi.m_inoutline_id "
         + ") msi_qty ON msi_qty.m_inoutline_id = sil.m_inoutline_id "
         + "LEFT JOIN ("
         + "  SELECT il2.m_inoutline_id, SUM(ABS(il2.qtyinvoiced)) AS qtyinvoiced "
         + "  FROM c_invoiceline il2 "
         + "  JOIN c_invoice i2 ON i2.c_invoice_id = il2.c_invoice_id "
-        + "  WHERE i2.docstatus NOT IN ('VO','CL','DR') AND i2.isactive = 'Y' "
+        + "  WHERE i2.docstatus NOT IN (" + statusFilter + ") AND i2.isactive = 'Y' "
         + "  GROUP BY il2.m_inoutline_id "
         + ") direct_qty ON direct_qty.m_inoutline_id = sil.m_inoutline_id "
         + "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'";
