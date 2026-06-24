@@ -18,25 +18,49 @@ package com.etendoerp.go.oauth2;
 
 import static org.junit.Assert.assertEquals;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.util.Properties;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.base.session.OBPropertiesProvider;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 
 /** Tests OAuth2 discovery metadata used by remote MCP clients. */
 public class OAuth2ServletMetadataTest {
 
+  private MockedStatic<OBPropertiesProvider> propertiesMock;
+
+  /**
+   * Isolate from the ambient Openbravo.properties so a developer's local
+   * {@code etgo.oauth2.public.url} does not override the servlet-derived endpoints
+   * these assertions expect. {@code PublicUrlResolver.readProperty} falls back to
+   * {@code OBPropertiesProvider} when the System property is unset.
+   */
+  @Before
+  public void mockOpenbravoProperties() {
+    OBPropertiesProvider provider = mock(OBPropertiesProvider.class);
+    when(provider.getOpenbravoProperties()).thenReturn(new Properties());
+    propertiesMock = mockStatic(OBPropertiesProvider.class);
+    propertiesMock.when(OBPropertiesProvider::getInstance).thenReturn(provider);
+  }
+
   @After
   public void clearProperties() {
+    if (propertiesMock != null) {
+      propertiesMock.close();
+    }
     System.clearProperty(PublicUrlResolver.OAUTH2_PUBLIC_URL_PROPERTY);
   }
 
