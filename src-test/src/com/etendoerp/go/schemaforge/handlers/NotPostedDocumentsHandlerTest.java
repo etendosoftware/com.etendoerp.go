@@ -156,4 +156,40 @@ public class NotPostedDocumentsHandlerTest {
     assertEquals(1, resp.getBody().getInt("ok"));
     assertEquals(2, resp.getBody().getInt("total"));
   }
+
+  @Test
+  public void handleReturns500WhenPostBodyIsMissingRequiredFields() throws Exception {
+    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+    DocumentPostingService service = mock(DocumentPostingService.class);
+    handler.setPostingService(service);
+
+    // Missing "tableId" and "recordId" → getString() throws JSONException → caught → 500
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+    when(ctx.getFieldName()).thenReturn("post");
+    when(ctx.getRequestBody()).thenReturn(new JSONObject());
+
+    NeoResponse resp = handler.handle(ctx);
+
+    assertNotNull(resp);
+    assertEquals(500, resp.getHttpStatus());
+  }
+
+  @Test
+  public void handleReturns500WhenBulkPostBodyIsMissingRows() throws Exception {
+    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+    DocumentPostingService service = mock(DocumentPostingService.class);
+    handler.setPostingService(service);
+
+    // Missing "rows" key → getJSONArray() throws JSONException → caught → 500
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.ACTION);
+    when(ctx.getFieldName()).thenReturn("bulk-post");
+    when(ctx.getRequestBody()).thenReturn(new JSONObject());
+
+    NeoResponse resp = handler.handle(ctx);
+
+    assertNotNull(resp);
+    assertEquals(500, resp.getHttpStatus());
+  }
 }

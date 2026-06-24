@@ -642,4 +642,18 @@ public class GoodsShipmentHeaderHandlerTest {
       assertNotNull(result);
     }
   }
+
+  @Test
+  public void handleReturnsPostingResponseWhenServiceHandlesAction() {
+    com.etendoerp.go.schemaforge.handlers.DocumentPostingService service =
+        mock(com.etendoerp.go.schemaforge.handlers.DocumentPostingService.class);
+    NeoContext ctx = mock(NeoContext.class);
+    NeoResponse sentinel = NeoResponse.ok(new JSONObject());
+    when(service.handleAction(ctx)).thenReturn(sentinel);
+
+    GoodsShipmentHeaderHandler h = new GoodsShipmentHeaderHandler();
+    h.setPostingService(service);
+
+    assertSame(sentinel, h.handle(ctx));
+  }
 }

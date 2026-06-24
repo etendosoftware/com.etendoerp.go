@@ -25,6 +25,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -259,6 +260,99 @@ public class DocumentPostingServiceTest {
 
     assertNotNull(resp);
     assertEquals(200, resp.getHttpStatus());
+  }
+
+  @Test
+  public void unpostReturnsFailureOnException() {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    try (MockedStatic<ResetAccounting> ra = mockStatic(ResetAccounting.class);
+        MockedStatic<OBContext> obc = mockStatic(OBContext.class)) {
+      stubObContext(obc);
+      ra.when(() -> ResetAccounting.delete(anyString(), anyString(), anyString(), anyString(), anyString(), anyString()))
+          .thenThrow(new RuntimeException("DB error"));
+
+      DocumentPostingService.PostResult r = svc.unpost("259", "rec-1");
+
+      assertFalse(r.ok());
+      assertNotNull(r.message());
+    }
+  }
+
+  @Test
+  public void postReturnsDefaultMessageWhenAcctServerResultIsNull() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getMessageResult()).thenReturn(null);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Posting failed", r.message());
+    }
+  }
+
+  @Test
+  public void postReturnsDefaultMessageWhenAcctServerResultMessageIsEmpty() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    OBError emptyErr = new OBError();
+    emptyErr.setMessage("");
+    when(acct.getMessageResult()).thenReturn(emptyErr);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Posting failed", r.message());
+    }
+  }
+
+  @Test
+  public void rollbackQuietlyIgnoresRollbackException() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+    doThrow(new RuntimeException("rollback failed")).when(conn).releaseRollbackConnection(con);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenThrow(new RuntimeException("acct engine failed"));
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertNotNull(r.message());
+    }
   }
 
   @Test

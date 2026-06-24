@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -427,5 +428,19 @@ public class AmortizationHeaderHandlerTest {
   public void testHandlerIsRegisteredWithExpectedQualifier() {
     javax.inject.Named named = AmortizationHeaderHandler.class.getAnnotation(javax.inject.Named.class);
     assertTrue(named != null && "amortizationHeaderHandler".equals(named.value()));
+  }
+
+  @Test
+  public void handleReturnsPostingResponseWhenServiceHandlesAction() {
+    com.etendoerp.go.schemaforge.handlers.DocumentPostingService service =
+        mock(com.etendoerp.go.schemaforge.handlers.DocumentPostingService.class);
+    NeoContext context = mock(NeoContext.class);
+    NeoResponse sentinel = NeoResponse.ok(new JSONObject());
+    when(service.handleAction(context)).thenReturn(sentinel);
+
+    AmortizationHeaderHandler handler = new AmortizationHeaderHandler();
+    handler.setPostingService(service);
+
+    assertSame(sentinel, handler.handle(context));
   }
 }
