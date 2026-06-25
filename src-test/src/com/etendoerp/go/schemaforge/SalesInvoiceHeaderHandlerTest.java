@@ -22,6 +22,8 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -583,6 +585,152 @@ public class SalesInvoiceHeaderHandlerTest {
 
       TestableSalesHandler h = new TestableSalesHandler();
       assertEquals("FAC", h.callResolveSubtype("dt-err"));
+    }
+  }
+
+  // ── handle(): exchange rate validation path ───────────────────────────────
+
+  /**
+   * Verifies that handle() returns the exchange rate error immediately when
+   * {@code validateExchangeRateBeforeComplete} returns a non-null response.
+   */
+  @Test
+  public void handle_exchangeRateError_shortCircuits() {
+    NeoResponse expected = NeoResponse.error(422, "Exchange rate required");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).build();
+    try (MockedStatic<AbstractOrderHeaderHandler> ahMock =
+             Mockito.mockStatic(AbstractOrderHeaderHandler.class)) {
+      ahMock.when(() -> AbstractOrderHeaderHandler.validateExchangeRateBeforeComplete(ctx))
+          .thenReturn(expected);
+      NeoResponse result = new SalesInvoiceHeaderHandler().handle(ctx);
+      assertSame(expected, result);
+    }
+  }
+
+  // ── afterHandle(): amount negation for NC / DEV subtypes ─────────────────
+
+  /**
+   * Builds a body for NC/DEV subtype tests with a specific transactionDocument field.
+   */
+  private static JSONObject invoiceBodyWithDocType(String docTypeId, double grand, double outstanding)
+      throws Exception {
+    JSONObject invoice = new JSONObject()
+        .put("transactionDocument", docTypeId)
+        .put("processed", false)
+        .put("etgoTotalDiscount", 0.0)
+        .put("grandTotalAmount", grand)
+        .put("outstandingAmount", outstanding);
+    return new JSONObject().put("response", new JSONObject().put("data", new JSONArray().put(invoice)));
+  }
+
+  /**
+   * Verifies that grandTotalAmount and outstandingAmount are negated for NC (credit memo)
+   * subtype records when amounts are positive.
+   */
+  @Test
+  public void afterHandle_ncSubtype_negatesPositiveAmounts() throws Exception {
+    JSONObject body = invoiceBodyWithDocType("dt-arc", 150.0, 100.0);
+    NeoContext ctx = getCtx(); // list mode — no recordId, no enrichSourceInvoice call
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARC");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("NC", rec.getString("arInvoiceSubtype"));
+      assertEquals(-150.0, rec.getDouble("grandTotalAmount"), 0.001);
+      assertEquals(-100.0, rec.getDouble("outstandingAmount"), 0.001);
+    }
+  }
+
+  /**
+   * Verifies that grandTotalAmount and outstandingAmount are negated for DEV (return invoice)
+   * subtype records when amounts are positive.
+   */
+  @Test
+  public void afterHandle_devSubtype_negatesPositiveAmounts() throws Exception {
+    JSONObject body = invoiceBodyWithDocType("dt-ari-rm", 200.0, 200.0);
+    NeoContext ctx = getCtx(); // list mode
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI_RM");
+      when(dal.get(DocumentType.class, "dt-ari-rm")).thenReturn(dt);
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("DEV", rec.getString("arInvoiceSubtype"));
+      assertEquals(-200.0, rec.getDouble("grandTotalAmount"), 0.001);
+      assertEquals(-200.0, rec.getDouble("outstandingAmount"), 0.001);
+    }
+  }
+
+  /**
+   * Verifies that non-positive amounts are NOT negated — the guard {@code grand > 0} must hold.
+   */
+  @Test
+  public void afterHandle_ncSubtype_doesNotNegateZeroOrNegativeAmounts() throws Exception {
+    JSONObject body = invoiceBodyWithDocType("dt-arc", 0.0, -50.0);
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARC");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals(0.0, rec.getDouble("grandTotalAmount"), 0.001);   // unchanged
+      assertEquals(-50.0, rec.getDouble("outstandingAmount"), 0.001); // already negative, unchanged
+    }
+  }
+
+  // ── afterHandle(): enrichDocTypeLocked in detail view ───────────────────
+
+  /**
+   * Verifies that {@code docTypeLocked = true} is injected for detail-view GET responses
+   * (i.e., when context carries a recordId).
+   */
+  @Test
+  public void afterHandle_detailView_enrichesDocTypeLocked() throws Exception {
+    JSONObject body = invoiceBodyNoDiscount("inv-lock");
+    NeoContext ctx = getDetailCtx("inv-lock");
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false); // no return receipt found
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertTrue("docTypeLocked must be true in detail view", rec.getBoolean("docTypeLocked"));
     }
   }
 

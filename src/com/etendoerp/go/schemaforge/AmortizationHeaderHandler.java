@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 
+import javax.inject.Inject;
 import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
@@ -30,6 +31,8 @@ import org.openbravo.base.model.Property;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.service.OBDal;
+
+import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 
 /**
  * NeoHandler for the {@code header} entity of the {@code amortization} spec.
@@ -62,8 +65,20 @@ public class AmortizationHeaderHandler implements NeoHandler {
   private static final String NAME_PREFIX = "Amortización - ";
   private static final String NAME_FALLBACK = "Amortización";
 
+  @Inject
+  private DocumentPostingService postingService;
+
+  /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
+  void setPostingService(DocumentPostingService postingService) {
+    this.postingService = postingService;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
+    if (posting != null) {
+      return posting;
+    }
     // Pre-hook: nothing to intercept — let the defaults service run first
     return null;
   }
