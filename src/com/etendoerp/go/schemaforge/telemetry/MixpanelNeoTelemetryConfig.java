@@ -48,6 +48,15 @@ public final class MixpanelNeoTelemetryConfig {
   private final String distinctId;
   private final int timeoutMs;
 
+  /**
+   * Creates immutable backend Mixpanel configuration with normalized optional values.
+   *
+   * @param enabled whether backend Mixpanel submission is enabled
+   * @param token Mixpanel project token
+   * @param apiHost Mixpanel API host
+   * @param distinctId backend distinct identifier
+   * @param timeoutMs HTTP connect/read timeout in milliseconds
+   */
   public MixpanelNeoTelemetryConfig(
       boolean enabled, String token, String apiHost, String distinctId, int timeoutMs) {
     this.enabled = enabled;
@@ -57,6 +66,11 @@ public final class MixpanelNeoTelemetryConfig {
     this.timeoutMs = timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS;
   }
 
+  /**
+   * Reads backend Mixpanel configuration from Java, Openbravo, or environment properties.
+   *
+   * @return runtime backend Mixpanel configuration
+   */
   public static MixpanelNeoTelemetryConfig fromRuntime() {
     boolean enabled = isTruthy(readConfigValue(PROP_ENABLED, ENV_ENABLED, "true"));
     String token = readConfigValue(PROP_TOKEN, ENV_TOKEN, null);

@@ -127,6 +127,13 @@ final class MixpanelNeoTelemetrySink implements NeoTelemetrySink {
 
   @FunctionalInterface
   interface ConnectionFactory {
+    /**
+     * Opens an HTTP connection to the Mixpanel track endpoint.
+     *
+     * @param url Mixpanel track endpoint URL
+     * @return opened HTTP connection
+     * @throws IOException when the connection cannot be opened
+     */
     HttpURLConnection open(URL url) throws IOException;
   }
 }
