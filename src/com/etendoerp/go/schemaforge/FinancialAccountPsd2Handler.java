@@ -135,6 +135,9 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   private static final String KEY_NATURE = "nature";
   private static final String KEY_WARNING = "warning";
   private static final String KEY_PROVIDER_NAME = "providerName";
+  private static final String KEY_IMPORT_FROM_DATE = "importFromDate";
+  private static final String KEY_IMPORT_TO_DATE = "importToDate";
+  private static final String KEY_STATEMENT_GROUPING = "statementGrouping";
   private static final String KEY_PROVIDER_LOGO = "providerLogoUrl";
   private static final String KEY_LOGO_URL = "logo_url";
   private static final String KEY_DATA = "data";
@@ -221,15 +224,15 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     boolean connected = BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
         .equals(finAcc.getPSD2ConnectionStatus());
     data.put("connected", connected);
-    data.put("saltEdgeAccountId", finAcc.getPSD2SaltEdgeAccountID());
+    data.put(KEY_SALT_EDGE_ACCOUNT_ID, finAcc.getPSD2SaltEdgeAccountID());
     data.put("maskedPan", finAcc.getPSD2CardNumber());
-    data.put("importFromDate", formatDate(finAcc.getPSD2ImportFromDate()));
-    data.put("importToDate", formatDate(finAcc.getPSD2ImportToDate()));
-    data.put("statementGrouping", finAcc.getPSD2StatementFrequency());
+    data.put(KEY_IMPORT_FROM_DATE, formatDate(finAcc.getPSD2ImportFromDate()));
+    data.put(KEY_IMPORT_TO_DATE, formatDate(finAcc.getPSD2ImportToDate()));
+    data.put(KEY_STATEMENT_GROUPING, finAcc.getPSD2StatementFrequency());
     if (connection != null) {
       Date expiresAt = connection.getConsentExpiresAt();
-      data.put("status", connection.getConnectionStatus());
-      data.put("providerName", connection.getProviderName());
+      data.put(ACTION_STATUS, connection.getConnectionStatus());
+      data.put(KEY_PROVIDER_NAME, connection.getProviderName());
       data.put("scopes", connection.getFetchScopes());
       data.put("consentExpiresAt", formatInstant(expiresAt));
       data.put("daysUntilExpires", daysUntil(expiresAt));
@@ -306,13 +309,10 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     JSONArray providers = new JSONArray();
     for (int i = 0; i < all.length(); i++) {
       JSONObject row = all.optJSONObject(i);
-      if (row == null) {
-        continue;
+      boolean matchesQuery = q == null || StringUtils.containsIgnoreCase(row != null ? row.optString(KEY_NAME, "") : "", q);
+      if (row != null && matchesQuery) {
+        providers.put(row);
       }
-      if (q != null && !StringUtils.containsIgnoreCase(row.optString(KEY_NAME, ""), q)) {
-        continue;
-      }
-      providers.put(row);
     }
 
     JSONObject out = new JSONObject();
@@ -362,14 +362,13 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
         }
         String code = p.optString(KEY_CODE, "");
         String name = p.optString(KEY_NAME, "");
-        if (StringUtils.isBlank(code) || StringUtils.isBlank(name)) {
-          continue;
+        if (!StringUtils.isBlank(code) && !StringUtils.isBlank(name)) {
+          JSONObject row = new JSONObject();
+          row.put(KEY_CODE, code);
+          row.put(KEY_NAME, name);
+          row.put("logoUrl", p.optString(KEY_LOGO_URL, ""));
+          providers.put(row);
         }
-        JSONObject row = new JSONObject();
-        row.put(KEY_CODE, code);
-        row.put(KEY_NAME, name);
-        row.put("logoUrl", p.optString(KEY_LOGO_URL, ""));
-        providers.put(row);
       }
     }
     return providers;
@@ -530,7 +529,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     // button (GetTransactions action) — both delegate to fetchAccountTransactions.
     String status = SaltEdgeAccountLinkHelper.fetchAccountTransactions(finAcc, messages);
     JSONObject data = new JSONObject();
-    data.put("status", status);
+    data.put(ACTION_STATUS, status);
     data.put("message", messages.toString().trim());
     return okData(data);
   }
@@ -546,14 +545,14 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     if (finAcc == null) {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
     }
-    if (body.has("importFromDate")) {
-      finAcc.setPSD2ImportFromDate(parseDate(bodyString(body, "importFromDate")));
+    if (body.has(KEY_IMPORT_FROM_DATE)) {
+      finAcc.setPSD2ImportFromDate(parseDate(bodyString(body, KEY_IMPORT_FROM_DATE)));
     }
-    if (body.has("importToDate")) {
-      finAcc.setPSD2ImportToDate(parseDate(bodyString(body, "importToDate")));
+    if (body.has(KEY_IMPORT_TO_DATE)) {
+      finAcc.setPSD2ImportToDate(parseDate(bodyString(body, KEY_IMPORT_TO_DATE)));
     }
-    if (body.has("statementGrouping")) {
-      finAcc.setPSD2StatementFrequency(bodyString(body, "statementGrouping"));
+    if (body.has(KEY_STATEMENT_GROUPING)) {
+      finAcc.setPSD2StatementFrequency(bodyString(body, KEY_STATEMENT_GROUPING));
     }
     OBDal.getInstance().save(finAcc);
     OBDal.getInstance().flush();
@@ -634,7 +633,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
 
   private static JSONArray defaultFetchScopes() {
     JSONArray scopes = new JSONArray();
-    scopes.put("accounts");
+    scopes.put(ACTION_ACCOUNTS);
     scopes.put("balance");
     scopes.put(BankIntegrationConstants.TRANSACTIONS);
     scopes.put(BankIntegrationConstants.HOLDER_INFO);
