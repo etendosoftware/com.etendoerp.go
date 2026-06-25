@@ -105,7 +105,8 @@ public class CurrencyOptionsHandler implements NeoHandler {
         orgId    = order.getOrganization().getId();
         clientId = order.getClient().getId();
         orderDate = order.getOrderDate() != null
-            ? new java.sql.Date(order.getOrderDate().getTime()).toLocalDate()
+            ? java.time.Instant.ofEpochMilli(order.getOrderDate().getTime())
+                .atZone(java.time.ZoneId.systemDefault()).toLocalDate()
             : LocalDate.now();
       }
 
@@ -145,94 +146,10 @@ public class CurrencyOptionsHandler implements NeoHandler {
     Connection conn = OBDal.getInstance().getConnection();
     java.sql.Date sqlDate = java.sql.Date.valueOf(orderDate);
 
-    // Map of currencyId → {isoCode, rate} — LinkedHashMap preserves insertion order
-    Map<String, double[]> rateMap = new LinkedHashMap<>();
+    Map<String, double[]> rateMap = queryDirectRates(conn, orgCurrencyId, clientId, orgId, sqlDate);
+    mergeInverseRates(conn, orgCurrencyId, rateMap, clientId, orgId, sqlDate);
 
-    // Direct rates: org currency → other currencies
-    String directSql =
-        "SELECT cr.c_currency_id_to AS cid, c.iso_code, cr.multiplyrate"
-      + " FROM c_conversion_rate cr"
-      + " JOIN c_currency c ON c.c_currency_id = cr.c_currency_id_to"
-      + " WHERE cr.c_currency_id = ?"
-      + " AND cr.ad_client_id = ?"
-      + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
-      + " AND cr.isactive = 'Y'"
-      + " AND c.isactive = 'Y'"
-      + " AND cr.validfrom <= ?"
-      + " AND (cr.validto IS NULL OR cr.validto >= ?)"
-      + " ORDER BY c.iso_code";
-
-    try (PreparedStatement ps = conn.prepareStatement(directSql)) {
-      ps.setString(1, orgCurrencyId);
-      ps.setString(2, clientId);
-      ps.setString(3, orgId);
-      ps.setDate(4, sqlDate);
-      ps.setDate(5, sqlDate);
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          String cid = rs.getString("cid");
-          double rate = rs.getDouble("multiplyrate");
-          rateMap.put(cid, new double[]{ rate });
-        }
-      }
-    }
-
-    // Inverse rates: other currencies → org currency (rate = 1/divideRate = multiplyRate inverted)
-    String inverseSql =
-        "SELECT cr.c_currency_id AS cid, c.iso_code, cr.multiplyrate AS inv_rate"
-      + " FROM c_conversion_rate cr"
-      + " JOIN c_currency c ON c.c_currency_id = cr.c_currency_id"
-      + " WHERE cr.c_currency_id_to = ?"
-      + " AND cr.ad_client_id = ?"
-      + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
-      + " AND cr.isactive = 'Y'"
-      + " AND c.isactive = 'Y'"
-      + " AND cr.validfrom <= ?"
-      + " AND (cr.validto IS NULL OR cr.validto >= ?)"
-      + " ORDER BY c.iso_code";
-
-    // Collect inverse candidates separately to avoid overwriting direct rates
-    Map<String, double[]> inverseMap = new LinkedHashMap<>();
-    try (PreparedStatement ps = conn.prepareStatement(inverseSql)) {
-      ps.setString(1, orgCurrencyId);
-      ps.setString(2, clientId);
-      ps.setString(3, orgId);
-      ps.setDate(4, sqlDate);
-      ps.setDate(5, sqlDate);
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          String cid = rs.getString("cid");
-          if (!rateMap.containsKey(cid)) {
-            double invRate = rs.getDouble("inv_rate");
-            double displayRate = invRate != 0 ? 1.0 / invRate : 0.0;
-            inverseMap.put(cid, new double[]{ displayRate });
-          }
-        }
-      }
-    }
-
-    // Resolve ISO codes for inverse-only currencies
-    if (!inverseMap.isEmpty()) {
-      String isoSql = "SELECT c_currency_id, iso_code FROM c_currency WHERE c_currency_id = ANY(?) AND isactive = 'Y'";
-      String[] ids = inverseMap.keySet().toArray(new String[0]);
-      try (PreparedStatement ps = conn.prepareStatement(isoSql)) {
-        ps.setArray(1, conn.createArrayOf("text", ids));
-        try (ResultSet rs = ps.executeQuery()) {
-          while (rs.next()) {
-            String cid = rs.getString(1);
-            double[] entry = inverseMap.get(cid);
-            if (entry != null) {
-              rateMap.put(cid, new double[]{ entry[0] });
-            }
-          }
-        }
-      }
-    }
-
-    // Build result array — org currency first at rate 1.0, then sorted by ISO code
     JSONArray arr = new JSONArray();
-
-    // Org currency (always included)
     String orgIsoCode = resolveIsoCode(conn, orgCurrencyId);
     JSONObject orgEntry = new JSONObject();
     orgEntry.put("id", orgCurrencyId);
@@ -253,6 +170,91 @@ public class CurrencyOptionsHandler implements NeoHandler {
     }
 
     return arr;
+  }
+
+  private Map<String, double[]> queryDirectRates(Connection conn, String orgCurrencyId,
+      String clientId, String orgId, java.sql.Date sqlDate) throws Exception {
+    Map<String, double[]> rateMap = new LinkedHashMap<>();
+    String sql =
+        "SELECT cr.c_currency_id_to AS cid, cr.multiplyrate"
+      + " FROM c_conversion_rate cr"
+      + " JOIN c_currency c ON c.c_currency_id = cr.c_currency_id_to"
+      + " WHERE cr.c_currency_id = ?"
+      + " AND cr.ad_client_id = ?"
+      + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
+      + " AND cr.isactive = 'Y'"
+      + " AND c.isactive = 'Y'"
+      + " AND cr.validfrom <= ?"
+      + " AND (cr.validto IS NULL OR cr.validto >= ?)"
+      + " ORDER BY c.iso_code";
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, orgCurrencyId);
+      ps.setString(2, clientId);
+      ps.setString(3, orgId);
+      ps.setDate(4, sqlDate);
+      ps.setDate(5, sqlDate);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          rateMap.put(rs.getString("cid"), new double[]{ rs.getDouble("multiplyrate") });
+        }
+      }
+    }
+    return rateMap;
+  }
+
+  private void mergeInverseRates(Connection conn, String orgCurrencyId,
+      Map<String, double[]> rateMap, String clientId, String orgId,
+      java.sql.Date sqlDate) throws Exception {
+    Map<String, double[]> inverseMap = new LinkedHashMap<>();
+    String sql =
+        "SELECT cr.c_currency_id AS cid, cr.multiplyrate AS inv_rate"
+      + " FROM c_conversion_rate cr"
+      + " JOIN c_currency c ON c.c_currency_id = cr.c_currency_id"
+      + " WHERE cr.c_currency_id_to = ?"
+      + " AND cr.ad_client_id = ?"
+      + " AND (cr.ad_org_id = '0' OR cr.ad_org_id = ?)"
+      + " AND cr.isactive = 'Y'"
+      + " AND c.isactive = 'Y'"
+      + " AND cr.validfrom <= ?"
+      + " AND (cr.validto IS NULL OR cr.validto >= ?)"
+      + " ORDER BY c.iso_code";
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, orgCurrencyId);
+      ps.setString(2, clientId);
+      ps.setString(3, orgId);
+      ps.setDate(4, sqlDate);
+      ps.setDate(5, sqlDate);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String cid = rs.getString("cid");
+          if (!rateMap.containsKey(cid)) {
+            double invRate = rs.getDouble("inv_rate");
+            inverseMap.put(cid, new double[]{ invRate != 0 ? 1.0 / invRate : 0.0 });
+          }
+        }
+      }
+    }
+    if (!inverseMap.isEmpty()) {
+      resolveIsoCodesForInverse(conn, inverseMap, rateMap);
+    }
+  }
+
+  private void resolveIsoCodesForInverse(Connection conn, Map<String, double[]> inverseMap,
+      Map<String, double[]> rateMap) throws Exception {
+    String isoSql = "SELECT c_currency_id, iso_code FROM c_currency WHERE c_currency_id = ANY(?) AND isactive = 'Y'";
+    String[] ids = inverseMap.keySet().toArray(new String[0]);
+    try (PreparedStatement ps = conn.prepareStatement(isoSql)) {
+      ps.setArray(1, conn.createArrayOf("text", ids));
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String cid = rs.getString(1);
+          double[] entry = inverseMap.get(cid);
+          if (entry != null) {
+            rateMap.put(cid, entry);
+          }
+        }
+      }
+    }
   }
 
   private String resolveIsoCode(Connection conn, String currencyId) {

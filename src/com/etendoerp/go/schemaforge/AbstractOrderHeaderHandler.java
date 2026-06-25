@@ -57,6 +57,9 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(AbstractOrderHeaderHandler.class);
   private static final String FIELD_DOCUMENT_ACTION = "documentAction";
+  private static final String FIELD_CURRENCY = "currency";
+  private static final String FIELD_PRICE_LIST = "priceList";
+  private static final String FIELD_VALUE = "value";
   private static final String DOC_TYPE_ORDER = "order";
   private static final String DOC_TYPE_INVOICE = "invoice";
 
@@ -215,47 +218,53 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       if (previous == null || previous.getBody() == null) {
         return null;
       }
-
       JSONObject body = previous.getBody();
       JSONObject updates = body.optJSONObject("updates");
       JSONObject requestBody = context.getRequestBody();
-      String triggerField = (requestBody != null) ? requestBody.optString("field", "") : "";
-      JSONObject formState = (requestBody != null) ? requestBody.optJSONObject("formState") : null;
+      String triggerField = requestBody != null ? requestBody.optString("field", "") : "";
+      JSONObject formState = requestBody != null ? requestBody.optJSONObject("formState") : null;
 
-      // Behavior 1: Remove currency pushed by any callout (currency = user-only)
-      if (updates != null && updates.has("currency") && !"currency".equals(triggerField)) {
-        updates.remove("currency");
-        log.debug("[ETP-4027] Removed callout-driven currency update (trigger={})", triggerField);
-      }
-
-      // Behavior 2: Inactive price list fallback (only on businessPartner change)
-      if ("businessPartner".equals(triggerField) && updates != null && updates.has("priceList")) {
+      blockCalloutCurrencyUpdate(updates, triggerField);
+      if ("businessPartner".equals(triggerField) && updates != null && updates.has(FIELD_PRICE_LIST)) {
         applyPriceListFallbackIfNeeded(body, updates);
       }
-
-      // Behavior 3: Exchange rate warning (only when user changes currency directly)
-      if (("currencyid".equals(triggerField) || "currency".equals(triggerField)) && formState != null) {
-        // Use requestBody.value (the newly selected currency) instead of formState.currency,
-        // which may still carry the previous value when the callout fires.
-        String docCurrencyId = (requestBody != null) ? requestBody.optString("value", "") : "";
-        if (docCurrencyId.isEmpty()) {
-          docCurrencyId = formState.optString("currencyid", "");
-        }
-        String orderDate = formState.optString("orderDate", "");
-        String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-        String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
-        if (!docCurrencyId.isEmpty() && orgCurrencyId != null
-            && !docCurrencyId.equals(orgCurrencyId) && !orderDate.isEmpty()) {
-          if (!hasConversionRate(orgCurrencyId, docCurrencyId, orderDate)) {
-            appendMessage(body, "WARNING", "noExchangeRateAvailable");
-            log.debug("[ETP-4027] No conversion rate warning added (currency={})", docCurrencyId);
-          }
-        }
-      }
+      checkExchangeRateWarning(body, requestBody, formState, triggerField);
     } catch (Exception e) {
       log.warn("[ETP-4027] afterCallout failed (non-fatal): {}", e.getMessage());
     }
     return null; // mutations applied in-place; dispatcher merges nothing extra
+  }
+
+  private static void blockCalloutCurrencyUpdate(JSONObject updates, String triggerField) {
+    if (updates != null && updates.has(FIELD_CURRENCY) && !FIELD_CURRENCY.equals(triggerField)) {
+      updates.remove(FIELD_CURRENCY);
+      log.debug("[ETP-4027] Removed callout-driven currency update (trigger={})", triggerField);
+    }
+  }
+
+  private void checkExchangeRateWarning(JSONObject body, JSONObject requestBody,
+      JSONObject formState, String triggerField) {
+    if (formState == null) {
+      return;
+    }
+    if (!FIELD_CURRENCY.equals(triggerField) && !"currencyid".equals(triggerField)) {
+      return;
+    }
+    // Use requestBody.value (the newly selected currency) instead of formState.currency,
+    // which may still carry the previous value when the callout fires.
+    String docCurrencyId = requestBody != null ? requestBody.optString(FIELD_VALUE, "") : "";
+    if (docCurrencyId.isEmpty()) {
+      docCurrencyId = formState.optString("currencyid", "");
+    }
+    String orderDate = formState.optString("orderDate", "");
+    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+    String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+    if (!docCurrencyId.isEmpty() && orgCurrencyId != null
+        && !docCurrencyId.equals(orgCurrencyId) && !orderDate.isEmpty()
+        && !hasConversionRate(orgCurrencyId, docCurrencyId, orderDate)) {
+      appendMessage(body, "WARNING", "noExchangeRateAvailable");
+      log.debug("[ETP-4027] No conversion rate warning added (currency={})", docCurrencyId);
+    }
   }
 
   /**
@@ -322,12 +331,12 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       }
 
       // Replace in updates (preserve object wrapper format if present)
-      Object existing = updates.get("priceList");
+      Object existing = updates.get(FIELD_PRICE_LIST);
       if (existing instanceof JSONObject existingObj) {
-        existingObj.put("value", defaultId);
+        existingObj.put(FIELD_VALUE, defaultId);
         existingObj.remove("identifier");
       } else {
-        updates.put("priceList", defaultId);
+        updates.put(FIELD_PRICE_LIST, defaultId);
       }
       appendMessage(body, "WARNING", "priceListFallbackAlert");
       log.debug("[ETP-4027] Replaced inactive priceList {} with default {}", priceListId, defaultId);
@@ -338,11 +347,11 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
 
   private String extractPriceListId(JSONObject updates) {
     try {
-      Object raw = updates.get("priceList");
+      Object raw = updates.get(FIELD_PRICE_LIST);
       if (raw instanceof JSONObject rawObj) {
-        return rawObj.optString("value", null);
+        return rawObj.optString(FIELD_VALUE, null);
       }
-      return updates.optString("priceList", null);
+      return updates.optString(FIELD_PRICE_LIST, null);
     } catch (Exception e) {
       return null;
     }
@@ -501,7 +510,7 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       return;
     }
     JSONObject reqBody = context.getRequestBody();
-    if (reqBody == null || !reqBody.has("currency")) {
+    if (reqBody == null || !reqBody.has(FIELD_CURRENCY)) {
       return;
     }
     String recordId = context.getRecordId();

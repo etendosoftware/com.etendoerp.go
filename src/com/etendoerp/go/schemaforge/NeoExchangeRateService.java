@@ -41,8 +41,8 @@ import org.openbravo.dal.service.OBDal;
  * ISO codes are unique by the ISO 4217 standard, so the lookup is unambiguous.
  *
  * <p>Response:
- * <pre>{"hasRate": true,  "rate": 1.09}</pre>
- * <pre>{"hasRate": false}</pre>
+ * <pre>{FIELD_HAS_RATE: true,  "rate": 1.09}</pre>
+ * <pre>{FIELD_HAS_RATE: false}</pre>
  *
  * <p>If no direct {@code FROM→TO} rate is configured, the endpoint falls back to the
  * inverse direction ({@code TO→FROM}) and returns {@code 1/rate}.  This mirrors the
@@ -60,6 +60,7 @@ class NeoExchangeRateService {
   private static final String PARAM_FROM_CURRENCY = "fromCurrency";
   private static final String PARAM_TO_CURRENCY   = "toCurrency";
   private static final String PARAM_DATE          = "date";
+  private static final String FIELD_HAS_RATE      = "hasRate";
 
   private NeoExchangeRateService() {
   }
@@ -87,7 +88,7 @@ class NeoExchangeRateService {
 
       if (fromCurrencyId.equals(toCurrencyId)) {
         JSONObject body = new JSONObject();
-        body.put("hasRate", true);
+        body.put(FIELD_HAS_RATE, true);
         body.put("rate", 1.0);
         return NeoResponse.ok(body);
       }
@@ -98,7 +99,7 @@ class NeoExchangeRateService {
       Double directRate  = queryRate(conn, fromCurrencyId, toCurrencyId, clientId, orgId, localDate);
       if (directRate != null) {
         JSONObject body = new JSONObject();
-        body.put("hasRate", true);
+        body.put(FIELD_HAS_RATE, true);
         body.put("rate", directRate);
         return NeoResponse.ok(body);
       }
@@ -106,10 +107,10 @@ class NeoExchangeRateService {
       Double inverseRate = queryRate(conn, toCurrencyId, fromCurrencyId, clientId, orgId, localDate);
       JSONObject body = new JSONObject();
       if (inverseRate != null) {
-        body.put("hasRate", true);
+        body.put(FIELD_HAS_RATE, true);
         body.put("rate", inverseRate != 0 ? 1.0 / inverseRate : 0);
       } else {
-        body.put("hasRate", false);
+        body.put(FIELD_HAS_RATE, false);
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {

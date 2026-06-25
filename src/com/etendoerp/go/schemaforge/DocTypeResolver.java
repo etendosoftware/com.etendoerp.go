@@ -65,28 +65,9 @@ public class DocTypeResolver {
       if (docTypeTargetCol == null) {
         return;
       }
-      if (clientSubmittedFields != null && !clientSubmittedFields.isEmpty()) {
-        // When the tab has a subtype filter (e.g. sOSubType LIKE 'OB' for quotations), the filter
-        // is authoritative — always reapply so the correct doctype is enforced regardless of what
-        // the client sent. Only skip for tabs with no subtype constraint, where the user's explicit
-        // choice should be preserved (e.g. a sales-order tab that allows multiple doc types).
-        String tabWhere = ctx.getSfEntity() != null && ctx.getSfEntity().getADTab() != null
-            ? ctx.getSfEntity().getADTab().getHqlwhereclause() : null;
-        boolean hasSubTypeConstraint = tabWhere != null && (
-            PAT_SUBTYPE_LIKE.matcher(tabWhere).find() ||
-            PAT_SUBTYPE_NOT_LIKE.matcher(tabWhere).find());
-        if (!hasSubTypeConstraint) {
-          Entity dalEntity = ModelProvider.getInstance()
-              .getEntityByTableId(adTab.getTable().getId());
-          if (dalEntity != null) {
-            Property targetProp = dalEntity.getPropertyByColumnName(COL_DOC_TYPE_TARGET_ID);
-            if (targetProp != null && clientSubmittedFields.contains(targetProp.getName())) {
-              log.debug("Skipping doctype reapply — no tab subtype constraint, client submitted {}={}",
-                  targetProp.getName(), body.optString(targetProp.getName()));
-              return;
-            }
-          }
-        }
+      if (shouldSkipDocTypeReapply(ctx, adTab, clientSubmittedFields)) {
+        log.debug("Skipping doctype reapply — client submitted explicit doc type choice");
+        return;
       }
       String correctId = resolveDefaultDocTypeId(docTypeTargetCol, ctx);
       if (correctId != null) {
@@ -95,6 +76,32 @@ public class DocTypeResolver {
     } catch (Exception e) {
       log.debug("Error reapplying doctype: {}", e.getMessage());
     }
+  }
+
+  /**
+   * Returns {@code true} when the caller submitted an explicit doc-type choice that must be
+   * preserved. Only relevant for tabs without a subtype constraint — tabs with a LIKE/NOT LIKE
+   * filter always enforce the canonical doctype regardless of what the client sent.
+   */
+  private static boolean shouldSkipDocTypeReapply(NeoContext ctx, Tab adTab,
+      Set<String> clientSubmittedFields) {
+    if (clientSubmittedFields == null || clientSubmittedFields.isEmpty()) {
+      return false;
+    }
+    String tabWhere = ctx.getSfEntity() != null && ctx.getSfEntity().getADTab() != null
+        ? ctx.getSfEntity().getADTab().getHqlwhereclause() : null;
+    boolean hasSubTypeConstraint = tabWhere != null && (
+        PAT_SUBTYPE_LIKE.matcher(tabWhere).find() ||
+        PAT_SUBTYPE_NOT_LIKE.matcher(tabWhere).find());
+    if (hasSubTypeConstraint) {
+      return false;
+    }
+    Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
+    if (dalEntity == null) {
+      return false;
+    }
+    Property targetProp = dalEntity.getPropertyByColumnName(COL_DOC_TYPE_TARGET_ID);
+    return targetProp != null && clientSubmittedFields.contains(targetProp.getName());
   }
 
   /**
