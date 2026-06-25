@@ -34,6 +34,10 @@ public final class ReferenceOverrideSelectorPolicy {
     overrides.put("DF1CEA94B3564A33AFDB37C07E1CE353",
         "exists (select 1 from FinancialMgmtFinAccPaymentMethod fapm"
             + " where fapm.account = e and fapm.active = true)");
+    // C_DocType_Trx (C_DocTypeTarget_ID on invoices/orders): exclude reversed copies.
+    // ARI/API with isReturn=Y are auto-generated reversal documents, never user-selectable.
+    overrides.put("22F546D49D3A48E1B2B4F50446A8DE58",
+        "(e.documentCategory NOT IN ('ARI', 'API') OR e.return = false)");
     REFERENCE_OVERRIDE_FILTERS = java.util.Collections.unmodifiableMap(overrides);
   }
 
