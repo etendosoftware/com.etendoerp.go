@@ -46,6 +46,7 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
+import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
@@ -182,7 +183,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
 
   private NeoResponse handlePost(String action, NeoContext context) throws JSONException {
     if (ACTION_CONNECT.equals(action)) {
-      return handleConnect();
+      return handleConnect(context);
     }
     if (ACTION_LINK.equals(action)) {
       return handleLink(context);
@@ -378,10 +379,23 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   // POST connect (returns the Salt Edge connect URL; works for both cases)
   // ---------------------------------------------------------------------------
 
-  private NeoResponse handleConnect() throws JSONException {
+  private NeoResponse handleConnect(NeoContext context) throws JSONException {
     String apiKey = BankIntegrationUtils.getPsd2ApiKey(currentClient());
     String returnTo = resolveAppShellOrigin() + CALLBACK_PATH;
-    String connectUrl = BankIntegrationUtils.createSaltEdgeConnection(apiKey, returnTo);
+    // Case 1 (existing account): if the account already knows its bank — e.g. the provider was
+    // chosen when it was created offline — preselect it so the Salt Edge widget skips the bank
+    // picker and opens that provider's login directly. Otherwise show the full provider selection.
+    String accountId = bodyString(context.getRequestBody(), PARAM_ACCOUNT_ID);
+    Provider provider = null;
+    if (accountId != null) {
+      FIN_FinancialAccount finAcc = loadAccount(accountId);
+      if (finAcc != null) {
+        provider = finAcc.getPsd2Provider();
+      }
+    }
+    String connectUrl = provider != null
+        ? BankIntegrationUtils.createSaltEdgeConnection(apiKey, returnTo, provider)
+        : BankIntegrationUtils.createSaltEdgeConnection(apiKey, returnTo);
     JSONObject data = new JSONObject();
     data.put(KEY_CONNECT_URL, connectUrl);
     return okData(data);
