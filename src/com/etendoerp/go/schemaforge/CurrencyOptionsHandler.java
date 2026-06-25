@@ -173,7 +173,7 @@ public class CurrencyOptionsHandler implements NeoHandler {
   }
 
   private Map<String, double[]> queryDirectRates(Connection conn, String orgCurrencyId,
-      String clientId, String orgId, java.sql.Date sqlDate) throws Exception {
+      String clientId, String orgId, java.sql.Date sqlDate) throws java.sql.SQLException {
     Map<String, double[]> rateMap = new LinkedHashMap<>();
     String sql =
         "SELECT cr.c_currency_id_to AS cid, cr.multiplyrate"
@@ -204,7 +204,7 @@ public class CurrencyOptionsHandler implements NeoHandler {
 
   private void mergeInverseRates(Connection conn, String orgCurrencyId,
       Map<String, double[]> rateMap, String clientId, String orgId,
-      java.sql.Date sqlDate) throws Exception {
+      java.sql.Date sqlDate) throws java.sql.SQLException {
     Map<String, double[]> inverseMap = new LinkedHashMap<>();
     String sql =
         "SELECT cr.c_currency_id AS cid, cr.multiplyrate AS inv_rate"
@@ -240,7 +240,7 @@ public class CurrencyOptionsHandler implements NeoHandler {
   }
 
   private void resolveIsoCodesForInverse(Connection conn, Map<String, double[]> inverseMap,
-      Map<String, double[]> rateMap) throws Exception {
+      Map<String, double[]> rateMap) throws java.sql.SQLException {
     String isoSql = "SELECT c_currency_id, iso_code FROM c_currency WHERE c_currency_id = ANY(?) AND isactive = 'Y'";
     String[] ids = inverseMap.keySet().toArray(new String[0]);
     try (PreparedStatement ps = conn.prepareStatement(isoSql)) {
