@@ -140,6 +140,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         JSONObject rec = dataArr.getJSONObject(0);
         enrichSourceInvoice(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
+        enrichLinkedShipments(rec, context.getRecordId());
       }
       TbaiSyncStatusInjector.inject(dataArr);
       return NeoResponse.ok(body);
@@ -264,5 +265,40 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   private static double roundHalfUp(double value) {
     return Math.round(value * 100.0) / 100.0;
+  }
+
+  /**
+   * Injects {@code linkedShipments} into the invoice detail record.
+   * Finds all sales shipments (M_InOut) whose lines are referenced by the invoice's
+   * C_InvoiceLine.M_InOutLine_ID. Covers invoices created directly from a shipment
+   * (standalone or via-order), where the native process always populates M_InOutLine_ID.
+   */
+  @SuppressWarnings("java:S2077")
+  private void enrichLinkedShipments(JSONObject rec, String invoiceId) {
+    String sql =
+        "SELECT DISTINCT io.m_inout_id, io.documentno, io.docstatus " +
+        "FROM c_invoiceline il " +
+        "JOIN m_inoutline iol ON iol.m_inoutline_id = il.m_inoutline_id " +
+        "JOIN m_inout io ON io.m_inout_id = iol.m_inout_id " +
+        "WHERE il.c_invoice_id = ? " +
+        "  AND il.m_inoutline_id IS NOT NULL " +
+        "  AND io.isactive = 'Y' AND io.issotrx = 'Y'";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, invoiceId);
+      JSONArray shipments = new JSONArray();
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONObject s = new JSONObject();
+          s.put("id", rs.getString(1));
+          s.put("documentNo", rs.getString(2));
+          s.put("documentStatus", rs.getString(3));
+          shipments.put(s);
+        }
+      }
+      rec.put("linkedShipments", shipments);
+    } catch (Exception e) {
+      log.warn("Could not enrich linked shipments for invoice {}: {}", invoiceId, e.getMessage());
+    }
   }
 }
