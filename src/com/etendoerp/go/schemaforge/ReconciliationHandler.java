@@ -181,6 +181,7 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String KEY_SUGGESTED = "suggested";
   private static final String COL_PARTNER_NAME = "partner_name";
   private static final String KEY_COUNTS = "counts";
+  private static final String KEY_TOTAL = "total";
   private static final String SQL_VARCHAR = "varchar";
   private static final String KEY_GROUPS = "groups";
   private static final String STATUS_PENDING = "pending";
@@ -421,7 +422,7 @@ public class ReconciliationHandler implements NeoHandler {
     }
     JSONObject data = new JSONObject();
     data.put("lines", lines);
-    data.put("total", total);
+    data.put(KEY_TOTAL, total);
     data.put(KEY_COUNTS, countsJson);
     return envelope(data);
   }
@@ -904,6 +905,8 @@ public class ReconciliationHandler implements NeoHandler {
     data.put("account", accountId);
     data.put("kpis", kpis);
     data.put(KEY_GROUPS, groups);
+    ReconciliationKpiTelemetry.emitBankMatchAttempted(
+        pendingLines.size(), groups.length(), opsToLink);
     return envelope(data);
   }
 
@@ -950,16 +953,23 @@ public class ReconciliationHandler implements NeoHandler {
     }
 
     JSONArray results = new JSONArray();
+    int successfulGroups = 0;
     for (int i = 0; i < groupsJson.length(); i++) {
       JSONObject groupEntry = groupsJson.optJSONObject(i);
       if (groupEntry != null) {
-        results.put(applyGroup(account, groupEntry).getBody());
+        NeoResponse groupResult = applyGroup(account, groupEntry);
+        if (groupResult.getHttpStatus() < HttpServletResponse.SC_BAD_REQUEST) {
+          successfulGroups++;
+        }
+        results.put(groupResult.getBody());
       }
     }
 
     JSONObject data = new JSONObject();
     data.put("applied", results.length());
     data.put("results", results);
+    ReconciliationKpiTelemetry.emitReconciliationMatchEvaluated(
+        groupsJson.length(), results.length(), successfulGroups);
     return NeoResponse.createdWithData(data);
   }
 
