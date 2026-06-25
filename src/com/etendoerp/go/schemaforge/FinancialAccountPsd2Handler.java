@@ -23,6 +23,7 @@ import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.Date;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import javax.inject.Named;
 import javax.servlet.http.HttpServletRequest;
@@ -49,6 +50,8 @@ import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper.LinkAccountData;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 
 /**
  * NeoHandler that bridges the Etendo Go Accounts UI to the existing PSD2 / Salt Edge integration
@@ -84,6 +87,16 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper.LinkA
 public class FinancialAccountPsd2Handler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(FinancialAccountPsd2Handler.class);
+
+  /**
+   * Provider catalog cache keyed by {@code clientId|country}, so the bank picker does not hit the
+   * Salt Edge middleware on every open. Bank lists change rarely, so a 24h TTL is ample; the value
+   * is the serialized provider array.
+   */
+  private static final Cache<String, String> PROVIDERS_CACHE = CacheBuilder.newBuilder()
+      .maximumSize(100)
+      .expireAfterWrite(24, TimeUnit.HOURS)
+      .build();
 
   private static final String METHOD_GET = "GET";
   private static final String METHOD_POST = "POST";
@@ -287,41 +300,78 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   private NeoResponse handleProviders(NeoContext context) throws JSONException {
     String country = StringUtils.defaultIfBlank(queryParam(context, PARAM_COUNTRY), DEFAULT_PROVIDER_COUNTRY);
     String q = StringUtils.trimToNull(queryParam(context, PARAM_Q));
-    String apiKey = BankIntegrationUtils.getPsd2ApiKey(currentClient());
+
+    JSONArray all = cachedProviders(country);
     JSONArray providers = new JSONArray();
-    // No API key configured for the client → return an empty catalog; the SPA falls back to its
-    // static bank list so offline account creation still works without PSD2 set up.
-    if (StringUtils.isNotBlank(apiKey)) {
-      String endpoint = BankIntegrationConstants.SALT_EDGE_MIDDLEWARE_URL
-          + "providers?include_ais_fields=true&exclude_inactive=true&per_page=1000&country_code=" + country;
-      JSONObject response = BankIntegrationUtils.makeSaltEdgeRequest("GET", null, endpoint, apiKey);
-      JSONArray data = response.optJSONArray(KEY_DATA);
-      if (data != null) {
-        for (int i = 0; i < data.length(); i++) {
-          JSONObject p = data.optJSONObject(i);
-          if (p == null) {
-            continue;
-          }
-          String code = p.optString(KEY_CODE, "");
-          String name = p.optString(KEY_NAME, "");
-          if (StringUtils.isBlank(code) || StringUtils.isBlank(name)) {
-            continue;
-          }
-          if (q != null && !StringUtils.containsIgnoreCase(name, q)) {
-            continue;
-          }
-          JSONObject row = new JSONObject();
-          row.put(KEY_CODE, code);
-          row.put(KEY_NAME, name);
-          row.put("logoUrl", p.optString(KEY_LOGO_URL, ""));
-          providers.put(row);
-        }
+    for (int i = 0; i < all.length(); i++) {
+      JSONObject row = all.optJSONObject(i);
+      if (row == null) {
+        continue;
       }
+      if (q != null && !StringUtils.containsIgnoreCase(row.optString(KEY_NAME, ""), q)) {
+        continue;
+      }
+      providers.put(row);
     }
+
     JSONObject out = new JSONObject();
     out.put(KEY_PROVIDERS, providers);
     out.put(PARAM_COUNTRY, country);
     return okData(out);
+  }
+
+  /**
+   * Returns the full Salt Edge provider catalog for a country, cached per client+country with a
+   * 24h TTL so the bank picker does not hit the middleware on every open. The free-text filter is
+   * applied by the caller (not cached). Empty results are NOT cached, so a transient middleware
+   * outage (or a not-yet-configured API key) retries on the next request instead of caching a hole.
+   */
+  private JSONArray cachedProviders(String country) throws JSONException {
+    String cacheKey = currentClient().getId() + "|" + country;
+    String cached = PROVIDERS_CACHE.getIfPresent(cacheKey);
+    if (cached != null) {
+      return new JSONArray(cached);
+    }
+    JSONArray fetched = fetchProvidersFromMiddleware(country);
+    if (fetched.length() > 0) {
+      PROVIDERS_CACHE.put(cacheKey, fetched.toString());
+    }
+    return fetched;
+  }
+
+  /**
+   * Fetches and maps the provider catalog for a country from the Salt Edge middleware. Returns an
+   * empty array when the client has no PSD2 API key (the SPA then falls back to its static list).
+   */
+  private JSONArray fetchProvidersFromMiddleware(String country) throws JSONException {
+    JSONArray providers = new JSONArray();
+    String apiKey = BankIntegrationUtils.getPsd2ApiKey(currentClient());
+    if (StringUtils.isBlank(apiKey)) {
+      return providers;
+    }
+    String endpoint = BankIntegrationConstants.SALT_EDGE_MIDDLEWARE_URL
+        + "providers?include_ais_fields=true&exclude_inactive=true&per_page=1000&country_code=" + country;
+    JSONObject response = BankIntegrationUtils.makeSaltEdgeRequest("GET", null, endpoint, apiKey);
+    JSONArray data = response.optJSONArray(KEY_DATA);
+    if (data != null) {
+      for (int i = 0; i < data.length(); i++) {
+        JSONObject p = data.optJSONObject(i);
+        if (p == null) {
+          continue;
+        }
+        String code = p.optString(KEY_CODE, "");
+        String name = p.optString(KEY_NAME, "");
+        if (StringUtils.isBlank(code) || StringUtils.isBlank(name)) {
+          continue;
+        }
+        JSONObject row = new JSONObject();
+        row.put(KEY_CODE, code);
+        row.put(KEY_NAME, name);
+        row.put("logoUrl", p.optString(KEY_LOGO_URL, ""));
+        providers.put(row);
+      }
+    }
+    return providers;
   }
 
   // ---------------------------------------------------------------------------
