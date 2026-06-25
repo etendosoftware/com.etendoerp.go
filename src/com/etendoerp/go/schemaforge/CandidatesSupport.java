@@ -91,7 +91,11 @@ final class CandidatesSupport {
 
   /** Per-isreceipt count of reconcilable transactions of the account (for the type selector). */
   private static final String TXN_COUNTS_SQL =
-      "SELECT COALESCE(fp.isreceipt, '') AS is_receipt, COUNT(*) AS cnt"
+      // Bucket payment-less transactions (funds transfers, bank fees) by their amount
+      // direction so they count toward receipts/payments instead of an empty bucket.
+      "SELECT COALESCE(fp.isreceipt,"
+          + "          CASE WHEN COALESCE(ft.depositamt, 0) >= COALESCE(ft.paymentamt, 0)"
+          + "               THEN 'Y' ELSE 'N' END) AS is_receipt, COUNT(*) AS cnt"
           + "  FROM fin_finacc_transaction ft"
           + "  LEFT JOIN fin_payment fp ON fp.fin_payment_id = ft.fin_payment_id"
           + " WHERE ft.fin_reconciliation_id IS NULL"
@@ -100,7 +104,9 @@ final class CandidatesSupport {
           + "   AND ft.fin_financial_account_id = ?"
           + "   AND (CAST(? AS date) IS NULL OR ft.statementdate >= ?)"
           + "   AND (CAST(? AS date) IS NULL OR ft.statementdate <= ?)"
-          + " GROUP BY fp.isreceipt";
+          + " GROUP BY COALESCE(fp.isreceipt,"
+          + "          CASE WHEN COALESCE(ft.depositamt, 0) >= COALESCE(ft.paymentamt, 0)"
+          + "               THEN 'Y' ELSE 'N' END)";
 
   /** Per-issotrx count of unpaid invoice installments (for the type selector). */
   private static final String INVOICE_COUNTS_SQL =

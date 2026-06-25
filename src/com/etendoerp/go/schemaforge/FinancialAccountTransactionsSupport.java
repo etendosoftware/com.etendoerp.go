@@ -1,0 +1,155 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright © 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
+package com.etendoerp.go.schemaforge;
+
+import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
+import java.util.Date;
+import java.util.Map;
+import java.util.function.Consumer;
+
+import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+
+/**
+ * Stateless helpers extracted from {@link FinancialAccountTransactionsHandler} to keep that class
+ * below Sonar's per-class method threshold: Classic-parity presentation labels, request-body
+ * parsing utilities, and the funds-transfer conversion-rate rule. All methods are pure (or only
+ * touch the DAL) and carry no per-request state, so they live here as static utilities.
+ */
+final class FinancialAccountTransactionsSupport {
+
+  /** trxType code → Classic "Transaction Type" label (unknown codes pass through). */
+  private static final Map<String, String> TRX_TYPE_CLASSIC = Map.of(
+      "BPD", "BP Deposit",
+      "BPW", "BP Withdrawal");
+
+  /** payment status code → long Classic label (dual of movementStatusConfig). */
+  private static final Map<String, String> STATUS_CLASSIC = Map.of(
+      "RPAP", "Awaiting Payment",
+      "RPAE", "Awaiting Execution",
+      "RPVOID", "Voided",
+      "RPR", "Payment Received",
+      "PPM", "Payment Made",
+      "PWNC", "Withdrawn not Cleared",
+      "RDNC", "Deposited not Cleared",
+      "RPPC", "Payment Cleared");
+
+  private static final DateTimeFormatter DMY_DASH =
+      DateTimeFormatter.ofPattern("dd-MM-yyyy").withZone(ZoneOffset.UTC);
+
+  private static final DateTimeFormatter DMY = DateTimeFormatter.ofPattern("dd/MM/yyyy");
+
+  private FinancialAccountTransactionsSupport() {
+  }
+
+  /** trxType code → Classic "Transaction Type" label (unknown codes pass through). */
+  static String trxTypeClassicLabel(String code) {
+    return StringUtils.isBlank(code) ? "" : TRX_TYPE_CLASSIC.getOrDefault(code, code);
+  }
+
+  /** payment status code → long Classic label (dual of movementStatusConfig). */
+  static String statusClassicLabel(String code) {
+    return StringUtils.isBlank(code) ? "" : STATUS_CLASSIC.getOrDefault(code, code);
+  }
+
+  /** Synthetic "Payment" column: {@code docNo - dd-MM-yyyy - contact - |amount|}. */
+  static String buildPaymentLabel(String docNo, Timestamp date, String contact, BigDecimal amount) {
+    String dateStr = date == null ? "" : DMY_DASH.format(Instant.ofEpochMilli(date.getTime()));
+    String amt = (amount == null ? BigDecimal.ZERO : amount.abs())
+        .stripTrailingZeros().toPlainString();
+    StringBuilder sb = new StringBuilder();
+    for (String part : new String[] { docNo, dateStr, contact, amt }) {
+      if (StringUtils.isNotBlank(part)) {
+        if (sb.length() > 0) sb.append(" - ");
+        sb.append(part);
+      }
+    }
+    return sb.toString();
+  }
+
+  static String formatDmy(java.sql.Date d) {
+    return d == null ? "" : DMY.format(d.toLocalDate());
+  }
+
+  /** Signed days from today to the due date: negative = overdue, 0 = due today. */
+  static int daysUntil(java.sql.Date dueDate, LocalDate today) {
+    return dueDate == null ? 0 : (int) ChronoUnit.DAYS.between(today, dueDate.toLocalDate());
+  }
+
+  /** SQL fragment restricting bpartners by role (customer / vendor / any). */
+  static String bpartnerRoleFilter(String role) {
+    if ("customer".equals(role)) {
+      return " AND iscustomer='Y'";
+    }
+    if ("vendor".equals(role)) {
+      return " AND isvendor='Y'";
+    }
+    return "";
+  }
+
+  /**
+   * Conversion rate to pass to {@code FundsTransferActionHandler.createTransfer}: {@code 1} for a
+   * same-currency transfer; the user-provided rate when currencies differ; or {@code null} to let
+   * Classic resolve the system rate.
+   */
+  static BigDecimal resolveConversionRate(FIN_FinancialAccount source,
+      FIN_FinancialAccount dest, BigDecimal provided) {
+    if (source.getCurrency().getId().equalsIgnoreCase(dest.getCurrency().getId())) {
+      return BigDecimal.ONE;
+    }
+    return provided;
+  }
+
+  static BigDecimal optBigDecimal(JSONObject body, String key) {
+    if (!body.has(key) || body.isNull(key)) return null;
+    try {
+      return new BigDecimal(body.getString(key));
+    } catch (Exception e) {
+      try {
+        return BigDecimal.valueOf(body.getDouble(key));
+      } catch (Exception ex) {
+        return null;
+      }
+    }
+  }
+
+  static Date parseDate(String iso, Date fallback) {
+    if (StringUtils.isBlank(iso)) return fallback;
+    try {
+      return Date.from(Instant.parse(iso));
+    } catch (Exception e) {
+      return fallback;
+    }
+  }
+
+  static <T extends BaseOBObject> void attachOptional(String id, Class<T> entityClass,
+      Consumer<T> setter) {
+    if (StringUtils.isBlank(id)) return;
+    T ref = OBDal.getInstance().get(entityClass, id);
+    if (ref != null) setter.accept(ref);
+  }
+}

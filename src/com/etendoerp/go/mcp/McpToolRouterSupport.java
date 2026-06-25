@@ -42,6 +42,7 @@ import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 final class McpToolRouterSupport {
 
@@ -200,7 +201,17 @@ final class McpToolRouterSupport {
       specObj.put("entities", entities);
     }
     if ("R".equals(specType)) {
+      // Report callability is truthful (ETP-4255): a report spec is callable only when it
+      // is backed by a NEO-native report handler. Non-callable specs expose a stable
+      // not_configured_for_report_generation status + message; Jasper/AD_Process reports
+      // are never executable by Etendo Go.
       specObj.put("isReport", true);
+      boolean callable = NeoReportCallability.isReportCallable(spec);
+      specObj.put("callable", callable);
+      if (!callable) {
+        specObj.put("status", NeoReportCallability.STATUS_NOT_CONFIGURED);
+        specObj.put("message", NeoReportCallability.buildNotConfiguredMessage(spec.getName()));
+      }
     }
     return specObj;
   }
