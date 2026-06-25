@@ -17,7 +17,6 @@
 
 package com.etendoerp.go.mcp;
 
-import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -52,11 +51,11 @@ import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
-import com.etendoerp.go.schemaforge.NeoReportService;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * Routes MCP tool calls to appropriate NEO Headless handlers.
@@ -819,55 +818,51 @@ public class McpToolRouter {
   // ── Report generation ─────────────────────────────────────────────────
 
   /**
-   * Generate a report. Returns the report description (binary output cannot be
-   * sent via MCP text content, so we describe what would be generated and provide
-   * the parameters needed to call the REST endpoint directly).
+   * Generate a report through its NEO-native report handler (ETP-4255).
+   *
+   * <p>Etendo Go/NEO/MCP no longer execute Jasper/AD_Process reports. A report spec is
+   * callable only when it is backed by a NEO report handler ({@code NeoHandler} bean
+   * matched by the entity's {@code Java_Qualifier}); the handler returns report data as
+   * JSON. When the spec has no NEO-native handler it is non-callable: this returns the
+   * exact same {@code not_configured_for_report_generation} message shown by discover.</p>
    */
   private JSONObject handleReport(String specName, JSONObject args) throws Exception {
     SFSpec spec = findSpecOrThrow(specName);
 
-    Process adProcess = spec.getProcess();
-    if (adProcess == null) {
-      return wrapAsErrorContent("Report spec '" + specName + "' has no linked AD_Process");
+    // First included entity declaring a NEO report handler qualifier, or null.
+    SFEntity reportEntity = null;
+    for (SFEntity entity : McpToolRouterSupport.listIncludedEntities(spec.getId())) {
+      if (StringUtils.isNotBlank(entity.getJavaQualifier())) {
+        reportEntity = entity;
+        break;
+      }
+    }
+    NeoHandler handler = reportEntity != null
+        ? McpHookExecutor.resolveEntityHandler(reportEntity) : null;
+    if (handler == null) {
+      // Non-callable report: identical message to neo_discover. Not an error path.
+      return wrapAsTextContent(
+          NeoReportCallability.buildNotConfiguredResponse(specName).toString(2));
     }
 
-    // Check RBAC
-    if (!NeoAccessUtils.hasProcessAccess(adProcess.getId())) {
-      return wrapAsErrorContent("Access denied to report '" + specName
-          + ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX);
-    }
-
-    String format = args != null ? args.optString("format", "pdf") : "pdf";
     JSONObject parameters = args != null ? args.optJSONObject(McpConstants.PARAM_PARAMETERS) : null;
-
-    // Generate report to byte array and return base64 or description
-    try {
-      ByteArrayOutputStream baos = new ByteArrayOutputStream();
-      NeoReportService.generateReport(adProcess, parameters,
-          format.toUpperCase(), baos);
-
-      // For MCP, encode as base64 so the client can save the file
-      byte[] reportBytes = baos.toByteArray();
-      String base64 = java.util.Base64.getEncoder().encodeToString(reportBytes);
-
-      JSONObject reportResult = new JSONObject();
-      reportResult.put("format", format);
-      reportResult.put("sizeBytes", reportBytes.length);
-      reportResult.put("base64", base64);
-      reportResult.put("filename", specName + "." + format.toLowerCase());
-
-      return wrapAsTextContent(reportResult.toString());
-    } catch (Exception e) {
-      log.error("Error generating report '{}'", specName, e);
-      // Fall back to describe
-      NeoResponse describeResponse = NeoReportService.describeReport(adProcess);
-      JSONObject fallback = new JSONObject();
-      fallback.put(McpConstants.KEY_ERROR, "Report generation failed: " + e.getMessage());
-      fallback.put("description", describeResponse.getBody());
-      fallback.put("hint", "Use the REST endpoint POST /sws/neo/" + specName
-          + " with exportType and params to generate the report via HTTP");
-      return McpToolRouter.wrapAsErrorContent(fallback.toString(2));
+    if (parameters == null) {
+      parameters = new JSONObject();
     }
+    NeoContext ctx = NeoContext.builder()
+        .specName(specName)
+        .entityName(reportEntity.getName())
+        .httpMethod("POST")
+        .requestBody(parameters)
+        .sfEntity(reportEntity)
+        .obContext(OBContext.getOBContext())
+        .build();
+    NeoResponse neoResponse = handler.handle(ctx);
+    if (neoResponse == null) {
+      return wrapAsTextContent(
+          NeoReportCallability.buildNotConfiguredResponse(specName).toString(2));
+    }
+    return McpHookExecutor.neoResponseToMcpResult(neoResponse);
   }
 
   private void authorizeSpecAccess(String specName) throws Exception {
