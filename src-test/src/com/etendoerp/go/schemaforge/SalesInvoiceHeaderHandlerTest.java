@@ -588,26 +588,6 @@ public class SalesInvoiceHeaderHandlerTest {
     }
   }
 
-  // ── handle(): exchange rate validation path ───────────────────────────────
-
-  /**
-   * Verifies that handle() returns the exchange rate error immediately when
-   * {@code validateExchangeRateBeforeComplete} returns a non-null response.
-   */
-  @Test
-  public void handle_exchangeRateError_shortCircuits() {
-    NeoResponse expected = NeoResponse.error(422, "Exchange rate required");
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("POST").endpointType(NeoEndpointType.CRUD).build();
-    try (MockedStatic<AbstractOrderHeaderHandler> ahMock =
-             Mockito.mockStatic(AbstractOrderHeaderHandler.class)) {
-      ahMock.when(() -> AbstractOrderHeaderHandler.validateExchangeRateBeforeComplete(ctx))
-          .thenReturn(expected);
-      NeoResponse result = new SalesInvoiceHeaderHandler().handle(ctx);
-      assertSame(expected, result);
-    }
-  }
-
   // ── afterHandle(): amount negation for NC / DEV subtypes ─────────────────
 
   /**
