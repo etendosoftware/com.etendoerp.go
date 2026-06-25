@@ -93,9 +93,12 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   private static final String PARAM_CONNECTION_ID = "connectionId";
   private static final String PARAM_SALT_EDGE_ACCOUNT_ID = "saltEdgeAccountId";
   private static final String PARAM_TYPE = "type";
+  private static final String PARAM_COUNTRY = "country";
+  private static final String PARAM_Q = "q";
 
   private static final String ACTION_STATUS = "status";
   private static final String ACTION_ACCOUNTS = "accounts";
+  private static final String ACTION_PROVIDERS = "providers";
   private static final String ACTION_CONNECT = "connect";
   private static final String ACTION_LINK = "link";
   private static final String ACTION_CREATE_AND_LINK = "createAndLink";
@@ -117,6 +120,13 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   private static final String KEY_CURRENCY = "currency";
   private static final String KEY_NATURE = "nature";
   private static final String KEY_WARNING = "warning";
+  private static final String KEY_PROVIDER_NAME = "providerName";
+  private static final String KEY_PROVIDER_LOGO = "providerLogoUrl";
+  private static final String KEY_LOGO_URL = "logo_url";
+  private static final String KEY_DATA = "data";
+  private static final String KEY_CODE = "code";
+  private static final String KEY_PROVIDERS = "providers";
+  private static final String DEFAULT_PROVIDER_COUNTRY = "ES";
   private static final String MSG_ACCOUNT_NOT_FOUND = "Financial account not found";
   private static final String MSG_MISSING = "Missing required parameter: ";
 
@@ -134,6 +144,9 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
         }
         if (ACTION_ACCOUNTS.equals(action)) {
           return handleAccounts(context);
+        }
+        if (ACTION_PROVIDERS.equals(action)) {
+          return handleProviders(context);
         }
         return NeoResponse.error(400, MSG_MISSING + PARAM_ACTION);
       }
@@ -254,7 +267,61 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     }
     JSONObject data = new JSONObject();
     data.put(KEY_ACCOUNTS, out);
+    // Include the bank/provider name so the selection modal can show which bank these
+    // accounts belong to. Only resolved when there is something to select.
+    if (out.length() > 0) {
+      JSONObject details = BankIntegrationUtils.getSaltEdgeConnectionDetails(connectionId, apiKey);
+      data.put(KEY_PROVIDER_NAME, details.optString(BankIntegrationConstants.PROVIDER_NAME, ""));
+      String providerCode = details.optString(BankIntegrationConstants.PROVIDER_CODE, "");
+      if (StringUtils.isNotBlank(providerCode)) {
+        data.put(KEY_PROVIDER_LOGO, fetchProviderLogo(providerCode, apiKey));
+      }
+    }
     return okData(data);
+  }
+
+  // ---------------------------------------------------------------------------
+  // GET providers (Salt Edge bank catalog by country, for the bank picker)
+  // ---------------------------------------------------------------------------
+
+  private NeoResponse handleProviders(NeoContext context) throws JSONException {
+    String country = StringUtils.defaultIfBlank(queryParam(context, PARAM_COUNTRY), DEFAULT_PROVIDER_COUNTRY);
+    String q = StringUtils.trimToNull(queryParam(context, PARAM_Q));
+    String apiKey = BankIntegrationUtils.getPsd2ApiKey(currentClient());
+    JSONArray providers = new JSONArray();
+    // No API key configured for the client → return an empty catalog; the SPA falls back to its
+    // static bank list so offline account creation still works without PSD2 set up.
+    if (StringUtils.isNotBlank(apiKey)) {
+      String endpoint = BankIntegrationConstants.SALT_EDGE_MIDDLEWARE_URL
+          + "providers?include_ais_fields=true&exclude_inactive=true&per_page=1000&country_code=" + country;
+      JSONObject response = BankIntegrationUtils.makeSaltEdgeRequest("GET", null, endpoint, apiKey);
+      JSONArray data = response.optJSONArray(KEY_DATA);
+      if (data != null) {
+        for (int i = 0; i < data.length(); i++) {
+          JSONObject p = data.optJSONObject(i);
+          if (p == null) {
+            continue;
+          }
+          String code = p.optString(KEY_CODE, "");
+          String name = p.optString(KEY_NAME, "");
+          if (StringUtils.isBlank(code) || StringUtils.isBlank(name)) {
+            continue;
+          }
+          if (q != null && !StringUtils.containsIgnoreCase(name, q)) {
+            continue;
+          }
+          JSONObject row = new JSONObject();
+          row.put(KEY_CODE, code);
+          row.put(KEY_NAME, name);
+          row.put("logoUrl", p.optString(KEY_LOGO_URL, ""));
+          providers.put(row);
+        }
+      }
+    }
+    JSONObject out = new JSONObject();
+    out.put(KEY_PROVIDERS, providers);
+    out.put(PARAM_COUNTRY, country);
+    return okData(out);
   }
 
   // ---------------------------------------------------------------------------
@@ -287,7 +354,13 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
     }
     String apiKey = SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc);
-    String warning = linkSelectedAccount(finAcc, connectionId, saltEdgeAccountId, apiKey);
+    JSONArray accounts = BankIntegrationUtils.getSaltEdgeAccountsForConnection(connectionId, apiKey);
+    JSONObject node = findAccountNode(accounts, saltEdgeAccountId);
+    if (node == null) {
+      return NeoResponse.error(404, "Selected bank account not found in the connection");
+    }
+    JSONObject details = BankIntegrationUtils.getSaltEdgeConnectionDetails(connectionId, apiKey);
+    String warning = linkAccount(finAcc, connectionId, saltEdgeAccountId, node, details, apiKey);
     JSONObject data = new JSONObject();
     data.put("linked", true);
     data.put(PARAM_ACCOUNT_ID, finAcc.getId());
@@ -320,13 +393,14 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     if (currency == null) {
       return NeoResponse.error(400, "Unsupported currency: " + currencyCode);
     }
-    String name = StringUtils.defaultIfBlank(node.optString(BankIntegrationConstants.NAME, ""),
-        currencyCode + " account");
+    JSONObject details = BankIntegrationUtils.getSaltEdgeConnectionDetails(connectionId, apiKey);
+    String name = connectedAccountName(details.optString(BankIntegrationConstants.PROVIDER_NAME, null),
+        node, currencyCode);
 
     FIN_FinancialAccount finAcc = FinancialAccountSupport.createAccount(currentClient(),
         OBContext.getOBContext().getCurrentOrganization(), currency, name, type);
 
-    String warning = linkSelectedAccount(finAcc, connectionId, saltEdgeAccountId, apiKey, accounts);
+    String warning = linkAccount(finAcc, connectionId, saltEdgeAccountId, node, details, apiKey);
     JSONObject data = new JSONObject();
     data.put(PARAM_ACCOUNT_ID, finAcc.getId());
     data.put(KEY_NAME, finAcc.getName());
@@ -427,19 +501,8 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
   // Shared linking + helpers
   // ---------------------------------------------------------------------------
 
-  private String linkSelectedAccount(FIN_FinancialAccount finAcc, String connectionId,
-      String saltEdgeAccountId, String apiKey) {
-    JSONArray accounts = BankIntegrationUtils.getSaltEdgeAccountsForConnection(connectionId, apiKey);
-    return linkSelectedAccount(finAcc, connectionId, saltEdgeAccountId, apiKey, accounts);
-  }
-
-  private String linkSelectedAccount(FIN_FinancialAccount finAcc, String connectionId,
-      String saltEdgeAccountId, String apiKey, JSONArray accounts) {
-    JSONObject node = findAccountNode(accounts, saltEdgeAccountId);
-    if (node == null) {
-      throw new OBException("Selected bank account not found in the connection");
-    }
-    JSONObject details = BankIntegrationUtils.getSaltEdgeConnectionDetails(connectionId, apiKey);
+  private String linkAccount(FIN_FinancialAccount finAcc, String connectionId,
+      String saltEdgeAccountId, JSONObject node, JSONObject details, String apiKey) {
     LinkAccountData data = new LinkAccountData(
         details.optString(BankIntegrationConstants.PROVIDER_CODE, null),
         details.optString(BankIntegrationConstants.PROVIDER_NAME, null),
@@ -448,6 +511,44 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
         SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(details, apiKey));
     return SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(finAcc, saltEdgeAccountId,
         connectionId, node, data);
+  }
+
+  /**
+   * Builds the financial account name for a connected account (case 2). Uses the bank/provider
+   * name as the primary identifier, suffixed with the Salt Edge account name when present
+   * (e.g. {@code "Banco Santander - Savings account"}). Falls back to the account name or the
+   * currency when the provider name is unknown.
+   */
+  private static String connectedAccountName(String providerName, JSONObject node, String currencyCode) {
+    String accountName = StringUtils.trimToEmpty(node.optString(BankIntegrationConstants.NAME, ""));
+    boolean hasProvider = StringUtils.isNotBlank(providerName);
+    if (hasProvider && StringUtils.isNotBlank(accountName)) {
+      return providerName + " - " + accountName;
+    }
+    if (hasProvider) {
+      return providerName;
+    }
+    if (StringUtils.isNotBlank(accountName)) {
+      return accountName;
+    }
+    return currencyCode + " account";
+  }
+
+  /**
+   * Fetches the {@code logo_url} of a Salt Edge provider by code (for the account-selection modal
+   * header). The logo is non-critical: any failure returns an empty string so the SPA falls back
+   * to the generic bank icon.
+   */
+  private static String fetchProviderLogo(String providerCode, String apiKey) {
+    try {
+      String endpoint = BankIntegrationConstants.SALT_EDGE_MIDDLEWARE_URL + "providers/" + providerCode;
+      JSONObject response = BankIntegrationUtils.makeSaltEdgeRequest("GET", null, endpoint, apiKey);
+      JSONObject data = response.optJSONObject(KEY_DATA);
+      return data != null ? data.optString(KEY_LOGO_URL, "") : "";
+    } catch (Exception e) {
+      log.warn("Could not fetch provider logo for {}: {}", providerCode, e.getMessage());
+      return "";
+    }
   }
 
   private JSONObject findAccountNode(JSONArray accounts, String saltEdgeAccountId) {
