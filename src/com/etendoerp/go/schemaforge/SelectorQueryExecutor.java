@@ -117,11 +117,28 @@ final class SelectorQueryExecutor {
     dataQuery.setMaxResult(limit);
     dataQuery.setFirstResult(offset);
 
+    JSONArray items = buildSimpleSelectorItems(dataQuery.list(), meta);
+
+    if (language != null && !"en_US".equals(language)) {
+      enrichCountryTranslations(items, meta.entityName, language);
+    }
+
+    return SelectorResponseSupport.buildSelectorResponse(items, new JSONArray(), totalCount, limit, offset);
+  }
+
+  /**
+   * Builds the {id, label} JSON items for a simple (non-rich) selector result set.
+   * The label comes from a resolved dotted display property when present, otherwise from the
+   * entity identifier. Extracted from executeQuery to keep its cognitive complexity within range.
+   */
+  private static JSONArray buildSimpleSelectorItems(List<BaseOBObject> rows, SelectorMeta meta)
+      throws Exception {
     JSONArray items = new JSONArray();
-    for (BaseOBObject bob : dataQuery.list()) {
+    final boolean hasDottedDisplay = meta.displayProperty != null && meta.displayProperty.contains(".");
+    for (BaseOBObject bob : rows) {
       JSONObject item = new JSONObject();
       item.put("id", SelectorRowMapper.normalizeEntityId(bob.getId().toString()));
-      if (meta.displayProperty != null && meta.displayProperty.contains(".")) {
+      if (hasDottedDisplay) {
         Object labelValue = resolvePropertyValue(bob, meta.displayProperty);
         item.put(FIELD_LABEL, labelValue != null ? labelValue : bob.getIdentifier());
       } else {
@@ -129,12 +146,7 @@ final class SelectorQueryExecutor {
       }
       items.put(item);
     }
-
-    if (language != null && !"en_US".equals(language)) {
-      enrichCountryTranslations(items, meta.entityName, language);
-    }
-
-    return SelectorResponseSupport.buildSelectorResponse(items, new JSONArray(), totalCount, limit, offset);
+    return items;
   }
 
   private static NeoResponse executeRichQuery(SelectorMeta meta,
