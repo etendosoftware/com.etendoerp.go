@@ -57,13 +57,13 @@ final class NeoInvoiceSupport {
   // SQL literals derived from trusted booleans — no injection risk.
   @SuppressWarnings("java:S2077")
   static Map<String, BigDecimal> computePendingQtyPerLine(String inOutId, boolean includeDrafts) {
-    // When includeDrafts=false: original two-path query (m_matchsi + direct m_inoutline_id link),
-    // excluding draft invoices. Used for the billing-status badge.
+    // includeDrafts=false: three paths — m_matchsi, direct m_inoutline_id, and ol_qty (invoice
+    // created from the ORDER: m_inoutline_id IS NULL, joined via c_orderline_id scoped to this
+    // shipment). Used for the billing-status badge and for blocking duplicate invoice creation.
     //
-    // When includeDrafts=true: adds a third path (draft_unlinked) that detects draft invoice
-    // lines where M_InOutLine_ID is not yet set, falling back to C_OrderLine_ID scoped to this
-    // shipment. This prevents a second draft from being created for already-committed quantities
-    // even when InvoiceLineLinker has not yet run for the existing draft.
+    // includeDrafts=true: same three paths plus draft_all (draft invoice lines joined via
+    // c_orderline_id, scoped to this shipment). Prevents a second draft from being created even
+    // when InvoiceLineLinker has not yet run for the existing draft.
     String sql;
     int paramCount;
     if (!includeDrafts) {
@@ -72,7 +72,8 @@ final class NeoInvoiceSupport {
           + "  ABS(sil.movementqty) AS movement_qty, "
           + "  COALESCE(GREATEST("
           + "    COALESCE(msi_qty.qtymatched, 0), "
-          + "    COALESCE(direct_qty.qtyinvoiced, 0) "
+          + "    COALESCE(direct_qty.qtyinvoiced, 0), "
+          + "    COALESCE(ol_qty.qtyinvoiced, 0) "
           + "  ), 0) AS invoiced_qty "
           + "FROM m_inoutline sil "
           + "LEFT JOIN ("
@@ -90,8 +91,22 @@ final class NeoInvoiceSupport {
           + "  WHERE i2.docstatus NOT IN ('VO','CL','DR') AND i2.isactive = 'Y' "
           + "  GROUP BY il2.m_inoutline_id "
           + ") direct_qty ON direct_qty.m_inoutline_id = sil.m_inoutline_id "
+          // Invoice created from the order (m_inoutline_id is NULL on the invoice line):
+          // join via c_orderline_id scoped to this shipment to avoid counting other receipts.
+          + "LEFT JOIN ("
+          + "  SELECT iol2.m_inoutline_id, SUM(ABS(il3.qtyinvoiced)) AS qtyinvoiced "
+          + "  FROM c_invoiceline il3 "
+          + "  JOIN c_invoice i3 ON i3.c_invoice_id = il3.c_invoice_id "
+          + "  JOIN m_inoutline iol2 ON iol2.c_orderline_id = il3.c_orderline_id "
+          + "                       AND iol2.m_inout_id = ? "
+          + "                       AND iol2.isactive = 'Y' "
+          + "  WHERE i3.docstatus NOT IN ('VO','CL','DR') AND i3.isactive = 'Y' "
+          + "    AND il3.c_orderline_id IS NOT NULL "
+          + "    AND il3.m_inoutline_id IS NULL "
+          + "  GROUP BY iol2.m_inoutline_id "
+          + ") ol_qty ON ol_qty.m_inoutline_id = sil.m_inoutline_id "
           + "WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'";
-      paramCount = 1;
+      paramCount = 2;  // first ? = inOutId (ol_qty scope), second ? = inOutId (WHERE)
     } else {
       // draft_all: ANY draft invoice linked to the same order line as the receipt line,
       // regardless of whether m_inoutline_id is NULL (created from PO) or points to a
@@ -151,9 +166,9 @@ final class NeoInvoiceSupport {
             BigDecimal pending = (movQty != null ? movQty : BigDecimal.ZERO)
                 .subtract(invQty != null ? invQty : BigDecimal.ZERO)
                 .max(BigDecimal.ZERO);
-            if (pending.compareTo(BigDecimal.ZERO) > 0) {
-              result.put(lineId, pending);
-            }
+            // Include ALL active lines (even pending=0) so callers can distinguish
+            // "fully invoiced" (0 in map) from "line not yet seen by DB" (absent).
+            result.put(lineId, pending);
           }
         }
       }
