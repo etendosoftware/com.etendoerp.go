@@ -511,12 +511,13 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     if (finAcc == null) {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
     }
-    String apiKey = SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc);
     StringBuilder messages = new StringBuilder();
-    JSONArray imported = BankIntegrationUtils.getSaltEdgeTransactions(finAcc, apiKey, messages);
+    // Single source of truth: the same per-account fetch behind the Classic "Get Bank Statement"
+    // button (GetTransactions action) — both delegate to fetchAccountTransactions.
+    String status = SaltEdgeAccountLinkHelper.fetchAccountTransactions(finAcc, messages);
     JSONObject data = new JSONObject();
-    data.put("imported", imported != null ? imported.length() : 0);
-    data.put("message", messages.toString());
+    data.put("status", status);
+    data.put("message", messages.toString().trim());
     return okData(data);
   }
 
