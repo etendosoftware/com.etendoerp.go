@@ -122,11 +122,11 @@ public class BusinessPartnerHandler implements NeoHandler {
   }
 
   private static String extractRecordId(JSONObject body) {
-    JSONObject record = firstRecord(body);
-    if (record == null) {
+    JSONObject recordNode = firstRecord(body);
+    if (recordNode == null) {
       return null;
     }
-    String id = record.optString("id", null);
+    String id = recordNode.optString("id", null);
     return StringUtils.isNotBlank(id) ? id : null;
   }
 
@@ -322,11 +322,11 @@ public class BusinessPartnerHandler implements NeoHandler {
     if (previousResult == null || previousResult.getBody() == null) {
       return null;
     }
-    JSONObject record = firstRecord(previousResult.getBody());
-    if (record == null) {
+    JSONObject recordNode = firstRecord(previousResult.getBody());
+    if (recordNode == null) {
       return null;
     }
-    if (record.optString(FIELD_EMAIL, "").contains("@")) {
+    if (recordNode.optString(FIELD_EMAIL, "").contains("@")) {
       return null; // partner already has its own email
     }
     try {
@@ -334,7 +334,7 @@ public class BusinessPartnerHandler implements NeoHandler {
       if (StringUtils.isBlank(contactEmail)) {
         return null;
       }
-      record.put(FIELD_EMAIL, contactEmail);
+      recordNode.put(FIELD_EMAIL, contactEmail);
       return NeoResponse.ok(previousResult.getBody());
     } catch (Exception e) {
       log.warn("BusinessPartnerHandler: could not resolve contact email fallback for bp={}", recordId, e);

@@ -534,4 +534,32 @@ class BusinessPartnerHandlerTest {
       assertEquals("contact@partner.com", patchedEmail);
     }
   }
+
+  /**
+   * A GET with a recordId but a {@code null} previous result must skip the fallback
+   * and return {@code null} without touching the database.
+   */
+  @Test
+  void testAfterHandleGetNullPreviousResultReturnsNull() {
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn("REC_ID");
+    when(ctx.getPreviousResult()).thenReturn(null);
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  /**
+   * A GET whose response body carries no record array must skip the fallback and
+   * return {@code null}.
+   */
+  @Test
+  void testAfterHandleGetNoRecordInBodyReturnsNull() {
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(new JSONObject());
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn("REC_ID");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    assertNull(handler.afterHandle(ctx));
+  }
 }
