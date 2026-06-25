@@ -21,7 +21,6 @@ import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.process.ProcessInstance;
 import org.openbravo.model.ad.ui.Process;
@@ -48,54 +47,37 @@ import org.openbravo.service.db.CallProcess;
  * {@code open-close-period-control} spec.
  */
 @Named("period-control-doc-openclose")
-public class PeriodControlDocOpenCloseHandler implements NeoHandler {
+public class PeriodControlDocOpenCloseHandler extends AbstractPeriodOpenCloseHandler {
 
   private static final Logger log = LogManager.getLogger(PeriodControlDocOpenCloseHandler.class);
   private static final String PROCESS_168_ID = "168";
 
   @Override
-  public NeoResponse handle(NeoContext context) {
-    PeriodOpenCloseSupport.OpenCloseRequest req = PeriodOpenCloseSupport.parse(context);
-    if (req.isAbort()) {
-      return req.toHandlerReturn();
+  protected NeoResponse doHandle(String openCloseValue, String recordId) throws Exception {
+    PeriodControl periodControl = OBDal.getInstance().get(PeriodControl.class, recordId);
+    if (periodControl == null) {
+      return NeoResponse.error(404, "PeriodControl not found: " + recordId);
     }
 
-    String openCloseValue = req.openCloseValue;
-    String recordId = req.recordId;
+    // C_PeriodControl_Process reads PeriodAction directly from the DB record
+    periodControl.setPeriodAction(openCloseValue);
+    OBDal.getInstance().save(periodControl);
+    OBDal.getInstance().flush();
 
-    try {
-      OBContext.setAdminMode();
-      try {
-        PeriodControl periodControl = OBDal.getInstance().get(PeriodControl.class, recordId);
-        if (periodControl == null) {
-          return NeoResponse.error(404, "PeriodControl not found: " + recordId);
-        }
-
-        // C_PeriodControl_Process reads PeriodAction directly from the DB record
-        periodControl.setPeriodAction(openCloseValue);
-        OBDal.getInstance().save(periodControl);
-        OBDal.getInstance().flush();
-
-        Process process168 = OBDal.getInstance().get(Process.class, PROCESS_168_ID);
-        if (process168 == null) {
-          return NeoResponse.error(500, "AD Process 168 (C_PeriodControl_Process) not found");
-        }
-
-        ProcessInstance pInstance = CallProcess.getInstance().call(process168, recordId, null);
-        OBDal.getInstance().getSession().refresh(pInstance);
-
-        return PeriodOpenCloseSupport.translateResult(pInstance, process168);
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.error("Error executing period control doc open/close for record {}", recordId, e);
-      return NeoResponse.error(500, "Period control doc open/close failed: " + e.getMessage());
+    Process process168 = OBDal.getInstance().get(Process.class, PROCESS_168_ID);
+    if (process168 == null) {
+      return NeoResponse.error(500, "AD Process 168 (C_PeriodControl_Process) not found");
     }
+
+    ProcessInstance pInstance = CallProcess.getInstance().call(process168, recordId, null);
+    OBDal.getInstance().getSession().refresh(pInstance);
+
+    return PeriodOpenCloseSupport.translateResult(pInstance, process168);
   }
 
   @Override
-  public NeoResponse afterHandle(NeoContext context) {
-    return null;
+  protected NeoResponse onError(String recordId, Exception e) {
+    log.error("Error executing period control doc open/close for record {}", recordId, e);
+    return NeoResponse.error(500, "Period control doc open/close failed: " + e.getMessage());
   }
 }

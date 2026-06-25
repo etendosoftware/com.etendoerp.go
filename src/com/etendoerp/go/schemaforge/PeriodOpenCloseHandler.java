@@ -24,7 +24,6 @@ import javax.inject.Named;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.provider.OBProvider;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.process.ProcessInstance;
 import org.openbravo.model.ad.ui.Process;
@@ -51,69 +50,52 @@ import org.openbravo.service.db.CallProcess;
  * {@code open-close-period-control} spec.
  */
 @Named("period-openclose")
-public class PeriodOpenCloseHandler implements NeoHandler {
+public class PeriodOpenCloseHandler extends AbstractPeriodOpenCloseHandler {
 
   private static final Logger log = LogManager.getLogger(PeriodOpenCloseHandler.class);
   private static final String PROCESS_167_ID = "167";
 
   @Override
-  public NeoResponse handle(NeoContext context) {
-    PeriodOpenCloseSupport.OpenCloseRequest req = PeriodOpenCloseSupport.parse(context);
-    if (req.isAbort()) {
-      return req.toHandlerReturn();
+  protected NeoResponse doHandle(String openCloseValue, String recordId) throws Exception {
+    Period period = OBDal.getInstance().get(Period.class, recordId);
+    if (period == null) {
+      return NeoResponse.error(404, "Period not found: " + recordId);
     }
 
-    String openCloseValue = req.openCloseValue;
-    String recordId = req.recordId;
+    // Create the C_PeriodControl_Log entry that C_Period_Process reads.
+    // setPeriodNo stores the C_Period FK (the DAL property "periodNo" maps to
+    // the Periodno column which is a FK, despite the name).
+    PeriodControlLog logEntry = OBProvider.getInstance().get(PeriodControlLog.class);
+    logEntry.setNewOBObject(true);
+    logEntry.setId(UUID.randomUUID().toString().toUpperCase().replace("-", ""));
+    logEntry.setClient(period.getClient());
+    logEntry.setOrganization(period.getOrganization());
+    logEntry.setActive(true);
+    // cascade / isRecursive — true so the process handles sub-orgs
+    logEntry.setCascade(true);
+    logEntry.setYear(period.getYear());
+    logEntry.setCalendar(period.getYear().getCalendar());
+    logEntry.setPeriodNo(period);
+    logEntry.setPeriodAction(openCloseValue);
+    logEntry.setPeriod(period);
+    // documentCategory null means "all document types"
+    OBDal.getInstance().save(logEntry);
+    OBDal.getInstance().flush();
 
-    try {
-      OBContext.setAdminMode();
-      try {
-        Period period = OBDal.getInstance().get(Period.class, recordId);
-        if (period == null) {
-          return NeoResponse.error(404, "Period not found: " + recordId);
-        }
-
-        // Create the C_PeriodControl_Log entry that C_Period_Process reads.
-        // setPeriodNo stores the C_Period FK (the DAL property "periodNo" maps to
-        // the Periodno column which is a FK, despite the name).
-        PeriodControlLog logEntry = OBProvider.getInstance().get(PeriodControlLog.class);
-        logEntry.setNewOBObject(true);
-        logEntry.setId(UUID.randomUUID().toString().toUpperCase().replace("-", ""));
-        logEntry.setClient(period.getClient());
-        logEntry.setOrganization(period.getOrganization());
-        logEntry.setActive(true);
-        // cascade / isRecursive — true so the process handles sub-orgs
-        logEntry.setCascade(true);
-        logEntry.setYear(period.getYear());
-        logEntry.setCalendar(period.getYear().getCalendar());
-        logEntry.setPeriodNo(period);
-        logEntry.setPeriodAction(openCloseValue);
-        logEntry.setPeriod(period);
-        // documentCategory null means "all document types"
-        OBDal.getInstance().save(logEntry);
-        OBDal.getInstance().flush();
-
-        Process process167 = OBDal.getInstance().get(Process.class, PROCESS_167_ID);
-        if (process167 == null) {
-          return NeoResponse.error(500, "AD Process 167 (C_Period_Process) not found");
-        }
-
-        ProcessInstance pInstance = CallProcess.getInstance().call(process167, logEntry.getId(), null);
-        OBDal.getInstance().getSession().refresh(pInstance);
-
-        return PeriodOpenCloseSupport.translateResult(pInstance, process167);
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.error("Error executing period open/close for period {}", recordId, e);
-      return NeoResponse.error(500, "Period open/close failed: " + e.getMessage());
+    Process process167 = OBDal.getInstance().get(Process.class, PROCESS_167_ID);
+    if (process167 == null) {
+      return NeoResponse.error(500, "AD Process 167 (C_Period_Process) not found");
     }
+
+    ProcessInstance pInstance = CallProcess.getInstance().call(process167, logEntry.getId(), null);
+    OBDal.getInstance().getSession().refresh(pInstance);
+
+    return PeriodOpenCloseSupport.translateResult(pInstance, process167);
   }
 
   @Override
-  public NeoResponse afterHandle(NeoContext context) {
-    return null;
+  protected NeoResponse onError(String recordId, Exception e) {
+    log.error("Error executing period open/close for period {}", recordId, e);
+    return NeoResponse.error(500, "Period open/close failed: " + e.getMessage());
   }
 }
