@@ -119,6 +119,26 @@ public class NeoTelemetryService {
   }
 
   /**
+   * Creates the runtime backend telemetry service.
+   *
+   * @return runtime telemetry service
+   */
+  public static NeoTelemetryService runtime() {
+    NeoTelemetrySink logSink = new LogNeoTelemetrySink();
+    MixpanelNeoTelemetryConfig config = MixpanelNeoTelemetryConfig.fromRuntime();
+    if (!config.isConfigured()) {
+      log.info("Backend Mixpanel telemetry is not configured enabled={} tokenPresent={}",
+          config.isEnabled(), config.getToken() != null);
+      return new NeoTelemetryService(logSink, System::nanoTime, Clock.systemUTC());
+    }
+    log.info("Backend Mixpanel telemetry is configured apiHost={} distinctId={}",
+        config.getApiHost(), config.getDistinctId());
+    return new NeoTelemetryService(
+        new CompositeNeoTelemetrySink(logSink, new MixpanelNeoTelemetrySink(config)),
+        System::nanoTime, Clock.systemUTC());
+  }
+
+  /**
    * Creates a service with custom dependencies.
    *
    * @param sink event sink
@@ -148,8 +168,8 @@ public class NeoTelemetryService {
       sink.emit(new NeoTelemetryEvent(eventName, sanitizeProperties(properties),
           Instant.now(clock)));
     } catch (Exception e) {
-      log.warn("Backend telemetry sink failed for event {}: {}", eventName,
-          e.getClass().getSimpleName());
+      log.warn("Backend telemetry sink failed for event {}: {} {}", eventName,
+          e.getClass().getSimpleName(), e.getMessage());
     }
   }
 

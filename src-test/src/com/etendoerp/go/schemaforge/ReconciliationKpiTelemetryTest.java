@@ -42,7 +42,7 @@ public class ReconciliationKpiTelemetryTest {
     NeoTelemetryService service = mock(NeoTelemetryService.class);
 
     try (MockedStatic<NeoTelemetryService> telemetry = mockStatic(NeoTelemetryService.class)) {
-      telemetry.when(NeoTelemetryService::logging).thenReturn(service);
+      telemetry.when(NeoTelemetryService::runtime).thenReturn(service);
 
       ReconciliationKpiTelemetry.emitBankMatchAttempted(8, 3, 4);
 
@@ -56,7 +56,7 @@ public class ReconciliationKpiTelemetryTest {
     NeoTelemetryService service = mock(NeoTelemetryService.class);
 
     try (MockedStatic<NeoTelemetryService> telemetry = mockStatic(NeoTelemetryService.class)) {
-      telemetry.when(NeoTelemetryService::logging).thenReturn(service);
+      telemetry.when(NeoTelemetryService::runtime).thenReturn(service);
 
       ReconciliationKpiTelemetry.emitReconciliationMatchEvaluated(5, 5, 4);
 

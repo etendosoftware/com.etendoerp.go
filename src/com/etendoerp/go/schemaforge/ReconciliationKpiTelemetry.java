@@ -45,7 +45,7 @@ final class ReconciliationKpiTelemetry {
     properties.put(KEY_TOTAL, totalLines);
     properties.put(KEY_COUNT, groupsFound);
     properties.put(KEY_CORRECT_COUNT, operationsToLink);
-    NeoTelemetryService.logging().emit(NeoTelemetryEvents.BACKEND_BANK_MATCH_ATTEMPTED,
+    NeoTelemetryService.runtime().emit(NeoTelemetryEvents.BACKEND_BANK_MATCH_ATTEMPTED,
         properties);
   }
 
@@ -55,7 +55,7 @@ final class ReconciliationKpiTelemetry {
     properties.put(KEY_TOTAL, totalGroups);
     properties.put(KEY_COUNT, attemptedGroups);
     properties.put(KEY_CORRECT_COUNT, successfulGroups);
-    NeoTelemetryService.logging().emit(
+    NeoTelemetryService.runtime().emit(
         NeoTelemetryEvents.BACKEND_BANK_RECONCILIATION_MATCH_EVALUATED, properties);
   }
 
