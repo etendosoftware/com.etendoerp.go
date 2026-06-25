@@ -23,7 +23,6 @@ import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -55,34 +54,17 @@ import org.openbravo.service.db.CallProcess;
 public class PeriodOpenCloseHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(PeriodOpenCloseHandler.class);
-
   private static final String PROCESS_167_ID = "167";
-  private static final String FIELD_OPEN_CLOSE = "openClose";
-  private static final String FIELD_VALUES = "fieldValues";
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    if (context.getEndpointType() != NeoEndpointType.ACTION
-        || !FIELD_OPEN_CLOSE.equals(context.getFieldName())) {
-      return null;
+    PeriodOpenCloseSupport.OpenCloseRequest req = PeriodOpenCloseSupport.parse(context);
+    if (req.isAbort()) {
+      return req.toHandlerReturn();
     }
 
-    JSONObject body = context.getRequestBody();
-    if (body == null) {
-      return NeoResponse.error(400, "Missing request body");
-    }
-
-    JSONObject fieldValues = body.optJSONObject(FIELD_VALUES);
-    String openCloseValue = fieldValues != null ? fieldValues.optString(FIELD_OPEN_CLOSE, null) : null;
-
-    if (openCloseValue == null || openCloseValue.isBlank()) {
-      return NeoResponse.error(400, "Missing required parameter: openClose");
-    }
-
-    String recordId = context.getRecordId();
-    if (recordId == null || recordId.isBlank()) {
-      return NeoResponse.error(400, "Missing recordId");
-    }
+    String openCloseValue = req.openCloseValue;
+    String recordId = req.recordId;
 
     try {
       OBContext.setAdminMode();
@@ -117,12 +99,10 @@ public class PeriodOpenCloseHandler implements NeoHandler {
           return NeoResponse.error(500, "AD Process 167 (C_Period_Process) not found");
         }
 
-        ProcessInstance pInstance = CallProcess.getInstance()
-            .call(process167, logEntry.getId(), null);
-
+        ProcessInstance pInstance = CallProcess.getInstance().call(process167, logEntry.getId(), null);
         OBDal.getInstance().getSession().refresh(pInstance);
 
-        return translateResult(pInstance, process167);
+        return PeriodOpenCloseSupport.translateResult(pInstance, process167);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -135,29 +115,5 @@ public class PeriodOpenCloseHandler implements NeoHandler {
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     return null;
-  }
-
-  private static NeoResponse translateResult(ProcessInstance pInstance, Process process)
-      throws Exception {
-    JSONObject result = new JSONObject();
-    long resultCode = pInstance.getResult() != null ? pInstance.getResult() : 0L;
-    String errorMsg = pInstance.getErrorMsg();
-
-    if (resultCode == 0L) {
-      String cleanMsg = errorMsg != null
-          ? errorMsg.replaceFirst("@ERROR=", "")
-          : "Process failed";
-      result.put("status", "error");
-      result.put("message", cleanMsg);
-      return new NeoResponse(400, result);
-    }
-
-    result.put("status", "success");
-    if (errorMsg != null && !errorMsg.isBlank()) {
-      result.put("message", errorMsg.replaceFirst("@SUCCESS=", ""));
-    } else {
-      result.put("message", "Process " + process.getName() + " executed successfully");
-    }
-    return NeoResponse.ok(result);
   }
 }
