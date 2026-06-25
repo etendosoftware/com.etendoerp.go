@@ -424,4 +424,114 @@ class BusinessPartnerHandlerTest {
       assertEquals("1000067", patchedKey);
     }
   }
+
+  // ── afterHandle() — GET: contact email fallback ──────────────────────────────
+
+  /**
+   * Builds a NEO GET response body with a single record carrying {@code id = REC_ID}
+   * and the given {@code etgoEmail} (omitted when {@code email} is {@code null}).
+   */
+  private static JSONObject buildGetBody(String email) throws Exception {
+    JSONObject recordEntry = new JSONObject();
+    recordEntry.put("id", "REC_ID");
+    if (email != null) {
+      recordEntry.put("etgoEmail", email);
+    }
+    JSONArray data = new JSONArray();
+    data.put(recordEntry);
+    JSONObject response = new JSONObject();
+    response.put("data", data);
+    JSONObject body = new JSONObject();
+    body.put("response", response);
+    return body;
+  }
+
+  /**
+   * A GET with no recordId is a list fetch; the handler must skip the email fallback
+   * and return {@code null} without touching the database.
+   */
+  @Test
+  void testAfterHandleGetBlankRecordIdReturnsNull() {
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn("");
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  /**
+   * When the partner record already carries its own {@code etgoEmail}, the handler must
+   * leave the response untouched (return {@code null}) and never query contacts.
+   */
+  @Test
+  void testAfterHandleGetPartnerAlreadyHasEmailReturnsNull() throws Exception {
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(buildGetBody("partner@own.com"));
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn("REC_ID");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  /**
+   * When the partner email is blank and no contact has a valid email, the handler must
+   * return {@code null} and leave the record unchanged.
+   */
+  @Test
+  void testAfterHandleGetNoContactEmailReturnsNull() throws Exception {
+    JSONObject body = buildGetBody(null);
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn("REC_ID");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psMock = mock(PreparedStatement.class);
+    ResultSet rsMock = mock(ResultSet.class);
+    when(rsMock.next()).thenReturn(false);
+    when(psMock.executeQuery()).thenReturn(rsMock);
+    when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      assertNull(handler.afterHandle(ctx));
+    }
+  }
+
+  /**
+   * When the partner email is blank and a contact has a valid email, the handler must
+   * inject that email into {@code etgoEmail} and return a non-null response.
+   */
+  @Test
+  void testAfterHandleGetInjectsContactEmail() throws Exception {
+    JSONObject body = buildGetBody(null);
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn("REC_ID");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psMock = mock(PreparedStatement.class);
+    ResultSet rsMock = mock(ResultSet.class);
+    when(rsMock.next()).thenReturn(true);
+    when(rsMock.getString(1)).thenReturn("contact@partner.com");
+    when(psMock.executeQuery()).thenReturn(rsMock);
+    when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      String patchedEmail = body.getJSONObject("response").getJSONArray("data").getJSONObject(0).getString("etgoEmail");
+      assertEquals("contact@partner.com", patchedEmail);
+    }
+  }
 }

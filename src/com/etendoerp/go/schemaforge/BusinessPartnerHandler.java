@@ -52,6 +52,15 @@ import org.openbravo.dal.service.OBDal;
  *       only when the record's current {@code name} is blank in the database.</li>
  * </ul>
  *
+ * <p>On GET (single record, i.e. {@code /contacts/businessPartner/{id}}):
+ * <ul>
+ *   <li>{@code afterHandle()} fills the {@code etgoEmail} field with the email of one
+ *       of the partner's contacts ({@code ad_user.email}) when the partner's own email
+ *       field ({@code EM_Etgo_Email}) is blank. Company partners normally hold the email
+ *       on their contacts, not on the partner record itself; the document Send modal
+ *       autofills this value as the default recipient.</li>
+ * </ul>
+ *
  * <p>Registered via {@code JAVA_QUALIFIER = 'businessPartnerHandler'} on the
  * ETGO_SF_ENTITY record for the contacts spec's businessPartner entity.
  */
@@ -67,6 +76,7 @@ public class BusinessPartnerHandler implements NeoHandler {
       "vendorBlocking");
   private static final String FIELD_FIRSTNAME = "etgoFirstname";
   private static final String FIELD_LASTNAME = "etgoLastname";
+  private static final String FIELD_EMAIL = "etgoEmail";
 
   /**
    * Concatenates non-blank parts separated by a single space.
@@ -94,21 +104,53 @@ public class BusinessPartnerHandler implements NeoHandler {
     return new String[]{ "", "", "" };
   }
 
-  private static String extractRecordId(JSONObject body) {
+  /**
+   * Returns the first record under {@code response.data} (or top-level {@code data}),
+   * or {@code null} when the body has no record array.
+   */
+  private static JSONObject firstRecord(JSONObject body) {
     try {
       JSONObject response = body.optJSONObject("response");
-      if (response == null) {
-        return null;
-      }
-      JSONArray data = response.optJSONArray("data");
+      JSONArray data = (response != null) ? response.optJSONArray("data") : body.optJSONArray("data");
       if (data == null || data.length() == 0) {
         return null;
       }
-      String id = data.getJSONObject(0).optString("id", null);
-      return StringUtils.isNotBlank(id) ? id : null;
+      return data.getJSONObject(0);
     } catch (Exception e) {
       return null;
     }
+  }
+
+  private static String extractRecordId(JSONObject body) {
+    JSONObject record = firstRecord(body);
+    if (record == null) {
+      return null;
+    }
+    String id = record.optString("id", null);
+    return StringUtils.isNotBlank(id) ? id : null;
+  }
+
+  /**
+   * Looks up the email of one active contact ({@code ad_user}) of the given business
+   * partner. Returns the oldest active contact's email, or {@code null} when no
+   * contact has a valid email.
+   */
+  private static String queryContactEmail(String bPartnerId) throws Exception {
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(
+        "SELECT email FROM ad_user"
+            + " WHERE c_bpartner_id = ? AND isactive = 'Y'"
+            + "   AND email IS NOT NULL AND position('@' in email) > 0"
+            + " ORDER BY created"
+            + " LIMIT 1")) {
+      ps.setString(1, bPartnerId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          return StringUtils.trimToNull(rs.getString(1));
+        }
+      }
+    }
+    return null;
   }
 
   private static String queryIdentifier(String recordId) throws Exception {
@@ -236,7 +278,11 @@ public class BusinessPartnerHandler implements NeoHandler {
 
   @Override
   public NeoResponse afterHandle(NeoContext ctx) {
-    if (!"POST".equals(ctx.getHttpMethod())) {
+    String method = ctx.getHttpMethod();
+    if ("GET".equals(method)) {
+      return fillContactEmailFallback(ctx);
+    }
+    if (!"POST".equals(method)) {
       return null;
     }
     NeoResponse previousResult = ctx.getPreviousResult();
@@ -257,6 +303,41 @@ public class BusinessPartnerHandler implements NeoHandler {
       return NeoResponse.ok(previousResult.getBody());
     } catch (Exception e) {
       log.error("BusinessPartnerHandler: error updating searchKey from em_etgo_identifier", e);
+      return null;
+    }
+  }
+
+  /**
+   * On a single-record GET, injects a contact email into {@code etgoEmail} when the
+   * partner's own email field is blank, so the document Send modal has a default
+   * recipient to propose. Returns {@code null} (keeping the default CRUD result) for
+   * list fetches, partners that already carry an email, or when no contact email exists.
+   */
+  private NeoResponse fillContactEmailFallback(NeoContext ctx) {
+    String recordId = ctx.getRecordId();
+    if (StringUtils.isBlank(recordId)) {
+      return null; // list fetch — no single partner to resolve
+    }
+    NeoResponse previousResult = ctx.getPreviousResult();
+    if (previousResult == null || previousResult.getBody() == null) {
+      return null;
+    }
+    JSONObject record = firstRecord(previousResult.getBody());
+    if (record == null) {
+      return null;
+    }
+    if (record.optString(FIELD_EMAIL, "").contains("@")) {
+      return null; // partner already has its own email
+    }
+    try {
+      String contactEmail = queryContactEmail(recordId);
+      if (StringUtils.isBlank(contactEmail)) {
+        return null;
+      }
+      record.put(FIELD_EMAIL, contactEmail);
+      return NeoResponse.ok(previousResult.getBody());
+    } catch (Exception e) {
+      log.warn("BusinessPartnerHandler: could not resolve contact email fallback for bp={}", recordId, e);
       return null;
     }
   }
