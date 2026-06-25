@@ -63,6 +63,7 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * Unit tests for {@link McpToolRouterSupport}.
@@ -374,8 +375,61 @@ class McpToolRouterSupportTest {
       when(spec.getName()).thenReturn("aging");
       when(spec.getDescription()).thenReturn(null);
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
-      assertTrue(result.getBoolean("isReport"));
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+        assertTrue(result.getBoolean("isReport"));
+      }
+    }
+
+    /**
+     * ETP-4255: discover output for a CALLABLE report spec (NEO-native handler backed)
+     * carries {@code callable:true} and omits status/message.
+     */
+    @Test
+    void callableReportSpecCarriesCallableTrueWithoutStatus() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("aging");
+      when(spec.getDescription()).thenReturn(null);
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+
+        assertTrue(result.getBoolean("isReport"));
+        assertTrue(result.getBoolean("callable"));
+        assertFalse(result.has("status"));
+        assertFalse(result.has("message"));
+      }
+    }
+
+    /**
+     * ETP-4255: discover output for a NON-callable report spec carries {@code callable:false}
+     * plus the stable {@code not_configured_for_report_generation} status and a human message.
+     */
+    @Test
+    void nonCallableReportSpecCarriesStatusAndMessage() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("invoice-report");
+      when(spec.getDescription()).thenReturn(null);
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(false);
+        callabilityMock.when(() -> NeoReportCallability.buildNotConfiguredMessage("invoice-report"))
+            .thenCallRealMethod();
+
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+
+        assertTrue(result.getBoolean("isReport"));
+        assertFalse(result.getBoolean("callable"));
+        assertEquals(NeoReportCallability.STATUS_NOT_CONFIGURED, result.getString("status"));
+        assertTrue(result.getString("message").contains("not configured"));
+      }
     }
 
     @Test

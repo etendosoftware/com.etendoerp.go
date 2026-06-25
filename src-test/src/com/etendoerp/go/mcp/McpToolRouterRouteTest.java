@@ -54,14 +54,16 @@ import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
+import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
+import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
-import com.etendoerp.go.schemaforge.NeoReportService;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * Unit tests for {@link McpToolRouter#route} and its internal handler dispatch,
@@ -101,7 +103,6 @@ class McpToolRouterRouteTest {
   private MockedStatic<NeoAccessUtils> accessMock;
   private MockedStatic<NeoDefaultsService> defaultsMock;
   private MockedStatic<NeoProcessService> processMock;
-  private MockedStatic<NeoReportService> reportMock;
   private MockedStatic<NeoSelectorService> selectorMock;
   private MockedStatic<NeoButtonActionHelper> buttonActionMock;
 
@@ -116,7 +117,6 @@ class McpToolRouterRouteTest {
     accessMock = mockStatic(NeoAccessUtils.class);
     defaultsMock = mockStatic(NeoDefaultsService.class);
     processMock = mockStatic(NeoProcessService.class);
-    reportMock = mockStatic(NeoReportService.class);
     selectorMock = mockStatic(NeoSelectorService.class);
     buttonActionMock = mockStatic(NeoButtonActionHelper.class);
 
@@ -136,7 +136,6 @@ class McpToolRouterRouteTest {
     if (accessMock != null) accessMock.close();
     if (defaultsMock != null) defaultsMock.close();
     if (processMock != null) processMock.close();
-    if (reportMock != null) reportMock.close();
     if (selectorMock != null) selectorMock.close();
     if (buttonActionMock != null) buttonActionMock.close();
   }
@@ -551,69 +550,79 @@ class McpToolRouterRouteTest {
   // ── Report tools ──────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("route — report tools")
+  @DisplayName("route — report tools (ETP-4255: NEO-native handlers only)")
   class ReportTests {
 
+    private SFSpec mockReportSpec() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn(SPEC_ID);
+      when(spec.getName()).thenReturn("invoice-report");
+      when(spec.getSpecType()).thenReturn("R");
+      return spec;
+    }
+
+    /**
+     * ETP-4255: a report spec with no NEO-native handler is non-callable. The report tool
+     * returns the canonical {@code not_configured_for_report_generation} body as plain TEXT
+     * content (NOT an error), and never executes Jasper/AD_Process reports.
+     */
     @Test
-    @DisplayName("report tool with no linked AD_Process returns error")
-    void reportToolNoProcessReturnsError() throws Exception {
-      SFSpec spec = mockSpec();
-      when(spec.getProcess()).thenReturn(null);
+    @DisplayName("report tool with no handler returns non-error not_configured text")
+    void reportToolNoHandlerReturnsNotConfigured() throws Exception {
+      SFSpec spec = mockReportSpec();
       setupSpecLookup(spec);
+      // No included entity declares a Java_Qualifier → no NEO-native handler.
+      supportMock.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
+          .thenReturn(Collections.emptyList());
 
       JSONObject result = router.route("generate_invoice_report", null, REPORT_SCOPES);
 
-      assertTrue(result.getBoolean("isError"));
+      // Not an error path.
+      assertFalse(result.has("isError") && result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
-      assertTrue(text.contains("no linked AD_Process"));
+      JSONObject body = new JSONObject(text);
+      assertEquals("invoice-report", body.getString("name"));
+      assertEquals("report", body.getString("type"));
+      assertFalse(body.getBoolean("callable"));
+      assertEquals(NeoReportCallability.STATUS_NOT_CONFIGURED, body.getString("status"));
+      assertTrue(body.getString("message").contains("not configured"));
     }
 
+    /**
+     * A report spec whose included entity declares a {@code Java_Qualifier} is callable: the
+     * matching NeoHandler runs and its NeoResponse JSON is returned (no Jasper involved).
+     */
     @Test
-    @DisplayName("report tool with denied RBAC returns error")
-    void reportToolDeniedRbacReturnsError() throws Exception {
-      SFSpec spec = mockSpec();
-      Process adProcess = mock(Process.class);
-      when(adProcess.getId()).thenReturn(PROCESS_ID);
-      when(spec.getProcess()).thenReturn(adProcess);
+    @DisplayName("report tool with NEO handler invokes handle() and returns its JSON")
+    void reportToolWithHandlerReturnsHandlerJson() throws Exception {
+      SFSpec spec = mockReportSpec();
       setupSpecLookup(spec);
 
-      accessMock.when(() -> NeoAccessUtils.hasProcessAccess(PROCESS_ID)).thenReturn(false);
+      SFEntity reportEntity = mock(SFEntity.class);
+      when(reportEntity.getName()).thenReturn("aging");
+      when(reportEntity.getJavaQualifier()).thenReturn("agingReportHandler");
+      supportMock.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
+          .thenReturn(List.of(reportEntity));
 
-      JSONObject result = router.route("generate_invoice_report", null, REPORT_SCOPES);
+      JSONObject reportData = new JSONObject();
+      reportData.put("rows", 3);
+      NeoResponse handlerResponse = NeoResponse.ok(reportData);
 
-      assertTrue(result.getBoolean("isError"));
-      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
-      assertTrue(text.contains("Access denied"));
-    }
+      NeoHandler handler = mock(NeoHandler.class);
+      when(handler.handle(any(NeoContext.class))).thenReturn(handlerResponse);
 
-    @Test
-    @DisplayName("report tool with generation failure returns fallback description")
-    void reportToolGenerationFailureFallback() throws Exception {
-      SFSpec spec = mockSpec();
-      Process adProcess = mock(Process.class);
-      when(adProcess.getId()).thenReturn(PROCESS_ID);
-      when(spec.getProcess()).thenReturn(adProcess);
-      setupSpecLookup(spec);
-      accessMock.when(() -> NeoAccessUtils.hasProcessAccess(PROCESS_ID)).thenReturn(true);
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(reportEntity))
+            .thenReturn(handler);
+        hookMock.when(() -> McpHookExecutor.neoResponseToMcpResult(any()))
+            .thenCallRealMethod();
 
-      reportMock.when(() -> NeoReportService.generateReport(
-          eq(adProcess), any(), anyString(), any()))
-          .thenThrow(new RuntimeException("Template not found"));
+        JSONObject result = router.route("generate_invoice_report", null, REPORT_SCOPES);
 
-      JSONObject describeBody = new JSONObject();
-      describeBody.put("info", "Invoice report");
-      NeoResponse describeResp = NeoResponse.ok(describeBody);
-      reportMock.when(() -> NeoReportService.describeReport(adProcess))
-          .thenReturn(describeResp);
-
-      JSONObject args = new JSONObject();
-      args.put("format", "pdf");
-
-      JSONObject result = router.route("generate_invoice_report", args, REPORT_SCOPES);
-
-      assertTrue(result.getBoolean("isError"));
-      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
-      assertTrue(text.contains("Template not found"));
+        assertFalse(result.has("isError") && result.getBoolean("isError"));
+        String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+        assertTrue(text.contains("\"rows\""));
+      }
     }
   }
 
