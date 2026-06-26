@@ -864,8 +864,7 @@ class McpToolRouterRouteTest {
           anyString(), org.mockito.ArgumentMatchers.any()))
           .thenReturn("# Finance docs\nbody text");
 
-      // Override the preference lookup seam so no DB/static mocking is needed;
-      // this test does not care about the token value.
+      // Stub the token-resolution seam so the test needs no DB or static mocking
       McpToolRouter docsRouter = new McpToolRouter() {
         @Override
         String resolveContext7Token() {
@@ -893,8 +892,7 @@ class McpToolRouterRouteTest {
           anyString(), org.mockito.ArgumentMatchers.any()))
           .thenReturn("");
 
-      // Override the preference lookup seam so no DB/static mocking is needed;
-      // this test does not care about the token value.
+      // Stub the token-resolution seam so the test needs no DB or static mocking
       McpToolRouter docsRouter = new McpToolRouter() {
         @Override
         String resolveContext7Token() {
@@ -920,7 +918,7 @@ class McpToolRouterRouteTest {
           anyString(), org.mockito.ArgumentMatchers.any()))
           .thenReturn("docs body");
 
-      // Override the preference lookup seam so no DB/static mocking is needed.
+      // Stub the token-resolution seam so the test needs no DB or static mocking
       McpToolRouter tokenRouter = new McpToolRouter() {
         @Override
         String resolveContext7Token() {

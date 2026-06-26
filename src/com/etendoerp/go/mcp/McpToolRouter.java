@@ -293,7 +293,7 @@ public class McpToolRouter {
 
     // Apply filters as where clause
     if (filters != null && filters.length() > 0) {
-      String whereClause = buildWhereFromFilters(filters, adTab);
+      String whereClause = McpToolRouterSupport.buildWhereFromFilters(filters, adTab, log);
       if (StringUtils.isNotBlank(whereClause)) {
         params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause);
         params.put(JsonConstants.USE_ALIAS, "true");
@@ -456,7 +456,7 @@ public class McpToolRouter {
     }
 
     // Wrap for DefaultJsonDataService
-    String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
+    String wrappedBody = McpToolRouterSupport.wrapForSmartclient(filteredBody, dalEntityName, null, log);
     String result = jsonService.add(params, wrappedBody);
     JSONObject responseJson = new JSONObject(result);
 
@@ -509,7 +509,7 @@ public class McpToolRouter {
     }
 
     // Wrap for DefaultJsonDataService with record ID
-    String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, recordId);
+    String wrappedBody = McpToolRouterSupport.wrapForSmartclient(filteredBody, dalEntityName, recordId, log);
     String result = jsonService.update(params, wrappedBody);
     JSONObject responseJson = new JSONObject(result);
 
@@ -1024,59 +1024,6 @@ public class McpToolRouter {
   }
 
   /**
-   * Build an HQL where clause fragment from MCP filter key-value pairs.
-   * Filters are applied as exact-match conditions using the DAL property name.
-   */
-  private String buildWhereFromFilters(JSONObject filters, Tab adTab) throws JSONException {
-    Entity dalEntity = ModelProvider.getInstance()
-        .getEntityByTableName(adTab.getTable().getDBTableName());
-    if (dalEntity == null) {
-      return null;
-    }
-
-    StringBuilder where = new StringBuilder();
-    Iterator<String> keys = filters.keys();
-    while (keys.hasNext()) {
-      String key = keys.next();
-      String value = filters.getString(key);
-      appendFilterCondition(where, dalEntity, key, value);
-    }
-    return where.length() > 0 ? where.toString() : null;
-  }
-
-  /**
-   * Resolve a single filter key to a DAL property and append an HQL condition.
-   */
-  private void appendFilterCondition(StringBuilder where, Entity dalEntity,
-      String key, String value) {
-    Property prop = null;
-    try {
-      prop = dalEntity.getPropertyByColumnName(key);
-    } catch (Exception ignored) {
-      try {
-        prop = dalEntity.getProperty(key);
-      } catch (Exception alsoIgnored) {
-        log.debug("Filter column '{}' not found in entity, skipping", key);
-      }
-    }
-
-    if (prop == null) {
-      log.warn("Filter key '{}' could not be resolved to a DAL property, ignoring", key);
-      return;
-    }
-
-    if (where.length() > 0) {
-      where.append(" and ");
-    }
-    String escaped = value.replace("'", "''");
-    if (!prop.isPrimitive()) {
-      where.append("e.").append(prop.getName()).append(".id='").append(escaped).append("'");
-    } else {
-      where.append("e.").append(prop.getName()).append("='").append(escaped).append("'");
-    }
-  }
-
-  /**
    * Map user-provided fields to DAL property names without SF-field filtering.
    * Accepts both DAL property names ("businessPartner") and DB column names
    * ("C_BPartner_ID"), resolving all to their DAL property equivalents.
@@ -1205,30 +1152,6 @@ public class McpToolRouter {
         log.warn("Removed FK sentinel '0' for {} — no sibling value found for {}",
             propName, targetEntity);
       }
-    }
-  }
-
-  /**
-   * Wraps a flat JSON body into the structure expected by DefaultJsonDataService.
-   * Identical to NeoServlet.wrapForSmartclient().
-   */
-  private String wrapForSmartclient(JSONObject filteredBody, String dalEntityName,
-      String recordId) {
-    try {
-      JSONObject data = filteredBody != null ? filteredBody : new JSONObject();
-      data.put(JsonConstants.ENTITYNAME, dalEntityName);
-      if (recordId != null) {
-        data.put(JsonConstants.ID, recordId);
-      } else {
-        data.put(JsonConstants.NEW_INDICATOR, true);
-      }
-
-      JSONObject wrapper = new JSONObject();
-      wrapper.put(JsonConstants.DATA, data);
-      return wrapper.toString();
-    } catch (Exception e) {
-      log.error("Error wrapping body for Smartclient format: {}", e.getMessage(), e);
-      return "{}";
     }
   }
 
