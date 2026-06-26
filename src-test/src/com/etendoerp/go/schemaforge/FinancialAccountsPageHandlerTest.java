@@ -344,6 +344,66 @@ public class FinancialAccountsPageHandlerTest {
   }
 
   /**
+   * Verifies that {@code buildAccountsArray()} emits the {@code psd2Connected} flag for each row:
+   * an account with an active PSD2 connection serialises {@code true}, one without serialises
+   * {@code false}. The UI uses this to show the "Conectado" badge on the account card.
+   *
+   * @throws Exception
+   *     if the JSON traversal fails
+   */
+  @Test
+  public void testBuildAccountsArrayEmitsPsd2ConnectedFlag() throws Exception {
+    AccountRow connected = account("acc-1", "BBVA PSD2", "B", new BigDecimal("100.00"), "EUR");
+    connected.psd2Connected = true;
+    AccountRow offline = account("acc-2", "Caja manual", "B", new BigDecimal("0.00"), "EUR");
+
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(connected, offline),
+        Collections.emptyMap());
+
+    assertEquals(2, arr.length());
+    assertTrue("connected account serialises psd2Connected=true",
+        arr.getJSONObject(0).getBoolean("psd2Connected"));
+    assertFalse("offline account serialises psd2Connected=false",
+        arr.getJSONObject(1).getBoolean("psd2Connected"));
+  }
+
+  /**
+   * Verifies that {@code loadAccounts()} maps column 11 ({@code em_psd2_connection_status}) to the
+   * {@code psd2Connected} flag: {@code 'CO'} (connected) → true, any other value → false.
+   *
+   * @throws Exception
+   *     if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadAccountsMapsPsd2ConnectionStatus() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, true, false);
+    when(rs.getString(1)).thenReturn("acc-1", "acc-2");
+    when(rs.getString(8)).thenReturn("N", "N");
+    when(rs.getString(9)).thenReturn("Y", "Y");
+    // Column 11 (em_psd2_connection_status): first connected ('CO'), second pending ('IN').
+    when(rs.getString(11)).thenReturn("CO", "IN");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
+
+      assertEquals(2, rows.size());
+      assertTrue("'CO' maps to psd2Connected=true", rows.get(0).psd2Connected);
+      assertFalse("non-'CO' maps to psd2Connected=false", rows.get(1).psd2Connected);
+    }
+  }
+
+  /**
    * Verifies that {@code buildAccountsArray()} emits the {@code active} flag for
    * each row: active accounts serialise {@code true}, archived ones serialise
    * {@code false}, so the UI can split them into the normal and "inactive"
