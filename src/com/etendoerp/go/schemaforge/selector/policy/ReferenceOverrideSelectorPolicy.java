@@ -37,7 +37,7 @@ public final class ReferenceOverrideSelectorPolicy {
     // C_DocType_Trx (C_DocTypeTarget_ID on invoices/orders): exclude reversed copies.
     // ARI/API with isReturn=Y are auto-generated reversal documents, never user-selectable.
     overrides.put("22F546D49D3A48E1B2B4F50446A8DE58",
-        "(e.documentCategory NOT IN ('ARI', 'API') OR e.return = false)");
+        "(e.documentCategory NOT IN ('ARI', 'API') OR e.`return` = false)");
     REFERENCE_OVERRIDE_FILTERS = java.util.Collections.unmodifiableMap(overrides);
   }
 

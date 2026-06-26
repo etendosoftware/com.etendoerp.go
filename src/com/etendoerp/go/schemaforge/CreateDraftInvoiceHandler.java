@@ -216,7 +216,14 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       }
     } catch (OBException e) {
       log.warn("Error creating draft invoice from {}: {}", specName, e.getMessage());
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      try {
+        JSONObject body = new JSONObject();
+        body.put("status", "error");
+        body.put("message", e.getMessage());
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
+      } catch (Exception jsonEx) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      }
     } catch (Exception e) {
       log.error("Error creating draft invoice from {}: {}", specName, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
