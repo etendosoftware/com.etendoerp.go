@@ -74,6 +74,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   private static final BigDecimal PCT_5_20 = new BigDecimal("5.20");
   private static final BigDecimal PCT_0_50 = new BigDecimal("0.50");
   private static final BigDecimal PCT_0_26 = new BigDecimal("0.26");
+  private static final BigDecimal PCT_0_62 = new BigDecimal("0.62");
   private static final BigDecimal PCT_1_00 = new BigDecimal("1.00");
   private static final BigDecimal PCT_1_75 = new BigDecimal("1.75");
 
@@ -379,12 +380,17 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     // VAT_SALES_EC (recargo equivalencia) — split by %.
     // Box assignment depends on form version: Oct 2024+ reassigned 0.5%/0.26% to 168/170
     // and introduced 1% in boxes 16/18.
+    // Pre-2024: 0%, 0.50%, 0.62% all go to 16/18; box 17 = dominant rate by largest base.
     TaxReportParameter paramEC =
         dao303.getTaxReportParameter(taxReport, VAT_SALES, "VAT_SALES_EC");
     if (paramEC != null) {
       List<TaxRate> ecTaxes =
           dao303.get303Taxes(taxReport.getId(), "All", "All", "All", paramEC);
       applyPercentageSplit(b, helper, ecTaxes, pct -> vatEcBoxes(pct, isNewForm), rateToBoxes);
+      if (!isNewForm && b.containsKey(16)) {
+        BigDecimal dominantRate = computePreOct2024EcDominantRate(helper, ecTaxes);
+        if (dominantRate != null) b.put(17, dominantRate);
+      }
     }
   }
 
@@ -407,7 +413,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
    *   0.26% / 0.50% → boxes 168/170 (new row introduced Oct 2024)
    *   1.00%         → boxes 16/18  (previously held 0.50% in older forms)
    * Pre-Oct 2024 (isNewForm=false):
-   *   0.50%         → boxes 16/18
+   *   0% / 0.50% / 0.62% → boxes 16/18 (box 17 = dominant rate, computed separately)
    */
   List<Integer> vatEcBoxes(BigDecimal pct, boolean isNewForm) {
     if (pct == null) return Collections.emptyList();
@@ -419,9 +425,35 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
         return java.util.Arrays.asList(168, 170);
       if (pct.compareTo(PCT_1_00) == 0) return java.util.Arrays.asList(16, 18);
     } else {
-      if (pct.compareTo(PCT_0_50) == 0) return java.util.Arrays.asList(16, 18);
+      if (pct.compareTo(PCT_0_50) == 0 || pct.compareTo(PCT_0_62) == 0
+          || pct.compareTo(BigDecimal.ZERO) == 0) return java.util.Arrays.asList(16, 18);
     }
     return Collections.emptyList();
+  }
+
+  /**
+   * For pre-Oct 2024 forms: picks the dominant RE rate (0%, 0.50%, 0.62%) for box 17 display,
+   * defined as the rate with the largest base imponible — matching Classic AEAT303Report2023 logic.
+   * Returns null if no EC activity found.
+   */
+  BigDecimal computePreOct2024EcDominantRate(AEAT303CalculationsHelper helper,
+      List<TaxRate> ecTaxes) {
+    BigDecimal[] candidates = { BigDecimal.ZERO, PCT_0_50, PCT_0_62 };
+    Map<BigDecimal, List<TaxRate>> split = splitByPercentage(ecTaxes);
+    BigDecimal dominantRate = null;
+    BigDecimal maxBase = BigDecimal.ZERO;
+    for (BigDecimal rate : candidates) {
+      BigDecimal normRate = rate.setScale(2, java.math.RoundingMode.HALF_UP);
+      List<TaxRate> group = split.get(normRate);
+      if (group == null || group.isEmpty()) continue;
+      Map<String, BigDecimal> amounts = helper.calculateAmountsMap(group, InvoiceType.ALL);
+      BigDecimal base = amounts.getOrDefault(TAX_BASE_AMOUNT, BigDecimal.ZERO).abs();
+      if (base.compareTo(maxBase) > 0) {
+        maxBase = base;
+        dominantRate = normRate;
+      }
+    }
+    return dominantRate;
   }
 
   private void applyPercentageSplit(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
