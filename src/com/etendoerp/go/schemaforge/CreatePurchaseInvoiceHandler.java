@@ -123,7 +123,14 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       }
     } catch (OBException e) {
       log.warn("Error creating purchase invoice from order {}: {}", recordId, e.getMessage());
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      try {
+        JSONObject body = new JSONObject();
+        body.put("status", "error");
+        body.put("message", e.getMessage());
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
+      } catch (Exception jsonEx) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      }
     } catch (Exception e) {
       log.error("Error creating purchase invoice from order {}: {}", recordId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,

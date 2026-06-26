@@ -93,6 +93,10 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     if (posting != null) {
       return posting;
     }
+    NeoResponse lineQtyError = validateLineQtyBeforeComplete(context);
+    if (lineQtyError != null) {
+      return lineQtyError;
+    }
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       NeoResponse lockError = validateDocTypeLock(context);
       if (lockError != null) {

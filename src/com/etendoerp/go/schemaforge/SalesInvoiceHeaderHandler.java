@@ -99,6 +99,10 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     if (posting != null) {
       return posting;
     }
+    NeoResponse lineQtyError = validateLineQtyBeforeComplete(context);
+    if (lineQtyError != null) {
+      return lineQtyError;
+    }
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       NeoResponse lockError = validateDocTypeLock(context);
       if (lockError != null) {
@@ -276,14 +280,17 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   @SuppressWarnings("java:S2077")
   private void enrichLinkedShipments(JSONObject rec, String invoiceId) {
     String sql =
-        "SELECT DISTINCT io.m_inout_id, io.documentno, io.docstatus " +
+        "SELECT DISTINCT io.m_inout_id, io.documentno, io.docstatus, io.movementtype " +
         "FROM c_invoiceline il " +
-        "JOIN m_inoutline iol ON iol.m_inoutline_id = il.m_inoutline_id " +
+        "JOIN m_inoutline iol ON (" +
+        "  iol.m_inoutline_id = il.m_inoutline_id " +
+        "  OR (il.m_inoutline_id IS NULL AND il.c_orderline_id IS NOT NULL AND iol.c_orderline_id = il.c_orderline_id)" +
+        ") " +
         "JOIN m_inout io ON io.m_inout_id = iol.m_inout_id " +
-        "WHERE il.c_invoice_id = ? " +
-        "  AND il.m_inoutline_id IS NOT NULL " +
-        "  AND io.isactive = 'Y' AND io.issotrx = 'Y'";
-    Connection conn = OBDal.getInstance().getConnection();
+        "WHERE il.c_invoice_id = ? AND il.isactive = 'Y' " +
+        "  AND io.isactive = 'Y' AND io.docstatus NOT IN ('VO','CL') " +
+        "  AND io.issotrx = 'Y'";
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       ps.setString(1, invoiceId);
       JSONArray shipments = new JSONArray();
@@ -293,6 +300,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
           s.put("id", rs.getString(1));
           s.put("documentNo", rs.getString(2));
           s.put("documentStatus", rs.getString(3));
+          s.put("movementType", rs.getString(4));
           shipments.put(s);
         }
       }
