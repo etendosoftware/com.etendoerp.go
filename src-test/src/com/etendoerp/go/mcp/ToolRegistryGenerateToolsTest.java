@@ -169,8 +169,10 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       List<String> names = toolNames(tools);
+      // Read access always yields neo_discover + the docs tool when no specs exist.
       assertTrue(names.contains("neo_discover"));
-      assertEquals(1, tools.size());
+      assertTrue(names.contains("docs"));
+      assertEquals(2, tools.size());
     }
 
     @Test
@@ -272,10 +274,16 @@ class ToolRegistryGenerateToolsTest {
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+      List<String> names = toolNames(tools);
 
-      // Only neo_discover, no CRUD tools since no accessible window specs
-      assertEquals(1, tools.size());
-      assertEquals("neo_discover", tools.get(0).getName());
+      // No CRUD tools since there are no accessible window specs; only the
+      // read-scope baseline tools (neo_discover + docs) are present.
+      assertFalse(names.contains("neo_list"));
+      assertFalse(names.contains("neo_get"));
+      assertFalse(names.contains("neo_create"));
+      assertTrue(names.contains("neo_discover"));
+      assertTrue(names.contains("docs"));
+      assertEquals(2, tools.size());
     }
 
     @Test
@@ -371,10 +379,17 @@ class ToolRegistryGenerateToolsTest {
       mockSpecCriteria(Collections.emptyList());
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read", "neo:write"));
+      List<String> names = toolNames(tools);
 
-      // Only neo_discover
-      assertEquals(1, tools.size());
-      assertEquals("neo_discover", tools.get(0).getName());
+      // No window specs => no CRUD/window tools. Only the read-scope baseline
+      // tools (neo_discover + docs) are present.
+      assertFalse(names.contains("neo_list"));
+      assertFalse(names.contains("neo_create"));
+      assertFalse(names.contains("neo_update"));
+      assertFalse(names.contains("neo_delete"));
+      assertTrue(names.contains("neo_discover"));
+      assertTrue(names.contains("docs"));
+      assertEquals(2, tools.size());
     }
   }
 
@@ -1124,6 +1139,75 @@ class ToolRegistryGenerateToolsTest {
       Map<String, Object> paramsProp = (Map<String, Object>) props.get("parameters");
       // No nested properties since the only field had no column
       assertFalse(paramsProp.containsKey("properties"));
+    }
+  }
+
+  // ── docs tool registration ────────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("generateTools — docs tool")
+  class DocsToolTests {
+
+    @Test
+    @DisplayName("neo:read scope registers the docs tool")
+    void readScopeRegistersDocs() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+
+      assertTrue(toolNames(tools).contains("docs"), "docs should be registered with read scope");
+    }
+
+    @Test
+    @DisplayName("neo:* scope registers the docs tool")
+    void wildcardScopeRegistersDocs() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
+
+      assertTrue(toolNames(tools).contains("docs"), "docs should be registered with wildcard scope");
+    }
+
+    @Test
+    @DisplayName("scope without read access (only neo:process) does not register the docs tool")
+    void noReadScopeDoesNotRegisterDocs() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:process"));
+
+      assertFalse(toolNames(tools).contains("docs"),
+          "docs should NOT be registered without read access");
+    }
+
+    @Test
+    @DisplayName("docs tool has required topic field")
+    @SuppressWarnings("unchecked")
+    void docsToolHasRequiredTopic() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+
+      McpToolDefinition docsTool = tools.stream()
+          .filter(t -> "docs".equals(t.getName()))
+          .findFirst()
+          .orElse(null);
+      assertNotNull(docsTool, "docs tool should be present");
+
+      Map<String, Object> schema = docsTool.getInputSchema();
+      List<String> required = (List<String>) schema.get("required");
+      assertNotNull(required);
+      assertTrue(required.contains("topic"));
+
+      Map<String, Object> props = (Map<String, Object>) schema.get("properties");
+      assertTrue(props.containsKey("topic"));
+      assertTrue(props.containsKey("tokens"));
+      assertTrue(props.containsKey("type"));
+    }
+
+    @Test
+    @DisplayName("resolveSpecName returns null for the docs tool")
+    void resolveSpecNameReturnsNullForDocs() {
+      assertNull(ToolRegistry.resolveSpecName("docs", null));
     }
   }
 

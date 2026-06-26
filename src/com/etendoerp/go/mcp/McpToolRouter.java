@@ -37,6 +37,9 @@ import org.openbravo.base.model.Property;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.businessUtility.Preferences;
+import org.openbravo.erpCommon.utility.PropertyException;
+import org.openbravo.erpCommon.utility.PropertyNotFoundException;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
@@ -83,6 +86,8 @@ public class McpToolRouter {
 
   private static final Logger log = LogManager.getLogger(McpToolRouter.class);
   private static final String ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX = "' for current role";
+  /** OBPreference property name holding the optional Context7 API token. */
+  static final String PREF_CONTEXT7_TOKEN = "ETGO_Context7Token";
 
 
   /**
@@ -131,6 +136,8 @@ public class McpToolRouter {
             return handleAction(specName, arguments);
           case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
             return handleGenerateAmortizationPlan(arguments);
+          case "docs":
+            return handleDocs(arguments);
           default:
             // Check if it's a report tool (generate_*)
             if (toolName.startsWith(McpConstants.GENERATE_PREFIX)) {
@@ -145,6 +152,85 @@ public class McpToolRouter {
     } catch (Exception e) {
       log.error("Error routing MCP tool '{}'", toolName, e);
       return wrapAsErrorContent("Error executing " + toolName + ": " + e.getMessage());
+    }
+  }
+
+  // ── docs (Context7 documentation lookup) ──────────────────────────────
+
+  /**
+   * Handle the {@code docs} tool: fetch documentation from Context7 for the
+   * {@code etendosoftware/etendo-go-docs} library, filtered by a topic.
+   * <p>
+   * Delegates to {@link #handleDocs(JSONObject, Context7DocsClient)} with a default
+   * client. Tests should call the package-private overload with a mocked client.
+   *
+   * @param arguments tool arguments ({@code topic} required, {@code tokens} and
+   *                  {@code type} optional)
+   * @return MCP text content with the docs body, or error content on failure
+   */
+  private JSONObject handleDocs(JSONObject arguments) {
+    return handleDocs(arguments, new Context7DocsClient());
+  }
+
+  /**
+   * Package-private seam for the {@code docs} tool so unit tests can inject a mocked
+   * {@link Context7DocsClient} and exercise the success path without the network.
+   *
+   * @param arguments tool arguments ({@code topic} required, {@code tokens} and
+   *                  {@code type} optional)
+   * @param client    the Context7 client to use for the lookup
+   * @return MCP text content with the docs body, a friendly message when no docs are
+   *         found, or error content on failure
+   */
+  JSONObject handleDocs(JSONObject arguments, Context7DocsClient client) {
+    String topic = arguments != null ? arguments.optString("topic", null) : null;
+    if (StringUtils.isBlank(topic)) {
+      return wrapAsErrorContent("The 'topic' argument is required for the docs tool.");
+    }
+    int tokens = arguments != null
+        ? arguments.optInt("tokens", Context7DocsClient.DEFAULT_TOKENS)
+        : Context7DocsClient.DEFAULT_TOKENS;
+    String type = arguments != null
+        ? arguments.optString("type", Context7DocsClient.DEFAULT_TYPE)
+        : Context7DocsClient.DEFAULT_TYPE;
+
+    String apiKey = resolveContext7Token();
+    try {
+      String body = client.fetchDocs(topic, tokens, type, apiKey);
+      if (StringUtils.isBlank(body)) {
+        return wrapAsTextContent("No documentation found for topic '" + topic + "'.");
+      }
+      return wrapAsTextContent(body);
+    } catch (Exception e) {
+      log.error("Error fetching docs for topic '{}'", topic, e);
+      return wrapAsErrorContent("Error fetching docs: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Resolve the optional Context7 API token from the {@code ETGO_Context7Token} OBPreference.
+   * <p>
+   * Runs within the {@code OBContext.setAdminMode()} scope of {@link #route} and uses the
+   * current context (client, org, user, role; window = null). If no preference is defined
+   * or it is blank, returns {@code null} so the docs lookup proceeds unauthenticated.
+   * The token value is never logged.
+   *
+   * @return the configured token, or {@code null} when none is set
+   */
+  String resolveContext7Token() {
+    OBContext ctx = OBContext.getOBContext();
+    try {
+      String value = Preferences.getPreferenceValue(
+          PREF_CONTEXT7_TOKEN, true,
+          ctx.getCurrentClient(), ctx.getCurrentOrganization(),
+          ctx.getUser(), ctx.getRole(), null);
+      return StringUtils.trimToNull(value);
+    } catch (PropertyNotFoundException e) {
+      // No preference defined → unauthenticated call.
+      return null;
+    } catch (PropertyException e) {
+      log.warn("Could not read preference {}: {}", PREF_CONTEXT7_TOKEN, e.getMessage());
+      return null;
     }
   }
 
@@ -207,7 +293,7 @@ public class McpToolRouter {
 
     // Apply filters as where clause
     if (filters != null && filters.length() > 0) {
-      String whereClause = buildWhereFromFilters(filters, adTab);
+      String whereClause = McpToolRouterSupport.buildWhereFromFilters(filters, adTab, log);
       if (StringUtils.isNotBlank(whereClause)) {
         params.put(JsonConstants.WHERE_AND_FILTER_CLAUSE, whereClause);
         params.put(JsonConstants.USE_ALIAS, "true");
@@ -370,7 +456,7 @@ public class McpToolRouter {
     }
 
     // Wrap for DefaultJsonDataService
-    String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, null);
+    String wrappedBody = McpToolRouterSupport.wrapForSmartclient(filteredBody, dalEntityName, null, log);
     String result = jsonService.add(params, wrappedBody);
     JSONObject responseJson = new JSONObject(result);
 
@@ -423,7 +509,7 @@ public class McpToolRouter {
     }
 
     // Wrap for DefaultJsonDataService with record ID
-    String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, recordId);
+    String wrappedBody = McpToolRouterSupport.wrapForSmartclient(filteredBody, dalEntityName, recordId, log);
     String result = jsonService.update(params, wrappedBody);
     JSONObject responseJson = new JSONObject(result);
 
@@ -938,59 +1024,6 @@ public class McpToolRouter {
   }
 
   /**
-   * Build an HQL where clause fragment from MCP filter key-value pairs.
-   * Filters are applied as exact-match conditions using the DAL property name.
-   */
-  private String buildWhereFromFilters(JSONObject filters, Tab adTab) throws JSONException {
-    Entity dalEntity = ModelProvider.getInstance()
-        .getEntityByTableName(adTab.getTable().getDBTableName());
-    if (dalEntity == null) {
-      return null;
-    }
-
-    StringBuilder where = new StringBuilder();
-    Iterator<String> keys = filters.keys();
-    while (keys.hasNext()) {
-      String key = keys.next();
-      String value = filters.getString(key);
-      appendFilterCondition(where, dalEntity, key, value);
-    }
-    return where.length() > 0 ? where.toString() : null;
-  }
-
-  /**
-   * Resolve a single filter key to a DAL property and append an HQL condition.
-   */
-  private void appendFilterCondition(StringBuilder where, Entity dalEntity,
-      String key, String value) {
-    Property prop = null;
-    try {
-      prop = dalEntity.getPropertyByColumnName(key);
-    } catch (Exception ignored) {
-      try {
-        prop = dalEntity.getProperty(key);
-      } catch (Exception alsoIgnored) {
-        log.debug("Filter column '{}' not found in entity, skipping", key);
-      }
-    }
-
-    if (prop == null) {
-      log.warn("Filter key '{}' could not be resolved to a DAL property, ignoring", key);
-      return;
-    }
-
-    if (where.length() > 0) {
-      where.append(" and ");
-    }
-    String escaped = value.replace("'", "''");
-    if (!prop.isPrimitive()) {
-      where.append("e.").append(prop.getName()).append(".id='").append(escaped).append("'");
-    } else {
-      where.append("e.").append(prop.getName()).append("='").append(escaped).append("'");
-    }
-  }
-
-  /**
    * Map user-provided fields to DAL property names without SF-field filtering.
    * Accepts both DAL property names ("businessPartner") and DB column names
    * ("C_BPartner_ID"), resolving all to their DAL property equivalents.
@@ -1119,30 +1152,6 @@ public class McpToolRouter {
         log.warn("Removed FK sentinel '0' for {} — no sibling value found for {}",
             propName, targetEntity);
       }
-    }
-  }
-
-  /**
-   * Wraps a flat JSON body into the structure expected by DefaultJsonDataService.
-   * Identical to NeoServlet.wrapForSmartclient().
-   */
-  private String wrapForSmartclient(JSONObject filteredBody, String dalEntityName,
-      String recordId) {
-    try {
-      JSONObject data = filteredBody != null ? filteredBody : new JSONObject();
-      data.put(JsonConstants.ENTITYNAME, dalEntityName);
-      if (recordId != null) {
-        data.put(JsonConstants.ID, recordId);
-      } else {
-        data.put(JsonConstants.NEW_INDICATOR, true);
-      }
-
-      JSONObject wrapper = new JSONObject();
-      wrapper.put(JsonConstants.DATA, data);
-      return wrapper.toString();
-    } catch (Exception e) {
-      log.error("Error wrapping body for Smartclient format: {}", e.getMessage(), e);
-      return "{}";
     }
   }
 

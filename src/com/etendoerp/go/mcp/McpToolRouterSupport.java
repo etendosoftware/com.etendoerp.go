@@ -533,4 +533,84 @@ final class McpToolRouterSupport {
     int errorStatus = errorObj.optInt(McpConstants.KEY_STATUS, -1);
     return errorStatus > 0 ? String.valueOf(errorStatus) : null;
   }
+
+  // ── List filter helpers (kept here to stay within McpToolRouter method-count limit) ─
+
+  /**
+   * Build an HQL where clause fragment from MCP filter key-value pairs.
+   * Filters are applied as exact-match conditions using the DAL property name.
+   */
+  static String buildWhereFromFilters(JSONObject filters, Tab adTab,
+      org.apache.logging.log4j.Logger log) throws JSONException {
+    Entity dalEntity = org.openbravo.base.model.ModelProvider.getInstance()
+        .getEntityByTableName(adTab.getTable().getDBTableName());
+    if (dalEntity == null) {
+      return null;
+    }
+
+    StringBuilder where = new StringBuilder();
+    java.util.Iterator<String> keys = filters.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      String value = filters.getString(key);
+      appendFilterCondition(where, dalEntity, key, value, log);
+    }
+    return where.length() > 0 ? where.toString() : null;
+  }
+
+  /**
+   * Resolve a single filter key to a DAL property and append an HQL condition.
+   */
+  private static void appendFilterCondition(StringBuilder where, Entity dalEntity,
+      String key, String value, org.apache.logging.log4j.Logger log) {
+    Property prop = null;
+    try {
+      prop = dalEntity.getPropertyByColumnName(key);
+    } catch (Exception ignored) {
+      try {
+        prop = dalEntity.getProperty(key);
+      } catch (Exception alsoIgnored) {
+        log.debug("Filter column '{}' not found in entity, skipping", key);
+      }
+    }
+
+    if (prop == null) {
+      log.warn("Filter key '{}' could not be resolved to a DAL property, ignoring", key);
+      return;
+    }
+
+    if (where.length() > 0) {
+      where.append(" and ");
+    }
+    String escaped = value.replace("'", "''");
+    if (!prop.isPrimitive()) {
+      where.append("e.").append(prop.getName()).append(".id='").append(escaped).append("'");
+    } else {
+      where.append("e.").append(prop.getName()).append("='").append(escaped).append("'");
+    }
+  }
+
+  /**
+   * Wraps a flat JSON body into the structure expected by DefaultJsonDataService.
+   * Identical to NeoServlet.wrapForSmartclient().
+   */
+  static String wrapForSmartclient(JSONObject filteredBody, String dalEntityName,
+      String recordId, org.apache.logging.log4j.Logger log) {
+    try {
+      JSONObject data = filteredBody != null ? filteredBody : new JSONObject();
+      data.put(org.openbravo.service.json.JsonConstants.ENTITYNAME, dalEntityName);
+      if (recordId != null) {
+        data.put(org.openbravo.service.json.JsonConstants.ID, recordId);
+      } else {
+        data.put(org.openbravo.service.json.JsonConstants.NEW_INDICATOR, true);
+      }
+
+      JSONObject wrapper = new JSONObject();
+      wrapper.put(org.openbravo.service.json.JsonConstants.DATA, data);
+      return wrapper.toString();
+    } catch (Exception e) {
+      log.error("Error wrapping body for Smartclient format: {}", e.getMessage(), e);
+      return "{}";
+    }
+  }
 }

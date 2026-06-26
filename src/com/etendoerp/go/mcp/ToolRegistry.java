@@ -75,6 +75,7 @@ public class ToolRegistry {
     // Always add neo_discover if user can read
     if (permissions.canRead) {
       tools.add(buildDiscoverTool());
+      tools.add(buildDocsTool());
     }
 
     // Query all active specs
@@ -202,6 +203,11 @@ public class ToolRegistry {
    * @return the spec name, or null if not resolvable
    */
   public static String resolveSpecName(String toolName, org.codehaus.jettison.json.JSONObject arguments) {
+    // Static tools (e.g. docs) are not tied to any spec
+    if ("docs".equals(toolName)) {
+      return null;
+    }
+
     // CRUD tools carry spec in arguments
     if (isCrudTool(toolName)) {
       return arguments != null ? arguments.optString("spec", null) : null;
@@ -254,6 +260,26 @@ public class ToolRegistry {
             + "Returns spec names, types, entities, and available HTTP methods. "
             + "Use this first to discover what specs and entities are available.",
         schema);
+  }
+
+  // ── Docs tool (Context7 documentation lookup) ─────────────────────────
+
+  private McpToolDefinition buildDocsTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("topic", stringProp(
+        "Term/topic to search in the Etendo Go docs (e.g. 'finance', 'payment')."));
+    props.put("tokens", intProp(
+        "Approximate max size of the returned docs (default 5000, clamped to 500-20000)."));
+    props.put("type", stringProp(
+        "Response format: 'txt' (default) or 'json'."));
+
+    return new McpToolDefinition(
+        "docs",
+        "Search the Etendo Go documentation (etendosoftware/etendo-go-docs via Context7) "
+            + "for a given topic and return the relevant documentation text inline. "
+            + "Use this to look up how-tos, concepts, and reference material before "
+            + "answering questions about Etendo Go.",
+        buildObjectSchema(props, List.of("topic")));
   }
 
   // ── CRUD tools (registered once with spec enum) ───────────────────────
