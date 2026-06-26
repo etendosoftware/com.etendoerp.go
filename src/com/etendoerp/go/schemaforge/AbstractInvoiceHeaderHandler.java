@@ -403,29 +403,10 @@ public abstract class AbstractInvoiceHeaderHandler {
         return null;
       }
       for (Map.Entry<String, Map<String, BigDecimal>> inoutEntry : linesByInout.entrySet()) {
-        String inoutId = inoutEntry.getKey();
-        Map<String, BigDecimal> draftLines = inoutEntry.getValue();
-        Map<String, BigDecimal> pendingMap = NeoInvoiceSupport.computePendingQtyPerLine(inoutId, false);
-        for (Map.Entry<String, BigDecimal> lineEntry : draftLines.entrySet()) {
-          String lineId = lineEntry.getKey();
-          BigDecimal draftQty = lineEntry.getValue();
-          if (draftQty == null || draftQty.compareTo(BigDecimal.ZERO) <= 0) {
-            continue;
-          }
-          BigDecimal pendingQty = pendingMap.getOrDefault(lineId, BigDecimal.ZERO);
-          if (pendingQty.compareTo(draftQty) < 0) {
-            String docNo = docNoByInout.get(inoutId);
-            String template = OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced");
-            String msg = template
-                .replace("@docNo@", docNo)
-                .replace("@invoiced@", draftQty.toPlainString())
-                .replace("@pending@", pendingQty.toPlainString());
-            log.warn("Blocking invoice completion id={}: {}", invoiceId, msg);
-            JSONObject body = new JSONObject();
-            body.put("status", "error");
-            body.put("message", msg);
-            return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
-          }
+        NeoResponse error = checkInoutEntryForOverInvoicing(
+            inoutEntry.getKey(), inoutEntry.getValue(), docNoByInout, invoiceId);
+        if (error != null) {
+          return error;
         }
       }
       return null;
@@ -435,6 +416,34 @@ public abstract class AbstractInvoiceHeaderHandler {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  private static NeoResponse checkInoutEntryForOverInvoicing(String inoutId,
+      Map<String, BigDecimal> draftLines, Map<String, String> docNoByInout,
+      String invoiceId) throws Exception {
+    Map<String, BigDecimal> pendingMap = NeoInvoiceSupport.computePendingQtyPerLine(inoutId, false);
+    for (Map.Entry<String, BigDecimal> lineEntry : draftLines.entrySet()) {
+      String lineId = lineEntry.getKey();
+      BigDecimal draftQty = lineEntry.getValue();
+      if (draftQty == null || draftQty.compareTo(BigDecimal.ZERO) <= 0) {
+        continue;
+      }
+      BigDecimal pendingQty = pendingMap.getOrDefault(lineId, BigDecimal.ZERO);
+      if (pendingQty.compareTo(draftQty) < 0) {
+        String docNo = docNoByInout.get(inoutId);
+        String template = OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced");
+        String msg = template
+            .replace("@docNo@", docNo)
+            .replace("@invoiced@", draftQty.toPlainString())
+            .replace("@pending@", pendingQty.toPlainString());
+        log.warn("Blocking invoice completion id={}: {}", invoiceId, msg);
+        JSONObject body = new JSONObject();
+        body.put("status", "error");
+        body.put("message", msg);
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
+      }
+    }
+    return null;
   }
 
   private static boolean isInvoiceCompleteAction(NeoContext context) {

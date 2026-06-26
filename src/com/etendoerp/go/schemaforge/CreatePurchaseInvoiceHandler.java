@@ -66,7 +66,6 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(CreatePurchaseInvoiceHandler.class);
   private static final String ACTION_NAME = "createPurchaseInvoice";
-  private static final String CHECK_ACTION = "checkPurchaseInvoice";
   private static final String SPEC_PURCHASE_ORDER = "purchase-order";
   private static final String SPEC_GOODS_RECEIPT = "goods-receipt";
   private static final String FIELD_ORDERED_QUANTITY = "orderedQuantity";
@@ -431,13 +430,19 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     // creates one invoice line per entry and does not deduplicate.
     Map<String, BigDecimal> accumulated = new LinkedHashMap<>();
     for (ShipmentInOutLine rl : receipt.getMaterialMgmtShipmentInOutLineList()) {
-      if (!rl.isActive() || rl.getProduct() == null) continue;
+      if (!rl.isActive() || rl.getProduct() == null) {
+        continue;
+      }
       OrderLine ol = rl.getSalesOrderLine();
-      if (ol == null) ol = orderLineByProduct.get(rl.getProduct().getId());
-      if (ol == null) continue;
-      BigDecimal qty = resolveReceiptLineQty(rl, qtyOverrides);
-      if (qty == null || qty.compareTo(BigDecimal.ZERO) <= 0) continue;
-      accumulated.merge(ol.getId(), qty, BigDecimal::add);
+      if (ol == null) {
+        ol = orderLineByProduct.get(rl.getProduct().getId());
+      }
+      if (ol != null) {
+        BigDecimal qty = resolveReceiptLineQty(rl, qtyOverrides);
+        if (qty != null && qty.compareTo(BigDecimal.ZERO) > 0) {
+          accumulated.merge(ol.getId(), qty, BigDecimal::add);
+        }
+      }
     }
     JSONArray selectedLines = new JSONArray();
     for (Map.Entry<String, BigDecimal> e : accumulated.entrySet()) {
