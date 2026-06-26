@@ -864,12 +864,21 @@ class McpToolRouterRouteTest {
           anyString(), org.mockito.ArgumentMatchers.any()))
           .thenReturn("# Finance docs\nbody text");
 
+      // Override the preference lookup seam so no DB/static mocking is needed;
+      // this test does not care about the token value.
+      McpToolRouter docsRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return null;
+        }
+      };
+
       JSONObject args = new JSONObject();
       args.put("topic", "finance");
       args.put("tokens", 1000);
       args.put("type", "txt");
 
-      JSONObject result = new McpToolRouter().handleDocs(args, mockClient);
+      JSONObject result = docsRouter.handleDocs(args, mockClient);
 
       assertFalse(result.has("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
@@ -884,10 +893,19 @@ class McpToolRouterRouteTest {
           anyString(), org.mockito.ArgumentMatchers.any()))
           .thenReturn("");
 
+      // Override the preference lookup seam so no DB/static mocking is needed;
+      // this test does not care about the token value.
+      McpToolRouter docsRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return null;
+        }
+      };
+
       JSONObject args = new JSONObject();
       args.put("topic", "nonexistent");
 
-      JSONObject result = new McpToolRouter().handleDocs(args, mockClient);
+      JSONObject result = docsRouter.handleDocs(args, mockClient);
 
       assertFalse(result.has("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");

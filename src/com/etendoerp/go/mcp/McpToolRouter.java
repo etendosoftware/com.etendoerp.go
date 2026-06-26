@@ -221,7 +221,7 @@ public class McpToolRouter {
     OBContext ctx = OBContext.getOBContext();
     try {
       String value = Preferences.getPreferenceValue(
-          PREF_CONTEXT7_TOKEN, false,
+          PREF_CONTEXT7_TOKEN, true,
           ctx.getCurrentClient(), ctx.getCurrentOrganization(),
           ctx.getUser(), ctx.getRole(), null);
       return StringUtils.trimToNull(value);

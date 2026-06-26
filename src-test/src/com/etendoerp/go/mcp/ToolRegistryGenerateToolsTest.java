@@ -169,8 +169,10 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       List<String> names = toolNames(tools);
+      // Read access always yields neo_discover + the docs tool when no specs exist.
       assertTrue(names.contains("neo_discover"));
-      assertEquals(1, tools.size());
+      assertTrue(names.contains("docs"));
+      assertEquals(2, tools.size());
     }
 
     @Test
@@ -272,10 +274,16 @@ class ToolRegistryGenerateToolsTest {
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+      List<String> names = toolNames(tools);
 
-      // Only neo_discover, no CRUD tools since no accessible window specs
-      assertEquals(1, tools.size());
-      assertEquals("neo_discover", tools.get(0).getName());
+      // No CRUD tools since there are no accessible window specs; only the
+      // read-scope baseline tools (neo_discover + docs) are present.
+      assertFalse(names.contains("neo_list"));
+      assertFalse(names.contains("neo_get"));
+      assertFalse(names.contains("neo_create"));
+      assertTrue(names.contains("neo_discover"));
+      assertTrue(names.contains("docs"));
+      assertEquals(2, tools.size());
     }
 
     @Test
@@ -371,10 +379,17 @@ class ToolRegistryGenerateToolsTest {
       mockSpecCriteria(Collections.emptyList());
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read", "neo:write"));
+      List<String> names = toolNames(tools);
 
-      // Only neo_discover
-      assertEquals(1, tools.size());
-      assertEquals("neo_discover", tools.get(0).getName());
+      // No window specs => no CRUD/window tools. Only the read-scope baseline
+      // tools (neo_discover + docs) are present.
+      assertFalse(names.contains("neo_list"));
+      assertFalse(names.contains("neo_create"));
+      assertFalse(names.contains("neo_update"));
+      assertFalse(names.contains("neo_delete"));
+      assertTrue(names.contains("neo_discover"));
+      assertTrue(names.contains("docs"));
+      assertEquals(2, tools.size());
     }
   }
 
