@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -41,6 +42,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -55,6 +57,7 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * Unit tests for {@link NeoRequestRouter}.
@@ -217,35 +220,90 @@ class NeoRequestRouterTest {
   }
 
   /**
-   * Verifies that a report spec (type "R") routes to handleReportSpecRequest.
+   * Verifies that a report spec (type "R") with NO NEO-native handler routes to
+   * handleReportSpecRequest and is exposed as non-callable: the router writes the
+   * canonical {@code not_configured_for_report_generation} body (HTTP 200) instead of
+   * executing any Jasper/AD_Process report (ETP-4255).
    */
   @SuppressWarnings("unchecked")
   @Test
-  void testHandleSpecRequestRoutesToReport() throws Exception {
+  void testHandleSpecRequestRoutesToReportNotConfigured() throws Exception {
     NeoPathInfo pathInfo = new NeoPathInfo("myReport", null, null);
     SFSpec spec = mock(SFSpec.class);
     when(spec.getSpecType()).thenReturn("R");
     when(spec.getId()).thenReturn("spec-id");
-    Process reportProcess = mock(Process.class);
-    when(reportProcess.getId()).thenReturn("report-proc-id");
-    when(spec.getProcess()).thenReturn(reportProcess);
-    when(servlet.authenticator.hasProcessAccess("report-proc-id")).thenReturn(true);
+    when(spec.getName()).thenReturn("myReport");
 
     supportMock.when(() -> NeoServletSupport.findSpec("myReport")).thenReturn(spec);
 
+    // No SFEntity carries a Java_Qualifier -> resolveReportHandlerQualifier returns null
+    // -> spec is non-callable, no handler dispatch, no Jasper fallback.
     OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
     when(obDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
     when(entityCriteria.add(any(Criterion.class))).thenReturn(entityCriteria);
     when(entityCriteria.list()).thenReturn(Collections.emptyList());
 
-    NeoResponse describeResult = NeoResponse.ok(new org.codehaus.jettison.json.JSONObject());
+    router.handleSpecRequest(pathInfo, "GET", request, response);
 
-    try (MockedStatic<NeoReportService> reportMock = mockStatic(NeoReportService.class)) {
-      reportMock.when(() -> NeoReportService.describeReport(reportProcess)).thenReturn(describeResult);
+    // The handler must NEVER be invoked for a non-callable report.
+    verify(servlet, never()).handleWithHooks(anyString(), any(), any(), any());
+
+    ArgumentCaptor<NeoResponse> captor = ArgumentCaptor.forClass(NeoResponse.class);
+    verify(servlet).writeResponse(eq(response), captor.capture());
+    NeoResponse written = captor.getValue();
+    assertEquals(200, written.getHttpStatus());
+    org.codehaus.jettison.json.JSONObject body = written.getBody();
+    assertEquals("myReport", body.getString("name"));
+    assertEquals("report", body.getString("type"));
+    assertEquals(false, body.getBoolean("callable"));
+    assertEquals(NeoReportCallability.STATUS_NOT_CONFIGURED, body.getString("status"));
+    assertTrue(body.getString("message").contains("not configured"));
+  }
+
+  /**
+   * Verifies that a report spec backed by a NEO-native handler (an entity declaring a
+   * {@code Java_Qualifier}) dispatches through {@code servlet.handleWithHooks} and writes
+   * the handler's NeoResponse — never a Jasper/AD_Process result.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  void testHandleSpecRequestRoutesToReportHandler() throws Exception {
+    NeoPathInfo pathInfo = new NeoPathInfo("aging-receivable", null, null);
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getSpecType()).thenReturn("R");
+    when(spec.getId()).thenReturn("spec-id");
+    when(spec.getName()).thenReturn("aging-receivable");
+
+    supportMock.when(() -> NeoServletSupport.findSpec("aging-receivable")).thenReturn(spec);
+
+    // One SFEntity exposes a NEO report handler qualifier -> callable.
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getJavaQualifier()).thenReturn("agingReportHandler");
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.add(any(Criterion.class))).thenReturn(entityCriteria);
+    when(entityCriteria.list()).thenReturn(java.util.List.of(entity));
+
+    when(servlet.extractQueryParams(request)).thenReturn(Collections.emptyMap());
+
+    org.codehaus.jettison.json.JSONObject reportBody = new org.codehaus.jettison.json.JSONObject();
+    reportBody.put("rows", new org.codehaus.jettison.json.JSONArray());
+    NeoResponse handlerResult = NeoResponse.ok(reportBody);
+    when(servlet.handleWithHooks(eq("agingReportHandler"), any(), eq(request), eq(response)))
+        .thenReturn(handlerResult);
+
+    try (MockedStatic<NeoRequestBodyParser> bodyParserMock = mockStatic(NeoRequestBodyParser.class);
+         MockedStatic<NeoCsvExportService> csvMock = mockStatic(NeoCsvExportService.class)) {
+      bodyParserMock.when(() -> NeoRequestBodyParser.readRequestBody(request)).thenReturn(null);
+      bodyParserMock.when(() -> NeoRequestBodyParser.parseOptionalJsonObject(any()))
+          .thenReturn(null);
+      csvMock.when(() -> NeoCsvExportService.tryExport(any(), any(), eq(response)))
+          .thenReturn(false);
 
       router.handleSpecRequest(pathInfo, "GET", request, response);
 
-      verify(servlet).writeResponse(response, describeResult);
+      verify(servlet).handleWithHooks(eq("agingReportHandler"), any(), eq(request), eq(response));
+      verify(servlet).writeResponse(response, handlerResult);
     }
   }
 

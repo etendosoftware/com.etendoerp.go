@@ -176,10 +176,12 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String KEY_STATUS = "status";
   private static final String KEY_DOCUMENT_NO = "documentNo";
   private static final String KEY_PARTNER_NAME = "partnerName";
+  private static final String KEY_DESCRIPTION = "description";
   private static final String KEY_PENDING_BALANCE = "pendingBalance";
   private static final String KEY_SUGGESTED = "suggested";
   private static final String COL_PARTNER_NAME = "partner_name";
   private static final String KEY_COUNTS = "counts";
+  private static final String KEY_TOTAL = "total";
   private static final String SQL_VARCHAR = "varchar";
   private static final String KEY_GROUPS = "groups";
   private static final String STATUS_PENDING = "pending";
@@ -228,8 +230,14 @@ public class ReconciliationHandler implements NeoHandler {
           + "       ft.statementdate,"
           + "       COALESCE(fp.documentno, '') AS document_no,"
           + "       COALESCE(bp.name, '') AS partner_name,"
+          + "       COALESCE(ft.description, '') AS description,"
           + "       COALESCE(ft.depositamt, 0) - COALESCE(ft.paymentamt, 0) AS amount,"
-          + "       COALESCE(fp.isreceipt, 'N') AS is_receipt"
+          // Funds transfers / bank fees are GL-item transactions with no FIN_Payment, so
+          // fp.isreceipt is NULL. Derive the direction from the transaction amount instead
+          // (deposit >= payment → collection) so payment-less transactions still get bucketed.
+          + "       COALESCE(fp.isreceipt,"
+          + "                CASE WHEN COALESCE(ft.depositamt, 0) >= COALESCE(ft.paymentamt, 0)"
+          + "                     THEN 'Y' ELSE 'N' END) AS is_receipt"
           + "  FROM fin_finacc_transaction ft"
           + "  LEFT JOIN fin_payment fp ON fp.fin_payment_id = ft.fin_payment_id"
           + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = COALESCE(ft.c_bpartner_id, fp.c_bpartner_id)"
@@ -381,7 +389,7 @@ public class ReconciliationHandler implements NeoHandler {
           JSONObject row = new JSONObject();
           row.put(KEY_ID, lineId);
           row.put(KEY_DATE, formatDate(rs.getTimestamp("datetrx")));
-          row.put("description", StringUtils.trimToEmpty(rs.getString("description")));
+          row.put(KEY_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(KEY_DESCRIPTION)));
           row.put(KEY_PARTNER_NAME, StringUtils.trimToEmpty(rs.getString(COL_PARTNER_NAME)));
           row.put("referenceNo", StringUtils.trimToEmpty(rs.getString("reference_no")));
           // Coarse status kept for backward compatibility (pending|reconciled).
@@ -414,7 +422,7 @@ public class ReconciliationHandler implements NeoHandler {
     }
     JSONObject data = new JSONObject();
     data.put("lines", lines);
-    data.put("total", total);
+    data.put(KEY_TOTAL, total);
     data.put(KEY_COUNTS, countsJson);
     return envelope(data);
   }
@@ -476,7 +484,11 @@ public class ReconciliationHandler implements NeoHandler {
     boolean filterDocType = StringUtils.isNotBlank(docType);
     if (filterDocType) {
       // docType maps to the payment direction: receipts (collections) vs payments.
-      sql.append(" AND fp.isreceipt = ?");
+      // Mirror the SELECT's derivation so payment-less transactions (transfers, bank
+      // fees) are matched by their amount direction instead of being dropped on NULL.
+      sql.append(" AND COALESCE(fp.isreceipt,"
+          + " CASE WHEN COALESCE(ft.depositamt, 0) >= COALESCE(ft.paymentamt, 0)"
+          + " THEN 'Y' ELSE 'N' END) = ?");
     }
     sql.append(CANDIDATES_ORDER);
     try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
@@ -495,6 +507,7 @@ public class ReconciliationHandler implements NeoHandler {
           row.put(KEY_DATE, formatDate(rs.getTimestamp("statementdate")));
           row.put(KEY_DOCUMENT_NO, StringUtils.trimToEmpty(rs.getString("document_no")));
           row.put(KEY_PARTNER_NAME, StringUtils.trimToEmpty(rs.getString(COL_PARTNER_NAME)));
+          row.put(KEY_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(KEY_DESCRIPTION)));
           row.put(KEY_AMOUNT, amount);
           // Pending balance equals the transaction amount for now (partial
           // allocations against invoices are a follow-up).
@@ -892,6 +905,8 @@ public class ReconciliationHandler implements NeoHandler {
     data.put("account", accountId);
     data.put("kpis", kpis);
     data.put(KEY_GROUPS, groups);
+    ReconciliationKpiTelemetry.emitBankMatchAttempted(
+        pendingLines.size(), groups.length(), opsToLink);
     return envelope(data);
   }
 
@@ -938,16 +953,23 @@ public class ReconciliationHandler implements NeoHandler {
     }
 
     JSONArray results = new JSONArray();
+    int successfulGroups = 0;
     for (int i = 0; i < groupsJson.length(); i++) {
       JSONObject groupEntry = groupsJson.optJSONObject(i);
       if (groupEntry != null) {
-        results.put(applyGroup(account, groupEntry).getBody());
+        NeoResponse groupResult = applyGroup(account, groupEntry);
+        if (groupResult.getHttpStatus() < HttpServletResponse.SC_BAD_REQUEST) {
+          successfulGroups++;
+        }
+        results.put(groupResult.getBody());
       }
     }
 
     JSONObject data = new JSONObject();
     data.put("applied", results.length());
     data.put("results", results);
+    ReconciliationKpiTelemetry.emitReconciliationMatchEvaluated(
+        groupsJson.length(), results.length(), successfulGroups);
     return NeoResponse.createdWithData(data);
   }
 

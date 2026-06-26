@@ -201,6 +201,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     OBDal.getInstance().getSession().refresh(invoice);
     invoice = getSupport().applyOrderDiscountToInvoice(invoice, orderId, totalDiscountService);
     getSupport().ensureLineGrossAmounts(invoice);
+    getSupport().propagateOrderRateToInvoice(order, invoice);
 
     return invoice;
   }
