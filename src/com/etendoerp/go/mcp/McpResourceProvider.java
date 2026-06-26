@@ -35,6 +35,7 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * Provides MCP Resources — read-only schema information that AI agents can browse
@@ -53,6 +54,9 @@ public class McpResourceProvider {
   private static final String FIELD_DESCRIPTION = "description";
   private static final String FIELD_MIME_TYPE = "mimeType";
   private static final String FIELD_PROCESS_NAME = "processName";
+  private static final String FIELD_IS_REPORT = "isReport";
+  private static final String FIELD_SPEC_NAME = "specName";
+  private static final String FIELD_SPEC_TYPE = "specType";
   private static final String MIME_TYPE_JSON = "application/json";
   private static final String URI_SPECS = "neo://specs";
   private static final String URI_SPECS_PREFIX = URI_SPECS + "/";
@@ -206,7 +210,9 @@ public class McpResourceProvider {
         specObj.put(FIELD_PROCESS_NAME, process.getName());
       }
       if ("R".equals(spec.getSpecType())) {
-        specObj.put("isReport", true);
+        // Report callability is truthful (ETP-4255): callable only via a NEO-native handler.
+        specObj.put(FIELD_IS_REPORT, true);
+        specObj.put("callable", NeoReportCallability.isReportCallable(spec));
       }
     }
 
@@ -268,8 +274,8 @@ public class McpResourceProvider {
     }
     SFEntity entity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
     JSONObject result = buildEntityJson(entity, true);
-    result.put("specName", specName);
-    result.put("specType", spec.getSpecType());
+    result.put(FIELD_SPEC_NAME, specName);
+    result.put(FIELD_SPEC_TYPE, spec.getSpecType());
     return result;
   }
 
@@ -288,6 +294,13 @@ public class McpResourceProvider {
           "Spec '" + specName + "' is not a process or report (type: " + specType + ")");
     }
 
+    // Report specs (ETP-4255) are NEO-native callable metadata only; they are not backed
+    // by AD_Process/Jasper. Report callability is reported truthfully here, matching
+    // neo_discover. A callable report is described by its NEO handler, not AD_Process.
+    if ("R".equals(specType)) {
+      return describeReportSpec(spec, specName, specType);
+    }
+
     Process adProcess = spec.getProcess();
     if (adProcess == null) {
       throw new IllegalArgumentException(
@@ -295,9 +308,9 @@ public class McpResourceProvider {
     }
 
     JSONObject result = new JSONObject();
-    result.put("specName", specName);
-    result.put("specType", specType);
-    result.put("isReport", "R".equals(specType));
+    result.put(FIELD_SPEC_NAME, specName);
+    result.put(FIELD_SPEC_TYPE, specType);
+    result.put(FIELD_IS_REPORT, "R".equals(specType));
     result.put(FIELD_PROCESS_NAME, adProcess.getName());
     result.put("processId", adProcess.getId());
     result.put(FIELD_DESCRIPTION, adProcess.getDescription());
@@ -335,6 +348,29 @@ public class McpResourceProvider {
     result.put("parameters", parameters);
     result.put("parameterCount", parameters.length());
     return result;
+  }
+
+  /**
+   * Describe a report spec (ETP-4255): NEO-native callable metadata only, not backed by
+   * AD_Process/Jasper. Callability is reported truthfully, matching neo_discover.
+   */
+  private JSONObject describeReportSpec(SFSpec spec, String specName, String specType)
+      throws Exception {
+    JSONObject reportResult = NeoReportCallability.buildNotConfiguredResponse(specName);
+    boolean callable = NeoReportCallability.isReportCallable(spec);
+    reportResult.put("callable", callable);
+    reportResult.put(FIELD_SPEC_NAME, specName);
+    reportResult.put(FIELD_SPEC_TYPE, specType);
+    reportResult.put(FIELD_IS_REPORT, true);
+    if (callable) {
+      // Callable report: drop the not-configured status/message, the NEO handler serves it.
+      reportResult.remove("status");
+      reportResult.remove("message");
+      String qualifier = NeoReportCallability.resolveReportHandlerQualifier(spec);
+      reportResult.put("reportHandler", qualifier);
+    }
+    reportResult.put(FIELD_DESCRIPTION, spec.getDescription());
+    return reportResult;
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────────

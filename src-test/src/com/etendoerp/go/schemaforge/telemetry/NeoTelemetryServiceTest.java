@@ -59,13 +59,21 @@ class NeoTelemetryServiceTest {
 
     Map<String, Object> properties = new LinkedHashMap<>();
     properties.put("accuracy", 98.5d);
+    properties.put("channel", "ocr");
     properties.put("count", 4);
+    properties.put("correctCount", 3);
+    properties.put("critical", true);
     properties.put("durationMs", 1250L);
     properties.put("entity", "invoice");
+    properties.put("entityType", "supplier_invoice");
+    properties.put("flow", "invoice_ingestion");
+    properties.put("kpiId", "kpi_precision_purchase_ocr_fields");
+    properties.put("module", "purchases");
     properties.put("operation", "create");
     properties.put("source", "ocr");
     properties.put("specName", "purchase-invoice");
     properties.put("status", "success");
+    properties.put("total", 4);
     properties.put("recordId", "A123");
     properties.put("documentNo", "INV-1");
     properties.put("token", "secret");
@@ -76,10 +84,18 @@ class NeoTelemetryServiceTest {
 
     Map<String, Object> emitted = sink.last().getProperties();
     assertEquals(98.5d, emitted.get("accuracy"));
+    assertEquals("ocr", emitted.get("channel"));
     assertEquals(4, emitted.get("count"));
+    assertEquals(3, emitted.get("correctCount"));
+    assertEquals(true, emitted.get("critical"));
     assertEquals(1250L, emitted.get("durationMs"));
     assertEquals("invoice", emitted.get("entity"));
+    assertEquals("supplier_invoice", emitted.get("entityType"));
+    assertEquals("invoice_ingestion", emitted.get("flow"));
+    assertEquals("kpi_precision_purchase_ocr_fields", emitted.get("kpiId"));
+    assertEquals("purchases", emitted.get("module"));
     assertEquals("purchase-invoice", emitted.get("specName"));
+    assertEquals(4, emitted.get("total"));
     assertFalse(emitted.containsKey("recordId"));
     assertFalse(emitted.containsKey("documentNo"));
     assertFalse(emitted.containsKey("token"));
@@ -94,17 +110,53 @@ class NeoTelemetryServiceTest {
 
     service.emit(NeoTelemetryEvents.BACKEND_BANK_MATCH_ATTEMPTED, mapOf(
         "accuracy", 120,
+        "correctCount", -1,
+        "critical", "true",
         "durationMs", "2500",
         "httpStatus", 99,
         "score", "9",
-        "status", "success"));
+        "status", "success",
+        "total", Double.POSITIVE_INFINITY));
 
     Map<String, Object> emitted = sink.last().getProperties();
     assertEquals("success", emitted.get("status"));
     assertFalse(emitted.containsKey("accuracy"));
+    assertFalse(emitted.containsKey("correctCount"));
+    assertFalse(emitted.containsKey("critical"));
     assertFalse(emitted.containsKey("durationMs"));
     assertFalse(emitted.containsKey("httpStatus"));
     assertFalse(emitted.containsKey("score"));
+    assertFalse(emitted.containsKey("total"));
+  }
+
+  @Test
+  void emitKeepsEtp4307BackendKpiEvents() {
+    RecordingSink sink = new RecordingSink();
+    NeoTelemetryService service = service(sink, 0L);
+
+    service.emit(NeoTelemetryEvents.BACKEND_INVOICE_INGESTION_COMPLETED,
+        mapOf("kpiId", "kpi_adopt_purchase_ocr_channel", "module", "purchases",
+            "channel", "ocr", "entityType", "supplier_invoice", "status", "success"));
+    service.emit(NeoTelemetryEvents.BACKEND_STOCK_MOVEMENT_VALIDATED,
+        mapOf("kpiId", "kpi_integrity_inventory_movement_traceability",
+            "module", "inventory", "entityType", "stock_movement", "critical", true,
+            "status", "success"));
+    service.emit(NeoTelemetryEvents.BACKEND_ACCEPTANCE_INTEGRITY_CHECK_COMPLETED,
+        mapOf("kpiId", "kpi_integrity_product_stock_card_inventory",
+            "module", "products", "correctCount", 10, "total", 10,
+            "critical", true, "status", "success"));
+
+    assertEquals(3, sink.events.size());
+    assertEquals(NeoTelemetryEvents.BACKEND_INVOICE_INGESTION_COMPLETED,
+        sink.events.get(0).getName());
+    assertEquals(NeoTelemetryEvents.BACKEND_STOCK_MOVEMENT_VALIDATED,
+        sink.events.get(1).getName());
+    assertEquals(NeoTelemetryEvents.BACKEND_ACCEPTANCE_INTEGRITY_CHECK_COMPLETED,
+        sink.events.get(2).getName());
+    assertEquals("kpi_integrity_product_stock_card_inventory",
+        sink.events.get(2).getProperties().get("kpiId"));
+    assertEquals(10, sink.events.get(2).getProperties().get("correctCount"));
+    assertEquals(10, sink.events.get(2).getProperties().get("total"));
   }
 
   @Test

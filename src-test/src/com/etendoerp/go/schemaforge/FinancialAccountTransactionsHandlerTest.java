@@ -24,8 +24,14 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -52,6 +58,8 @@ import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
  * Mockito-driven unit tests for {@link FinancialAccountTransactionsHandler}.
@@ -1279,5 +1287,171 @@ public class FinancialAccountTransactionsHandlerTest {
     assertEquals(200, response.getHttpStatus());
     JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
     assertEquals(1, data.getJSONArray("bpartners").length());
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // transfer() — funds transfer between accounts (POST ?action=transfer)
+  // Validates inputs and delegates to Classic FundsTransferActionHandler via
+  // the doTransfer seam, which the tests stub (no DB / no real transfer).
+  // ─────────────────────────────────────────────────────────────────────
+
+  private static FIN_FinancialAccount accountWithCurrency(String id, String currencyId) {
+    FIN_FinancialAccount acc = mock(FIN_FinancialAccount.class);
+    when(acc.getId()).thenReturn(id);
+    Currency cur = mock(Currency.class);
+    when(cur.getId()).thenReturn(currencyId);
+    when(acc.getCurrency()).thenReturn(cur);
+    return acc;
+  }
+
+  private JSONObject transferBody(String sourceId, String destId, String amount) throws Exception {
+    return new JSONObject()
+        .put("sourceAccountId", sourceId)
+        .put("destinationAccountId", destId)
+        .put("amount", amount);
+  }
+
+  /**
+   * Happy path: a same-currency transfer validates, then delegates to Classic with conversion rate
+   * 1, no bank fee (feeFrom/feeTo = 0), a null GL item and the default description.
+   */
+  @Test
+  public void testTransferDelegatesToClassic() throws Exception {
+    FinancialAccountTransactionsHandler h = spy(new FinancialAccountTransactionsHandler());
+    FIN_FinancialAccount source = accountWithCurrency("SRC", "EUR");
+    FIN_FinancialAccount dest = accountWithCurrency("DST", "EUR");
+    doReturn(source).when(h).loadAccount("SRC");
+    doReturn(dest).when(h).loadAccount("DST");
+    doReturn(true).when(h).sameOrgScope(source, dest);    doNothing().when(h).doTransfer(any(), any(), any(), any(), any(), any(), any(), any(), any());
+
+    NeoResponse response = h.transfer(transferBody("SRC", "DST", "100"));
+
+    assertEquals(201, response.getHttpStatus());
+    assertTrue(response.getBody().getJSONObject("response").getJSONObject("data")
+        .getBoolean("transferred"));
+    verify(h).doTransfer(any(), eq(source), eq(dest), isNull(), eq(new BigDecimal("100")),
+        eq(BigDecimal.ONE), eq(BigDecimal.ZERO), eq(BigDecimal.ZERO),
+        eq("Funds Transfer Transaction"));
+  }
+
+  /** Transferring to the same account is rejected with a 400 and never delegates. */
+  @Test
+  public void testTransferSameAccountReturns400() throws Exception {
+    FinancialAccountTransactionsHandler h = spy(new FinancialAccountTransactionsHandler());
+    NeoResponse response = h.transfer(transferBody("SRC", "SRC", "100"));
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(response.getBody().getJSONObject("error").getString("message").contains("different"));
+    verify(h, never()).doTransfer(any(), any(), any(), any(), any(), any(), any(), any(), any());
+  }
+
+  /** A non-positive amount is rejected with a 400. */
+  @Test
+  public void testTransferNonPositiveAmountReturns400() throws Exception {
+    FinancialAccountTransactionsHandler h = spy(new FinancialAccountTransactionsHandler());
+    NeoResponse response = h.transfer(transferBody("SRC", "DST", "0"));
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(response.getBody().getJSONObject("error").getString("message")
+        .contains("greater than zero"));
+  }
+
+  /** Missing source/destination ids are rejected with a 400 before any load. */
+  @Test
+  public void testTransferMissingParamsReturns400() throws Exception {
+    FinancialAccountTransactionsHandler h = spy(new FinancialAccountTransactionsHandler());
+    NeoResponse response = h.transfer(new JSONObject().put("amount", "100"));
+    assertEquals(400, response.getHttpStatus());
+    verify(h, never()).loadAccount(anyString());
+  }
+
+  /** An unknown account yields a 404. */
+  @Test
+  public void testTransferMissingAccountReturns404() throws Exception {
+    FinancialAccountTransactionsHandler h = spy(new FinancialAccountTransactionsHandler());
+    doReturn(accountWithCurrency("SRC", "EUR")).when(h).loadAccount("SRC");
+    doReturn(null).when(h).loadAccount("DST");
+    NeoResponse response = h.transfer(transferBody("SRC", "DST", "100"));
+    assertEquals(404, response.getHttpStatus());
+  }
+
+  /** Accounts outside the same organization tree are rejected with a 400. */
+  @Test
+  public void testTransferDifferentOrgReturns400() throws Exception {
+    FinancialAccountTransactionsHandler h = spy(new FinancialAccountTransactionsHandler());
+    FIN_FinancialAccount source = accountWithCurrency("SRC", "EUR");
+    FIN_FinancialAccount dest = accountWithCurrency("DST", "EUR");
+    doReturn(source).when(h).loadAccount("SRC");
+    doReturn(dest).when(h).loadAccount("DST");
+    doReturn(false).when(h).sameOrgScope(source, dest);
+
+    NeoResponse response = h.transfer(transferBody("SRC", "DST", "100"));
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(response.getBody().getJSONObject("error").getString("message")
+        .contains("organization"));
+  }
+
+  /** A multi-currency transfer forwards the user-provided conversion rate to Classic. */
+  @Test
+  public void testTransferMultiCurrencyPassesRate() throws Exception {
+    FinancialAccountTransactionsHandler h = spy(new FinancialAccountTransactionsHandler());
+    FIN_FinancialAccount source = accountWithCurrency("SRC", "EUR");
+    FIN_FinancialAccount dest = accountWithCurrency("DST", "USD");
+    doReturn(source).when(h).loadAccount("SRC");
+    doReturn(dest).when(h).loadAccount("DST");
+    doReturn(true).when(h).sameOrgScope(source, dest);    doNothing().when(h).doTransfer(any(), any(), any(), any(), any(), any(), any(), any(), any());
+
+    JSONObject body = transferBody("SRC", "DST", "100").put("conversionRate", "1.1");
+    h.transfer(body);
+
+    verify(h).doTransfer(any(), eq(source), eq(dest), isNull(), eq(new BigDecimal("100")),
+        eq(new BigDecimal("1.1")), eq(BigDecimal.ZERO), eq(BigDecimal.ZERO), anyString());
+  }
+
+  /** A checked bank fee forwards both the source-side (bankFeeFrom) and destination-side (bankFeeTo) fees. */
+  @Test
+  public void testTransferBankFeeMapsBothSides() throws Exception {
+    FinancialAccountTransactionsHandler h = spy(new FinancialAccountTransactionsHandler());
+    FIN_FinancialAccount source = accountWithCurrency("SRC", "EUR");
+    FIN_FinancialAccount dest = accountWithCurrency("DST", "EUR");
+    doReturn(source).when(h).loadAccount("SRC");
+    doReturn(dest).when(h).loadAccount("DST");
+    doReturn(true).when(h).sameOrgScope(source, dest);    doNothing().when(h).doTransfer(any(), any(), any(), any(), any(), any(), any(), any(), any());
+
+    JSONObject body = transferBody("SRC", "DST", "100")
+        .put("bankFee", true).put("bankFeeFrom", "5").put("bankFeeTo", "3");
+    h.transfer(body);
+
+    verify(h).doTransfer(any(), eq(source), eq(dest), isNull(), eq(new BigDecimal("100")),
+        eq(BigDecimal.ONE), eq(new BigDecimal("5")), eq(new BigDecimal("3")), anyString());
+  }
+
+  /** An error mid-transfer (the Classic seam throws) rolls back and returns a 500 via handle(). */
+  @Test
+  public void testHandleTransferErrorRollsBack() throws Exception {
+    FinancialAccountTransactionsHandler h = spy(new FinancialAccountTransactionsHandler());
+    FIN_FinancialAccount source = accountWithCurrency("SRC", "EUR");
+    FIN_FinancialAccount dest = accountWithCurrency("DST", "EUR");
+    doReturn(source).when(h).loadAccount("SRC");
+    doReturn(dest).when(h).loadAccount("DST");
+    doReturn(true).when(h).sameOrgScope(source, dest);    doThrow(new RuntimeException("boom")).when(h)
+        .doTransfer(any(), any(), any(), any(), any(), any(), any(), any(), any());
+
+    NeoContext ctx = mock(NeoContext.class);
+    Map<String, String> qp = new HashMap<>();
+    qp.put("action", "transfer");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getQueryParams()).thenReturn(qp);
+    when(ctx.getRequestBody()).thenReturn(transferBody("SRC", "DST", "100"));
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = h.handle(ctx);
+
+      assertEquals(500, response.getHttpStatus());
+      verify(dal).rollbackAndClose();
+    }
   }
 }

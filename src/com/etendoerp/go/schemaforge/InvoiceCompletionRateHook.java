@@ -26,9 +26,11 @@ import org.openbravo.model.common.invoice.Invoice;
 
 /**
  * Blocks invoice completion when no exchange rate is available, for completions that run through
- * {@code ProcessInvoiceUtil} (classic backoffice UI). Delegates to {@link InvoiceExchangeRateValidator};
- * the NEO/headless path is covered separately by
- * {@link AbstractOrderHeaderHandler#validateExchangeRateBeforeComplete}.
+ * {@code ProcessInvoiceUtil} (classic backoffice UI). Delegates to {@link InvoiceExchangeRateValidator}.
+ *
+ * <p>The NEO/headless path no longer enforces this check at completion time (ETP-4027): the
+ * exchange-rate validation moves to the frontend, triggered when the user changes the document
+ * currency.
  */
 @ApplicationScoped
 public class InvoiceCompletionRateHook implements ProcessInvoiceHook {

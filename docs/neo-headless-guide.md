@@ -55,7 +55,7 @@ NeoServlet (/sws/neo/*)
     |
     +-- Route por tipo de spec:
     |     |
-    |     +-- Report spec (type R) --> NeoReportService
+    |     +-- Report spec (type R) --> NeoHandler NEO-native (Java_Qualifier) o no-invocable (ETP-4255; ya no usa Jasper)
     |     |
     |     +-- Process spec (type P) --> NeoProcessService.executeProcess()
     |     |
@@ -385,10 +385,13 @@ Base URL: `/sws/neo`
 
 ### Report Specs (SPEC_TYPE = 'R')
 
+> **ETP-4255:** sin ejecucion Jasper. Invocable solo via `NeoHandler` NEO-native; si no,
+> GET/POST devuelven HTTP 200 con estado `not_configured_for_report_generation`. Ver §13.
+
 | Pattern | Method | Descripcion |
 |---------|--------|-------------|
-| `/{specName}` | GET | Describir reporte + formatos soportados |
-| `/{specName}` | POST | Generar reporte (con parametro `format`) |
+| `/{specName}` | GET | Describe (handler NEO-native) o estado no-invocable |
+| `/{specName}` | POST | Ejecuta via handler NEO-native (datos JSON) o estado no-invocable |
 
 ---
 
@@ -888,6 +891,26 @@ El `recordId` de la URL se inyecta automaticamente como `inpRecordId` en los par
 ---
 
 ## 13. Pipeline de Reportes
+
+> **DESCARTADO / OBSOLETO — ETP-4255.** El pipeline Jasper descrito abajo **ya no existe en
+> runtime**. Se conserva solo como registro historico. Razones:
+> - Etendo Go / NEO Headless / MCP **nunca** debe ejecutar Jasper, JRXML, reportes clasicos
+>   por `AD_Process`, ni `ReportingUtils.exportJR` (regla dura de producto/arquitectura).
+> - El camino de ejecucion Jasper en runtime (`NeoReportService.generateReport`/
+>   `describeReport`/`resolveReportMetadata`, y el fallback de `NeoRequestRouter`/
+>   `NeoProcessReportEndpoint`) fue **eliminado**.
+> - Los reportes Jasper/JRXML legacy solo existen como fuente de migracion offline para la
+>   tooling de Schema Forge (`source: "jasper-migration"`); eso **nunca** implica ejecucion
+>   en runtime por Etendo Go.
+>
+> **Comportamiento actual (NEO-native-handlers-only):** un spec `R` es invocable solo si
+> esta respaldado por un `NeoHandler` (bean CDI por `ETGO_SF_ENTITY.Java_Qualifier`) que
+> devuelve datos en JSON. Handlers disponibles: `agingReportHandler` (`aging-receivable`),
+> `inventoryStockReportHandler` (`inventory-stock-report`), `taxReportHandler`
+> (`tax-report`). Un `R` **sin** handler NEO-native no es invocable: GET y POST devuelven
+> **HTTP 200** con `{name, type:"report", callable:false, status:"not_configured_for_report_generation", message}`,
+> identico a `neo_discover` y a la herramienta de reporte de MCP. La integracion de jsreport
+> queda fuera del alcance de ETP-4255.
 
 El `NeoReportService` genera reportes Jasper desde specs tipo `R`.
 

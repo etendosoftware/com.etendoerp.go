@@ -53,6 +53,7 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * Unit tests for {@link ToolRegistry} — covers generateTools, processSpec,
@@ -199,14 +200,22 @@ class ToolRegistryGenerateToolsTest {
 
       mockSpecCriteria(List.of(windowSpec, processSpec, reportSpec));
 
-      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
-      List<String> names = toolNames(tools);
+      // ETP-4255: a generate_* tool is only emitted for a callable (NeoHandler-backed)
+      // report spec.
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(reportSpec))
+            .thenReturn(true);
 
-      assertTrue(names.contains("neo_discover"));
-      assertTrue(names.contains("neo_list"));
-      assertTrue(names.contains("neo_create"));
-      assertTrue(names.contains("complete_order"));
-      assertTrue(names.contains("generate_print_invoice"));
+        List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
+        List<String> names = toolNames(tools);
+
+        assertTrue(names.contains("neo_discover"));
+        assertTrue(names.contains("neo_list"));
+        assertTrue(names.contains("neo_create"));
+        assertTrue(names.contains("complete_order"));
+        assertTrue(names.contains("generate_print_invoice"));
+      }
     }
 
     @Test
@@ -467,14 +476,33 @@ class ToolRegistryGenerateToolsTest {
   // ── generateTools: report spec processing ─────────────────────────────
 
   @Nested
-  @DisplayName("generateTools — report specs")
+  @DisplayName("generateTools — report specs (ETP-4255 callability gate)")
   class ReportSpecTests {
 
+    private MockedStatic<NeoReportCallability> callabilityMock;
+
+    @BeforeEach
+    void setUpCallability() {
+      callabilityMock = mockStatic(NeoReportCallability.class);
+    }
+
+    @AfterEach
+    void tearDownCallability() {
+      if (callabilityMock != null) {
+        callabilityMock.close();
+      }
+    }
+
+    /**
+     * A NEO-native callable report spec (backed by a NeoHandler) with neo:report scope
+     * emits a generate_* tool.
+     */
     @Test
-    @DisplayName("report spec with access and neo:report scope generates tool")
-    void reportSpecWithAccessGeneratesTool() {
+    @DisplayName("callable report spec with neo:report scope generates tool")
+    void callableReportSpecGeneratesTool() {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
       when(spec.getProcess()).thenReturn(null);
+      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
       mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
@@ -484,28 +512,32 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains("generate_print_invoice"));
     }
 
+    /**
+     * A non-callable report spec (no NEO-native handler) emits NO generate_* tool even with
+     * neo:report scope — Jasper/AD_Process reports are never executed by Etendo Go (ETP-4255).
+     */
     @Test
-    @DisplayName("report spec without neo:report scope is excluded")
-    void reportSpecWithoutReportScope() {
+    @DisplayName("non-callable report spec emits no generate_ tool")
+    void nonCallableReportSpecEmitsNoTool() {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
-      mockSpecCriteria(List.of(spec));
-
-      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
-
-      assertFalse(toolNames(tools).contains("generate_print_invoice"));
-    }
-
-    @Test
-    @DisplayName("report spec with denied process access is excluded")
-    void reportSpecWithDeniedAccess() {
-      SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
-      Process adProcess = mock(Process.class);
-      when(adProcess.getId()).thenReturn(PROCESS_ID);
-      when(spec.getProcess()).thenReturn(adProcess);
-      accessMock.when(() -> NeoAccessUtils.hasProcessAccess(PROCESS_ID)).thenReturn(false);
+      when(spec.getProcess()).thenReturn(null);
+      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(false);
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:report"));
+
+      assertFalse(toolNames(tools).contains("generate_print_invoice"),
+          "Non-callable report specs must not produce a generate_* tool");
+    }
+
+    @Test
+    @DisplayName("callable report spec without neo:report scope is excluded")
+    void reportSpecWithoutReportScope() {
+      SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
+      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+      mockSpecCriteria(List.of(spec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       assertFalse(toolNames(tools).contains("generate_print_invoice"));
     }
@@ -516,6 +548,7 @@ class ToolRegistryGenerateToolsTest {
     void reportToolIncludesFormatParam() {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
       when(spec.getProcess()).thenReturn(null);
+      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
       mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
@@ -536,6 +569,7 @@ class ToolRegistryGenerateToolsTest {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
       when(spec.getProcess()).thenReturn(null);
       when(spec.getDescription()).thenReturn("Generates a PDF invoice");
+      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
       mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
@@ -572,16 +606,24 @@ class ToolRegistryGenerateToolsTest {
 
       mockSpecCriteria(List.of(windowSpec, processSpec, reportSpec));
 
-      List<McpToolDefinition> tools = registry.generateTools(
-          scopesOf("neo:read", "neo:write", "neo:process", "neo:report"));
-      List<String> names = toolNames(tools);
+      // ETP-4255: a generate_* tool is only emitted for a callable (NeoHandler-backed)
+      // report spec.
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(reportSpec))
+            .thenReturn(true);
 
-      // discover + 8 CRUD + 1 process + 1 report = 11
-      assertTrue(names.contains("neo_discover"));
-      assertTrue(names.contains("neo_list"));
-      assertTrue(names.contains("neo_create"));
-      assertTrue(names.contains("complete_order"));
-      assertTrue(names.contains("generate_print_invoice"));
+        List<McpToolDefinition> tools = registry.generateTools(
+            scopesOf("neo:read", "neo:write", "neo:process", "neo:report"));
+        List<String> names = toolNames(tools);
+
+        // discover + 8 CRUD + 1 process + 1 report = 11
+        assertTrue(names.contains("neo_discover"));
+        assertTrue(names.contains("neo_list"));
+        assertTrue(names.contains("neo_create"));
+        assertTrue(names.contains("complete_order"));
+        assertTrue(names.contains("generate_print_invoice"));
+      }
     }
 
     @Test

@@ -1118,7 +1118,9 @@ public class ReconciliationHandlerTest {
     when(t1.getFinPayment()).thenReturn(null);
     doReturn(t1).when(handler).loadTransaction("t1");
 
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
@@ -1134,6 +1136,7 @@ public class ReconciliationHandlerTest {
       assertEquals(1, kpis.getInt("groupsFound"));
       assertEquals(1, kpis.getInt("opsToLink"));
       assertEquals(0, kpis.getInt("willCreate"));
+      telemetry.verify(() -> ReconciliationKpiTelemetry.emitBankMatchAttempted(1, 1, 1));
     }
   }
 
@@ -1246,7 +1249,13 @@ public class ReconciliationHandlerTest {
         .put("financialAccountId", ACC_ID)
         .put("groups", new JSONArray().put(group));
 
-    NeoResponse response = handler.applySuggestions(body);
+    NeoResponse response;
+    try (MockedStatic<ReconciliationKpiTelemetry> telemetry =
+        mockStatic(ReconciliationKpiTelemetry.class)) {
+      response = handler.applySuggestions(body);
+      telemetry.verify(
+          () -> ReconciliationKpiTelemetry.emitReconciliationMatchEvaluated(1, 1, 1));
+    }
 
     assertEquals(201, response.getHttpStatus());
     verify(handler).matchBankStatementLine(eq(line), argThat(ops ->
@@ -1273,7 +1282,13 @@ public class ReconciliationHandlerTest {
         .put("financialAccountId", ACC_ID)
         .put("groups", new JSONArray().put(group));
 
-    NeoResponse response = handler.applySuggestions(body);
+    NeoResponse response;
+    try (MockedStatic<ReconciliationKpiTelemetry> telemetry =
+        mockStatic(ReconciliationKpiTelemetry.class)) {
+      response = handler.applySuggestions(body);
+      telemetry.verify(
+          () -> ReconciliationKpiTelemetry.emitReconciliationMatchEvaluated(1, 1, 0));
+    }
 
     assertEquals(201, response.getHttpStatus());
     JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
