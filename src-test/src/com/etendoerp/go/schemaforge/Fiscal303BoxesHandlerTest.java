@@ -198,40 +198,98 @@ public class Fiscal303BoxesHandlerTest {
 
   // ── vatEcBoxes ────────────────────────────────────────────────────────────
 
-  /** 1.40 % EC surcharge (standard rate) → boxes 19/21. */
+  /** 1.40 % EC surcharge → boxes 19/21 regardless of form version. */
   @Test
   public void testVatEc140MapsToBoxes19And21() {
-    assertEquals(Arrays.asList(19, 21), handler.vatEcBoxes(pct("1.40")));
+    assertEquals(Arrays.asList(19, 21), handler.vatEcBoxes(pct("1.40"), false));
+    assertEquals(Arrays.asList(19, 21), handler.vatEcBoxes(pct("1.40"), true));
   }
 
-  /** 5.20 % EC surcharge (standard rate) → boxes 22/24. */
+  /** 5.20 % EC surcharge → boxes 22/24 regardless of form version. */
   @Test
   public void testVatEc520MapsToBoxes22And24() {
-    assertEquals(Arrays.asList(22, 24), handler.vatEcBoxes(pct("5.20")));
+    assertEquals(Arrays.asList(22, 24), handler.vatEcBoxes(pct("5.20"), false));
+    assertEquals(Arrays.asList(22, 24), handler.vatEcBoxes(pct("5.20"), true));
   }
 
-  /** 0.50 % EC surcharge (reduced rate) → boxes 16/18. */
+  /** 0.50 % EC: pre-Oct 2024 → boxes 16/18; Oct 2024+ → boxes 168/170. */
   @Test
-  public void testVatEc050MapsToBoxes16And18() {
-    assertEquals(Arrays.asList(16, 18), handler.vatEcBoxes(pct("0.50")));
+  public void testVatEc050OldFormMapsToBoxes16And18() {
+    assertEquals(Arrays.asList(16, 18), handler.vatEcBoxes(pct("0.50"), false));
   }
 
-  /** 1.75 % EC surcharge (new reduced rate 2023) → boxes 156/158. */
+  @Test
+  public void testVatEc050NewFormMapsToBoxes168And170() {
+    assertEquals(Arrays.asList(168, 170), handler.vatEcBoxes(pct("0.50"), true));
+  }
+
+  /** 0.26 % EC (new Oct 2024): only valid in new form → boxes 168/170. */
+  @Test
+  public void testVatEc026NewFormMapsToBoxes168And170() {
+    assertEquals(Arrays.asList(168, 170), handler.vatEcBoxes(pct("0.26"), true));
+  }
+
+  @Test
+  public void testVatEc026OldFormReturnsEmpty() {
+    assertTrue(handler.vatEcBoxes(pct("0.26"), false).isEmpty());
+  }
+
+  /** 1.00 % EC (new Oct 2024): only valid in new form → boxes 16/18. */
+  @Test
+  public void testVatEc100NewFormMapsToBoxes16And18() {
+    assertEquals(Arrays.asList(16, 18), handler.vatEcBoxes(pct("1.00"), true));
+  }
+
+  @Test
+  public void testVatEc100OldFormReturnsEmpty() {
+    assertTrue(handler.vatEcBoxes(pct("1.00"), false).isEmpty());
+  }
+
+  /** 1.75 % EC surcharge → boxes 156/158 regardless of form version. */
   @Test
   public void testVatEc175MapsToBoxes156And158() {
-    assertEquals(Arrays.asList(156, 158), handler.vatEcBoxes(pct("1.75")));
+    assertEquals(Arrays.asList(156, 158), handler.vatEcBoxes(pct("1.75"), false));
+    assertEquals(Arrays.asList(156, 158), handler.vatEcBoxes(pct("1.75"), true));
   }
 
   /** Unrecognised EC percentage must return empty, not throw. */
   @Test
   public void testVatEcUnknownPercentReturnsEmpty() {
-    assertTrue(handler.vatEcBoxes(pct("3.00")).isEmpty());
+    assertTrue(handler.vatEcBoxes(pct("3.00"), false).isEmpty());
+    assertTrue(handler.vatEcBoxes(pct("3.00"), true).isEmpty());
   }
 
   /** Null input must return empty, not throw NPE. */
   @Test
   public void testVatEcNullReturnsEmpty() {
-    assertTrue(handler.vatEcBoxes(null).isEmpty());
+    assertTrue(handler.vatEcBoxes(null, false).isEmpty());
+    assertTrue(handler.vatEcBoxes(null, true).isEmpty());
+  }
+
+  // ── isOct2024OrLater ─────────────────────────────────────────────────────
+
+  @Test
+  public void testIsOct2024OrLater_quarterly() {
+    assertFalse(Fiscal303BoxesHandler.isOct2024OrLater(2024, "T1"));
+    assertFalse(Fiscal303BoxesHandler.isOct2024OrLater(2024, "T2"));
+    assertFalse(Fiscal303BoxesHandler.isOct2024OrLater(2024, "T3"));
+    assertTrue(Fiscal303BoxesHandler.isOct2024OrLater(2024, "T4"));
+  }
+
+  @Test
+  public void testIsOct2024OrLater_monthly() {
+    assertFalse(Fiscal303BoxesHandler.isOct2024OrLater(2024, "9"));
+    assertTrue(Fiscal303BoxesHandler.isOct2024OrLater(2024, "10"));
+    assertTrue(Fiscal303BoxesHandler.isOct2024OrLater(2024, "11"));
+    assertTrue(Fiscal303BoxesHandler.isOct2024OrLater(2024, "12"));
+  }
+
+  @Test
+  public void testIsOct2024OrLater_years() {
+    assertFalse(Fiscal303BoxesHandler.isOct2024OrLater(2023, "T4"));
+    assertFalse(Fiscal303BoxesHandler.isOct2024OrLater(2022, "T4"));
+    assertTrue(Fiscal303BoxesHandler.isOct2024OrLater(2025, "T1"));
+    assertTrue(Fiscal303BoxesHandler.isOct2024OrLater(2026, "T1"));
   }
 
   // ── finalizeInvoiceRow ────────────────────────────────────────────────────
