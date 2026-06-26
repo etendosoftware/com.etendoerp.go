@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 import java.util.HashMap;
 import java.util.Map;
 
+import javax.inject.Inject;
 import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
@@ -30,6 +31,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.scheduling.ProcessBundle;
 import org.openbravo.service.db.DalConnectionProvider;
+
+import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 
 /**
  * Hooks for the Simple G/L Journal header entity.
@@ -61,8 +64,20 @@ public class GlJournalHeaderHandler implements NeoHandler {
   /** AD_Process_ID of "Add Payment From Journal" (FIN_AddPaymentFromJournal) — GL Journal completion. */
   private static final String COMPLETE_PROCESS_ID = "5BE14AA10165490A9ADEFB7532F7FA94";
 
+  @Inject
+  private DocumentPostingService postingService;
+
+  /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
+  void setPostingService(DocumentPostingService postingService) {
+    this.postingService = postingService;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
+    if (posting != null) {
+      return posting;
+    }
     // Completion runs the real core process with a proper context, replacing NEO's
     // contextless dispatch that would NPE inside FIN_AddPaymentFromJournal.
     if (isCompleteAction(context)) {

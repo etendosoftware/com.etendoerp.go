@@ -32,6 +32,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
 
+import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+
 /**
  * NeoHandler for the Purchase Invoice header entity.
  *
@@ -77,11 +79,19 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   @Inject
   private TotalDiscountService totalDiscountService;
 
+  @Inject
+  private DocumentPostingService postingService;
+
+  /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
+  void setPostingService(DocumentPostingService postingService) {
+    this.postingService = postingService;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse rateError = AbstractOrderHeaderHandler.validateExchangeRateBeforeComplete(context);
-    if (rateError != null) {
-      return rateError;
+    NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
+    if (posting != null) {
+      return posting;
     }
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       NeoResponse lockError = validateDocTypeLock(context);

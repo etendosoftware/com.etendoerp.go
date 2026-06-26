@@ -36,6 +36,7 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * Generates MCP tool definitions dynamically based on ETGO_SF_SPEC configuration
@@ -117,7 +118,11 @@ public class ToolRegistry {
         tools.add(buildProcessTool(spec.getName(), spec));
         return;
       }
-      if ("R".equals(specType) && hasProcessAccess(spec) && permissions.canReport) {
+      // A generate_ tool is emitted only for NEO-native callable report specs backed by a
+      // Java qualifier handler. Non-callable report specs get no tool and surface as
+      // not configured via neo discover.
+      if ("R".equals(specType) && permissions.canReport
+          && NeoReportCallability.isReportCallable(spec)) {
         tools.add(buildReportTool(spec.getName(), spec));
       }
     } catch (Exception e) {

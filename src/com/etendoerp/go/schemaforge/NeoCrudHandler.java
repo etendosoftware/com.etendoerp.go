@@ -96,12 +96,12 @@ class NeoCrudHandler {
   private final NeoTelemetryService telemetryService;
 
   NeoCrudHandler(NeoServlet servlet) {
-    this(servlet, NeoTelemetryService.logging());
+    this(servlet, NeoTelemetryService.runtime());
   }
 
   NeoCrudHandler(NeoServlet servlet, NeoTelemetryService telemetryService) {
     this.servlet = servlet;
-    this.telemetryService = telemetryService == null ? NeoTelemetryService.logging()
+    this.telemetryService = telemetryService == null ? NeoTelemetryService.runtime()
         : telemetryService;
   }
 

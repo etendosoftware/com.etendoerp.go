@@ -19,8 +19,11 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -271,5 +274,19 @@ public class GlJournalHeaderHandlerTest {
       assertNull(handler.handle(ctx));
       assertEquals("ACCT-SCHEMA-001", body.getString("accountingSchema"));
     }
+  }
+
+  @Test
+  public void handleReturnsPostingResponseWhenServiceHandlesAction() {
+    com.etendoerp.go.schemaforge.handlers.DocumentPostingService service =
+        mock(com.etendoerp.go.schemaforge.handlers.DocumentPostingService.class);
+    NeoContext ctx = mock(NeoContext.class);
+    NeoResponse sentinel = NeoResponse.ok(new JSONObject());
+    when(service.handleAction(ctx)).thenReturn(sentinel);
+
+    GlJournalHeaderHandler h = new GlJournalHeaderHandler();
+    h.setPostingService(service);
+
+    assertSame(sentinel, h.handle(ctx));
   }
 }

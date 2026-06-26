@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -297,5 +298,19 @@ public class PurchaseInvoiceHeaderHandlerTest {
       NeoResponse result = handler.afterHandle(ctx);
       assertNull(result);
     }
+  }
+
+  @Test
+  public void handleReturnsPostingResponseWhenServiceHandlesAction() {
+    com.etendoerp.go.schemaforge.handlers.DocumentPostingService service =
+        mock(com.etendoerp.go.schemaforge.handlers.DocumentPostingService.class);
+    NeoContext ctx = mock(NeoContext.class);
+    NeoResponse sentinel = NeoResponse.ok(new JSONObject());
+    when(service.handleAction(ctx)).thenReturn(sentinel);
+
+    PurchaseInvoiceHeaderHandler h = new PurchaseInvoiceHeaderHandler();
+    h.setPostingService(service);
+
+    assertSame(sentinel, h.handle(ctx));
   }
 }
