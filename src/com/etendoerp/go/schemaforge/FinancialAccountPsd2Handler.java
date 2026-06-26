@@ -392,9 +392,8 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
         provider = finAcc.getPsd2Provider();
       }
     }
-    String connectUrl = provider != null
-        ? BankIntegrationUtils.createSaltEdgeConnection(apiKey, returnTo, provider)
-        : BankIntegrationUtils.createSaltEdgeConnection(apiKey, returnTo);
+    // provider may be null (no bank remembered) → buildAndConnect shows the full provider picker.
+    String connectUrl = BankIntegrationUtils.createSaltEdgeConnection(apiKey, returnTo, provider);
     JSONObject data = new JSONObject();
     data.put(KEY_CONNECT_URL, connectUrl);
     return okData(data);
