@@ -17,10 +17,14 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.inject.Named;
 
@@ -44,15 +48,25 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * NeoHandler for the {@code chart-of-accounts} spec, bound to the
  * {@code elementValue} entity (table {@code C_ElementValue}).
  *
- * <p>Implements three behaviours:
+ * <p>Implements five behaviours:
  * <ul>
  *   <li><b>A — isLeaf enrichment</b> (afterHandle, CRUD GET): injects an {@code isLeaf}
  *       boolean into every record of the GET response based on {@code IsSummary}.
  *       {@code IsSummary = 'N'} → {@code isLeaf: true}; {@code 'Y'} → {@code false}.</li>
- *   <li><b>B — codePrefix default</b> (handle, DEFAULTS): when {@code parentAccountId}
+ *   <li><b>B — hierarchy metadata</b> (afterHandle, CRUD GET list): injects
+ *       {@code parentId} (direct parent's {@code C_ElementValue_ID}, null if root),
+ *       {@code depth} (hops to root; 0 = root), {@code hasChildren} (true if the node has
+ *       children in {@code AD_TreeNode}), and {@code parentCode4} (the {@code Value} of the
+ *       nearest ancestor whose {@code Value} has exactly 4 characters, null if none).
+ *       Uses a single bulk load of the full tree — no N+1 queries.</li>
+ *   <li><b>C — YTD balances</b> (afterHandle, CRUD GET list): injects {@code ytdDebit},
+ *       {@code ytdCredit}, and {@code ytdBalance} for the current fiscal year.
+ *       Leaf balances are read from {@code fact_acct} in one query; summary-account totals
+ *       are computed in-memory via a bottom-up tree rollup — no recursive SQL.</li>
+ *   <li><b>D — codePrefix default</b> (handle, DEFAULTS): when {@code parentAccountId}
  *       is present as a query parameter, returns the first 4 characters of the parent's
  *       {@code Value} (account code) as {@code codePrefix} in the defaults payload.</li>
- *   <li><b>C — PGC save validation</b> (handle, CRUD POST/PUT/PATCH):
+ *   <li><b>E — PGC save validation</b> (handle, CRUD POST/PUT/PATCH):
  *       <ol>
  *         <li>Rejects codes that do not match {@code ^\d{8}$}.</li>
  *         <li>Rejects code changes on summary (non-leaf) accounts — accounts that have
@@ -81,6 +95,18 @@ public class ChartOfAccountsHandler implements NeoHandler {
   /** Required exact length of the account code. */
   private static final int ACCOUNT_CODE_LENGTH = 8;
 
+  /**
+   * Exact {@code Value} length used as the grouping level for {@code parentCode4}.
+   * Walk up the parent chain until a node whose {@code Value} has this length is found.
+   */
+  private static final int PARENT_CODE_LENGTH = 4;
+
+  /**
+   * Maximum number of hops traversed upward in the tree before bailing out,
+   * guarding against circular references in corrupted {@code AD_TreeNode} data.
+   */
+  private static final int MAX_TREE_DEPTH = 30;
+
   static final String ERR_INVALID_CODE =
       "El código de cuenta debe tener exactamente 8 dígitos";
 
@@ -104,6 +130,59 @@ public class ChartOfAccountsHandler implements NeoHandler {
   private static final String SQL_CHILDREN_COUNT =
       "SELECT COUNT(*) FROM AD_TreeNode "
       + "WHERE Parent_ID = :parentId AND AD_Tree_ID = :treeId";
+
+  /**
+   * SQL that finds the {@code AD_Tree_ID} for the {@code EV} (Element Value) tree
+   * belonging to a given client. One tree per chart of accounts per client.
+   */
+  private static final String SQL_FIND_EV_TREE =
+      "SELECT ad_tree_id FROM ad_tree "
+      + "WHERE treetype = 'EV' AND ad_client_id = :clientId "
+      + "LIMIT 1";
+
+  /**
+   * SQL that loads all {@code (node_id, parent_id)} pairs for a given tree.
+   * Root nodes have {@code parent_id = '0'}.
+   */
+  private static final String SQL_LOAD_TREE_NODES =
+      "SELECT node_id, parent_id FROM ad_treenode WHERE ad_tree_id = :treeId";
+
+  /**
+   * SQL that loads all {@code (c_elementvalue_id, value)} pairs for a given client.
+   * Used to look up account codes when walking the tree for {@code parentCode4}.
+   */
+  private static final String SQL_LOAD_EV_VALUES =
+      "SELECT c_elementvalue_id, value FROM c_elementvalue WHERE ad_client_id = :clientId";
+
+  /**
+   * SQL that finds the {@code c_year_id} for the current fiscal year of a given client.
+   * Joins through {@code c_period} to get year date boundaries, because {@code c_year}
+   * itself has no {@code startdate}/{@code enddate} columns.
+   */
+  private static final String SQL_CURRENT_YEAR =
+      "SELECT DISTINCT y.c_year_id "
+      + "FROM c_year y "
+      + "JOIN c_period p ON p.c_year_id = y.c_year_id "
+      + "WHERE y.ad_client_id = :clientId "
+      + "  AND CURRENT_DATE BETWEEN p.startdate AND p.enddate "
+      + "LIMIT 1";
+
+  /**
+   * SQL that aggregates YTD debit, credit, and net balance per account
+   * from {@code fact_acct} for all periods belonging to a given fiscal year.
+   * Returns only accounts that have actual postings — summary accounts (with no direct
+   * postings) are enriched later via in-memory rollup.
+   */
+  private static final String SQL_YTD_BALANCES =
+      "SELECT fa.account_id, "
+      + "  COALESCE(SUM(fa.amtacctdr), 0) AS ytd_debit, "
+      + "  COALESCE(SUM(fa.amtacctcr), 0) AS ytd_credit, "
+      + "  COALESCE(SUM(fa.amtacctdr - fa.amtacctcr), 0) AS ytd_balance "
+      + "FROM fact_acct fa "
+      + "JOIN c_period p ON fa.c_period_id = p.c_period_id "
+      + "WHERE p.c_year_id = :yearId "
+      + "  AND fa.ad_client_id = :clientId "
+      + "GROUP BY fa.account_id";
 
   // ── NeoHandler entry points ────────────────────────────────────────────────
 
@@ -134,11 +213,13 @@ public class ChartOfAccountsHandler implements NeoHandler {
   /**
    * Post-hook:
    * <ul>
-   *   <li>CRUD GET: enriches every record with an {@code isLeaf} boolean.</li>
+   *   <li>CRUD GET: enriches every record with {@code isLeaf}. For list responses
+   *       (no {@code recordId}), also injects hierarchy metadata ({@code parentId},
+   *       {@code depth}, {@code hasChildren}, {@code parentCode4}) and YTD balance
+   *       fields ({@code ytdDebit}, {@code ytdCredit}, {@code ytdBalance}).</li>
    *   <li>DEFAULTS: when {@code parentAccountId} is present, injects {@code codePrefix}
    *       (first {@value #PGC_PREFIX_LENGTH} digits of the parent's account code) into
-   *       the defaults payload already resolved by the AD_Column defaults service — so
-   *       both the standard field defaults <em>and</em> {@code codePrefix} are returned.</li>
+   *       the defaults payload already resolved by the AD_Column defaults service.</li>
    * </ul>
    * On any failure the original result is preserved (method returns {@code null}).
    */
@@ -147,7 +228,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
     try {
       if (context.getEndpointType() == NeoEndpointType.CRUD
           && "GET".equals(context.getHttpMethod())) {
-        return enrichWithIsLeaf(context);
+        return enrichGetResponse(context);
       }
       if (context.getEndpointType() == NeoEndpointType.DEFAULTS) {
         return injectCodePrefix(context);
@@ -159,19 +240,13 @@ public class ChartOfAccountsHandler implements NeoHandler {
     }
   }
 
-  // ── A. isLeaf enrichment ───────────────────────────────────────────────────
+  // ── A. isLeaf enrichment + B. Hierarchy + C. YTD ─────────────────────────
 
   /**
-   * Reads the {@code response.data} array from the previous GET result and adds
-   * {@code isLeaf: true/false} to every record based on a batch DB lookup of
-   * {@code C_ElementValue.IsSummary}.
-   *
-   * <p>Because {@code summaryLevel} is a system-visibility field in the contract it is
-   * stripped from the GET response by the field filter before {@code afterHandle} runs.
-   * A separate batch OBDal query is therefore used instead of reading the field from
-   * the already-filtered response.</p>
+   * Unified GET response enrichment. Always applies {@code isLeaf}; applies hierarchy
+   * metadata and YTD balances only on list responses (no {@code recordId}).
    */
-  private NeoResponse enrichWithIsLeaf(NeoContext context) throws Exception {
+  private NeoResponse enrichGetResponse(NeoContext context) throws Exception {
     JSONArray data = extractDataArray(context);
     if (data == null) {
       return null;
@@ -180,8 +255,24 @@ public class ChartOfAccountsHandler implements NeoHandler {
     if (ids.isEmpty()) {
       return null;
     }
+
+    // A: isLeaf — applies to both single-record GET and list GET
     Map<String, Boolean> isSummaryMap = querySummaryLevels(ids);
     applyIsLeaf(data, isSummaryMap);
+
+    // B + C: hierarchy metadata and YTD balances — list GET only
+    boolean isList = context.getRecordId() == null;
+    if (isList) {
+      OBContext obCtx = context.getObContext();
+      if (obCtx != null) {
+        String clientId = obCtx.getCurrentClient().getId();
+        TreeData treeData = loadTreeData(clientId);
+        applyHierarchyMetadata(data, treeData);
+        Map<String, BigDecimal[]> ytdBalances = computeYtdBalances(clientId, treeData.nodeParentMap);
+        applyYtdBalances(data, ytdBalances);
+      }
+    }
+
     return NeoResponse.ok(context.getPreviousResult().getBody());
   }
 
@@ -189,7 +280,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
    * Extracts the {@code response.data} JSONArray from the previous handler result,
    * or returns {@code null} when the structure is missing or empty.
    */
-  private static JSONArray extractDataArray(NeoContext context) {
+  static JSONArray extractDataArray(NeoContext context) {
     NeoResponse previous = context.getPreviousResult();
     if (previous == null || previous.getBody() == null) {
       return null;
@@ -202,11 +293,25 @@ public class ChartOfAccountsHandler implements NeoHandler {
     return (data != null && data.length() > 0) ? data : null;
   }
 
+  static List<String> collectIds(JSONArray data) {
+    List<String> ids = new ArrayList<>(data.length());
+    for (int i = 0; i < data.length(); i++) {
+      JSONObject entry = data.optJSONObject(i);
+      if (entry != null) {
+        String id = entry.optString("id", null);
+        if (id != null && !id.isEmpty()) {
+          ids.add(id);
+        }
+      }
+    }
+    return ids;
+  }
+
   /**
    * Injects {@code isLeaf} into each entry of {@code data} using the pre-built map.
    * Skips entries that have no {@code id} or whose id is not in the map.
    */
-  private static void applyIsLeaf(JSONArray data, Map<String, Boolean> isSummaryMap)
+  static void applyIsLeaf(JSONArray data, Map<String, Boolean> isSummaryMap)
       throws Exception {
     for (int i = 0; i < data.length(); i++) {
       JSONObject entry = data.optJSONObject(i);
@@ -219,20 +324,6 @@ public class ChartOfAccountsHandler implements NeoHandler {
         entry.put("isLeaf", !isSummary);
       }
     }
-  }
-
-  private static List<String> collectIds(JSONArray data) {
-    List<String> ids = new ArrayList<>(data.length());
-    for (int i = 0; i < data.length(); i++) {
-      JSONObject entry = data.optJSONObject(i);
-      if (entry != null) {
-        String id = entry.optString("id", null);
-        if (id != null && !id.isEmpty()) {
-          ids.add(id);
-        }
-      }
-    }
-    return ids;
   }
 
   /**
@@ -257,7 +348,328 @@ public class ChartOfAccountsHandler implements NeoHandler {
     return result;
   }
 
-  // ── B. Defaults — inject codePrefix from parent account ───────────────────
+  // ── B. Hierarchy metadata ──────────────────────────────────────────────────
+
+  /**
+   * Container for the in-memory chart of accounts tree, loaded once per GET_LIST request.
+   *
+   * <ul>
+   *   <li>{@code nodeParentMap} — {@code nodeId → parentId}; {@code null} value means root.</li>
+   *   <li>{@code nodeValueMap} — {@code nodeId → Value} (account code string from
+   *       {@code C_ElementValue.Value}).</li>
+   *   <li>{@code parentNodeIds} — set of nodeIds that have at least one child in the tree.</li>
+   * </ul>
+   */
+  private static class TreeData {
+    final Map<String, String> nodeParentMap;
+    final Map<String, String> nodeValueMap;
+    final Set<String> parentNodeIds;
+
+    TreeData(Map<String, String> nodeParent, Map<String, String> nodeValue,
+        Set<String> parents) {
+      this.nodeParentMap = nodeParent;
+      this.nodeValueMap = nodeValue;
+      this.parentNodeIds = parents;
+    }
+  }
+
+  /**
+   * Loads the full chart of accounts tree for {@code clientId} into memory.
+   *
+   * <p>Uses two queries: one for {@code AD_TreeNode} (parent/child relationships)
+   * and one for {@code C_ElementValue} (account codes). Both run in admin mode
+   * to ensure cross-org visibility within the client.
+   *
+   * @param clientId the {@code AD_Client_ID} of the current tenant
+   * @return a populated {@link TreeData}; empty maps when no tree is found
+   */
+  @SuppressWarnings("unchecked")
+  private TreeData loadTreeData(String clientId) {
+    OBContext.setAdminMode(true);
+    try {
+      // 1. Find the EV tree for this client
+      NativeQuery<Object> treeQry = (NativeQuery<Object>) OBDal.getInstance()
+          .getSession()
+          .createNativeQuery(SQL_FIND_EV_TREE);
+      treeQry.setParameter("clientId", clientId);
+      List<Object> treeRows = treeQry.list();
+      if (treeRows.isEmpty()) {
+        log.debug("ChartOfAccountsHandler: no EV tree found for clientId={}", clientId);
+        return new TreeData(Collections.emptyMap(), Collections.emptyMap(),
+            Collections.emptySet());
+      }
+      String treeId = (String) treeRows.get(0);
+
+      // 2. Load all treenode rows for this tree
+      NativeQuery<Object> nodeQry = (NativeQuery<Object>) OBDal.getInstance()
+          .getSession()
+          .createNativeQuery(SQL_LOAD_TREE_NODES);
+      nodeQry.setParameter("treeId", treeId);
+      List<Object> nodeRows = nodeQry.list();
+
+      Map<String, String> nodeParentMap = new HashMap<>(nodeRows.size() * 2);
+      Set<String> parentNodeIds = new HashSet<>();
+
+      for (Object rawRow : nodeRows) {
+        Object[] row = (Object[]) rawRow;
+        String nodeId = (String) row[0];
+        String parentId = (String) row[1];
+        // Root nodes are marked with parent_id = '0' or NULL
+        if (parentId != null && !"0".equals(parentId)) {
+          nodeParentMap.put(nodeId, parentId);
+          parentNodeIds.add(parentId);
+        } else {
+          nodeParentMap.put(nodeId, null); // root — no parent
+        }
+      }
+
+      // 3. Load all element value codes for the client (for parentCode4 resolution)
+      NativeQuery<Object> evQry = (NativeQuery<Object>) OBDal.getInstance()
+          .getSession()
+          .createNativeQuery(SQL_LOAD_EV_VALUES);
+      evQry.setParameter("clientId", clientId);
+      List<Object> evRows = evQry.list();
+
+      Map<String, String> nodeValueMap = new HashMap<>(evRows.size() * 2);
+      for (Object rawRow : evRows) {
+        Object[] row = (Object[]) rawRow;
+        nodeValueMap.put((String) row[0], (String) row[1]);
+      }
+
+      return new TreeData(nodeParentMap, nodeValueMap, parentNodeIds);
+
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Injects hierarchy fields into each record of the GET_LIST response.
+   *
+   * <p>Fields injected per record:
+   * <ul>
+   *   <li>{@code parentId} — {@code C_ElementValue_ID} of the direct parent; JSON null
+   *       for root nodes.</li>
+   *   <li>{@code depth} — number of hops from this node to the root (0 = root).</li>
+   *   <li>{@code hasChildren} — {@code true} if this node appears as a parent in
+   *       {@code AD_TreeNode}.</li>
+   *   <li>{@code parentCode4} — {@code Value} of the nearest ancestor whose {@code Value}
+   *       has exactly {@value #PARENT_CODE_LENGTH} characters; JSON null if none found.</li>
+   * </ul>
+   */
+  private void applyHierarchyMetadata(JSONArray data, TreeData tree) throws Exception {
+    for (int i = 0; i < data.length(); i++) {
+      JSONObject entry = data.optJSONObject(i);
+      if (entry == null) {
+        continue;
+      }
+      String id = entry.optString("id", null);
+      if (id == null) {
+        continue;
+      }
+
+      String parentId = tree.nodeParentMap.get(id); // null when root or not in tree
+      int depth = computeDepth(id, tree.nodeParentMap);
+      boolean hasChildren = tree.parentNodeIds.contains(id);
+      String parentCode4 = findParentCode4(id, tree.nodeParentMap, tree.nodeValueMap);
+
+      entry.put("parentId", parentId != null ? parentId : JSONObject.NULL);
+      entry.put("depth", depth);
+      entry.put("hasChildren", hasChildren);
+      entry.put("parentCode4", parentCode4 != null ? parentCode4 : JSONObject.NULL);
+    }
+  }
+
+  /**
+   * Computes the depth of {@code nodeId} in the tree by walking up the parent chain.
+   * Returns 0 for roots and for nodes not present in the map.
+   * Capped at {@value #MAX_TREE_DEPTH} to guard against circular references.
+   */
+  static int computeDepth(String nodeId, Map<String, String> nodeParentMap) {
+    int depth = 0;
+    String current = nodeParentMap.get(nodeId); // parent of nodeId
+    int guard = 0;
+    while (current != null && guard < MAX_TREE_DEPTH) {
+      depth++;
+      current = nodeParentMap.get(current);
+      guard++;
+    }
+    return depth;
+  }
+
+  /**
+   * Walks up the ancestor chain of {@code nodeId} and returns the {@code Value}
+   * of the nearest ancestor whose {@code Value} has exactly {@value #PARENT_CODE_LENGTH}
+   * characters, or {@code null} if none is found before the root.
+   *
+   * <p>The node itself is excluded — traversal starts at its direct parent.
+   */
+  static String findParentCode4(String nodeId, Map<String, String> nodeParentMap,
+      Map<String, String> nodeValueMap) {
+    String current = nodeParentMap.get(nodeId); // start at direct parent
+    int guard = 0;
+    while (current != null && guard < MAX_TREE_DEPTH) {
+      String value = nodeValueMap.get(current);
+      if (value != null && value.length() == PARENT_CODE_LENGTH) {
+        return value;
+      }
+      current = nodeParentMap.get(current);
+      guard++;
+    }
+    return null;
+  }
+
+  // ── C. YTD balances ───────────────────────────────────────────────────────
+
+  /**
+   * Loads YTD balances from {@code fact_acct} for the current fiscal year and rolls
+   * them up to summary accounts using the in-memory tree.
+   *
+   * <p>Two queries are issued:
+   * <ol>
+   *   <li>Fiscal year lookup: finds the {@code c_year_id} whose period dates bracket
+   *       {@code CURRENT_DATE} for this client.</li>
+   *   <li>Balance aggregation: one {@code GROUP BY account_id} over {@code fact_acct}
+   *       joined to {@code c_period} — no N+1 queries.</li>
+   * </ol>
+   *
+   * <p>After loading leaf balances, summary accounts are enriched via
+   * {@link #rollupBalances}, which propagates each node's balance to its parent
+   * bottom-up. This runs entirely in memory — no recursive SQL.
+   *
+   * @param clientId      the {@code AD_Client_ID} of the current tenant
+   * @param nodeParentMap tree parent relationship (from {@link #loadTreeData})
+   * @return map of {@code C_ElementValue_ID} → {@code [ytdDebit, ytdCredit, ytdBalance]};
+   *         empty map when no fiscal year is active
+   */
+  @SuppressWarnings("unchecked")
+  private Map<String, BigDecimal[]> computeYtdBalances(String clientId,
+      Map<String, String> nodeParentMap) {
+    OBContext.setAdminMode(true);
+    try {
+      // 1. Find the current fiscal year
+      NativeQuery<Object> yearQry = (NativeQuery<Object>) OBDal.getInstance()
+          .getSession()
+          .createNativeQuery(SQL_CURRENT_YEAR);
+      yearQry.setParameter("clientId", clientId);
+      List<Object> yearRows = yearQry.list();
+      if (yearRows.isEmpty()) {
+        log.debug("ChartOfAccountsHandler: no active fiscal year for clientId={}", clientId);
+        return Collections.emptyMap();
+      }
+      String yearId = (String) yearRows.get(0);
+
+      // 2. Aggregate YTD balances for all posting accounts
+      NativeQuery<Object> balQry = (NativeQuery<Object>) OBDal.getInstance()
+          .getSession()
+          .createNativeQuery(SQL_YTD_BALANCES);
+      balQry.setParameter("yearId", yearId);
+      balQry.setParameter("clientId", clientId);
+      List<Object> balRows = balQry.list();
+
+      Map<String, BigDecimal[]> balances = new HashMap<>(balRows.size() * 2);
+      for (Object rawRow : balRows) {
+        Object[] row = (Object[]) rawRow;
+        String accountId = (String) row[0];
+        BigDecimal debit = toBigDecimal(row[1]);
+        BigDecimal credit = toBigDecimal(row[2]);
+        BigDecimal balance = toBigDecimal(row[3]);
+        balances.put(accountId, new BigDecimal[]{debit, credit, balance});
+      }
+
+      // 3. Roll up leaf totals to summary/parent accounts in-memory
+      rollupBalances(balances, nodeParentMap);
+
+      return balances;
+
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Safely converts a value returned by a {@code NativeQuery} numeric column to
+   * {@link BigDecimal}. Handles {@code BigDecimal}, {@code Number}, and {@code null}.
+   */
+  static BigDecimal toBigDecimal(Object value) {
+    if (value instanceof BigDecimal) {
+      return (BigDecimal) value;
+    }
+    if (value instanceof Number) {
+      return new BigDecimal(value.toString());
+    }
+    return BigDecimal.ZERO;
+  }
+
+  /**
+   * Propagates leaf account balances upward to their ancestors in-memory.
+   *
+   * <p>Algorithm: iterate over a snapshot of the initial (leaf) balance entries.
+   * For each entry, walk up the {@code nodeParentMap} and add the entry's balance
+   * to every ancestor. Because only the ORIGINAL leaf entries are iterated (snapshot),
+   * contributions from different leaves accumulate correctly at each ancestor without
+   * double-counting.
+   *
+   * <p>After this method returns, {@code balances} contains correct accumulated totals
+   * for both leaf accounts and all their summary ancestors.
+   *
+   * @param balances      mutable map of account_id → [debit, credit, balance]; modified
+   *                      in place to add summary account entries
+   * @param nodeParentMap tree relationship (nodeId → parentId; null value = root)
+   */
+  static void rollupBalances(Map<String, BigDecimal[]> balances,
+      Map<String, String> nodeParentMap) {
+    // Snapshot the original leaf entries so we don't iterate newly created parent entries
+    List<Map.Entry<String, BigDecimal[]>> leaves = new ArrayList<>(balances.entrySet());
+
+    for (Map.Entry<String, BigDecimal[]> entry : leaves) {
+      String nodeId = entry.getKey();
+      BigDecimal[] leafBalance = entry.getValue();
+
+      String parentId = nodeParentMap.get(nodeId);
+      int guard = 0;
+      while (parentId != null && guard < MAX_TREE_DEPTH) {
+        BigDecimal[] parentBalance = balances.computeIfAbsent(parentId,
+            k -> new BigDecimal[]{BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO});
+        parentBalance[0] = parentBalance[0].add(leafBalance[0]);
+        parentBalance[1] = parentBalance[1].add(leafBalance[1]);
+        parentBalance[2] = parentBalance[2].add(leafBalance[2]);
+
+        parentId = nodeParentMap.get(parentId);
+        guard++;
+      }
+    }
+  }
+
+  /**
+   * Injects {@code ytdDebit}, {@code ytdCredit}, and {@code ytdBalance} into each
+   * record of the GET_LIST response. Records with no balance data receive zeros.
+   */
+  static void applyYtdBalances(JSONArray data, Map<String, BigDecimal[]> ytdBalances)
+      throws Exception {
+    for (int i = 0; i < data.length(); i++) {
+      JSONObject entry = data.optJSONObject(i);
+      if (entry == null) {
+        continue;
+      }
+      String id = entry.optString("id", null);
+      if (id == null) {
+        continue;
+      }
+      BigDecimal[] balance = ytdBalances.get(id);
+      if (balance != null) {
+        entry.put("ytdDebit", balance[0]);
+        entry.put("ytdCredit", balance[1]);
+        entry.put("ytdBalance", balance[2]);
+      } else {
+        entry.put("ytdDebit", BigDecimal.ZERO);
+        entry.put("ytdCredit", BigDecimal.ZERO);
+        entry.put("ytdBalance", BigDecimal.ZERO);
+      }
+    }
+  }
+
+  // ── D. Defaults — inject codePrefix from parent account ───────────────────
 
   /**
    * Post-hook for the DEFAULTS endpoint. Augments the AD_Column defaults already resolved
@@ -348,7 +760,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
     return null;
   }
 
-  // ── C. Save validation ─────────────────────────────────────────────────────
+  // ── E. Save validation ─────────────────────────────────────────────────────
 
   /**
    * Validates the account code in a create or update request.
