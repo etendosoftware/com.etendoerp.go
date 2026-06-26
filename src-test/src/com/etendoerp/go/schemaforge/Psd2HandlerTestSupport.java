@@ -82,15 +82,13 @@ final class Psd2HandlerTestSupport {
    * resolves to a client whose id is {@link #CLIENT_ID} and the current organization is a mock.
    *
    * @param obContext the open MockedStatic over {@link OBContext}
-   * @return the mocked Client (so a test can assert further interactions if needed)
    */
-  static Client stubObContext(org.mockito.MockedStatic<OBContext> obContext) {
+  static void stubObContext(org.mockito.MockedStatic<OBContext> obContext) {
     OBContext ctx = mock(OBContext.class);
     Client client = mock(Client.class);
     when(client.getId()).thenReturn(CLIENT_ID);
     when(ctx.getCurrentClient()).thenReturn(client);
     when(ctx.getCurrentOrganization()).thenReturn(mock(Organization.class));
     obContext.when(OBContext::getOBContext).thenReturn(ctx);
-    return client;
   }
 }
