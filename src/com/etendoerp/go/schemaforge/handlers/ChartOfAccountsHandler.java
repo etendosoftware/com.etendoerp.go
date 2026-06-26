@@ -110,18 +110,14 @@ public class ChartOfAccountsHandler implements NeoHandler {
   /**
    * Pre-hook:
    * <ul>
-   *   <li>DEFAULTS: injects {@code codePrefix} from the parent account when
-   *       {@code parentAccountId} is present.</li>
    *   <li>CRUD POST/PUT/PATCH: validates the account code before saving.</li>
-   *   <li>Everything else: passes through (returns {@code null}).</li>
+   *   <li>DEFAULTS and everything else: returns {@code null} so the default service runs
+   *       first; {@code afterHandle} then augments the result.</li>
    * </ul>
    */
   @Override
   public NeoResponse handle(NeoContext context) {
     try {
-      if (context.getEndpointType() == NeoEndpointType.DEFAULTS) {
-        return handleDefaults(context);
-      }
       if (context.getEndpointType() == NeoEndpointType.CRUD) {
         String method = context.getHttpMethod();
         if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
@@ -136,8 +132,15 @@ public class ChartOfAccountsHandler implements NeoHandler {
   }
 
   /**
-   * Post-hook: enriches CRUD GET responses with an {@code isLeaf} boolean per record.
-   * On any failure the enrichment is skipped silently — the default response is preserved.
+   * Post-hook:
+   * <ul>
+   *   <li>CRUD GET: enriches every record with an {@code isLeaf} boolean.</li>
+   *   <li>DEFAULTS: when {@code parentAccountId} is present, injects {@code codePrefix}
+   *       (first {@value #PGC_PREFIX_LENGTH} digits of the parent's account code) into
+   *       the defaults payload already resolved by the AD_Column defaults service — so
+   *       both the standard field defaults <em>and</em> {@code codePrefix} are returned.</li>
+   * </ul>
+   * On any failure the original result is preserved (method returns {@code null}).
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
@@ -146,9 +149,12 @@ public class ChartOfAccountsHandler implements NeoHandler {
           && "GET".equals(context.getHttpMethod())) {
         return enrichWithIsLeaf(context);
       }
+      if (context.getEndpointType() == NeoEndpointType.DEFAULTS) {
+        return injectCodePrefix(context);
+      }
       return null;
     } catch (Exception e) {
-      log.warn("ChartOfAccountsHandler.afterHandle could not enrich isLeaf: {}", e.getMessage(), e);
+      log.warn("ChartOfAccountsHandler.afterHandle error: {}", e.getMessage(), e);
       return null;
     }
   }
@@ -254,26 +260,35 @@ public class ChartOfAccountsHandler implements NeoHandler {
   // ── B. Defaults — inject codePrefix from parent account ───────────────────
 
   /**
-   * Handles the DEFAULTS endpoint pre-hook. When {@code parentAccountId} is present,
-   * returns a defaults payload containing {@code codePrefix} (first
-   * {@value #PGC_PREFIX_LENGTH} characters of the parent's account code).
+   * Post-hook for the DEFAULTS endpoint. Augments the AD_Column defaults already resolved
+   * by the default service with a {@code codePrefix} key when {@code parentAccountId} is
+   * present as a query parameter.
+   *
+   * <p>The response structure produced by the defaults service is:
+   * <pre>{@code {"defaults": { "isActive": true, ... }}}</pre>
+   * This method adds {@code "codePrefix": "<first 4 digits of parent Value>"} inside the
+   * existing {@code defaults} object, so both the standard field defaults and the prefix
+   * hint reach the frontend in a single response.
    *
    * <p>Query-param lookup follows the two-step pattern established by
    * {@code AmortizationHeaderHandler}:
    * <ol>
-   *   <li>{@link NeoContext#getQueryParams()} — populated by the MCP path and (after
-   *       ETP-4247) by the REST path through {@code NeoDefaultsEndpoint}.</li>
+   *   <li>{@link NeoContext#getQueryParams()} — populated by the MCP path and the REST
+   *       path through {@code NeoDefaultsEndpoint}.</li>
    *   <li>{@link RequestContext} HTTP parameter — fallback for callers that do not yet
    *       set queryParams in the hook context.</li>
    * </ol>
    *
-   * @return a {@link NeoResponse} with {@code {"defaults": {"codePrefix": "..."}}} if
-   *         {@code parentAccountId} is resolved and the parent exists; {@code null}
-   *         otherwise (falls through to the default defaults service).
+   * @return the augmented {@link NeoResponse} when {@code parentAccountId} is resolved
+   *         and the parent exists; {@code null} otherwise (keeps the original result).
    */
-  private NeoResponse handleDefaults(NeoContext context) {
+  private NeoResponse injectCodePrefix(NeoContext context) {
     String parentAccountId = resolveParentAccountId(context);
     if (parentAccountId == null) {
+      return null;
+    }
+    NeoResponse previous = context.getPreviousResult();
+    if (previous == null || previous.getBody() == null) {
       return null;
     }
 
@@ -291,14 +306,16 @@ public class ChartOfAccountsHandler implements NeoHandler {
         return null;
       }
 
-      String codePrefix = parentCode.substring(0, PGC_PREFIX_LENGTH);
-      JSONObject defaults = new JSONObject();
-      defaults.put("codePrefix", codePrefix);
-      JSONObject responseBody = new JSONObject();
-      responseBody.put("defaults", defaults);
-      return NeoResponse.ok(responseBody);
+      JSONObject body = previous.getBody();
+      JSONObject defaults = body.optJSONObject("defaults");
+      if (defaults == null) {
+        defaults = new JSONObject();
+        body.put("defaults", defaults);
+      }
+      defaults.put("codePrefix", parentCode.substring(0, PGC_PREFIX_LENGTH));
+      return NeoResponse.ok(body);
     } catch (Exception e) {
-      log.error("ChartOfAccountsHandler.handleDefaults error for parentAccountId={}: {}",
+      log.error("ChartOfAccountsHandler.injectCodePrefix error for parentAccountId={}: {}",
           parentAccountId, e.getMessage(), e);
       return null;
     } finally {
