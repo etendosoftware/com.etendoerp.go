@@ -24,7 +24,6 @@ import java.time.LocalDate;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
@@ -63,7 +62,6 @@ import org.openbravo.model.common.order.Order;
  *       shared/global rates (org '*') as standard Etendo pattern.</li>
  * </ul>
  */
-@ApplicationScoped
 @Named("currencyOptionsHandler")
 public class CurrencyOptionsHandler implements NeoHandler {
 
