@@ -80,6 +80,7 @@ import org.openbravo.base.weld.WeldUtils;
  * For shipments: invoices the full movement quantity, pulling prices from linked order lines.
  */
 @Named("createDraftInvoiceHandler")
+@SuppressWarnings("java:S1448")
 public class CreateDraftInvoiceHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(CreateDraftInvoiceHandler.class);

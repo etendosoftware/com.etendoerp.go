@@ -66,6 +66,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   private static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
   private static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
+  private static final String FIELD_DOCUMENT_NO = "documentNo";
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
@@ -234,7 +235,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         if (rs.next()) {
           JSONObject retReceipt = new JSONObject();
           retReceipt.put("id", rs.getString("ret_id"));
-          retReceipt.put("documentNo", rs.getString("ret_doc"));
+          retReceipt.put(FIELD_DOCUMENT_NO, rs.getString("ret_doc"));
           retReceipt.put("documentStatus", rs.getString("ret_status"));
           rec.put("sourceReturnReceipt", retReceipt);
 
@@ -242,7 +243,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
           if (origInvId != null) {
             JSONObject sourceInvoice = new JSONObject();
             sourceInvoice.put("id", origInvId);
-            sourceInvoice.put("documentNo", rs.getString("inv_doc"));
+            sourceInvoice.put(FIELD_DOCUMENT_NO, rs.getString("inv_doc"));
             rec.put("sourceInvoice", sourceInvoice);
           }
         }
@@ -298,7 +299,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         while (rs.next()) {
           JSONObject s = new JSONObject();
           s.put("id", rs.getString(1));
-          s.put("documentNo", rs.getString(2));
+          s.put(FIELD_DOCUMENT_NO, rs.getString(2));
           s.put("documentStatus", rs.getString(3));
           s.put("movementType", rs.getString(4));
           shipments.put(s);
