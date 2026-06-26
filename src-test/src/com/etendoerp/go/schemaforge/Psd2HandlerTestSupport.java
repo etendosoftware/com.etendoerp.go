@@ -83,6 +83,9 @@ final class Psd2HandlerTestSupport {
    *
    * @param obContext the open MockedStatic over {@link OBContext}
    */
+  // ctx and client ARE used (as receivers of the when(...) stubbings below); S1854 mis-reports
+  // them as dead stores on this mock-setup pattern (false positive), so it is suppressed here.
+  @SuppressWarnings("java:S1854")
   static void stubObContext(org.mockito.MockedStatic<OBContext> obContext) {
     OBContext ctx = mock(OBContext.class);
     Client client = mock(Client.class);
