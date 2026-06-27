@@ -359,6 +359,7 @@ public class SalesInvoiceHeaderHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
       PreparedStatement ps = mock(PreparedStatement.class);
@@ -403,6 +404,7 @@ public class SalesInvoiceHeaderHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
       PreparedStatement ps = mock(PreparedStatement.class);
@@ -440,6 +442,7 @@ public class SalesInvoiceHeaderHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
       PreparedStatement ps = mock(PreparedStatement.class);
@@ -698,6 +701,7 @@ public class SalesInvoiceHeaderHandlerTest {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
       PreparedStatement ps = mock(PreparedStatement.class);
@@ -723,6 +727,7 @@ public class SalesInvoiceHeaderHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
       PreparedStatement ps = mock(PreparedStatement.class);
