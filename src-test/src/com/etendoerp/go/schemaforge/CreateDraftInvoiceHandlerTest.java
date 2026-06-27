@@ -2194,7 +2194,7 @@ public class CreateDraftInvoiceHandlerTest {
 
       CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
         @Override
-        protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId) {
+        protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId, boolean includeDrafts) {
           Map<String, BigDecimal> m = new java.util.LinkedHashMap<>();
           m.put("line-A", new BigDecimal("3"));
           m.put("line-B", new BigDecimal("0"));
@@ -2225,7 +2225,7 @@ public class CreateDraftInvoiceHandlerTest {
 
       CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
         @Override
-        protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId) {
+        protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId, boolean includeDrafts) {
           throw new RuntimeException("db burst");
         }
       };

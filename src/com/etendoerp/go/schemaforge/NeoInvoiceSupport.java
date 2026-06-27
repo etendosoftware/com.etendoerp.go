@@ -166,9 +166,9 @@ final class NeoInvoiceSupport {
             BigDecimal pending = (movQty != null ? movQty : BigDecimal.ZERO)
                 .subtract(invQty != null ? invQty : BigDecimal.ZERO)
                 .max(BigDecimal.ZERO);
-            // Include ALL active lines (even pending=0) so callers can distinguish
-            // "fully invoiced" (0 in map) from "line not yet seen by DB" (absent).
-            result.put(lineId, pending);
+            if (pending.compareTo(BigDecimal.ZERO) > 0) {
+              result.put(lineId, pending);
+            }
           }
         }
       }
