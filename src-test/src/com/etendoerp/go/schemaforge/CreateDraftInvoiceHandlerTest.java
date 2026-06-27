@@ -1161,7 +1161,7 @@ public class CreateDraftInvoiceHandlerTest {
     JSONArray capturedLines;
 
     @Override
-    protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId) {
+    protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId, boolean includeDrafts) {
       return Collections.emptyMap();
     }
 
