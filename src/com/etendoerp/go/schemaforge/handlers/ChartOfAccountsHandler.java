@@ -148,11 +148,11 @@ public class ChartOfAccountsHandler implements NeoHandler {
       "SELECT node_id, parent_id FROM ad_treenode WHERE ad_tree_id = :treeId";
 
   /**
-   * SQL that loads all {@code (c_elementvalue_id, value)} pairs for a given client.
-   * Used to look up account codes when walking the tree for {@code parentCode4}.
+   * SQL that loads {@code (c_elementvalue_id, value, name)} triples for a given client.
+   * Used to look up account codes/names when walking the tree for {@code parentCode4}.
    */
   private static final String SQL_LOAD_EV_VALUES =
-      "SELECT c_elementvalue_id, value FROM c_elementvalue WHERE ad_client_id = :clientId";
+      "SELECT c_elementvalue_id, value, name FROM c_elementvalue WHERE ad_client_id = :clientId";
 
   /**
    * SQL that finds the {@code c_year_id} for the current fiscal year of a given client.
@@ -271,6 +271,9 @@ public class ChartOfAccountsHandler implements NeoHandler {
         Map<String, BigDecimal[]> ytdBalances = computeYtdBalances(clientId, treeData.nodeParentMap);
         applyYtdBalances(data, ytdBalances);
       }
+      // Show only subaccounts (issummary = 'N') — summary/group accounts are navigation
+      // artefacts only; the UI groups rows by parentCode4 instead.
+      filterToSubaccounts(data, isSummaryMap, context.getPreviousResult().getBody());
     }
 
     return NeoResponse.ok(context.getPreviousResult().getBody());
@@ -348,6 +351,32 @@ public class ChartOfAccountsHandler implements NeoHandler {
     return result;
   }
 
+  /**
+   * Removes summary accounts ({@code IsSummary = 'Y'}) from the list response in-place.
+   * Rebuilds the {@code response.data} JSONArray keeping only posting/subaccounts,
+   * and updates {@code response.totalRows} to match.
+   */
+  private static void filterToSubaccounts(JSONArray data, Map<String, Boolean> isSummaryMap,
+      JSONObject responseBody) throws Exception {
+    JSONArray filtered = new JSONArray();
+    for (int i = 0; i < data.length(); i++) {
+      JSONObject entry = data.optJSONObject(i);
+      if (entry == null) {
+        continue;
+      }
+      String id = entry.optString("id", null);
+      Boolean isSummary = id != null ? isSummaryMap.get(id) : null;
+      if (!Boolean.TRUE.equals(isSummary)) {
+        filtered.put(entry);
+      }
+    }
+    JSONObject response = responseBody.optJSONObject("response");
+    if (response != null) {
+      response.put("data", filtered);
+      response.put("totalRows", filtered.length());
+    }
+  }
+
   // ── B. Hierarchy metadata ──────────────────────────────────────────────────
 
   /**
@@ -363,12 +392,14 @@ public class ChartOfAccountsHandler implements NeoHandler {
   private static class TreeData {
     final Map<String, String> nodeParentMap;
     final Map<String, String> nodeValueMap;
+    final Map<String, String> nodeNameMap;
     final Set<String> parentNodeIds;
 
     TreeData(Map<String, String> nodeParent, Map<String, String> nodeValue,
-        Set<String> parents) {
+        Map<String, String> nodeName, Set<String> parents) {
       this.nodeParentMap = nodeParent;
       this.nodeValueMap = nodeValue;
+      this.nodeNameMap = nodeName;
       this.parentNodeIds = parents;
     }
   }
@@ -396,7 +427,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
       if (treeRows.isEmpty()) {
         log.debug("ChartOfAccountsHandler: no EV tree found for clientId={}", clientId);
         return new TreeData(Collections.emptyMap(), Collections.emptyMap(),
-            Collections.emptySet());
+            Collections.emptyMap(), Collections.emptySet());
       }
       String treeId = (String) treeRows.get(0);
 
@@ -431,12 +462,14 @@ public class ChartOfAccountsHandler implements NeoHandler {
       List<Object> evRows = evQry.list();
 
       Map<String, String> nodeValueMap = new HashMap<>(evRows.size() * 2);
+      Map<String, String> nodeNameMap = new HashMap<>(evRows.size() * 2);
       for (Object rawRow : evRows) {
         Object[] row = (Object[]) rawRow;
         nodeValueMap.put((String) row[0], (String) row[1]);
+        nodeNameMap.put((String) row[0], (String) row[2]);
       }
 
-      return new TreeData(nodeParentMap, nodeValueMap, parentNodeIds);
+      return new TreeData(nodeParentMap, nodeValueMap, nodeNameMap, parentNodeIds);
 
     } finally {
       OBContext.restorePreviousMode();
@@ -472,11 +505,14 @@ public class ChartOfAccountsHandler implements NeoHandler {
       int depth = computeDepth(id, tree.nodeParentMap);
       boolean hasChildren = tree.parentNodeIds.contains(id);
       String parentCode4 = findParentCode4(id, tree.nodeParentMap, tree.nodeValueMap);
+      String parentCode4Name = findParentCode4Name(id, tree.nodeParentMap,
+          tree.nodeValueMap, tree.nodeNameMap);
 
       entry.put("parentId", parentId != null ? parentId : JSONObject.NULL);
       entry.put("depth", depth);
       entry.put("hasChildren", hasChildren);
       entry.put("parentCode4", parentCode4 != null ? parentCode4 : JSONObject.NULL);
+      entry.put("parentCode4Name", parentCode4Name != null ? parentCode4Name : JSONObject.NULL);
     }
   }
 
@@ -512,6 +548,25 @@ public class ChartOfAccountsHandler implements NeoHandler {
       String value = nodeValueMap.get(current);
       if (value != null && value.length() == PARENT_CODE_LENGTH) {
         return value;
+      }
+      current = nodeParentMap.get(current);
+      guard++;
+    }
+    return null;
+  }
+
+  /**
+   * Returns the {@code Name} of the nearest 4-digit ancestor, or {@code null} if none found.
+   * Mirrors {@link #findParentCode4} but resolves the name instead of the value.
+   */
+  static String findParentCode4Name(String nodeId, Map<String, String> nodeParentMap,
+      Map<String, String> nodeValueMap, Map<String, String> nodeNameMap) {
+    String current = nodeParentMap.get(nodeId);
+    int guard = 0;
+    while (current != null && guard < MAX_TREE_DEPTH) {
+      String value = nodeValueMap.get(current);
+      if (value != null && value.length() == PARENT_CODE_LENGTH) {
+        return nodeNameMap.get(current);
       }
       current = nodeParentMap.get(current);
       guard++;
