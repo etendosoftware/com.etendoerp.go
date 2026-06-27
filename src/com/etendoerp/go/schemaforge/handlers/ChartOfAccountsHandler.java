@@ -38,6 +38,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
+import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -184,6 +185,24 @@ public class ChartOfAccountsHandler implements NeoHandler {
       + "  AND fa.ad_client_id = :clientId "
       + "GROUP BY fa.account_id";
 
+  /**
+   * SQL used for the CoA list endpoint. It intentionally bypasses
+   * {@code DefaultJsonDataService}, whose readable-client filtering can return an empty list
+   * for JWT-authenticated GO users even when the current client owns account records.
+   */
+  private static final String SQL_LIST_LEAF_ACCOUNTS =
+      "SELECT c_elementvalue_id, value, name, description, accounttype, issummary, isactive "
+      + "FROM c_elementvalue "
+      + "WHERE ad_client_id = :clientId "
+      + "  AND issummary = 'N' "
+      + "ORDER BY value ASC "
+      + "LIMIT :limit OFFSET :offset";
+
+  private static final String SQL_COUNT_LEAF_ACCOUNTS =
+      "SELECT COUNT(*) FROM c_elementvalue "
+      + "WHERE ad_client_id = :clientId "
+      + "  AND issummary = 'N'";
+
   // ── NeoHandler entry points ────────────────────────────────────────────────
 
   /**
@@ -199,6 +218,12 @@ public class ChartOfAccountsHandler implements NeoHandler {
     try {
       if (context.getEndpointType() == NeoEndpointType.CRUD) {
         String method = context.getHttpMethod();
+        if ("GET".equals(method) && context.getRecordId() == null) {
+          NeoResponse listResponse = fetchElementValuesDirectly(context);
+          if (listResponse != null) {
+            return listResponse;
+          }
+        }
         if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
           return validateSave(context);
         }
@@ -243,6 +268,93 @@ public class ChartOfAccountsHandler implements NeoHandler {
   // ── A. isLeaf enrichment + B. Hierarchy + C. YTD ─────────────────────────
 
   /**
+   * Serves the list GET through native SQL so CoA remains visible when the generic
+   * SmartClient datasource loses records through readable-client filtering.
+   */
+  @SuppressWarnings("unchecked")
+  private NeoResponse fetchElementValuesDirectly(NeoContext context) throws Exception {
+    OBContext obCtx = context.getObContext();
+    if (obCtx == null || obCtx.getCurrentClient() == null) {
+      return null;
+    }
+
+    Map<String, String> queryParams = context.getQueryParams();
+    int startRow = Math.max(0, parseIntOrDefault(queryParams,
+        JsonConstants.STARTROW_PARAMETER, 0));
+    int requestedEndRow = parseIntOrDefault(queryParams,
+        JsonConstants.ENDROW_PARAMETER, startRow + 74);
+    int pageSize = Math.max(1, requestedEndRow >= startRow
+        ? requestedEndRow - startRow + 1
+        : 75);
+    String clientId = obCtx.getCurrentClient().getId();
+
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery<Object> countQry = (NativeQuery<Object>) OBDal.getInstance()
+          .getSession()
+          .createNativeQuery(SQL_COUNT_LEAF_ACCOUNTS);
+      countQry.setParameter("clientId", clientId);
+      int totalRows = toInt(countQry.uniqueResult());
+
+      NativeQuery<Object> listQry = (NativeQuery<Object>) OBDal.getInstance()
+          .getSession()
+          .createNativeQuery(SQL_LIST_LEAF_ACCOUNTS);
+      listQry.setParameter("clientId", clientId);
+      listQry.setParameter("limit", pageSize);
+      listQry.setParameter("offset", startRow);
+
+      JSONArray data = new JSONArray();
+      for (Object rawRow : listQry.list()) {
+        Object[] row = (Object[]) rawRow;
+        JSONObject entry = new JSONObject();
+        entry.put("id", row[0]);
+        entry.put(FIELD_SEARCH_KEY, row[1]);
+        entry.put("name", row[2]);
+        entry.put("description", row[3] != null ? row[3] : JSONObject.NULL);
+        entry.put("accountType", row[4] != null ? row[4] : JSONObject.NULL);
+        entry.put("summaryLevel", "Y".equals(row[5]));
+        entry.put("active", "Y".equals(row[6]));
+        data.put(entry);
+      }
+
+      JSONObject response = new JSONObject();
+      response.put("startRow", startRow);
+      response.put("endRow", data.length() > 0 ? startRow + data.length() - 1 : requestedEndRow);
+      response.put("totalRows", totalRows);
+      response.put("data", data);
+      response.put("status", 0);
+
+      JSONObject body = new JSONObject();
+      body.put("response", response);
+      return NeoResponse.ok(body);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private static int parseIntOrDefault(Map<String, String> queryParams, String key, int fallback) {
+    if (queryParams == null) {
+      return fallback;
+    }
+    String raw = queryParams.get(key);
+    if (raw == null || raw.trim().isEmpty()) {
+      return fallback;
+    }
+    try {
+      return Integer.parseInt(raw.trim());
+    } catch (NumberFormatException e) {
+      return fallback;
+    }
+  }
+
+  private static int toInt(Object value) {
+    if (value instanceof Number) {
+      return ((Number) value).intValue();
+    }
+    return 0;
+  }
+
+  /**
    * Unified GET response enrichment. Always applies {@code isLeaf}; applies hierarchy
    * metadata and YTD balances only on list responses (no {@code recordId}).
    */
@@ -273,7 +385,9 @@ public class ChartOfAccountsHandler implements NeoHandler {
       }
       // Show only subaccounts (issummary = 'N') — summary/group accounts are navigation
       // artefacts only; the UI groups rows by parentCode4 instead.
-      filterToSubaccounts(data, isSummaryMap, context.getPreviousResult().getBody());
+      if (containsSummaryRows(isSummaryMap)) {
+        filterToSubaccounts(data, isSummaryMap, context.getPreviousResult().getBody());
+      }
     }
 
     return NeoResponse.ok(context.getPreviousResult().getBody());
@@ -375,6 +489,10 @@ public class ChartOfAccountsHandler implements NeoHandler {
       response.put("data", filtered);
       response.put("totalRows", filtered.length());
     }
+  }
+
+  private static boolean containsSummaryRows(Map<String, Boolean> isSummaryMap) {
+    return isSummaryMap.values().stream().anyMatch(Boolean.TRUE::equals);
   }
 
   // ── B. Hierarchy metadata ──────────────────────────────────────────────────
