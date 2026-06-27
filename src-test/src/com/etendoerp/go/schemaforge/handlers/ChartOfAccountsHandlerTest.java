@@ -105,6 +105,19 @@ public class ChartOfAccountsHandlerTest {
   }
 
   @Test
+  public void handleReturnsErrorForProtectedParentLikeSubaccountOnCreate() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    JSONObject body = new JSONObject().put("searchKey", "10000000");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    NeoResponse resp = handler.handle(ctx);
+    assertNotNull(resp);
+    assertEquals(400, resp.getHttpStatus());
+  }
+
+  @Test
   public void handleReturnsNullWhenSearchKeyAbsentOnPost() throws Exception {
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
@@ -164,6 +177,45 @@ public class ChartOfAccountsHandlerTest {
   @Test
   public void errPrefixLockedMessageIsInSpanish() {
     assertTrue(ChartOfAccountsHandler.ERR_PREFIX_LOCKED.length() > 5);
+  }
+
+  @Test
+  public void errProtectedParentLikeSubaccountMessageIsInSpanish() {
+    assertTrue("Error must mention protected parent-like subaccounts",
+        ChartOfAccountsHandler.ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT.contains("subcuentas padre"));
+    assertTrue(ChartOfAccountsHandler.ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT.contains("0000"));
+  }
+
+  // ── account code validation ────────────────────────────────────────────────
+
+  @Test
+  public void isValidAccountCodeAcceptsExactlyEightDigits() {
+    assertTrue(ChartOfAccountsHandler.isValidAccountCode("12345678"));
+    assertTrue(ChartOfAccountsHandler.isValidAccountCode("00000000"));
+  }
+
+  @Test
+  public void isValidAccountCodeRejectsNullNonDigitsAndWrongLength() {
+    assertFalse(ChartOfAccountsHandler.isValidAccountCode(null));
+    assertFalse(ChartOfAccountsHandler.isValidAccountCode("1234567"));
+    assertFalse(ChartOfAccountsHandler.isValidAccountCode("123456789"));
+    assertFalse(ChartOfAccountsHandler.isValidAccountCode("1234A678"));
+    assertFalse(ChartOfAccountsHandler.isValidAccountCode(" 12345678"));
+  }
+
+  @Test
+  public void isProtectedParentLikeSubaccountAcceptsEightDigitCodesEndingInFourZeros() {
+    assertTrue(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("10000000"));
+    assertTrue(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("10100000"));
+    assertTrue(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("99990000"));
+  }
+
+  @Test
+  public void isProtectedParentLikeSubaccountRejectsLeafCodesAndInvalidCodes() {
+    assertFalse(ChartOfAccountsHandler.isProtectedParentLikeSubaccount(null));
+    assertFalse(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("10000001"));
+    assertFalse(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("1000"));
+    assertFalse(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("1000000A"));
   }
 
   // ── computeDepth ──────────────────────────────────────────────────────────

@@ -70,6 +70,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *   <li><b>E — PGC save validation</b> (handle, CRUD POST/PUT/PATCH):
  *       <ol>
  *         <li>Rejects codes that do not match {@code ^\d{8}$}.</li>
+ *         <li>Rejects protected parent-like subaccount codes such as {@code 10000000}
+ *             or {@code 10100000}.</li>
  *         <li>Rejects code changes on summary (non-leaf) accounts — accounts that have
  *             children in {@code AD_TreeNode}.</li>
  *         <li>Rejects prefix changes on leaf accounts (first 4 digits are immutable).</li>
@@ -116,6 +118,9 @@ public class ChartOfAccountsHandler implements NeoHandler {
 
   static final String ERR_PREFIX_LOCKED =
       "El prefijo PGC (primeros 4 dígitos) no puede modificarse";
+
+  static final String ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT =
+      "Las subcuentas padre terminadas en 0000 no pueden crearse ni modificarse";
 
   /**
    * SQL that returns the {@code AD_Tree_ID} for a given {@code C_ElementValue_ID}.
@@ -203,6 +208,12 @@ public class ChartOfAccountsHandler implements NeoHandler {
       + "WHERE ad_client_id = :clientId "
       + "  AND issummary = 'N'";
 
+  private static final String SQL_GET_ACCOUNT_BY_ID =
+      "SELECT c_elementvalue_id, value, name, description, accounttype, issummary, isactive "
+      + "FROM c_elementvalue "
+      + "WHERE ad_client_id = :clientId "
+      + "  AND c_elementvalue_id = :recordId";
+
   // ── NeoHandler entry points ────────────────────────────────────────────────
 
   /**
@@ -222,6 +233,12 @@ public class ChartOfAccountsHandler implements NeoHandler {
           NeoResponse listResponse = fetchElementValuesDirectly(context);
           if (listResponse != null) {
             return listResponse;
+          }
+        }
+        if ("GET".equals(method) && context.getRecordId() != null) {
+          NeoResponse detailResponse = fetchElementValueByIdDirectly(context);
+          if (detailResponse != null) {
+            return detailResponse;
           }
         }
         if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
@@ -305,16 +322,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
 
       JSONArray data = new JSONArray();
       for (Object rawRow : listQry.list()) {
-        Object[] row = (Object[]) rawRow;
-        JSONObject entry = new JSONObject();
-        entry.put("id", row[0]);
-        entry.put(FIELD_SEARCH_KEY, row[1]);
-        entry.put("name", row[2]);
-        entry.put("description", row[3] != null ? row[3] : JSONObject.NULL);
-        entry.put("accountType", row[4] != null ? row[4] : JSONObject.NULL);
-        entry.put("summaryLevel", "Y".equals(row[5]));
-        entry.put("active", "Y".equals(row[6]));
-        data.put(entry);
+        data.put(toAccountJson((Object[]) rawRow));
       }
 
       JSONObject response = new JSONObject();
@@ -330,6 +338,55 @@ public class ChartOfAccountsHandler implements NeoHandler {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  @SuppressWarnings("unchecked")
+  private NeoResponse fetchElementValueByIdDirectly(NeoContext context) throws Exception {
+    OBContext obCtx = context.getObContext();
+    if (obCtx == null || obCtx.getCurrentClient() == null) {
+      return null;
+    }
+
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery<Object> detailQry = (NativeQuery<Object>) OBDal.getInstance()
+          .getSession()
+          .createNativeQuery(SQL_GET_ACCOUNT_BY_ID);
+      detailQry.setParameter("clientId", obCtx.getCurrentClient().getId());
+      detailQry.setParameter("recordId", context.getRecordId());
+
+      JSONArray data = new JSONArray();
+      List<Object> rows = detailQry.list();
+      if (!rows.isEmpty()) {
+        data.put(toAccountJson((Object[]) rows.get(0)));
+      }
+
+      JSONObject response = new JSONObject();
+      response.put("startRow", 0);
+      response.put("endRow", data.length() > 0 ? 0 : -1);
+      response.put("totalRows", data.length());
+      response.put("data", data);
+      response.put("status", 0);
+
+      JSONObject body = new JSONObject();
+      body.put("response", response);
+      return NeoResponse.ok(body);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private static JSONObject toAccountJson(Object[] row) throws Exception {
+    JSONObject entry = new JSONObject();
+    entry.put("id", row[0]);
+    entry.put(FIELD_SEARCH_KEY, row[1]);
+    entry.put("name", row[2]);
+    entry.put("description", row[3] != null ? row[3] : JSONObject.NULL);
+    entry.put("accountType", row[4] != null ? row[4] : JSONObject.NULL);
+    entry.put("summaryLevel", "Y".equals(row[5]));
+    entry.put("active", "Y".equals(row[6]));
+    entry.put("protectedParentLikeSubaccount", isProtectedParentLikeSubaccount(String.valueOf(row[1])) ? "Y" : "N");
+    return entry;
   }
 
   private static int parseIntOrDefault(Map<String, String> queryParams, String key, int fallback) {
@@ -942,8 +999,10 @@ public class ChartOfAccountsHandler implements NeoHandler {
    * <ol>
    *   <li>If {@code searchKey} is present in the request body it must match exactly
    *       {@value #ACCOUNT_CODE_LENGTH} decimal digits.</li>
+   *   <li>Protected parent-like subaccount codes ending in {@code 0000} are rejected
+   *       on create and on update, even when the request omits {@code searchKey}.</li>
    *   <li>For updates (PUT/PATCH): if the account has children in {@code AD_TreeNode}
-   *       and the code is being changed, the update is rejected.</li>
+ *       and the code is being changed, the update is rejected.</li>
    *   <li>For updates to leaf accounts (no children): if the first
    *       {@value #PGC_PREFIX_LENGTH} digits of the code would change, the update is
    *       rejected.</li>
@@ -958,19 +1017,23 @@ public class ChartOfAccountsHandler implements NeoHandler {
       return null;
     }
 
+    boolean isNewRecord = "POST".equals(context.getHttpMethod())
+        || context.getRecordId() == null;
     String submittedCode = body.optString(FIELD_SEARCH_KEY, null);
     if (submittedCode == null) {
-      return null; // field not being changed — skip format checks
+      return isNewRecord ? null : validateExistingProtectedAccount(context.getRecordId());
     }
 
     // Validation 1: exactly 8 decimal digits
-    if (!submittedCode.matches("\\d{" + ACCOUNT_CODE_LENGTH + "}")) {
+    if (!isValidAccountCode(submittedCode)) {
       return NeoResponse.error(400, ERR_INVALID_CODE);
     }
 
-    // New records: only format check applies (no existing code to compare against)
-    boolean isNewRecord = "POST".equals(context.getHttpMethod())
-        || context.getRecordId() == null;
+    if (isProtectedParentLikeSubaccount(submittedCode)) {
+      return NeoResponse.error(400, ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT);
+    }
+
+    // New records: format/protected-code checks apply (no existing code to compare against)
     if (isNewRecord) {
       return null;
     }
@@ -1007,6 +1070,10 @@ public class ChartOfAccountsHandler implements NeoHandler {
       return null; // no current code to compare
     }
 
+    if (isProtectedParentLikeSubaccount(currentCode)) {
+      return NeoResponse.error(400, ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT);
+    }
+
     boolean codeChanged = !submittedCode.equals(currentCode);
     int childrenCount = countChildren(recordId);
     boolean hasChildren = childrenCount > 0;
@@ -1026,6 +1093,31 @@ public class ChartOfAccountsHandler implements NeoHandler {
     }
 
     return null;
+  }
+
+  private NeoResponse validateExistingProtectedAccount(String recordId) {
+    OBContext.setAdminMode(true);
+    try {
+      ElementValue existing = OBDal.getInstance().get(ElementValue.class, recordId);
+      if (existing != null && isProtectedParentLikeSubaccount(existing.getSearchKey())) {
+        return NeoResponse.error(400, ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT);
+      }
+      return null;
+    } catch (Exception e) {
+      log.error("ChartOfAccountsHandler.validateExistingProtectedAccount error for recordId={}: {}",
+          recordId, e.getMessage(), e);
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  static boolean isValidAccountCode(String code) {
+    return code != null && code.matches("\\d{" + ACCOUNT_CODE_LENGTH + "}");
+  }
+
+  static boolean isProtectedParentLikeSubaccount(String code) {
+    return isValidAccountCode(code) && code.endsWith("0000");
   }
 
   /**
