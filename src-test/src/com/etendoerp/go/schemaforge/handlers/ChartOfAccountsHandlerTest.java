@@ -218,6 +218,43 @@ public class ChartOfAccountsHandlerTest {
     assertFalse(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("1000000A"));
   }
 
+  @Test
+  public void buildLeafAccountWhereClauseSupportsNestedSupportedCriteria() throws Exception {
+    Map<String, Object> params = new HashMap<>();
+    String where = ChartOfAccountsHandler.buildLeafAccountWhereClause(
+        "{\"_constructor\":\"AdvancedCriteria\",\"operator\":\"and\",\"criteria\":["
+            + "{\"fieldName\":\"searchKey\",\"operator\":\"iContains\",\"value\":\"43\"},"
+            + "{\"_constructor\":\"AdvancedCriteria\",\"operator\":\"or\",\"criteria\":["
+            + "{\"fieldName\":\"active\",\"operator\":\"equals\",\"value\":true},"
+            + "{\"fieldName\":\"accountType\",\"operator\":\"equals\",\"value\":\"E\"}]}]}",
+        params);
+
+    assertTrue(where.contains("value ILIKE :filter1"));
+    assertTrue(where.contains("(isactive = :filter2 OR accounttype = :filter3)"));
+    assertEquals("%43%", params.get("filter1"));
+    assertEquals("Y", params.get("filter2"));
+    assertEquals("E", params.get("filter3"));
+  }
+
+  @Test
+  public void buildLeafAccountWhereClauseIgnoresUnsupportedCriteria() throws Exception {
+    Map<String, Object> params = new HashMap<>();
+    String where = ChartOfAccountsHandler.buildLeafAccountWhereClause(
+        "[{\"fieldName\":\"ytdBalance\",\"operator\":\"greaterThan\",\"value\":10}]",
+        params);
+
+    assertEquals("", where);
+    assertTrue(params.isEmpty());
+  }
+
+  @Test
+  public void resolveLeafAccountOrderByRestrictsSortToSupportedColumns() {
+    assertEquals("value DESC", ChartOfAccountsHandler.resolveLeafAccountOrderBy("-searchKey"));
+    assertEquals("name ASC", ChartOfAccountsHandler.resolveLeafAccountOrderBy("name asc"));
+    assertEquals("value ASC", ChartOfAccountsHandler.resolveLeafAccountOrderBy("ytdBalance desc"));
+    assertEquals("value ASC", ChartOfAccountsHandler.resolveLeafAccountOrderBy(null));
+  }
+
   // ── computeDepth ──────────────────────────────────────────────────────────
 
   @Test
