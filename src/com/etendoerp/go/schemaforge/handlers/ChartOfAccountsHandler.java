@@ -87,7 +87,11 @@ public class ChartOfAccountsHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(ChartOfAccountsHandler.class);
 
   /** API field name for the account code (mapped from DB column {@code Value}). */
-  private static final String FIELD_SEARCH_KEY = "searchKey";
+  static final String FIELD_SEARCH_KEY = "searchKey";
+
+  private static final String PARAM_CLIENT_ID = "clientId";
+  private static final String RESP_TOTAL_ROWS = "totalRows";
+  private static final String RESP_RESPONSE = "response";
 
   /** Query param name for the parent account on new-record defaults calls. */
   private static final String PARAM_PARENT_ACCOUNT_ID = "parentAccountId";
@@ -206,8 +210,6 @@ public class ChartOfAccountsHandler implements NeoHandler {
       + "WHERE ad_client_id = :clientId "
       + "  AND issummary = 'N'";
 
-  private static final String DEFAULT_LIST_ORDER_BY = "value ASC";
-
   private static final String SQL_GET_ACCOUNT_BY_ID =
       "SELECT c_elementvalue_id, value, name, description, accounttype, issummary, isactive "
       + "FROM c_elementvalue "
@@ -226,30 +228,28 @@ public class ChartOfAccountsHandler implements NeoHandler {
    */
   @Override
   public NeoResponse handle(NeoContext context) {
-    try {
-      if (context.getEndpointType() == NeoEndpointType.CRUD) {
-        String method = context.getHttpMethod();
-        if ("GET".equals(method) && context.getRecordId() == null) {
-          NeoResponse listResponse = fetchElementValuesDirectly(context);
-          if (listResponse != null) {
-            return listResponse;
-          }
-        }
-        if ("GET".equals(method) && context.getRecordId() != null) {
-          NeoResponse detailResponse = fetchElementValueByIdDirectly(context);
-          if (detailResponse != null) {
-            return detailResponse;
-          }
-        }
-        if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
-          return validateSave(context);
-        }
-      }
+    if (context.getEndpointType() != NeoEndpointType.CRUD) {
       return null;
+    }
+    try {
+      return handleCrudRequest(context);
     } catch (Exception e) {
       log.error("ChartOfAccountsHandler.handle error: {}", e.getMessage(), e);
       return NeoResponse.error(500, "Chart of accounts handler error: " + e.getMessage());
     }
+  }
+
+  private NeoResponse handleCrudRequest(NeoContext context) throws Exception {
+    String method = context.getHttpMethod();
+    if ("GET".equals(method)) {
+      return context.getRecordId() == null
+          ? fetchElementValuesDirectly(context)
+          : fetchElementValueByIdDirectly(context);
+    }
+    if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
+      return validateSave(context);
+    }
+    return null;
   }
 
   /**
@@ -315,8 +315,8 @@ public class ChartOfAccountsHandler implements NeoHandler {
       NativeQuery<Object> countQry = (NativeQuery<Object>) OBDal.getInstance()
           .getSession()
           .createNativeQuery(SQL_COUNT_LEAF_ACCOUNTS + whereClause);
-      countQry.setParameter("clientId", clientId);
-      applySqlParameters(countQry, sqlParams);
+      countQry.setParameter(PARAM_CLIENT_ID, clientId);
+      ChartOfAccountsCriteria.applySqlParameters(countQry, sqlParams);
       int totalRows = toInt(countQry.uniqueResult());
 
       NativeQuery<Object> listQry = (NativeQuery<Object>) OBDal.getInstance()
@@ -324,8 +324,8 @@ public class ChartOfAccountsHandler implements NeoHandler {
           .createNativeQuery(SQL_LIST_LEAF_ACCOUNTS + whereClause
               + " ORDER BY " + orderBy
               + " LIMIT :limit OFFSET :offset");
-      listQry.setParameter("clientId", clientId);
-      applySqlParameters(listQry, sqlParams);
+      listQry.setParameter(PARAM_CLIENT_ID, clientId);
+      ChartOfAccountsCriteria.applySqlParameters(listQry, sqlParams);
       listQry.setParameter("limit", pageSize);
       listQry.setParameter("offset", startRow);
 
@@ -337,12 +337,12 @@ public class ChartOfAccountsHandler implements NeoHandler {
       JSONObject response = new JSONObject();
       response.put("startRow", startRow);
       response.put("endRow", data.length() > 0 ? startRow + data.length() - 1 : requestedEndRow);
-      response.put("totalRows", totalRows);
+      response.put(RESP_TOTAL_ROWS, totalRows);
       response.put("data", data);
       response.put("status", 0);
 
       JSONObject body = new JSONObject();
-      body.put("response", response);
+      body.put(RESP_RESPONSE, response);
       return NeoResponse.ok(body);
     } finally {
       OBContext.restorePreviousMode();
@@ -361,7 +361,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
       NativeQuery<Object> detailQry = (NativeQuery<Object>) OBDal.getInstance()
           .getSession()
           .createNativeQuery(SQL_GET_ACCOUNT_BY_ID);
-      detailQry.setParameter("clientId", obCtx.getCurrentClient().getId());
+      detailQry.setParameter(PARAM_CLIENT_ID, obCtx.getCurrentClient().getId());
       detailQry.setParameter("recordId", context.getRecordId());
 
       JSONArray data = new JSONArray();
@@ -373,12 +373,12 @@ public class ChartOfAccountsHandler implements NeoHandler {
       JSONObject response = new JSONObject();
       response.put("startRow", 0);
       response.put("endRow", data.length() > 0 ? 0 : -1);
-      response.put("totalRows", data.length());
+      response.put(RESP_TOTAL_ROWS, data.length());
       response.put("data", data);
       response.put("status", 0);
 
       JSONObject body = new JSONObject();
-      body.put("response", response);
+      body.put(RESP_RESPONSE, response);
       return NeoResponse.ok(body);
     } finally {
       OBContext.restorePreviousMode();
@@ -420,321 +420,15 @@ public class ChartOfAccountsHandler implements NeoHandler {
     return 0;
   }
 
+  /** @see ChartOfAccountsCriteria#buildLeafAccountWhereClause */
   static String buildLeafAccountWhereClause(String rawCriteria,
       Map<String, Object> sqlParams) throws Exception {
-    if (rawCriteria == null || rawCriteria.trim().isEmpty()) {
-      return "";
-    }
-
-    String sql = buildCriteriaSql(parseCriteriaPayload(rawCriteria), sqlParams, new int[]{0});
-    return sql == null || sql.isEmpty() ? "" : " AND (" + sql + ")";
+    return ChartOfAccountsCriteria.buildLeafAccountWhereClause(rawCriteria, sqlParams);
   }
 
+  /** @see ChartOfAccountsCriteria#resolveLeafAccountOrderBy */
   static String resolveLeafAccountOrderBy(String rawSortBy) {
-    if (rawSortBy == null || rawSortBy.trim().isEmpty()) {
-      return DEFAULT_LIST_ORDER_BY;
-    }
-
-    String trimmed = rawSortBy.trim();
-    String[] parts = trimmed.split("\\s+");
-    String fieldToken = parts.length > 0 ? parts[0] : "";
-    String direction = parts.length > 1 && "desc".equalsIgnoreCase(parts[1]) ? "DESC" : "ASC";
-
-    if (fieldToken.startsWith("-")) {
-      fieldToken = fieldToken.substring(1);
-      direction = "DESC";
-    }
-
-    String column = resolveListColumn(fieldToken);
-    return column != null ? column + " " + direction : DEFAULT_LIST_ORDER_BY;
-  }
-
-  private static Object parseCriteriaPayload(String rawCriteria) throws Exception {
-    String trimmed = rawCriteria.trim();
-    return trimmed.startsWith("[") ? new JSONArray(trimmed) : new JSONObject(trimmed);
-  }
-
-  private static String buildCriteriaSql(Object node, Map<String, Object> sqlParams,
-      int[] sequence) throws Exception {
-    if (node instanceof JSONArray) {
-      return joinCriteriaGroup((JSONArray) node, "and", sqlParams, sequence);
-    }
-    if (!(node instanceof JSONObject)) {
-      return null;
-    }
-
-    JSONObject json = (JSONObject) node;
-    if (json.has("criteria")) {
-      JSONArray criteria = json.optJSONArray("criteria");
-      if (criteria == null) {
-        return null;
-      }
-      return joinCriteriaGroup(criteria, json.optString("operator", "and"), sqlParams, sequence);
-    }
-    return buildSingleCriterionSql(json, sqlParams, sequence);
-  }
-
-  private static String joinCriteriaGroup(JSONArray criteria, String operator,
-      Map<String, Object> sqlParams, int[] sequence) throws Exception {
-    List<String> parts = new ArrayList<>();
-    for (int i = 0; i < criteria.length(); i++) {
-      String fragment = buildCriteriaSql(criteria.opt(i), sqlParams, sequence);
-      if (fragment != null && !fragment.isEmpty()) {
-        parts.add(fragment);
-      }
-    }
-    if (parts.isEmpty()) {
-      return null;
-    }
-    if (parts.size() == 1) {
-      return parts.get(0);
-    }
-
-    String glue = "or".equalsIgnoreCase(operator) ? " OR " : " AND ";
-    return "(" + String.join(glue, parts) + ")";
-  }
-
-  private static String buildSingleCriterionSql(JSONObject criterion,
-      Map<String, Object> sqlParams, int[] sequence) throws Exception {
-    String fieldName = criterion.optString("fieldName", null);
-    String operator = criterion.optString("operator", null);
-    String column = resolveListColumn(fieldName);
-    if (column == null || operator == null || operator.isEmpty()) {
-      return null;
-    }
-
-    if (FIELD_SEARCH_KEY.equals(fieldName) || "name".equals(fieldName)) {
-      return buildTextCriterionSql(column, operator, criterion.opt("value"), sqlParams, sequence);
-    }
-    if ("accountType".equals(fieldName)) {
-      return buildEnumCriterionSql(column, operator, criterion.opt("value"), sqlParams, sequence);
-    }
-    if ("active".equals(fieldName)) {
-      return buildBooleanCriterionSql(column, operator, criterion.opt("value"), sqlParams, sequence);
-    }
-    return null;
-  }
-
-  private static String buildTextCriterionSql(String column, String operator, Object value,
-      Map<String, Object> sqlParams, int[] sequence) {
-    switch (operator) {
-      case "isNull":
-        return column + " IS NULL";
-      case "notNull":
-      case "isNotNull":
-        return column + " IS NOT NULL";
-      case "iContains":
-        return bindLowercaseLike(column, value, sqlParams, sequence, true);
-      case "iNotContains": {
-        String bound = bindLowercaseLike(column, value, sqlParams, sequence, true);
-        return bound == null ? null : "COALESCE(" + column + ", '') NOT ILIKE "
-            + bound.substring(bound.lastIndexOf(' ') + 1);
-      }
-      case "iEquals":
-      case "equals":
-        return bindCaseInsensitiveEquals(column, value, sqlParams, sequence, false);
-      case "iNotEqual":
-      case "notEqual":
-        return bindCaseInsensitiveEquals(column, value, sqlParams, sequence, true);
-      case "inSet":
-        return bindTextInSet(column, value, sqlParams, sequence);
-      default:
-        return null;
-    }
-  }
-
-  private static String buildEnumCriterionSql(String column, String operator, Object value,
-      Map<String, Object> sqlParams, int[] sequence) {
-    switch (operator) {
-      case "isNull":
-        return column + " IS NULL";
-      case "notNull":
-      case "isNotNull":
-        return column + " IS NOT NULL";
-      case "equals":
-      case "iEquals":
-        return bindPlainEquals(column, value, sqlParams, sequence, false);
-      case "notEqual":
-      case "iNotEqual":
-        return bindPlainEquals(column, value, sqlParams, sequence, true);
-      case "inSet":
-        return bindPlainInSet(column, value, sqlParams, sequence);
-      default:
-        return null;
-    }
-  }
-
-  private static String buildBooleanCriterionSql(String column, String operator, Object value,
-      Map<String, Object> sqlParams, int[] sequence) {
-    if (!"equals".equals(operator) && !"notEqual".equals(operator)) {
-      return null;
-    }
-
-    String boolFlag = toYesNoFlag(value);
-    if (boolFlag == null) {
-      return null;
-    }
-    String paramName = nextParamName(sequence);
-    sqlParams.put(paramName, boolFlag);
-    return column + ("notEqual".equals(operator) ? " <> :" : " = :") + paramName;
-  }
-
-  private static String bindLowercaseLike(String column, Object value,
-      Map<String, Object> sqlParams, int[] sequence, boolean contains) {
-    String normalized = normalizeTextValue(value);
-    if (normalized == null) {
-      return null;
-    }
-    String paramName = nextParamName(sequence);
-    sqlParams.put(paramName, contains ? "%" + normalized + "%" : normalized);
-    return column + " ILIKE :" + paramName;
-  }
-
-  private static String bindCaseInsensitiveEquals(String column, Object value,
-      Map<String, Object> sqlParams, int[] sequence, boolean negate) {
-    String normalized = normalizeTextValue(value);
-    if (normalized == null) {
-      return null;
-    }
-    String paramName = nextParamName(sequence);
-    sqlParams.put(paramName, normalized);
-    return (negate
-        ? "LOWER(COALESCE(" + column + ", '')) <> :"
-        : "LOWER(COALESCE(" + column + ", '')) = :") + paramName;
-  }
-
-  private static String bindTextInSet(String column, Object value,
-      Map<String, Object> sqlParams, int[] sequence) {
-    List<String> values = splitCriterionValues(value);
-    if (values.isEmpty()) {
-      return null;
-    }
-    List<String> placeholders = new ArrayList<>();
-    for (String item : values) {
-      String normalized = normalizeTextValue(item);
-      if (normalized == null) {
-        continue;
-      }
-      String paramName = nextParamName(sequence);
-      sqlParams.put(paramName, normalized);
-      placeholders.add(":" + paramName);
-    }
-    return placeholders.isEmpty()
-        ? null
-        : "LOWER(COALESCE(" + column + ", '')) IN (" + String.join(", ", placeholders) + ")";
-  }
-
-  private static String bindPlainEquals(String column, Object value,
-      Map<String, Object> sqlParams, int[] sequence, boolean negate) {
-    String normalized = normalizePlainValue(value);
-    if (normalized == null) {
-      return null;
-    }
-    String paramName = nextParamName(sequence);
-    sqlParams.put(paramName, normalized);
-    return column + (negate ? " <> :" : " = :") + paramName;
-  }
-
-  private static String bindPlainInSet(String column, Object value,
-      Map<String, Object> sqlParams, int[] sequence) {
-    List<String> values = splitCriterionValues(value);
-    if (values.isEmpty()) {
-      return null;
-    }
-    List<String> placeholders = new ArrayList<>();
-    for (String item : values) {
-      String normalized = normalizePlainValue(item);
-      if (normalized == null) {
-        continue;
-      }
-      String paramName = nextParamName(sequence);
-      sqlParams.put(paramName, normalized);
-      placeholders.add(":" + paramName);
-    }
-    return placeholders.isEmpty() ? null : column + " IN (" + String.join(", ", placeholders) + ")";
-  }
-
-  private static List<String> splitCriterionValues(Object value) {
-    List<String> values = new ArrayList<>();
-    if (value instanceof JSONArray) {
-      JSONArray jsonArray = (JSONArray) value;
-      for (int i = 0; i < jsonArray.length(); i++) {
-        String item = normalizePlainValue(jsonArray.opt(i));
-        if (item != null) {
-          values.add(item);
-        }
-      }
-      return values;
-    }
-
-    String raw = normalizePlainValue(value);
-    if (raw == null) {
-      return values;
-    }
-    for (String part : raw.split(",")) {
-      String normalized = normalizePlainValue(part);
-      if (normalized != null) {
-        values.add(normalized);
-      }
-    }
-    return values;
-  }
-
-  private static String normalizeTextValue(Object value) {
-    String normalized = normalizePlainValue(value);
-    return normalized == null ? null : normalized.toLowerCase();
-  }
-
-  private static String normalizePlainValue(Object value) {
-    if (value == null || JSONObject.NULL.equals(value)) {
-      return null;
-    }
-    String normalized = String.valueOf(value).trim();
-    return normalized.isEmpty() ? null : normalized;
-  }
-
-  private static String toYesNoFlag(Object value) {
-    if (value instanceof Boolean) {
-      return Boolean.TRUE.equals(value) ? "Y" : "N";
-    }
-    String normalized = normalizeTextValue(value);
-    if (normalized == null) {
-      return null;
-    }
-    if ("true".equals(normalized) || "y".equals(normalized) || "yes".equals(normalized)) {
-      return "Y";
-    }
-    if ("false".equals(normalized) || "n".equals(normalized) || "no".equals(normalized)) {
-      return "N";
-    }
-    return null;
-  }
-
-  private static String nextParamName(int[] sequence) {
-    sequence[0]++;
-    return "filter" + sequence[0];
-  }
-
-  private static String resolveListColumn(String fieldName) {
-    if (FIELD_SEARCH_KEY.equals(fieldName)) {
-      return "value";
-    }
-    if ("name".equals(fieldName)) {
-      return "name";
-    }
-    if ("accountType".equals(fieldName)) {
-      return "accounttype";
-    }
-    if ("active".equals(fieldName)) {
-      return "isactive";
-    }
-    return null;
-  }
-
-  private static void applySqlParameters(NativeQuery<Object> query, Map<String, Object> sqlParams) {
-    for (Map.Entry<String, Object> entry : sqlParams.entrySet()) {
-      query.setParameter(entry.getKey(), entry.getValue());
-    }
+    return ChartOfAccountsCriteria.resolveLeafAccountOrderBy(rawSortBy);
   }
 
   /**
@@ -785,7 +479,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
     if (previous == null || previous.getBody() == null) {
       return null;
     }
-    JSONObject response = previous.getBody().optJSONObject("response");
+    JSONObject response = previous.getBody().optJSONObject(RESP_RESPONSE);
     if (response == null) {
       return null;
     }
@@ -867,10 +561,10 @@ public class ChartOfAccountsHandler implements NeoHandler {
         filtered.put(entry);
       }
     }
-    JSONObject response = responseBody.optJSONObject("response");
+    JSONObject response = responseBody.optJSONObject(RESP_RESPONSE);
     if (response != null) {
       response.put("data", filtered);
-      response.put("totalRows", filtered.length());
+      response.put(RESP_TOTAL_ROWS, filtered.length());
     }
   }
 
@@ -923,7 +617,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
       NativeQuery<Object> treeQry = (NativeQuery<Object>) OBDal.getInstance()
           .getSession()
           .createNativeQuery(SQL_FIND_EV_TREE);
-      treeQry.setParameter("clientId", clientId);
+      treeQry.setParameter(PARAM_CLIENT_ID, clientId);
       List<Object> treeRows = treeQry.list();
       if (treeRows.isEmpty()) {
         log.debug("ChartOfAccountsHandler: no EV tree found for clientId={}", clientId);
@@ -959,7 +653,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
       NativeQuery<Object> evQry = (NativeQuery<Object>) OBDal.getInstance()
           .getSession()
           .createNativeQuery(SQL_LOAD_EV_VALUES);
-      evQry.setParameter("clientId", clientId);
+      evQry.setParameter(PARAM_CLIENT_ID, clientId);
       List<Object> evRows = evQry.list();
 
       Map<String, String> nodeValueMap = new HashMap<>(evRows.size() * 2);
@@ -994,26 +688,21 @@ public class ChartOfAccountsHandler implements NeoHandler {
   private void applyHierarchyMetadata(JSONArray data, TreeData tree) throws Exception {
     for (int i = 0; i < data.length(); i++) {
       JSONObject entry = data.optJSONObject(i);
-      if (entry == null) {
-        continue;
-      }
-      String id = entry.optString("id", null);
-      if (id == null) {
-        continue;
-      }
+      String id = entry != null ? entry.optString("id", null) : null;
+      if (entry != null && id != null) {
+        String parentId = tree.nodeParentMap.get(id); // null when root or not in tree
+        int depth = computeDepth(id, tree.nodeParentMap);
+        boolean hasChildren = tree.parentNodeIds.contains(id);
+        String parentCode4 = findParentCode4(id, tree.nodeParentMap, tree.nodeValueMap);
+        String parentCode4Name = findParentCode4Name(id, tree.nodeParentMap,
+            tree.nodeValueMap, tree.nodeNameMap);
 
-      String parentId = tree.nodeParentMap.get(id); // null when root or not in tree
-      int depth = computeDepth(id, tree.nodeParentMap);
-      boolean hasChildren = tree.parentNodeIds.contains(id);
-      String parentCode4 = findParentCode4(id, tree.nodeParentMap, tree.nodeValueMap);
-      String parentCode4Name = findParentCode4Name(id, tree.nodeParentMap,
-          tree.nodeValueMap, tree.nodeNameMap);
-
-      entry.put("parentId", parentId != null ? parentId : JSONObject.NULL);
-      entry.put("depth", depth);
-      entry.put("hasChildren", hasChildren);
-      entry.put("parentCode4", parentCode4 != null ? parentCode4 : JSONObject.NULL);
-      entry.put("parentCode4Name", parentCode4Name != null ? parentCode4Name : JSONObject.NULL);
+        entry.put("parentId", parentId != null ? parentId : JSONObject.NULL);
+        entry.put("depth", depth);
+        entry.put("hasChildren", hasChildren);
+        entry.put("parentCode4", parentCode4 != null ? parentCode4 : JSONObject.NULL);
+        entry.put("parentCode4Name", parentCode4Name != null ? parentCode4Name : JSONObject.NULL);
+      }
     }
   }
 
@@ -1107,7 +796,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
       NativeQuery<Object> yearQry = (NativeQuery<Object>) OBDal.getInstance()
           .getSession()
           .createNativeQuery(SQL_CURRENT_YEAR);
-      yearQry.setParameter("clientId", clientId);
+      yearQry.setParameter(PARAM_CLIENT_ID, clientId);
       List<Object> yearRows = yearQry.list();
       if (yearRows.isEmpty()) {
         log.debug("ChartOfAccountsHandler: no active fiscal year for clientId={}", clientId);
@@ -1120,7 +809,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
           .getSession()
           .createNativeQuery(SQL_YTD_BALANCES);
       balQry.setParameter("yearId", yearId);
-      balQry.setParameter("clientId", clientId);
+      balQry.setParameter(PARAM_CLIENT_ID, clientId);
       List<Object> balRows = balQry.list();
 
       Map<String, BigDecimal[]> balances = new HashMap<>(balRows.size() * 2);
@@ -1205,22 +894,18 @@ public class ChartOfAccountsHandler implements NeoHandler {
       throws Exception {
     for (int i = 0; i < data.length(); i++) {
       JSONObject entry = data.optJSONObject(i);
-      if (entry == null) {
-        continue;
-      }
-      String id = entry.optString("id", null);
-      if (id == null) {
-        continue;
-      }
-      BigDecimal[] balance = ytdBalances.get(id);
-      if (balance != null) {
-        entry.put("ytdDebit", balance[0]);
-        entry.put("ytdCredit", balance[1]);
-        entry.put("ytdBalance", balance[2]);
-      } else {
-        entry.put("ytdDebit", BigDecimal.ZERO);
-        entry.put("ytdCredit", BigDecimal.ZERO);
-        entry.put("ytdBalance", BigDecimal.ZERO);
+      String id = entry != null ? entry.optString("id", null) : null;
+      if (entry != null && id != null) {
+        BigDecimal[] balance = ytdBalances.get(id);
+        if (balance != null) {
+          entry.put("ytdDebit", balance[0]);
+          entry.put("ytdCredit", balance[1]);
+          entry.put("ytdBalance", balance[2]);
+        } else {
+          entry.put("ytdDebit", BigDecimal.ZERO);
+          entry.put("ytdCredit", BigDecimal.ZERO);
+          entry.put("ytdBalance", BigDecimal.ZERO);
+        }
       }
     }
   }
