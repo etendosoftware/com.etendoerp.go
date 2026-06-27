@@ -231,18 +231,23 @@ final class NeoReturnReceiptService {
     return results.isEmpty() ? null : results.get(0);
   }
 
-  private static boolean hasExistingReturn(String shipmentId) throws Exception {
+  private static boolean hasExistingReturn(String shipmentId) {
     String sql = "SELECT COUNT(*) FROM m_inout io"
         + " JOIN m_inoutline iol ON iol.m_inout_id = io.m_inout_id"
         + " WHERE iol.m_inoutline_id_cancel IN"
         + " (SELECT m_inoutline_id FROM m_inoutline WHERE m_inout_id = ?)"
         + " AND io.isactive = 'Y'";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, shipmentId);
-      try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() && rs.getInt(1) > 0;
+    try {
+      Connection conn = OBDal.getInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, shipmentId);
+        try (ResultSet rs = ps.executeQuery()) {
+          return rs.next() && rs.getInt(1) > 0;
+        }
       }
+    } catch (Exception e) {
+      log.warn("Could not check for existing return of {}: {}", shipmentId, e.getMessage());
+      return false;
     }
   }
 
