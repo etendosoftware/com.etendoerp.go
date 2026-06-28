@@ -89,6 +89,12 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
 
   private static final String PARAM_SELECTED_ORG_ID = "selectedOrgId";
 
+  private static final String FIELD_ACCRUAL = "accrual";
+  private static final String FIELD_DESCRIPTION = "description";
+  private static final String FIELD_CURRENCY = "currency";
+  private static final String FIELD_AUTOMATIC_PERIOD_CONTROL = "automaticPeriodControl";
+  private static final String FIELD_ACTIVE = "active";
+
   private static final class DefaultFieldMapping {
     final String apiKey;
     final String property;
@@ -292,10 +298,11 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     out.put("id", state.schema.getId());
     out.put("name", state.schema.getName());
     out.put("gAAP", state.schema.getGAAP());
-    out.put("accrual", bool(state.schema.isAccrual()));
-    out.put("description", nullable(state.schema.getDescription()));
-    out.put("currency", state.schema.getCurrency() != null ? state.schema.getCurrency().getId() : JSONObject.NULL);
-    out.put("automaticPeriodControl", bool(state.schema.isAutomaticPeriodControl()));
+    out.put(FIELD_ACCRUAL, bool(state.schema.isAccrual()));
+    out.put(FIELD_DESCRIPTION, nullable(state.schema.getDescription()));
+    out.put(FIELD_CURRENCY,
+        state.schema.getCurrency() != null ? state.schema.getCurrency().getId() : JSONObject.NULL);
+    out.put(FIELD_AUTOMATIC_PERIOD_CONTROL, bool(state.schema.isAutomaticPeriodControl()));
     return out;
   }
 
@@ -313,7 +320,7 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
       JSONObject item = new JSONObject();
       item.put("id", row.getId());
       item.put("label", nullable(row.getName()));
-      item.put("active", bool(row.isActive()));
+      item.put(FIELD_ACTIVE, bool(row.isActive()));
       item.put("mandatory", bool(row.isMandatory()));
       item.put("caption", buildDimensionCaption(row));
       item.put("type", nullable(row.getType()));
@@ -419,17 +426,17 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     if (general.has("gAAP")) {
       state.schema.setGAAP(trimmedOrNull(general.optString("gAAP", null)));
     }
-    if (general.has("description")) {
-      state.schema.setDescription(trimmedOrNull(general.optString("description", null)));
+    if (general.has(FIELD_DESCRIPTION)) {
+      state.schema.setDescription(trimmedOrNull(general.optString(FIELD_DESCRIPTION, null)));
     }
-    if (general.has("accrual")) {
-      state.schema.setAccrual(general.optBoolean("accrual"));
+    if (general.has(FIELD_ACCRUAL)) {
+      state.schema.setAccrual(general.optBoolean(FIELD_ACCRUAL));
     }
-    if (general.has("automaticPeriodControl")) {
-      state.schema.setAutomaticPeriodControl(general.optBoolean("automaticPeriodControl"));
+    if (general.has(FIELD_AUTOMATIC_PERIOD_CONTROL)) {
+      state.schema.setAutomaticPeriodControl(general.optBoolean(FIELD_AUTOMATIC_PERIOD_CONTROL));
     }
-    if (general.has("currency") && !general.isNull("currency")) {
-      String currencyId = trimmedOrNull(general.optString("currency", null));
+    if (general.has(FIELD_CURRENCY) && !general.isNull(FIELD_CURRENCY)) {
+      String currencyId = trimmedOrNull(general.optString(FIELD_CURRENCY, null));
       if (currencyId != null) {
         Currency currency = OBDal.getInstance().get(Currency.class, currencyId);
         if (currency == null) {
@@ -468,22 +475,13 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
 
     for (int i = 0; i < dimensions.length(); i++) {
       JSONObject item = dimensions.optJSONObject(i);
-      if (item == null) {
-        continue;
-      }
-      String id = trimmedOrNull(item.optString("id", null));
-      if (id == null) {
-        continue;
-      }
-      AcctSchemaElement row = byId.get(id);
-      if (row == null) {
-        continue;
-      }
-      if (item.has("active")) {
-        if (bool(row.isMandatory()) && !item.optBoolean("active")) {
+      String id = item != null ? trimmedOrNull(item.optString("id", null)) : null;
+      AcctSchemaElement row = id != null ? byId.get(id) : null;
+      if (row != null && item.has(FIELD_ACTIVE)) {
+        if (bool(row.isMandatory()) && !item.optBoolean(FIELD_ACTIVE)) {
           throw new OBException("Mandatory accounting dimensions cannot be deactivated");
         }
-        row.setActive(item.optBoolean("active"));
+        row.setActive(item.optBoolean(FIELD_ACTIVE));
         OBDal.getInstance().save(row);
       }
     }
