@@ -1,19 +1,3 @@
-/*
- * *************************************************************************
- * The contents of this file are subject to the Etendo License
- * (the "License"), you may not use this file except in compliance with
- * the License.
- * You may obtain a copy of the License at
- * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
- * Software distributed under the License is distributed on an
- * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
- * implied. See the License for the specific language governing rights
- * and limitations under the License.
- * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
- * All Rights Reserved.
- * Contributor(s): Futit Services S.L.
- * *************************************************************************
- */
 package com.etendoerp.go.schemaforge;
 
 import javax.servlet.http.HttpServletResponse;
@@ -37,6 +21,12 @@ final class PaymentActionHandlerSupport {
   private static final String CREDIT_SOURCES_ACTION = "invoiceCreditSources";
   private static final String CONFIRM_ACTION = "confirmPayment";
 
+  private static final String FIELD_PAYMENT_ID = "paymentId";
+  private static final String FIELD_SCHEDULE_ID = "scheduleId";
+  private static final String FIELD_AMOUNT = "actual_payment";
+  private static final String FIELD_DATE = "payment_date";
+  private static final String FIELD_ACCOUNT = "fin_financial_account_id";
+
   private PaymentActionHandlerSupport() {
   }
 
@@ -46,7 +36,37 @@ final class PaymentActionHandlerSupport {
     }
     String fieldName = context.getFieldName();
 
-    // ── read-only catalog/listing actions ────────────────────────────────────
+    NeoResponse queryResult = routeQuery(context, fieldName, isReceipt);
+    if (queryResult != null) {
+      return queryResult;
+    }
+
+    boolean isConfirm = CONFIRM_ACTION.equals(fieldName);
+    if ((!isConfirm && !ACTION_NAME.equals(fieldName)) || !"POST".equals(context.getHttpMethod())) {
+      return null;
+    }
+
+    String invoiceId = context.getRecordId();
+    if (StringUtils.isBlank(invoiceId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invoice ID is required");
+    }
+    JSONObject body = context.getRequestBody();
+    if (body == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Request body is required");
+    }
+
+    // Validate inputs BEFORE opening an admin session, so malformed requests
+    // return 400 without requiring a DB context.
+    NeoResponse validationError = validateBody(body, isConfirm);
+    if (validationError != null) {
+      return validationError;
+    }
+
+    return executeMutating(context, fieldName, isReceipt, invoiceId, body, isConfirm, log);
+  }
+
+  /** Routes the read-only listing actions; returns null when {@code fieldName} is not one. */
+  private static NeoResponse routeQuery(NeoContext context, String fieldName, boolean isReceipt) {
     if (LIST_ACTION.equals(fieldName)) {
       return PaymentRegistrationService.handleListPayments(context);
     }
@@ -59,65 +79,48 @@ final class PaymentActionHandlerSupport {
     if (CREDIT_SOURCES_ACTION.equals(fieldName)) {
       return PaymentRegistrationService.handleListCreditSources(context, isReceipt);
     }
+    return null;
+  }
 
-    // ── mutating actions (require POST) ──────────────────────────────────────
-    boolean isConfirm = CONFIRM_ACTION.equals(fieldName);
-    boolean isRegister = ACTION_NAME.equals(fieldName);
-    if ((!isConfirm && !isRegister) || !"POST".equals(context.getHttpMethod())) {
-      return null;
-    }
-
-    String invoiceId = context.getRecordId();
-    if (StringUtils.isBlank(invoiceId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invoice ID is required");
-    }
-
-    JSONObject body = context.getRequestBody();
-    if (body == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Request body is required");
-    }
-
-    // Validate inputs BEFORE opening an admin session, so malformed requests
-    // return 400 without requiring a DB context.
-    String paymentId = null;
-    String scheduleId = null;
-    String strAmount = null;
-    String strDate = null;
-    String accountId = null;
+  /** Validates the required body fields; returns an error response, or null when valid. */
+  private static NeoResponse validateBody(JSONObject body, boolean isConfirm) {
     if (isConfirm) {
-      paymentId = body.optString("paymentId", null);
-      if (StringUtils.isBlank(paymentId)) {
+      if (StringUtils.isBlank(body.optString(FIELD_PAYMENT_ID, null))) {
         return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "paymentId is required");
       }
-    } else {
-      scheduleId = body.optString("scheduleId", null);
-      strAmount = body.optString("actual_payment", null);
-      strDate = body.optString("payment_date", null);
-      accountId = body.optString("fin_financial_account_id", null);
-      if (StringUtils.isBlank(scheduleId) || StringUtils.isBlank(strAmount)
-          || StringUtils.isBlank(strDate) || StringUtils.isBlank(accountId)) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-            "Missing required fields: scheduleId, actual_payment, payment_date, fin_financial_account_id");
-      }
+      return null;
     }
+    if (StringUtils.isBlank(body.optString(FIELD_SCHEDULE_ID, null))
+        || StringUtils.isBlank(body.optString(FIELD_AMOUNT, null))
+        || StringUtils.isBlank(body.optString(FIELD_DATE, null))
+        || StringUtils.isBlank(body.optString(FIELD_ACCOUNT, null))) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Missing required fields: scheduleId, actual_payment, payment_date, fin_financial_account_id");
+    }
+    return null;
+  }
 
-    // Advanced path (two-step modal): explicit payment method, draft/confirm,
-    // credit consumption and/or overpayment resolution. Falls back to the legacy
-    // single-step register for callers that send only the 4 base fields.
-    boolean advanced = !isConfirm && (body.has("process") || body.has("creditSources")
-        || body.has("overpaymentAction") || body.has("fin_paymentmethod_id"));
+  /** True when the register body carries advanced (two-step modal) fields. */
+  private static boolean isAdvanced(JSONObject body) {
+    return body.has("process") || body.has("creditSources")
+        || body.has("overpaymentAction") || body.has("fin_paymentmethod_id");
+  }
 
+  /** Runs the mutating action inside an admin session with rollback-on-error handling. */
+  private static NeoResponse executeMutating(NeoContext context, String fieldName, boolean isReceipt,
+      String invoiceId, JSONObject body, boolean isConfirm, Logger log) {
     try {
       OBContext.setAdminMode(true);
       try {
         if (isConfirm) {
-          return PaymentRegistrationService.confirmDraftPayment(paymentId);
+          return PaymentRegistrationService.confirmDraftPayment(body.optString(FIELD_PAYMENT_ID, null));
         }
-        if (advanced) {
+        if (isAdvanced(body)) {
           return PaymentRegistrationService.doRegisterPaymentAdvanced(invoiceId, body, isReceipt);
         }
-        return PaymentRegistrationService.doRegisterPayment(
-            invoiceId, scheduleId, strAmount, strDate, accountId, isReceipt);
+        return PaymentRegistrationService.doRegisterPayment(invoiceId,
+            body.optString(FIELD_SCHEDULE_ID, null), body.optString(FIELD_AMOUNT, null),
+            body.optString(FIELD_DATE, null), body.optString(FIELD_ACCOUNT, null), isReceipt);
       } finally {
         OBContext.restorePreviousMode();
       }
