@@ -2400,4 +2400,362 @@ public class CreateDraftInvoiceHandlerTest {
     assertEquals(0, new BigDecimal("5").compareTo(result));
   }
 
+  // ── handleCreate — OBException produces structured JSON body ────────────────
+
+  /**
+   * When createFromOrder throws an OBException the catch block wraps the message
+   * in {"status":"error","message":"..."} and returns HTTP 400.
+   */
+  @Test
+  public void testHandleCreateOBExceptionReturns400WithStructuredBody() throws Exception {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+      mockAdminMode(obContextMock);
+
+      DispatchHandler handler = new DispatchHandler();
+      handler.createFailure = new OBException("not enough stock");
+
+      NeoResponse response = handler.handle(NeoContext.builder()
+          .specName(SPEC_SALES_ORDER)
+          .entityName(ENTITY_HEADER)
+          .httpMethod("POST")
+          .endpointType(NeoEndpointType.ACTION)
+          .fieldName(ACTION_CREATE)
+          .recordId("order-err")
+          .build());
+
+      assertNotNull(response);
+      assertEquals(400, response.getHttpStatus());
+      // The OBException path in handleCreate builds {"status":"error","message":"..."}
+      // but NeoResponse.error wraps it; check the body contains the message
+      String body = response.getBody().toString();
+      assertTrue("Response body must contain the OBException message",
+          body.contains("not enough stock"));
+    }
+  }
+
+  // ── handleCheck — single draft returns id + documentNo ──────────────────────
+
+  /**
+   * When exactly one draft exists the check response contains its id and documentNo,
+   * and the "drafts" array is absent (only added when count > 1).
+   */
+  @Test
+  public void testHandleCheckSingleDraftReturnsIdAndDocNo() throws Exception {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+      mockAdminMode(obContextMock);
+
+      Invoice draft = mock(Invoice.class);
+      when(draft.getId()).thenReturn("inv-single");
+      when(draft.getDocumentNo()).thenReturn("INV-SINGLE-001");
+
+      DispatchHandler handler = new DispatchHandler();
+      handler.draftsToReturn = Collections.singletonList(draft);
+
+      NeoResponse response = handler.handle(NeoContext.builder()
+          .specName(SPEC_SALES_ORDER)
+          .entityName(ENTITY_HEADER)
+          .httpMethod("GET")
+          .endpointType(NeoEndpointType.ACTION)
+          .fieldName(ACTION_CHECK)
+          .recordId("order-single")
+          .build());
+
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertTrue(data.getBoolean("exists"));
+      assertEquals(1, data.getInt("count"));
+      assertEquals("inv-single", data.getString("id"));
+      assertEquals("INV-SINGLE-001", data.getString(FIELD_DOCUMENT_NO));
+      assertFalse("drafts array must not be present when count == 1", data.has("drafts"));
+    }
+  }
+
+  // ── createFromShipments — single shipment with linked order delegates ────────
+
+  /**
+   * When there is exactly one shipment and it has a linked sales order,
+   * createFromShipments delegates to createFromOrder instead of the multi-shipment path.
+   */
+  @Test
+  public void testCreateFromShipmentsSingleShipmentWithOrderDelegatesToCreateFromOrder() {
+    Order linkedOrder = mock(Order.class);
+    when(linkedOrder.getId()).thenReturn("order-linked");
+
+    ShipmentInOut single = mock(ShipmentInOut.class);
+    when(single.getSalesOrder()).thenReturn(linkedOrder);
+    when(single.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.emptyList());
+    when(single.getId()).thenReturn("ship-single");
+
+    Invoice expectedInvoice = mock(Invoice.class);
+    final boolean[] orderPathCalled = {false};
+    final boolean[] multiPathCalled = {false};
+
+    CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+      @Override
+      protected List<ShipmentInOut> loadAndValidateShipments(List<String> ids) {
+        return Collections.singletonList(single);
+      }
+
+      @Override
+      protected Invoice createFromOrder(String orderId, Map<String, BigDecimal> lineOverrides) {
+        orderPathCalled[0] = true;
+        assertEquals("order-linked", orderId);
+        return expectedInvoice;
+      }
+
+      @Override
+      protected Invoice createInvoiceHeaderFromShipment(ShipmentInOut first, List<ShipmentInOut> shipments) {
+        multiPathCalled[0] = true;
+        return null;
+      }
+
+      @Override
+      protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId, boolean includeDrafts) {
+        return Collections.emptyMap();
+      }
+    };
+
+    Invoice result = handler.createFromShipments(
+        Collections.singletonList("ship-single"), Collections.emptyMap());
+    assertSame(expectedInvoice, result);
+    assertTrue("Single-shipment-with-order path must delegate to createFromOrder",
+        orderPathCalled[0]);
+    assertFalse("Multi-shipment path must NOT be entered", multiPathCalled[0]);
+  }
+
+  // ── capShipmentLineOverrides — all lines capped to zero throws ──────────────
+
+  /**
+   * When every line override is fully consumed by an existing draft the cap method
+   * throws OBException instead of returning an empty map.
+   */
+  @Test(expected = OBException.class)
+  public void testCreateFromShipmentsAllLinesCappedToZeroThrows() {
+    ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+    when(sl.getId()).thenReturn("sl-used");
+
+    ShipmentInOut shipment = mock(ShipmentInOut.class);
+    when(shipment.getSalesOrder()).thenReturn(null); // forces multi-shipment path
+    when(shipment.getMaterialMgmtShipmentInOutLineList())
+        .thenReturn(Collections.singletonList(sl));
+    when(shipment.getId()).thenReturn("ship-cap");
+
+    // pendingQty for all overridden lines is zero → cap leaves empty map → throw
+    Map<String, BigDecimal> overrides = new HashMap<>();
+    overrides.put("sl-used", new BigDecimal("3"));
+
+    CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+      @Override
+      protected List<ShipmentInOut> loadAndValidateShipments(List<String> ids) {
+        return Collections.singletonList(shipment);
+      }
+
+      @Override
+      protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId, boolean includeDrafts) {
+        // Returns zero for sl-used → override gets capped to 0 → dropped
+        Map<String, BigDecimal> m = new HashMap<>();
+        m.put("sl-used", BigDecimal.ZERO);
+        return m;
+      }
+
+      @Override
+      protected Invoice createInvoiceHeaderFromShipment(ShipmentInOut first, List<ShipmentInOut> shipments) {
+        return mock(Invoice.class);
+      }
+    };
+
+    handler.createFromShipments(Collections.singletonList("ship-cap"), overrides);
+  }
+
+  // ── computePendingQtyPerLine (1-arg) delegates to 2-arg ─────────────────────
+
+  /**
+   * The 1-arg overload (no includeDrafts param) must call the 2-arg variant
+   * with includeDrafts=false. Verified via a subclass that captures the flag.
+   */
+  @Test
+  public void testComputePendingQtyPerLineOneArgDelegatesToTwoArgWithFalse() {
+    // Capture the includeDrafts flag passed by the 1-arg overload
+    boolean[] capturedFlag = {true}; // init to true so a false write is detectable
+    CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+      @Override
+      protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId, boolean includeDrafts) {
+        capturedFlag[0] = includeDrafts;
+        return Collections.emptyMap();
+      }
+    };
+    handler.computePendingQtyPerLine("ship-1arg");
+    assertFalse("1-arg overload must pass includeDrafts=false to the 2-arg variant",
+        capturedFlag[0]);
+  }
+
+  // ── computePendingQtyPerLine (2-arg, includeDrafts=true) — draft SQL branch ──
+
+  /**
+   * When includeDrafts=true the method uses a different SQL branch. The DB mock
+   * yields one line with movQty=5 and invoiced=2 → pending=3.
+   */
+  @Test
+  public void testComputePendingQtyPerLineIncludeDraftsReturnsPositivePending() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      java.sql.Connection conn = mock(java.sql.Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+
+      java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString(1)).thenReturn("line-draft");
+      when(rs.getBigDecimal(2)).thenReturn(new BigDecimal("5"));
+      when(rs.getBigDecimal(3)).thenReturn(new BigDecimal("2"));
+      when(ps.executeQuery()).thenReturn(rs);
+
+      Map<String, BigDecimal> result = new CreateDraftInvoiceHandler()
+          .computePendingQtyPerLine("ship-draft", true);
+
+      assertEquals(1, result.size());
+      assertEquals(0, new BigDecimal("3").compareTo(result.get("line-draft")));
+    }
+  }
+
+  /**
+   * includeDrafts=true with a line fully consumed by drafts → pending=0 → omitted.
+   */
+  @Test
+  public void testComputePendingQtyPerLineIncludeDraftsFullyConsumedLineOmitted() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      java.sql.Connection conn = mock(java.sql.Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+
+      java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString(1)).thenReturn("line-consumed");
+      when(rs.getBigDecimal(2)).thenReturn(new BigDecimal("5"));
+      when(rs.getBigDecimal(3)).thenReturn(new BigDecimal("5")); // fully invoiced
+      when(ps.executeQuery()).thenReturn(rs);
+
+      Map<String, BigDecimal> result = new CreateDraftInvoiceHandler()
+          .computePendingQtyPerLine("ship-full", true);
+
+      assertTrue("Fully consumed line must be omitted even with includeDrafts=true",
+          result.isEmpty());
+    }
+  }
+
+  /**
+   * includeDrafts=true, DB throws → empty map returned without propagation.
+   */
+  @Test
+  public void testComputePendingQtyPerLineIncludeDraftsDbErrorReturnsEmptyMap() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("DB down includeDrafts=true"));
+
+      Map<String, BigDecimal> result = new CreateDraftInvoiceHandler()
+          .computePendingQtyPerLine("ship-err", true);
+
+      assertNotNull(result);
+      assertTrue(result.isEmpty());
+    }
+  }
+
+  // ── findLinkedInvoiceLine ─────────────────────────────────────────────────────
+
+  /**
+   * When the HQL query returns a matching invoice line, findLinkedInvoiceLine returns it.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testFindLinkedInvoiceLineReturnsMatchingLine() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      InvoiceLine il = mock(InvoiceLine.class);
+      Query<InvoiceLine> q = mock(Query.class);
+      when(session.createQuery(anyString(), eq(InvoiceLine.class))).thenReturn(q);
+      when(q.setParameter(anyString(), any())).thenReturn(q);
+      when(q.setMaxResults(anyInt())).thenReturn(q);
+      when(q.list()).thenReturn(Collections.singletonList(il));
+
+      InvoiceLine result = new CreateDraftInvoiceHandler().findLinkedInvoiceLine("sl-linked");
+      assertSame(il, result);
+    }
+  }
+
+  /**
+   * When no matching invoice line exists, findLinkedInvoiceLine returns null.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testFindLinkedInvoiceLineReturnsNullWhenNotFound() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      Query<InvoiceLine> q = mock(Query.class);
+      when(session.createQuery(anyString(), eq(InvoiceLine.class))).thenReturn(q);
+      when(q.setParameter(anyString(), any())).thenReturn(q);
+      when(q.setMaxResults(anyInt())).thenReturn(q);
+      when(q.list()).thenReturn(Collections.emptyList());
+
+      assertNull(new CreateDraftInvoiceHandler().findLinkedInvoiceLine("sl-missing"));
+    }
+  }
+
+  /**
+   * When the query throws, findLinkedInvoiceLine swallows the exception and returns null.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testFindLinkedInvoiceLineReturnsNullOnException() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+      when(session.createQuery(anyString(), eq(InvoiceLine.class)))
+          .thenThrow(new RuntimeException("query error"));
+
+      assertNull(new CreateDraftInvoiceHandler().findLinkedInvoiceLine("sl-err"));
+    }
+  }
+
+  // ── addShipmentLinesToInvoice — throws when all lines produce null qty ────────
+
+  /**
+   * When no shipment line produces a qualifying quantity (all return null from
+   * resolveShipmentLineQty) addShipmentLinesToInvoice throws OBException.
+   */
+  @Test(expected = OBException.class)
+  public void testAddShipmentLinesToInvoiceThrowsWhenNoQualifyingLines() {
+    ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+    when(sl.getId()).thenReturn("sl-none");
+
+    ShipmentInOut shipment = mock(ShipmentInOut.class);
+    when(shipment.getMaterialMgmtShipmentInOutLineList())
+        .thenReturn(Collections.singletonList(sl));
+    when(shipment.getId()).thenReturn("ship-none");
+
+    AddShipmentLinesHandler handler = new AddShipmentLinesHandler();
+    // qtyByShipmentLineId intentionally empty → resolveShipmentLineQty returns null for sl-none
+
+    handler.addShipmentLinesToInvoice(
+        mock(Invoice.class),
+        Collections.singletonList(shipment),
+        Collections.emptyMap());
+  }
+
 }
