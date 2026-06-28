@@ -35,7 +35,6 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.advpaymentmngt.dao.AdvPaymentMngtDao;
 import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
-import org.openbravo.advpaymentmngt.process.FIN_PaymentProcess;
 import org.openbravo.advpaymentmngt.utility.FIN_Utility;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.secureApp.VariablesSecureApp;
@@ -47,7 +46,6 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBDateUtils;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
-import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
@@ -171,7 +169,6 @@ final class PaymentRegistrationService {
       throw new OBException(MSG_NO_PENDING_PSD);
     }
 
-    BusinessPartner bp = invoice.getBusinessPartner();
     Organization org = invoice.getOrganization();
 
     FIN_PaymentMethod paymentMethod = resolvePaymentMethod(account, invoice, isReceipt);
@@ -183,8 +180,8 @@ final class PaymentRegistrationService {
     DocumentType docType = resolveArApDocType(org, isReceipt);
     checkPeriodOpen(invoice, docType, paymentDate);
 
-    FIN_Payment payment = createDraftPayment(new AdvPaymentMngtDao(), isReceipt, org, docType,
-        bp, paymentMethod, account, paymentDate, invoice.getCurrency(), amount);
+    FIN_Payment payment = createDraftPayment(new AdvPaymentMngtDao(), isReceipt, invoice,
+        paymentMethod, account, paymentDate, amount);
     linkPSDsToPayment(pendingPSDs, payment, amount);
     processOrThrow(payment);
     return payment;
@@ -545,10 +542,10 @@ final class PaymentRegistrationService {
     checkPeriodOpen(invoice, docType, paymentDate);
 
     AdvPaymentMngtDao dao = new AdvPaymentMngtDao();
-    FIN_Payment payment = createDraftPayment(dao, isReceipt, org, docType,
-        invoice.getBusinessPartner(), paymentMethod, account, paymentDate, invoice.getCurrency(), cash);
+    FIN_Payment payment = createDraftPayment(dao, isReceipt, invoice,
+        paymentMethod, account, paymentDate, cash);
 
-    BigDecimal totalFunded = consumeCreditSources(payment, body.optJSONArray("creditSources"));
+    BigDecimal totalFunded = PaymentCreditConsumer.consume(payment, body.optJSONArray("creditSources"));
 
     List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(scheduleId);
     if (pendingPSDs.isEmpty()) {
@@ -578,66 +575,6 @@ final class PaymentRegistrationService {
   }
 
   // ─── ADVANCED HELPERS ──────────────────────────────────────────────────────
-
-  /**
-   * Consumes the selected funding sources, returning the total amount they fund.
-   * Accumulated credit uses Classic's used-credit mechanism on the source payment;
-   * credit memos / returns are linked as a negative invoice payment detail.
-   */
-  private static BigDecimal consumeCreditSources(FIN_Payment payment, JSONArray creditSources) {
-    BigDecimal totalFunded = BigDecimal.ZERO;
-    if (creditSources == null) {
-      return totalFunded;
-    }
-    for (int i = 0; i < creditSources.length(); i++) {
-      totalFunded = totalFunded.add(consumeOneSource(payment, creditSources.optJSONObject(i)));
-    }
-    return totalFunded;
-  }
-
-  /** Consumes a single funding source, returning the amount it funded (0 when skipped). */
-  private static BigDecimal consumeOneSource(FIN_Payment payment, JSONObject src) {
-    if (src == null) {
-      return BigDecimal.ZERO;
-    }
-    BigDecimal use = parsePositiveAmount(src.optString("use", "0"));
-    if (use == null) {
-      return BigDecimal.ZERO;
-    }
-    if ("credit".equals(src.optString("kind", ""))) {
-      return consumeAccumulatedCredit(payment, src.optString("paymentId", null), use);
-    }
-    return consumeAbono(payment, src.optString("psdId", null), use);
-  }
-
-  /** Consumes accumulated credit from a source payment via the used-credit mechanism. */
-  private static BigDecimal consumeAccumulatedCredit(FIN_Payment payment, String paymentId,
-      BigDecimal use) {
-    if (StringUtils.isBlank(paymentId)) {
-      return BigDecimal.ZERO;
-    }
-    FIN_Payment creditPayment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
-    if (creditPayment == null) {
-      throw new OBException("Credit payment not found: " + paymentId);
-    }
-    creditPayment.setUsedCredit(nullToZero(creditPayment.getUsedCredit()).add(use));
-    FIN_PaymentProcess.linkCreditPayment(payment, use, creditPayment);
-    OBDal.getInstance().save(creditPayment);
-    return use;
-  }
-
-  /** Consumes a credit memo / return by linking its PSD as a negative detail. */
-  private static BigDecimal consumeAbono(FIN_Payment payment, String psdId, BigDecimal use) {
-    if (StringUtils.isBlank(psdId)) {
-      return BigDecimal.ZERO;
-    }
-    FIN_PaymentScheduleDetail psd = OBDal.getInstance().get(FIN_PaymentScheduleDetail.class, psdId);
-    if (psd == null) {
-      throw new OBException("Credit source not found: " + psdId);
-    }
-    FIN_AddPayment.updatePaymentDetail(psd, payment, use.negate(), false);
-    return use;
-  }
 
   /** Registers the over-payment (generated credit or refund) and processes the payment. */
   private static void applyOverpaymentAndProcess(FIN_Payment payment, AdvPaymentMngtDao dao,
@@ -729,14 +666,15 @@ final class PaymentRegistrationService {
 
   /** Creates and persists a draft FIN_Payment (not processed yet) with its transaction amount. */
   private static FIN_Payment createDraftPayment(AdvPaymentMngtDao dao, boolean isReceipt,
-      Organization org, DocumentType docType, BusinessPartner bp, FIN_PaymentMethod paymentMethod,
-      FIN_FinancialAccount account, Date paymentDate, Currency currency, BigDecimal amount)
-      throws Exception {
+      Invoice invoice, FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account,
+      Date paymentDate, BigDecimal amount) throws Exception {
+    DocumentType docType = resolveArApDocType(invoice.getOrganization(), isReceipt);
     String docNo = FIN_Utility.getDocumentNo(docType, "FIN_Payment");
     VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
     RequestContext.get().setVariableSecureApp(vars);
-    FIN_Payment payment = dao.getNewPayment(isReceipt, org, docType, docNo, bp, paymentMethod,
-        account, "0", paymentDate, "", currency, BigDecimal.ONE, amount);
+    FIN_Payment payment = dao.getNewPayment(isReceipt, invoice.getOrganization(), docType, docNo,
+        invoice.getBusinessPartner(), paymentMethod, account, "0", paymentDate, "",
+        invoice.getCurrency(), BigDecimal.ONE, amount);
     payment.setAmount(amount);
     FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, BigDecimal.ONE, amount);
     OBDal.getInstance().save(payment);
@@ -775,16 +713,6 @@ final class PaymentRegistrationService {
       total = total.add(psd.getAmount());
     }
     return total;
-  }
-
-  /** Parses a strictly-positive amount, returning null for blank/invalid/non-positive input. */
-  private static BigDecimal parsePositiveAmount(String raw) {
-    try {
-      BigDecimal value = new BigDecimal(raw);
-      return value.compareTo(BigDecimal.ZERO) > 0 ? value : null;
-    } catch (NumberFormatException e) {
-      return null;
-    }
   }
 
   /**

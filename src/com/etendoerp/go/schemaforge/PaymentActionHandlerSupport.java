@@ -62,7 +62,7 @@ final class PaymentActionHandlerSupport {
       return validationError;
     }
 
-    return executeMutating(context, fieldName, isReceipt, invoiceId, body, isConfirm, log);
+    return executeMutating(fieldName, isReceipt, invoiceId, body, isConfirm, log);
   }
 
   /** Routes the read-only listing actions; returns null when {@code fieldName} is not one. */
@@ -107,7 +107,7 @@ final class PaymentActionHandlerSupport {
   }
 
   /** Runs the mutating action inside an admin session with rollback-on-error handling. */
-  private static NeoResponse executeMutating(NeoContext context, String fieldName, boolean isReceipt,
+  private static NeoResponse executeMutating(String fieldName, boolean isReceipt,
       String invoiceId, JSONObject body, boolean isConfirm, Logger log) {
     try {
       OBContext.setAdminMode(true);
