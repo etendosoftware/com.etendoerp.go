@@ -77,33 +77,42 @@ final class PaymentActionHandlerSupport {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Request body is required");
     }
 
+    // Validate inputs BEFORE opening an admin session, so malformed requests
+    // return 400 without requiring a DB context.
+    String paymentId = null;
+    String scheduleId = null;
+    String strAmount = null;
+    String strDate = null;
+    String accountId = null;
+    if (isConfirm) {
+      paymentId = body.optString("paymentId", null);
+      if (StringUtils.isBlank(paymentId)) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "paymentId is required");
+      }
+    } else {
+      scheduleId = body.optString("scheduleId", null);
+      strAmount = body.optString("actual_payment", null);
+      strDate = body.optString("payment_date", null);
+      accountId = body.optString("fin_financial_account_id", null);
+      if (StringUtils.isBlank(scheduleId) || StringUtils.isBlank(strAmount)
+          || StringUtils.isBlank(strDate) || StringUtils.isBlank(accountId)) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+            "Missing required fields: scheduleId, actual_payment, payment_date, fin_financial_account_id");
+      }
+    }
+
+    // Advanced path (two-step modal): explicit payment method, draft/confirm,
+    // credit consumption and/or overpayment resolution. Falls back to the legacy
+    // single-step register for callers that send only the 4 base fields.
+    boolean advanced = !isConfirm && (body.has("process") || body.has("creditSources")
+        || body.has("overpaymentAction") || body.has("fin_paymentmethod_id"));
+
     try {
       OBContext.setAdminMode(true);
       try {
         if (isConfirm) {
-          String paymentId = body.optString("paymentId", null);
-          if (StringUtils.isBlank(paymentId)) {
-            return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "paymentId is required");
-          }
           return PaymentRegistrationService.confirmDraftPayment(paymentId);
         }
-
-        String scheduleId = body.optString("scheduleId", null);
-        String strAmount = body.optString("actual_payment", null);
-        String strDate = body.optString("payment_date", null);
-        String accountId = body.optString("fin_financial_account_id", null);
-
-        if (StringUtils.isBlank(scheduleId) || StringUtils.isBlank(strAmount)
-            || StringUtils.isBlank(strDate) || StringUtils.isBlank(accountId)) {
-          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-              "Missing required fields: scheduleId, actual_payment, payment_date, fin_financial_account_id");
-        }
-
-        // Advanced path (two-step modal): explicit payment method, draft/confirm,
-        // credit consumption and/or overpayment resolution. Falls back to the
-        // legacy single-step register for callers that send only the 4 base fields.
-        boolean advanced = body.has("process") || body.has("creditSources")
-            || body.has("overpaymentAction") || body.has("fin_paymentmethod_id");
         if (advanced) {
           return PaymentRegistrationService.doRegisterPaymentAdvanced(invoiceId, body, isReceipt);
         }

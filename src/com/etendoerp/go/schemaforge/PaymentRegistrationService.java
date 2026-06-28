@@ -610,8 +610,9 @@ final class PaymentRegistrationService {
     VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
     RequestContext.get().setVariableSecureApp(vars);
     DalConnectionProvider conn = new DalConnectionProvider(false);
+    AdvPaymentMngtDao dao = new AdvPaymentMngtDao();
 
-    FIN_Payment payment = new AdvPaymentMngtDao().getNewPayment(
+    FIN_Payment payment = dao.getNewPayment(
         isReceipt, org, docType, docNo, bp, paymentMethod, account,
         "0", paymentDate, "", invoiceCurrency, BigDecimal.ONE, cash);
     payment.setAmount(cash);
@@ -619,7 +620,6 @@ final class PaymentRegistrationService {
     OBDal.getInstance().save(payment);
     OBDal.getInstance().flush();
 
-    // consume selected credit / abono PSDs as negative details
     // Consume credit/abono. Accumulated credit ('credit') funds via used-credit;
     // credit memos ('abono') are linked as negative invoice details. Both reduce
     // the cash needed, so they count toward the funds applied to the invoice.
@@ -649,7 +649,6 @@ final class PaymentRegistrationService {
     BigDecimal leftover = funds.subtract(invoiceApplied);
     boolean overpaid = leftover.compareTo(BigDecimal.ZERO) > 0;
     if (overpaid) {
-      AdvPaymentMngtDao dao = new AdvPaymentMngtDao();
       FIN_PaymentScheduleDetail creditPsd = dao.getNewPaymentScheduleDetail(org, leftover);
       dao.getNewPaymentDetail(payment, creditPsd, leftover, BigDecimal.ZERO, false, null);
       OBDal.getInstance().flush();
