@@ -699,7 +699,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       try {
         JSONObject entry = new JSONObject();
         entry.put("id", ol.getId());
-        entry.put("orderedQuantity", pending.toPlainString());
+        entry.put(FIELD_ORDERED_QUANTITY, pending.toPlainString());
         selectedLines.put(entry);
       } catch (Exception e) {
         log.warn("Failed to add line {}: {}", ol.getId(), e.getMessage());
