@@ -39,6 +39,9 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
+import com.etendoerp.psd2.bank.integration.data.Provider;
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
+
 /**
  * NeoHandler that powers the financial-account window as a generic W (CRUD) spec
  * (ETP-4239, converting the former report-style spec from ETP-4096).
@@ -83,6 +86,12 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String FIELD_SWIFT_CODE = "swiftCode";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_MATCHING_ALGORITHM = "matchingAlgorithm";
+  /** Salt Edge provider chosen at offline creation (optional); persisted so a later PSD2 connect
+   *  can preselect that bank. {@link #FIELD_PSD2_PROVIDER} is the DAL FK property the generic CRUD
+   *  resolves by id (mirrors how {@link #FIELD_COUNTRY} is injected). */
+  private static final String FIELD_PROVIDER_CODE = "providerCode";
+  private static final String FIELD_PROVIDER_NAME = "providerName";
+  private static final String FIELD_PSD2_PROVIDER = "psd2Provider";
 
   private static final String TYPE_BANK = "B";
   private static final String TYPE_CASH = "C";
@@ -159,7 +168,13 @@ public class FinancialAccountHandler implements NeoHandler {
 
     // Normalize the account type (defaults to Bank) so the generic service
     // always persists one of the allowed values.
-    body.put(FIELD_TYPE, normalizeType(body.optString(FIELD_TYPE, TYPE_BANK).trim()));
+    String type = normalizeType(body.optString(FIELD_TYPE, TYPE_BANK).trim());
+    body.put(FIELD_TYPE, type);
+
+    // Persist the chosen Salt Edge provider (offline "with bank selected" flow): upsert the
+    // provider and inject the FK so the account remembers its bank. The account stays offline —
+    // this is metadata only — but a later PSD2 connect can then preselect that provider.
+    enrichProvider(body, type);
 
     // Inject the country derived from the IBAN before the insert — the trigger
     // FIN_FINANCIAL_ACCOUNT_TRG2 rejects a bank account with an IBAN but no country.
@@ -174,6 +189,24 @@ public class FinancialAccountHandler implements NeoHandler {
     injectDefaultMatchingAlgorithm(body);
 
     return null;
+  }
+
+  /**
+   * When the offline create carries a Salt Edge provider (bank accounts only), upsert the provider
+   * record and inject its id under the {@code psd2Provider} FK property so the generic CRUD links
+   * it — same mechanism used for {@code country}. The transient {@code providerCode}/
+   * {@code providerName} keys are removed so they are not treated as entity properties.
+   */
+  private void enrichProvider(JSONObject body, String type) throws JSONException {
+    String providerCode = body.optString(FIELD_PROVIDER_CODE, "").trim();
+    if (TYPE_BANK.equals(type) && StringUtils.isNotBlank(providerCode)) {
+      String providerName = body.optString(FIELD_PROVIDER_NAME, providerCode).trim();
+      Provider provider = BankIntegrationUtils.upsertProvider(providerCode, providerName, null);
+      OBDal.getInstance().flush();
+      body.put(FIELD_PSD2_PROVIDER, provider.getId());
+    }
+    body.remove(FIELD_PROVIDER_CODE);
+    body.remove(FIELD_PROVIDER_NAME);
   }
 
   // ---------------------------------------------------------------------------
