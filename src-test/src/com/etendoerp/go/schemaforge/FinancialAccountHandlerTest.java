@@ -23,6 +23,8 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -37,6 +39,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
@@ -45,14 +48,18 @@ import org.junit.runner.RunWith;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.enterprise.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
+import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
 /**
@@ -707,6 +714,283 @@ public class FinancialAccountHandlerTest {
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
       h.exitAdminMode();
       obContext.verify(OBContext::restorePreviousMode);
+    }
+  }
+
+  // ── afterHandle: default payment-method assignment by type ────────────────
+  //
+  // Routing/orchestration tests use the spy with the DAL-bound seams
+  // (extractCreatedId, loadAccount, assignDefaultPaymentMethods) stubbed; the
+  // assignment-logic tests run the real assignDefaultPaymentMethods body with
+  // findPaymentMethodByName/linkExists/createLink stubbed and OBDal mocked.
+
+  /** A foreign spec is ignored by the post-hook (no account lookup). */
+  @Test
+  public void testAfterHandleForeignSpecReturnsNull() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn("sales-order");
+
+    assertNull(handler.afterHandle(ctx));
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /** Non-POST writes (e.g. PUT) do not trigger payment-method assignment. */
+  @Test
+  public void testAfterHandleNonPostReturnsNull() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+
+    assertNull(handler.afterHandle(ctx));
+    verify(handler, never()).extractCreatedId(any());
+  }
+
+  /** A POST whose response carries no id assigns nothing. */
+  @Test
+  public void testAfterHandleNoCreatedIdSkipsAssignment() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    doReturn(null).when(handler).extractCreatedId(ctx);
+
+    assertNull(handler.afterHandle(ctx));
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /** A POST with a created id loads the account and delegates the assignment. */
+  @Test
+  public void testAfterHandlePostAssignsForCreatedAccount() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    doReturn(ACC_ID).when(handler).extractCreatedId(ctx);
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doNothing().when(handler).assignDefaultPaymentMethods(account);
+
+    assertNull(handler.afterHandle(ctx));
+    verify(handler).assignDefaultPaymentMethods(account);
+  }
+
+  /** A failure during assignment is swallowed so account creation is not broken. */
+  @Test
+  public void testAfterHandleSwallowsAssignmentFailure() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    doReturn(ACC_ID).when(handler).extractCreatedId(ctx);
+    doThrow(new RuntimeException("boom")).when(handler).loadAccount(ACC_ID);
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  /** A Cash account gets Efectivo assigned as its default method. */
+  @Test
+  public void testAssignCashAccountLinksEfectivoAsDefault() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("C");
+    FIN_PaymentMethod cash = mock(FIN_PaymentMethod.class);
+    doReturn(cash).when(handler).findPaymentMethodByName("Efectivo");
+    doReturn(false).when(handler).linkExists(account, cash);
+    doNothing().when(handler).createLink(any(), any(), anyBoolean());
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      handler.assignDefaultPaymentMethods(account);
+    }
+    verify(handler).createLink(account, cash, true);
+  }
+
+  /** A Bank account links Transfer (default), Check and Card. */
+  @Test
+  public void testAssignBankAccountLinksThreeMethodsTransferDefault() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("B");
+    FIN_PaymentMethod transfer = mock(FIN_PaymentMethod.class);
+    FIN_PaymentMethod check = mock(FIN_PaymentMethod.class);
+    FIN_PaymentMethod card = mock(FIN_PaymentMethod.class);
+    doReturn(transfer).when(handler).findPaymentMethodByName("Transferencia bancaria");
+    doReturn(check).when(handler).findPaymentMethodByName("Cheque");
+    doReturn(card).when(handler).findPaymentMethodByName("Tarjeta");
+    doReturn(false).when(handler).linkExists(any(), any());
+    doNothing().when(handler).createLink(any(), any(), anyBoolean());
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      handler.assignDefaultPaymentMethods(account);
+    }
+    verify(handler).createLink(account, transfer, true);
+    verify(handler).createLink(account, check, false);
+    verify(handler).createLink(account, card, false);
+  }
+
+  /** A Card account links only Tarjeta, as its default. */
+  @Test
+  public void testAssignCardAccountLinksTarjetaAsDefault() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("CA");
+    FIN_PaymentMethod card = mock(FIN_PaymentMethod.class);
+    doReturn(card).when(handler).findPaymentMethodByName("Tarjeta");
+    doReturn(false).when(handler).linkExists(account, card);
+    doNothing().when(handler).createLink(any(), any(), anyBoolean());
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(mock(OBDal.class));
+      handler.assignDefaultPaymentMethods(account);
+    }
+    verify(handler).createLink(account, card, true);
+    verify(handler, times(1)).createLink(any(), any(), anyBoolean());
+  }
+
+  /** An account type with no mapping assigns nothing. */
+  @Test
+  public void testAssignUnknownTypeLinksNothing() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("ZZ");
+
+    handler.assignDefaultPaymentMethods(account);
+
+    verify(handler, never()).createLink(any(), any(), anyBoolean());
+  }
+
+  /** An existing link is left untouched (idempotent) — no create, no flush. */
+  @Test
+  public void testAssignSkipsExistingLink() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("C");
+    FIN_PaymentMethod cash = mock(FIN_PaymentMethod.class);
+    doReturn(cash).when(handler).findPaymentMethodByName("Efectivo");
+    doReturn(true).when(handler).linkExists(account, cash);
+
+    handler.assignDefaultPaymentMethods(account);
+
+    verify(handler, never()).createLink(any(), any(), anyBoolean());
+  }
+
+  /** A missing payment method is skipped without creating a link. */
+  @Test
+  public void testAssignMissingMethodIsSkipped() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("C");
+    doReturn(null).when(handler).findPaymentMethodByName("Efectivo");
+
+    handler.assignDefaultPaymentMethods(account);
+
+    verify(handler, never()).createLink(any(), any(), anyBoolean());
+  }
+
+  // ── extractCreatedId (real body) ──────────────────────────────────────────
+
+  /** A null previous result yields no id. */
+  @Test
+  public void testExtractCreatedIdNullPreviousReturnsNull() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getPreviousResult()).thenReturn(null);
+    assertNull(new FinancialAccountHandler().extractCreatedId(ctx));
+  }
+
+  /** The id is read from a {@code response.data[0].id} array envelope. */
+  @Test
+  public void testExtractCreatedIdFromDataArray() throws Exception {
+    JSONObject record = new JSONObject().put("id", "acc-9");
+    JSONObject response = new JSONObject().put("data", new JSONArray().put(record));
+    JSONObject body = new JSONObject().put("response", response);
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(201, body));
+
+    assertEquals("acc-9", new FinancialAccountHandler().extractCreatedId(ctx));
+  }
+
+  /** The id is read from a {@code response.data.id} object envelope. */
+  @Test
+  public void testExtractCreatedIdFromDataObject() throws Exception {
+    JSONObject record = new JSONObject().put("id", "acc-7");
+    JSONObject response = new JSONObject().put("data", record);
+    JSONObject body = new JSONObject().put("response", response);
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(201, body));
+
+    assertEquals("acc-7", new FinancialAccountHandler().extractCreatedId(ctx));
+  }
+
+  /** A body without a {@code response} wrapper yields no id. */
+  @Test
+  public void testExtractCreatedIdMissingResponseReturnsNull() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(201, new JSONObject()));
+    assertNull(new FinancialAccountHandler().extractCreatedId(ctx));
+  }
+
+  // ── findPaymentMethodByName / linkExists / createLink (real body) ─────────
+
+  /** findPaymentMethodByName filters by name + active and returns the unique result. */
+  @Test
+  public void testFindPaymentMethodByNameReturnsUniqueResult() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    FIN_PaymentMethod method = mock(FIN_PaymentMethod.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_PaymentMethod> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_PaymentMethod.class)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(method);
+
+      assertSame(method, h.findPaymentMethodByName("Efectivo"));
+      verify(criteria, times(2)).add(any());
+      verify(criteria).setMaxResults(1);
+    }
+  }
+
+  /** linkExists returns false when no link row is found. */
+  @Test
+  public void testLinkExistsFalseWhenNoRow() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_PaymentMethod method = mock(FIN_PaymentMethod.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<FinAccPaymentMethod> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FinAccPaymentMethod.class)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+
+      assertFalse(h.linkExists(account, method));
+      verify(criteria).setMaxResults(1);
+    }
+  }
+
+  /** createLink populates the new link from the account and saves it as default. */
+  @Test
+  public void testCreateLinkSavesDefaultLink() {
+    FinancialAccountHandler h = new FinancialAccountHandler();
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(account.getClient()).thenReturn(client);
+    when(account.getOrganization()).thenReturn(org);
+    FIN_PaymentMethod method = mock(FIN_PaymentMethod.class);
+    FinAccPaymentMethod link = mock(FinAccPaymentMethod.class);
+
+    try (MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FinAccPaymentMethod.class)).thenReturn(link);
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      h.createLink(account, method, true);
+
+      verify(link).setClient(client);
+      verify(link).setOrganization(org);
+      verify(link).setAccount(account);
+      verify(link).setPaymentMethod(method);
+      verify(link).setDefault(true);
+      verify(dal).save(link);
     }
   }
 }

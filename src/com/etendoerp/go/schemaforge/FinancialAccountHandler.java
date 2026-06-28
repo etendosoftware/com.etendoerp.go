@@ -18,7 +18,9 @@
 package com.etendoerp.go.schemaforge;
 
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
@@ -26,17 +28,21 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
+import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
 import com.etendoerp.psd2.bank.integration.data.Provider;
@@ -103,6 +109,30 @@ public class FinancialAccountHandler implements NeoHandler {
   /** Reconciliation document statuses considered closed (not "open"). */
   private static final List<String> CLOSED_RECONCILIATION_STATUSES = Arrays.asList("CO", "CL");
 
+  // Default payment methods seeded by the onboarding dataset (GOClient sampledata),
+  // matched by name. it1 has no payment-method management screen and exactly these
+  // four fixed methods, so name matching is acceptable; if methods ever become
+  // localizable or renameable this must migrate to a stable key.
+  private static final String METHOD_CASH = "Efectivo";
+  private static final String METHOD_TRANSFER = "Transferencia bancaria";
+  private static final String METHOD_CHECK = "Cheque";
+  private static final String METHOD_CARD = "Tarjeta";
+
+  /**
+   * Maps each financial-account type to the payment methods that must be auto-assigned
+   * on creation. The first method in each list becomes the account's default. Mirrors
+   * the static links shipped in the onboarding dataset for the seeded accounts.
+   */
+  private static final Map<String, List<String>> PAYMENT_METHODS_BY_TYPE = buildMethodsByType();
+
+  private static Map<String, List<String>> buildMethodsByType() {
+    Map<String, List<String>> map = new LinkedHashMap<>();
+    map.put(TYPE_CASH, Arrays.asList(METHOD_CASH));
+    map.put(TYPE_BANK, Arrays.asList(METHOD_TRANSFER, METHOD_CHECK, METHOD_CARD));
+    map.put(TYPE_CARD, Arrays.asList(METHOD_CARD));
+    return map;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!SPEC.equals(context.getSpecName())) {
@@ -136,6 +166,119 @@ public class FinancialAccountHandler implements NeoHandler {
     } finally {
       exitAdminMode();
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Post-hook: auto-assign default payment methods by account type on create
+  // ---------------------------------------------------------------------------
+
+  /**
+   * After the generic CRUD persists a new financial account, link the default
+   * payment methods that correspond to its type ({@link #PAYMENT_METHODS_BY_TYPE}),
+   * so a Cash/Bank/Card account is usable for receipts/payments without manual
+   * setup. Idempotent: existing links are left untouched. Failures here never
+   * break account creation — the account is already committed and the assignment
+   * is best-effort.
+   */
+  @Override
+  public NeoResponse afterHandle(NeoContext context) {
+    if (!SPEC.equals(context.getSpecName()) || !METHOD_POST.equals(context.getHttpMethod())) {
+      return null;
+    }
+    try {
+      enterAdminMode();
+      String accountId = extractCreatedId(context);
+      if (StringUtils.isBlank(accountId)) {
+        return null;
+      }
+      FIN_FinancialAccount account = loadAccount(accountId);
+      if (account != null) {
+        assignDefaultPaymentMethods(account);
+      }
+    } catch (Exception e) {
+      log.error("financial-account afterHandle: failed to assign default payment methods", e);
+    } finally {
+      exitAdminMode();
+    }
+    // Keep the original CRUD response untouched.
+    return null;
+  }
+
+  /** Reads the persisted record id from the generic CRUD response envelope. */
+  String extractCreatedId(NeoContext context) {
+    NeoResponse prev = context.getPreviousResult();
+    if (prev == null || prev.getBody() == null) {
+      return null;
+    }
+    JSONObject response = prev.getBody().optJSONObject("response");
+    if (response == null) {
+      return null;
+    }
+    Object data = response.opt("data");
+    if (data instanceof JSONArray) {
+      JSONArray arr = (JSONArray) data;
+      JSONObject first = arr.length() > 0 ? arr.optJSONObject(0) : null;
+      return first == null ? null : StringUtils.trimToNull(first.optString("id", null));
+    }
+    if (data instanceof JSONObject) {
+      return StringUtils.trimToNull(((JSONObject) data).optString("id", null));
+    }
+    return null;
+  }
+
+  void assignDefaultPaymentMethods(FIN_FinancialAccount account) {
+    List<String> methodNames = PAYMENT_METHODS_BY_TYPE.get(account.getType());
+    if (methodNames == null || methodNames.isEmpty()) {
+      return;
+    }
+    boolean created = false;
+    for (int i = 0; i < methodNames.size(); i++) {
+      String methodName = methodNames.get(i);
+      FIN_PaymentMethod method = findPaymentMethodByName(methodName);
+      if (method == null) {
+        log.warn("financial-account afterHandle: payment method '{}' not found; skipping", methodName);
+        continue;
+      }
+      if (linkExists(account, method)) {
+        continue;
+      }
+      createLink(account, method, i == 0);
+      created = true;
+    }
+    if (created) {
+      OBDal.getInstance().flush();
+    }
+  }
+
+  FIN_PaymentMethod findPaymentMethodByName(String name) {
+    OBCriteria<FIN_PaymentMethod> criteria =
+        OBDal.getInstance().createCriteria(FIN_PaymentMethod.class);
+    criteria.add(Restrictions.eq(FIN_PaymentMethod.PROPERTY_NAME, name));
+    criteria.add(Restrictions.eq(FIN_PaymentMethod.PROPERTY_ACTIVE, true));
+    criteria.setMaxResults(1);
+    return (FIN_PaymentMethod) criteria.uniqueResult();
+  }
+
+  boolean linkExists(FIN_FinancialAccount account, FIN_PaymentMethod method) {
+    OBCriteria<FinAccPaymentMethod> criteria =
+        OBDal.getInstance().createCriteria(FinAccPaymentMethod.class);
+    criteria.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, account));
+    criteria.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_PAYMENTMETHOD, method));
+    criteria.setMaxResults(1);
+    return criteria.uniqueResult() != null;
+  }
+
+  void createLink(FIN_FinancialAccount account, FIN_PaymentMethod method, boolean isDefault) {
+    FinAccPaymentMethod link = OBProvider.getInstance().get(FinAccPaymentMethod.class);
+    link.setClient(account.getClient());
+    link.setOrganization(account.getOrganization());
+    link.setAccount(account);
+    link.setPaymentMethod(method);
+    link.setDefault(isDefault);
+    // payinAllow/payoutAllow (true), execution type ("M") and the invoice-paid
+    // statuses come from the entity's column defaults — Manual, allowing both
+    // receipts and payments, matching the onboarding dataset.
+    OBDal.getInstance().save(link);
   }
 
   // ---------------------------------------------------------------------------
