@@ -817,6 +817,157 @@ class McpToolRouterRouteTest {
     }
   }
 
+  // ── docs ────────────────────────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("route — docs")
+  class DocsTests {
+
+    @Test
+    @DisplayName("docs with missing topic returns error content")
+    void docsMissingTopicReturnsError() throws Exception {
+      JSONObject result = router.route("docs", new JSONObject(), READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("topic"));
+    }
+
+    @Test
+    @DisplayName("docs with blank topic returns error content")
+    void docsBlankTopicReturnsError() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("topic", "   ");
+
+      JSONObject result = router.route("docs", args, READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("topic"));
+    }
+
+    @Test
+    @DisplayName("docs with null arguments returns error content")
+    void docsNullArgsReturnsError() throws Exception {
+      JSONObject result = router.route("docs", null, READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("topic"));
+    }
+
+    @Test
+    @DisplayName("handleDocs success path returns the docs body via injected client")
+    void docsSuccessReturnsBody() throws Exception {
+      Context7DocsClient mockClient = mock(Context7DocsClient.class);
+      when(mockClient.fetchDocs(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+          anyString(), org.mockito.ArgumentMatchers.any()))
+          .thenReturn("# Finance docs\nbody text");
+
+      // Stub the token-resolution seam so the test needs no DB or static mocking
+      McpToolRouter docsRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return null;
+        }
+      };
+
+      JSONObject args = new JSONObject();
+      args.put("topic", "finance");
+      args.put("tokens", 1000);
+      args.put("type", "txt");
+
+      JSONObject result = docsRouter.handleDocs(args, mockClient);
+
+      assertFalse(result.has("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertEquals("# Finance docs\nbody text", text);
+    }
+
+    @Test
+    @DisplayName("handleDocs with blank body returns friendly no-results message")
+    void docsBlankBodyReturnsFriendlyMessage() throws Exception {
+      Context7DocsClient mockClient = mock(Context7DocsClient.class);
+      when(mockClient.fetchDocs(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+          anyString(), org.mockito.ArgumentMatchers.any()))
+          .thenReturn("");
+
+      // Stub the token-resolution seam so the test needs no DB or static mocking
+      McpToolRouter docsRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return null;
+        }
+      };
+
+      JSONObject args = new JSONObject();
+      args.put("topic", "nonexistent");
+
+      JSONObject result = docsRouter.handleDocs(args, mockClient);
+
+      assertFalse(result.has("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("No documentation found for topic"));
+    }
+
+    @Test
+    @DisplayName("handleDocs threads the resolved Context7 token to the client")
+    void docsPassesResolvedTokenToClient() throws Exception {
+      Context7DocsClient mockClient = mock(Context7DocsClient.class);
+      when(mockClient.fetchDocs(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+          anyString(), org.mockito.ArgumentMatchers.any()))
+          .thenReturn("docs body");
+
+      // Stub the token-resolution seam so the test needs no DB or static mocking
+      McpToolRouter tokenRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return "tok-123";
+        }
+      };
+
+      JSONObject args = new JSONObject();
+      args.put("topic", "finance");
+
+      JSONObject result = tokenRouter.handleDocs(args, mockClient);
+
+      assertFalse(result.has("isError"));
+      org.mockito.ArgumentCaptor<String> tokenCaptor =
+          org.mockito.ArgumentCaptor.forClass(String.class);
+      org.mockito.Mockito.verify(mockClient).fetchDocs(anyString(),
+          org.mockito.ArgumentMatchers.anyInt(), anyString(), tokenCaptor.capture());
+      assertEquals("tok-123", tokenCaptor.getValue());
+    }
+
+    @Test
+    @DisplayName("handleDocs passes a null token to the client when none is configured")
+    void docsPassesNullTokenWhenUnset() throws Exception {
+      Context7DocsClient mockClient = mock(Context7DocsClient.class);
+      when(mockClient.fetchDocs(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+          anyString(), org.mockito.ArgumentMatchers.any()))
+          .thenReturn("docs body");
+
+      McpToolRouter tokenRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return null;
+        }
+      };
+
+      JSONObject args = new JSONObject();
+      args.put("topic", "finance");
+
+      JSONObject result = tokenRouter.handleDocs(args, mockClient);
+
+      assertFalse(result.has("isError"));
+      org.mockito.ArgumentCaptor<String> tokenCaptor =
+          org.mockito.ArgumentCaptor.forClass(String.class);
+      org.mockito.Mockito.verify(mockClient).fetchDocs(anyString(),
+          org.mockito.ArgumentMatchers.anyInt(), anyString(), tokenCaptor.capture());
+      org.junit.jupiter.api.Assertions.assertNull(tokenCaptor.getValue());
+    }
+  }
+
   // ── neo_action ────────────────────────────────────────────────────────
 
   @Nested

@@ -72,7 +72,6 @@ dependencies {
     implementation('com.etendoerp:docker:[3.0.0,)')
     implementation('com.etendoerp:accounting.dimensions.assets:[3.0.0,)')
     implementation('com.etendoerp:accounting.dimensions.assets.template:[3.0.0,)')
-    implementation('com.etendoerp:psd2.bank.integration:[2.0.0,)')
     implementation('com.etendoerp:payment.removal:[3.0.0,)')
     implementation('com.google.api-client:google-api-client:2.8.1')
     compileOnly 'io.swagger.core.v3:swagger-models:2.1.13'
