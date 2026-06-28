@@ -517,11 +517,6 @@ public class PurchaseInvoiceHeaderHandlerTest {
    */
   @Test
   public void getInvoiceSubtypeKey_returnsApInvoiceSubtype() throws Exception {
-    // Expose via the TestablePurchaseHandler subclass already defined in this class.
-    TestablePurchaseHandler h = new TestablePurchaseHandler();
-    // resolveSubtype with blank returns FAC; enrichInvoiceSubtype puts it under the key.
-    // Use the key indirectly: create a rec, call enrichInvoiceSubtype via the base method.
-    JSONObject rec = new JSONObject();
     // No OBDal needed since docTypeId will be blank (resolveSubtype returns FAC)
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
