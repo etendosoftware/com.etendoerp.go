@@ -2425,8 +2425,6 @@ public class CreateDraftInvoiceHandlerTest {
 
       assertNotNull(response);
       assertEquals(400, response.getHttpStatus());
-      // The OBException path in handleCreate builds {"status":"error","message":"..."}
-      // but NeoResponse.error wraps it; check the body contains the message
       String body = response.getBody().toString();
       assertTrue("Response body must contain the OBException message",
           body.contains("not enough stock"));
@@ -2466,7 +2464,7 @@ public class CreateDraftInvoiceHandlerTest {
       assertTrue(data.getBoolean("exists"));
       assertEquals(1, data.getInt("count"));
       assertEquals("inv-single", data.getString("id"));
-      assertEquals("INV-SINGLE-001", data.getString(FIELD_DOCUMENT_NO));
+      assertEquals("INV-SINGLE-001", data.getString("documentNo"));
       assertFalse("drafts array must not be present when count == 1", data.has("drafts"));
     }
   }
