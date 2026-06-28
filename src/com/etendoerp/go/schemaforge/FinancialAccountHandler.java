@@ -237,13 +237,10 @@ public class FinancialAccountHandler implements NeoHandler {
       FIN_PaymentMethod method = findPaymentMethodByName(methodName);
       if (method == null) {
         log.warn("financial-account afterHandle: payment method '{}' not found; skipping", methodName);
-        continue;
+      } else if (!linkExists(account, method)) {
+        createLink(account, method, i == 0);
+        created = true;
       }
-      if (linkExists(account, method)) {
-        continue;
-      }
-      createLink(account, method, i == 0);
-      created = true;
     }
     if (created) {
       OBDal.getInstance().flush();

@@ -892,8 +892,8 @@ public class FinancialAccountHandlerTest {
   /** The id is read from a {@code response.data[0].id} array envelope. */
   @Test
   public void testExtractCreatedIdFromDataArray() throws Exception {
-    JSONObject record = new JSONObject().put("id", "acc-9");
-    JSONObject response = new JSONObject().put("data", new JSONArray().put(record));
+    JSONObject dataRow = new JSONObject().put("id", "acc-9");
+    JSONObject response = new JSONObject().put("data", new JSONArray().put(dataRow));
     JSONObject body = new JSONObject().put("response", response);
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getPreviousResult()).thenReturn(new NeoResponse(201, body));
@@ -904,8 +904,8 @@ public class FinancialAccountHandlerTest {
   /** The id is read from a {@code response.data.id} object envelope. */
   @Test
   public void testExtractCreatedIdFromDataObject() throws Exception {
-    JSONObject record = new JSONObject().put("id", "acc-7");
-    JSONObject response = new JSONObject().put("data", record);
+    JSONObject dataRow = new JSONObject().put("id", "acc-7");
+    JSONObject response = new JSONObject().put("data", dataRow);
     JSONObject body = new JSONObject().put("response", response);
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getPreviousResult()).thenReturn(new NeoResponse(201, body));
