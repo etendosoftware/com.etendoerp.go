@@ -473,6 +473,11 @@ final class PaymentRegistrationService {
         .list();
     for (FIN_Payment src : credits) {
       BigDecimal avail = nullToZero(src.getGeneratedCredit()).subtract(nullToZero(src.getUsedCredit()));
+      if (avail.signum() <= 0) {
+        // Defensive: the HQL already excludes fully-consumed credit, but never
+        // expose a zero/negative-availability row if one slips through.
+        continue;
+      }
       JSONObject item = new JSONObject();
       item.put("id", src.getId());
       item.put("kind", "credit");

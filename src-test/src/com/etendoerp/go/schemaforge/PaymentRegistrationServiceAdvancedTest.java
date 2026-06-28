@@ -262,7 +262,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("Credit listing nets generatedCredit - usedCredit and skips fully consumed credit")
-  void listCreditSourcesNetsAvailableCredit() throws Exception {
+  void testListCreditSourcesNetsAvailableCredit() throws Exception {
     NeoContext context = creditSourcesContext();
     stubInvoiceWithBp();
 
@@ -302,7 +302,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("Abono listing returns unpaid negative credit-memo PSDs with absolute avail")
-  void listCreditSourcesReturnsAbonos() throws Exception {
+  void testListCreditSourcesReturnsAbonos() throws Exception {
     NeoContext context = creditSourcesContext();
     stubInvoiceWithBp();
 
@@ -337,7 +337,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("Credit sources for an invoice without a business partner returns empty")
-  void listCreditSourcesNoBusinessPartnerReturnsEmpty() throws Exception {
+  void testListCreditSourcesNoBusinessPartnerReturnsEmpty() throws Exception {
     NeoContext context = creditSourcesContext();
     when(dal.get(Invoice.class, INVOICE_ID)).thenReturn(invoice);
     when(invoice.getBusinessPartner()).thenReturn(null);
@@ -355,7 +355,7 @@ class PaymentRegistrationServiceAdvancedTest {
   @Test
   @SuppressWarnings("unchecked")
   @DisplayName("Payment methods are de-duplicated and filtered to the natural org tree")
-  void listPaymentMethodsDistinctWithinNaturalTree() throws Exception {
+  void testListPaymentMethodsDistinctWithinNaturalTree() throws Exception {
     NeoContext context = creditSourcesContext();
     stubInvoiceOrgTree();
 
@@ -401,7 +401,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("Draft creates the payment but does NOT process it")
-  void advancedDraftDoesNotProcess() throws Exception {
+  void testAdvancedDraftDoesNotProcess() throws Exception {
     stubAdvancedBasics();
     stubPendingPSDs(new BigDecimal("100.00"));
     // A draft is created but not processed → the entity still reports processed=false.
@@ -422,7 +422,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("Confirm processes the payment and settles the installment with cash")
-  void advancedConfirmProcessesAndSettles() throws Exception {
+  void testAdvancedConfirmProcessesAndSettles() throws Exception {
     stubAdvancedBasics();
     FIN_PaymentScheduleDetail psd = stubPendingPSDs(new BigDecimal("100.00"));
 
@@ -448,7 +448,7 @@ class PaymentRegistrationServiceAdvancedTest {
   @Test
   @DisplayName("Consuming accumulated credit bumps source usedCredit, links FIN_Payment_Credit, "
       + "and pays the invoice with zero cash")
-  void advancedConsumesAccumulatedCredit() throws Exception {
+  void testAdvancedConsumesAccumulatedCredit() throws Exception {
     stubAdvancedBasics();
     FIN_PaymentScheduleDetail psd = stubPendingPSDs(new BigDecimal("100.00"));
 
@@ -477,7 +477,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("Consuming an abono (credit memo) links it as a negative payment detail")
-  void advancedConsumesAbonoAsNegativeDetail() throws Exception {
+  void testAdvancedConsumesAbonoAsNegativeDetail() throws Exception {
     stubAdvancedBasics();
     stubPendingPSDs(new BigDecimal("100.00"));
 
@@ -506,7 +506,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("Over-payment with leave-credit registers credit and does not refund")
-  void advancedOverpaymentLeaveCredit() throws Exception {
+  void testAdvancedOverpaymentLeaveCredit() throws Exception {
     stubAdvancedBasics();
     stubPendingPSDs(new BigDecimal("100.00"));
 
@@ -526,7 +526,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("Over-payment with refund creates and processes a refund payment for the leftover")
-  void advancedOverpaymentRefund() throws Exception {
+  void testAdvancedOverpaymentRefund() throws Exception {
     stubAdvancedBasics();
     stubPendingPSDs(new BigDecimal("100.00"));
 
@@ -545,7 +545,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("Advanced register rejects an empty installment with no pending PSDs")
-  void advancedEmptyPendingPsdsThrows() throws Exception {
+  void testAdvancedEmptyPendingPsdsThrows() throws Exception {
     stubAdvancedBasics();
     stubPendingPSDs(); // empty
 
@@ -562,7 +562,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("confirmDraftPayment processes the saved draft and returns its status")
-  void confirmDraftPaymentProcesses() throws Exception {
+  void testConfirmDraftPaymentProcesses() throws Exception {
     when(dal.get(FIN_Payment.class, NEW_PAY_ID)).thenReturn(newPayment);
     when(newPayment.isProcessed()).thenReturn(true);
 
@@ -577,7 +577,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("confirmDraftPayment returns 404 when the payment does not exist")
-  void confirmDraftPaymentNotFound() throws Exception {
+  void testConfirmDraftPaymentNotFound() throws Exception {
     when(dal.get(FIN_Payment.class, "missing")).thenReturn(null);
 
     NeoResponse response = PaymentRegistrationService.confirmDraftPayment("missing");
@@ -590,7 +590,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("confirmDraftPayment surfaces a processing error as an exception")
-  void confirmDraftPaymentProcessingError() throws Exception {
+  void testConfirmDraftPaymentProcessingError() throws Exception {
     when(dal.get(FIN_Payment.class, NEW_PAY_ID)).thenReturn(newPayment);
     OBError error = mock(OBError.class);
     when(error.getType()).thenReturn(ERROR_TYPE);
