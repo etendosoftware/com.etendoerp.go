@@ -294,6 +294,7 @@ public class BusinessPartnerHandler implements NeoHandler {
     }
     try {
       JSONObject body = previousResult.getBody();
+      boolean modified = false;
 
       if ("POST".equals(method)) {
         String recordId = extractRecordId(body);
@@ -302,12 +303,13 @@ public class BusinessPartnerHandler implements NeoHandler {
           if (StringUtils.isNotBlank(identifier)) {
             updateSearchKey(recordId, identifier);
             patchSearchKeyInResponse(body, identifier);
+            modified = true;
           }
         }
       }
 
-      injectViesMessage(body);
-      return NeoResponse.ok(body);
+      modified |= injectViesMessage(body);
+      return modified ? NeoResponse.ok(body) : null;
     } catch (Exception e) {
       log.error("BusinessPartnerHandler: error in afterHandle()", e);
       return null;
@@ -319,24 +321,24 @@ public class BusinessPartnerHandler implements NeoHandler {
    * injects a {@code messages} array at the root of the response body so the frontend
    * (useEntity.js, line: {@code data?.messages}) can show the toast.
    */
-  private static void injectViesMessage(JSONObject body) {
+  private static boolean injectViesMessage(JSONObject body) {
     try {
       JSONObject response = body.optJSONObject(RESPONSE_KEY);
       if (response == null) {
-        return;
+        return false;
       }
       JSONArray data = response.optJSONArray("data");
       if (data == null || data.length() == 0) {
-        return;
+        return false;
       }
       JSONObject savedRecord = data.getJSONObject(0);
       String taxIdKey = savedRecord.optString("oBTIKTaxIDKey", null);
       if (!"2".equals(taxIdKey)) {
-        return;
+        return false;
       }
       String viesStatus = savedRecord.optString("oBTIKVIESStatus", null);
       if (viesStatus == null || "P".equals(viesStatus)) {
-        return;
+        return false;
       }
 
       boolean valid = "V".equals(viesStatus);
@@ -348,8 +350,10 @@ public class BusinessPartnerHandler implements NeoHandler {
       JSONArray messages = new JSONArray();
       messages.put(msg);
       body.put("messages", messages);
+      return true;
     } catch (Exception e) {
       log.warn("BusinessPartnerHandler: could not inject VIES message", e);
+      return false;
     }
   }
 
