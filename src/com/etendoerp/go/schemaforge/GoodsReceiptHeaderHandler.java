@@ -33,7 +33,11 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.businesspartner.Location;
 
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 
@@ -77,8 +81,58 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     if (posting != null) {
       return posting;
     }
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && "POST".equals(context.getHttpMethod())
+        && context.getRecordId() == null) {
+      injectPartnerAddressIfMissing(context);
+    }
     return NeoHeaderActionRouter.dispatch(context,
         cloneRecordHandler, createPurchaseInvoiceHandler, createPurchaseReturnHandler);
+  }
+
+  private void injectPartnerAddressIfMissing(NeoContext context) {
+    try {
+      JSONObject body = context.getRequestBody();
+      if (body == null || body.has("partnerAddress")) {
+        return;
+      }
+      String bpId = body.optString("businessPartner", null);
+      if (bpId == null || bpId.isEmpty()) {
+        return;
+      }
+      OBContext.setAdminMode(true);
+      try {
+        Location loc = findShipToLocation(bpId);
+        if (loc == null) {
+          loc = findAnyActiveLocation(bpId);
+        }
+        if (loc != null) {
+          body.put("partnerAddress", loc.getId());
+          log.debug("Injected partnerAddress {} for BP {} on goods receipt create", loc.getId(), bpId);
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.debug("Could not inject partnerAddress for goods receipt: {}", e.getMessage());
+    }
+  }
+
+  private Location findShipToLocation(String bpId) {
+    OBCriteria<Location> crit = OBDal.getInstance().createCriteria(Location.class);
+    crit.add(Restrictions.eq(Location.PROPERTY_BUSINESSPARTNER + ".id", bpId));
+    crit.add(Restrictions.eq(Location.PROPERTY_SHIPTOADDRESS, true));
+    crit.add(Restrictions.eq(Location.PROPERTY_ACTIVE, true));
+    crit.setMaxResults(1);
+    return (Location) crit.uniqueResult();
+  }
+
+  private Location findAnyActiveLocation(String bpId) {
+    OBCriteria<Location> crit = OBDal.getInstance().createCriteria(Location.class);
+    crit.add(Restrictions.eq(Location.PROPERTY_BUSINESSPARTNER + ".id", bpId));
+    crit.add(Restrictions.eq(Location.PROPERTY_ACTIVE, true));
+    crit.setMaxResults(1);
+    return (Location) crit.uniqueResult();
   }
 
   @Override
@@ -146,13 +200,26 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
   }
 
   private static String buildInvoiceStatusSql(String whereClause) {
+    // Three detection paths per receipt line, to handle the full invoice lifecycle:
+    //
+    // msi_qty   — via M_MatchSI: populated by m_inout_post after the receipt is posted.
+    // direct_qty — via c_invoiceline.m_inoutline_id: set by InvoiceLineLinker when the
+    //              invoice was created directly from this receipt.
+    // ol_qty    — via c_orderline_id fallback: covers invoices created from the purchase
+    //              order (not from the receipt) where m_inoutline_id is never set.
+    //              Each line's contribution is capped at movementqty to avoid over-stating
+    //              when the order invoice covers more units than this receipt delivered.
     return
       "SELECT iol.m_inout_id, "
       + "  CASE WHEN SUM(ABS(iol.movementqty)) = 0 THEN 0 "
       + "       ELSE LEAST(100, ROUND("
-      + "         COALESCE(SUM(GREATEST("
-      + "           COALESCE(msi_qty.qtymatched, 0),"
-      + "           COALESCE(direct_qty.qtyinvoiced, 0)"
+      + "         COALESCE(SUM(LEAST("
+      + "           GREATEST("
+      + "             COALESCE(msi_qty.qtymatched, 0),"
+      + "             COALESCE(direct_qty.qtyinvoiced, 0),"
+      + "             COALESCE(ol_qty.qtyinvoiced_via_ol, 0)"
+      + "           ),"
+      + "           ABS(iol.movementqty)"
       + "         )), 0) / SUM(ABS(iol.movementqty)) * 100"
       + "       )) "
       + "  END "
@@ -172,6 +239,16 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
       + "  WHERE i2.docstatus NOT IN ('VO','CL','DR') AND i2.isactive = 'Y' "
       + "  GROUP BY il2.m_inoutline_id "
       + ") direct_qty ON direct_qty.m_inoutline_id = iol.m_inoutline_id "
+      + "LEFT JOIN ("
+      + "  SELECT iol2.m_inoutline_id, SUM(ABS(il3.qtyinvoiced)) AS qtyinvoiced_via_ol "
+      + "  FROM c_invoiceline il3 "
+      + "  JOIN c_invoice i3 ON i3.c_invoice_id = il3.c_invoice_id "
+      + "  JOIN m_inoutline iol2 ON iol2.c_orderline_id = il3.c_orderline_id "
+      + "  WHERE i3.docstatus NOT IN ('VO','CL','DR') AND i3.isactive = 'Y' "
+      + "    AND il3.m_inoutline_id IS NULL "
+      + "    AND il3.c_orderline_id IS NOT NULL "
+      + "  GROUP BY iol2.m_inoutline_id "
+      + ") ol_qty ON ol_qty.m_inoutline_id = iol.m_inoutline_id "
       + "WHERE iol.isactive = 'Y' AND " + whereClause + " "
       + "GROUP BY iol.m_inout_id";
   }
