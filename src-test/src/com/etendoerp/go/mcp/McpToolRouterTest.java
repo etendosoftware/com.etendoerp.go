@@ -59,6 +59,7 @@ public class McpToolRouterTest {
   private static final String TOOL_NEO_BATCH = "neo_batch";
   private static final String TOOL_COMPLETE_ORDER = "complete_order";
   private static final String TOOL_GENERATE_INVOICE = "generate_invoice_report";
+  private static final String TOOL_DOCS = "docs";
 
   // ── wrapAsTextContent ──────────────────────────────────────────────────
 
@@ -537,6 +538,24 @@ public class McpToolRouterTest {
   @Test(expected = OBSecurityException.class)
   public void testAuthorizeToolCallRejectsBlankToolName() {
     McpAuthorizationService.authorizeToolCall("   ", Set.of("neo:*"));
+  }
+
+  /** Tests that the docs tool requires read scope at execution time. */
+  @Test(expected = OBSecurityException.class)
+  public void testAuthorizeToolCallRejectsDocsWithoutReadScope() {
+    McpAuthorizationService.authorizeToolCall(TOOL_DOCS, Set.of("neo:process"));
+  }
+
+  /** Tests that read scope allows the docs tool. */
+  @Test
+  public void testAuthorizeToolCallAllowsDocsWithReadScope() {
+    McpAuthorizationService.authorizeToolCall(TOOL_DOCS, Set.of("neo:read"));
+  }
+
+  /** Tests that the wildcard scope allows the docs tool. */
+  @Test
+  public void testAuthorizeToolCallAllowsDocsWithWildcardScope() {
+    McpAuthorizationService.authorizeToolCall(TOOL_DOCS, Set.of("neo:*"));
   }
 
   // ── McpAuthorizationService.parseScopes ───────────────────────────────
