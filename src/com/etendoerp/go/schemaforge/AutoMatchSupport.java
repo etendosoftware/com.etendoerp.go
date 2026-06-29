@@ -151,7 +151,7 @@ final class AutoMatchSupport {
       return true;
     }
     long diffMs = Math.abs(a.getTime() - b.getTime());
-    return diffMs <= (long) days * 86_400_000L;
+    return diffMs <= days * 86_400_000L;
   }
 
   /**
