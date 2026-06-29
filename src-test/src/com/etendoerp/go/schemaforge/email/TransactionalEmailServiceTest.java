@@ -27,6 +27,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -337,6 +342,40 @@ public class TransactionalEmailServiceTest {
   }
 
   @Test
+  public void suppressesConcurrentDuplicateBeforeSecondProviderSend() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{\"id\":\"provider-id\"}")).withDelayMillis(150);
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    TransactionalEmailService service = service(new FixtureContract(), adapter, safetyStore);
+    JSONObject command = new JSONObject();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "ABC123");
+    command.put(EmailContractCommandSupport.FIELD_IDEMPOTENCY_KEY, "fixture:ABC123:v1");
+    CountDownLatch ready = new CountDownLatch(2);
+    CountDownLatch start = new CountDownLatch(1);
+    ExecutorService executor = Executors.newFixedThreadPool(2);
+    try {
+      Future<NeoResponse> first = executor.submit(() -> sendAfterStart(service, command, ready,
+          start));
+      Future<NeoResponse> second = executor.submit(() -> sendAfterStart(service, command, ready,
+          start));
+      assertTrue("Both workers should be ready", ready.await(1, TimeUnit.SECONDS));
+      start.countDown();
+
+      NeoResponse firstResponse = first.get(2, TimeUnit.SECONDS);
+      NeoResponse secondResponse = second.get(2, TimeUnit.SECONDS);
+
+      List<String> statuses = Arrays.asList(responseData(firstResponse).getString("status"),
+          responseData(secondResponse).getString("status"));
+      assertTrue(statuses.contains(TransactionalEmailService.STATUS_SENT));
+      assertTrue(statuses.contains(TransactionalEmailService.STATUS_DUPLICATE));
+      assertEquals(1, adapter.getSendCount());
+      assertEquals(2, safetyStore.getAuditRecords().size());
+    } finally {
+      executor.shutdownNow();
+    }
+  }
+
+  @Test
   public void recordsDuplicateObservability() throws Exception {
     FakeProviderAdapter adapter = new FakeProviderAdapter(true,
         new EmailProviderResponse(202, "{\"id\":\"provider-id\"}"));
@@ -600,6 +639,13 @@ public class TransactionalEmailServiceTest {
       EmailObservabilitySink observabilitySink) {
     return new TransactionalEmailService(new SingleContractRegistry(contract), adapter,
         safetyStore, observabilitySink);
+  }
+
+  private static NeoResponse sendAfterStart(TransactionalEmailService service, JSONObject command,
+      CountDownLatch ready, CountDownLatch start) throws Exception {
+    ready.countDown();
+    start.await(1, TimeUnit.SECONDS);
+    return service.send("fixture-contract", new JSONObject(command.toString()));
   }
 
   private static class SingleContractRegistry implements EmailContractRegistry {
@@ -873,6 +919,7 @@ public class TransactionalEmailServiceTest {
     private EmailProviderRequest lastRequest;
     private boolean supportsMultipleRecipients;
     private boolean supportsCcChannel;
+    private long delayMillis;
 
     FakeProviderAdapter(boolean configured, EmailProviderResponse response) {
       this.configured = configured;
@@ -882,6 +929,11 @@ public class TransactionalEmailServiceTest {
     FakeProviderAdapter withMultiRecipientCapabilities() {
       this.supportsMultipleRecipients = true;
       this.supportsCcChannel = true;
+      return this;
+    }
+
+    FakeProviderAdapter withDelayMillis(long delayMillis) {
+      this.delayMillis = delayMillis;
       return this;
     }
 
@@ -901,22 +953,31 @@ public class TransactionalEmailServiceTest {
     }
 
     @Override
-    public EmailProviderResponse send(EmailProviderRequest request) throws IOException {
+    public synchronized EmailProviderResponse send(EmailProviderRequest request)
+        throws IOException {
       sendCalled = true;
       sendCount++;
       lastRequest = request;
+      if (delayMillis > 0L) {
+        try {
+          Thread.sleep(delayMillis);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+          throw new IOException("Interrupted while sending fake email", e);
+        }
+      }
       return response;
     }
 
-    boolean wasSendCalled() {
+    synchronized boolean wasSendCalled() {
       return sendCalled;
     }
 
-    EmailProviderRequest getLastRequest() {
+    synchronized EmailProviderRequest getLastRequest() {
       return lastRequest;
     }
 
-    int getSendCount() {
+    synchronized int getSendCount() {
       return sendCount;
     }
   }
