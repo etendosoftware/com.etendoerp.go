@@ -25,6 +25,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
+import org.openbravo.erpCommon.utility.OBMessageUtils;
+
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -561,5 +563,294 @@ class BusinessPartnerHandlerTest {
     when(ctx.getPreviousResult()).thenReturn(prevResult);
 
     assertNull(handler.afterHandle(ctx));
+  }
+
+  // ── afterHandle() — DELETE guard ─────────────────────────────────────────
+
+  /**
+   * DELETE is not a write method — afterHandle must return {@code null} immediately.
+   */
+  @Test
+  void testAfterHandleDeleteReturnsNull() {
+    when(ctx.getHttpMethod()).thenReturn("DELETE");
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  // ── afterHandle() — injectViesMessage: guard paths ──────────────────────
+
+  /**
+   * When the response body has no "response" key, injectViesMessage returns false
+   * and afterHandle returns null (PUT path — no searchKey update).
+   */
+  @Test
+  void testAfterHandlePutNoViesMessageWhenBodyHasNoResponseKey() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("someOtherKey", "value");
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  /**
+   * When the response data array is empty, injectViesMessage returns false
+   * and afterHandle returns null.
+   */
+  @Test
+  void testAfterHandlePutNoViesMessageWhenDataArrayIsEmpty() throws Exception {
+    JSONObject response = new JSONObject();
+    response.put("data", new JSONArray());
+    JSONObject body = new JSONObject();
+    body.put("response", response);
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  /**
+   * When oBTIKTaxIDKey != "2", injectViesMessage must skip message injection
+   * and afterHandle returns null (no searchKey patch on PUT).
+   */
+  @Test
+  void testAfterHandlePutNoViesMessageWhenTaxKeyNotNOI() throws Exception {
+    JSONObject record = new JSONObject();
+    record.put("id", "REC_ID");
+    record.put("oBTIKTaxIDKey", "1");
+    record.put("oBTIKVIESStatus", "V");
+    JSONArray data = new JSONArray();
+    data.put(record);
+    JSONObject response = new JSONObject();
+    response.put("data", data);
+    JSONObject body = new JSONObject();
+    body.put("response", response);
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    assertNull(handler.afterHandle(ctx));
+    assertNull(body.optJSONArray("messages"));
+  }
+
+  /**
+   * When oBTIKVIESStatus = "P" (pending), injectViesMessage must not inject a message.
+   */
+  @Test
+  void testAfterHandlePutNoViesMessageWhenStatusIsPending() throws Exception {
+    JSONObject record = new JSONObject();
+    record.put("id", "REC_ID");
+    record.put("oBTIKTaxIDKey", "2");
+    record.put("oBTIKVIESStatus", "P");
+    JSONArray data = new JSONArray();
+    data.put(record);
+    JSONObject response = new JSONObject();
+    response.put("data", data);
+    JSONObject body = new JSONObject();
+    body.put("response", response);
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    assertNull(handler.afterHandle(ctx));
+    assertNull(body.optJSONArray("messages"));
+  }
+
+  /**
+   * When oBTIKVIESStatus is absent (null), injectViesMessage must not inject a message.
+   */
+  @Test
+  void testAfterHandlePutNoViesMessageWhenStatusIsNull() throws Exception {
+    JSONObject record = new JSONObject();
+    record.put("id", "REC_ID");
+    record.put("oBTIKTaxIDKey", "2");
+    JSONArray data = new JSONArray();
+    data.put(record);
+    JSONObject response = new JSONObject();
+    response.put("data", data);
+    JSONObject body = new JSONObject();
+    body.put("response", response);
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    assertNull(handler.afterHandle(ctx));
+    assertNull(body.optJSONArray("messages"));
+  }
+
+  // ── afterHandle() — injectViesMessage: message injection paths ───────────
+
+  /**
+   * Builds a POST response body containing a record with the given tax key and VIES status.
+   */
+  private static JSONObject buildViesBody(String taxIdKey, String viesStatus) throws Exception {
+    JSONObject record = new JSONObject();
+    record.put("id", "REC_ID");
+    if (taxIdKey != null) {
+      record.put("oBTIKTaxIDKey", taxIdKey);
+    }
+    if (viesStatus != null) {
+      record.put("oBTIKVIESStatus", viesStatus);
+    }
+    JSONArray data = new JSONArray();
+    data.put(record);
+    JSONObject response = new JSONObject();
+    response.put("data", data);
+    JSONObject body = new JSONObject();
+    body.put("response", response);
+    return body;
+  }
+
+  /**
+   * When PUT body has oBTIKTaxIDKey = "2" and oBTIKVIESStatus = "V",
+   * injectViesMessage must inject a "success" message.
+   */
+  @Test
+  void testAfterHandlePutInjectsViesSuccessMessageForValidStatus() throws Exception {
+    JSONObject body = buildViesBody("2", "V");
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    try (MockedStatic<OBMessageUtils> mMsg = mockStatic(OBMessageUtils.class)) {
+      mMsg.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("msg");
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONArray messages = body.optJSONArray("messages");
+      assertNotNull(messages);
+      assertEquals(1, messages.length());
+      assertEquals("success", messages.getJSONObject(0).getString("type"));
+    }
+  }
+
+  /**
+   * When PUT body has oBTIKTaxIDKey = "2" and oBTIKVIESStatus = "I",
+   * injectViesMessage must inject a "warning" message.
+   */
+  @Test
+  void testAfterHandlePutInjectsViesWarningMessageForInvalidStatus() throws Exception {
+    JSONObject body = buildViesBody("2", "I");
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    try (MockedStatic<OBMessageUtils> mMsg = mockStatic(OBMessageUtils.class)) {
+      mMsg.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("msg");
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONArray messages = body.optJSONArray("messages");
+      assertNotNull(messages);
+      assertEquals(1, messages.length());
+      assertEquals("warning", messages.getJSONObject(0).getString("type"));
+    }
+  }
+
+  /**
+   * On POST with oBTIKTaxIDKey = "2" and oBTIKVIESStatus = "V", afterHandle must
+   * run both the searchKey lookup (returning blank) and injectViesMessage,
+   * returning a non-null response with a "success" message.
+   */
+  @Test
+  void testAfterHandlePostInjectsViesSuccessMessageWhenIdentifierIsBlank() throws Exception {
+    JSONObject body = buildViesBody("2", "V");
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psMock = mock(PreparedStatement.class);
+    ResultSet rsMock = mock(ResultSet.class);
+    when(rsMock.next()).thenReturn(false);
+    when(psMock.executeQuery()).thenReturn(rsMock);
+    when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class);
+         MockedStatic<OBMessageUtils> mMsg = mockStatic(OBMessageUtils.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+      mMsg.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("msg");
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONArray messages = body.optJSONArray("messages");
+      assertNotNull(messages);
+      assertEquals("success", messages.getJSONObject(0).getString("type"));
+    }
+  }
+
+  /**
+   * On POST with oBTIKTaxIDKey != "2", no message is injected and afterHandle returns
+   * null when the identifier lookup is also blank.
+   */
+  @Test
+  void testAfterHandlePostNoViesMessageWhenTaxKeyNotNOI() throws Exception {
+    JSONObject body = buildViesBody("1", "V");
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    Connection connMock = mock(Connection.class);
+    PreparedStatement psMock = mock(PreparedStatement.class);
+    ResultSet rsMock = mock(ResultSet.class);
+    when(rsMock.next()).thenReturn(false);
+    when(psMock.executeQuery()).thenReturn(rsMock);
+    when(connMock.prepareStatement(anyString())).thenReturn(psMock);
+
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      assertNull(handler.afterHandle(ctx));
+      assertNull(body.optJSONArray("messages"));
+    }
+  }
+
+  /**
+   * On PATCH with oBTIKTaxIDKey = "2" and oBTIKVIESStatus = "I", afterHandle
+   * must inject a "warning" message (PATCH is now treated as a write method).
+   */
+  @Test
+  void testAfterHandlePatchInjectsViesWarningMessage() throws Exception {
+    JSONObject body = buildViesBody("2", "I");
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    try (MockedStatic<OBMessageUtils> mMsg = mockStatic(OBMessageUtils.class)) {
+      mMsg.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("msg");
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      assertEquals("warning", body.getJSONArray("messages").getJSONObject(0).getString("type"));
+    }
   }
 }
