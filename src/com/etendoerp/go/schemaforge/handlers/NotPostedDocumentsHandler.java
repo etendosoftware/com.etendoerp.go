@@ -219,63 +219,48 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   }
 
   /**
-   * Translates the flat frontend query params into the SmartClient AdvancedCriteria format
-   * expected by {@link NoPostedDocumentDS#getData}.
+   * Translates frontend query params into the flat param map expected by
+   * {@link NoPostedDocumentDS#getData}. Field names are read directly from the params
+   * map by the datasource — no AdvancedCriteria wrapping.
+   *
+   * <p>Key mapping (datasource param → frontend param):
+   * <ul>
+   *   <li>{@code _org}            ← current OBContext organisation</li>
+   *   <li>{@code accounting_status} ← {@code accountingStatus} (JSON string array)</li>
+   *   <li>{@code document}        ← {@code document}</li>
+   *   <li>{@code DateFrom}        ← {@code dateFrom}</li>
+   *   <li>{@code DateTo}          ← {@code dateTo}</li>
+   * </ul>
    */
   private Map<String, String> buildDsParams(Map<String, String> params) throws Exception {
     Map<String, String> dsParams = new HashMap<>();
-    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
-    dsParams.put("org", orgId);
-
-    JSONArray criteria = new JSONArray();
+    dsParams.put("_org", OBContext.getOBContext().getCurrentOrganization().getId());
 
     String document = params.get("document");
     if (document != null && !document.isEmpty()) {
-      criteria.put(criterion("document", "iEquals", document));
+      dsParams.put("document", document);
     }
 
     String accountingStatus = params.get(KEY_ACCOUNTING_STATUS);
     if (accountingStatus != null && !accountingStatus.isEmpty()) {
-      // May be a comma-separated list from multi-select
-      String[] statuses = accountingStatus.split(",");
-      if (statuses.length == 1) {
-        criteria.put(criterion(KEY_ACCOUNTING_STATUS, "iEquals", accountingStatus.trim()));
-      } else {
-        JSONArray values = new JSONArray();
-        for (String s : statuses) {
-          values.put(s.trim());
-        }
-        criteria.put(criterion(KEY_ACCOUNTING_STATUS, "inSet", values));
+      JSONArray arr = new JSONArray();
+      for (String s : accountingStatus.split(",")) {
+        arr.put(s.trim());
       }
+      dsParams.put("accounting_status", arr.toString());
     }
 
     String dateFrom = params.get("dateFrom");
     if (dateFrom != null && !dateFrom.isEmpty()) {
-      criteria.put(criterion("accountingDate", "greaterOrEqual", dateFrom));
+      dsParams.put("DateFrom", dateFrom);
     }
 
     String dateTo = params.get("dateTo");
     if (dateTo != null && !dateTo.isEmpty()) {
-      criteria.put(criterion("accountingDate", "lessOrEqual", dateTo));
-    }
-
-    if (criteria.length() > 0) {
-      JSONObject advancedCriteria = new JSONObject();
-      advancedCriteria.put("_constructor", "AdvancedCriteria");
-      advancedCriteria.put("operator", "and");
-      advancedCriteria.put("criteria", criteria);
-      dsParams.put("criteria", advancedCriteria.toString());
+      dsParams.put("DateTo", dateTo);
     }
 
     return dsParams;
-  }
-
-  private static JSONObject criterion(String field, String operator, Object value) throws Exception {
-    JSONObject c = new JSONObject();
-    c.put("fieldName", field);
-    c.put("operator", operator);
-    c.put("value", value);
-    return c;
   }
 
   // ── ACTION ────────────────────────────────────────────────────────────────────
