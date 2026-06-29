@@ -404,6 +404,49 @@ public class FinancialAccountsPageHandlerTest {
   }
 
   /**
+   * Verifies that {@code loadAccounts()} maps columns 12 ({@code em_etgo_date_tolerance}) and 13
+   * ({@code em_etgo_amount_tolerance}) via COALESCE into the {@link AccountRow#dateTolerance} and
+   * {@link AccountRow#amountTolerance} fields. The COALESCE in the SQL means the DB never returns
+   * NULL for these columns, but the Java side also guards for null (column 13 is BigDecimal).
+   *
+   * @throws Exception
+   *     if the mocked JDBC chain fails
+   */
+  @Test
+  public void testLoadAccountsReadsToleranceColumns() throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(java.sql.Array.class));
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, false);
+    when(rs.getString(1)).thenReturn("acc-tol");
+    when(rs.getString(8)).thenReturn("N");
+    when(rs.getString(9)).thenReturn("Y");
+    when(rs.getString(11)).thenReturn("CO");
+    // Column 12: dateTolerance = 5 (non-default)
+    when(rs.getInt(12)).thenReturn(5);
+    // Column 13: amountTolerance = 2.50 (non-default)
+    when(rs.getBigDecimal(13)).thenReturn(new BigDecimal("2.50"));
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenReturn(conn);
+
+      List<AccountRow> rows = handler.loadAccounts(CLIENT_ID, ORGS);
+
+      assertEquals(1, rows.size());
+      AccountRow row = rows.get(0);
+      assertEquals("dateTolerance column 12 read correctly", 5, row.dateTolerance);
+      assertEquals("amountTolerance column 13 read correctly",
+          0, new BigDecimal("2.50").compareTo(row.amountTolerance));
+    }
+  }
+
+  /**
    * Verifies that {@code buildAccountsArray()} emits the {@code active} flag for
    * each row: active accounts serialise {@code true}, archived ones serialise
    * {@code false}, so the UI can split them into the normal and "inactive"
@@ -715,6 +758,55 @@ public class FinancialAccountsPageHandlerTest {
 
       assertTrue("expected empty pending map", result.isEmpty());
     }
+  }
+
+  // ── Tolerance fields (dateTolerance / amountTolerance) ───────────────────
+
+  /**
+   * Verifies that {@code buildAccountsArray()} serialises the {@code dateTolerance} and
+   * {@code amountTolerance} fields from the {@link AccountRow} into the row JSON so the
+   * reconciliation UI can read the per-account matching settings without a second request.
+   * The default values (3 days, 0%) are emitted when the DB columns return NULL (COALESCE).
+   *
+   * @throws Exception
+   *     if the JSON traversal fails
+   */
+  @Test
+  public void testBuildAccountsArrayEmitsToleranceFieldsWithDefaults() throws Exception {
+    // AccountRow constructor initialises dateTolerance=3 and amountTolerance=0 — the
+    // COALESCE defaults the DB returns when the columns are NULL.
+    List<AccountRow> accounts = Arrays.asList(
+        account("acc-tol", "BBVA", "B", new BigDecimal("100.00"), "EUR"));
+
+    JSONArray arr = handler.buildAccountsArray(accounts, Collections.emptyMap());
+
+    JSONObject row = arr.getJSONObject(0);
+    assertTrue("dateTolerance field must be present", row.has("dateTolerance"));
+    assertTrue("amountTolerance field must be present", row.has("amountTolerance"));
+    assertEquals("default dateTolerance is 3 days", 3, row.getInt("dateTolerance"));
+    assertEquals("default amountTolerance is 0",
+        0, BigDecimal.ZERO.compareTo(new BigDecimal(row.getString("amountTolerance"))));
+  }
+
+  /**
+   * Verifies that a non-default tolerance (e.g. set by the user in the account settings)
+   * is faithfully propagated into the JSON row — the field is not hard-coded to the default.
+   *
+   * @throws Exception
+   *     if the JSON traversal fails
+   */
+  @Test
+  public void testBuildAccountsArrayEmitsCustomToleranceValues() throws Exception {
+    AccountRow acc = account("acc-custom-tol", "Caja", "C", new BigDecimal("50.00"), "EUR");
+    acc.dateTolerance = 7;
+    acc.amountTolerance = new BigDecimal("1.50");
+
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(acc), Collections.emptyMap());
+
+    JSONObject row = arr.getJSONObject(0);
+    assertEquals("custom dateTolerance serialised", 7, row.getInt("dateTolerance"));
+    assertEquals("custom amountTolerance serialised",
+        0, new BigDecimal("1.50").compareTo(new BigDecimal(row.getString("amountTolerance"))));
   }
 
   // ── nullSafeBigDecimal() helper ──────────────────────────────────────────
