@@ -620,12 +620,12 @@ class BusinessPartnerHandlerTest {
    */
   @Test
   void testAfterHandlePutNoViesMessageWhenTaxKeyNotNOI() throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("id", "REC_ID");
-    record.put("oBTIKTaxIDKey", "1");
-    record.put("oBTIKVIESStatus", "V");
+    JSONObject savedRecord = new JSONObject();
+    savedRecord.put("id", "REC_ID");
+    savedRecord.put("oBTIKTaxIDKey", "1");
+    savedRecord.put("oBTIKVIESStatus", "V");
     JSONArray data = new JSONArray();
-    data.put(record);
+    data.put(savedRecord);
     JSONObject response = new JSONObject();
     response.put("data", data);
     JSONObject body = new JSONObject();
@@ -645,12 +645,12 @@ class BusinessPartnerHandlerTest {
    */
   @Test
   void testAfterHandlePutNoViesMessageWhenStatusIsPending() throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("id", "REC_ID");
-    record.put("oBTIKTaxIDKey", "2");
-    record.put("oBTIKVIESStatus", "P");
+    JSONObject savedRecord = new JSONObject();
+    savedRecord.put("id", "REC_ID");
+    savedRecord.put("oBTIKTaxIDKey", "2");
+    savedRecord.put("oBTIKVIESStatus", "P");
     JSONArray data = new JSONArray();
-    data.put(record);
+    data.put(savedRecord);
     JSONObject response = new JSONObject();
     response.put("data", data);
     JSONObject body = new JSONObject();
@@ -670,11 +670,11 @@ class BusinessPartnerHandlerTest {
    */
   @Test
   void testAfterHandlePutNoViesMessageWhenStatusIsNull() throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("id", "REC_ID");
-    record.put("oBTIKTaxIDKey", "2");
+    JSONObject savedRecord = new JSONObject();
+    savedRecord.put("id", "REC_ID");
+    savedRecord.put("oBTIKTaxIDKey", "2");
     JSONArray data = new JSONArray();
-    data.put(record);
+    data.put(savedRecord);
     JSONObject response = new JSONObject();
     response.put("data", data);
     JSONObject body = new JSONObject();
@@ -695,16 +695,16 @@ class BusinessPartnerHandlerTest {
    * Builds a POST response body containing a record with the given tax key and VIES status.
    */
   private static JSONObject buildViesBody(String taxIdKey, String viesStatus) throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("id", "REC_ID");
+    JSONObject savedRecord = new JSONObject();
+    savedRecord.put("id", "REC_ID");
     if (taxIdKey != null) {
-      record.put("oBTIKTaxIDKey", taxIdKey);
+      savedRecord.put("oBTIKTaxIDKey", taxIdKey);
     }
     if (viesStatus != null) {
-      record.put("oBTIKVIESStatus", viesStatus);
+      savedRecord.put("oBTIKVIESStatus", viesStatus);
     }
     JSONArray data = new JSONArray();
-    data.put(record);
+    data.put(savedRecord);
     JSONObject response = new JSONObject();
     response.put("data", data);
     JSONObject body = new JSONObject();
