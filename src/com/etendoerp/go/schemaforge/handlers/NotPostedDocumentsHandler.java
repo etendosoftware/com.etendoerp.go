@@ -69,8 +69,30 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   /** AD_Reference ID for the Document type selector (ETBLKP_Documents). */
   static final String DOCUMENT_TYPE_REF_ID = "DE94535164E741AB9B1A560EF3F72854";
 
-  /** AD_Reference ID for the Accounting status selector. */
-  static final String ACCOUNTING_STATUS_REF_ID = "D674E22A40DE4CEE931AB96F4CD914F9";
+  /** AD_Reference ID for the Accounting status selector (ETBLKP_All_Accounting Status). */
+  static final String ACCOUNTING_STATUS_REF_ID = "D431058F6B7345598D1E0709DFF3B5DD";
+
+  /**
+   * Curated subset of accounting statuses shown in the UI filter.
+   * Each entry is { value, fallbackLabel }. "E,C" is a composite: both Error (E) and
+   * Error-No-Cost (C) are matched server-side when this option is selected.
+   *
+   * Excluded from UI (all present in ETBLKP_All_Accounting Status but not actionable
+   * from the Not Posted Documents view):
+   *   y  = Post Prepared        d  = Disabled For Background
+   *   DT = No Document Type     L  = Document Locked
+   *   AD = No Accounting Date   Y  = Posted
+   *   D  = Document Disabled    NO = No Related PO
+   *   l  = Pending Refresh      c  = Not Convertible (no rate)
+   *   b  = Not Balanced         NC = Cost Not Calculated
+   *   T  = Table Disabled
+   */
+  private static final String[][] ACCOUNTING_STATUS_FILTER_OPTIONS = {
+      { "N",   "Unposted"        },
+      { "E,C", "Error"           },   // E = Error, C = Error-No-Cost (unified)
+      { "i",   "Invalid Account" },
+      { "p",   "Period Closed"   },
+  };
 
   private static final String KEY_TABLE_ID = "tableId";
   private static final String KEY_ACCOUNTING_STATUS = "accountingStatus";
@@ -135,8 +157,34 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   private NeoResponse buildFilterOptions() throws Exception {
     JSONObject body = new JSONObject();
     body.put("documentTypes", refListOptions(DOCUMENT_TYPE_REF_ID));
-    body.put("accountingStatuses", refListOptions(ACCOUNTING_STATUS_REF_ID));
+    body.put("accountingStatuses", buildAccountingStatusOptions());
     return NeoResponse.ok(body);
+  }
+
+  private JSONArray buildAccountingStatusOptions() throws Exception {
+    Map<String, String> labels = refListLabels(ACCOUNTING_STATUS_REF_ID);
+    JSONArray arr = new JSONArray();
+    for (String[] opt : ACCOUNTING_STATUS_FILTER_OPTIONS) {
+      String firstKey = opt[0].split(",")[0];
+      JSONObject o = new JSONObject();
+      o.put("value", opt[0]);
+      o.put("label", labels.getOrDefault(firstKey, opt[1]));
+      arr.put(o);
+    }
+    return arr;
+  }
+
+  private Map<String, String> refListLabels(String referenceId) throws Exception {
+    Map<String, String> result = new HashMap<>();
+    Reference ref = OBDal.getInstance().get(Reference.class, referenceId);
+    if (ref == null) return result;
+    String lang = OBContext.getOBContext().getLanguage().getLanguage();
+    for (org.openbravo.model.ad.domain.List item : ref.getADListList()) {
+      if (!item.isActive()) continue;
+      String label = getTranslatedName(item, lang);
+      result.put(item.getSearchKey(), label != null ? label : item.getName());
+    }
+    return result;
   }
 
   /** Thin subclass that promotes {@code getData} from protected to package-accessible. */
