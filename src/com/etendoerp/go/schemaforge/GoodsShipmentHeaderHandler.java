@@ -321,7 +321,8 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       "       ELSE LEAST(100, ROUND( " +
       "         COALESCE(SUM(GREATEST( " +
       "           COALESCE(msi_qty.qtymatched, 0), " +
-      "           COALESCE(direct_qty.qtyinvoiced, 0) " +
+      "           COALESCE(direct_qty.qtyinvoiced, 0), " +
+      "           COALESCE(ol_qty.qtyinvoiced, 0) " +
       "         )), 0) / SUM(ABS(iol.movementqty)) * 100 " +
       "       )) " +
       "  END " +
@@ -341,6 +342,19 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       "  WHERE i2.docstatus NOT IN ('VO','CL','DR') AND i2.isactive = 'Y' " +
       "  GROUP BY il2.m_inoutline_id " +
       ") direct_qty ON direct_qty.m_inoutline_id = iol.m_inoutline_id " +
+      // Invoice created from the order (m_inoutline_id is NULL on the invoice line):
+      // join via c_orderline_id to find the shipment line.
+      "LEFT JOIN ( " +
+      "  SELECT iol2.m_inoutline_id, SUM(ABS(il3.qtyinvoiced)) AS qtyinvoiced " +
+      "  FROM c_invoiceline il3 " +
+      "  JOIN c_invoice i3 ON i3.c_invoice_id = il3.c_invoice_id " +
+      "  JOIN m_inoutline iol2 ON iol2.c_orderline_id = il3.c_orderline_id " +
+      "                        AND iol2.isactive = 'Y' " +
+      "  WHERE i3.docstatus NOT IN ('VO','CL','DR') AND i3.isactive = 'Y' " +
+      "    AND il3.c_orderline_id IS NOT NULL " +
+      "    AND il3.m_inoutline_id IS NULL " +
+      "  GROUP BY iol2.m_inoutline_id " +
+      ") ol_qty ON ol_qty.m_inoutline_id = iol.m_inoutline_id " +
       "WHERE iol.isactive = 'Y' AND " + whereClause + " " +
       "GROUP BY iol.m_inout_id";
   }

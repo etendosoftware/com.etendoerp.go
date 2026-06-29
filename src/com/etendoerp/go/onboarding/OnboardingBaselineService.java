@@ -87,9 +87,9 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R7 tax-accounts (2026-06-17).
+   * Current watermark: R8 account-codes-8digits (2026-06-26).
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-06-17T12:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-06-26T12:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("

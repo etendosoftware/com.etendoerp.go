@@ -97,7 +97,7 @@ class PaymentDetailsHandlerTest {
 
     @Test
     @DisplayName("Non-CRUD endpoint returns null")
-    void nonCrudEndpointReturnsNull() {
+    void testNonCrudEndpointReturnsNull() {
       NeoContext ctx = NeoContext.builder()
           .httpMethod("GET")
           .endpointType(NeoEndpointType.SELECTOR)
@@ -107,7 +107,7 @@ class PaymentDetailsHandlerTest {
 
     @Test
     @DisplayName("POST request returns null")
-    void postRequestReturnsNull() {
+    void testPostRequestReturnsNull() {
       NeoContext ctx = NeoContext.builder()
           .httpMethod("POST")
           .endpointType(NeoEndpointType.CRUD)
@@ -117,7 +117,7 @@ class PaymentDetailsHandlerTest {
 
     @Test
     @DisplayName("GET with recordId returns null")
-    void getWithRecordIdReturnsNull() {
+    void testGetWithRecordIdReturnsNull() {
       NeoContext ctx = NeoContext.builder()
           .httpMethod("GET")
           .endpointType(NeoEndpointType.CRUD)
@@ -128,7 +128,7 @@ class PaymentDetailsHandlerTest {
 
     @Test
     @DisplayName("GET list with null parentId returns empty response")
-    void getListNullParentIdReturnsEmpty() throws Exception {
+    void testGetListNullParentIdReturnsEmpty() throws Exception {
       Map<String, String> params = new HashMap<>();
       NeoContext ctx = NeoContext.builder()
           .httpMethod("GET")
@@ -148,7 +148,7 @@ class PaymentDetailsHandlerTest {
 
     @Test
     @DisplayName("GET list with empty parentId returns empty response")
-    void getListEmptyParentIdReturnsEmpty() throws Exception {
+    void testGetListEmptyParentIdReturnsEmpty() throws Exception {
       Map<String, String> params = new HashMap<>();
       params.put("parentId", "");
       NeoContext ctx = NeoContext.builder()
@@ -169,7 +169,7 @@ class PaymentDetailsHandlerTest {
 
     @Test
     @DisplayName("GET list with null queryParams returns empty response")
-    void getListNullQueryParamsReturnsEmpty() throws Exception {
+    void testGetListNullQueryParamsReturnsEmpty() throws Exception {
       NeoContext ctx = NeoContext.builder()
           .httpMethod("GET")
           .endpointType(NeoEndpointType.CRUD)
@@ -193,7 +193,7 @@ class PaymentDetailsHandlerTest {
     @Test
     @DisplayName("Returns all fields when payment detail and payment are present")
     @SuppressWarnings("unchecked")
-    void fullPaymentDetailsReturnsAllFields() throws Exception {
+    void testFullPaymentDetailsReturnsAllFields() throws Exception {
       String parentId = "schedule-123";
       Map<String, String> params = new HashMap<>();
       params.put("parentId", parentId);
@@ -266,7 +266,7 @@ class PaymentDetailsHandlerTest {
     @Test
     @DisplayName("Null payment detail: only base fields returned")
     @SuppressWarnings("unchecked")
-    void nullPaymentDetailReturnsOnlyBaseFields() throws Exception {
+    void testNullPaymentDetailReturnsOnlyBaseFields() throws Exception {
       String parentId = "schedule-456";
       Map<String, String> params = new HashMap<>();
       params.put("parentId", parentId);
@@ -308,7 +308,7 @@ class PaymentDetailsHandlerTest {
     @Test
     @DisplayName("Null payment method and account: identifier returns empty string")
     @SuppressWarnings("unchecked")
-    void nullPaymentMethodAndAccountReturnsEmptyIdentifier() throws Exception {
+    void testNullPaymentMethodAndAccountReturnsEmptyIdentifier() throws Exception {
       String parentId = "schedule-789";
       Map<String, String> params = new HashMap<>();
       params.put("parentId", parentId);
@@ -360,7 +360,7 @@ class PaymentDetailsHandlerTest {
     @Test
     @DisplayName("Multiple payment schedule details returned in data array")
     @SuppressWarnings("unchecked")
-    void multipleDetailsReturnedCorrectly() throws Exception {
+    void testMultipleDetailsReturnedCorrectly() throws Exception {
       String parentId = "schedule-multi";
       Map<String, String> params = new HashMap<>();
       params.put("parentId", parentId);
@@ -407,7 +407,7 @@ class PaymentDetailsHandlerTest {
 
   @Test
   @DisplayName("formatDate converts Date to dd-MM-yyyy format")
-  void formatDateConvertsToDdMmYyyy() throws Exception {
+  void testFormatDateConvertsToDdMmYyyy() throws Exception {
     Method formatDate = PaymentDetailsHandler.class.getDeclaredMethod("formatDate", Date.class);
     formatDate.setAccessible(true);
 
@@ -419,7 +419,7 @@ class PaymentDetailsHandlerTest {
 
   @Test
   @DisplayName("formatDate handles end-of-year date correctly")
-  void formatDateEndOfYear() throws Exception {
+  void testFormatDateEndOfYear() throws Exception {
     Method formatDate = PaymentDetailsHandler.class.getDeclaredMethod("formatDate", Date.class);
     formatDate.setAccessible(true);
 
@@ -434,7 +434,7 @@ class PaymentDetailsHandlerTest {
   @Test
   @DisplayName("Exception during query returns HTTP 500 error response")
   @SuppressWarnings("unchecked")
-  void exceptionDuringQueryReturns500() throws Exception {
+  void testExceptionDuringQueryReturns500() throws Exception {
     String parentId = "schedule-error";
     Map<String, String> params = new HashMap<>();
     params.put("parentId", parentId);

@@ -52,14 +52,14 @@ public class PaymentActionHandlerSupportTest {
   }
 
   @Test
-  public void nonActionEndpointReturnsNull() {
+  public void testNonActionEndpointReturnsNull() {
     NeoContext ctx = buildContext(NeoEndpointType.CRUD, "registerPayment", "POST", "inv-1", null);
     NeoResponse resp = PaymentActionHandlerSupport.handle(ctx, true, log);
     assertNull(resp);
   }
 
   @Test
-  public void listPaymentsDelegates() {
+  public void testListPaymentsDelegates() {
     NeoContext ctx = buildContext(NeoEndpointType.ACTION, "invoicePayments", "GET", "inv-1", null);
     NeoResponse expected = new NeoResponse(200, null);
 
@@ -73,7 +73,7 @@ public class PaymentActionHandlerSupportTest {
   }
 
   @Test
-  public void listAccountsDelegates() {
+  public void testListAccountsDelegates() {
     NeoContext ctx = buildContext(NeoEndpointType.ACTION, "invoiceAccounts", "GET", "inv-1", null);
     NeoResponse expected = new NeoResponse(200, null);
 
@@ -88,21 +88,21 @@ public class PaymentActionHandlerSupportTest {
   }
 
   @Test
-  public void nonRegisterPaymentActionReturnsNull() {
+  public void testNonRegisterPaymentActionReturnsNull() {
     NeoContext ctx = buildContext(NeoEndpointType.ACTION, "someOtherAction", "POST", "inv-1", null);
     NeoResponse resp = PaymentActionHandlerSupport.handle(ctx, true, log);
     assertNull(resp);
   }
 
   @Test
-  public void registerPaymentGetMethodReturnsNull() {
+  public void testRegisterPaymentGetMethodReturnsNull() {
     NeoContext ctx = buildContext(NeoEndpointType.ACTION, "registerPayment", "GET", "inv-1", null);
     NeoResponse resp = PaymentActionHandlerSupport.handle(ctx, true, log);
     assertNull(resp);
   }
 
   @Test
-  public void registerPaymentBlankInvoiceIdReturnsBadRequest() {
+  public void testRegisterPaymentBlankInvoiceIdReturnsBadRequest() {
     NeoContext ctx = buildContext(NeoEndpointType.ACTION, "registerPayment", "POST", "", null);
     NeoResponse resp = PaymentActionHandlerSupport.handle(ctx, true, log);
 
@@ -111,7 +111,7 @@ public class PaymentActionHandlerSupportTest {
   }
 
   @Test
-  public void registerPaymentNullBodyReturnsBadRequest() {
+  public void testRegisterPaymentNullBodyReturnsBadRequest() {
     NeoContext ctx = buildContext(NeoEndpointType.ACTION, "registerPayment", "POST", "inv-1", null);
     NeoResponse resp = PaymentActionHandlerSupport.handle(ctx, true, log);
 
@@ -120,7 +120,7 @@ public class PaymentActionHandlerSupportTest {
   }
 
   @Test
-  public void registerPaymentMissingFieldsReturnsBadRequest() throws Exception {
+  public void testRegisterPaymentMissingFieldsReturnsBadRequest() throws Exception {
     JSONObject body = new JSONObject();
     body.put("scheduleId", "sched-1");
     // Missing actual_payment, payment_date, fin_financial_account_id
@@ -132,7 +132,7 @@ public class PaymentActionHandlerSupportTest {
   }
 
   @Test
-  public void registerPaymentSuccessDelegates() throws Exception {
+  public void testRegisterPaymentSuccessDelegates() throws Exception {
     JSONObject body = new JSONObject();
     body.put("scheduleId", "sched-1");
     body.put("actual_payment", "100.00");
@@ -155,7 +155,7 @@ public class PaymentActionHandlerSupportTest {
   }
 
   @Test
-  public void registerPaymentOBExceptionReturnsBadRequest() throws Exception {
+  public void testRegisterPaymentOBExceptionReturnsBadRequest() throws Exception {
     JSONObject body = new JSONObject();
     body.put("scheduleId", "sched-1");
     body.put("actual_payment", "100.00");
@@ -180,7 +180,7 @@ public class PaymentActionHandlerSupportTest {
   }
 
   @Test
-  public void registerPaymentGenericExceptionReturnsInternalError() throws Exception {
+  public void testRegisterPaymentGenericExceptionReturnsInternalError() throws Exception {
     JSONObject body = new JSONObject();
     body.put("scheduleId", "sched-1");
     body.put("actual_payment", "100.00");

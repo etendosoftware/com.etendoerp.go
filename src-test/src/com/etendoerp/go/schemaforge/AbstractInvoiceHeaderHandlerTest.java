@@ -22,16 +22,21 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -43,6 +48,7 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
@@ -622,5 +628,366 @@ public class AbstractInvoiceHeaderHandlerTest {
     JSONObject rec = new JSONObject();
     handler.callEnrichDocTypeLocked(rec);
     assertTrue(rec.getBoolean("docTypeLocked"));
+  }
+
+  // ── validateLineQtyBeforeComplete — guard conditions ─────────────────────────
+
+  /**
+   * When the context is a GET (not PATCH/PUT/ACTION with CO), the method returns null immediately.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_nonCompleteAction_returnsNull() {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-1")
+        .build();
+    assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+  }
+
+  /**
+   * PATCH with documentAction=CO but empty recordId returns null (nothing to check).
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_completeActionButNoRecordId_returnsNull() throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .requestBody(body)
+        .build();
+    assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+  }
+
+  /**
+   * PATCH with documentAction=CO, invoice has no lines linked to shipment lines
+   * (SQL returns no rows) — returns null (no over-invoice risk).
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_completeActionNoLinkedLines_returnsNull()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-no-lines")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false); // no rows
+
+      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+    }
+  }
+
+  /**
+   * PATCH with documentAction=CO, invoice line qty <= pending — no error (guard passes).
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_completeActionLineQtyWithinPending_returnsNull()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-ok")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      // One invoice line linked to inout-1/line-1, draftQty=3
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString(1)).thenReturn("line-1");
+      when(rs.getBigDecimal(2)).thenReturn(new BigDecimal("3"));
+      when(rs.getString(3)).thenReturn("inout-1");
+      when(rs.getString(4)).thenReturn("R-2024-001");
+
+      // pending=5 >= draftQty=3 → no error
+      Map<String, BigDecimal> pendingMap = new HashMap<>();
+      pendingMap.put("line-1", new BigDecimal("5"));
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-1"), eq(false)))
+          .thenReturn(pendingMap);
+
+      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+    }
+  }
+
+  /**
+   * PATCH with documentAction=CO, invoice line qty exceeds pending — returns 400.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_completeActionOverInvoiced_returns400()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-over")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class);
+         MockedStatic<OBMessageUtils> msgMock =
+             Mockito.mockStatic(OBMessageUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      // draftQty=10 > pending=3 → over-invoiced
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString(1)).thenReturn("line-2");
+      when(rs.getBigDecimal(2)).thenReturn(new BigDecimal("10"));
+      when(rs.getString(3)).thenReturn("inout-2");
+      when(rs.getString(4)).thenReturn("R-2024-002");
+
+      Map<String, BigDecimal> pendingMap = new HashMap<>();
+      pendingMap.put("line-2", new BigDecimal("3"));
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-2"), eq(false)))
+          .thenReturn(pendingMap);
+
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced"))
+          .thenReturn("Document @docNo@ invoiced @invoiced@ pending @pending@");
+
+      NeoResponse result = AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx);
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+    }
+  }
+
+  /**
+   * PUT with documentAction=CO also triggers the over-invoice guard (both PATCH and PUT are valid).
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_putWithCompleteAction_alsoChecksGuard()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-put-over")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class);
+         MockedStatic<OBMessageUtils> msgMock =
+             Mockito.mockStatic(OBMessageUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString(1)).thenReturn("line-3");
+      when(rs.getBigDecimal(2)).thenReturn(new BigDecimal("5"));
+      when(rs.getString(3)).thenReturn("inout-3");
+      when(rs.getString(4)).thenReturn("R-PUT");
+
+      Map<String, BigDecimal> pendingMap = new HashMap<>();
+      pendingMap.put("line-3", new BigDecimal("2")); // 5 > 2 → error
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-3"), eq(false)))
+          .thenReturn(pendingMap);
+
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced"))
+          .thenReturn("Document @docNo@ invoiced @invoiced@ pending @pending@");
+
+      NeoResponse result = AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx);
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+    }
+  }
+
+  /**
+   * ACTION endpoint with fieldName=documentAction and fieldValues.documentAction=CO
+   * also triggers the guard.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_actionEndpointWithCoFieldValue_triggersGuard()
+      throws Exception {
+    JSONObject fieldValues = new JSONObject().put("documentAction", "CO");
+    JSONObject body = new JSONObject().put("fieldValues", fieldValues);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("documentAction")
+        .recordId("inv-action")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false); // no linked lines → passes guard
+
+      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+    }
+  }
+
+  /**
+   * ACTION endpoint with fieldName=documentAction and docAction=RE (not CO)
+   * does not trigger the guard.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_actionEndpointNonCoAction_returnsNull()
+      throws Exception {
+    JSONObject fieldValues = new JSONObject().put("documentAction", "RE");
+    JSONObject body = new JSONObject().put("fieldValues", fieldValues);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("documentAction")
+        .recordId("inv-re")
+        .requestBody(body)
+        .build();
+    assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+  }
+
+  /**
+   * ACTION endpoint with mismatched fieldName does not trigger the guard.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_actionEndpointWrongFieldName_returnsNull()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("someOtherAction")
+        .recordId("inv-other")
+        .requestBody(body)
+        .build();
+    assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+  }
+
+  /**
+   * When the invoice lines SQL throws an unexpected exception the method catches it
+   * and returns null (fail-open so completion is not blocked by a technical error).
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_sqlException_returnsNull() throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-sql-err")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("connection lost"));
+
+      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+    }
+  }
+
+  /**
+   * When draftQty is zero or negative the line is skipped, and no error is returned.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_zeroOrNegativeDraftQty_lineSkipped()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-zero-qty")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      // draftQty=0 → should be skipped regardless of pending
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString(1)).thenReturn("line-zero");
+      when(rs.getBigDecimal(2)).thenReturn(BigDecimal.ZERO);
+      when(rs.getString(3)).thenReturn("inout-z");
+      when(rs.getString(4)).thenReturn("R-ZERO");
+
+      // Even if pending is also zero, no error should be triggered
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-z"), eq(false)))
+          .thenReturn(Collections.emptyMap());
+
+      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+    }
   }
 }

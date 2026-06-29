@@ -186,7 +186,8 @@ public class NeoDefaultsService {
 
           try {
             String preview;
-            preview = resolveSequencePreviewForColumn(adColumn, vars, conn, windowId, docTypeTargetId, docTypeId);
+            preview = NeoSequencePreviewHelper.resolveSequencePreviewForColumn(
+                adColumn, vars, conn, windowId, docTypeTargetId, docTypeId);
             if (preview != null) {
               defaults.put(propertyName, preview);
               sequenceFields.put(propertyName);
@@ -244,18 +245,6 @@ public class NeoDefaultsService {
       log.error("Error resolving defaults: {}", e.getMessage(), e);
       return NeoResponse.error(500, "Failed to resolve defaults: " + e.getMessage());
     }
-  }
-
-  private static @Nullable String resolveSequencePreviewForColumn(Column adColumn, VariablesSecureApp vars,
-      DalConnectionProvider conn, String windowId, String docTypeTargetId, String docTypeId) {
-    String preview;
-    if (Boolean.TRUE.equals(SequenceUtils.isSequence(adColumn))) {
-      preview = resolveTransactionalSequencePreview(adColumn);
-    } else {
-      preview = resolveSequencePreviewWithDocType(
-          adColumn, vars, conn, windowId, docTypeTargetId, docTypeId);
-    }
-    return preview;
   }
 
   private static @Nullable Object resolveOrFirstComboOption(NeoContext ctx, Column column, Object resolved) {
@@ -458,8 +447,8 @@ public class NeoDefaultsService {
 
     // Sequence/DocumentNo fields — use Utility.getDocumentNo for real preview
     if (isSequenceField(adColumn)) {
-      String preview = resolveSequencePreview(adColumn, request.vars, request.conn,
-          request.windowId, request.ctx);
+      String preview = NeoSequencePreviewHelper.resolveSequencePreview(adColumn, request.vars,
+          request.conn, request.windowId, request.ctx);
       if (preview != null) {
         return preview;
       }
@@ -631,32 +620,6 @@ public class NeoDefaultsService {
   }
 
   /**
-   * Generate a sequence preview using the doctype IDs already resolved in pass 1.
-   *
-   * <p>Mirrors UIDefinition.getFieldProperties line 210 exactly:
-   * {@code Utility.getDocumentNo(conn, vars, windowId, tableName, docTypeTarget, docType, false, false)}
-   * Classic reads docTypeTarget from RequestContext (set when C_DocTypeTarget_ID was processed
-   * before DocumentNo). We pass those values explicitly after resolving them in pass 1.
-   */
-  private static String resolveSequencePreviewWithDocType(Column adColumn,
-      VariablesSecureApp vars, DalConnectionProvider conn, String windowId,
-      String docTypeTargetId, String docTypeId) {
-    try {
-      String tableName = adColumn.getTable().getDBTableName();
-      String docNo = Utility.getDocumentNo(conn, vars, windowId, tableName,
-          docTypeTargetId, docTypeId, false, false);
-      if (docNo != null && !docNo.isEmpty()) {
-        return "<" + docNo + ">";
-      }
-      return null;
-    } catch (Exception e) {
-      log.debug(LOG_SEQUENCE_PREVIEW_FAILURE,
-          adColumn.getDBColumnName(), e.getMessage());
-      return null;
-    }
-  }
-
-  /**
    * Extract resolved C_DocTypeTarget_ID and C_DocType_ID values from the defaults built in pass 1.
    * Returns a two-element array: [docTypeTargetId, docTypeId], either may be empty string.
    */
@@ -684,32 +647,6 @@ public class NeoDefaultsService {
       }
     }
     return new String[]{ docTypeTargetId, docTypeId };
-  }
-
-  /**
-   * Generate a preview of the next sequence value without consuming it.
-   * Uses Utility.getDocumentNo with updateNext=false for a real preview.
-   * Returns the value wrapped in angle brackets (e.g., "<1000234>").
-   *
-   * @deprecated Use {@link #resolveSequencePreviewWithDocType} from resolveDefaults pass 2.
-   *   This method passes empty doctype strings and is only kept for callers outside the
-   *   two-pass defaults flow (e.g., injectMandatoryDefaults).
-   */
-  @Deprecated
-  private static String resolveSequencePreview(Column adColumn, VariablesSecureApp vars,
-      DalConnectionProvider conn, String windowId, NeoContext ctx) {
-    try {
-      String tableName = adColumn.getTable().getDBTableName();
-      String docNo = Utility.getDocumentNo(conn, vars, windowId, tableName, "", "", false, false);
-      if (docNo != null && !docNo.isEmpty()) {
-        return "<" + docNo + ">";
-      }
-      return "<auto>";
-    } catch (Exception e) {
-      log.debug(LOG_SEQUENCE_PREVIEW_FAILURE,
-          adColumn.getDBColumnName(), e.getMessage());
-      return "<auto>";
-    }
   }
 
   /**

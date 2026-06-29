@@ -1,19 +1,3 @@
-/*
- * *************************************************************************
- * The contents of this file are subject to the Etendo License
- * (the "License"), you may not use this file except in compliance with
- * the License.
- * You may obtain a copy of the License at
- * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
- * Software distributed under the License is distributed on an
- * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
- * implied. See the License for the specific language governing rights
- * and limitations under the License.
- * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
- * All Rights Reserved.
- * Contributor(s): Futit Services S.L.
- * *************************************************************************
- */
 package com.etendoerp.go.schemaforge;
 
 import javax.servlet.http.HttpServletResponse;
@@ -33,6 +17,15 @@ final class PaymentActionHandlerSupport {
   private static final String ACTION_NAME = "registerPayment";
   private static final String LIST_ACTION = "invoicePayments";
   private static final String ACCOUNTS_ACTION = "invoiceAccounts";
+  private static final String METHODS_ACTION = "invoicePaymentMethods";
+  private static final String CREDIT_SOURCES_ACTION = "invoiceCreditSources";
+  private static final String CONFIRM_ACTION = "confirmPayment";
+
+  private static final String FIELD_PAYMENT_ID = "paymentId";
+  private static final String FIELD_SCHEDULE_ID = "scheduleId";
+  private static final String FIELD_AMOUNT = "actual_payment";
+  private static final String FIELD_DATE = "payment_date";
+  private static final String FIELD_ACCOUNT = "fin_financial_account_id";
 
   private PaymentActionHandlerSupport() {
   }
@@ -43,13 +36,13 @@ final class PaymentActionHandlerSupport {
     }
     String fieldName = context.getFieldName();
 
-    if (LIST_ACTION.equals(fieldName)) {
-      return PaymentRegistrationService.handleListPayments(context);
+    NeoResponse queryResult = routeQuery(context, fieldName, isReceipt);
+    if (queryResult != null) {
+      return queryResult;
     }
-    if (ACCOUNTS_ACTION.equals(fieldName)) {
-      return PaymentRegistrationService.handleListAccounts(context, isReceipt);
-    }
-    if (!ACTION_NAME.equals(fieldName) || !"POST".equals(context.getHttpMethod())) {
+
+    boolean isConfirm = CONFIRM_ACTION.equals(fieldName);
+    if ((!isConfirm && !ACTION_NAME.equals(fieldName)) || !"POST".equals(context.getHttpMethod())) {
       return null;
     }
 
@@ -57,40 +50,89 @@ final class PaymentActionHandlerSupport {
     if (StringUtils.isBlank(invoiceId)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invoice ID is required");
     }
-
     JSONObject body = context.getRequestBody();
     if (body == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Request body is required");
     }
 
-    String scheduleId = body.optString("scheduleId", null);
-    String strAmount = body.optString("actual_payment", null);
-    String strDate = body.optString("payment_date", null);
-    String accountId = body.optString("fin_financial_account_id", null);
+    // Validate inputs BEFORE opening an admin session, so malformed requests
+    // return 400 without requiring a DB context.
+    NeoResponse validationError = validateBody(body, isConfirm);
+    if (validationError != null) {
+      return validationError;
+    }
 
-    if (StringUtils.isBlank(scheduleId) || StringUtils.isBlank(strAmount)
-        || StringUtils.isBlank(strDate) || StringUtils.isBlank(accountId)) {
+    return executeMutating(fieldName, isReceipt, invoiceId, body, isConfirm, log);
+  }
+
+  /** Routes the read-only listing actions; returns null when {@code fieldName} is not one. */
+  private static NeoResponse routeQuery(NeoContext context, String fieldName, boolean isReceipt) {
+    if (LIST_ACTION.equals(fieldName)) {
+      return PaymentRegistrationService.handleListPayments(context);
+    }
+    if (ACCOUNTS_ACTION.equals(fieldName)) {
+      return PaymentRegistrationService.handleListAccounts(context, isReceipt);
+    }
+    if (METHODS_ACTION.equals(fieldName)) {
+      return PaymentRegistrationService.handleListPaymentMethods(context, isReceipt);
+    }
+    if (CREDIT_SOURCES_ACTION.equals(fieldName)) {
+      return PaymentRegistrationService.handleListCreditSources(context, isReceipt);
+    }
+    return null;
+  }
+
+  /** Validates the required body fields; returns an error response, or null when valid. */
+  private static NeoResponse validateBody(JSONObject body, boolean isConfirm) {
+    if (isConfirm) {
+      if (StringUtils.isBlank(body.optString(FIELD_PAYMENT_ID, null))) {
+        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "paymentId is required");
+      }
+      return null;
+    }
+    if (StringUtils.isBlank(body.optString(FIELD_SCHEDULE_ID, null))
+        || StringUtils.isBlank(body.optString(FIELD_AMOUNT, null))
+        || StringUtils.isBlank(body.optString(FIELD_DATE, null))
+        || StringUtils.isBlank(body.optString(FIELD_ACCOUNT, null))) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "Missing required fields: scheduleId, actual_payment, payment_date, fin_financial_account_id");
     }
+    return null;
+  }
 
+  /** True when the register body carries advanced (two-step modal) fields. */
+  private static boolean isAdvanced(JSONObject body) {
+    return body.has("process") || body.has("creditSources")
+        || body.has("overpaymentAction") || body.has("fin_paymentmethod_id");
+  }
+
+  /** Runs the mutating action inside an admin session with rollback-on-error handling. */
+  private static NeoResponse executeMutating(String fieldName, boolean isReceipt,
+      String invoiceId, JSONObject body, boolean isConfirm, Logger log) {
     try {
       OBContext.setAdminMode(true);
       try {
-        return PaymentRegistrationService.doRegisterPayment(
-            invoiceId, scheduleId, strAmount, strDate, accountId, isReceipt);
+        if (isConfirm) {
+          return PaymentRegistrationService.confirmDraftPayment(body.optString(FIELD_PAYMENT_ID, null));
+        }
+        if (isAdvanced(body)) {
+          return PaymentRegistrationService.doRegisterPaymentAdvanced(invoiceId, body, isReceipt);
+        }
+        return PaymentRegistrationService.doRegisterPayment(invoiceId,
+            body.optString(FIELD_SCHEDULE_ID, null), body.optString(FIELD_AMOUNT, null),
+            body.optString(FIELD_DATE, null), body.optString(FIELD_ACCOUNT, null), isReceipt);
       } finally {
         OBContext.restorePreviousMode();
       }
     } catch (OBException e) {
       OBDal.getInstance().rollbackAndClose();
-      log.warn("Payment registration failed for invoice {}: {}", invoiceId, e.getMessage());
+      log.warn("Payment action '{}' failed for invoice {}: {}", fieldName, invoiceId, e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
       OBDal.getInstance().rollbackAndClose();
-      log.error("Error registering payment for invoice {}: {}", invoiceId, e.getMessage(), e);
+      log.error("Error in payment action '{}' for invoice {}: {}", fieldName, invoiceId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "An internal error occurred while registering the payment");
+          "An internal error occurred while processing the payment");
     }
   }
 }

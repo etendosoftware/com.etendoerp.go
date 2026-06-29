@@ -115,7 +115,7 @@ class PaymentRegistrationServiceTest {
    * Verifies that a null invoice returns HTTP 404.
    */
   @Test
-  void doRegisterPayment_nullInvoice_returns404() throws Exception {
+  void testDoRegisterPaymentNullInvoiceReturns404() throws Exception {
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(null);
 
     NeoResponse response = PaymentRegistrationService.doRegisterPayment(
@@ -130,7 +130,7 @@ class PaymentRegistrationServiceTest {
    * Verifies that a null payment schedule returns HTTP 404.
    */
   @Test
-  void doRegisterPayment_nullSchedule_returns404() throws Exception {
+  void testDoRegisterPaymentNullScheduleReturns404() throws Exception {
     Invoice invoice = mock(Invoice.class);
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
     when(obDal.get(FIN_PaymentSchedule.class, "sched-1")).thenReturn(null);
@@ -147,7 +147,7 @@ class PaymentRegistrationServiceTest {
    * Verifies that an invalid (non-numeric) amount returns HTTP 400.
    */
   @Test
-  void doRegisterPayment_invalidAmount_returns400() throws Exception {
+  void testDoRegisterPaymentInvalidAmountReturns400() throws Exception {
     Invoice invoice = mock(Invoice.class);
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
@@ -165,7 +165,7 @@ class PaymentRegistrationServiceTest {
    * Verifies that an invalid date format returns HTTP 400.
    */
   @Test
-  void doRegisterPayment_invalidDate_returns400() throws Exception {
+  void testDoRegisterPaymentInvalidDateReturns400() throws Exception {
     Invoice invoice = mock(Invoice.class);
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
@@ -183,7 +183,7 @@ class PaymentRegistrationServiceTest {
    * Verifies that a null financial account returns HTTP 400.
    */
   @Test
-  void doRegisterPayment_nullAccount_returns400() throws Exception {
+  void testDoRegisterPaymentNullAccountReturns400() throws Exception {
     Invoice invoice = mock(Invoice.class);
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
     when(obDal.get(Invoice.class, "inv-1")).thenReturn(invoice);
@@ -202,7 +202,7 @@ class PaymentRegistrationServiceTest {
    * Verifies that a currency mismatch between invoice and account returns HTTP 400.
    */
   @Test
-  void doRegisterPayment_currencyMismatch_returns400() throws Exception {
+  void testDoRegisterPaymentCurrencyMismatchReturns400() throws Exception {
     Invoice invoice = mock(Invoice.class);
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
@@ -237,7 +237,7 @@ class PaymentRegistrationServiceTest {
    */
   @Test
   @SuppressWarnings("unchecked")
-  void doRegisterPayment_emptyPSDs_returns400() throws Exception {
+  void testDoRegisterPaymentEmptyPSDsReturns400() throws Exception {
     Invoice invoice = mock(Invoice.class);
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
@@ -271,7 +271,7 @@ class PaymentRegistrationServiceTest {
    */
   @Test
   @SuppressWarnings("unchecked")
-  void doRegisterPayment_nullPaymentMethod_returns400() throws Exception {
+  void testDoRegisterPaymentNullPaymentMethodReturns400() throws Exception {
     Invoice invoice = mock(Invoice.class);
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
@@ -325,7 +325,7 @@ class PaymentRegistrationServiceTest {
    */
   @Test
   @SuppressWarnings("unchecked")
-  void doRegisterPayment_sameCurrency_passesCurrencyCheck() throws Exception {
+  void testDoRegisterPaymentSameCurrencyPassesCurrencyCheck() throws Exception {
     Invoice invoice = mock(Invoice.class);
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
@@ -360,7 +360,7 @@ class PaymentRegistrationServiceTest {
    */
   @Test
   @SuppressWarnings("unchecked")
-  void doRegisterPayment_nullInvoiceCurrency_skipsCurrencyCheck() throws Exception {
+  void testDoRegisterPaymentNullInvoiceCurrencySkipsCurrencyCheck() throws Exception {
     Invoice invoice = mock(Invoice.class);
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
@@ -395,7 +395,7 @@ class PaymentRegistrationServiceTest {
    */
   @Test
   @SuppressWarnings("unchecked")
-  void doRegisterPayment_nullAccountCurrency_skipsCurrencyCheck() throws Exception {
+  void testDoRegisterPaymentNullAccountCurrencySkipsCurrencyCheck() throws Exception {
     Invoice invoice = mock(Invoice.class);
     FIN_PaymentSchedule schedule = mock(FIN_PaymentSchedule.class);
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
@@ -431,7 +431,7 @@ class PaymentRegistrationServiceTest {
    * Verifies that a blank invoice ID returns HTTP 400.
    */
   @Test
-  void handleListAccounts_blankInvoiceId_returns400() {
+  void testHandleListAccountsBlankInvoiceIdReturns400() {
     NeoContext context = NeoContext.builder()
         .recordId("")
         .httpMethod("GET")
@@ -447,7 +447,7 @@ class PaymentRegistrationServiceTest {
    * Verifies that a null record ID returns HTTP 400.
    */
   @Test
-  void handleListAccounts_nullInvoiceId_returns400() {
+  void testHandleListAccountsNullInvoiceIdReturns400() {
     NeoContext context = NeoContext.builder()
         .recordId(null)
         .httpMethod("GET")
@@ -463,7 +463,7 @@ class PaymentRegistrationServiceTest {
    * Verifies that a null invoice returns HTTP 404.
    */
   @Test
-  void handleListAccounts_nullInvoice_returns404() {
+  void testHandleListAccountsNullInvoiceReturns404() {
     NeoContext context = NeoContext.builder()
         .recordId("inv-1")
         .httpMethod("GET")
@@ -483,7 +483,7 @@ class PaymentRegistrationServiceTest {
    */
   @Test
   @SuppressWarnings("unchecked")
-  void handleListAccounts_filtersAccountsByPaymentMethod() throws Exception {
+  void testHandleListAccountsFiltersAccountsByPaymentMethod() throws Exception {
     NeoContext context = NeoContext.builder()
         .recordId("inv-1")
         .httpMethod("GET")
@@ -567,7 +567,7 @@ class PaymentRegistrationServiceTest {
    */
   @Test
   @SuppressWarnings("unchecked")
-  void handleListAccounts_emptyNaturalTree_returnsEmptyItems() throws Exception {
+  void testHandleListAccountsEmptyNaturalTreeReturnsEmptyItems() throws Exception {
     NeoContext context = NeoContext.builder()
         .recordId("inv-1")
         .httpMethod("GET")
@@ -604,7 +604,7 @@ class PaymentRegistrationServiceTest {
    * Verifies that an unexpected exception in handleListAccounts returns HTTP 500.
    */
   @Test
-  void handleListAccounts_exceptionReturns500() {
+  void testHandleListAccountsExceptionReturns500() {
     NeoContext context = NeoContext.builder()
         .recordId("inv-1")
         .httpMethod("GET")
@@ -624,7 +624,7 @@ class PaymentRegistrationServiceTest {
    */
   @Test
   @SuppressWarnings("unchecked")
-  void handleListAccounts_accountWithNullCurrency_omitsCurrencyFields() throws Exception {
+  void testHandleListAccountsAccountWithNullCurrencyOmitsCurrencyFields() throws Exception {
     NeoContext context = NeoContext.builder()
         .recordId("inv-1")
         .httpMethod("GET")
@@ -684,7 +684,7 @@ class PaymentRegistrationServiceTest {
    * Verifies that a blank invoice ID returns HTTP 400.
    */
   @Test
-  void handleListPayments_blankInvoiceId_returns400() {
+  void testHandleListPaymentsBlankInvoiceIdReturns400() {
     NeoContext context = NeoContext.builder()
         .recordId("  ")
         .httpMethod("GET")
@@ -700,7 +700,7 @@ class PaymentRegistrationServiceTest {
    * Verifies that a null invoice ID returns HTTP 400.
    */
   @Test
-  void handleListPayments_nullInvoiceId_returns400() {
+  void testHandleListPaymentsNullInvoiceIdReturns400() {
     NeoContext context = NeoContext.builder()
         .recordId(null)
         .httpMethod("GET")
@@ -717,7 +717,7 @@ class PaymentRegistrationServiceTest {
    */
   @Test
   @SuppressWarnings("unchecked")
-  void handleListPayments_normalResults_returns200WithPayments() throws Exception {
+  void testHandleListPaymentsNormalResultsReturns200WithPayments() throws Exception {
     NeoContext context = NeoContext.builder()
         .recordId("inv-1")
         .httpMethod("GET")
@@ -762,7 +762,7 @@ class PaymentRegistrationServiceTest {
    */
   @Test
   @SuppressWarnings("unchecked")
-  void handleListPayments_withAccountAndMethod_includesDetails() throws Exception {
+  void testHandleListPaymentsWithAccountAndMethodIncludesDetails() throws Exception {
     NeoContext context = NeoContext.builder()
         .recordId("inv-1")
         .httpMethod("GET")
@@ -811,7 +811,7 @@ class PaymentRegistrationServiceTest {
    */
   @Test
   @SuppressWarnings("unchecked")
-  void handleListPayments_emptyResults_returns200WithEmptyData() throws Exception {
+  void testHandleListPaymentsEmptyResultsReturns200WithEmptyData() throws Exception {
     NeoContext context = NeoContext.builder()
         .recordId("inv-1")
         .httpMethod("GET")
@@ -834,7 +834,7 @@ class PaymentRegistrationServiceTest {
    * Verifies that handleListPayments returns HTTP 500 on unexpected exception.
    */
   @Test
-  void handleListPayments_exception_returns500() {
+  void testHandleListPaymentsExceptionReturns500() {
     NeoContext context = NeoContext.builder()
         .recordId("inv-1")
         .httpMethod("GET")
@@ -855,7 +855,7 @@ class PaymentRegistrationServiceTest {
    */
   @Test
   @SuppressWarnings("unchecked")
-  void handleListPayments_nullPaymentDate_handledGracefully() throws Exception {
+  void testHandleListPaymentsNullPaymentDateHandledGracefully() throws Exception {
     NeoContext context = NeoContext.builder()
         .recordId("inv-1")
         .httpMethod("GET")
@@ -891,7 +891,7 @@ class PaymentRegistrationServiceTest {
    */
   @Test
   @SuppressWarnings("unchecked")
-  void handleListPayments_accountWithNullCurrency_handledGracefully() throws Exception {
+  void testHandleListPaymentsAccountWithNullCurrencyHandledGracefully() throws Exception {
     NeoContext context = NeoContext.builder()
         .recordId("inv-1")
         .httpMethod("GET")
