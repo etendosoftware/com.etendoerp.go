@@ -30,11 +30,13 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -49,10 +51,12 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
+import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 
@@ -314,6 +318,222 @@ public class FinancialAccountPsd2HandlerLinkTest {
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
       assertEquals(404, handler.handle(postContext("import-settings", body)).getHttpStatus());
+    }
+  }
+
+  // ── extractFetchScopes (via link happy path) ──────────────────────────────
+
+  /**
+   * {@code extractFetchScopes} must read the scopes from {@code last_attempt.fetch_scopes}, NOT
+   * from the root {@code fetch_scopes} key. This regression guard verifies that the correct nested
+   * path is used: when {@code last_attempt} is present and carries a non-blank {@code fetch_scopes},
+   * that value is forwarded into the {@link LinkAccountData} that reaches
+   * {@code SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount}.
+   */
+  @Test
+  public void testExtractFetchScopesReadsFromLastAttemptNested() throws Exception {
+    JSONObject body = linkBody();
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    JSONArray nodes = new JSONArray().put(new JSONObject().put("id", SALT_EDGE_ACCOUNT_ID));
+    JSONObject lastAttempt = new JSONObject().put("fetch_scopes", "accounts,transactions");
+    JSONObject details = new JSONObject()
+        .put("provider_name", "BBVA")
+        .put("last_attempt", lastAttempt);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc)).thenReturn(API_KEY);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
+          .thenReturn(nodes);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
+          .thenReturn(details);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(any(), anyString()))
+          .thenReturn(null);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(finAcc),
+          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(),
+          argThat(d -> d != null && "accounts,transactions".equals(d.fetchScopes))))
+          .thenReturn("");
+
+      // OBDal for resolveProvider (findProviderByCode criteria — returns null so setPsd2Provider
+      // is not called, keeping this test focused on extractFetchScopes only).
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Provider> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Provider.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+
+      NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
+
+      assertEquals(200, response.getHttpStatus());
+      // The argThat above only matches when fetchScopes == "accounts,transactions",
+      // so this verify acts as the assertion.
+      linkHelper.verify(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(finAcc),
+          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(),
+          argThat(d -> d != null && "accounts,transactions".equals(d.fetchScopes))));
+    }
+  }
+
+  /**
+   * When {@code details} has no {@code last_attempt} key, {@code extractFetchScopes} returns an
+   * empty string — no NPE and no fallback to the root-level {@code fetch_scopes} (which Salt Edge
+   * does NOT set on connection objects).
+   */
+  @Test
+  public void testExtractFetchScopesMissingLastAttemptReturnsEmpty() throws Exception {
+    JSONObject body = linkBody();
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    JSONArray nodes = new JSONArray().put(new JSONObject().put("id", SALT_EDGE_ACCOUNT_ID));
+    // details has root-level fetch_scopes but NO last_attempt — must NOT read the root key.
+    JSONObject details = new JSONObject()
+        .put("provider_name", "BBVA")
+        .put("fetch_scopes", "accounts,transactions");   // root key — should be ignored
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc)).thenReturn(API_KEY);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
+          .thenReturn(nodes);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
+          .thenReturn(details);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(any(), anyString()))
+          .thenReturn(null);
+      // Only the empty-fetchScopes call must be made — root key must NOT be used.
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(finAcc),
+          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(),
+          argThat(d -> d != null && "".equals(d.fetchScopes))))
+          .thenReturn("");
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Provider> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Provider.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+
+      NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
+
+      assertEquals(200, response.getHttpStatus());
+      linkHelper.verify(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(finAcc),
+          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(),
+          argThat(d -> d != null && "".equals(d.fetchScopes))));
+    }
+  }
+
+  // ── linkAccount: setPsd2Provider (ETP-4097 fix) ───────────────────────────
+
+  /**
+   * When the Salt Edge connection details carry a {@code provider_code} that resolves to an existing
+   * {@link Provider} record in the DB, {@code linkAccount} must call {@code finAcc.setPsd2Provider}
+   * with that provider so the "Bank Provider" field is populated (mirrors classic AisConnectionCallback).
+   */
+  @Test
+  public void testLinkAccountSetsPsd2ProviderWhenProviderFound() throws Exception {
+    JSONObject body = linkBody();
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    JSONArray nodes = new JSONArray().put(new JSONObject().put("id", SALT_EDGE_ACCOUNT_ID));
+    JSONObject details = new JSONObject()
+        .put("provider_name", "BBVA")
+        .put("provider_code", "bbva");
+
+    Provider provider = mock(Provider.class);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc)).thenReturn(API_KEY);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
+          .thenReturn(nodes);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
+          .thenReturn(details);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(any(), anyString()))
+          .thenReturn(null);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(any(), any(),
+          any(), any(), any())).thenReturn("");
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Provider> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Provider.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      // Provider found by code — resolveProvider returns it.
+      when(criteria.uniqueResult()).thenReturn(provider);
+      doNothing().when(dal).save(finAcc);
+
+      NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
+
+      assertEquals(200, response.getHttpStatus());
+      // setPsd2Provider must be called with the resolved provider.
+      verify(finAcc).setPsd2Provider(provider);
+      verify(dal).save(finAcc);
+    }
+  }
+
+  /**
+   * When the provider code is blank, {@code resolveProvider} returns null and {@code setPsd2Provider}
+   * must NOT be called — the "Bank Provider" field is left empty rather than crashing.
+   */
+  @Test
+  public void testLinkAccountDoesNotSetPsd2ProviderWhenProviderCodeBlank() throws Exception {
+    JSONObject body = linkBody();
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    JSONArray nodes = new JSONArray().put(new JSONObject().put("id", SALT_EDGE_ACCOUNT_ID));
+    // No provider_code in details → resolveProvider returns null.
+    JSONObject details = new JSONObject().put("provider_name", "BBVA");
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc)).thenReturn(API_KEY);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
+          .thenReturn(nodes);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
+          .thenReturn(details);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(any(), anyString()))
+          .thenReturn(null);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(any(), any(),
+          any(), any(), any())).thenReturn("");
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
+
+      assertEquals(200, response.getHttpStatus());
+      // No provider_code → setPsd2Provider must NOT be called.
+      verify(finAcc, never()).setPsd2Provider(any());
     }
   }
 

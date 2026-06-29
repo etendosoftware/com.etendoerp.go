@@ -480,8 +480,8 @@ public class ReconciliationHandler implements NeoHandler {
     // 1:N: if the selected line amount equals the sum of a signal group (same logic the automatch
     // uses), pre-mark ALL of its operations as suggested — not only a single 1:1 standard match.
     if (selectedLine != null) {
-      BigDecimal lineTarget = AutoMatchSupport.nullSafe(selectedLine.getCramount())
-          .subtract(AutoMatchSupport.nullSafe(selectedLine.getDramount()));
+      BigDecimal lineTarget = nullSafe(selectedLine.getCramount())
+          .subtract(nullSafe(selectedLine.getDramount()));
       BigDecimal candidateAmtTol =
           AutoMatchSupport.computeAmountTolerance(lineTarget, candidateAmtTolPct);
       for (FIN_FinaccTransaction t : AutoMatchSupport.findSignalGroup(

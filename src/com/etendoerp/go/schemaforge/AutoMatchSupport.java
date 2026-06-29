@@ -97,7 +97,8 @@ final class AutoMatchSupport {
 
   static List<FIN_FinaccTransaction> findSignalGroup(String accountId, FIN_BankStatementLine line,
       java.util.Set<String> usedTxnIds, BigDecimal tolerance, int dateTolDays) {
-    BigDecimal target = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
+    BigDecimal target = ReconciliationSupport.nullSafe(line.getCramount())
+        .subtract(ReconciliationSupport.nullSafe(line.getDramount()));
     if (target.signum() == 0) {
       return Collections.emptyList();
     }
@@ -557,7 +558,8 @@ final class AutoMatchSupport {
   static int[] matchFallback(String accountId, FIN_BankStatementLine line,
       Set<String> usedTxnIds, List<MatchRuleEngine.Rule> rules, JSONArray groups,
       int dateTolDays, BigDecimal amtTolPct) throws JSONException {
-    BigDecimal target = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
+    BigDecimal target = ReconciliationSupport.nullSafe(line.getCramount())
+        .subtract(ReconciliationSupport.nullSafe(line.getDramount()));
     BigDecimal amtTol = computeAmountTolerance(target, amtTolPct);
     List<FIN_FinaccTransaction> signalGroup =
         findSignalGroup(accountId, line, usedTxnIds, amtTol, dateTolDays);
