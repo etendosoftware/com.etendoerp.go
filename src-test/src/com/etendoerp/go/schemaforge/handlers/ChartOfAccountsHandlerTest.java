@@ -363,6 +363,67 @@ public class ChartOfAccountsHandlerTest {
     assertNull(ChartOfAccountsHandler.findParentCode4("node", parents, values));
   }
 
+  // ── findParentCode4Name ───────────────────────────────────────────────────
+
+  @Test
+  public void findParentCode4NameReturnsNullWhenNodeHasNoParent() {
+    Map<String, String> parents = Collections.singletonMap("node", null);
+    Map<String, String> values = Collections.singletonMap("node", "1234");
+    Map<String, String> names = Collections.singletonMap("node", "Test");
+    assertNull(ChartOfAccountsHandler.findParentCode4Name("node", parents, values, names));
+  }
+
+  @Test
+  public void findParentCode4NameReturnsNullWhenNodeNotInMap() {
+    assertNull(ChartOfAccountsHandler.findParentCode4Name("ghost",
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap()));
+  }
+
+  @Test
+  public void findParentCode4NameFindsSummaryParentName() {
+    Map<String, String> parents = new HashMap<>();
+    parents.put("leaf", "parent");
+    parents.put("parent", null);
+    Map<String, String> values = new HashMap<>();
+    values.put("parent", "1234");
+    Map<String, String> names = new HashMap<>();
+    names.put("parent", "Acreedores");
+
+    assertEquals("Acreedores",
+        ChartOfAccountsHandler.findParentCode4Name("leaf", parents, values, names));
+  }
+
+  @Test
+  public void findParentCode4NameSkipsParentWithWrongValueLength() {
+    // leaf → p3 (length-3 value) → gp4 (length-4 value — match)
+    Map<String, String> parents = new HashMap<>();
+    parents.put("leaf", "p3");
+    parents.put("p3", "gp4");
+    parents.put("gp4", null);
+    Map<String, String> values = new HashMap<>();
+    values.put("p3", "123");
+    values.put("gp4", "1234");
+    Map<String, String> names = new HashMap<>();
+    names.put("p3", "WrongLevel");
+    names.put("gp4", "GrandParentGroup");
+
+    assertEquals("GrandParentGroup",
+        ChartOfAccountsHandler.findParentCode4Name("leaf", parents, values, names));
+  }
+
+  @Test
+  public void findParentCode4NameReturnsNullWhenNoAncestorMatchesFourCharValue() {
+    Map<String, String> parents = new HashMap<>();
+    parents.put("leaf", "parent");
+    parents.put("parent", null);
+    Map<String, String> values = new HashMap<>();
+    values.put("parent", "12");
+    Map<String, String> names = new HashMap<>();
+    names.put("parent", "ShortCode");
+
+    assertNull(ChartOfAccountsHandler.findParentCode4Name("leaf", parents, values, names));
+  }
+
   // ── rollupBalances ────────────────────────────────────────────────────────
 
   @Test
