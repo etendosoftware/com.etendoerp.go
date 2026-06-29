@@ -483,7 +483,7 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       if (!ViesService.STATUS_PENDING.equals(vies.status)) {
         viesStatus = vies.status;
         try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE c_bpartner SET em_obtik_viesstatus = ? WHERE c_bpartner_id = ?")) {
+            "UPDATE c_bpartner SET em_obtik_vies_status = ? WHERE c_bpartner_id = ?")) {
           ps.setString(1, viesStatus);
           ps.setString(2, bpId);
           ps.executeUpdate();
