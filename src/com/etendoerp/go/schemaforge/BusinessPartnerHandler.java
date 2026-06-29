@@ -31,6 +31,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 /**
  * Pre/post-save hook for the businessPartner entity in the contacts spec.
@@ -236,7 +237,9 @@ public class BusinessPartnerHandler implements NeoHandler {
 
   @Override
   public NeoResponse afterHandle(NeoContext ctx) {
-    if (!"POST".equals(ctx.getHttpMethod())) {
+    String method = ctx.getHttpMethod();
+    boolean isWrite = "POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method);
+    if (!isWrite) {
       return null;
     }
     NeoResponse previousResult = ctx.getPreviousResult();
@@ -244,20 +247,63 @@ public class BusinessPartnerHandler implements NeoHandler {
       return null;
     }
     try {
-      String recordId = extractRecordId(previousResult.getBody());
-      if (recordId == null) {
-        return null;
+      JSONObject body = previousResult.getBody();
+
+      if ("POST".equals(method)) {
+        String recordId = extractRecordId(body);
+        if (recordId != null) {
+          String identifier = queryIdentifier(recordId);
+          if (StringUtils.isNotBlank(identifier)) {
+            updateSearchKey(recordId, identifier);
+            patchSearchKeyInResponse(body, identifier);
+          }
+        }
       }
-      String identifier = queryIdentifier(recordId);
-      if (StringUtils.isBlank(identifier)) {
-        return null;
-      }
-      updateSearchKey(recordId, identifier);
-      patchSearchKeyInResponse(previousResult.getBody(), identifier);
-      return NeoResponse.ok(previousResult.getBody());
+
+      injectViesMessage(body);
+      return NeoResponse.ok(body);
     } catch (Exception e) {
-      log.error("BusinessPartnerHandler: error updating searchKey from em_etgo_identifier", e);
+      log.error("BusinessPartnerHandler: error in afterHandle()", e);
       return null;
+    }
+  }
+
+  /**
+   * If the saved record has {@code oBTIKTaxIDKey = '2'} and a resolved VIES status (V or I),
+   * injects a {@code messages} array at the root of the response body so the frontend
+   * (useEntity.js, line: {@code data?.messages}) can show the toast.
+   */
+  private static void injectViesMessage(JSONObject body) {
+    try {
+      JSONObject response = body.optJSONObject("response");
+      if (response == null) {
+        return;
+      }
+      JSONArray data = response.optJSONArray("data");
+      if (data == null || data.length() == 0) {
+        return;
+      }
+      JSONObject record = data.getJSONObject(0);
+      String taxIdKey = record.optString("oBTIKTaxIDKey", null);
+      if (!"2".equals(taxIdKey)) {
+        return;
+      }
+      String viesStatus = record.optString("oBTIKVIESStatus", null);
+      if (viesStatus == null || "P".equals(viesStatus)) {
+        return;
+      }
+
+      boolean valid = "V".equals(viesStatus);
+      JSONObject msg = new JSONObject();
+      msg.put("type", valid ? "success" : "warning");
+      msg.put("title", OBMessageUtils.messageBD(valid ? "OBTIK_ViesValidTitle" : "OBTIK_ViesInvalidTitle"));
+      msg.put("text", OBMessageUtils.messageBD(valid ? "OBTIK_ViesValidText" : "OBTIK_ViesInvalidText"));
+
+      JSONArray messages = new JSONArray();
+      messages.put(msg);
+      body.put("messages", messages);
+    } catch (Exception e) {
+      log.warn("BusinessPartnerHandler: could not inject VIES message", e);
     }
   }
 }

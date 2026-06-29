@@ -17,7 +17,13 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+
 import javax.inject.Named;
+
+import org.openbravo.module.bptaxidkey.ViesService;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -27,6 +33,7 @@ import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Region;
@@ -108,6 +115,10 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       return NeoResponse.error(400, "Missing parentId (Business Partner ID)");
     }
 
+    // Capture pre-save key and country before any OBDal saves
+    String preSaveKey = queryBPKey(bpId);
+    String countryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
+
     OBContext.setAdminMode(true);
     try {
       BusinessPartner bp = OBDal.getInstance().get(BusinessPartner.class, bpId);
@@ -141,7 +152,10 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
       OBDal.getInstance().flush();
 
-      return wrapRecord(buildRecord(bpLoc, geoLoc), 201);
+      // Build the response record and optionally inject a tax-key warning message
+      JSONObject locationJson = buildRecord(bpLoc, geoLoc);
+      checkAndAutoSetTaxKey(locationJson, bpId, countryId, preSaveKey);
+      return wrapRecord(locationJson, 201);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -166,6 +180,11 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         return NeoResponse.error(500, "BPartner Location has no linked C_Location: " + bplId);
       }
 
+      // Capture country and pre-save key before applying changes and flushing
+      String countryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
+      String bpId = bpLoc.getBusinessPartner() != null ? bpLoc.getBusinessPartner().getId() : null;
+      String preSaveKey = (countryId != null && bpId != null) ? queryBPKey(bpId) : null;
+
       applyGeoLocFields(body, geoLoc);
 
       String nameVal = nullIfEmpty(body.optString("name", null));
@@ -183,7 +202,10 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
       OBDal.getInstance().flush();
 
-      return wrapRecord(buildRecord(bpLoc, geoLoc), 200);
+      // Build the response record and optionally inject a tax-key warning message
+      JSONObject locationJson = buildRecord(bpLoc, geoLoc);
+      checkAndAutoSetTaxKey(locationJson, bpId, countryId, preSaveKey);
+      return wrapRecord(locationJson, 200);
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -349,6 +371,142 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     JSONObject wrapper = new JSONObject();
     wrapper.put(FIELD_RESPONSE, responseData);
     return new NeoResponse(httpStatus, wrapper);
+  }
+
+  // ------------------------------------------------------------------ tax key helpers
+
+  /**
+   * Reads the current {@code em_obtik_tax_id_key} value for the given BP via JDBC.
+   * Called BEFORE flush to capture the pre-save state.
+   */
+  private static String queryBPKey(String bpId) {
+    if (bpId == null || bpId.isEmpty()) {
+      return null;
+    }
+    try {
+      Connection conn = OBDal.getInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(
+          "SELECT em_obtik_tax_id_key FROM c_bpartner WHERE c_bpartner_id = ?")) {
+        ps.setString(1, bpId);
+        try (ResultSet rs = ps.executeQuery()) {
+          return rs.next() ? rs.getString("em_obtik_tax_id_key") : null;
+        }
+      }
+    } catch (Exception e) {
+      log.warn("ContactsLocationAddressHandler: could not query BP key for bpId={}: {}", bpId, e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Checks whether the BP qualifies for auto-promotion to key='2' (NOI) and, if so,
+   * performs the JDBC update, calls VIES, and injects a warning message into the response.
+   *
+   * <p>Conditions (all must be true):
+   * <ol>
+   *   <li>{@code countryId} is non-null (a country was included in the request).</li>
+   *   <li>{@code preSaveKey} was not already {@code '2'}.</li>
+   *   <li>The country has {@code em_eucntry_iseucountry='Y'} and {@code countrycode != 'ES'}.</li>
+   *   <li>The BP's {@code taxid} starts with a 2-char prefix that maps to an EU country (not ES).</li>
+   * </ol>
+   *
+   * <p>Called AFTER flush. The observer ({@link TaxIDKeyAutoSetObserver}) may also fire for
+   * Classic; this handler is the authoritative path for Go and makes the mutation idempotent.
+   */
+  private static void checkAndAutoSetTaxKey(JSONObject locationJson, String bpId,
+      String countryId, String preSaveKey) {
+    if (bpId == null || bpId.isEmpty() || countryId == null || "2".equals(preSaveKey)) {
+      return;
+    }
+    try {
+      Connection conn = OBDal.getInstance().getConnection();
+
+      // Check 1: Is the country EU and not Spain?
+      boolean isEuNotEs = false;
+      try (PreparedStatement ps = conn.prepareStatement(
+          "SELECT em_eucntry_iseucountry, countrycode FROM c_country WHERE c_country_id = ?")) {
+        ps.setString(1, countryId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            isEuNotEs = "Y".equalsIgnoreCase(rs.getString("em_eucntry_iseucountry"))
+                && !"ES".equalsIgnoreCase(rs.getString("countrycode"));
+          }
+        }
+      }
+      if (!isEuNotEs) {
+        return;
+      }
+
+      // Check 2: Get BP taxId
+      String taxId = null;
+      try (PreparedStatement ps = conn.prepareStatement(
+          "SELECT taxid FROM c_bpartner WHERE c_bpartner_id = ?")) {
+        ps.setString(1, bpId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            taxId = rs.getString("taxid");
+          }
+        }
+      }
+      if (taxId == null || taxId.length() < 2) {
+        return;
+      }
+
+      // Check 3: taxId prefix maps to an EU country (not ES)
+      int prefixMatchCount = 0;
+      try (PreparedStatement ps = conn.prepareStatement(
+          "SELECT COUNT(*) FROM c_country"
+          + " WHERE UPPER(countrycode) = UPPER(SUBSTRING(?, 1, 2))"
+          + " AND em_eucntry_iseucountry = 'Y'"
+          + " AND UPPER(countrycode) != 'ES'")) {
+        ps.setString(1, taxId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            prefixMatchCount = rs.getInt(1);
+          }
+        }
+      }
+      if (prefixMatchCount == 0) {
+        return;
+      }
+
+      // All conditions met — set key to '2' (NOI)
+      try (PreparedStatement ps = conn.prepareStatement(
+          "UPDATE c_bpartner SET em_obtik_tax_id_key = '2' WHERE c_bpartner_id = ?")) {
+        ps.setString(1, bpId);
+        ps.executeUpdate();
+      }
+
+      // Call VIES and persist the result
+      ViesService.ViesResult vies = ViesService.checkVat(taxId);
+      String viesStatus = null;
+      if (!ViesService.STATUS_PENDING.equals(vies.status)) {
+        viesStatus = vies.status;
+        try (PreparedStatement ps = conn.prepareStatement(
+            "UPDATE c_bpartner SET em_obtik_vies_status = ? WHERE c_bpartner_id = ?")) {
+          ps.setString(1, viesStatus);
+          ps.setString(2, bpId);
+          ps.executeUpdate();
+        }
+      }
+
+      // Inject warning message into the response
+      String viesLabel = "V".equals(viesStatus) ? OBMessageUtils.messageBD("OBTIK_ViesStatusValid")
+          : "I".equals(viesStatus) ? OBMessageUtils.messageBD("OBTIK_ViesStatusInvalid")
+          : OBMessageUtils.messageBD("OBTIK_ViesStatusUnverified");
+
+      JSONObject msg = new JSONObject();
+      msg.put("type", "warning");
+      msg.put("title", OBMessageUtils.messageBD("OBTIK_TaxKeyAutoSetTitle"));
+      msg.put("text", OBMessageUtils.messageBD("OBTIK_TaxKeyAutoSetText") + viesLabel + ".");
+
+      JSONArray messages = new JSONArray();
+      messages.put(msg);
+      locationJson.put("messages", messages);
+
+    } catch (Exception e) {
+      log.warn("ContactsLocationAddressHandler: error in checkAndAutoSetTaxKey for bpId={}: {}", bpId, e.getMessage());
+    }
   }
 
   private static String joinNonNull(String... parts) {
