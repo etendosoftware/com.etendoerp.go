@@ -398,7 +398,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    */
   @SuppressWarnings("java:S2077")
   protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId) {
-    return NeoInvoiceSupport.computePendingQtyPerLine(shipmentId, false);
+    return computePendingQtyPerLine(shipmentId, false);
   }
 
   @SuppressWarnings("java:S2077")
