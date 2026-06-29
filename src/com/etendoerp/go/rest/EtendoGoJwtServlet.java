@@ -29,6 +29,9 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.time.Instant;
 
 import javax.servlet.http.HttpServletRequest;
@@ -78,6 +81,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *   POST /sws/go/password-reset/confirm — Confirm password reset token (public)
  *   POST /sws/go/change-password — Change local password (requires session token)
  *   POST /sws/go/onboarding   — Create a new environment (requires session token, streams NDJSON)
+ *   GET  /sws/go/onboarding/draft  — Get the saved onboarding wizard draft (requires session token)
+ *   POST /sws/go/onboarding/draft  — Save or clear the onboarding wizard draft (requires session token)
  *   GET  /sws/go/me           — Get current account info (requires session token)
  *   GET  /sws/go/environments — List environments for the account (requires session token)
  *   GET  /sws/go/login?userId=X — Get an Etendo JWT for an AD_User (requires session token + ownership)
@@ -94,16 +99,24 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private static final String HASH_ALGORITHM = "SHA-256";
   private static final int SALT_BYTES = 16;
+  // Heartbeat cadence for the onboarding NDJSON stream. Must stay well below the
+  // CloudFront/proxy origin-response (inter-byte) timeout — default 30s — so a slow
+  // step never leaves the connection idle long enough to be dropped mid-stream.
+  private static final int ONBOARDING_HEARTBEAT_SECONDS = 10;
   private static final String UTF_8 = "UTF-8";
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_CLIENT_NAME = "clientName";
   private static final String FIELD_STATUS = "status";
   private static final String FIELD_TOKEN = "token";
   private static final String FIELD_MESSAGE = "message";
+  private static final String FIELD_CODE = "code";
+  private static final String FIELD_USER_MESSAGE = "userMessage";
   private static final String FIELD_PASSWORD = "password";
   private static final String FIELD_SUCCESS = "success";
+  private static final String FIELD_TIMESTAMP = "timestamp";
   private static final String FIELD_ACCOUNT = "account";
   private static final String FIELD_AUTH_METHOD = "authMethod";
+  private static final String FIELD_LANGUAGE = "language";
   private static final String STATUS_SUCCESS = FIELD_SUCCESS;
   private static final String INVALID_JSON_BODY = "Invalid JSON body";
   private static final String INTERNAL_ERROR = "Internal error";
@@ -131,6 +144,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PASSWORD_RESET_INVALID_MESSAGE =
       "Invalid or expired password reset token";
   private static final String SSO_PREFIX = "/sso/";
+  private static final String PATH_ONBOARDING_DRAFT = "/onboarding/draft";
+  private static final String FIELD_DRAFT = "draft";
+  private static final String FIELD_DRAFT_STEP = "step";
+  private static final String FIELD_DRAFT_FORM = "form";
+  private static final int ONBOARDING_DRAFT_MAX_LENGTH = 4000;
+  private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { "fullName", "businessType",
+      FIELD_CLIENT_NAME, "currency", FIELD_LANGUAGE, "countryCode", "fiscalIdType",
+      "fiscalIdValue", "address", "sector" };
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
   OnboardingAccountingWiringService onboardingAccountingWiringService =
@@ -177,14 +198,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   // --- HTTP method dispatchers ---
 
+  /**
+   * Route matcher tolerating an optional trailing slash.
+   */
+  private static boolean isPath(String path, String route) {
+    return route.equals(path) || (route + "/").equals(path);
+  }
+
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
-    if ("/me".equals(path) || "/me/".equals(path)) {
+    if (isPath(path, "/me")) {
       handleMe(request, response);
-    } else if ("/environments".equals(path) || "/environments/".equals(path)) {
+    } else if (isPath(path, PATH_ONBOARDING_DRAFT)) {
+      handleGetOnboardingDraft(request, response);
+    } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
-    } else if ("/login".equals(path) || "/login/".equals(path)) {
+    } else if (isPath(path, "/login")) {
       handleEnvironmentLogin(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
@@ -195,21 +225,21 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
     String ssoProvider = extractSsoProvider(path);
-    if ("/register".equals(path) || "/register/".equals(path)) {
+    if (isPath(path, "/register")) {
       handleRegister(request, response);
-    } else if ("/login".equals(path) || "/login/".equals(path)) {
+    } else if (isPath(path, "/login")) {
       handleLogin(request, response);
     } else if (ssoProvider != null) {
       handleSsoLogin(ssoProvider, request, response);
-    } else if ("/password-reset/request".equals(path)
-        || "/password-reset/request/".equals(path)) {
+    } else if (isPath(path, "/password-reset/request")) {
       handlePasswordResetRequest(request, response);
-    } else if ("/password-reset/confirm".equals(path)
-        || "/password-reset/confirm/".equals(path)) {
+    } else if (isPath(path, "/password-reset/confirm")) {
       handlePasswordResetConfirm(request, response);
-    } else if ("/change-password".equals(path) || "/change-password/".equals(path)) {
+    } else if (isPath(path, "/change-password")) {
       handleChangePassword(request, response);
-    } else if ("/onboarding".equals(path) || "/onboarding/".equals(path)) {
+    } else if (isPath(path, PATH_ONBOARDING_DRAFT)) {
+      handleSaveOnboardingDraft(request, response);
+    } else if (isPath(path, "/onboarding")) {
       handleOnboarding(request, response);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
@@ -241,7 +271,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       email = body.getString(FIELD_EMAIL).trim().toLowerCase();
       password = body.getString(FIELD_PASSWORD);
       name = body.getString("name").trim();
-      language = body.optString("language", "").trim();
+      language = body.optString(FIELD_LANGUAGE, "").trim();
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Missing required fields: email, password, name");
@@ -251,6 +281,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (email.isEmpty() || password.isEmpty() || name.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Fields email, password, and name must not be empty");
+      return;
+    }
+    if (!PasswordPolicy.isStrong(password)) {
+      writeWeakPasswordError(response);
       return;
     }
 
@@ -520,6 +554,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           "Fields token and password must not be empty");
       return;
     }
+    if (!PasswordPolicy.isStrong(password)) {
+      writeWeakPasswordError(response);
+      return;
+    }
 
     try {
       OBContext.setOBContext("0", "0", "0", "0");
@@ -582,6 +620,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (currentPassword.isEmpty() || newPassword.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Fields currentPassword and newPassword must not be empty");
+      return;
+    }
+    if (!PasswordPolicy.isStrong(newPassword)) {
+      writeWeakPasswordError(response);
       return;
     }
 
@@ -671,6 +713,172 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Resolve the platform account from the request's Bearer token under the
+   * system admin context. Always enters admin mode (so callers can restore it
+   * in their finally block) and writes the 401 response when the header is
+   * missing or the token does not match an active account, returning null.
+   */
+  private Account resolveAuthenticatedAccount(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    OBContext.setOBContext("0", "0", "0", "0");
+    OBContext.setAdminMode(true);
+    String token = extractBearerToken(request);
+    if (token == null) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
+      return null;
+    }
+    Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
+    if (account == null) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+    }
+    return account;
+  }
+
+  @FunctionalInterface
+  private interface AuthenticatedAccountAction {
+    void execute(Account account) throws IOException, JSONException;
+  }
+
+  /**
+   * Shared request template for the draft endpoints: resolves the account,
+   * runs the action, and maps failures to the standard 500 responses with a
+   * DAL rollback. Keeps the per-endpoint logic free of boilerplate.
+   */
+  private void runWithAuthenticatedAccount(HttpServletRequest request,
+      HttpServletResponse response, String actionLabel, AuthenticatedAccountAction action)
+      throws IOException {
+    try {
+      Account account = resolveAuthenticatedAccount(request, response);
+      if (account == null) {
+        return;
+      }
+      action.execute(account);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges(actionLabel, e, log);
+      log.error("Request '{}' failed", actionLabel, e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error handling '{}'", actionLabel, e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void writeSuccessStatus(HttpServletResponse response, JSONObject result)
+      throws IOException, JSONException {
+    result.put(FIELD_STATUS, STATUS_SUCCESS);
+    writeResponse(response, HttpServletResponse.SC_OK, result);
+  }
+
+  /**
+   * GET /sws/go/onboarding/draft
+   * Header: Authorization: Bearer <session_token>
+   * Returns 200 with { status, draft } where draft is the saved onboarding
+   * wizard draft (object) or null when no draft is stored.
+   */
+  private void handleGetOnboardingDraft(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "get onboarding draft", account -> {
+      JSONObject result = new JSONObject();
+      result.put(FIELD_DRAFT, parseStoredOnboardingDraft(account));
+      writeSuccessStatus(response, result);
+    });
+  }
+
+  /**
+   * POST /sws/go/onboarding/draft
+   * Header: Authorization: Bearer <session_token>
+   * Body: { "draft": { "step": 1|2, "form": { ... } } } to save, { "draft": null } to clear.
+   * Only whitelisted form fields are stored; the serialized draft is capped at 4000 chars.
+   */
+  private void handleSaveOnboardingDraft(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "save onboarding draft", account -> {
+      JSONObject body = readJsonBodyOrBadRequest(request, response);
+      if (body == null) {
+        return;
+      }
+      JSONObject draft = body.optJSONObject(FIELD_DRAFT);
+      String storedDraft = null;
+      if (draft != null) {
+        storedDraft = sanitizeOnboardingDraft(draft).toString();
+        if (storedDraft.length() > ONBOARDING_DRAFT_MAX_LENGTH) {
+          writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+              "Onboarding draft is too large");
+          return;
+        }
+      }
+      // updateOnboardingDraft flushes and commits internally
+      // (EtendoGoJwtDalHelper.flushAndCommitDalChanges) — no extra commit here.
+      EtendoGoJwtDalHelper.updateOnboardingDraft(account, storedDraft);
+      writeSuccessStatus(response, new JSONObject());
+    });
+  }
+
+  /**
+   * Read the JSON request body, writing a 400 response and returning null when
+   * the payload is not valid JSON.
+   */
+  private JSONObject readJsonBodyOrBadRequest(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    try {
+      return readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return null;
+    }
+  }
+
+  /**
+   * Keep only known wizard fields so arbitrary client payloads are never persisted.
+   */
+  private JSONObject sanitizeOnboardingDraft(JSONObject draft) throws JSONException {
+    JSONObject clean = new JSONObject();
+    int step = draft.optInt(FIELD_DRAFT_STEP, 1);
+    clean.put(FIELD_DRAFT_STEP, Math.min(Math.max(step, 1), 2));
+    JSONObject cleanForm = new JSONObject();
+    JSONObject form = draft.optJSONObject(FIELD_DRAFT_FORM);
+    if (form != null) {
+      for (String field : ONBOARDING_DRAFT_FORM_FIELDS) {
+        Object value = form.opt(field);
+        if (value instanceof String) {
+          cleanForm.put(field, value);
+        }
+      }
+    }
+    clean.put(FIELD_DRAFT_FORM, cleanForm);
+    return clean;
+  }
+
+  private Object parseStoredOnboardingDraft(Account account) {
+    String storedDraft = EtendoGoJwtDalHelper.getOnboardingDraft(account);
+    if (StringUtils.isBlank(storedDraft)) {
+      return JSONObject.NULL;
+    }
+    try {
+      return new JSONObject(storedDraft);
+    } catch (JSONException e) {
+      log.warn("Stored onboarding draft for account {} is not valid JSON; ignoring",
+          account.getId());
+      return JSONObject.NULL;
+    }
+  }
+
+  private void clearOnboardingDraftBestEffort(Account account) {
+    if (account == null) {
+      return;
+    }
+    try {
+      // updateOnboardingDraft flushes and commits internally
+      // (EtendoGoJwtDalHelper.flushAndCommitDalChanges) — no extra commit here.
+      EtendoGoJwtDalHelper.updateOnboardingDraft(account, null);
+    } catch (RuntimeException e) {
+      log.warn("Clearing onboarding draft failed without blocking onboarding", e);
     }
   }
 
@@ -825,6 +1033,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Generate a random password for the admin user
     String adminPassword = UUID.randomUUID().toString().substring(0, 12);
 
+    // Keepalive: a background thread emits a blank NDJSON line on a fixed cadence so the
+    // gap between bytes never exceeds the CloudFront/proxy inter-byte timeout while a slow
+    // step runs. The frontend skips empty lines (processLines), so this needs no UI change.
+    ScheduledExecutorService heartbeat = startOnboardingHeartbeat(writer);
+
     try {
       VariablesSecureApp vars = prepareAdminContext(writer, onboardingRequest.language);
       String clientId = resolveOrCreateClient(writer, vars, accountEmail, onboardingRequest, currencyId,
@@ -859,6 +1072,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
       Account account = findAccountForCommittedOnboarding(token, accountEmail);
+      clearOnboardingDraftBestEffort(account);
       String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
       sendAuthEmailBestEffort("environment-ready",
           () -> authEmailSender.sendEnvironmentReady(account, clientId, normalizedLanguage));
@@ -874,8 +1088,68 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           "Onboarding failed: " + e.getMessage());
       sendFinalResult(writer, false, "Onboarding failed: " + e.getMessage());
     } finally {
+      // Stop the keepalive before the final flush so no heartbeat races the result line.
+      heartbeat.shutdownNow();
       OBContext.restorePreviousMode();
       writer.flush();
+      // PrintWriter swallows IOExceptions (broken pipe): when CloudFront or any proxy
+      // hits its response timeout it silently drops the client mid-stream while the
+      // backend keeps running to completion (and commits). checkError() is the only
+      // way to detect it. Surface it explicitly so it stops being invisible in the logs.
+      if (writer.checkError()) {
+        log.warn("Onboarding stream to client was lost before the result line was delivered "
+            + "(likely a CloudFront/proxy response timeout). The environment may have been "
+            + "created successfully server-side, but the UI will report a false failure. "
+            + "accountEmail={}", accountEmail);
+      }
+    }
+  }
+
+  /**
+   * Starts a daemon scheduler that emits a blank NDJSON line every
+   * {@link #ONBOARDING_HEARTBEAT_SECONDS} seconds. This keeps bytes flowing on the
+   * streaming response so a long-running onboarding step never leaves the connection
+   * idle past the CloudFront/proxy inter-byte timeout (which would silently drop the
+   * client mid-stream and make the UI report a false failure).
+   *
+   * <p>The caller MUST call {@code shutdownNow()} on the returned executor in a
+   * {@code finally} block.
+   */
+  private ScheduledExecutorService startOnboardingHeartbeat(PrintWriter writer) {
+    return startOnboardingHeartbeat(writer, ONBOARDING_HEARTBEAT_SECONDS, TimeUnit.SECONDS);
+  }
+
+  /**
+   * Interval-injectable variant (package-private for tests so they do not have to wait
+   * the production {@link #ONBOARDING_HEARTBEAT_SECONDS} cadence).
+   */
+  ScheduledExecutorService startOnboardingHeartbeat(PrintWriter writer, long interval, TimeUnit unit) {
+    ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
+      Thread thread = new Thread(runnable, "onboarding-heartbeat");
+      thread.setDaemon(true);
+      return thread;
+    });
+    scheduler.scheduleAtFixedRate(() -> sendHeartbeat(writer), interval, interval, unit);
+    return scheduler;
+  }
+
+  /**
+   * Writes a NDJSON heartbeat line to keep the connection alive during slow steps. It is a
+   * self-describing {@code {"type":"heartbeat"}} object (not a blank line) so it is visible
+   * in raw stream captures and logs while still being ignored by the frontend, which only
+   * reacts to {@code type=progress} and {@code type=result}. PrintWriter is internally
+   * synchronized, so concurrent writes from this heartbeat and the main onboarding thread
+   * each emit whole lines without corrupting the NDJSON output.
+   */
+  void sendHeartbeat(PrintWriter writer) {
+    try {
+      JSONObject heartbeat = new JSONObject();
+      heartbeat.put("type", "heartbeat");
+      heartbeat.put(FIELD_TIMESTAMP, Instant.now().toString());
+      writer.println(heartbeat.toString());
+      writer.flush();
+    } catch (JSONException e) {
+      log.warn("Error writing heartbeat", e);
     }
   }
 
@@ -937,7 +1211,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OnboardingRequestData data = new OnboardingRequestData();
       data.clientName = clientName;
       data.currencyIso = body.optString("currency", "EUR").trim();
-      data.language = body.optString("language", "en_US").trim();
+      data.language = body.optString(FIELD_LANGUAGE, "en_US").trim();
       // Country drives the org's tax resolution; default to Spain (ES) when the form omits it.
       data.countryCode = body.optString("countryCode", "ES").trim();
       data.address = body.optString("address", "").trim();
@@ -1310,16 +1584,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * Write a NDJSON progress line.
    */
-  private void sendProgress(PrintWriter writer, String step, String status, String message) {
+  void sendProgress(PrintWriter writer, String step, String status, String message) {
     try {
       JSONObject progress = new JSONObject();
       progress.put("type", "progress");
       progress.put("step", step);
       progress.put(FIELD_STATUS, status);
       progress.put(FIELD_MESSAGE, message);
-      progress.put("timestamp", Instant.now().toString());
+      progress.put(FIELD_TIMESTAMP, Instant.now().toString());
       writer.println(progress.toString());
       writer.flush();
+      // If the flush failed the client is already gone (broken pipe, swallowed by
+      // PrintWriter). Log at DEBUG which step was streaming so the cut point is
+      // identifiable when onboarding-stream logging is enabled.
+      if (writer.checkError()) {
+        log.debug("Client connection lost while streaming onboarding step '{}' (status={})",
+            step, status);
+      }
     } catch (JSONException e) {
       log.warn("Error writing progress", e);
     }
@@ -1328,15 +1609,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * Write the final NDJSON result line.
    */
-  private void sendFinalResult(PrintWriter writer, boolean success, String message) {
+  void sendFinalResult(PrintWriter writer, boolean success, String message) {
     try {
       JSONObject result = new JSONObject();
       result.put("type", "result");
       result.put(FIELD_SUCCESS, success);
       result.put(FIELD_MESSAGE, message);
-      result.put("timestamp", Instant.now().toString());
+      result.put(FIELD_TIMESTAMP, Instant.now().toString());
       writer.println(result.toString());
       writer.flush();
+      // The final result line is what the UI waits for. If the flush failed the client
+      // never received it (broken pipe swallowed by PrintWriter) — the UI will report a
+      // false failure even though the backend finished. Make that explicit.
+      if (writer.checkError()) {
+        log.warn("Onboarding final result (success={}) could not be delivered to the client; "
+            + "the connection was already closed (likely a CloudFront/proxy stream timeout).",
+            success);
+      }
     } catch (JSONException e) {
       log.warn("Error writing final result", e);
     }
@@ -1534,6 +1823,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         FIELD_MESSAGE,
         FIELD_STATUS,
         PROGRESS_ERROR);
+  }
+
+  /**
+   * Write the weak-password rejection as HTTP 400 with a stable, machine-readable
+   * envelope: {@code { "error": { "code": "WEAK_PASSWORD", "message": "...",
+   * "userMessage": "..." } } }.
+   */
+  private void writeWeakPasswordError(HttpServletResponse response) throws IOException {
+    try {
+      JSONObject error = new JSONObject();
+      error.put(FIELD_CODE, PasswordPolicy.ERROR_CODE);
+      error.put(FIELD_MESSAGE, PasswordPolicy.MESSAGE);
+      error.put(FIELD_USER_MESSAGE, PasswordPolicy.USER_MESSAGE);
+      JSONObject envelope = new JSONObject();
+      envelope.put(PROGRESS_ERROR, error);
+      writeResponse(response, HttpServletResponse.SC_BAD_REQUEST, envelope);
+    } catch (JSONException e) {
+      log.error("JSON error building weak-password response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
   }
 
   private static class OnboardingRequestData {

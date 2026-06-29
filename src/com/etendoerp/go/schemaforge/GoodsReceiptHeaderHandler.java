@@ -35,6 +35,8 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+
 /**
  * NeoHandler for the Goods Receipt header entity.
  *
@@ -61,8 +63,20 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
   @Inject
   private CreatePurchaseReturnHandler createPurchaseReturnHandler;
 
+  @Inject
+  private DocumentPostingService postingService;
+
+  /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
+  void setPostingService(DocumentPostingService postingService) {
+    this.postingService = postingService;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
+    if (posting != null) {
+      return posting;
+    }
     return NeoHeaderActionRouter.dispatch(context,
         cloneRecordHandler, createPurchaseInvoiceHandler, createPurchaseReturnHandler);
   }

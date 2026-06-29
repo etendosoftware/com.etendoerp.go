@@ -24,18 +24,25 @@ import java.sql.ResultSet;
 import javax.inject.Inject;
 import javax.inject.Named;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.DocumentType;
+
+import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 
 /**
  * NeoHandler for the Purchase Invoice header entity.
  *
- * Dispatches custom ACTION requests to the appropriate handler:
+ * <p>Extends {@link AbstractInvoiceHeaderHandler} to inherit shared document-type-lock
+ * enforcement, origin-invoice persistence, and GET enrichment logic.
+ *
+ * <p>Dispatches custom ACTION requests to the appropriate handler:
  * <ul>
- *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler} (uses {@code CloneInvoiceHook})</li>
+ *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler}</li>
  *   <li>{@code registerPayment} / {@code invoicePayments} / {@code invoiceAccounts} → {@link RegisterPaymentOutHandler}</li>
  *   <li>{@code Em_Aeatsii_Send} → {@link SiiSendHandler}</li>
  *   <li>{@code Em_Tbai_Xmlgenerator} → {@link TbaiXmlgeneratorHandler}</li>
@@ -44,9 +51,16 @@ import org.openbravo.dal.service.OBDal;
  * <p>Before the Complete action (documentAction=CO), creates the total discount line.
  * Delegates to {@link TotalDiscountService} via the shared helper in
  * {@link AbstractOrderHeaderHandler}.
+ *
+ * <p>Subtype resolution for AP invoices:
+ * <ul>
+ *   <li>{@code APC} → NC (Credit Note)</li>
+ *   <li>{@code API} + isReturn → DEV (Return Invoice)</li>
+ *   <li>otherwise → FAC (Standard Invoice)</li>
+ * </ul>
  */
 @Named("purchaseInvoiceHeaderHandler")
-public class PurchaseInvoiceHeaderHandler implements NeoHandler {
+public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(PurchaseInvoiceHeaderHandler.class);
 
@@ -65,11 +79,29 @@ public class PurchaseInvoiceHeaderHandler implements NeoHandler {
   @Inject
   private TotalDiscountService totalDiscountService;
 
+  @Inject
+  private DocumentPostingService postingService;
+
+  /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
+  void setPostingService(DocumentPostingService postingService) {
+    this.postingService = postingService;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse rateError = AbstractOrderHeaderHandler.validateExchangeRateBeforeComplete(context);
-    if (rateError != null) {
-      return rateError;
+    NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
+    if (posting != null) {
+      return posting;
+    }
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
+      NeoResponse lockError = validateDocTypeLock(context);
+      if (lockError != null) {
+        return lockError;
+      }
+      NeoResponse originError = validateOriginInvoiceRequired(context);
+      if (originError != null) {
+        return originError;
+      }
     }
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
     return NeoHeaderActionRouter.dispatch(
@@ -83,20 +115,59 @@ public class PurchaseInvoiceHeaderHandler implements NeoHandler {
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     try {
+      // POST/PUT: persist origin invoice relationship after the record is saved
+      if (NeoEndpointType.CRUD.equals(context.getEndpointType())
+          && ("POST".equals(context.getHttpMethod()) || "PUT".equals(context.getHttpMethod()))) {
+        persistOriginInvoice(context);
+      }
+
+      // GET: enrich response with virtual fields
       JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
       if (dataArr == null) {
         return null;
       }
       JSONObject body = context.getPreviousResult().getBody();
       if (context.getRecordId() != null) {
-        enrichLinkedReceipts(dataArr.getJSONObject(0), context.getRecordId());
+        JSONObject rec = dataArr.getJSONObject(0);
+        enrichLinkedReceipts(rec, context.getRecordId());
+        enrichOriginInvoice(rec, context.getRecordId());
+        enrichInvoiceSubtype(rec, getInvoiceSubtypeKey());
+        enrichDocTypeLocked(rec);
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {
-      log.error("Error enriching purchase invoice with linked receipts", e);
+      log.error("Error enriching purchase invoice", e);
       return null;
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // AP-specific subtype resolution
+  // ---------------------------------------------------------------------------
+
+  /** {@inheritDoc} AP: APC → NC, API+isReturn → DEV, otherwise FAC. */
+  @Override
+  protected String classifyDocType(DocumentType dt) {
+    String category = dt.getDocumentCategory();
+    if ("APC".equals(category)) return SUBTYPE_NC;
+    if ("API".equals(category) && Boolean.TRUE.equals(dt.isReturn())) return SUBTYPE_DEV;
+    return SUBTYPE_FAC;
+  }
+
+  /**
+   * {@inheritDoc}
+   *
+   * @return {@code "apInvoiceSubtype"}
+   */
+  @Override
+  protected String getInvoiceSubtypeKey() {
+    return "apInvoiceSubtype";
+  }
+
+  // ---------------------------------------------------------------------------
+  // AP-specific GET enrichment
+  // ---------------------------------------------------------------------------
+
 
   @SuppressWarnings("java:S2077")
   private void enrichLinkedReceipts(JSONObject rec, String invoiceId) {

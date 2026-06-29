@@ -30,14 +30,17 @@ import org.codehaus.jettison.json.JSONObject;
 public final class EmailDeliveryPolicy {
 
   private static final EmailDeliveryPolicy EMPTY = new EmailDeliveryPolicy(null,
-      Collections.emptyList());
+      Collections.emptyList(), false);
 
   private final String idempotencyKey;
   private final List<EmailThrottleRule> throttleRules;
+  private final boolean serverDerivedIdempotency;
 
-  private EmailDeliveryPolicy(String idempotencyKey, List<EmailThrottleRule> throttleRules) {
+  private EmailDeliveryPolicy(String idempotencyKey, List<EmailThrottleRule> throttleRules,
+      boolean serverDerivedIdempotency) {
     this.idempotencyKey = StringUtils.trimToNull(idempotencyKey);
     this.throttleRules = Collections.unmodifiableList(new ArrayList<>(throttleRules));
+    this.serverDerivedIdempotency = serverDerivedIdempotency;
   }
 
   /**
@@ -59,7 +62,29 @@ public final class EmailDeliveryPolicy {
   public static EmailDeliveryPolicy of(String idempotencyKey,
       List<EmailThrottleRule> throttleRules) {
     return new EmailDeliveryPolicy(idempotencyKey,
-        throttleRules == null ? Collections.emptyList() : throttleRules);
+        throttleRules == null ? Collections.emptyList() : throttleRules, false);
+  }
+
+  /**
+   * Creates a policy whose idempotency key is server-derived; any caller-supplied key is ignored.
+   *
+   * @param idempotencyKey server-derived idempotency key
+   * @param throttleRules throttle rules selected by the contract
+   * @return delivery policy with server-derived idempotency
+   */
+  public static EmailDeliveryPolicy serverDerived(String idempotencyKey,
+      List<EmailThrottleRule> throttleRules) {
+    return new EmailDeliveryPolicy(idempotencyKey,
+        throttleRules == null ? Collections.emptyList() : throttleRules, true);
+  }
+
+  /**
+   * Indicates whether the idempotency key is server-derived and the caller key must be ignored.
+   *
+   * @return {@code true} when the caller-supplied idempotency key is ignored
+   */
+  public boolean isServerDerivedIdempotency() {
+    return serverDerivedIdempotency;
   }
 
   /**
@@ -72,7 +97,7 @@ public final class EmailDeliveryPolicy {
     if (idempotencyKey != null) {
       return idempotencyKey;
     }
-    if (context == null || context.getCommand() == null) {
+    if (serverDerivedIdempotency || context == null || context.getCommand() == null) {
       return null;
     }
     JSONObject body = context.getCommand().getBody();

@@ -22,20 +22,14 @@ import java.io.IOException;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
-import org.apache.commons.lang3.StringUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
-import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
-import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * Path-parsing and top-level spec dispatch collaborator for {@link NeoServlet}.
@@ -44,8 +38,6 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * back to the servlet.
  */
 class NeoRequestRouter {
-
-  private static final Logger log = LogManager.getLogger(NeoRequestRouter.class);
 
   private final NeoServlet servlet;
 
@@ -119,53 +111,26 @@ class NeoRequestRouter {
 
   /**
    * Handles report-type spec requests (specType = "R").
-   * Checks for custom handler qualifier first, then falls back to standard Jasper report flow.
+   *
+   * <p>Report generation is NEO-native-handlers-only (ETP-4255). When the spec is backed
+   * by a NEO report handler ({@code Java_Qualifier}), that handler serves the request.
+   * Otherwise the spec is non-callable: there is no Jasper/AD_Process fallback. Both GET
+   * and POST then return HTTP 200 with the canonical
+   * {@code not_configured_for_report_generation} status body, identical to MCP discover
+   * and the MCP report tool.</p>
    */
   void handleReportSpecRequest(SFSpec spec, NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws Exception {
-    // Custom NeoHandler dispatch (single-segment handlers such as bank-statements).
-    String reportHandlerQualifier = findReportHandlerQualifier(spec);
+    // NEO-native handler dispatch (single-segment handlers such as aging-receivable).
+    String reportHandlerQualifier = NeoReportCallability.resolveReportHandlerQualifier(spec);
     if (reportHandlerQualifier != null
         && dispatchReportHandler(reportHandlerQualifier, pathInfo, method, request, response)) {
       return;
     }
-    Process adReportProcess = spec.getProcess();
-    if (adReportProcess != null && !servlet.authenticator.hasProcessAccess(adReportProcess.getId())) {
-      servlet.sendError(response, HttpServletResponse.SC_FORBIDDEN,
-          "Access denied to report for current role");
-      return;
-    }
-    if ("GET".equals(method)) {
-      if (adReportProcess == null) {
-        servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-            "Report spec has no linked AD_Process");
-        return;
-      }
-      servlet.writeResponse(response, NeoReportService.describeReport(adReportProcess));
-      return;
-    }
-    if (!"POST".equals(method)) {
-      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-          "Report specs support GET (describe) and POST (generateReport)");
-      return;
-    }
-    servlet.processReportEndpoint.handleReportSpec(spec, request, response);
-  }
-
-  /** First non-blank Java_Qualifier among the spec's entities, or {@code null}. */
-  private String findReportHandlerQualifier(SFSpec spec) {
-    try {
-      OBCriteria<SFEntity> qCriteria = OBDal.getInstance().createCriteria(SFEntity.class);
-      qCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", spec.getId()));
-      for (SFEntity qEntity : qCriteria.list()) {
-        if (StringUtils.isNotBlank(qEntity.getJavaQualifier())) {
-          return qEntity.getJavaQualifier();
-        }
-      }
-    } catch (Exception e) {
-      log.warn("Error checking report handler qualifier for spec '{}': {}", spec.getName(), e.getMessage());
-    }
-    return null;
+    // No NEO-native report handler: Jasper/AD_Process report execution has been removed.
+    // Expose the report as non-callable with a stable status (HTTP 200), never an error.
+    servlet.writeResponse(response,
+        NeoResponse.ok(NeoReportCallability.buildNotConfiguredResponse(spec.getName())));
   }
 
   /**

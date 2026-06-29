@@ -599,6 +599,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     invoice = getSupport().applyOrderDiscountToInvoice(invoice, orderId, totalDiscountService);
     getSupport().ensureLineGrossAmounts(invoice);
 
+    getSupport().propagateOrderRateToInvoice(order, invoice);
+
     return invoice;
   }
 

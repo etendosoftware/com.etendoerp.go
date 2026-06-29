@@ -24,31 +24,48 @@ import java.sql.ResultSet;
 import javax.inject.Inject;
 import javax.inject.Named;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.DocumentType;
+
+import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 
 /**
  * NeoHandler for the Sales Invoice header entity.
- * <p>
- * Dispatches custom ACTION requests to the appropriate handler:
+ *
+ * <p>Extends {@link AbstractInvoiceHeaderHandler} to inherit shared document-type-lock
+ * enforcement and GET enrichment logic.
+ *
+ * <p>Subtype resolution for AR invoices:
  * <ul>
- *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler} (uses {@code CloneInvoiceHook})</li>
+ *   <li>{@code ARC} → NC (Credit Memo)</li>
+ *   <li>{@code ARI_RM} → DEV (Return Invoice)</li>
+ *   <li>otherwise → FAC (Standard Invoice)</li>
+ * </ul>
+ *
+ * <p>GET enrichment injects {@code arInvoiceSubtype} into every record (list and detail)
+ * and negates {@code grandTotalAmount} / {@code outstandingAmount} for NC and DEV subtypes.
+ * {@code docTypeLocked} is injected only in detail-view responses.
+ *
+ * <p>Dispatches custom ACTION requests:
+ * <ul>
+ *   <li>{@code cloneRecord} → {@link NeoCloneRecordHandler}</li>
  *   <li>{@code registerPayment} / {@code invoicePayments} / {@code invoiceAccounts} → {@link RegisterPaymentHandler}</li>
  *   <li>{@code Em_Aeatsii_Send} → {@link SiiSendHandler}</li>
  *   <li>{@code Em_Tbai_Xmlgenerator} → {@link TbaiXmlgeneratorHandler}</li>
  * </ul>
- *
- * <p>Before the Complete action (documentAction=CO), creates the total discount line so it is
- * included in the completed invoice. Delegates to {@link TotalDiscountService} via the shared
- * helper in {@link AbstractOrderHeaderHandler}.
  */
 @Named("salesInvoiceHeaderHandler")
-public class SalesInvoiceHeaderHandler implements NeoHandler {
+public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(SalesInvoiceHeaderHandler.class);
+
+  private static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
+  private static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
@@ -65,34 +82,32 @@ public class SalesInvoiceHeaderHandler implements NeoHandler {
   @Inject
   private TotalDiscountService totalDiscountService;
 
-  /**
-   * Rounds a monetary value to 2 decimal places using half-up rounding.
-   *
-   * @param value
-   *     the raw computed amount
-   * @return the value rounded to 2 decimal places
-   */
-  private static double roundHalfUp(double value) {
-    return Math.round(value * 100.0) / 100.0;
+  @Inject
+  private CreateInvoiceShipmentHandler createInvoiceShipmentHandler;
+
+  @Inject
+  private DocumentPostingService postingService;
+
+  /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
+  void setPostingService(DocumentPostingService postingService) {
+    this.postingService = postingService;
   }
 
-  /**
-   * Pre-hook: creates the total-discount line before the Complete action and routes all other
-   * ACTION requests to the appropriate downstream handler.
-   *
-   * @param context
-   *     the current request context
-   * @return the response from the matched downstream handler, or null if none matched
-   */
   @Override
   public NeoResponse handle(NeoContext context) {
-    NeoResponse rateError = AbstractOrderHeaderHandler.validateExchangeRateBeforeComplete(context);
-    if (rateError != null) {
-      return rateError;
+    NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
+    if (posting != null) {
+      return posting;
+    }
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
+      NeoResponse lockError = validateDocTypeLock(context);
+      if (lockError != null) {
+        return lockError;
+      }
     }
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
-    return NeoHeaderActionRouter.dispatch(context, cloneRecordHandler, registerPaymentHandler, siiSendHandler,
-        tbaiXmlgeneratorHandler);
+    return NeoHeaderActionRouter.dispatch(context, cloneRecordHandler, registerPaymentHandler,
+        siiSendHandler, tbaiXmlgeneratorHandler, createInvoiceShipmentHandler);
   }
 
   /**
@@ -111,38 +126,79 @@ public class SalesInvoiceHeaderHandler implements NeoHandler {
     }
     try {
       JSONObject body = prev.getBody();
-      JSONObject wrapper = body.optJSONObject("response");
-      if (wrapper == null) {
+      JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
+      if (dataArr == null || dataArr.length() == 0) {
         return null;
       }
-      JSONArray data = wrapper.optJSONArray("data");
-      if (data == null || data.length() == 0) {
-        return null;
-      }
-      for (int i = 0; i < data.length(); i++) {
-        JSONObject rec = data.getJSONObject(i);
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject rec = dataArr.getJSONObject(i);
+        enrichInvoiceSubtype(rec, getInvoiceSubtypeKey());
+        applyAmountNegationForCredit(rec);
         applyTotalDiscountToRecord(rec);
-        if (context.getRecordId() != null) {
-          enrichSourceInvoice(rec, context.getRecordId());
-        }
       }
-      TbaiSyncStatusInjector.inject(data);
+      if (context.getRecordId() != null) {
+        JSONObject rec = dataArr.getJSONObject(0);
+        enrichSourceInvoice(rec, context.getRecordId());
+        enrichDocTypeLocked(rec);
+      }
+      TbaiSyncStatusInjector.inject(dataArr);
       return NeoResponse.ok(body);
     } catch (Exception e) {
-      log.error("Error post-processing sales invoice GET response", e);
+      log.error("Error enriching sales invoice response", e);
       return null;
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // AR-specific subtype resolution
+  // ---------------------------------------------------------------------------
+
+  /** {@inheritDoc} AR: ARC → NC, ARI_RM → DEV, otherwise FAC. */
+  @Override
+  protected String classifyDocType(DocumentType dt) {
+    String category = dt.getDocumentCategory();
+    if ("ARC".equals(category)) return SUBTYPE_NC;
+    if ("ARI_RM".equals(category)) return SUBTYPE_DEV;
+    return SUBTYPE_FAC;
+  }
+
   /**
-   * Applies the total-discount factor to {@code grandTotalAmount} and {@code outstandingAmount}
-   * in the given record. Skips confirmed invoices ({@code processed=true}) and records with no
-   * positive discount.
+   * {@inheritDoc}
    *
-   * @param invoice
-   *     a single invoice record from the response data array; modified in-place
-   * @throws Exception
-   *     if a JSON read or write operation fails
+   * @return {@code "arInvoiceSubtype"}
+   */
+  @Override
+  protected String getInvoiceSubtypeKey() {
+    return "arInvoiceSubtype";
+  }
+
+  // ---------------------------------------------------------------------------
+  // Amount adjustments
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Negates {@code grandTotalAmount} and {@code outstandingAmount} for credit memo (NC) and
+   * return invoice (DEV) records. Credit instruments represent money owed to the customer,
+   * so amounts are displayed as negative in the list.
+   */
+  private void applyAmountNegationForCredit(JSONObject rec) throws Exception {
+    String subtype = rec.optString(getInvoiceSubtypeKey(), SUBTYPE_FAC);
+    if (!SUBTYPE_NC.equals(subtype) && !SUBTYPE_DEV.equals(subtype)) {
+      return;
+    }
+    double grand = rec.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
+    if (grand > 0) {
+      rec.put(FIELD_GRAND_TOTAL_AMOUNT, -grand);
+    }
+    double outstanding = rec.optDouble(FIELD_OUTSTANDING_AMOUNT, 0.0);
+    if (outstanding > 0) {
+      rec.put(FIELD_OUTSTANDING_AMOUNT, -outstanding);
+    }
+  }
+
+  /**
+   * Applies the etgoTotalDiscount factor to {@code grandTotalAmount} and {@code outstandingAmount}
+   * for draft invoices. Skips confirmed invoices and records with no positive discount.
    */
   /**
    * For return invoices, injects:
@@ -200,11 +256,13 @@ public class SalesInvoiceHeaderHandler implements NeoHandler {
       return;
     }
     double factor = 1.0 - discountPct / 100.0;
+    double grand = invoice.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
+    invoice.put(FIELD_GRAND_TOTAL_AMOUNT, roundHalfUp(grand * factor));
+    double outstanding = invoice.optDouble(FIELD_OUTSTANDING_AMOUNT, 0.0);
+    invoice.put(FIELD_OUTSTANDING_AMOUNT, roundHalfUp(outstanding * factor));
+  }
 
-    double grandTotal = invoice.optDouble("grandTotalAmount", 0.0);
-    invoice.put("grandTotalAmount", roundHalfUp(grandTotal * factor));
-
-    double outstanding = invoice.optDouble("outstandingAmount", 0.0);
-    invoice.put("outstandingAmount", roundHalfUp(outstanding * factor));
+  private static double roundHalfUp(double value) {
+    return Math.round(value * 100.0) / 100.0;
   }
 }

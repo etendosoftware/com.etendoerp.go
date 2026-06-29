@@ -62,6 +62,35 @@ public class ApiGatewayEmailProviderAdapter implements EmailProviderAdapter {
   }
 
   /**
+   * Indicates whether the API Gateway endpoint fans out to multiple recipients.
+   * <p>
+   * The gateway is backed by Amazon SES, whose {@code SendEmail} destination accepts multiple
+   * {@code To} addresses (up to 50 recipients per message, well above the document-send business
+   * limit). The payload emits {@code to} as a JSON array for multi-recipient sends
+   * (see {@link EmailProviderRequest#toProviderPayload()}), so this returns {@code true}.
+   *
+   * @return {@code true} — SES delivers every {@code to} recipient
+   */
+  @Override
+  public boolean supportsMultipleRecipients() {
+    return true;
+  }
+
+  /**
+   * Indicates whether the API Gateway endpoint delivers a CC channel.
+   * <p>
+   * Amazon SES delivers a {@code Cc} channel via the {@code SendEmail} destination, and the
+   * payload emits {@code cc} as a JSON array when CC recipients are present, so this returns
+   * {@code true}.
+   *
+   * @return {@code true} — SES delivers CC recipients
+   */
+  @Override
+  public boolean supportsCcChannel() {
+    return true;
+  }
+
+  /**
    * Sends a resolved provider request to the configured API Gateway endpoint.
    *
    * @param request provider payload resolved by a contract

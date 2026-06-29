@@ -17,6 +17,16 @@
 
 package com.etendoerp.go.schemaforge.email;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+
+import org.apache.commons.lang3.StringUtils;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.util.Check;
 
 /**
@@ -38,6 +48,9 @@ public final class EmailAuditRecord {
   private final Integer providerStatus;
   private final boolean duplicate;
   private final long createdAtMillis;
+  private final List<String> finalToRecipientHashes;
+  private final List<String> finalCcRecipientHashes;
+  private final List<String> finalRecipientDomains;
 
   private EmailAuditRecord(EmailSendContext context, String idempotencyKey, int httpStatus,
       String status, String message, Integer providerStatus, boolean duplicate) {
@@ -56,6 +69,10 @@ public final class EmailAuditRecord {
     this.providerStatus = providerStatus;
     this.duplicate = duplicate;
     this.createdAtMillis = System.currentTimeMillis();
+    EmailRecipientSet recipients = context.getRecipientSet();
+    this.finalToRecipientHashes = hashList(recipients == null ? null : recipients.getTo());
+    this.finalCcRecipientHashes = hashList(recipients == null ? null : recipients.getCc());
+    this.finalRecipientDomains = domainList(recipients);
   }
 
   private EmailAuditRecord(Snapshot snapshot) {
@@ -73,6 +90,9 @@ public final class EmailAuditRecord {
     this.providerStatus = snapshot.providerStatus;
     this.duplicate = snapshot.duplicate;
     this.createdAtMillis = snapshot.createdAtMillis;
+    this.finalToRecipientHashes = Collections.emptyList();
+    this.finalCcRecipientHashes = Collections.emptyList();
+    this.finalRecipientDomains = Collections.emptyList();
   }
 
   /**
@@ -189,6 +209,33 @@ public final class EmailAuditRecord {
   }
 
   /**
+   * Returns the SHA-256 hashes of the final to-channel recipients (never raw addresses).
+   *
+   * @return immutable list of to-recipient hashes
+   */
+  public List<String> getFinalToRecipientHashes() {
+    return finalToRecipientHashes;
+  }
+
+  /**
+   * Returns the SHA-256 hashes of the final cc-channel recipients (never raw addresses).
+   *
+   * @return immutable list of cc-recipient hashes
+   */
+  public List<String> getFinalCcRecipientHashes() {
+    return finalCcRecipientHashes;
+  }
+
+  /**
+   * Returns the plaintext lower-cased domains of the final recipient set.
+   *
+   * @return immutable list of recipient domains
+   */
+  public List<String> getFinalRecipientDomains() {
+    return finalRecipientDomains;
+  }
+
+  /**
    * Returns the HTTP status.
    *
    * @return HTTP status
@@ -240,5 +287,60 @@ public final class EmailAuditRecord {
    */
   public long getCreatedAtMillis() {
     return createdAtMillis;
+  }
+
+  private static List<String> hashList(List<String> addresses) {
+    if (addresses == null || addresses.isEmpty()) {
+      return Collections.emptyList();
+    }
+    List<String> hashes = new ArrayList<>(addresses.size());
+    for (String address : addresses) {
+      String hashed = hash(address);
+      if (hashed != null) {
+        hashes.add(hashed);
+      }
+    }
+    return Collections.unmodifiableList(hashes);
+  }
+
+  private static List<String> domainList(EmailRecipientSet recipients) {
+    if (recipients == null) {
+      return Collections.emptyList();
+    }
+    List<String> domains = new ArrayList<>();
+    addDomains(domains, recipients.getTo());
+    addDomains(domains, recipients.getCc());
+    return Collections.unmodifiableList(domains);
+  }
+
+  private static void addDomains(List<String> domains, List<String> addresses) {
+    for (String address : addresses) {
+      int at = address.lastIndexOf('@');
+      if (at >= 0 && at < address.length() - 1) {
+        String domain = address.substring(at + 1).toLowerCase(Locale.ROOT);
+        if (!domains.contains(domain)) {
+          domains.add(domain);
+        }
+      }
+    }
+  }
+
+  private static String hash(String value) {
+    String normalized = StringUtils.trimToNull(value);
+    if (normalized == null) {
+      return null;
+    }
+    try {
+      MessageDigest digest = MessageDigest.getInstance("SHA-256");
+      byte[] bytes = digest.digest(normalized.toLowerCase(Locale.ROOT)
+          .getBytes(StandardCharsets.UTF_8));
+      StringBuilder hex = new StringBuilder(bytes.length * 2);
+      for (byte b : bytes) {
+        hex.append(String.format("%02x", b));
+      }
+      return hex.toString();
+    } catch (NoSuchAlgorithmException e) {
+      throw new OBException("SHA-256 unavailable", e);
+    }
   }
 }

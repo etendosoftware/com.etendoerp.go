@@ -53,14 +53,17 @@ import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.schemaforge.AmortizationPlanService;
+import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
+import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
-import com.etendoerp.go.schemaforge.NeoReportService;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * Unit tests for {@link McpToolRouter#route} and its internal handler dispatch,
@@ -100,7 +103,6 @@ class McpToolRouterRouteTest {
   private MockedStatic<NeoAccessUtils> accessMock;
   private MockedStatic<NeoDefaultsService> defaultsMock;
   private MockedStatic<NeoProcessService> processMock;
-  private MockedStatic<NeoReportService> reportMock;
   private MockedStatic<NeoSelectorService> selectorMock;
   private MockedStatic<NeoButtonActionHelper> buttonActionMock;
 
@@ -115,7 +117,6 @@ class McpToolRouterRouteTest {
     accessMock = mockStatic(NeoAccessUtils.class);
     defaultsMock = mockStatic(NeoDefaultsService.class);
     processMock = mockStatic(NeoProcessService.class);
-    reportMock = mockStatic(NeoReportService.class);
     selectorMock = mockStatic(NeoSelectorService.class);
     buttonActionMock = mockStatic(NeoButtonActionHelper.class);
 
@@ -135,7 +136,6 @@ class McpToolRouterRouteTest {
     if (accessMock != null) accessMock.close();
     if (defaultsMock != null) defaultsMock.close();
     if (processMock != null) processMock.close();
-    if (reportMock != null) reportMock.close();
     if (selectorMock != null) selectorMock.close();
     if (buttonActionMock != null) buttonActionMock.close();
   }
@@ -550,69 +550,79 @@ class McpToolRouterRouteTest {
   // ── Report tools ──────────────────────────────────────────────────────
 
   @Nested
-  @DisplayName("route — report tools")
+  @DisplayName("route — report tools (ETP-4255: NEO-native handlers only)")
   class ReportTests {
 
+    private SFSpec mockReportSpec() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getId()).thenReturn(SPEC_ID);
+      when(spec.getName()).thenReturn("invoice-report");
+      when(spec.getSpecType()).thenReturn("R");
+      return spec;
+    }
+
+    /**
+     * ETP-4255: a report spec with no NEO-native handler is non-callable. The report tool
+     * returns the canonical {@code not_configured_for_report_generation} body as plain TEXT
+     * content (NOT an error), and never executes Jasper/AD_Process reports.
+     */
     @Test
-    @DisplayName("report tool with no linked AD_Process returns error")
-    void reportToolNoProcessReturnsError() throws Exception {
-      SFSpec spec = mockSpec();
-      when(spec.getProcess()).thenReturn(null);
+    @DisplayName("report tool with no handler returns non-error not_configured text")
+    void reportToolNoHandlerReturnsNotConfigured() throws Exception {
+      SFSpec spec = mockReportSpec();
       setupSpecLookup(spec);
+      // No included entity declares a Java_Qualifier → no NEO-native handler.
+      supportMock.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
+          .thenReturn(Collections.emptyList());
 
       JSONObject result = router.route("generate_invoice_report", null, REPORT_SCOPES);
 
-      assertTrue(result.getBoolean("isError"));
+      // Not an error path.
+      assertFalse(result.has("isError") && result.getBoolean("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
-      assertTrue(text.contains("no linked AD_Process"));
+      JSONObject body = new JSONObject(text);
+      assertEquals("invoice-report", body.getString("name"));
+      assertEquals("report", body.getString("type"));
+      assertFalse(body.getBoolean("callable"));
+      assertEquals(NeoReportCallability.STATUS_NOT_CONFIGURED, body.getString("status"));
+      assertTrue(body.getString("message").contains("not configured"));
     }
 
+    /**
+     * A report spec whose included entity declares a {@code Java_Qualifier} is callable: the
+     * matching NeoHandler runs and its NeoResponse JSON is returned (no Jasper involved).
+     */
     @Test
-    @DisplayName("report tool with denied RBAC returns error")
-    void reportToolDeniedRbacReturnsError() throws Exception {
-      SFSpec spec = mockSpec();
-      Process adProcess = mock(Process.class);
-      when(adProcess.getId()).thenReturn(PROCESS_ID);
-      when(spec.getProcess()).thenReturn(adProcess);
+    @DisplayName("report tool with NEO handler invokes handle() and returns its JSON")
+    void reportToolWithHandlerReturnsHandlerJson() throws Exception {
+      SFSpec spec = mockReportSpec();
       setupSpecLookup(spec);
 
-      accessMock.when(() -> NeoAccessUtils.hasProcessAccess(PROCESS_ID)).thenReturn(false);
+      SFEntity reportEntity = mock(SFEntity.class);
+      when(reportEntity.getName()).thenReturn("aging");
+      when(reportEntity.getJavaQualifier()).thenReturn("agingReportHandler");
+      supportMock.when(() -> McpToolRouterSupport.listIncludedEntities(SPEC_ID))
+          .thenReturn(List.of(reportEntity));
 
-      JSONObject result = router.route("generate_invoice_report", null, REPORT_SCOPES);
+      JSONObject reportData = new JSONObject();
+      reportData.put("rows", 3);
+      NeoResponse handlerResponse = NeoResponse.ok(reportData);
 
-      assertTrue(result.getBoolean("isError"));
-      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
-      assertTrue(text.contains("Access denied"));
-    }
+      NeoHandler handler = mock(NeoHandler.class);
+      when(handler.handle(any(NeoContext.class))).thenReturn(handlerResponse);
 
-    @Test
-    @DisplayName("report tool with generation failure returns fallback description")
-    void reportToolGenerationFailureFallback() throws Exception {
-      SFSpec spec = mockSpec();
-      Process adProcess = mock(Process.class);
-      when(adProcess.getId()).thenReturn(PROCESS_ID);
-      when(spec.getProcess()).thenReturn(adProcess);
-      setupSpecLookup(spec);
-      accessMock.when(() -> NeoAccessUtils.hasProcessAccess(PROCESS_ID)).thenReturn(true);
+      try (MockedStatic<McpHookExecutor> hookMock = mockStatic(McpHookExecutor.class)) {
+        hookMock.when(() -> McpHookExecutor.resolveEntityHandler(reportEntity))
+            .thenReturn(handler);
+        hookMock.when(() -> McpHookExecutor.neoResponseToMcpResult(any()))
+            .thenCallRealMethod();
 
-      reportMock.when(() -> NeoReportService.generateReport(
-          eq(adProcess), any(), anyString(), any()))
-          .thenThrow(new RuntimeException("Template not found"));
+        JSONObject result = router.route("generate_invoice_report", null, REPORT_SCOPES);
 
-      JSONObject describeBody = new JSONObject();
-      describeBody.put("info", "Invoice report");
-      NeoResponse describeResp = NeoResponse.ok(describeBody);
-      reportMock.when(() -> NeoReportService.describeReport(adProcess))
-          .thenReturn(describeResp);
-
-      JSONObject args = new JSONObject();
-      args.put("format", "pdf");
-
-      JSONObject result = router.route("generate_invoice_report", args, REPORT_SCOPES);
-
-      assertTrue(result.getBoolean("isError"));
-      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
-      assertTrue(text.contains("Template not found"));
+        assertFalse(result.has("isError") && result.getBoolean("isError"));
+        String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+        assertTrue(text.contains("\"rows\""));
+      }
     }
   }
 
@@ -807,6 +817,157 @@ class McpToolRouterRouteTest {
     }
   }
 
+  // ── docs ────────────────────────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("route — docs")
+  class DocsTests {
+
+    @Test
+    @DisplayName("docs with missing topic returns error content")
+    void docsMissingTopicReturnsError() throws Exception {
+      JSONObject result = router.route("docs", new JSONObject(), READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("topic"));
+    }
+
+    @Test
+    @DisplayName("docs with blank topic returns error content")
+    void docsBlankTopicReturnsError() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("topic", "   ");
+
+      JSONObject result = router.route("docs", args, READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("topic"));
+    }
+
+    @Test
+    @DisplayName("docs with null arguments returns error content")
+    void docsNullArgsReturnsError() throws Exception {
+      JSONObject result = router.route("docs", null, READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("topic"));
+    }
+
+    @Test
+    @DisplayName("handleDocs success path returns the docs body via injected client")
+    void docsSuccessReturnsBody() throws Exception {
+      Context7DocsClient mockClient = mock(Context7DocsClient.class);
+      when(mockClient.fetchDocs(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+          anyString(), org.mockito.ArgumentMatchers.any()))
+          .thenReturn("# Finance docs\nbody text");
+
+      // Stub the token-resolution seam so the test needs no DB or static mocking
+      McpToolRouter docsRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return null;
+        }
+      };
+
+      JSONObject args = new JSONObject();
+      args.put("topic", "finance");
+      args.put("tokens", 1000);
+      args.put("type", "txt");
+
+      JSONObject result = docsRouter.handleDocs(args, mockClient);
+
+      assertFalse(result.has("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertEquals("# Finance docs\nbody text", text);
+    }
+
+    @Test
+    @DisplayName("handleDocs with blank body returns friendly no-results message")
+    void docsBlankBodyReturnsFriendlyMessage() throws Exception {
+      Context7DocsClient mockClient = mock(Context7DocsClient.class);
+      when(mockClient.fetchDocs(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+          anyString(), org.mockito.ArgumentMatchers.any()))
+          .thenReturn("");
+
+      // Stub the token-resolution seam so the test needs no DB or static mocking
+      McpToolRouter docsRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return null;
+        }
+      };
+
+      JSONObject args = new JSONObject();
+      args.put("topic", "nonexistent");
+
+      JSONObject result = docsRouter.handleDocs(args, mockClient);
+
+      assertFalse(result.has("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("No documentation found for topic"));
+    }
+
+    @Test
+    @DisplayName("handleDocs threads the resolved Context7 token to the client")
+    void docsPassesResolvedTokenToClient() throws Exception {
+      Context7DocsClient mockClient = mock(Context7DocsClient.class);
+      when(mockClient.fetchDocs(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+          anyString(), org.mockito.ArgumentMatchers.any()))
+          .thenReturn("docs body");
+
+      // Stub the token-resolution seam so the test needs no DB or static mocking
+      McpToolRouter tokenRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return "tok-123";
+        }
+      };
+
+      JSONObject args = new JSONObject();
+      args.put("topic", "finance");
+
+      JSONObject result = tokenRouter.handleDocs(args, mockClient);
+
+      assertFalse(result.has("isError"));
+      org.mockito.ArgumentCaptor<String> tokenCaptor =
+          org.mockito.ArgumentCaptor.forClass(String.class);
+      org.mockito.Mockito.verify(mockClient).fetchDocs(anyString(),
+          org.mockito.ArgumentMatchers.anyInt(), anyString(), tokenCaptor.capture());
+      assertEquals("tok-123", tokenCaptor.getValue());
+    }
+
+    @Test
+    @DisplayName("handleDocs passes a null token to the client when none is configured")
+    void docsPassesNullTokenWhenUnset() throws Exception {
+      Context7DocsClient mockClient = mock(Context7DocsClient.class);
+      when(mockClient.fetchDocs(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+          anyString(), org.mockito.ArgumentMatchers.any()))
+          .thenReturn("docs body");
+
+      McpToolRouter tokenRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return null;
+        }
+      };
+
+      JSONObject args = new JSONObject();
+      args.put("topic", "finance");
+
+      JSONObject result = tokenRouter.handleDocs(args, mockClient);
+
+      assertFalse(result.has("isError"));
+      org.mockito.ArgumentCaptor<String> tokenCaptor =
+          org.mockito.ArgumentCaptor.forClass(String.class);
+      org.mockito.Mockito.verify(mockClient).fetchDocs(anyString(),
+          org.mockito.ArgumentMatchers.anyInt(), anyString(), tokenCaptor.capture());
+      org.junit.jupiter.api.Assertions.assertNull(tokenCaptor.getValue());
+    }
+  }
+
   // ── neo_action ────────────────────────────────────────────────────────
 
   @Nested
@@ -817,7 +978,7 @@ class McpToolRouterRouteTest {
     private static final String RECORD_ID = "record-001";
     private static final String ACTION_NAME = "Processed";
 
-    @org.junit.jupiter.api.BeforeEach
+    @BeforeEach
     void setupActionSupport() {
       supportMock.when(() -> McpToolRouterSupport.mapNeoResponseToActionResult(any()))
           .thenCallRealMethod();
@@ -944,6 +1105,116 @@ class McpToolRouterRouteTest {
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
       JSONObject body = new JSONObject(text);
       assertEquals("warning", body.getString("processResult"));
+    }
+  }
+
+  // ── neo_generate_amortization_plan (ETP-4232) ─────────────────────────────
+
+  @Nested
+  @DisplayName("route — neo_generate_amortization_plan (ETP-4232)")
+  class GenerateAmortizationPlanTests {
+
+    private static final Set<String> PROCESS_SCOPES_LOCAL = Set.of("neo:process");
+    private MockedStatic<AmortizationPlanService> amortMock;
+
+    @BeforeEach
+    void setUpAmort() {
+      amortMock = mockStatic(AmortizationPlanService.class);
+    }
+
+    @org.junit.jupiter.api.AfterEach
+    void tearDownAmort() {
+      if (amortMock != null) {
+        amortMock.close();
+      }
+    }
+
+    @Test
+    @DisplayName("routes neo_generate_amortization_plan to handleGenerateAmortizationPlan and returns success")
+    void routesAmortizationToolToHandler() throws Exception {
+      JSONObject planBody = new JSONObject();
+      planBody.put("success", true);
+      planBody.put("amortizationId", "AMORT-001");
+      planBody.put("periodsGenerated", 12);
+      NeoResponse successResp = NeoResponse.ok(planBody);
+
+      amortMock.when(() -> AmortizationPlanService.generatePlan(eq("ASSET-001"))).thenReturn(successResp);
+
+      JSONObject args = new JSONObject();
+      args.put("assetId", "ASSET-001");
+
+      JSONObject result = router.route(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN,
+          args, PROCESS_SCOPES_LOCAL);
+
+      assertFalse(result.has("isError"), "Successful plan generation must not be an error");
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("AMORT-001"));
+    }
+
+    @Test
+    @DisplayName("neo_generate_amortization_plan propagates 400 error as isError")
+    void amortizationToolPropagates400() throws Exception {
+      NeoResponse errorResp = NeoResponse.error(400, "assetId is required");
+
+      amortMock.when(() -> AmortizationPlanService.generatePlan(isNull())).thenReturn(errorResp);
+
+      JSONObject result = router.route(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN,
+          null, PROCESS_SCOPES_LOCAL);
+
+      assertTrue(result.getBoolean("isError"), "Error response must set isError=true");
+    }
+
+    @Test
+    @DisplayName("neo_generate_amortization_plan propagates 404 as isError")
+    void amortizationToolPropagates404() throws Exception {
+      NeoResponse notFoundResp = NeoResponse.error(404, "Asset not found: UNKNOWN");
+
+      amortMock.when(() -> AmortizationPlanService.generatePlan(eq("UNKNOWN"))).thenReturn(notFoundResp);
+
+      JSONObject args = new JSONObject();
+      args.put("assetId", "UNKNOWN");
+
+      JSONObject result = router.route(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN,
+          args, PROCESS_SCOPES_LOCAL);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("Asset not found"));
+    }
+
+    @Test
+    @DisplayName("neo_generate_amortization_plan propagates 409 as isError")
+    void amortizationToolPropagates409() throws Exception {
+      NeoResponse conflictResp = NeoResponse.error(409,
+          "Asset already has a generated amortization plan");
+
+      amortMock.when(() -> AmortizationPlanService.generatePlan(eq("ASSET-001"))).thenReturn(conflictResp);
+
+      JSONObject args = new JSONObject();
+      args.put("assetId", "ASSET-001");
+
+      JSONObject result = router.route(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN,
+          args, PROCESS_SCOPES_LOCAL);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("already has a generated amortization plan"));
+    }
+
+    @Test
+    @DisplayName("neo_generate_amortization_plan with missing assetId arg delegates null to service")
+    void amortizationToolMissingAssetIdDelegatesToService() throws Exception {
+      // When args has no assetId, the handler passes null to the service.
+      NeoResponse errorResp = NeoResponse.error(400, "assetId is required");
+
+      amortMock.when(() -> AmortizationPlanService.generatePlan(isNull())).thenReturn(errorResp);
+
+      // Pass args without assetId
+      JSONObject args = new JSONObject();
+      JSONObject result = router.route(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN,
+          args, PROCESS_SCOPES_LOCAL);
+
+      assertTrue(result.getBoolean("isError"));
     }
   }
 }

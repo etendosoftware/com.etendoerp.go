@@ -22,6 +22,8 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -39,6 +41,7 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.DocumentType;
 
 /**
  * Unit tests for {@link SalesInvoiceHeaderHandler}.
@@ -479,6 +482,236 @@ public class SalesInvoiceHeaderHandlerTest {
 
     assertFalse(rec.has("sourceReturnReceipt"));
     assertFalse(rec.has("sourceInvoice"));
+  }
+
+  // ── classifyDocType (via resolveSubtype) ──────────────────────────────────
+
+  /**
+   * Test accessor subclass that exposes resolveSubtype for direct testing.
+   */
+  private static class TestableSalesHandler extends SalesInvoiceHeaderHandler {
+    public String callResolveSubtype(String docTypeId) {
+      return resolveSubtype(docTypeId);
+    }
+  }
+
+  @Test
+  public void resolveSubtype_blankDocTypeId_returnsFac() {
+    TestableSalesHandler h = new TestableSalesHandler();
+    assertEquals("FAC", h.callResolveSubtype(null));
+    assertEquals("FAC", h.callResolveSubtype(""));
+    assertEquals("FAC", h.callResolveSubtype("   "));
+  }
+
+  @Test
+  public void resolveSubtype_docTypeNotFound_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(DocumentType.class, "dt-missing")).thenReturn(null);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-missing"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_arcCategory_returnsNc() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARC");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("NC", h.callResolveSubtype("dt-arc"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_ariRmCategory_returnsDev() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI_RM");
+      when(dal.get(DocumentType.class, "dt-ari-rm")).thenReturn(dt);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("DEV", h.callResolveSubtype("dt-ari-rm"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_ariCategory_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI");
+      when(dal.get(DocumentType.class, "dt-ari")).thenReturn(dt);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-ari"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_otherCategory_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("MMO");
+      when(dal.get(DocumentType.class, "dt-other")).thenReturn(dt);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-other"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_dbException_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(DocumentType.class, "dt-err"))
+          .thenThrow(new RuntimeException("DB error"));
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-err"));
+    }
+  }
+
+  // ── afterHandle(): amount negation for NC / DEV subtypes ─────────────────
+
+  /**
+   * Builds a body for NC/DEV subtype tests with a specific transactionDocument field.
+   */
+  private static JSONObject invoiceBodyWithDocType(String docTypeId, double grand, double outstanding)
+      throws Exception {
+    JSONObject invoice = new JSONObject()
+        .put("transactionDocument", docTypeId)
+        .put("processed", false)
+        .put("etgoTotalDiscount", 0.0)
+        .put("grandTotalAmount", grand)
+        .put("outstandingAmount", outstanding);
+    return new JSONObject().put("response", new JSONObject().put("data", new JSONArray().put(invoice)));
+  }
+
+  /**
+   * Verifies that grandTotalAmount and outstandingAmount are negated for NC (credit memo)
+   * subtype records when amounts are positive.
+   */
+  @Test
+  public void afterHandle_ncSubtype_negatesPositiveAmounts() throws Exception {
+    JSONObject body = invoiceBodyWithDocType("dt-arc", 150.0, 100.0);
+    NeoContext ctx = getCtx(); // list mode — no recordId, no enrichSourceInvoice call
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARC");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("NC", rec.getString("arInvoiceSubtype"));
+      assertEquals(-150.0, rec.getDouble("grandTotalAmount"), 0.001);
+      assertEquals(-100.0, rec.getDouble("outstandingAmount"), 0.001);
+    }
+  }
+
+  /**
+   * Verifies that grandTotalAmount and outstandingAmount are negated for DEV (return invoice)
+   * subtype records when amounts are positive.
+   */
+  @Test
+  public void afterHandle_devSubtype_negatesPositiveAmounts() throws Exception {
+    JSONObject body = invoiceBodyWithDocType("dt-ari-rm", 200.0, 200.0);
+    NeoContext ctx = getCtx(); // list mode
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI_RM");
+      when(dal.get(DocumentType.class, "dt-ari-rm")).thenReturn(dt);
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("DEV", rec.getString("arInvoiceSubtype"));
+      assertEquals(-200.0, rec.getDouble("grandTotalAmount"), 0.001);
+      assertEquals(-200.0, rec.getDouble("outstandingAmount"), 0.001);
+    }
+  }
+
+  /**
+   * Verifies that non-positive amounts are NOT negated — the guard {@code grand > 0} must hold.
+   */
+  @Test
+  public void afterHandle_ncSubtype_doesNotNegateZeroOrNegativeAmounts() throws Exception {
+    JSONObject body = invoiceBodyWithDocType("dt-arc", 0.0, -50.0);
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARC");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals(0.0, rec.getDouble("grandTotalAmount"), 0.001);   // unchanged
+      assertEquals(-50.0, rec.getDouble("outstandingAmount"), 0.001); // already negative, unchanged
+    }
+  }
+
+  // ── afterHandle(): enrichDocTypeLocked in detail view ───────────────────
+
+  /**
+   * Verifies that {@code docTypeLocked = true} is injected for detail-view GET responses
+   * (i.e., when context carries a recordId).
+   */
+  @Test
+  public void afterHandle_detailView_enrichesDocTypeLocked() throws Exception {
+    JSONObject body = invoiceBodyNoDiscount("inv-lock");
+    NeoContext ctx = getDetailCtx("inv-lock");
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false); // no return receipt found
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertTrue("docTypeLocked must be true in detail view", rec.getBoolean("docTypeLocked"));
+    }
   }
 
   /**

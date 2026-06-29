@@ -55,7 +55,7 @@ NeoServlet (/sws/neo/*)
     |
     +-- Route por tipo de spec:
     |     |
-    |     +-- Report spec (type R) --> NeoReportService
+    |     +-- Report spec (type R) --> NeoHandler NEO-native (Java_Qualifier) o no-invocable (ETP-4255; ya no usa Jasper)
     |     |
     |     +-- Process spec (type P) --> NeoProcessService.executeProcess()
     |     |
@@ -93,6 +93,7 @@ NeoServlet (/sws/neo/*)
 | `schemaforge.selector.policy` | SPI/registry para filtros por contexto, overrides, columnas virtuales y enriquecimiento post-query. |
 | `NeoCalloutService` | Ejecucion de AD_Callouts via REST. Construye request sintetico. |
 | `NeoDefaultsService` | Resolucion de valores por defecto (literals, context vars, SQL, sequences). |
+| `NeoAuxiliaryInputResolver` | Evalua los auxiliary inputs del tab e inyecta sus valores en sesion (`windowId\|nombre`) antes de resolver defaults, para que defaults tipo `@DESCRIPTION1@` resuelvan desde el padre. |
 | `NeoProcessService` | Ejecucion de procesos (OBUIAPP, Classic, scheduling, DB procedure). Validacion de parametros. |
 | `NeoReportService` | Generacion de reportes Jasper (PDF, XLS, XLSX, HTML, CSV). |
 | `NeoFieldFilter` | Filtra JSON basado en config ETGO_SF_FIELD (IsIncluded, IsReadOnly). |
@@ -384,10 +385,13 @@ Base URL: `/sws/neo`
 
 ### Report Specs (SPEC_TYPE = 'R')
 
+> **ETP-4255:** sin ejecucion Jasper. Invocable solo via `NeoHandler` NEO-native; si no,
+> GET/POST devuelven HTTP 200 con estado `not_configured_for_report_generation`. Ver §13.
+
 | Pattern | Method | Descripcion |
 |---------|--------|-------------|
-| `/{specName}` | GET | Describir reporte + formatos soportados |
-| `/{specName}` | POST | Generar reporte (con parametro `format`) |
+| `/{specName}` | GET | Describe (handler NEO-native) o estado no-invocable |
+| `/{specName}` | POST | Ejecuta via handler NEO-native (datos JSON) o estado no-invocable |
 
 ---
 
@@ -733,6 +737,8 @@ GET /sws/neo/{specName}/{entityName}/defaults?parentId=PARENT-RECORD-ID
 
 ### Pipeline de resolucion
 
+**Paso previo — Auxiliary inputs:** antes de resolver los campos, `NeoAuxiliaryInputResolver` evalua los auxiliary inputs activos del tab y los inyecta en sesion como `windowId|<nombre>`, replicando `FormInitializationComponent.computeAuxiliaryInputs`. Esto permite que un default de columna que referencia un auxiliary input por nombre se resuelva correctamente. Ejemplo: la linea de GL Journal tiene `Description` con default `@DESCRIPTION1@`, donde `DESCRIPTION1` es un auxiliary input del tab Lines con codigo `@SQL=SELECT description FROM gl_journal WHERE gl_journal_id=@GL_Journal_ID@`. El resolver ejecuta ese SQL (tomando `@GL_Journal_ID@` de los valores del registro padre cargados via `NeoParentValuesLoader`) y guarda el resultado en sesion, de modo que `@DESCRIPTION1@` resuelve a la descripcion del journal padre — igual que en classic, sin configuracion por ventana. Los codigos `@SQL=...` se evaluan via `NeoDefaultsSqlHelper.resolveSQLDefault`; los `@token@` via `Utility.getContext`; el resto como literal.
+
 Para cada campo incluido (IsIncluded=Y) de la entity, resuelve en este orden:
 
 1. **IsActive**: Siempre `true` (comportamiento NEO-specific)
@@ -885,6 +891,26 @@ El `recordId` de la URL se inyecta automaticamente como `inpRecordId` en los par
 ---
 
 ## 13. Pipeline de Reportes
+
+> **DESCARTADO / OBSOLETO — ETP-4255.** El pipeline Jasper descrito abajo **ya no existe en
+> runtime**. Se conserva solo como registro historico. Razones:
+> - Etendo Go / NEO Headless / MCP **nunca** debe ejecutar Jasper, JRXML, reportes clasicos
+>   por `AD_Process`, ni `ReportingUtils.exportJR` (regla dura de producto/arquitectura).
+> - El camino de ejecucion Jasper en runtime (`NeoReportService.generateReport`/
+>   `describeReport`/`resolveReportMetadata`, y el fallback de `NeoRequestRouter`/
+>   `NeoProcessReportEndpoint`) fue **eliminado**.
+> - Los reportes Jasper/JRXML legacy solo existen como fuente de migracion offline para la
+>   tooling de Schema Forge (`source: "jasper-migration"`); eso **nunca** implica ejecucion
+>   en runtime por Etendo Go.
+>
+> **Comportamiento actual (NEO-native-handlers-only):** un spec `R` es invocable solo si
+> esta respaldado por un `NeoHandler` (bean CDI por `ETGO_SF_ENTITY.Java_Qualifier`) que
+> devuelve datos en JSON. Handlers disponibles: `agingReportHandler` (`aging-receivable`),
+> `inventoryStockReportHandler` (`inventory-stock-report`), `taxReportHandler`
+> (`tax-report`). Un `R` **sin** handler NEO-native no es invocable: GET y POST devuelven
+> **HTTP 200** con `{name, type:"report", callable:false, status:"not_configured_for_report_generation", message}`,
+> identico a `neo_discover` y a la herramienta de reporte de MCP. La integracion de jsreport
+> queda fuera del alcance de ETP-4255.
 
 El `NeoReportService` genera reportes Jasper desde specs tipo `R`.
 

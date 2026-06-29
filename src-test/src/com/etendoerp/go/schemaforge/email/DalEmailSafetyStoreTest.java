@@ -42,6 +42,7 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
@@ -54,12 +55,16 @@ public class DalEmailSafetyStoreTest {
 
   private OBDal obDal;
   private MockedStatic<OBDal> obDalMock;
+  // ETGO_Email_Safety writes run in admin mode (setAdminMode/restorePreviousMode); mock the static
+  // so the unit tests do not touch a real OBContext.
+  private MockedStatic<OBContext> obContextMock;
 
   @Before
   public void setUp() {
     obDal = mock(OBDal.class);
     obDalMock = mockStatic(OBDal.class);
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+    obContextMock = mockStatic(OBContext.class);
     when(obDal.get(eq(Client.class), anyString())).thenReturn(mock(Client.class));
     when(obDal.get(eq(Organization.class), anyString())).thenReturn(mock(Organization.class));
   }
@@ -68,6 +73,9 @@ public class DalEmailSafetyStoreTest {
   public void tearDown() {
     if (obDalMock != null) {
       obDalMock.close();
+    }
+    if (obContextMock != null) {
+      obContextMock.close();
     }
   }
 
@@ -89,12 +97,16 @@ public class DalEmailSafetyStoreTest {
     snapshot.providerStatus = 202;
     snapshot.createdAtMillis = 1000L;
     EmailAuditRecord auditRecord = EmailAuditRecord.persisted(snapshot);
+    // ETGO_Email_Safety is SYSTEM-level: records must be owned by client 0.
+    Client systemClient = mock(Client.class);
+    when(obDal.get(eq(Client.class), eq("0"))).thenReturn(systemClient);
 
     store.recordAudit(auditRecord);
 
     ArgumentCaptor<BaseOBObject> captor = ArgumentCaptor.forClass(BaseOBObject.class);
     verify(obDal).save(captor.capture());
     BaseOBObject saved = captor.getValue();
+    assertEquals(systemClient, saved.get("client"));
     assertEquals("AUDIT", saved.get("recordType"));
     assertEquals("reset-password", saved.get("contractName"));
     assertEquals("reset-password", saved.get("template"));
@@ -193,6 +205,30 @@ public class DalEmailSafetyStoreTest {
     assertFalse(result.isAllowed());
     assertEquals(EmailThrottleRule.SCOPE_GLOBAL, result.getScope());
     assertEquals("maintenance", result.getMessage());
+  }
+
+  @Test
+  public void isRecipientSuppressedMatchesAddressHashAndDomain() {
+    @SuppressWarnings("unchecked")
+    OBQuery<BaseOBObject> query = mock(OBQuery.class);
+    when(obDal.createQuery(eq(DalEmailSafetyStore.ENTITY_EMAIL_SAFETY), anyString()))
+        .thenReturn(query);
+    MapRecord suppression = new MapRecord();
+    when(query.list()).thenReturn(List.of(suppression));
+
+    DalEmailSafetyStore store = new DalEmailSafetyStore(() -> 1000L, MapRecord::new);
+
+    assertTrue(store.isRecipientSuppressed("tenant-1", " Person@Example.COM "));
+    ArgumentCaptor<String> scopeCaptor = ArgumentCaptor.forClass(String.class);
+    verify(query).setNamedParameter(eq("scope"), scopeCaptor.capture());
+    assertEquals(DalEmailSafetyStore.SCOPE_ADDRESS, scopeCaptor.getValue());
+  }
+
+  @Test
+  public void isRecipientSuppressedReturnsFalseForBlankAddress() {
+    DalEmailSafetyStore store = new DalEmailSafetyStore(() -> 1000L, MapRecord::new);
+
+    assertFalse(store.isRecipientSuppressed("tenant-1", " "));
   }
 
   private static BaseOBObject sentAuditRecord() throws Exception {

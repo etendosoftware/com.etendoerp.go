@@ -18,26 +18,36 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.util.Collections;
+import java.util.List;
 
+import org.hibernate.criterion.Criterion;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.PaymentTerm;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.pricing.pricelist.PriceList;
+import org.openbravo.model.ad.system.Client;
 
 /**
  * Unit tests for the second {@code createShipmentReceiptHeader} overload in
@@ -265,6 +275,158 @@ public class NeoCommercialDocumentFactoryTest {
       verify(invoice).setWithholdingamount(BigDecimal.ZERO);
       verify(invoice).setClient(order.getClient());
       verify(invoice).setOrganization(order.getOrganization());
+    }
+  }
+
+  // ── findShipmentDocType ──────────────────────────────────────────────────
+
+  /**
+   * Verifies that findShipmentDocType returns the first DocumentType from criteria
+   * when the criteria list is non-empty.
+   */
+  @Test
+  public void testFindShipmentDocTypeReturnsFirstWhenFound() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Client client = mock(Client.class);
+      DocumentType expected = mock(DocumentType.class);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<DocumentType> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(DocumentType.class)).thenReturn(criteria);
+      when(criteria.add(any(Criterion.class))).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.singletonList(expected));
+
+      DocumentType result = NeoCommercialDocumentFactory.findShipmentDocType(client);
+
+      assertNotNull(result);
+      assertSame(expected, result);
+    }
+  }
+
+  /**
+   * Verifies that findShipmentDocType returns null when the criteria list is empty.
+   */
+  @Test
+  public void testFindShipmentDocTypeReturnsNullWhenNotFound() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Client client = mock(Client.class);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<DocumentType> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(DocumentType.class)).thenReturn(criteria);
+      when(criteria.add(any(Criterion.class))).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.emptyList());
+
+      DocumentType result = NeoCommercialDocumentFactory.findShipmentDocType(client);
+
+      assertNull(result);
+    }
+  }
+
+  // ── findDefaultLocator ───────────────────────────────────────────────────
+
+  /**
+   * Verifies that findDefaultLocator returns the default-flagged locator when one exists.
+   */
+  @Test
+  public void testFindDefaultLocatorReturnsDefaultLocatorWhenPresent() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse warehouse = mock(Warehouse.class);
+      Locator defaultLocator = mock(Locator.class);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<Locator> defaultCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Locator.class)).thenReturn(defaultCriteria);
+      when(defaultCriteria.add(any(Criterion.class))).thenReturn(defaultCriteria);
+      when(defaultCriteria.setMaxResults(1)).thenReturn(defaultCriteria);
+      when(defaultCriteria.list()).thenReturn(Collections.singletonList(defaultLocator));
+
+      Locator result = NeoCommercialDocumentFactory.findDefaultLocator(warehouse);
+
+      assertNotNull(result);
+      assertSame(defaultLocator, result);
+    }
+  }
+
+  /**
+   * Verifies that findDefaultLocator falls back to any active locator when no default exists.
+   */
+  @Test
+  public void testFindDefaultLocatorFallsBackToAnyActiveLocator() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse warehouse = mock(Warehouse.class);
+      Locator anyLocator = mock(Locator.class);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<Locator> defaultCriteria = mock(OBCriteria.class);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Locator> anyCriteria = mock(OBCriteria.class);
+
+      when(dal.createCriteria(Locator.class))
+          .thenReturn(defaultCriteria)
+          .thenReturn(anyCriteria);
+
+      when(defaultCriteria.add(any(Criterion.class))).thenReturn(defaultCriteria);
+      when(defaultCriteria.setMaxResults(1)).thenReturn(defaultCriteria);
+      when(defaultCriteria.list()).thenReturn(Collections.emptyList());
+
+      when(anyCriteria.add(any(Criterion.class))).thenReturn(anyCriteria);
+      when(anyCriteria.setMaxResults(1)).thenReturn(anyCriteria);
+      when(anyCriteria.list()).thenReturn(Collections.singletonList(anyLocator));
+
+      Locator result = NeoCommercialDocumentFactory.findDefaultLocator(warehouse);
+
+      assertNotNull(result);
+      assertSame(anyLocator, result);
+    }
+  }
+
+  /**
+   * Verifies that findDefaultLocator returns null when neither a default nor any active
+   * locator exists for the warehouse.
+   */
+  @Test
+  public void testFindDefaultLocatorReturnsNullWhenNoneExist() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse warehouse = mock(Warehouse.class);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<Locator> defaultCriteria = mock(OBCriteria.class);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Locator> anyCriteria = mock(OBCriteria.class);
+
+      when(dal.createCriteria(Locator.class))
+          .thenReturn(defaultCriteria)
+          .thenReturn(anyCriteria);
+
+      when(defaultCriteria.add(any(Criterion.class))).thenReturn(defaultCriteria);
+      when(defaultCriteria.setMaxResults(1)).thenReturn(defaultCriteria);
+      when(defaultCriteria.list()).thenReturn(Collections.emptyList());
+
+      when(anyCriteria.add(any(Criterion.class))).thenReturn(anyCriteria);
+      when(anyCriteria.setMaxResults(1)).thenReturn(anyCriteria);
+      when(anyCriteria.list()).thenReturn(Collections.emptyList());
+
+      Locator result = NeoCommercialDocumentFactory.findDefaultLocator(warehouse);
+
+      assertNull(result);
     }
   }
 

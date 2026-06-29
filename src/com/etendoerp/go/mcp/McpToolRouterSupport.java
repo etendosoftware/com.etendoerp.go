@@ -42,6 +42,7 @@ import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 final class McpToolRouterSupport {
 
@@ -200,7 +201,17 @@ final class McpToolRouterSupport {
       specObj.put("entities", entities);
     }
     if ("R".equals(specType)) {
+      // Report callability is truthful (ETP-4255): a report spec is callable only when it
+      // is backed by a NEO-native report handler. Non-callable specs expose a stable
+      // not_configured_for_report_generation status + message; Jasper/AD_Process reports
+      // are never executable by Etendo Go.
       specObj.put("isReport", true);
+      boolean callable = NeoReportCallability.isReportCallable(spec);
+      specObj.put("callable", callable);
+      if (!callable) {
+        specObj.put("status", NeoReportCallability.STATUS_NOT_CONFIGURED);
+        specObj.put("message", NeoReportCallability.buildNotConfiguredMessage(spec.getName()));
+      }
     }
     return specObj;
   }
@@ -227,19 +238,42 @@ final class McpToolRouterSupport {
     return null;
   }
 
-  static Map<String, String> loadVisibilityByColumnId(SFEntity sfEntity) {
+  /**
+   * Loads all SFField rows for the given entity in a single query and returns
+   * both the visibility map and the businessCritical map, keyed by AD_COLUMN_ID.
+   * Callers that need both maps should use this to avoid a second DB round-trip.
+   */
+  static FieldMetadata loadFieldMetadata(SFEntity sfEntity) {
     Map<String, String> visibilityByColumnId = new HashMap<>();
+    Map<String, Boolean> businessCriticalByColumnId = new HashMap<>();
     OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
     fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
     fieldCrit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
     for (SFField sfField : fieldCrit.list()) {
       Column adCol = sfField.getADColumn();
-      String visibility = (String) sfField.get("visibility");
-      if (adCol != null && visibility != null && !visibility.trim().isEmpty()) {
-        visibilityByColumnId.put((String) adCol.getId(), visibility.trim());
+      if (adCol == null) {
+        continue;
       }
+      String colId = (String) adCol.getId();
+      String visibility = (String) sfField.get("visibility");
+      if (visibility != null && !visibility.trim().isEmpty()) {
+        visibilityByColumnId.put(colId, visibility.trim());
+      }
+      Boolean isBusinessCritical = sfField.isBusinessCritical();
+      businessCriticalByColumnId.put(colId, Boolean.TRUE.equals(isBusinessCritical));
     }
-    return visibilityByColumnId;
+    return new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId);
+  }
+
+  static final class FieldMetadata {
+    final Map<String, String> visibilityByColumnId;
+    final Map<String, Boolean> businessCriticalByColumnId;
+
+    FieldMetadata(Map<String, String> visibilityByColumnId,
+        Map<String, Boolean> businessCriticalByColumnId) {
+      this.visibilityByColumnId = visibilityByColumnId;
+      this.businessCriticalByColumnId = businessCriticalByColumnId;
+    }
   }
 
   static Map<String, String> loadPromptByColumnId(SFEntity sfEntity) {
@@ -258,14 +292,14 @@ final class McpToolRouterSupport {
   }
 
   static JSONArray buildSchemaFieldsArray(Tab adTab, Entity dalEntity,
-      Map<String, String> visibilityByColumnId, Map<String, String> promptByColumnId,
-      java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs)
-      throws JSONException {
+      Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
+      Map<String, String> promptByColumnId,
+      java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs) throws JSONException {
     JSONArray fieldsArray = new JSONArray();
     for (Column col : adTab.getTable().getADColumnList()) {
       if (shouldIncludeSchemaColumn(col, systemColumns)) {
         fieldsArray.put(buildSchemaField(col, adTab, dalEntity, visibilityByColumnId,
-            promptByColumnId, selectorRefs));
+            businessCriticalByColumnId, promptByColumnId, selectorRefs));
       }
     }
     return fieldsArray;
@@ -276,9 +310,9 @@ final class McpToolRouterSupport {
   }
 
   private static JSONObject buildSchemaField(Column col, Tab adTab, Entity dalEntity,
-      Map<String, String> visibilityByColumnId, Map<String, String> promptByColumnId,
-      java.util.Set<String> selectorRefs)
-      throws JSONException {
+      Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
+      Map<String, String> promptByColumnId,
+      java.util.Set<String> selectorRefs) throws JSONException {
     String dbColName = col.getDBColumnName();
     String refId = col.getReference() != null ? (String) col.getReference().getId() : null;
     String type = mapColumnType(refId);
@@ -291,6 +325,9 @@ final class McpToolRouterSupport {
     fieldObj.put("readOnly", isReadOnlyColumn(adTab, col));
     addDefaultExpression(fieldObj, col);
     addVisibility(fieldObj, visibilityByColumnId.get((String) col.getId()), col.isMandatory());
+    boolean isBusinessCritical = Boolean.TRUE.equals(
+        businessCriticalByColumnId.get((String) col.getId()));
+    fieldObj.put("businessCritical", isBusinessCritical);
     addAgentPrompt(fieldObj, promptByColumnId.get((String) col.getId()));
     addSelectorInfo(fieldObj, refId, selectorRefs);
     if ("button".equals(type)) {
@@ -495,5 +532,85 @@ final class McpToolRouterSupport {
     }
     int errorStatus = errorObj.optInt(McpConstants.KEY_STATUS, -1);
     return errorStatus > 0 ? String.valueOf(errorStatus) : null;
+  }
+
+  // ── List filter helpers (kept here to stay within McpToolRouter method-count limit) ─
+
+  /**
+   * Build an HQL where clause fragment from MCP filter key-value pairs.
+   * Filters are applied as exact-match conditions using the DAL property name.
+   */
+  static String buildWhereFromFilters(JSONObject filters, Tab adTab,
+      org.apache.logging.log4j.Logger log) throws JSONException {
+    Entity dalEntity = org.openbravo.base.model.ModelProvider.getInstance()
+        .getEntityByTableName(adTab.getTable().getDBTableName());
+    if (dalEntity == null) {
+      return null;
+    }
+
+    StringBuilder where = new StringBuilder();
+    java.util.Iterator<String> keys = filters.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      String value = filters.getString(key);
+      appendFilterCondition(where, dalEntity, key, value, log);
+    }
+    return where.length() > 0 ? where.toString() : null;
+  }
+
+  /**
+   * Resolve a single filter key to a DAL property and append an HQL condition.
+   */
+  private static void appendFilterCondition(StringBuilder where, Entity dalEntity,
+      String key, String value, org.apache.logging.log4j.Logger log) {
+    Property prop = null;
+    try {
+      prop = dalEntity.getPropertyByColumnName(key);
+    } catch (Exception ignored) {
+      try {
+        prop = dalEntity.getProperty(key);
+      } catch (Exception alsoIgnored) {
+        log.debug("Filter column '{}' not found in entity, skipping", key);
+      }
+    }
+
+    if (prop == null) {
+      log.warn("Filter key '{}' could not be resolved to a DAL property, ignoring", key);
+      return;
+    }
+
+    if (where.length() > 0) {
+      where.append(" and ");
+    }
+    String escaped = value.replace("'", "''");
+    if (!prop.isPrimitive()) {
+      where.append("e.").append(prop.getName()).append(".id='").append(escaped).append("'");
+    } else {
+      where.append("e.").append(prop.getName()).append("='").append(escaped).append("'");
+    }
+  }
+
+  /**
+   * Wraps a flat JSON body into the structure expected by DefaultJsonDataService.
+   * Identical to NeoServlet.wrapForSmartclient().
+   */
+  static String wrapForSmartclient(JSONObject filteredBody, String dalEntityName,
+      String recordId, org.apache.logging.log4j.Logger log) {
+    try {
+      JSONObject data = filteredBody != null ? filteredBody : new JSONObject();
+      data.put(org.openbravo.service.json.JsonConstants.ENTITYNAME, dalEntityName);
+      if (recordId != null) {
+        data.put(org.openbravo.service.json.JsonConstants.ID, recordId);
+      } else {
+        data.put(org.openbravo.service.json.JsonConstants.NEW_INDICATOR, true);
+      }
+
+      JSONObject wrapper = new JSONObject();
+      wrapper.put(org.openbravo.service.json.JsonConstants.DATA, data);
+      return wrapper.toString();
+    } catch (Exception e) {
+      log.error("Error wrapping body for Smartclient format: {}", e.getMessage(), e);
+      return "{}";
+    }
   }
 }

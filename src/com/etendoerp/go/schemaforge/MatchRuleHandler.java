@@ -71,6 +71,7 @@ public class MatchRuleHandler extends AbstractNeoHandler {
   private static final String F_NAME = "name";
   private static final String F_TEXT_CONDITION = "textCondition";
   private static final String F_TEXT_PATTERN = "textPattern";
+  private static final String F_ACCOUNTING_CONCEPT = "accountingConcept";
 
   private static final int NAME_MAX_LENGTH = 60;
   private static final int PATTERN_MAX_LENGTH = 255;
@@ -117,13 +118,14 @@ public class MatchRuleHandler extends AbstractNeoHandler {
   }
 
   /**
-   * Validates the rule content: name, text condition / pattern (incl. safe regex) and
-   * transaction type. Returns {@code null} when valid.
+   * Validates the rule content: name, text condition / pattern (incl. safe regex), accounting
+   * concept and transaction type. Returns {@code null} when valid.
    */
   NeoResponse validateContent(JSONObject body) {
     String name = optTrimmed(body, F_NAME);
     String textCondition = optTrimmed(body, F_TEXT_CONDITION);
     String textPattern = optTrimmed(body, F_TEXT_PATTERN);
+    String accountingConcept = optTrimmed(body, F_ACCOUNTING_CONCEPT);
 
     if (StringUtils.isBlank(name)) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Name is required");
@@ -140,6 +142,11 @@ public class MatchRuleHandler extends AbstractNeoHandler {
     }
     if (textPattern.length() > PATTERN_MAX_LENGTH) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Pattern is too long");
+    }
+    // The accounting concept (GL item) is mandatory: it is the concept the automatch uses to
+    // create the payment/transaction when a rule matches a line with no counterpart.
+    if (StringUtils.isBlank(accountingConcept)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Accounting concept is required");
     }
     if (COND_REGEX.equals(textCondition)) {
       String regexError = validateRegex(textPattern);

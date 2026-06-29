@@ -120,21 +120,52 @@ final class PaymentRegistrationService {
           "Financial account not found");
     }
 
+    try {
+      FIN_Payment payment = registerPaymentCore(invoice, schedule, amount, paymentDate, account,
+          isReceipt);
+
+      JSONObject data = new JSONObject();
+      data.put("id", payment.getId());
+      data.put("documentNo", payment.getDocumentNo());
+      data.put("amount", payment.getAmount());
+      data.put("status", payment.getStatus());
+
+      JSONObject responseData = new JSONObject();
+      responseData.put("data", data);
+      JSONObject wrapper = new JSONObject();
+      wrapper.put("response", responseData);
+      return NeoResponse.created(wrapper);
+    } catch (OBException e) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+    }
+  }
+
+  /**
+   * Core payment creation + processing against an invoice installment, returning the persisted,
+   * processed {@link FIN_Payment}. Processing auto-creates the FIN_FinaccTransaction in the
+   * account (type BPD/BPW per ARR/APP). Throws {@link OBException} on any business validation
+   * failure (currency mismatch, no pending installment, no payment method, missing doc type,
+   * closed period, processing error). Shared by {@link #doRegisterPayment} (sales/purchase invoice
+   * handlers) and the bank-reconciliation "pay invoice" flow. Callers pass already-loaded,
+   * non-null entities.
+   */
+  static FIN_Payment registerPaymentCore(Invoice invoice, FIN_PaymentSchedule schedule,
+      BigDecimal amount, Date paymentDate, FIN_FinancialAccount account, boolean isReceipt)
+      throws Exception {
+
     // FIX #3 — currency compatibility: reject multi-currency until exchange rate UI is added
     Currency invoiceCurrency = invoice.getCurrency();
     Currency accountCurrency = account.getCurrency();
     if (invoiceCurrency != null && accountCurrency != null
         && !invoiceCurrency.getId().equals(accountCurrency.getId())) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "The selected account currency (" + accountCurrency.getISOCode()
-              + ") does not match the invoice currency (" + invoiceCurrency.getISOCode()
-              + "). Multi-currency payments must be processed from Etendo Classic.");
+      throw new OBException("The selected account currency (" + accountCurrency.getISOCode()
+          + ") does not match the invoice currency (" + invoiceCurrency.getISOCode()
+          + "). Multi-currency payments must be processed from Etendo Classic.");
     }
 
-    List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(scheduleId);
+    List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(schedule.getId());
     if (pendingPSDs.isEmpty()) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "No pending payment schedule details found for this installment");
+      throw new OBException("No pending payment schedule details found for this installment");
     }
 
     BusinessPartner bp = invoice.getBusinessPartner();
@@ -143,9 +174,8 @@ final class PaymentRegistrationService {
     // FIX #2 — resolve the payment method valid for this account
     FIN_PaymentMethod paymentMethod = resolvePaymentMethod(account, invoice, isReceipt);
     if (paymentMethod == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "No payment method configured for this financial account. "
-              + "Please configure a payment method in the financial account settings.");
+      throw new OBException("No payment method configured for this financial account. "
+          + "Please configure a payment method in the financial account settings.");
     }
 
     String docTypeCode = isReceipt ? "ARR" : "APP";
@@ -182,20 +212,7 @@ final class PaymentRegistrationService {
     if ("Error".equalsIgnoreCase(result.getType())) {
       throw new OBException(result.getMessage());
     }
-
-    JSONObject data = new JSONObject();
-    data.put("id", payment.getId());
-    data.put("documentNo", payment.getDocumentNo());
-    data.put("amount", payment.getAmount());
-    data.put("status", result.getType());
-    data.put("message", result.getMessage());
-
-    JSONObject responseData = new JSONObject();
-    responseData.put("data", data);
-    JSONObject wrapper = new JSONObject();
-    wrapper.put("response", responseData);
-
-    return NeoResponse.created(wrapper);
+    return payment;
   }
 
   // ─── ACCOUNTS: return accounts compatible with the invoice's org ───────────

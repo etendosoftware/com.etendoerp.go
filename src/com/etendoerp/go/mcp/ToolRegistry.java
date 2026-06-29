@@ -36,6 +36,7 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * Generates MCP tool definitions dynamically based on ETGO_SF_SPEC configuration
@@ -74,6 +75,7 @@ public class ToolRegistry {
     // Always add neo_discover if user can read
     if (permissions.canRead) {
       tools.add(buildDiscoverTool());
+      tools.add(buildDocsTool());
     }
 
     // Query all active specs
@@ -117,7 +119,11 @@ public class ToolRegistry {
         tools.add(buildProcessTool(spec.getName(), spec));
         return;
       }
-      if ("R".equals(specType) && hasProcessAccess(spec) && permissions.canReport) {
+      // A generate_ tool is emitted only for NEO-native callable report specs backed by a
+      // Java qualifier handler. Non-callable report specs get no tool and surface as
+      // not configured via neo discover.
+      if ("R".equals(specType) && permissions.canReport
+          && NeoReportCallability.isReportCallable(spec)) {
         tools.add(buildReportTool(spec.getName(), spec));
       }
     } catch (Exception e) {
@@ -139,6 +145,12 @@ public class ToolRegistry {
 
   private void registerCrudTools(List<McpToolDefinition> tools, List<String> accessibleWindowSpecs,
       ScopePermissions permissions) {
+    // Register the amortization plan tool independently of window specs availability:
+    // it is a built-in endpoint that does not require a window spec to be accessible.
+    if (permissions.canProcess) {
+      tools.add(buildGenerateAmortizationPlanTool());
+    }
+
     if (accessibleWindowSpecs.isEmpty()) {
       return;
     }
@@ -158,6 +170,25 @@ public class ToolRegistry {
     }
   }
 
+  // ── Amortization plan tool ─────────────────────────────────────────────
+
+  private McpToolDefinition buildGenerateAmortizationPlanTool() {
+    Map<String, Object> properties = new LinkedHashMap<>();
+    Map<String, Object> assetIdProp = new HashMap<>();
+    assetIdProp.put(McpConstants.KEY_DESCRIPTION,
+        "The ID of the asset to generate the amortization plan for");
+    assetIdProp.put("type", McpConstants.TYPE_STRING);
+    properties.put("assetId", assetIdProp);
+
+    return new McpToolDefinition(
+        McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN,
+        "Generate an amortization plan for an asset. Fires the native A_Asset_Post process "
+            + "and returns the resulting plan summary (periods, amounts, dates). "
+            + "The asset must be configured for depreciation and must not already have a plan.",
+        buildObjectSchema(properties, java.util.Arrays.asList("assetId"))
+    );
+  }
+
   // ── Tool name resolution ──────────────────────────────────────────────
 
   /**
@@ -172,6 +203,11 @@ public class ToolRegistry {
    * @return the spec name, or null if not resolvable
    */
   public static String resolveSpecName(String toolName, org.codehaus.jettison.json.JSONObject arguments) {
+    // Static tools (e.g. docs) are not tied to any spec
+    if ("docs".equals(toolName)) {
+      return null;
+    }
+
     // CRUD tools carry spec in arguments
     if (isCrudTool(toolName)) {
       return arguments != null ? arguments.optString("spec", null) : null;
@@ -205,6 +241,7 @@ public class ToolRegistry {
       case "neo_schema":
       case "neo_batch":
       case "neo_action":
+      case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
         return true;
       default:
         return false;
@@ -223,6 +260,26 @@ public class ToolRegistry {
             + "Returns spec names, types, entities, and available HTTP methods. "
             + "Use this first to discover what specs and entities are available.",
         schema);
+  }
+
+  // ── Docs tool (Context7 documentation lookup) ─────────────────────────
+
+  private McpToolDefinition buildDocsTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("topic", stringProp(
+        "Term/topic to search in the Etendo Go docs (e.g. 'finance', 'payment')."));
+    props.put("tokens", intProp(
+        "Approximate max size of the returned docs (default 5000, clamped to 500-20000)."));
+    props.put("type", stringProp(
+        "Response format: 'txt' (default) or 'json'."));
+
+    return new McpToolDefinition(
+        "docs",
+        "Search the Etendo Go documentation (etendosoftware/etendo-go-docs via Context7) "
+            + "for a given topic and return the relevant documentation text inline. "
+            + "Use this to look up how-tos, concepts, and reference material before "
+            + "answering questions about Etendo Go.",
+        buildObjectSchema(props, List.of("topic")));
   }
 
   // ── CRUD tools (registered once with spec enum) ───────────────────────

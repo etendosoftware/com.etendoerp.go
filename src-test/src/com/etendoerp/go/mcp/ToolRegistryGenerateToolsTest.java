@@ -53,6 +53,7 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * Unit tests for {@link ToolRegistry} — covers generateTools, processSpec,
@@ -168,8 +169,10 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       List<String> names = toolNames(tools);
+      // Read access always yields neo_discover + the docs tool when no specs exist.
       assertTrue(names.contains("neo_discover"));
-      assertEquals(1, tools.size());
+      assertTrue(names.contains("docs"));
+      assertEquals(2, tools.size());
     }
 
     @Test
@@ -199,14 +202,22 @@ class ToolRegistryGenerateToolsTest {
 
       mockSpecCriteria(List.of(windowSpec, processSpec, reportSpec));
 
-      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
-      List<String> names = toolNames(tools);
+      // ETP-4255: a generate_* tool is only emitted for a callable (NeoHandler-backed)
+      // report spec.
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(reportSpec))
+            .thenReturn(true);
 
-      assertTrue(names.contains("neo_discover"));
-      assertTrue(names.contains("neo_list"));
-      assertTrue(names.contains("neo_create"));
-      assertTrue(names.contains("complete_order"));
-      assertTrue(names.contains("generate_print_invoice"));
+        List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
+        List<String> names = toolNames(tools);
+
+        assertTrue(names.contains("neo_discover"));
+        assertTrue(names.contains("neo_list"));
+        assertTrue(names.contains("neo_create"));
+        assertTrue(names.contains("complete_order"));
+        assertTrue(names.contains("generate_print_invoice"));
+      }
     }
 
     @Test
@@ -263,10 +274,16 @@ class ToolRegistryGenerateToolsTest {
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+      List<String> names = toolNames(tools);
 
-      // Only neo_discover, no CRUD tools since no accessible window specs
-      assertEquals(1, tools.size());
-      assertEquals("neo_discover", tools.get(0).getName());
+      // No CRUD tools since there are no accessible window specs; only the
+      // read-scope baseline tools (neo_discover + docs) are present.
+      assertFalse(names.contains("neo_list"));
+      assertFalse(names.contains("neo_get"));
+      assertFalse(names.contains("neo_create"));
+      assertTrue(names.contains("neo_discover"));
+      assertTrue(names.contains("docs"));
+      assertEquals(2, tools.size());
     }
 
     @Test
@@ -362,10 +379,17 @@ class ToolRegistryGenerateToolsTest {
       mockSpecCriteria(Collections.emptyList());
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read", "neo:write"));
+      List<String> names = toolNames(tools);
 
-      // Only neo_discover
-      assertEquals(1, tools.size());
-      assertEquals("neo_discover", tools.get(0).getName());
+      // No window specs => no CRUD/window tools. Only the read-scope baseline
+      // tools (neo_discover + docs) are present.
+      assertFalse(names.contains("neo_list"));
+      assertFalse(names.contains("neo_create"));
+      assertFalse(names.contains("neo_update"));
+      assertFalse(names.contains("neo_delete"));
+      assertTrue(names.contains("neo_discover"));
+      assertTrue(names.contains("docs"));
+      assertEquals(2, tools.size());
     }
   }
 
@@ -467,14 +491,33 @@ class ToolRegistryGenerateToolsTest {
   // ── generateTools: report spec processing ─────────────────────────────
 
   @Nested
-  @DisplayName("generateTools — report specs")
+  @DisplayName("generateTools — report specs (ETP-4255 callability gate)")
   class ReportSpecTests {
 
+    private MockedStatic<NeoReportCallability> callabilityMock;
+
+    @BeforeEach
+    void setUpCallability() {
+      callabilityMock = mockStatic(NeoReportCallability.class);
+    }
+
+    @AfterEach
+    void tearDownCallability() {
+      if (callabilityMock != null) {
+        callabilityMock.close();
+      }
+    }
+
+    /**
+     * A NEO-native callable report spec (backed by a NeoHandler) with neo:report scope
+     * emits a generate_* tool.
+     */
     @Test
-    @DisplayName("report spec with access and neo:report scope generates tool")
-    void reportSpecWithAccessGeneratesTool() {
+    @DisplayName("callable report spec with neo:report scope generates tool")
+    void callableReportSpecGeneratesTool() {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
       when(spec.getProcess()).thenReturn(null);
+      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
       mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
@@ -484,28 +527,32 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains("generate_print_invoice"));
     }
 
+    /**
+     * A non-callable report spec (no NEO-native handler) emits NO generate_* tool even with
+     * neo:report scope — Jasper/AD_Process reports are never executed by Etendo Go (ETP-4255).
+     */
     @Test
-    @DisplayName("report spec without neo:report scope is excluded")
-    void reportSpecWithoutReportScope() {
+    @DisplayName("non-callable report spec emits no generate_ tool")
+    void nonCallableReportSpecEmitsNoTool() {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
-      mockSpecCriteria(List.of(spec));
-
-      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
-
-      assertFalse(toolNames(tools).contains("generate_print_invoice"));
-    }
-
-    @Test
-    @DisplayName("report spec with denied process access is excluded")
-    void reportSpecWithDeniedAccess() {
-      SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
-      Process adProcess = mock(Process.class);
-      when(adProcess.getId()).thenReturn(PROCESS_ID);
-      when(spec.getProcess()).thenReturn(adProcess);
-      accessMock.when(() -> NeoAccessUtils.hasProcessAccess(PROCESS_ID)).thenReturn(false);
+      when(spec.getProcess()).thenReturn(null);
+      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(false);
       mockSpecCriteria(List.of(spec));
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:report"));
+
+      assertFalse(toolNames(tools).contains("generate_print_invoice"),
+          "Non-callable report specs must not produce a generate_* tool");
+    }
+
+    @Test
+    @DisplayName("callable report spec without neo:report scope is excluded")
+    void reportSpecWithoutReportScope() {
+      SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
+      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+      mockSpecCriteria(List.of(spec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       assertFalse(toolNames(tools).contains("generate_print_invoice"));
     }
@@ -516,6 +563,7 @@ class ToolRegistryGenerateToolsTest {
     void reportToolIncludesFormatParam() {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
       when(spec.getProcess()).thenReturn(null);
+      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
       mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
@@ -536,6 +584,7 @@ class ToolRegistryGenerateToolsTest {
       SFSpec spec = createReportSpec(SPEC_PRINT_INVOICE);
       when(spec.getProcess()).thenReturn(null);
       when(spec.getDescription()).thenReturn("Generates a PDF invoice");
+      callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
       mockEmptyEntities();
       mockSpecCriteria(List.of(spec));
 
@@ -572,16 +621,24 @@ class ToolRegistryGenerateToolsTest {
 
       mockSpecCriteria(List.of(windowSpec, processSpec, reportSpec));
 
-      List<McpToolDefinition> tools = registry.generateTools(
-          scopesOf("neo:read", "neo:write", "neo:process", "neo:report"));
-      List<String> names = toolNames(tools);
+      // ETP-4255: a generate_* tool is only emitted for a callable (NeoHandler-backed)
+      // report spec.
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(reportSpec))
+            .thenReturn(true);
 
-      // discover + 8 CRUD + 1 process + 1 report = 11
-      assertTrue(names.contains("neo_discover"));
-      assertTrue(names.contains("neo_list"));
-      assertTrue(names.contains("neo_create"));
-      assertTrue(names.contains("complete_order"));
-      assertTrue(names.contains("generate_print_invoice"));
+        List<McpToolDefinition> tools = registry.generateTools(
+            scopesOf("neo:read", "neo:write", "neo:process", "neo:report"));
+        List<String> names = toolNames(tools);
+
+        // discover + 8 CRUD + 1 process + 1 report = 11
+        assertTrue(names.contains("neo_discover"));
+        assertTrue(names.contains("neo_list"));
+        assertTrue(names.contains("neo_create"));
+        assertTrue(names.contains("complete_order"));
+        assertTrue(names.contains("generate_print_invoice"));
+      }
     }
 
     @Test
@@ -701,6 +758,91 @@ class ToolRegistryGenerateToolsTest {
     @DisplayName("empty string returns false")
     void emptyStringReturnsFalse() {
       assertFalse(ToolRegistry.isCrudTool(""));
+    }
+
+    @Test
+    @DisplayName("neo_generate_amortization_plan returns true (ETP-4232)")
+    void generateAmortizationPlanIsCrudTool() {
+      assertTrue(ToolRegistry.isCrudTool(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN));
+    }
+  }
+
+  // ── neo_generate_amortization_plan tool (ETP-4232) ────────────────────────
+
+  @Nested
+  @DisplayName("generateTools — neo_generate_amortization_plan (ETP-4232)")
+  class GenerateAmortizationPlanToolTests {
+
+    @Test
+    @DisplayName("neo:process scope registers neo_generate_amortization_plan even with no window specs")
+    void processScopeRegistersAmortizationTool() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:process"));
+
+      List<String> names = toolNames(tools);
+      assertTrue(names.contains(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN),
+          "neo_generate_amortization_plan must be registered with neo:process scope");
+    }
+
+    @Test
+    @DisplayName("neo:read scope does NOT register neo_generate_amortization_plan")
+    void readScopeDoesNotRegisterAmortizationTool() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+
+      assertFalse(toolNames(tools).contains(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN),
+          "neo_generate_amortization_plan must NOT be registered with read-only scope");
+    }
+
+    @Test
+    @DisplayName("neo:* scope registers neo_generate_amortization_plan")
+    void wildcardScopeRegistersAmortizationTool() {
+      SFSpec windowSpec = createWindowSpec(SPEC_SALES_ORDER);
+      when(windowSpec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(windowSpec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
+
+      assertTrue(toolNames(tools).contains(McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN));
+    }
+
+    @Test
+    @DisplayName("neo_generate_amortization_plan tool has assetId as required property")
+    @SuppressWarnings("unchecked")
+    void amortizationToolHasAssetIdRequired() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:process"));
+
+      McpToolDefinition tool = tools.stream()
+          .filter(t -> McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN.equals(t.getName()))
+          .findFirst()
+          .orElse(null);
+      assertNotNull(tool, "Tool must be present");
+
+      Map<String, Object> schema = tool.getInputSchema();
+      List<String> required = (List<String>) schema.get("required");
+      assertNotNull(required);
+      assertTrue(required.contains("assetId"), "assetId must be in required list");
+
+      Map<String, Object> props = (Map<String, Object>) schema.get("properties");
+      assertNotNull(props);
+      assertTrue(props.containsKey("assetId"), "assetId must be in properties");
+    }
+
+    @Test
+    @DisplayName("resolveSpecName returns null for neo_generate_amortization_plan (CRUD tool)")
+    void resolveSpecNameReturnNullForAmortizationTool() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("assetId", "ASSET-001");
+
+      String result = ToolRegistry.resolveSpecName(
+          McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN, args);
+
+      // isCrudTool == true, so it reads "spec" from args — which is absent, returning null
+      assertNull(result, "resolveSpecName must return null for amortization tool (no spec arg)");
     }
   }
 
@@ -997,6 +1139,75 @@ class ToolRegistryGenerateToolsTest {
       Map<String, Object> paramsProp = (Map<String, Object>) props.get("parameters");
       // No nested properties since the only field had no column
       assertFalse(paramsProp.containsKey("properties"));
+    }
+  }
+
+  // ── docs tool registration ────────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("generateTools — docs tool")
+  class DocsToolTests {
+
+    @Test
+    @DisplayName("neo:read scope registers the docs tool")
+    void readScopeRegistersDocs() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+
+      assertTrue(toolNames(tools).contains("docs"), "docs should be registered with read scope");
+    }
+
+    @Test
+    @DisplayName("neo:* scope registers the docs tool")
+    void wildcardScopeRegistersDocs() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
+
+      assertTrue(toolNames(tools).contains("docs"), "docs should be registered with wildcard scope");
+    }
+
+    @Test
+    @DisplayName("scope without read access (only neo:process) does not register the docs tool")
+    void noReadScopeDoesNotRegisterDocs() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:process"));
+
+      assertFalse(toolNames(tools).contains("docs"),
+          "docs should NOT be registered without read access");
+    }
+
+    @Test
+    @DisplayName("docs tool has required topic field")
+    @SuppressWarnings("unchecked")
+    void docsToolHasRequiredTopic() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+
+      McpToolDefinition docsTool = tools.stream()
+          .filter(t -> "docs".equals(t.getName()))
+          .findFirst()
+          .orElse(null);
+      assertNotNull(docsTool, "docs tool should be present");
+
+      Map<String, Object> schema = docsTool.getInputSchema();
+      List<String> required = (List<String>) schema.get("required");
+      assertNotNull(required);
+      assertTrue(required.contains("topic"));
+
+      Map<String, Object> props = (Map<String, Object>) schema.get("properties");
+      assertTrue(props.containsKey("topic"));
+      assertTrue(props.containsKey("tokens"));
+      assertTrue(props.containsKey("type"));
+    }
+
+    @Test
+    @DisplayName("resolveSpecName returns null for the docs tool")
+    void resolveSpecNameReturnsNullForDocs() {
+      assertNull(ToolRegistry.resolveSpecName("docs", null));
     }
   }
 
