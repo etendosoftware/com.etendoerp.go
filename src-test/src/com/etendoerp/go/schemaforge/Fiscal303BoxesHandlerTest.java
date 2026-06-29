@@ -447,7 +447,7 @@ public class Fiscal303BoxesHandlerTest {
     for (String rate : ecRates) {
       assertFalse(
           "vatEcBoxes returned empty for rate " + rate,
-          handler.vatEcBoxes(pct(rate)).isEmpty());
+          handler.vatEcBoxes(pct(rate), false).isEmpty());
     }
   }
 
