@@ -188,7 +188,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           "  SELECT rl.Canceled_Inoutline_ID, SUM(ABS(rl.MovementQty)) AS ret_qty " +
           "  FROM M_InOutLine rl " +
           "  JOIN M_InOut rh ON rh.M_InOut_ID = rl.M_InOut_ID " +
-          "  WHERE rl.Canceled_Inoutline_ID IS NOT NULL AND rh.DocStatus = 'CO' " +
+          "  WHERE rl.Canceled_Inoutline_ID IS NOT NULL AND rh.DocStatus NOT IN ('VO') " +
           "  GROUP BY rl.Canceled_Inoutline_ID " +
           ") ret ON ret.Canceled_Inoutline_ID = l.M_InOutLine_ID " +
           "WHERE h.C_BPartner_ID = ? " +
@@ -232,7 +232,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           "  SELECT rl.Canceled_Inoutline_ID, SUM(ABS(rl.MovementQty)) AS ret_qty " +
           "  FROM M_InOutLine rl " +
           "  JOIN M_InOut rh ON rh.M_InOut_ID = rl.M_InOut_ID " +
-          "  WHERE rl.Canceled_Inoutline_ID IS NOT NULL AND rh.DocStatus = 'CO' " +
+          "  WHERE rl.Canceled_Inoutline_ID IS NOT NULL AND rh.DocStatus NOT IN ('VO') " +
           "  GROUP BY rl.Canceled_Inoutline_ID " +
           ") ret ON ret.Canceled_Inoutline_ID = l.M_InOutLine_ID " +
           "WHERE l.M_InOut_ID = ? " +
