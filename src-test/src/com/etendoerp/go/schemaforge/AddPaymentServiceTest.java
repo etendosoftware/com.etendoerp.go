@@ -216,7 +216,7 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Exact receipt against one invoice creates and processes the payment")
-  void exactReceiptHappyPath() throws Exception {
+  void testExactReceiptHappyPath() throws Exception {
     JSONObject body = baseBody("18.03").put("selectedInvoices", new JSONObject().put(PSD_ID, 18.03));
 
     NeoResponse response = AddPaymentService.doAddPayment(body);
@@ -234,7 +234,7 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Write-off flag is forwarded to updatePaymentDetail")
-  void writeoffForwarded() throws Exception {
+  void testWriteoffForwarded() throws Exception {
     JSONObject body = baseBody("18.03")
         .put("selectedInvoices", new JSONObject().put(PSD_ID, 18.03))
         .put("writeoffs", new JSONObject().put(PSD_ID, true));
@@ -246,7 +246,7 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Over-payment with leave-credit registers credit and does not refund")
-  void overpaymentLeaveCredit() throws Exception {
+  void testOverpaymentLeaveCredit() throws Exception {
     // Linked details sum to 18.03 but the payment is 25.00 → 6.97 left as credit.
     JSONObject body = baseBody("25.00")
         .put("selectedInvoices", new JSONObject().put(PSD_ID, 18.03))
@@ -260,7 +260,7 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Over-payment with refund creates and processes the refund payment")
-  void overpaymentRefund() throws Exception {
+  void testOverpaymentRefund() throws Exception {
     JSONObject body = baseBody("25.00")
         .put("selectedInvoices", new JSONObject().put(PSD_ID, 18.03))
         .put("overpaymentAction", "refund");
@@ -277,7 +277,7 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Receipt G/L line is saved with received minus paid")
-  void glLineReceiptSign() throws Exception {
+  void testGlLineReceiptSign() throws Exception {
     JSONObject gl = new JSONObject().put("glItemId", GL_ID).put("receivedIn", 5).put("paidOut", 2);
     JSONObject body = baseBody("18.03")
         .put("selectedInvoices", new JSONObject().put(PSD_ID, 18.03))
@@ -291,7 +291,7 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Payment G/L line is saved with paid minus received (inverse sign)")
-  void glLinePaymentSign() throws Exception {
+  void testGlLinePaymentSign() throws Exception {
     JSONObject gl = new JSONObject().put("glItemId", GL_ID).put("receivedIn", 0).put("paidOut", 4);
     JSONObject body = baseBody("18.03").put("isReceipt", false)
         .put("selectedInvoices", new JSONObject().put(PSD_ID, 18.03))
@@ -305,7 +305,7 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Blank G/L id and zero-amount lines are skipped")
-  void glLinesSkipped() throws Exception {
+  void testGlLinesSkipped() throws Exception {
     JSONArray gls = new JSONArray(Arrays.asList(
         new JSONObject().put("glItemId", "").put("receivedIn", 5).put("paidOut", 0),
         new JSONObject().put("glItemId", GL_ID).put("receivedIn", 0).put("paidOut", 0)));
@@ -320,7 +320,7 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Invoice lines with zero / invalid amounts are skipped")
-  void invoiceLinesSkipped() throws Exception {
+  void testInvoiceLinesSkipped() throws Exception {
     JSONObject sel = new JSONObject().put("PSD-A", 0).put("PSD-B", "not-a-number");
     JSONObject body = baseBody("0.01").put("selectedInvoices", sel);
 
@@ -331,7 +331,7 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("organizationId from the movement overrides the account organization")
-  void resolveMovementOrg() throws Exception {
+  void testResolveMovementOrg() throws Exception {
     Organization movementOrg = mock(Organization.class);
     when(dal.get(eq(Organization.class), eq("ORG-9"))).thenReturn(movementOrg);
     JSONObject body = baseBody("18.03")
@@ -346,7 +346,7 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Payment method falls back to the first method configured for the account")
-  void paymentMethodFallback() throws Exception {
+  void testPaymentMethodFallback() throws Exception {
     FinAccPaymentMethod fapm = mock(FinAccPaymentMethod.class);
     when(fapm.getPaymentMethod()).thenReturn(method);
     OBCriteria<FinAccPaymentMethod> crit = criteriaReturning(Collections.singletonList(fapm));
@@ -363,7 +363,7 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Invalid amount is rejected")
-  void invalidAmount() {
+  void testInvalidAmount() {
     OBException ex = assertThrows(OBException.class,
         () -> AddPaymentService.doAddPayment(baseBody("abc")));
     assertTrue(ex.getMessage().contains("Invalid amount"));
@@ -371,13 +371,13 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Non-positive amount is rejected")
-  void nonPositiveAmount() {
+  void testNonPositiveAmount() {
     assertThrows(OBException.class, () -> AddPaymentService.doAddPayment(baseBody("0")));
   }
 
   @Test
   @DisplayName("Invalid date is rejected")
-  void invalidDate() throws Exception {
+  void testInvalidDate() throws Exception {
     JSONObject body = baseBody("18.03");
     body.put("paymentDate", "31/31/2026");
     assertThrows(OBException.class, () -> AddPaymentService.doAddPayment(body));
@@ -385,7 +385,7 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Missing financial account is rejected")
-  void accountNotFound() {
+  void testAccountNotFound() {
     when(dal.get(eq(FIN_FinancialAccount.class), anyString())).thenReturn(null);
     OBException ex = assertThrows(OBException.class,
         () -> AddPaymentService.doAddPayment(baseBody("18.03")));
@@ -394,14 +394,14 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Missing contact is rejected")
-  void contactNotFound() {
+  void testContactNotFound() {
     when(dal.get(eq(BusinessPartner.class), anyString())).thenReturn(null);
     assertThrows(OBException.class, () -> AddPaymentService.doAddPayment(baseBody("18.03")));
   }
 
   @Test
   @DisplayName("No valid payment method is rejected")
-  void paymentMethodMissing() {
+  void testPaymentMethodMissing() {
     when(dal.get(eq(FIN_PaymentMethod.class), anyString())).thenReturn(null);
     OBCriteria<FinAccPaymentMethod> emptyCrit = criteriaReturning(Collections.emptyList());
     when(dal.createCriteria(eq(FinAccPaymentMethod.class))).thenReturn(emptyCrit);
@@ -412,14 +412,14 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Missing document type is rejected")
-  void docTypeMissing() {
+  void testDocTypeMissing() {
     finUtilityMock.when(() -> FIN_Utility.getDocumentType(any(), anyString())).thenReturn(null);
     assertThrows(OBException.class, () -> AddPaymentService.doAddPayment(baseBody("18.03")));
   }
 
   @Test
   @DisplayName("A processing error surfaces as an exception")
-  void processingError() throws Exception {
+  void testProcessingError() throws Exception {
     OBError error = mock(OBError.class);
     when(error.getType()).thenReturn("Error");
     when(error.getMessage()).thenReturn("boom");
@@ -433,7 +433,7 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Unknown invoice installment is rejected")
-  void psdNotFound() throws Exception {
+  void testPsdNotFound() throws Exception {
     when(dal.get(eq(FIN_PaymentScheduleDetail.class), anyString())).thenReturn(null);
     JSONObject body = baseBody("18.03").put("selectedInvoices", new JSONObject().put(PSD_ID, 18.03));
     OBException ex = assertThrows(OBException.class, () -> AddPaymentService.doAddPayment(body));
@@ -442,7 +442,7 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("Unknown G/L item is rejected")
-  void glItemNotFound() throws Exception {
+  void testGlItemNotFound() throws Exception {
     when(dal.get(eq(GLItem.class), anyString())).thenReturn(null);
     JSONObject gl = new JSONObject().put("glItemId", GL_ID).put("receivedIn", 5).put("paidOut", 0);
     JSONObject body = baseBody("18.03")
@@ -453,7 +453,7 @@ class AddPaymentServiceTest {
 
   @Test
   @DisplayName("No invoices and no over-payment processes a bare payment")
-  void noInvoicesNoOverpayment() throws Exception {
+  void testNoInvoicesNoOverpayment() throws Exception {
     when(payment.getFINPaymentDetailList()).thenReturn(Collections.emptyList());
     JSONObject body = baseBody("10.00"); // assigned 0, leftover 10 → credit, no action → stays credit
     NeoResponse response = AddPaymentService.doAddPayment(body);
