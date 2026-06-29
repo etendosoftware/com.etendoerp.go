@@ -22,7 +22,10 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -35,9 +38,17 @@ import javax.inject.Named;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
+import org.hibernate.query.NativeQuery;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.MockedStatic;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -692,6 +703,263 @@ public class ChartOfAccountsHandlerTest {
     JSONArray result = ChartOfAccountsHandler.extractDataArray(ctx);
     assertNotNull(result);
     assertEquals(1, result.length());
+  }
+
+  // ── extractDataArray — missing response key ──────────────────────────────
+
+  @Test
+  public void extractDataArrayReturnsNullWhenBodyHasNoResponseKey() {
+    NeoContext ctx = mock(NeoContext.class);
+    NeoResponse response = mock(NeoResponse.class);
+    when(response.getBody()).thenReturn(new JSONObject()); // body with no "response" key
+    when(ctx.getPreviousResult()).thenReturn(response);
+    assertNull(ChartOfAccountsHandler.extractDataArray(ctx));
+  }
+
+  // ── applyIsLeaf — null array entry ─────────────────────────────────────
+
+  @Test
+  public void applyIsLeafSkipsNullArrayEntry() throws Exception {
+    JSONArray data = new JSONArray();
+    data.put(JSONObject.NULL); // null entry in the array
+    data.put(new JSONObject().put("id", "EV2"));
+
+    Map<String, Boolean> isSummaryMap = Collections.singletonMap("EV2", Boolean.FALSE);
+    ChartOfAccountsHandler.applyIsLeaf(data, isSummaryMap);
+
+    // null entry was skipped; EV2 was processed
+    assertTrue(data.getJSONObject(1).getBoolean("isLeaf"));
+  }
+
+  // ── handle() — catch block and null return for DELETE ────────────────────
+
+  @Test
+  public void handleReturns500WhenCrudRequestThrows() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenThrow(new RuntimeException("boom"));
+
+    NeoResponse resp = handler.handle(ctx);
+    assertNotNull(resp);
+    assertEquals(500, resp.getHttpStatus());
+  }
+
+  @Test
+  public void handleReturnsNullForCrudDelete() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("DELETE");
+    assertNull(handler.handle(ctx));
+  }
+
+  // ── afterHandle() — DEFAULTS path and catch block ────────────────────────
+
+  @Test
+  public void afterHandleReturnsNullForDefaultsWhenNoParentIdFound() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
+    // getQueryParams() returns an empty map: no parentAccountId → resolveParentAccountId returns null
+    when(ctx.getQueryParams()).thenReturn(Collections.emptyMap());
+    // RequestContext.get() will return null in unit-test context → also no id
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  @Test
+  public void afterHandleReturnsNullForDefaultsWhenParentIdFoundButNoPreviousResult() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("parentAccountId", "SOME-ID");
+    when(ctx.getQueryParams()).thenReturn(queryParams);
+    when(ctx.getPreviousResult()).thenReturn(null); // injectCodePrefix checks previous == null
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  @Test
+  public void afterHandleReturnsNullWhenInjectCodePrefixThrows() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("parentAccountId", "SOME-ID");
+    when(ctx.getQueryParams()).thenReturn(queryParams);
+    when(ctx.getPreviousResult()).thenThrow(new RuntimeException("inject-error"));
+
+    // afterHandle catch block returns null instead of propagating
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  // ── afterHandle() CRUD GET list — enrichGetResponse with OBDal mock ──────
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandleEnrichesGetResponseListWithOBDalMock() throws Exception {
+    // Build a list-GET context: no recordId → isList=true
+    JSONArray dataArray = new JSONArray().put(new JSONObject().put("id", "EV1"));
+    JSONObject responseJson = new JSONObject()
+        .put("data", dataArray)
+        .put("totalRows", 1);
+    JSONObject body = new JSONObject().put("response", responseJson);
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+
+    OBContext obCtxInstance = mock(OBContext.class);
+    Client clientMock = mock(Client.class);
+    when(clientMock.getId()).thenReturn("TEST_CLIENT");
+    when(obCtxInstance.getCurrentClient()).thenReturn(clientMock);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn(null); // list GET
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getObContext()).thenReturn(obCtxInstance);
+
+    OBDal dalMock = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBQuery<ElementValue> summaryQry = mock(OBQuery.class);
+    when(dalMock.createQuery(any(Class.class), anyString())).thenReturn(summaryQry);
+    when(summaryQry.setNamedParameter(anyString(), any())).thenReturn(summaryQry);
+    when(summaryQry.list()).thenReturn(Collections.emptyList()); // no summary data
+
+    Session sessionMock = mock(Session.class);
+    when(dalMock.getSession()).thenReturn(sessionMock);
+
+    @SuppressWarnings("unchecked")
+    NativeQuery<Object> treeQry = mock(NativeQuery.class);   // SQL_FIND_EV_TREE → tree found
+    @SuppressWarnings("unchecked")
+    NativeQuery<Object> nodeQry = mock(NativeQuery.class);   // SQL_LOAD_TREE_NODES → empty
+    @SuppressWarnings("unchecked")
+    NativeQuery<Object> evQry = mock(NativeQuery.class);     // SQL_LOAD_EV_VALUES → empty
+    @SuppressWarnings("unchecked")
+    NativeQuery<Object> yearQry = mock(NativeQuery.class);   // SQL_CURRENT_YEAR → empty
+
+    // setParameter return value is not used in production code — no need to stub
+    when(treeQry.list()).thenReturn(Collections.singletonList("TREE-ID")); // tree exists
+    when(nodeQry.list()).thenReturn(Collections.emptyList()); // no nodes
+    when(evQry.list()).thenReturn(Collections.emptyList());   // no EVs
+    when(yearQry.list()).thenReturn(Collections.emptyList()); // no fiscal year → emptyMap
+
+    when(sessionMock.createNativeQuery(anyString()))
+        .thenReturn(treeQry)
+        .thenReturn(nodeQry)
+        .thenReturn(evQry)
+        .thenReturn(yearQry);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dalMock);
+      // setAdminMode and restorePreviousMode default to no-op in MockedStatic
+
+      NeoResponse result = handler.afterHandle(ctx);
+      assertNotNull("enrichGetResponse must return a non-null NeoResponse", result);
+      assertEquals(200, result.getHttpStatus());
+    }
+  }
+
+  // ── afterHandle() DEFAULTS — injectCodePrefix OBDal path ─────────────────
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandleInjectsCodePrefixWhenParentFoundInOBDal() throws Exception {
+    JSONObject body = new JSONObject().put("defaults", new JSONObject());
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("parentAccountId", "PARENT-ID");
+    when(ctx.getQueryParams()).thenReturn(queryParams);
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    ElementValue parentEV = mock(ElementValue.class);
+    when(parentEV.getSearchKey()).thenReturn("12345678"); // 8 digits → prefix = "1234"
+
+    OBDal dalMock = mock(OBDal.class);
+    when(dalMock.get(any(Class.class), any())).thenReturn(parentEV);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dalMock);
+
+      NeoResponse result = handler.afterHandle(ctx);
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      assertEquals("1234", result.getBody().getJSONObject("defaults").getString("codePrefix"));
+    }
+  }
+
+  // ── afterHandle() CRUD GET list — loadTreeData with populated node rows ────
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandleEnrichesGetResponseWithPopulatedNodeRows() throws Exception {
+    // Same list-GET context as the base test but nodeRows and evRows are non-empty,
+    // exercising the for-loop bodies inside loadTreeData (lines 641-651, 665-667).
+    JSONArray dataArray = new JSONArray().put(new JSONObject().put("id", "EV1"));
+    JSONObject responseJson = new JSONObject().put("data", dataArray).put("totalRows", 1);
+    JSONObject body = new JSONObject().put("response", responseJson);
+
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+
+    OBContext obCtxInstance = mock(OBContext.class);
+    Client clientMock = mock(Client.class);
+    when(clientMock.getId()).thenReturn("TEST_CLIENT");
+    when(obCtxInstance.getCurrentClient()).thenReturn(clientMock);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn(null);
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+    when(ctx.getObContext()).thenReturn(obCtxInstance);
+
+    OBDal dalMock = mock(OBDal.class);
+    OBQuery<ElementValue> summaryQry = mock(OBQuery.class);
+    when(dalMock.createQuery(any(Class.class), anyString())).thenReturn(summaryQry);
+    when(summaryQry.setNamedParameter(anyString(), any())).thenReturn(summaryQry);
+    when(summaryQry.list()).thenReturn(Collections.emptyList());
+
+    Session sessionMock = mock(Session.class);
+    when(dalMock.getSession()).thenReturn(sessionMock);
+
+    NativeQuery<Object> treeQry = mock(NativeQuery.class);
+    NativeQuery<Object> nodeQry = mock(NativeQuery.class);
+    NativeQuery<Object> evQry = mock(NativeQuery.class);
+    NativeQuery<Object> yearQry = mock(NativeQuery.class);
+
+    when(treeQry.list()).thenReturn(Collections.singletonList("TREE-ID"));
+
+    // Non-empty nodeRows: EV1 is a non-root child, ROOT-0 is a root node
+    java.util.List<Object> nodeRowsList = new java.util.ArrayList<>();
+    nodeRowsList.add(new Object[]{"EV1", "ROOT-0"}); // non-root → covers lines 641-648
+    nodeRowsList.add(new Object[]{"ROOT-0", "0"});   // parentId="0" → covers lines 649-651
+    when(nodeQry.list()).thenReturn(nodeRowsList);
+
+    // Non-empty evRows: EV1 and ROOT-0 with value/name → covers lines 665-667
+    java.util.List<Object> evRowsList = new java.util.ArrayList<>();
+    evRowsList.add(new Object[]{"EV1", "1001", "Caja"});
+    evRowsList.add(new Object[]{"ROOT-0", "1000", "Grupo Caja"});
+    when(evQry.list()).thenReturn(evRowsList);
+
+    when(yearQry.list()).thenReturn(Collections.emptyList()); // no fiscal year
+
+    when(sessionMock.createNativeQuery(anyString()))
+        .thenReturn(treeQry)
+        .thenReturn(nodeQry)
+        .thenReturn(evQry)
+        .thenReturn(yearQry);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dalMock);
+
+      NeoResponse result = handler.afterHandle(ctx);
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+    }
   }
 
   // ── countChildren (package-private, no OBDal mock available in unit test) ─

@@ -19,11 +19,19 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 import java.util.HashMap;
 import java.util.Map;
 
+import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.query.NativeQuery;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.junit.MockitoJUnitRunner;
@@ -366,5 +374,178 @@ public class ChartOfAccountsCriteriaTest {
   @Test
   public void resolveOrderByUnsupportedFieldFallsBackToDefault() {
     assertEquals("value ASC", ChartOfAccountsCriteria.resolveLeafAccountOrderBy("ytdBalance"));
+  }
+
+  // ── Text default operator (unsupported) ───────────────────────────────────
+
+  @Test
+  public void buildWhereClauseTextUnsupportedOperatorIsSkipped() throws Exception {
+    Map<String, Object> params = new HashMap<>();
+    String result = ChartOfAccountsCriteria.buildLeafAccountWhereClause(
+        "{\"fieldName\":\"searchKey\",\"operator\":\"startsWith\",\"value\":\"10\"}", params);
+    assertEquals("", result);
+    assertTrue(params.isEmpty());
+  }
+
+  // ── Enum default operator (unsupported) ──────────────────────────────────
+
+  @Test
+  public void buildWhereClauseEnumUnsupportedOperatorIsSkipped() throws Exception {
+    Map<String, Object> params = new HashMap<>();
+    String result = ChartOfAccountsCriteria.buildLeafAccountWhereClause(
+        "{\"fieldName\":\"accountType\",\"operator\":\"greaterThan\",\"value\":\"A\"}", params);
+    assertEquals("", result);
+    assertTrue(params.isEmpty());
+  }
+
+  // ── Text bind helpers — missing value key ─────────────────────────────────
+
+  @Test
+  public void buildWhereClauseIContainsWithMissingValueIsSkipped() throws Exception {
+    Map<String, Object> params = new HashMap<>();
+    // No "value" key → normalizeTextValue returns null → bindLowercaseLike returns null
+    String result = ChartOfAccountsCriteria.buildLeafAccountWhereClause(
+        "{\"fieldName\":\"searchKey\",\"operator\":\"iContains\"}", params);
+    assertEquals("", result);
+    assertTrue(params.isEmpty());
+  }
+
+  @Test
+  public void buildWhereClauseIEqualsWithMissingValueIsSkipped() throws Exception {
+    Map<String, Object> params = new HashMap<>();
+    String result = ChartOfAccountsCriteria.buildLeafAccountWhereClause(
+        "{\"fieldName\":\"searchKey\",\"operator\":\"iEquals\"}", params);
+    assertEquals("", result);
+    assertTrue(params.isEmpty());
+  }
+
+  @Test
+  public void buildWhereClauseInSetWithEmptyValueIsSkipped() throws Exception {
+    Map<String, Object> params = new HashMap<>();
+    // "value":"" → splitCriterionValues → raw == "" → normalizePlainValue returns null → empty list
+    String result = ChartOfAccountsCriteria.buildLeafAccountWhereClause(
+        "{\"fieldName\":\"searchKey\",\"operator\":\"inSet\",\"value\":\"\"}", params);
+    assertEquals("", result);
+    assertTrue(params.isEmpty());
+  }
+
+  // ── Enum bind helpers — missing/empty value ───────────────────────────────
+
+  @Test
+  public void buildWhereClauseEnumEqualsWithMissingValueIsSkipped() throws Exception {
+    Map<String, Object> params = new HashMap<>();
+    // No "value" key → normalizePlainValue returns null → bindPlainEquals returns null
+    String result = ChartOfAccountsCriteria.buildLeafAccountWhereClause(
+        "{\"fieldName\":\"accountType\",\"operator\":\"equals\"}", params);
+    assertEquals("", result);
+    assertTrue(params.isEmpty());
+  }
+
+  @Test
+  public void buildWhereClauseEnumInSetWithEmptyValueIsSkipped() throws Exception {
+    Map<String, Object> params = new HashMap<>();
+    String result = ChartOfAccountsCriteria.buildLeafAccountWhereClause(
+        "{\"fieldName\":\"accountType\",\"operator\":\"inSet\",\"value\":\"\"}", params);
+    assertEquals("", result);
+    assertTrue(params.isEmpty());
+  }
+
+  // ── criteria payload edge cases ───────────────────────────────────────────
+
+  @Test
+  public void buildWhereClauseNonObjectArrayElementIsSkipped() throws Exception {
+    // An integer in the root JSONArray → buildCriteriaSql receives non-JSONObject/JSONArray → null
+    Map<String, Object> params = new HashMap<>();
+    String result = ChartOfAccountsCriteria.buildLeafAccountWhereClause("[42]", params);
+    assertEquals("", result);
+    assertTrue(params.isEmpty());
+  }
+
+  @Test
+  public void buildWhereClauseGroupWithCriteriaKeyNotArrayIsSkipped() throws Exception {
+    // "criteria" key exists but is not a JSONArray → optJSONArray returns null → return null
+    Map<String, Object> params = new HashMap<>();
+    String result = ChartOfAccountsCriteria.buildLeafAccountWhereClause(
+        "{\"_constructor\":\"AdvancedCriteria\",\"operator\":\"and\",\"criteria\":\"invalid\"}",
+        params);
+    assertEquals("", result);
+    assertTrue(params.isEmpty());
+  }
+
+  // ── toYesNoFlag string paths ──────────────────────────────────────────────
+
+  @Test
+  public void buildWhereClauseActiveBooleanStringYesIsYFlag() throws Exception {
+    Map<String, Object> params = new HashMap<>();
+    String result = ChartOfAccountsCriteria.buildLeafAccountWhereClause(
+        "{\"fieldName\":\"active\",\"operator\":\"equals\",\"value\":\"yes\"}", params);
+    assertFalse(result.isEmpty());
+    assertEquals("Y", params.get("filter1"));
+  }
+
+  @Test
+  public void buildWhereClauseActiveBooleanStringYIsYFlag() throws Exception {
+    Map<String, Object> params = new HashMap<>();
+    String result = ChartOfAccountsCriteria.buildLeafAccountWhereClause(
+        "{\"fieldName\":\"active\",\"operator\":\"equals\",\"value\":\"y\"}", params);
+    assertFalse(result.isEmpty());
+    assertEquals("Y", params.get("filter1"));
+  }
+
+  @Test
+  public void buildWhereClauseActiveBooleanStringFalseIsNFlag() throws Exception {
+    Map<String, Object> params = new HashMap<>();
+    String result = ChartOfAccountsCriteria.buildLeafAccountWhereClause(
+        "{\"fieldName\":\"active\",\"operator\":\"equals\",\"value\":\"false\"}", params);
+    assertFalse(result.isEmpty());
+    assertEquals("N", params.get("filter1"));
+  }
+
+  @Test
+  public void buildWhereClauseActiveBooleanStringNoIsNFlag() throws Exception {
+    Map<String, Object> params = new HashMap<>();
+    String result = ChartOfAccountsCriteria.buildLeafAccountWhereClause(
+        "{\"fieldName\":\"active\",\"operator\":\"equals\",\"value\":\"no\"}", params);
+    assertFalse(result.isEmpty());
+    assertEquals("N", params.get("filter1"));
+  }
+
+  @Test
+  public void buildWhereClauseActiveBooleanStringNIsNFlag() throws Exception {
+    Map<String, Object> params = new HashMap<>();
+    String result = ChartOfAccountsCriteria.buildLeafAccountWhereClause(
+        "{\"fieldName\":\"active\",\"operator\":\"equals\",\"value\":\"n\"}", params);
+    assertFalse(result.isEmpty());
+    assertEquals("N", params.get("filter1"));
+  }
+
+  // ── Boolean JSON-null value ───────────────────────────────────────────────
+
+  @Test
+  public void buildWhereClauseActiveBooleanJsonNullValueIsSkipped() throws Exception {
+    // value: null in JSON → JSONObject.NULL → normalizePlainValue returns null → toYesNoFlag null
+    Map<String, Object> params = new HashMap<>();
+    String result = ChartOfAccountsCriteria.buildLeafAccountWhereClause(
+        "{\"fieldName\":\"active\",\"operator\":\"equals\",\"value\":null}", params);
+    assertEquals("", result);
+    assertTrue(params.isEmpty());
+  }
+
+  // ── applySqlParameters ────────────────────────────────────────────────────
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void applySqlParametersSetsAllParams() {
+    NativeQuery<Object> query = mock(NativeQuery.class);
+    // setParameter return value is not used — no stub needed; verify invocations directly
+
+    Map<String, Object> params = new HashMap<>();
+    params.put("filter1", "%caja%");
+    params.put("filter2", "Y");
+
+    ChartOfAccountsCriteria.applySqlParameters(query, params);
+
+    verify(query).setParameter("filter1", "%caja%");
+    verify(query).setParameter("filter2", "Y");
   }
 }
