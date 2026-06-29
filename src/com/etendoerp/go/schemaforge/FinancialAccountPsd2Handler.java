@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
@@ -566,14 +567,100 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
 
   private String linkAccount(FIN_FinancialAccount finAcc, String connectionId,
       String saltEdgeAccountId, JSONObject node, JSONObject details, String apiKey) {
+    String providerCode = details.optString(BankIntegrationConstants.PROVIDER_CODE, null);
+    String providerName = details.optString(BankIntegrationConstants.PROVIDER_NAME, null);
     LinkAccountData data = new LinkAccountData(
-        details.optString(BankIntegrationConstants.PROVIDER_CODE, null),
-        details.optString(BankIntegrationConstants.PROVIDER_NAME, null),
-        details.optString(BankIntegrationConstants.FETCH_SCOPES, null),
+        providerCode,
+        providerName,
+        extractFetchScopes(details),
         details.optString(BankIntegrationConstants.STATUS, null),
         SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(details, apiKey));
-    return SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(finAcc, saltEdgeAccountId,
+    String warning = SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(finAcc, saltEdgeAccountId,
         connectionId, node, data);
+
+    // Mirror the classic AisConnectionCallback flow: resolve (or fetch + register) the bank
+    // Provider and set it on the financial account. Without this the "Bank Provider" field stays
+    // empty for accounts connected from the SPA, unlike the classic connect flow. See ETP-4097.
+    Provider provider = resolveProvider(providerCode, providerName, apiKey);
+    if (provider != null) {
+      finAcc.setPsd2Provider(provider);
+      OBDal.getInstance().save(finAcc);
+    }
+    return warning;
+  }
+
+  /**
+   * Extracts the connection's fetch scopes from the Salt Edge connection details. Salt Edge nests
+   * them under {@code last_attempt.fetch_scopes}, NOT at the root — mirroring the classic
+   * {@code AisConnectionCallback.linkAndRedirect}. Reading the root key leaves the FinaccConnection
+   * with empty scopes, which prevents statement fetch (no {@code transactions} scope). See ETP-4097.
+   */
+  private static String extractFetchScopes(JSONObject details) {
+    JSONObject lastAttempt = details.optJSONObject(BankIntegrationConstants.LAST_ATTEMPT);
+    if (lastAttempt != null) {
+      return lastAttempt.optString(BankIntegrationConstants.FETCH_SCOPES, "");
+    }
+    return "";
+  }
+
+  /**
+   * Resolves the {@link Provider} for a Salt Edge provider code: returns the existing record when
+   * present, otherwise fetches its metadata from Salt Edge and registers it. Returns {@code null}
+   * when the code is blank.
+   */
+  private Provider resolveProvider(String providerCode, String providerName, String apiKey) {
+    if (StringUtils.isBlank(providerCode)) {
+      return null;
+    }
+    Provider existing = findProviderByCode(providerCode);
+    return existing != null ? existing : fetchAndRegisterProvider(providerCode, providerName, apiKey);
+  }
+
+  /**
+   * Looks up a {@link Provider} record by its Salt Edge provider code, in admin mode. Returns
+   * {@code null} if the code is blank or no matching record exists.
+   */
+  private Provider findProviderByCode(String code) {
+    if (StringUtils.isBlank(code)) {
+      return null;
+    }
+    try {
+      OBContext.setAdminMode();
+      OBCriteria<Provider> criteria = OBDal.getInstance().createCriteria(Provider.class);
+      criteria.add(Restrictions.eq(Provider.PROPERTY_PROVIDERCODE, code));
+      criteria.setMaxResults(1);
+      return (Provider) criteria.uniqueResult();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Fetches provider metadata (canonical name + max fetch interval) from Salt Edge and upserts the
+   * {@link Provider} record. Falls back to the connection's provider name and a 90-day interval if
+   * the metadata request fails, so the link still completes with a populated Bank Provider.
+   */
+  private Provider fetchAndRegisterProvider(String providerCode, String providerName, String apiKey) {
+    String name = StringUtils.defaultIfBlank(providerName, providerCode);
+    BigDecimal maxFetchInterval = BigDecimal.valueOf(90);
+    try {
+      String endpoint = BankIntegrationConstants.SALT_EDGE_MIDDLEWARE_URL + "providers/" + providerCode
+          + "?include_ais_fields=true&include_pis_fields=true&include_credentials_fields=false"
+          + "&include_sandboxes=" + BankIntegrationUtils.isFakeProvidersEnabled();
+      JSONObject response = BankIntegrationUtils.makeSaltEdgeRequest("GET", null, endpoint, apiKey);
+      JSONObject data = response.optJSONObject(BankIntegrationConstants.DATA);
+      if (data != null) {
+        name = data.optString(BankIntegrationConstants.NAME, providerCode);
+        long interval = data.optLong(BankIntegrationConstants.MAX_FETCH_INTERVAL, 0);
+        if (interval > 0) {
+          maxFetchInterval = BigDecimal.valueOf(interval);
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not fetch provider {} from Salt Edge, registering with fallback values: {}",
+          providerCode, e.getMessage());
+    }
+    return BankIntegrationUtils.upsertProvider(providerCode, name, maxFetchInterval);
   }
 
   /**
