@@ -52,6 +52,7 @@ import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchemaDefault;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchemaElement;
+import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 import org.openbravo.model.financialmgmt.calendar.Calendar;
 
 /**
@@ -183,6 +184,45 @@ class GeneralLedgerConfigurationHandlerTest {
     when(curCrit.addOrder(any())).thenReturn(curCrit);
     when(curCrit.setMaxResults(anyInt())).thenReturn(curCrit);
     when(curCrit.list()).thenReturn(Collections.emptyList());
+  }
+
+  /**
+   * Variant of wireLoadCriteria that returns the provided combos from the AccountingCombination
+   * criteria and the provided currencies from the Currency criteria.
+   */
+  @SuppressWarnings("unchecked")
+  private void wireLoadCriteriaWithCatalogsAndDimensions(
+      List<AcctSchemaElement> dimensions,
+      List<AccountingCombination> combos,
+      List<Currency> currencies) {
+
+    defaults = mock(AcctSchemaDefault.class);
+
+    OBCriteria<AcctSchemaDefault> defCrit = mock(OBCriteria.class);
+    when(obDal.createCriteria(AcctSchemaDefault.class)).thenReturn(defCrit);
+    when(defCrit.add(any())).thenReturn(defCrit);
+    when(defCrit.addOrder(any())).thenReturn(defCrit);
+    when(defCrit.setMaxResults(anyInt())).thenReturn(defCrit);
+    when(defCrit.uniqueResult()).thenReturn(defaults);
+
+    OBCriteria<AcctSchemaElement> elemCrit = mock(OBCriteria.class);
+    when(obDal.createCriteria(AcctSchemaElement.class)).thenReturn(elemCrit);
+    when(elemCrit.add(any())).thenReturn(elemCrit);
+    when(elemCrit.addOrder(any())).thenReturn(elemCrit);
+    when(elemCrit.list()).thenReturn(dimensions);
+
+    OBCriteria<AccountingCombination> accCrit = mock(OBCriteria.class);
+    when(obDal.createCriteria(AccountingCombination.class)).thenReturn(accCrit);
+    when(accCrit.add(any())).thenReturn(accCrit);
+    when(accCrit.addOrder(any())).thenReturn(accCrit);
+    when(accCrit.list()).thenReturn(combos);
+
+    OBCriteria<Currency> curCrit = mock(OBCriteria.class);
+    when(obDal.createCriteria(Currency.class)).thenReturn(curCrit);
+    when(curCrit.add(any())).thenReturn(curCrit);
+    when(curCrit.addOrder(any())).thenReturn(curCrit);
+    when(curCrit.setMaxResults(anyInt())).thenReturn(curCrit);
+    when(curCrit.list()).thenReturn(currencies);
   }
 
   private AcctSchemaElement dimension(String id, String label, boolean active, boolean mandatory,
@@ -399,5 +439,433 @@ class GeneralLedgerConfigurationHandlerTest {
     assertEquals(400, response.getHttpStatus());
     // The mandatory guard must fire before any write occurs.
     verify(obDal, never()).flush();
+  }
+
+  // ── Group A — applyGeneralChanges all fields ─────────────────────────────────
+
+  @Test
+  @DisplayName("POST updates description field via applyGeneralChanges")
+  void postUpdatesDescription() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+
+    JSONObject body = new JSONObject()
+        .put("general", new JSONObject().put("description", "New desc"));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(schema).setDescription("New desc");
+  }
+
+  @Test
+  @DisplayName("POST updates accrual boolean field via applyGeneralChanges")
+  void postUpdatesAccrual() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+
+    JSONObject body = new JSONObject()
+        .put("general", new JSONObject().put("accrual", false));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(schema).setAccrual(false);
+  }
+
+  @Test
+  @DisplayName("POST updates automaticPeriodControl boolean field via applyGeneralChanges")
+  void postUpdatesAutomaticPeriodControl() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+
+    JSONObject body = new JSONObject()
+        .put("general", new JSONObject().put("automaticPeriodControl", true));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(schema).setAutomaticPeriodControl(true);
+  }
+
+  @Test
+  @DisplayName("POST updates gAAP field via applyGeneralChanges")
+  void postUpdatesGaap() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+
+    JSONObject body = new JSONObject()
+        .put("general", new JSONObject().put("gAAP", "IFRS"));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(schema).setGAAP("IFRS");
+  }
+
+  @Test
+  @DisplayName("POST updates name and description together via applyGeneralChanges")
+  void postUpdatesNameAndMultipleFields() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    when(schema.getName()).thenReturn("X");
+
+    JSONObject body = new JSONObject()
+        .put("general", new JSONObject().put("name", "X").put("description", "Y"));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(schema).setName("X");
+    verify(schema).setDescription("Y");
+  }
+
+  // ── Group B — applyDefaultChanges success ────────────────────────────────────
+
+  @Test
+  @DisplayName("POST updates a default account field when a valid combination id is provided")
+  void postUpdatesDefaultAccount() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+
+    AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.getId()).thenReturn("combo-1");
+    when(obDal.get(AccountingCombination.class, "combo-1")).thenReturn(combo);
+
+    JSONObject body = new JSONObject()
+        .put("defaults", new JSONObject().put("bankAsset", "combo-1"));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(defaults).set(AcctSchemaDefault.PROPERTY_BANKASSET, combo);
+  }
+
+  @Test
+  @DisplayName("POST sets a default account field to null when JSONObject.NULL is provided")
+  void postNullDefaultAccount() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+
+    JSONObject body = new JSONObject()
+        .put("defaults", new JSONObject().put("bankAsset", JSONObject.NULL));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(defaults).set(AcctSchemaDefault.PROPERTY_BANKASSET, null);
+  }
+
+  // ── Group C — applyDimensionChanges success path ─────────────────────────────
+
+  @Test
+  @DisplayName("POST deactivating a non-mandatory dimension succeeds and saves the row")
+  void postDimensionNonMandatoryDeactivateSucceeds() throws Exception {
+    wireOrgWithLedger();
+    AcctSchemaElement dim = dimension("dim-prod", "Producto", true, false, "PR", 20L);
+    wireLoadCriteria(List.of(dim));
+
+    JSONObject body = new JSONObject().put("dimensions",
+        new JSONArray().put(new JSONObject().put("id", "dim-prod").put("active", false)));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(dim).setActive(false);
+    verify(obDal).save(dim);
+    verify(obDal).flush();
+  }
+
+  @Test
+  @DisplayName("POST with unknown dimension id is silently skipped — response 200 and flush called")
+  void postDimensionUnknownIdSkipped() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(List.of(dimension("dim-prod", "Producto", true, false, "PR", 20L)));
+
+    JSONObject body = new JSONObject().put("dimensions",
+        new JSONArray().put(new JSONObject().put("id", "does-not-exist").put("active", false)));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(obDal).flush();
+  }
+
+  // ── Group D — buildAccountOptions / resolveCombinationCode / resolveCombinationName ──
+
+  @Test
+  @DisplayName("GET returns account options in catalogs using combination fallback for code and description fallback for name")
+  void getAccountOptionsReturnedInCatalogs() throws Exception {
+    wireOrgWithLedger();
+
+    AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.getId()).thenReturn("combo-x");
+    when(combo.getAccount()).thenReturn(null);
+    when(combo.getCombination()).thenReturn("1000");
+    when(combo.getDescription()).thenReturn("Bank");
+
+    wireLoadCriteriaWithCatalogsAndDimensions(
+        Collections.emptyList(),
+        List.of(combo),
+        Collections.emptyList());
+
+    JSONObject row = aggregateRow(handler.handle(getCtx(ORG_ID)));
+
+    JSONArray accounts = row.getJSONObject("catalogs").getJSONArray("accounts");
+    assertEquals(1, accounts.length());
+    JSONObject item = accounts.getJSONObject(0);
+    assertEquals("combo-x", item.getString("id"));
+    assertEquals("1000", item.getString("code"));
+    assertTrue(item.getString("name").contains("Bank"));
+  }
+
+  @Test
+  @DisplayName("GET returns account options using ElementValue searchKey as code and name as label")
+  void getAccountOptionsWithAccount() throws Exception {
+    wireOrgWithLedger();
+
+    ElementValue account = mock(ElementValue.class);
+    when(account.getSearchKey()).thenReturn("572");
+    when(account.getName()).thenReturn("Bancos");
+
+    AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.getId()).thenReturn("combo-y");
+    when(combo.getAccount()).thenReturn(account);
+    when(combo.getCombination()).thenReturn("572");
+    when(combo.getDescription()).thenReturn("Cuentas bancarias");
+
+    wireLoadCriteriaWithCatalogsAndDimensions(
+        Collections.emptyList(),
+        List.of(combo),
+        Collections.emptyList());
+
+    JSONObject row = aggregateRow(handler.handle(getCtx(ORG_ID)));
+
+    JSONArray accounts = row.getJSONObject("catalogs").getJSONArray("accounts");
+    assertEquals(1, accounts.length());
+    JSONObject item = accounts.getJSONObject(0);
+    assertEquals("572", item.getString("code"));
+    assertEquals("Bancos", item.getString("name"));
+  }
+
+  // ── Group E — buildCurrencyOptions ──────────────────────────────────────────
+
+  @Test
+  @DisplayName("GET returns currency options in catalogs with ISO code as value label")
+  void getCurrencyOptionsReturnedInCatalogs() throws Exception {
+    wireOrgWithLedger();
+
+    Currency eur = mock(Currency.class);
+    when(eur.getId()).thenReturn("EUR-ID");
+    when(eur.getISOCode()).thenReturn("EUR");
+
+    wireLoadCriteriaWithCatalogsAndDimensions(
+        Collections.emptyList(),
+        Collections.emptyList(),
+        List.of(eur));
+
+    JSONObject row = aggregateRow(handler.handle(getCtx(ORG_ID)));
+
+    JSONArray currencies = row.getJSONObject("catalogs").getJSONArray("currencies");
+    assertEquals(1, currencies.length());
+    JSONObject item = currencies.getJSONObject(0);
+    assertEquals("EUR-ID", item.getString("value"));
+    assertTrue(item.getString("name").contains("EUR"));
+  }
+
+  @Test
+  @DisplayName("GET currency option with null ISO code falls back to currency id as name")
+  void getCurrencyOptionsNullIsoCode() throws Exception {
+    wireOrgWithLedger();
+
+    Currency noIso = mock(Currency.class);
+    when(noIso.getId()).thenReturn("X-ID");
+    when(noIso.getISOCode()).thenReturn(null);
+
+    wireLoadCriteriaWithCatalogsAndDimensions(
+        Collections.emptyList(),
+        Collections.emptyList(),
+        List.of(noIso));
+
+    JSONObject row = aggregateRow(handler.handle(getCtx(ORG_ID)));
+
+    JSONArray currencies = row.getJSONObject("catalogs").getJSONArray("currencies");
+    assertEquals(1, currencies.length());
+    assertEquals("X-ID", currencies.getJSONObject(0).getString("name"));
+  }
+
+  // ── Group F — inferDimensionScope and buildDimensionCaption ──────────────────
+
+  @Test
+  @DisplayName("Dimension caption for mandatory OO type contains Obligatorio and Facturas y asientos")
+  void dimensionCaptionMandatoryOO() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(List.of(dimension("dim-oo", "Org", true, true, "OO", 10L)));
+
+    JSONObject row = aggregateRow(handler.handle(getCtx(ORG_ID)));
+    String caption = row.getJSONArray("dimensions").getJSONObject(0).getString("caption");
+
+    assertTrue(caption.contains("Obligatorio"), "expected Obligatorio in: " + caption);
+    assertTrue(caption.contains("Facturas y asientos"), "expected scope in: " + caption);
+  }
+
+  @Test
+  @DisplayName("Dimension caption for optional PR type contains Opcional and Ventas y compras")
+  void dimensionCaptionOptionalPR() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(List.of(dimension("dim-pr", "Product", true, false, "PR", 10L)));
+
+    JSONObject row = aggregateRow(handler.handle(getCtx(ORG_ID)));
+    String caption = row.getJSONArray("dimensions").getJSONObject(0).getString("caption");
+
+    assertTrue(caption.contains("Opcional"), "expected Opcional in: " + caption);
+    assertTrue(caption.contains("Ventas y compras"), "expected scope in: " + caption);
+  }
+
+  @Test
+  @DisplayName("Dimension caption for PJ type contains Todos los documentos")
+  void dimensionCaptionPJ() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(List.of(dimension("dim-pj", "Project", true, false, "PJ", 10L)));
+
+    JSONObject row = aggregateRow(handler.handle(getCtx(ORG_ID)));
+    String caption = row.getJSONArray("dimensions").getJSONObject(0).getString("caption");
+
+    assertTrue(caption.contains("Todos los documentos"), "expected scope in: " + caption);
+  }
+
+  @Test
+  @DisplayName("Dimension caption for unknown type falls back to Todos los documentos")
+  void dimensionCaptionUnknownType() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(List.of(dimension("dim-zz", "Other", true, false, "ZZ", 10L)));
+
+    JSONObject row = aggregateRow(handler.handle(getCtx(ORG_ID)));
+    String caption = row.getJSONArray("dimensions").getJSONObject(0).getString("caption");
+
+    assertTrue(caption.contains("Todos los documentos"), "expected fallback scope in: " + caption);
+  }
+
+  @Test
+  @DisplayName("Dimension caption for null type contains only Opcional with no scope appended")
+  void dimensionCaptionNullType() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(List.of(dimension("dim-null", "NoType", true, false, null, 10L)));
+
+    JSONObject row = aggregateRow(handler.handle(getCtx(ORG_ID)));
+    String caption = row.getJSONArray("dimensions").getJSONObject(0).getString("caption");
+
+    assertTrue(caption.contains("Opcional"), "expected Opcional in: " + caption);
+    assertFalse(caption.contains("·"), "null type should produce no scope separator in: " + caption);
+  }
+
+  // ── Group G — mergeOrgQuery body override ────────────────────────────────────
+
+  @Test
+  @DisplayName("POST with selectedOrgId in body resolves that org instead of the query-param org")
+  void postWithOrgIdInBody() throws Exception {
+    wireOrgWithLedger();
+
+    AcctSchema schema2 = mock(AcctSchema.class);
+    when(schema2.getId()).thenReturn("ledger-002");
+    when(schema2.getName()).thenReturn("Body Ledger");
+    when(schema2.getGAAP()).thenReturn("IFRS");
+    when(schema2.isAccrual()).thenReturn(false);
+    when(schema2.isAutomaticPeriodControl()).thenReturn(false);
+    when(schema2.getDescription()).thenReturn(null);
+    when(schema2.getCurrency()).thenReturn(null);
+
+    Organization org2 = mock(Organization.class);
+    when(org2.getId()).thenReturn("body-org");
+    when(org2.getName()).thenReturn("Body Org");
+    when(org2.getCalendar()).thenReturn(null);
+    when(org2.getGeneralLedger()).thenReturn(schema2);
+    when(obDal.get(Organization.class, "body-org")).thenReturn(org2);
+
+    // Wire criteria for org2's schema
+    AcctSchemaDefault defaults2 = mock(AcctSchemaDefault.class);
+    OBCriteria<AcctSchemaDefault> defCrit2 = mock(OBCriteria.class);
+    when(obDal.createCriteria(AcctSchemaDefault.class)).thenReturn(defCrit2);
+    when(defCrit2.add(any())).thenReturn(defCrit2);
+    when(defCrit2.addOrder(any())).thenReturn(defCrit2);
+    when(defCrit2.setMaxResults(anyInt())).thenReturn(defCrit2);
+    when(defCrit2.uniqueResult()).thenReturn(defaults2);
+
+    OBCriteria<AcctSchemaElement> elemCrit2 = mock(OBCriteria.class);
+    when(obDal.createCriteria(AcctSchemaElement.class)).thenReturn(elemCrit2);
+    when(elemCrit2.add(any())).thenReturn(elemCrit2);
+    when(elemCrit2.addOrder(any())).thenReturn(elemCrit2);
+    when(elemCrit2.list()).thenReturn(Collections.emptyList());
+
+    OBCriteria<AccountingCombination> accCrit2 = mock(OBCriteria.class);
+    when(obDal.createCriteria(AccountingCombination.class)).thenReturn(accCrit2);
+    when(accCrit2.add(any())).thenReturn(accCrit2);
+    when(accCrit2.addOrder(any())).thenReturn(accCrit2);
+    when(accCrit2.list()).thenReturn(Collections.emptyList());
+
+    OBCriteria<Currency> curCrit2 = mock(OBCriteria.class);
+    when(obDal.createCriteria(Currency.class)).thenReturn(curCrit2);
+    when(curCrit2.add(any())).thenReturn(curCrit2);
+    when(curCrit2.addOrder(any())).thenReturn(curCrit2);
+    when(curCrit2.setMaxResults(anyInt())).thenReturn(curCrit2);
+    when(curCrit2.list()).thenReturn(Collections.emptyList());
+
+    JSONObject body = new JSONObject()
+        .put("selectedOrgId", "body-org")
+        .put("general", new JSONObject().put("name", "N"));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject orgInfo = aggregateRow(response).getJSONObject("orgInfo");
+    assertEquals("Body Org", orgInfo.getString("organization"));
+  }
+
+  // ── Group H — loadState null defaults branch ─────────────────────────────────
+
+  @Test
+  @DisplayName("GET returns 400 when no AcctSchemaDefault row exists for the ledger")
+  @SuppressWarnings("unchecked")
+  void getNoDefaultsReturns400() {
+    wireOrgWithLedger();
+
+    OBCriteria<AcctSchemaDefault> defCrit = mock(OBCriteria.class);
+    when(obDal.createCriteria(AcctSchemaDefault.class)).thenReturn(defCrit);
+    when(defCrit.add(any())).thenReturn(defCrit);
+    when(defCrit.addOrder(any())).thenReturn(defCrit);
+    when(defCrit.setMaxResults(anyInt())).thenReturn(defCrit);
+    when(defCrit.uniqueResult()).thenReturn(null);
+
+    NeoResponse response = handler.handle(getCtx(ORG_ID));
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  // ── Group I — resolveTargetOrganization "0" org path ─────────────────────────
+
+  @Test
+  @DisplayName("Current org with id '0' (system org) returns 400 — no concrete org available")
+  void zeroOrgIdCurrentOrgReturns400() {
+    Organization zeroOrg = mock(Organization.class);
+    when(zeroOrg.getId()).thenReturn("0");
+
+    OBContext ctx = mock(OBContext.class);
+    obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
+    when(ctx.getCurrentOrganization()).thenReturn(zeroOrg);
+
+    NeoResponse response = handler.handle(getCtx(null));
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  // ── Group J — handle() generic Exception → 500 ───────────────────────────────
+
+  @Test
+  @DisplayName("Unexpected RuntimeException in the aggregate pipeline returns 500")
+  void unexpectedExceptionReturns500() {
+    wireOrgWithLedger();
+    when(obDal.get(Organization.class, ORG_ID))
+        .thenThrow(new RuntimeException("boom"));
+
+    NeoResponse response = handler.handle(getCtx(ORG_ID));
+    assertEquals(500, response.getHttpStatus());
   }
 }
