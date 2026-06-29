@@ -2533,8 +2533,11 @@ public class CreateDraftInvoiceHandlerTest {
     ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
     when(sl.getId()).thenReturn("sl-used");
 
+    Order linkedOrder = mock(Order.class);
+    when(linkedOrder.getId()).thenReturn("order-cap");
+
     ShipmentInOut shipment = mock(ShipmentInOut.class);
-    when(shipment.getSalesOrder()).thenReturn(null); // forces multi-shipment path
+    when(shipment.getSalesOrder()).thenReturn(linkedOrder); // single-shipment-with-order path → cap is applied
     when(shipment.getMaterialMgmtShipmentInOutLineList())
         .thenReturn(Collections.singletonList(sl));
     when(shipment.getId()).thenReturn("ship-cap");
@@ -2551,15 +2554,10 @@ public class CreateDraftInvoiceHandlerTest {
 
       @Override
       protected Map<String, BigDecimal> computePendingQtyPerLine(String shipmentId, boolean includeDrafts) {
-        // Returns zero for sl-used → override gets capped to 0 → dropped
+        // Returns zero for sl-used → override gets capped to 0 → dropped → OBException
         Map<String, BigDecimal> m = new HashMap<>();
         m.put("sl-used", BigDecimal.ZERO);
         return m;
-      }
-
-      @Override
-      protected Invoice createInvoiceHeaderFromShipment(ShipmentInOut first, List<ShipmentInOut> shipments) {
-        return mock(Invoice.class);
       }
     };
 
