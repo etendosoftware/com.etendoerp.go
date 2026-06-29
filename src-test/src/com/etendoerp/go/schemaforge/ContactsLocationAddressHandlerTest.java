@@ -25,6 +25,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+
+import org.openbravo.module.bptaxidkey.ViesService;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
@@ -1241,15 +1243,14 @@ class ContactsLocationAddressHandlerTest {
     when(connMock.prepareStatement(argThat(s -> s != null && s.contains("em_obtik_viesstatus"))))
         .thenReturn(psUpdateVies);
 
-    try (MockedStatic<org.openbravo.module.bptaxidkey.ViesService> mVies =
-             mockStatic(org.openbravo.module.bptaxidkey.ViesService.class);
+    try (MockedStatic<ViesService> mVies = mockStatic(ViesService.class);
          MockedStatic<OBMessageUtils> mMsg = mockStatic(OBMessageUtils.class)) {
 
-      org.openbravo.module.bptaxidkey.ViesService.ViesResult viesResult =
-          mock(org.openbravo.module.bptaxidkey.ViesService.ViesResult.class);
-      viesResult.status = "V";
-      mVies.when(() -> org.openbravo.module.bptaxidkey.ViesService.checkVat(anyString()))
-          .thenReturn(viesResult);
+      java.lang.reflect.Constructor<ViesService.ViesResult> ctor =
+          ViesService.ViesResult.class.getDeclaredConstructor(String.class, String.class, String.class);
+      ctor.setAccessible(true);
+      ViesService.ViesResult viesResult = ctor.newInstance("V", null, null);
+      mVies.when(() -> ViesService.checkVat(anyString())).thenReturn(viesResult);
       mMsg.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("msg");
 
       JSONObject body = new JSONObject();
