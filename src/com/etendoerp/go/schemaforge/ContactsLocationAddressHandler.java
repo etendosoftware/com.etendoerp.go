@@ -491,9 +491,14 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       }
 
       // Inject warning message into the response
-      String viesLabel = "V".equals(viesStatus) ? OBMessageUtils.messageBD("OBTIK_ViesStatusValid")
-          : "I".equals(viesStatus) ? OBMessageUtils.messageBD("OBTIK_ViesStatusInvalid")
-          : OBMessageUtils.messageBD("OBTIK_ViesStatusUnverified");
+      String viesLabel;
+      if ("V".equals(viesStatus)) {
+        viesLabel = OBMessageUtils.messageBD("OBTIK_ViesStatusValid");
+      } else if ("I".equals(viesStatus)) {
+        viesLabel = OBMessageUtils.messageBD("OBTIK_ViesStatusInvalid");
+      } else {
+        viesLabel = OBMessageUtils.messageBD("OBTIK_ViesStatusUnverified");
+      }
 
       JSONObject msg = new JSONObject();
       msg.put("type", "warning");

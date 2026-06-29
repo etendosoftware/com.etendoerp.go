@@ -69,6 +69,7 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
 public class BusinessPartnerHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(BusinessPartnerHandler.class);
+  private static final String RESPONSE_KEY = "response";
   private static final String FIELD_SEARCH_KEY = "searchKey";
   private static final String FIELD_NAME = "name";
 
@@ -111,7 +112,7 @@ public class BusinessPartnerHandler implements NeoHandler {
    */
   private static JSONObject firstRecord(JSONObject body) {
     try {
-      JSONObject response = body.optJSONObject("response");
+      JSONObject response = body.optJSONObject(RESPONSE_KEY);
       JSONArray data = (response != null) ? response.optJSONArray("data") : body.optJSONArray("data");
       if (data == null || data.length() == 0) {
         return null;
@@ -179,7 +180,7 @@ public class BusinessPartnerHandler implements NeoHandler {
 
   private static void patchSearchKeyInResponse(JSONObject body, String identifier) {
     try {
-      JSONObject response = body.optJSONObject("response");
+      JSONObject response = body.optJSONObject(RESPONSE_KEY);
       if (response == null) {
         return;
       }
@@ -320,7 +321,7 @@ public class BusinessPartnerHandler implements NeoHandler {
    */
   private static void injectViesMessage(JSONObject body) {
     try {
-      JSONObject response = body.optJSONObject("response");
+      JSONObject response = body.optJSONObject(RESPONSE_KEY);
       if (response == null) {
         return;
       }
@@ -328,12 +329,12 @@ public class BusinessPartnerHandler implements NeoHandler {
       if (data == null || data.length() == 0) {
         return;
       }
-      JSONObject record = data.getJSONObject(0);
-      String taxIdKey = record.optString("oBTIKTaxIDKey", null);
+      JSONObject savedRecord = data.getJSONObject(0);
+      String taxIdKey = savedRecord.optString("oBTIKTaxIDKey", null);
       if (!"2".equals(taxIdKey)) {
         return;
       }
-      String viesStatus = record.optString("oBTIKVIESStatus", null);
+      String viesStatus = savedRecord.optString("oBTIKVIESStatus", null);
       if (viesStatus == null || "P".equals(viesStatus)) {
         return;
       }
