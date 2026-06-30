@@ -136,6 +136,8 @@ public class McpToolRouter {
             return handleAction(specName, arguments);
           case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
             return handleGenerateAmortizationPlan(arguments);
+          case McpConstants.TOOL_NEO_WIDGET:
+            return handleWidget(arguments);
           case "docs":
             return handleDocs(arguments);
           default:
@@ -205,6 +207,71 @@ public class McpToolRouter {
       log.error("Error fetching docs for topic '{}'", topic, e);
       return wrapAsErrorContent("Error fetching docs: " + e.getMessage());
     }
+  }
+
+  // ── neo_widget (business widgets, gap G4) ─────────────────────────────
+
+  /**
+   * Handle the {@code neo_widget} tool: resolve the selected widget to its backing
+   * {@code dashboard} spec entity, look up the entity's {@link NeoHandler} via its
+   * {@code Java_Qualifier}, and invoke it with a GET {@link NeoContext}. The widget
+   * data handlers (e.g. {@code WidgetKpisHandler}) are reused unmodified; this tool
+   * is only the MCP wrapper that makes them discoverable/invocable (ETP-4284).
+   *
+   * @param arguments tool arguments: {@code widget} (enum, required) and optional
+   *                  {@code params} object (e.g. {@code {"range": "30d"}})
+   * @return MCP text content with the widget JSON payload, or error content
+   */
+  private JSONObject handleWidget(JSONObject arguments) throws Exception {
+    validateArgs(arguments, McpConstants.PARAM_WIDGET);
+    String widget = arguments.getString(McpConstants.PARAM_WIDGET);
+
+    String entityName = ToolRegistry.WIDGET_ENTITY_BY_NAME.get(widget);
+    if (entityName == null) {
+      return wrapAsErrorContent("Unknown widget '" + widget + "'. Valid widgets: "
+          + String.join(", ", ToolRegistry.WIDGET_ENTITY_BY_NAME.keySet()));
+    }
+
+    SFSpec spec = findSpecOrThrow(McpConstants.SPEC_DASHBOARD);
+    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+
+    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    if (handler == null) {
+      return wrapAsErrorContent("No handler registered for widget '" + widget
+          + "' (entity '" + entityName + "', qualifier '" + sfEntity.getJavaQualifier() + "').");
+    }
+
+    // Forward the optional params object as the query-param map (e.g. range), mirroring
+    // the HTTP GET /sws/neo/dashboard/{entity}?range=... contract the handlers expect.
+    Map<String, String> queryParams = new HashMap<>();
+    JSONObject params = arguments.optJSONObject(McpConstants.PARAM_PARAMS);
+    if (params != null) {
+      Iterator<String> keys = params.keys();
+      while (keys.hasNext()) {
+        String key = keys.next();
+        queryParams.put(key, params.optString(key, null));
+      }
+    }
+
+    NeoContext context = NeoContext.builder()
+        .specName(McpConstants.SPEC_DASHBOARD)
+        .entityName(entityName)
+        .httpMethod("GET")
+        .sfEntity(sfEntity)
+        .obContext(OBContext.getOBContext())
+        .queryParams(queryParams)
+        .build();
+
+    NeoResponse response = handler.handle(context);
+    if (response == null) {
+      return wrapAsErrorContent("Widget '" + widget + "' returned no response.");
+    }
+    JSONObject body = response.getBody();
+    String text = body != null ? body.toString(2) : "{}";
+    if (response.getHttpStatus() >= 400) {
+      return wrapAsErrorContent(text);
+    }
+    return wrapAsTextContent(text);
   }
 
   /**

@@ -173,7 +173,25 @@ final class McpToolRouterSupport {
     }
   }
 
+  /**
+   * Identify the spec whose entities are handler-backed business widgets rather than
+   * CRUD windows (gap G4, ETP-4284). These entities have no {@code AD_Tab}, so the
+   * generic CRUD path cannot serve them; they are exposed via the {@code neo_widget}
+   * tool instead and must be excluded from the type-W CRUD catalog and discovery.
+   *
+   * @param spec the spec to test (may be {@code null})
+   * @return {@code true} when the spec backs widget handlers
+   */
+  static boolean isWidgetSpec(SFSpec spec) {
+    return spec != null && McpConstants.SPEC_DASHBOARD.equals(spec.getName());
+  }
+
   static boolean hasSpecAccess(SFSpec spec, String specType) {
+    // The dashboard/widget spec is not a CRUD window; it is surfaced via neo_widget,
+    // never through neo_discover's W catalog (ETP-4284 / G4).
+    if (isWidgetSpec(spec)) {
+      return false;
+    }
     if ("W".equals(specType)) {
       Window window = spec.getADWindow();
       return window == null || NeoAccessUtils.hasWindowAccess(window.getId());

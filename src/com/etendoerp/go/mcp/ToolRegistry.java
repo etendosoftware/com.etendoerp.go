@@ -76,6 +76,9 @@ public class ToolRegistry {
     if (permissions.canRead) {
       tools.add(buildDiscoverTool());
       tools.add(buildDocsTool());
+      // neo_widget wraps the handler-backed business widgets (gap G4, ETP-4284). It is a
+      // built-in read tool, not gated on any accessible window spec.
+      tools.add(buildWidgetTool());
     }
 
     // Query all active specs
@@ -132,6 +135,11 @@ public class ToolRegistry {
   }
 
   private void addWindowSpec(SFSpec spec, List<String> accessibleWindowSpecs) {
+    // The dashboard/widget spec is handler-backed (no AD_Tab) and is exposed via the
+    // neo_widget tool, so it must not pollute the CRUD spec enum (ETP-4284 / G4).
+    if (McpToolRouterSupport.isWidgetSpec(spec)) {
+      return;
+    }
     Window window = spec.getADWindow();
     if (window == null || NeoAccessUtils.hasWindowAccess(window.getId())) {
       accessibleWindowSpecs.add(spec.getName());
@@ -241,6 +249,7 @@ public class ToolRegistry {
       case "neo_schema":
       case "neo_batch":
       case "neo_action":
+      case McpConstants.TOOL_NEO_WIDGET:
       case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
         return true;
       default:
@@ -280,6 +289,76 @@ public class ToolRegistry {
             + "Use this to look up how-tos, concepts, and reference material before "
             + "answering questions about Etendo Go.",
         buildObjectSchema(props, List.of("topic")));
+  }
+
+  // ── Widget tool (business widgets enum, gap G4) ───────────────────────
+
+  /**
+   * Canonical mapping of {@code neo_widget} enum value → backing {@code dashboard}
+   * spec entity name (whose {@code Java_Qualifier} resolves the {@code NeoHandler}).
+   * Single source of truth shared with {@link McpToolRouter#handleWidget}.
+   * Order is preserved for a stable enum/description listing.
+   */
+  static final Map<String, String> WIDGET_ENTITY_BY_NAME;
+  /** Per-widget semantic descriptions surfaced to the agent in the enum. */
+  static final Map<String, String> WIDGET_DESCRIPTION_BY_NAME;
+  static {
+    Map<String, String> entities = new LinkedHashMap<>();
+    entities.put("kpis", "kpis");
+    entities.put("revenue-trend", "trends");
+    entities.put("pending-tasks", "pending-tasks");
+    entities.put("activity", "activity");
+    entities.put("recent-invoices", "recent-invoices");
+    entities.put("best-products", "best-products");
+    entities.put("best-sellers", "best-sellers");
+    entities.put("pending-amounts", "pending-amounts");
+    entities.put("top-clients", "top-clients");
+    WIDGET_ENTITY_BY_NAME = java.util.Collections.unmodifiableMap(entities);
+
+    Map<String, String> desc = new LinkedHashMap<>();
+    desc.put("kpis", "Summary KPI cards: revenue this month, pending invoices, and "
+        + "other headline business metrics with trend percentages.");
+    desc.put("revenue-trend", "Monthly revenue series (parallel labels/values arrays) "
+        + "for charting the revenue trend over the last 12 months.");
+    desc.put("pending-tasks", "Actionable pending tasks and alerts (overdue invoices, "
+        + "pending receptions/shipments, collections/payments due).");
+    desc.put("activity", "Recent activity feed (invoices paid, documents posted, notes).");
+    desc.put("recent-invoices", "Most recent completed sales invoices (newest first).");
+    desc.put("best-products", "Best-performing products by revenue/quantity.");
+    desc.put("best-sellers", "Best-selling sales reps / sellers ranking.");
+    desc.put("pending-amounts", "Outstanding receivable/payable amounts pending collection.");
+    desc.put("top-clients", "Top clients ranked by revenue.");
+    WIDGET_DESCRIPTION_BY_NAME = java.util.Collections.unmodifiableMap(desc);
+  }
+
+  /**
+   * Build the {@code neo_widget} tool: a single enum tool wrapping the 9 handler-backed
+   * business widgets (gap G4, ETP-4284). The enum value selects the widget; {@code params}
+   * is a free-form object forwarded to the handler (e.g. {@code {"range": "30d"}}).
+   */
+  private McpToolDefinition buildWidgetTool() {
+    StringBuilder enumDesc = new StringBuilder(
+        "Business widget to invoke. Available widgets:\n");
+    for (Map.Entry<String, String> e : WIDGET_DESCRIPTION_BY_NAME.entrySet()) {
+      enumDesc.append("- ").append(e.getKey()).append(": ").append(e.getValue()).append('\n');
+    }
+
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put(McpConstants.PARAM_WIDGET,
+        enumProp(enumDesc.toString(), new ArrayList<>(WIDGET_ENTITY_BY_NAME.keySet())));
+    props.put(McpConstants.PARAM_PARAMS, objectProp(
+        "Optional parameters forwarded to the widget. Most widgets accept "
+            + "'range' (e.g. '7d', '30d', '90d', '12m') to scope the period; "
+            + "omit for the widget's default window."));
+
+    return new McpToolDefinition(
+        McpConstants.TOOL_NEO_WIDGET,
+        "Get pre-computed business analytics from an Etendo Go dashboard widget "
+            + "(KPIs, revenue trend, pending tasks, activity, top clients, best sellers/products, "
+            + "recent invoices, pending amounts). Returns the widget's JSON payload "
+            + "{response:{data,count}}. Use this for business analysis instead of neo_list; "
+            + "these widgets aggregate data that has no single CRUD entity.",
+        buildObjectSchema(props, List.of(McpConstants.PARAM_WIDGET)));
   }
 
   // ── CRUD tools (registered once with spec enum) ───────────────────────
