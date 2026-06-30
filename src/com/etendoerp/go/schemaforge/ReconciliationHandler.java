@@ -25,7 +25,6 @@ import static com.etendoerp.go.schemaforge.ReconciliationSupport.envelope;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.formatDate;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.nullSafe;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.readOperationIds;
-import static com.etendoerp.go.schemaforge.ReconciliationSupport.signedAmount;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
@@ -68,14 +67,12 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
-import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
-import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 
 /**
@@ -359,6 +356,9 @@ public class ReconciliationHandler implements NeoHandler {
     sql.append(PENDING_LINES_ORDER);
 
     FIN_FinancialAccount account = loadAccount(accountId);
+    BigDecimal[] tols = loadTolerances(accountId);
+    int pendingDateTolDays = tols[0].intValue();
+    BigDecimal pendingAmtTolPct = tols[1];
     JSONArray rawLines = new JSONArray();
     // Connection is managed by the DAL's Hibernate Session; don't close it.
     Connection conn = OBDal.getInstance().getConnection();
@@ -384,7 +384,8 @@ public class ReconciliationHandler implements NeoHandler {
           boolean reconciled = STATUS_RECONCILED
               .equalsIgnoreCase(StringUtils.trimToEmpty(rs.getString("line_status")));
           String state = reconciled ? STATUS_RECONCILED
-              : AutoMatchSupport.classifyPendingLine(account, lineId, rules);
+              : AutoMatchSupport.classifyPendingLine(account, lineId, rules,
+                  pendingDateTolDays, pendingAmtTolPct);
 
           JSONObject row = new JSONObject();
           row.put(KEY_ID, lineId);
@@ -468,12 +469,20 @@ public class ReconciliationHandler implements NeoHandler {
       return CandidatesSupport.buildLinkedTransactions(lineId);
     }
 
-    Set<String> suggestedIds = suggestedTransactionIds(accountId, lineId);
+    BigDecimal[] candidateTols = loadTolerances(accountId);
+    int candidateDateTolDays = candidateTols[0].intValue();
+    BigDecimal candidateAmtTolPct = candidateTols[1];
+
+    Set<String> suggestedIds = suggestedTransactionIds(accountId, lineId, candidateDateTolDays);
     // 1:N: if the selected line amount equals the sum of a signal group (same logic the automatch
     // uses), pre-mark ALL of its operations as suggested — not only a single 1:1 standard match.
     if (selectedLine != null) {
+      BigDecimal lineTarget = nullSafe(selectedLine.getCramount())
+          .subtract(nullSafe(selectedLine.getDramount()));
+      BigDecimal candidateAmtTol =
+          AutoMatchSupport.computeAmountTolerance(lineTarget, candidateAmtTolPct);
       for (FIN_FinaccTransaction t : AutoMatchSupport.findSignalGroup(
-          accountId, selectedLine, new HashSet<>(), TOLERANCE)) {
+          accountId, selectedLine, new HashSet<>(), candidateAmtTol, candidateDateTolDays)) {
         suggestedIds.add(t.getId());
       }
     }
@@ -602,6 +611,10 @@ public class ReconciliationHandler implements NeoHandler {
    * same-amount transaction. The Classic algorithm is used as-is; no criteria are relaxed here.
    */
   Set<String> suggestedTransactionIds(String accountId, String lineId) {
+    return suggestedTransactionIds(accountId, lineId, AutoMatchSupport.DEFAULT_DATE_TOL_DAYS);
+  }
+
+  Set<String> suggestedTransactionIds(String accountId, String lineId, int dateTolDays) {
     Set<String> ids = new HashSet<>();
     if (StringUtils.isBlank(lineId)) {
       return ids;
@@ -620,7 +633,9 @@ public class ReconciliationHandler implements NeoHandler {
           new FIN_MatchingTransaction(account.getMatchingAlgorithm().getJavaClassName());
       FIN_MatchedTransaction matched = matcher.match(line, new ArrayList<>());
       if (matched != null && matched.getTransaction() != null
-          && !FIN_MatchedTransaction.NOMATCH.equals(matched.getMatchLevel())) {
+          && !FIN_MatchedTransaction.NOMATCH.equals(matched.getMatchLevel())
+          && AutoMatchSupport.withinDateWindow(line.getTransactionDate(),
+              matched.getTransaction().getTransactionDate(), dateTolDays)) {
         ids.add(matched.getTransaction().getId());
       }
     } catch (Exception e) {
@@ -693,119 +708,20 @@ public class ReconciliationHandler implements NeoHandler {
     // Pay each selected unpaid invoice (creates payment + auto-creates its transaction); the new
     // transaction ids join operationIds so the standard reconcile below matches them to the line.
     if (hasInvoices) {
-      NeoResponse invError = createInvoicePayments(account, line, invoiceSpecs, operationIds);
+      NeoResponse invError = ReconciliationFlowSupport.createInvoicePayments(
+          account, line, invoiceSpecs, operationIds, TOLERANCE);
       if (invError != null) {
         return invError;
       }
     }
 
-    NeoResponse opError = validateOperations(operationIds, accountId, line);
+    NeoResponse opError = ReconciliationFlowSupport.validateOperations(
+        operationIds, accountId, line, this::loadTransaction, TOLERANCE);
     if (opError != null) {
       return opError;
     }
 
     return compose(account, line, operationIds);
-  }
-
-  /**
-   * Creates one payment per selected unpaid invoice, distributing the statement line amount across
-   * them (capped at each installment's outstanding; the last may be partial). Each payment is
-   * processed via {@link PaymentRegistrationService#registerPaymentCore} — which auto-creates the
-   * finacc transaction (BPD/BPW) — and the resulting transaction id is appended to
-   * {@code operationIds} for the standard reconcile. Rejects when the invoices cannot cover the
-   * line amount.
-   *
-   * @return {@code null} when every payment was created, or a {@link NeoResponse} error
-   */
-  private NeoResponse createInvoicePayments(FIN_FinancialAccount account,
-      FIN_BankStatementLine line, JSONArray invoiceSpecs, List<String> operationIds)
-      throws Exception {
-    BigDecimal lineAmount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
-    boolean isReceipt = lineAmount.signum() >= 0;
-    BigDecimal remaining = lineAmount.abs();
-    for (int i = 0; i < invoiceSpecs.length(); i++) {
-      if (remaining.compareTo(TOLERANCE) <= 0) {
-        break;
-      }
-      JSONObject spec = invoiceSpecs.getJSONObject(i);
-      String invoiceId = spec.optString("invoiceId", null);
-      String scheduleId = spec.optString("scheduleId", null);
-      if (StringUtils.isBlank(invoiceId) || StringUtils.isBlank(scheduleId)) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-            "invoiceId and scheduleId are required for each invoice");
-      }
-      Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
-      FIN_PaymentSchedule schedule = OBDal.getInstance().get(FIN_PaymentSchedule.class, scheduleId);
-      if (invoice == null || schedule == null) {
-        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
-            "Invoice or payment schedule not found: " + invoiceId);
-      }
-      BigDecimal outstanding = nullSafe(schedule.getOutstandingAmount()).abs();
-      BigDecimal allocate = remaining.min(outstanding);
-      if (allocate.compareTo(TOLERANCE) > 0) {
-        FIN_Payment payment = PaymentRegistrationService.registerPaymentCore(
-            invoice, schedule, allocate, line.getTransactionDate(), account, isReceipt);
-        List<FIN_FinaccTransaction> txns = payment.getFINFinaccTransactionList();
-        if (txns.isEmpty()) {
-          return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-              "Payment did not produce a transaction: " + payment.getId());
-        }
-        // The transaction was auto-created by registerPaymentCore — flag it so the reactivate
-        // flow knows it must be fully undone (payment removed, invoice back to unpaid).
-        ReactivationSupport.markAutoCreated(txns.get(0));
-        operationIds.add(txns.get(0).getId());
-        remaining = remaining.subtract(allocate);
-      }
-    }
-    if (remaining.compareTo(TOLERANCE) > 0) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "The selected invoices do not cover the statement line amount. Remaining: "
-              + remaining.toPlainString());
-    }
-    return null;
-  }
-
-  /**
-   * Validates the selected operations: each must exist, belong to the account
-   * and not be reconciled yet; their signed amounts must sum to the line amount
-   * within {@link #TOLERANCE}.
-   *
-   * @return {@code null} when valid, or the {@link NeoResponse} carrying the error
-   */
-  private NeoResponse validateOperations(List<String> operationIds, String accountId,
-      FIN_BankStatementLine line) {
-    BigDecimal opSum = BigDecimal.ZERO;
-    for (String opId : operationIds) {
-      FIN_FinaccTransaction trx = loadTransaction(opId);
-      if (trx == null) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-            "Operation not found: " + opId);
-      }
-      if (trx.getAccount() == null || !accountId.equals(trx.getAccount().getId())) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-            "Operation does not belong to the financial account: " + opId);
-      }
-      if (trx.getReconciliation() != null) {
-        return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-            "Operation is already reconciled: " + opId);
-      }
-      opSum = opSum.add(signedAmount(trx));
-    }
-    BigDecimal lineAmount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
-    int lineSign = lineAmount.signum();
-    // Operations may match PART of the line — Etendo's matchBankStatementLine splits the line and
-    // leaves a remainder line (e.g. a 500 line matched to 300 reconciles 300 and leaves 200
-    // pending). They must NOT exceed the line amount, nor run in the opposite direction
-    // (over-reconciliation is not supported).
-    boolean sameDirection = opSum.signum() == 0 || lineSign == 0 || opSum.signum() == lineSign;
-    boolean withinLine = opSum.abs().compareTo(lineAmount.abs().add(TOLERANCE)) <= 0;
-    if (!sameDirection || !withinLine) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "The selected operations (" + opSum.toPlainString()
-              + ") exceed the statement line amount (" + lineAmount.toPlainString()
-              + "). Operations can match part of the line but not exceed it.");
-    }
-    return null;
   }
 
   /**
@@ -870,6 +786,10 @@ public class ReconciliationHandler implements NeoHandler {
     Connection conn = OBDal.getInstance().getConnection();
     List<MatchRuleEngine.Rule> rules = loadRules(conn, accountId);
 
+    BigDecimal[] autoTols = loadTolerances(accountId);
+    int autoDateTolDays = autoTols[0].intValue();
+    BigDecimal autoAmtTolPct = autoTols[1];
+
     // Collect all pending lines for this account.
     List<FIN_BankStatementLine> pendingLines = loadPendingLines(accountId);
 
@@ -881,7 +801,7 @@ public class ReconciliationHandler implements NeoHandler {
     for (FIN_BankStatementLine line : pendingLines) {
       // Pass 1 (1:1): standard algorithm — uses lazy evaluation so findSignalGroup is not called
       // when a 1:1 match is already found, avoiding an unnecessary DB query.
-      Set<String> suggested = suggestedTransactionIds(accountId, line.getId());
+      Set<String> suggested = suggestedTransactionIds(accountId, line.getId(), autoDateTolDays);
       suggested.removeAll(usedTxnIds);
       FIN_FinaccTransaction txn1to1 = suggested.isEmpty() ? null : loadTransaction(suggested.iterator().next());
       if (txn1to1 != null) {
@@ -889,7 +809,8 @@ public class ReconciliationHandler implements NeoHandler {
         groups.put(AutoMatchSupport.buildStandardGroup(line, txn1to1, FIN_MatchedTransaction.STRONG));
         opsToLink++;
       } else {
-        int[] delta = AutoMatchSupport.matchFallback(accountId, line, usedTxnIds, rules, groups);
+        int[] delta = AutoMatchSupport.matchFallback(accountId, line, usedTxnIds, rules, groups,
+            autoDateTolDays, autoAmtTolPct);
         opsToLink += delta[0];
         willCreate += delta[1];
       }
@@ -1014,7 +935,8 @@ public class ReconciliationHandler implements NeoHandler {
 
     // Operations (including any just-created rule transaction) may match part of the line but must
     // not EXCEED it — the same over-reconciliation guard the manual reconcileGroup path applies.
-    NeoResponse opError = validateOperations(operationIds, account.getId(), line);
+    NeoResponse opError = ReconciliationFlowSupport.validateOperations(
+        operationIds, account.getId(), line, this::loadTransaction, TOLERANCE);
     if (opError != null) {
       return opError;
     }
@@ -1313,6 +1235,33 @@ public class ReconciliationHandler implements NeoHandler {
 
   FIN_FinancialAccount loadAccount(String accountId) {
     return OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+  }
+
+  /**
+   * Loads per-account reconciliation tolerances via JDBC (DAL getters unavailable until entity
+   * regeneration). Returns [dateTolDays, amtTolPct] with safe defaults (3 days, 0%).
+   */
+  BigDecimal[] loadTolerances(String accountId) {
+    String sql = "SELECT COALESCE(em_etgo_date_tolerance, 3),"
+        + " COALESCE(em_etgo_amount_tolerance, 0)"
+        + " FROM fin_financial_account"
+        + " WHERE fin_financial_account_id = ?"; // NOSONAR java:S2077
+    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
+      ps.setString(1, accountId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          BigDecimal amtTol = rs.getBigDecimal(2);
+          return new BigDecimal[]{
+              BigDecimal.valueOf(rs.getInt(1)),
+              amtTol != null ? amtTol : BigDecimal.ZERO
+          };
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not load tolerances for account {}", accountId, e);
+    }
+    return new BigDecimal[]{BigDecimal.valueOf(AutoMatchSupport.DEFAULT_DATE_TOL_DAYS),
+        BigDecimal.ZERO};
   }
 
   FIN_BankStatementLine loadLine(String lineId) {
