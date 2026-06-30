@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE FIN_FINANCIAL_ACCOUNT">
+    <table name="FIN_FINANCIAL_ACCOUNT" primaryKey="FIN_FINANCIAL_ACCOUNT_KEY">
+      <column name="EM_ETGO_DATE_TOLERANCE" primaryKey="false" required="false" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[3]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="EM_ETGO_AMOUNT_TOLERANCE" primaryKey="false" required="false" type="DECIMAL" size="10,2" autoIncrement="false">
+        <default><![CDATA[0]]></default>
+        <onCreateDefault/>
+      </column>
+    </table>
+  </database>

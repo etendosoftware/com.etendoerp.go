@@ -22,6 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -128,6 +129,12 @@ public class ReconciliationHandlerTest {
   public void setUp() {
     handler = spy(new ReconciliationHandler());
     doNothing().when(handler).doRollbackAndClose();
+    // loadTolerances uses a raw JDBC connection unavailable in unit tests.
+    // Stub it to return the default values (3 days, 0%) so every test that
+    // exercises buildPendingLines / buildCandidates / buildAutoMatch stays
+    // deterministic without setting up a second PreparedStatement mock.
+    doReturn(new BigDecimal[]{BigDecimal.valueOf(3), BigDecimal.ZERO})
+        .when(handler).loadTolerances(any());
   }
 
   @After
@@ -345,7 +352,8 @@ public class ReconciliationHandlerTest {
     when(rs.getBigDecimal("amount")).thenReturn(new BigDecimal("50.00"), new BigDecimal("75.00"));
 
     // t1 is suggested, t2 is not.
-    doReturn(new HashSet<>(Arrays.asList("t1"))).when(handler).suggestedTransactionIds(ACC_ID, LINE_ID);
+    doReturn(new HashSet<>(Arrays.asList("t1"))).when(handler)
+        .suggestedTransactionIds(eq(ACC_ID), eq(LINE_ID), anyInt());
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
@@ -373,7 +381,8 @@ public class ReconciliationHandlerTest {
     PreparedStatement ps = mock(PreparedStatement.class);
     ResultSet rs = mock(ResultSet.class);
     when(rs.next()).thenReturn(false);
-    doReturn(new HashSet<String>()).when(handler).suggestedTransactionIds(ACC_ID, LINE_ID);
+    doReturn(new HashSet<String>()).when(handler)
+        .suggestedTransactionIds(eq(ACC_ID), eq(LINE_ID), anyInt());
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
@@ -1052,7 +1061,8 @@ public class ReconciliationHandlerTest {
     when(rs.getString("partner_name")).thenReturn("ACME");
     when(rs.getBigDecimal("amount")).thenReturn(new BigDecimal("60.00"));
 
-    doReturn(new HashSet<String>()).when(handler).suggestedTransactionIds(ACC_ID, LINE_ID);
+    doReturn(new HashSet<String>()).when(handler)
+        .suggestedTransactionIds(eq(ACC_ID), eq(LINE_ID), anyInt());
     FIN_BankStatementLine selectedLine = mock(FIN_BankStatementLine.class);
     doReturn(selectedLine).when(handler).loadLine(LINE_ID);
 
@@ -1064,7 +1074,8 @@ public class ReconciliationHandlerTest {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       stubConnection(dal, ps, rs);
-      ams.when(() -> AutoMatchSupport.findSignalGroup(eq(ACC_ID), eq(selectedLine), any(), any()))
+      ams.when(() -> AutoMatchSupport.findSignalGroup(eq(ACC_ID), eq(selectedLine), any(), any(),
+              anyInt()))
           .thenReturn(Arrays.asList(g1));
 
       NeoResponse response = handler.buildCandidates(ACC_ID, LINE_ID, null, null, null);
@@ -1109,7 +1120,8 @@ public class ReconciliationHandlerTest {
     when(line.getTransactionDate()).thenReturn(null);
     doReturn(Collections.singletonList(line)).when(handler).loadPendingLines(ACC_ID);
 
-    doReturn(new HashSet<>(Arrays.asList("t1"))).when(handler).suggestedTransactionIds(ACC_ID, "l1");
+    doReturn(new HashSet<>(Arrays.asList("t1"))).when(handler)
+        .suggestedTransactionIds(eq(ACC_ID), eq("l1"), anyInt());
     FIN_FinaccTransaction t1 = mock(FIN_FinaccTransaction.class);
     when(t1.getId()).thenReturn("t1");
     when(t1.getDepositAmount()).thenReturn(new BigDecimal("100.00"));
@@ -1165,20 +1177,24 @@ public class ReconciliationHandlerTest {
     doReturn(Collections.singletonList(line)).when(handler).loadPendingLines(ACC_ID);
 
     // No 1:1 standard suggestion.
-    doReturn(new HashSet<String>()).when(handler).suggestedTransactionIds(ACC_ID, "l1");
+    doReturn(new HashSet<String>()).when(handler)
+        .suggestedTransactionIds(eq(ACC_ID), eq("l1"), anyInt());
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<AutoMatchSupport> ams = mockStatic(AutoMatchSupport.class)) {
+        MockedStatic<AutoMatchSupport> ams = mockStatic(AutoMatchSupport.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
       // matchFallback composes the (stubbed) leaf helpers below; run its real body so the
       // orchestration is exercised while findSignalGroup/buildRuleGroup stay stubbed.
-      ams.when(() -> AutoMatchSupport.matchFallback(any(), any(), any(), any(), any()))
+      ams.when(() -> AutoMatchSupport.matchFallback(any(), any(), any(), any(), any(),
+              anyInt(), any()))
           .thenCallRealMethod();
       // No 1:N signal group → forces the rule-engine branch.
-      ams.when(() -> AutoMatchSupport.findSignalGroup(any(), any(), any(), any()))
+      ams.when(() -> AutoMatchSupport.findSignalGroup(any(), any(), any(), any(), anyInt()))
           .thenReturn(Collections.emptyList());
       ams.when(() -> AutoMatchSupport.buildRuleGroup(eq(line), eq(rule), any()))
           .thenReturn(new JSONObject().put("isNew", true).put("groupKey", "l1-rule-R1"));

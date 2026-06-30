@@ -71,6 +71,7 @@ final class AutoMatchSupport {
   /** Caps the partner/reference subset search to keep the preview predictable and bounded. */
   private static final int MAX_SIGNAL_SUBSET_SIZE = 12;
   private static final BigDecimal SIGNAL_MATCH_TOLERANCE = new BigDecimal("0.01");
+  static final int DEFAULT_DATE_TOL_DAYS = 3;
 
   private AutoMatchSupport() {
   }
@@ -91,11 +92,19 @@ final class AutoMatchSupport {
    */
   static List<FIN_FinaccTransaction> findSignalGroup(String accountId, FIN_BankStatementLine line,
       java.util.Set<String> usedTxnIds, BigDecimal tolerance) {
-    BigDecimal target = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
+    return findSignalGroup(accountId, line, usedTxnIds, tolerance, DEFAULT_DATE_TOL_DAYS);
+  }
+
+  static List<FIN_FinaccTransaction> findSignalGroup(String accountId, FIN_BankStatementLine line,
+      java.util.Set<String> usedTxnIds, BigDecimal tolerance, int dateTolDays) {
+    BigDecimal target = ReconciliationSupport.nullSafe(line.getCramount())
+        .subtract(ReconciliationSupport.nullSafe(line.getDramount()));
     if (target.signum() == 0) {
       return Collections.emptyList();
     }
-    List<FIN_FinaccTransaction> pool = loadUnreconciledSameSign(accountId, target, usedTxnIds);
+    java.util.Date lineDate = line.getTransactionDate();
+    List<FIN_FinaccTransaction> pool =
+        loadUnreconciledSameSign(accountId, target, usedTxnIds, dateTolDays, lineDate);
     // Try grouping by business partner, then by payment reference.
     List<FIN_FinaccTransaction> byPartner =
         matchByKey(pool, target, tolerance, AutoMatchSupport::partnerKey);
@@ -107,6 +116,12 @@ final class AutoMatchSupport {
 
   private static List<FIN_FinaccTransaction> loadUnreconciledSameSign(String accountId,
       BigDecimal target, java.util.Set<String> usedTxnIds) {
+    return loadUnreconciledSameSign(accountId, target, usedTxnIds, DEFAULT_DATE_TOL_DAYS, null);
+  }
+
+  private static List<FIN_FinaccTransaction> loadUnreconciledSameSign(String accountId,
+      BigDecimal target, java.util.Set<String> usedTxnIds, int dateToleranceDays,
+      java.util.Date lineDate) {
     String hql = "select ft from " + FIN_FinaccTransaction.ENTITY_NAME + " as ft"
         + " where ft.account.id = :acc"
         + "   and ft.reconciliation is null"
@@ -122,11 +137,34 @@ final class AutoMatchSupport {
         continue;
       }
       BigDecimal amt = nullSafe(t.getDepositAmount()).subtract(nullSafe(t.getPaymentAmount()));
-      if (amt.signum() == target.signum()) {
+      if (amt.signum() == target.signum()
+          && withinDateWindow(lineDate, t.getTransactionDate(), dateToleranceDays)) {
         pool.add(t);
       }
     }
     return pool;
+  }
+
+  /** Returns true if the difference between {@code a} and {@code b} is within {@code days}. */
+  static boolean withinDateWindow(java.util.Date a, java.util.Date b, int days) {
+    if (a == null || b == null) {
+      return true;
+    }
+    long diffMs = Math.abs(a.getTime() - b.getTime());
+    return diffMs <= days * 86_400_000L;
+  }
+
+  /**
+   * Computes the effective amount tolerance as max(SIGNAL_MATCH_TOLERANCE, abs(target) * pct/100).
+   * When {@code pct} is zero the floor tolerance is returned (preserving the current behaviour).
+   */
+  static BigDecimal computeAmountTolerance(BigDecimal target, BigDecimal pct) {
+    if (pct == null || pct.signum() == 0) {
+      return SIGNAL_MATCH_TOLERANCE;
+    }
+    BigDecimal derived = target.abs().multiply(pct)
+        .divide(BigDecimal.valueOf(100), 2, java.math.RoundingMode.HALF_UP);
+    return derived.max(SIGNAL_MATCH_TOLERANCE);
   }
 
   /**
@@ -390,15 +428,32 @@ final class AutoMatchSupport {
     return classifyPendingLine(account, line, rules);
   }
 
+  static String classifyPendingLine(FIN_FinancialAccount account, String lineId,
+      List<MatchRuleEngine.Rule> rules, int dateTolDays, BigDecimal amtTolPct) {
+    FIN_BankStatementLine line = OBDal.getInstance().get(FIN_BankStatementLine.class, lineId);
+    if (line == null) {
+      return STATE_PENDING;
+    }
+    return classifyPendingLine(account, line, rules, dateTolDays, amtTolPct);
+  }
+
   static String classifyPendingLine(FIN_FinancialAccount account, FIN_BankStatementLine line,
       List<MatchRuleEngine.Rule> rules) {
-    String level = standardMatchLevel(account, line);
+    return classifyPendingLine(account, line, rules, DEFAULT_DATE_TOL_DAYS, BigDecimal.ZERO);
+  }
+
+  static String classifyPendingLine(FIN_FinancialAccount account, FIN_BankStatementLine line,
+      List<MatchRuleEngine.Rule> rules, int dateTolDays, BigDecimal amtTolPct) {
+    String level = standardMatchLevel(account, line, dateTolDays);
     if (FIN_MatchedTransaction.STRONG.equals(level)) {
       return STATE_SUGGESTED;
     }
-    if (account != null && StringUtils.isNotBlank(account.getId())
-        && !findSignalGroup(account.getId(), line, new HashSet<>(), SIGNAL_MATCH_TOLERANCE).isEmpty()) {
-      return STATE_SUGGESTED;
+    if (account != null && StringUtils.isNotBlank(account.getId())) {
+      BigDecimal target = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
+      BigDecimal amtTol = computeAmountTolerance(target, amtTolPct);
+      if (!findSignalGroup(account.getId(), line, new HashSet<>(), amtTol, dateTolDays).isEmpty()) {
+        return STATE_SUGGESTED;
+      }
     }
     if (level != null) {
       return STATE_DIFFERENCE;
@@ -414,6 +469,11 @@ final class AutoMatchSupport {
 
   /** Match level the account's standard algorithm assigns to the line, or {@code null} if none. */
   static String standardMatchLevel(FIN_FinancialAccount account, FIN_BankStatementLine line) {
+    return standardMatchLevel(account, line, DEFAULT_DATE_TOL_DAYS);
+  }
+
+  static String standardMatchLevel(FIN_FinancialAccount account, FIN_BankStatementLine line,
+      int dateTolDays) {
     if (account == null || account.getMatchingAlgorithm() == null
         || StringUtils.isBlank(account.getMatchingAlgorithm().getJavaClassName())) {
       return null;
@@ -424,6 +484,10 @@ final class AutoMatchSupport {
       FIN_MatchedTransaction matched = matcher.match(line, new ArrayList<>());
       if (matched != null && matched.getTransaction() != null
           && !FIN_MatchedTransaction.NOMATCH.equals(matched.getMatchLevel())) {
+        if (!withinDateWindow(line.getTransactionDate(),
+            matched.getTransaction().getTransactionDate(), dateTolDays)) {
+          return null;
+        }
         return matched.getMatchLevel();
       }
     } catch (Exception e) {
@@ -487,8 +551,18 @@ final class AutoMatchSupport {
   static int[] matchFallback(String accountId, FIN_BankStatementLine line,
       Set<String> usedTxnIds, List<MatchRuleEngine.Rule> rules, JSONArray groups)
       throws JSONException {
+    return matchFallback(accountId, line, usedTxnIds, rules, groups,
+        DEFAULT_DATE_TOL_DAYS, BigDecimal.ZERO);
+  }
+
+  static int[] matchFallback(String accountId, FIN_BankStatementLine line,
+      Set<String> usedTxnIds, List<MatchRuleEngine.Rule> rules, JSONArray groups,
+      int dateTolDays, BigDecimal amtTolPct) throws JSONException {
+    BigDecimal target = ReconciliationSupport.nullSafe(line.getCramount())
+        .subtract(ReconciliationSupport.nullSafe(line.getDramount()));
+    BigDecimal amtTol = computeAmountTolerance(target, amtTolPct);
     List<FIN_FinaccTransaction> signalGroup =
-        findSignalGroup(accountId, line, usedTxnIds, SIGNAL_MATCH_TOLERANCE);
+        findSignalGroup(accountId, line, usedTxnIds, amtTol, dateTolDays);
     if (!signalGroup.isEmpty()) {
       signalGroup.forEach(t -> usedTxnIds.add(t.getId()));
       groups.put(buildMultiGroup(line, signalGroup));
