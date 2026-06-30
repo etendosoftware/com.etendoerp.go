@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -98,6 +99,45 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   private static final String KEY_ACCOUNTING_STATUS = "accountingStatus";
   private static final String KEY_RECORD_ID = "recordId";
   private static final String KEY_SUCCESS = "success";
+
+  /**
+   * Maps accounting status search keys to their {@code AD_Ref_List.ad_ref_list_id} (UUID).
+   * {@link NoPostedDocumentDS#getGridData} calls {@code getValues(jsonArray, referenceId)} which
+   * queries {@code AD_Ref_List} by primary key — so the JSON array must contain UUIDs, not
+   * search keys.
+   *
+   * <p>Source: {@code SELECT ad_ref_list_id, value FROM ad_ref_list
+   * WHERE ad_reference_id = 'D431058F6B7345598D1E0709DFF3B5DD' AND isactive = 'Y'}.
+   */
+  private static final Map<String, String> ACCOUNTING_STATUS_KEY_TO_ID = new HashMap<>();
+
+  /**
+   * Default statuses sent when the user applies no accounting-status filter (empty selection =
+   * "show all unposted").  Covers the four options exposed in the UI filter.
+   */
+  private static final List<String> DEFAULT_ACCOUNTING_STATUS_KEYS =
+      Arrays.asList("N", "E", "C", "i", "p");
+
+  static {
+    ACCOUNTING_STATUS_KEY_TO_ID.put("N",  "D16B6411F4CB4708AE05E7F6E109920E"); // Unposted
+    ACCOUNTING_STATUS_KEY_TO_ID.put("E",  "420D49CD77304D32BE49582002C315BE");  // Error
+    ACCOUNTING_STATUS_KEY_TO_ID.put("C",  "4AE29BF062D4484E976B1BEEF34A7913");  // Error, No cost
+    ACCOUNTING_STATUS_KEY_TO_ID.put("i",  "A12420CC6D4144768EEC57143859EFD6");  // Invalid Account
+    ACCOUNTING_STATUS_KEY_TO_ID.put("p",  "D1EAA8BCC3E649C398D4E544282E5292");  // Period Closed
+    ACCOUNTING_STATUS_KEY_TO_ID.put("Y",  "B9D7C571ACE54412A454492A7BADB31E");  // Posted
+    ACCOUNTING_STATUS_KEY_TO_ID.put("AD", "199C073FE49E4C57B5F9BFCF98187666");  // No Accounting Date
+    ACCOUNTING_STATUS_KEY_TO_ID.put("b",  "7D94AAD5D6ED4AB4A0E19C036AB16617");  // Not Balanced
+    ACCOUNTING_STATUS_KEY_TO_ID.put("c",  "ED89C605E8A448E5BF6ACEF88A7A4DFD");  // Not Convertible
+    ACCOUNTING_STATUS_KEY_TO_ID.put("d",  "7EA1102ED3944934AEB250DB59A1990A");  // Disabled For Background
+    ACCOUNTING_STATUS_KEY_TO_ID.put("D",  "249819A05B6E403EA3B238DE369FFADE");  // Document Disabled
+    ACCOUNTING_STATUS_KEY_TO_ID.put("DT", "0DCCE34BC1D1470BA91D27FD40C3977E");  // No Document Type
+    ACCOUNTING_STATUS_KEY_TO_ID.put("l",  "5D27C2A9DC37492888B36106AFD67206");  // Pending Refresh
+    ACCOUNTING_STATUS_KEY_TO_ID.put("L",  "B6B9CD0EC571428BABE2E23AC62AE484");  // Document Locked
+    ACCOUNTING_STATUS_KEY_TO_ID.put("NC", "EF3E057A84CD4BE88A9EF57BE9598DA3");  // Cost Not Calculated
+    ACCOUNTING_STATUS_KEY_TO_ID.put("NO", "D53EBEA4992F44CD8DEBB19C716B4991");  // No Related PO
+    ACCOUNTING_STATUS_KEY_TO_ID.put("T",  "F1D3C6E0594E4BEE9B60C559709A86E1");  // Table Disabled
+    ACCOUNTING_STATUS_KEY_TO_ID.put("y",  "0381BEF8BB984A488CCA55B41B10BC1E");  // Post Prepared
+  }
 
   /**
    * Maps the {@code documentType} string returned by {@link NoPostedDocumentDS} to the
@@ -223,13 +263,19 @@ public class NotPostedDocumentsHandler implements NeoHandler {
    * {@link NoPostedDocumentDS#getData}. Field names are read directly from the params
    * map by the datasource — no AdvancedCriteria wrapping.
    *
-   * <p>Key mapping (datasource param → frontend param):
+   * <p>Key insight: {@code NoPostedDocumentDS.getGridData} calls {@code getValues(jsonArray,
+   * referenceId)} which queries {@code AD_Ref_List.id IN (...)}. The JSON array must therefore
+   * contain {@code ad_ref_list_id} UUID values, NOT search keys like "N" or "E". This method
+   * translates the frontend's search-key shorthand to the required UUIDs via
+   * {@link #ACCOUNTING_STATUS_KEY_TO_ID}.
+   *
+   * <p>Key mapping:
    * <ul>
-   *   <li>{@code _org}            ← current OBContext organisation</li>
-   *   <li>{@code accounting_status} ← {@code accountingStatus} (JSON string array)</li>
-   *   <li>{@code document}        ← {@code document}</li>
-   *   <li>{@code DateFrom}        ← {@code dateFrom}</li>
-   *   <li>{@code DateTo}          ← {@code dateTo}</li>
+   *   <li>{@code _org}              ← current OBContext organisation</li>
+   *   <li>{@code accounting_status} ← JSON array of {@code ad_ref_list_id} UUIDs</li>
+   *   <li>{@code document}          ← {@code document}</li>
+   *   <li>{@code DateFrom}          ← {@code dateFrom}</li>
+   *   <li>{@code DateTo}            ← {@code dateTo}</li>
    * </ul>
    */
   private Map<String, String> buildDsParams(Map<String, String> params) throws Exception {
@@ -242,11 +288,18 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     }
 
     String accountingStatus = params.get(KEY_ACCOUNTING_STATUS);
-    if (accountingStatus != null && !accountingStatus.isEmpty()) {
-      JSONArray arr = new JSONArray();
-      for (String s : accountingStatus.split(",")) {
-        arr.put(s.trim());
+    List<String> statusKeys = (accountingStatus != null && !accountingStatus.isEmpty())
+        ? Arrays.asList(accountingStatus.split(","))
+        : DEFAULT_ACCOUNTING_STATUS_KEYS;
+
+    JSONArray arr = new JSONArray();
+    for (String key : statusKeys) {
+      String uuid = ACCOUNTING_STATUS_KEY_TO_ID.get(key.trim());
+      if (uuid != null) {
+        arr.put(uuid);
       }
+    }
+    if (arr.length() > 0) {
       dsParams.put("accounting_status", arr.toString());
     }
 
