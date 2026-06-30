@@ -631,4 +631,24 @@ final class McpToolRouterSupport {
       return "{}";
     }
   }
+
+  /**
+   * Validate that the given required arguments are present and non-null in {@code args}.
+   * Shared by {@link McpToolRouter} and {@link McpWidgetHandler} so the contract (and the
+   * error messages tests assert on) lives in a single place.
+   *
+   * @param args     the tool arguments (may be {@code null})
+   * @param required the argument keys that must be present
+   * @throws IllegalArgumentException when {@code args} is {@code null} or a key is missing
+   */
+  static void validateArgs(JSONObject args, String... required) {
+    if (args == null) {
+      throw new IllegalArgumentException("Missing arguments");
+    }
+    for (String key : required) {
+      if (!args.has(key) || args.isNull(key)) {
+        throw new IllegalArgumentException("Missing required argument: " + key);
+      }
+    }
+  }
 }

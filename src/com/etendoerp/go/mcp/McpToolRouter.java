@@ -269,7 +269,7 @@ public class McpToolRouter {
    * List records from a spec entity. Replicates NeoServlet.handleDefault() GET logic.
    */
   private JSONObject handleList(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY);
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     int limit = args.optInt("limit", 100);
@@ -277,8 +277,8 @@ public class McpToolRouter {
     String orderBy = args.optString("orderBy", null);
     JSONObject filters = args.optJSONObject("filters");
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -336,13 +336,13 @@ public class McpToolRouter {
    * Get a single record by ID.
    */
   private JSONObject handleGet(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY, "id");
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, "id");
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String recordId = args.getString("id");
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -371,13 +371,13 @@ public class McpToolRouter {
    * Create a new record.
    */
   private JSONObject handleCreate(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS);
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     JSONObject fields = args.getJSONObject(McpConstants.PARAM_FIELDS);
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -483,14 +483,14 @@ public class McpToolRouter {
    * Update an existing record.
    */
   private JSONObject handleUpdate(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS);
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String recordId = args.getString("id");
     JSONObject fields = args.getJSONObject(McpConstants.PARAM_FIELDS);
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -536,13 +536,13 @@ public class McpToolRouter {
    * Delete a record by ID.
    */
   private JSONObject handleDelete(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY, "id");
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, "id");
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String recordId = args.getString("id");
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -588,14 +588,14 @@ public class McpToolRouter {
    * Also supports parentContext for child selectors that depend on header values.
    */
   private JSONObject handleSelectors(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN);
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String columnName = args.getString(McpConstants.PARAM_COLUMN);
     String query = args.optString(McpConstants.PARAM_QUERY, null);
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     // Find the AD_Column by DB column name or DAL property name (field name from schema)
@@ -626,7 +626,7 @@ public class McpToolRouter {
    * Supports optional parentId for child entity defaults.
    */
   private JSONObject handleDefaults(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY);
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String parentId = args.optString(McpConstants.PARAM_PARENT_ID, null);
@@ -642,8 +642,8 @@ public class McpToolRouter {
       queryParams.put(McpConstants.PARAM_ASSET_ID, assetId);
     }
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     NeoContext ctx = NeoContext.builder()
@@ -695,12 +695,12 @@ public class McpToolRouter {
    * so the agent sees exactly the same fields the UI would show.
    */
   private JSONObject handleSchema(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY);
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
     Tab adTab = getAdTabOrThrow(sfEntity, entityName);
 
     Entity dalEntity = ModelProvider.getInstance()
@@ -827,15 +827,15 @@ public class McpToolRouter {
    * a descriptive {@code processMessage} — it is never swallowed.
    */
   JSONObject handleAction(String specName, JSONObject args) throws Exception {
-    validateArgs(args, McpConstants.PARAM_ENTITY, "id", "action");
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, "id", "action");
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String recordId = args.getString("id");
     String actionName = args.getString("action");
     JSONObject parameters = args.optJSONObject(McpConstants.PARAM_PARAMETERS);
 
-    SFSpec spec = findSpecOrThrow(specName);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
+    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
 
     NeoResponse neoResponse = NeoButtonActionHelper.executeButtonActionCore(
         sfEntity, recordId, actionName, parameters);
@@ -885,7 +885,7 @@ public class McpToolRouter {
    * Execute a process-type spec.
    */
   private JSONObject handleProcess(String specName, JSONObject args) throws Exception {
-    SFSpec spec = findSpecOrThrow(specName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
 
     Process adProcess = spec.getProcess();
     if (adProcess == null) {
@@ -915,7 +915,7 @@ public class McpToolRouter {
    * exact same {@code not_configured_for_report_generation} message shown by discover.</p>
    */
   private JSONObject handleReport(String specName, JSONObject args) throws Exception {
-    SFSpec spec = findSpecOrThrow(specName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
 
     // First included entity declaring a NEO report handler qualifier, or null.
     SFEntity reportEntity = null;
@@ -957,7 +957,7 @@ public class McpToolRouter {
     if (StringUtils.isBlank(specName)) {
       return;
     }
-    SFSpec spec = findSpecOrThrow(specName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     if (!McpToolRouterSupport.hasSpecAccess(spec, spec.getSpecType())) {
       throw new SecurityException("Access denied to spec '" + specName
           + ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX);
@@ -965,40 +965,6 @@ public class McpToolRouter {
   }
 
   // ── Spec/entity resolution helpers ────────────────────────────────────
-
-  /**
-   * Find an active spec by name or throw.
-   * Same query pattern as NeoServlet.findSpec().
-   */
-  private SFSpec findSpecOrThrow(String specName) throws Exception {
-    OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, specName));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    criteria.setMaxResults(1);
-    List<SFSpec> results = criteria.list();
-    if (results.isEmpty()) {
-      throw new IllegalArgumentException("Spec not found: " + specName);
-    }
-    return results.get(0);
-  }
-
-  /**
-   * Find an active, included entity within a spec or throw.
-   * Same query pattern as NeoServlet.findEntity().
-   */
-  private SFEntity findEntityOrThrow(String specId, String entityName) throws Exception {
-    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_NAME, entityName));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-    criteria.setMaxResults(1);
-    List<SFEntity> results = criteria.list();
-    if (results.isEmpty()) {
-      throw new IllegalArgumentException("Entity not found: " + entityName);
-    }
-    return results.get(0);
-  }
 
   /**
    * Get the AD_Tab linked to an entity, or throw if not linked.
@@ -1260,22 +1226,6 @@ public class McpToolRouter {
       return result;
     } catch (JSONException e) {
       throw new McpToolException("Error building MCP error content", e);
-    }
-  }
-
-  // ── Validation helpers ────────────────────────────────────────────────
-
-  /**
-   * Validate that required arguments are present.
-   */
-  private void validateArgs(JSONObject args, String... required) throws IllegalArgumentException {
-    if (args == null) {
-      throw new IllegalArgumentException("Missing arguments");
-    }
-    for (String key : required) {
-      if (!args.has(key) || args.isNull(key)) {
-        throw new IllegalArgumentException("Missing required argument: " + key);
-      }
     }
   }
 }

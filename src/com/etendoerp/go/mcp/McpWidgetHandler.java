@@ -19,14 +19,10 @@ package com.etendoerp.go.mcp;
 
 import java.util.HashMap;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
-import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoHandler;
@@ -43,8 +39,10 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
  * Behaviour is identical to the previous in-router implementation: it resolves the
  * selected widget to its backing {@code dashboard} spec entity, looks up the entity's
  * {@link NeoHandler} via its {@code Java_Qualifier}, and invokes it with a GET
- * {@link NeoContext}. The widget data handlers (e.g. {@code WidgetKpisHandler}) are
- * reused unmodified; this class is only the MCP wrapper that makes them
+ * {@link NeoContext}. Spec/entity resolution and argument validation are delegated to
+ * the shared {@link McpToolRouterSupport} helpers (same ones the router uses) so there
+ * is no duplicated lookup logic. The widget data handlers (e.g. {@code WidgetKpisHandler})
+ * are reused unmodified; this class is only the MCP wrapper that makes them
  * discoverable/invocable.
  */
 final class McpWidgetHandler {
@@ -62,7 +60,7 @@ final class McpWidgetHandler {
    * @return MCP text content with the widget JSON payload, or error content
    */
   static JSONObject handle(JSONObject arguments) throws Exception {
-    validateArgs(arguments, McpConstants.PARAM_WIDGET);
+    McpToolRouterSupport.validateArgs(arguments, McpConstants.PARAM_WIDGET);
     String widget = arguments.getString(McpConstants.PARAM_WIDGET);
 
     String entityName = ToolRegistry.WIDGET_ENTITY_BY_NAME.get(widget);
@@ -71,8 +69,8 @@ final class McpWidgetHandler {
           + String.join(", ", ToolRegistry.WIDGET_ENTITY_BY_NAME.keySet()));
     }
 
-    SFSpec spec = findSpecOrThrow(McpConstants.SPEC_DASHBOARD);
-    SFEntity sfEntity = findEntityOrThrow(spec.getId(), entityName);
+    SFSpec spec = McpToolRouterSupport.findActiveSpecByName(McpConstants.SPEC_DASHBOARD);
+    SFEntity sfEntity = McpToolRouterSupport.findIncludedEntity(spec.getId(), entityName);
 
     NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
     if (handler == null) {
@@ -111,54 +109,5 @@ final class McpWidgetHandler {
       return McpToolRouter.wrapAsErrorContent(text);
     }
     return McpToolRouter.wrapAsTextContent(text);
-  }
-
-  /**
-   * Find an active spec by name or throw. Same query pattern as
-   * {@code McpToolRouter.findSpecOrThrow}.
-   */
-  private static SFSpec findSpecOrThrow(String specName) {
-    OBCriteria<SFSpec> criteria = OBDal.getInstance().createCriteria(SFSpec.class);
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_NAME, specName));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    criteria.setMaxResults(1);
-    List<SFSpec> results = criteria.list();
-    if (results.isEmpty()) {
-      throw new IllegalArgumentException("Spec not found: " + specName);
-    }
-    return results.get(0);
-  }
-
-  /**
-   * Find an active, included entity within a spec or throw. Same query pattern as
-   * {@code McpToolRouter.findEntityOrThrow}.
-   */
-  private static SFEntity findEntityOrThrow(String specId, String entityName) {
-    OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ETGOSFSPEC + ".id", specId));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_NAME, entityName));
-    criteria.add(Restrictions.eq(SFSpec.PROPERTY_ISACTIVE, true));
-    criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-    criteria.setMaxResults(1);
-    List<SFEntity> results = criteria.list();
-    if (results.isEmpty()) {
-      throw new IllegalArgumentException("Entity not found: " + entityName);
-    }
-    return results.get(0);
-  }
-
-  /**
-   * Validate that required arguments are present. Same contract as
-   * {@code McpToolRouter.validateArgs}.
-   */
-  private static void validateArgs(JSONObject args, String... required) {
-    if (args == null) {
-      throw new IllegalArgumentException("Missing arguments");
-    }
-    for (String key : required) {
-      if (!args.has(key) || args.isNull(key)) {
-        throw new IllegalArgumentException("Missing required argument: " + key);
-      }
-    }
   }
 }
