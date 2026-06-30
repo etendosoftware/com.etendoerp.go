@@ -894,19 +894,20 @@ public class McpToolRouterTest {
     }
   }
 
-  /** Tests that route() rejects neo_widget without read scope. */
-  @Test
+  /**
+   * Tests that route() rejects neo_widget without read scope. Authorization runs
+   * before the try/catch in route(), so the OBSecurityException propagates to the
+   * caller (it is NOT wrapped as error content) — matching the other write/process
+   * scope-rejection tests above.
+   */
+  @Test(expected = OBSecurityException.class)
   public void testRouteWidgetRejectedWithoutReadScope() throws Exception {
     McpToolRouter router = new McpToolRouter();
 
     JSONObject args = new JSONObject();
     args.put("widget", "kpis");
 
-    JSONObject result = router.route(McpConstants.TOOL_NEO_WIDGET, args, Set.of("neo:write"));
-    assertTrue(result.optBoolean(FIELD_IS_ERROR, false));
-    String errorText = result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text");
-    assertTrue("neo_widget without read scope must fail on scope",
-        errorText.contains("requires scope"));
+    router.route(McpConstants.TOOL_NEO_WIDGET, args, Set.of("neo:write"));
   }
 
   /**

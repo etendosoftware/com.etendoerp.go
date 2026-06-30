@@ -169,10 +169,12 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       List<String> names = toolNames(tools);
-      // Read access always yields neo_discover + the docs tool when no specs exist.
+      // Read access always yields neo_discover + docs + neo_widget when no specs exist
+      // (neo_widget is a built-in read tool, ETP-4284).
       assertTrue(names.contains("neo_discover"));
       assertTrue(names.contains("docs"));
-      assertEquals(2, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
+      assertEquals(3, tools.size());
     }
 
     @Test
@@ -277,13 +279,14 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No CRUD tools since there are no accessible window specs; only the
-      // read-scope baseline tools (neo_discover + docs) are present.
+      // read-scope baseline tools (neo_discover + docs + neo_widget) are present.
       assertFalse(names.contains("neo_list"));
       assertFalse(names.contains("neo_get"));
       assertFalse(names.contains("neo_create"));
       assertTrue(names.contains("neo_discover"));
       assertTrue(names.contains("docs"));
-      assertEquals(2, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
+      assertEquals(3, tools.size());
     }
 
     @Test
@@ -382,14 +385,15 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No window specs => no CRUD/window tools. Only the read-scope baseline
-      // tools (neo_discover + docs) are present.
+      // tools (neo_discover + docs + neo_widget) are present.
       assertFalse(names.contains("neo_list"));
       assertFalse(names.contains("neo_create"));
       assertFalse(names.contains("neo_update"));
       assertFalse(names.contains("neo_delete"));
       assertTrue(names.contains("neo_discover"));
       assertTrue(names.contains("docs"));
-      assertEquals(2, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
+      assertEquals(3, tools.size());
     }
   }
 
