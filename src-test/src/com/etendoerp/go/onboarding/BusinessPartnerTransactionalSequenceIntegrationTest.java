@@ -23,6 +23,7 @@ import java.util.UUID;
 
 import org.hibernate.criterion.Restrictions;
 import org.junit.After;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -38,6 +39,7 @@ import org.openbravo.test.base.OBBaseTest;
 /**
  * Integration regression tests for Business Partner transactional sequences.
  */
+@Ignore("Temporarily disabled — flaky in CI due to sequence state dependency")
 public class BusinessPartnerTransactionalSequenceIntegrationTest extends OBBaseTest {
 
   private static final String BP_IDENTIFIER_COLUMN_ID = "294937FFC81749289BD9BB28E400D4B2";

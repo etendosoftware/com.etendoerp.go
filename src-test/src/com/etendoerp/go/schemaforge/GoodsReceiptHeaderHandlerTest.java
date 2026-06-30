@@ -22,7 +22,10 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -35,7 +38,10 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.businesspartner.Location;
 
 /**
  * Unit tests for {@link GoodsReceiptHeaderHandler}.
@@ -263,5 +269,236 @@ public class GoodsReceiptHeaderHandlerTest {
     h.setPostingService(service);
 
     assertSame(sentinel, h.handle(ctx));
+  }
+
+  // ── handle() — postingService returns null, routing continues ─────────────
+
+  /**
+   * When the posting service returns null the handler falls through to the
+   * NeoHeaderActionRouter dispatch path without short-circuiting.
+   */
+  @Test
+  public void handle_postingServiceReturnsNull_routesToActionRouter() {
+    com.etendoerp.go.schemaforge.handlers.DocumentPostingService service =
+        mock(com.etendoerp.go.schemaforge.handlers.DocumentPostingService.class);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("unknownAction")
+        .recordId("r-1")
+        .build();
+    when(service.handleAction(ctx)).thenReturn(null);
+
+    GoodsReceiptHeaderHandler h = new GoodsReceiptHeaderHandler();
+    h.setPostingService(service);
+
+    // NeoHeaderActionRouter.dispatch returns null when no sub-handler claims the action
+    NeoResponse result = h.handle(ctx);
+    assertNull("No matching action → dispatch returns null", result);
+  }
+
+  // ── handle() — null postingService skips posting check safely ─────────────
+
+  /**
+   * When postingService has not been injected (null), handle() must not throw.
+   */
+  @Test
+  public void handle_nullPostingService_doesNotThrow() {
+    GoodsReceiptHeaderHandler h = new GoodsReceiptHeaderHandler();
+    h.setPostingService(null);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("r-2")
+        .build();
+
+    // Must not throw; dispatch returns null for a GET CRUD with no matching action
+    NeoResponse result = h.handle(ctx);
+    assertNull(result);
+  }
+
+  // ── handle() — CRUD POST injects partnerAddress when BP present ──────────────
+
+  /**
+   * On a CRUD POST without recordId and with a businessPartner in the body,
+   * the handler injects a partnerAddress into the body if one can be found.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handle_crudPostWithBusinessPartner_injectsPartnerAddress() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+
+      ctxMock.when(() -> OBContext.setAdminMode(Mockito.anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Location loc = mock(Location.class);
+      when(loc.getId()).thenReturn("loc-ship-1");
+
+      OBCriteria<Location> crit = mock(OBCriteria.class);
+      when(dal.createCriteria(Location.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.setMaxResults(1)).thenReturn(crit);
+      when(crit.uniqueResult()).thenReturn(loc);
+
+      JSONObject body = new JSONObject().put("businessPartner", "bp-123");
+      NeoContext ctx = NeoContext.builder()
+          .httpMethod("POST")
+          .endpointType(NeoEndpointType.CRUD)
+          .requestBody(body)
+          // no recordId → CRUD create path
+          .build();
+
+      GoodsReceiptHeaderHandler h = new GoodsReceiptHeaderHandler();
+      h.setPostingService(null);
+      h.handle(ctx);
+
+      // After handle() the body should have been enriched
+      assertEquals("loc-ship-1", body.optString("partnerAddress", null));
+    }
+  }
+
+  /**
+   * On a CRUD POST without a body the handler skips address injection silently.
+   */
+  @Test
+  public void handle_crudPostNullBody_doesNotThrow() {
+    GoodsReceiptHeaderHandler h = new GoodsReceiptHeaderHandler();
+    h.setPostingService(null);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD)
+        // requestBody defaults to null
+        .build();
+
+    // Must not throw
+    h.handle(ctx);
+  }
+
+  /**
+   * On a CRUD POST where the body already contains partnerAddress the handler
+   * must not overwrite it.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void handle_crudPostBodyAlreadyHasPartnerAddress_doesNotOverwrite() throws Exception {
+    GoodsReceiptHeaderHandler h = new GoodsReceiptHeaderHandler();
+    h.setPostingService(null);
+
+    JSONObject body = new JSONObject()
+        .put("businessPartner", "bp-456")
+        .put("partnerAddress", "existing-loc");
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD)
+        .requestBody(body)
+        .build();
+
+    // No OBDal mock needed — the guard `body.has("partnerAddress")` must short-circuit
+    h.handle(ctx);
+
+    assertEquals("partnerAddress must not be overwritten", "existing-loc",
+        body.optString("partnerAddress", null));
+  }
+
+  // ── afterHandle — single record non-zero invoiceStatus ───────────────────────
+
+  /**
+   * Verifies that a non-zero invoice status returned by the DB query is written
+   * into the single-record enrichment output.
+   */
+  @Test
+  public void afterHandle_singleRecord_nonZeroInvoiceStatusIsPopulated() throws Exception {
+    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
+
+    JSONObject rec = new JSONObject().put("id", "r-nz");
+    JSONArray data = new JSONArray().put(rec);
+    JSONObject body = new JSONObject()
+        .put("response", new JSONObject().put("data", data));
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .recordId("r-nz")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      OBDal roInst = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(roInst);
+
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      // First PS call = computeInvoiceStatus (returns 50), second = computeReturnStatus (returns 0)
+      when(rs.next()).thenReturn(true, true, false);
+      when(rs.getInt(1)).thenReturn(50, 0);
+      when(rs.getInt(2)).thenReturn(50);
+
+      Connection roConn = mock(Connection.class);
+      PreparedStatement roPs = mock(PreparedStatement.class);
+      ResultSet roRs = mock(ResultSet.class);
+      when(roInst.getConnection()).thenReturn(roConn);
+      when(roConn.prepareStatement(anyString())).thenReturn(roPs);
+      when(roPs.executeQuery()).thenReturn(roRs);
+      when(roRs.next()).thenReturn(false);
+
+      NeoResponse result = handler.afterHandle(ctx);
+      assertNotNull(result);
+      JSONObject enriched = result.getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      // invoiceStatus must be populated (non-zero)
+      assertNotNull(enriched.opt("invoiceStatus"));
+    }
+  }
+
+  // ── afterHandle — batch mode, record without id in data ──────────────────────
+
+  /**
+   * Records in batch mode that do not have an "id" field must be silently skipped
+   * (no invoiceStatus written), and the overall response must still be 200.
+   */
+  @Test
+  public void afterHandle_batchMode_recordWithoutIdIsSkipped() throws Exception {
+    GoodsReceiptHeaderHandler handler = new GoodsReceiptHeaderHandler();
+
+    JSONObject recWithoutId = new JSONObject().put("documentNo", "DOC-001");
+    JSONArray data = new JSONArray().put(recWithoutId);
+    JSONObject body = new JSONObject()
+        .put("response", new JSONObject().put("data", data));
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false); // empty result set
+
+      NeoResponse result = handler.afterHandle(ctx);
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      // Record without id must not have invoiceStatus injected
+      assertNull("invoiceStatus must not be set on a record without id",
+          recWithoutId.opt("invoiceStatus"));
+    }
   }
 }
