@@ -60,6 +60,17 @@ final class McpConstants {
   /** Spec name that backs the widget handler entities (type W, no AD_Tab). */
   static final String SPEC_DASHBOARD = "dashboard";
 
+  // Widget enum keys / backing dashboard entity names (gap G4, ETP-4284).
+  static final String WIDGET_KPIS = "kpis";
+  static final String WIDGET_REVENUE_TREND = "revenue-trend";
+  static final String WIDGET_PENDING_TASKS = "pending-tasks";
+  static final String WIDGET_ACTIVITY = "activity";
+  static final String WIDGET_RECENT_INVOICES = "recent-invoices";
+  static final String WIDGET_BEST_PRODUCTS = "best-products";
+  static final String WIDGET_BEST_SELLERS = "best-sellers";
+  static final String WIDGET_PENDING_AMOUNTS = "pending-amounts";
+  static final String WIDGET_TOP_CLIENTS = "top-clients";
+
   private McpConstants() {
   }
 }

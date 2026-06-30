@@ -304,30 +304,30 @@ public class ToolRegistry {
   static final Map<String, String> WIDGET_DESCRIPTION_BY_NAME;
   static {
     Map<String, String> entities = new LinkedHashMap<>();
-    entities.put("kpis", "kpis");
-    entities.put("revenue-trend", "trends");
-    entities.put("pending-tasks", "pending-tasks");
-    entities.put("activity", "activity");
-    entities.put("recent-invoices", "recent-invoices");
-    entities.put("best-products", "best-products");
-    entities.put("best-sellers", "best-sellers");
-    entities.put("pending-amounts", "pending-amounts");
-    entities.put("top-clients", "top-clients");
+    entities.put(McpConstants.WIDGET_KPIS, McpConstants.WIDGET_KPIS);
+    entities.put(McpConstants.WIDGET_REVENUE_TREND, "trends");
+    entities.put(McpConstants.WIDGET_PENDING_TASKS, McpConstants.WIDGET_PENDING_TASKS);
+    entities.put(McpConstants.WIDGET_ACTIVITY, McpConstants.WIDGET_ACTIVITY);
+    entities.put(McpConstants.WIDGET_RECENT_INVOICES, McpConstants.WIDGET_RECENT_INVOICES);
+    entities.put(McpConstants.WIDGET_BEST_PRODUCTS, McpConstants.WIDGET_BEST_PRODUCTS);
+    entities.put(McpConstants.WIDGET_BEST_SELLERS, McpConstants.WIDGET_BEST_SELLERS);
+    entities.put(McpConstants.WIDGET_PENDING_AMOUNTS, McpConstants.WIDGET_PENDING_AMOUNTS);
+    entities.put(McpConstants.WIDGET_TOP_CLIENTS, McpConstants.WIDGET_TOP_CLIENTS);
     WIDGET_ENTITY_BY_NAME = java.util.Collections.unmodifiableMap(entities);
 
     Map<String, String> desc = new LinkedHashMap<>();
-    desc.put("kpis", "Summary KPI cards: revenue this month, pending invoices, and "
+    desc.put(McpConstants.WIDGET_KPIS, "Summary KPI cards: revenue this month, pending invoices, and "
         + "other headline business metrics with trend percentages.");
-    desc.put("revenue-trend", "Monthly revenue series (parallel labels/values arrays) "
+    desc.put(McpConstants.WIDGET_REVENUE_TREND, "Monthly revenue series (parallel labels/values arrays) "
         + "for charting the revenue trend over the last 12 months.");
-    desc.put("pending-tasks", "Actionable pending tasks and alerts (overdue invoices, "
+    desc.put(McpConstants.WIDGET_PENDING_TASKS, "Actionable pending tasks and alerts (overdue invoices, "
         + "pending receptions/shipments, collections/payments due).");
-    desc.put("activity", "Recent activity feed (invoices paid, documents posted, notes).");
-    desc.put("recent-invoices", "Most recent completed sales invoices (newest first).");
-    desc.put("best-products", "Best-performing products by revenue/quantity.");
-    desc.put("best-sellers", "Best-selling sales reps / sellers ranking.");
-    desc.put("pending-amounts", "Outstanding receivable/payable amounts pending collection.");
-    desc.put("top-clients", "Top clients ranked by revenue.");
+    desc.put(McpConstants.WIDGET_ACTIVITY, "Recent activity feed (invoices paid, documents posted, notes).");
+    desc.put(McpConstants.WIDGET_RECENT_INVOICES, "Most recent completed sales invoices (newest first).");
+    desc.put(McpConstants.WIDGET_BEST_PRODUCTS, "Best-performing products by revenue/quantity.");
+    desc.put(McpConstants.WIDGET_BEST_SELLERS, "Best-selling sales reps / sellers ranking.");
+    desc.put(McpConstants.WIDGET_PENDING_AMOUNTS, "Outstanding receivable/payable amounts pending collection.");
+    desc.put(McpConstants.WIDGET_TOP_CLIENTS, "Top clients ranked by revenue.");
     WIDGET_DESCRIPTION_BY_NAME = java.util.Collections.unmodifiableMap(desc);
   }
 
