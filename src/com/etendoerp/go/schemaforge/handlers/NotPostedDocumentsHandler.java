@@ -19,7 +19,7 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.LinkedHashSet;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -98,47 +98,60 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   };
 
   /**
-   * Document type codes (AD_Ref_List.value for reference {@link #DOCUMENT_TYPE_REF_ID}) that are
-   * shown in the UI filter dropdown.  Only codes whose backing Etendo table has accounting
-   * configured AND where bulk posting actually works in a standard installation are listed.
+   * Maps each document type code (AD_Ref_List.value for {@link #DOCUMENT_TYPE_REF_ID}) to the
+   * {@code AD_Table_ID} of its backing Etendo table.
    *
-   * <p><b>To enable a document type:</b> add its code here and verify it appears in
-   * {@code c_acctschema_table} with {@code isactive='Y'}.
+   * <p>This map drives the dynamic document-type filter: at request time
+   * {@link #refListDocumentTypes()} queries {@code c_acctschema_table} for all tables with
+   * {@code isactive='Y'}, and only shows codes whose table appears in that result — meaning any
+   * new document type whose module registers an accounting schema entry is picked up
+   * automatically, with no code change required here.
    *
-   * <p><b>To disable a document type:</b> remove its code from this set.
-   *
-   * <p>Full accounting-support matrix and rationale: see
-   * {@code docs/generated-custom-windows/not-posted-documents.md}
-   * §"Document type accounting support".
-   *
-   * <p><b>Current exclusions</b> (see doc for full reasoning):
-   * <ul>
-   *   <li>{@code BS, PIN, POT, R} — APRM module disables direct posting on these tables
-   *       ({@code FIN_BankStatement}, {@code FIN_Payment}, {@code FIN_Reconciliation});
-   *       accounting flows through {@code FIN_Finacc_Transaction} ({@code T}) instead.</li>
-   *   <li>{@code IC} — {@code M_Internal_Consumption} has no {@code c_acctschema_table} entry.</li>
-   *   <li>{@code WE} — {@code S_TimeExpense} has no {@code c_acctschema_table} entry.</li>
-   *   <li>{@code DD} — {@code FIN_Doubtful_Debt}: in {@code c_acctschema_table} but 0 documents
-   *       in this installation; enable when/if activated.</li>
-   *   <li>{@code CA} — {@code M_CostAdjustment}: same as DD.</li>
-   * </ul>
+   * <p>Source: {@code SELECT tablename, ad_table_id FROM ad_table WHERE tablename IN (...)}.
+   * Full matrix: {@code docs/generated-custom-windows/not-posted-documents.md}.
    */
-  static final Set<String> ENABLED_DOCUMENT_TYPE_CODES = new LinkedHashSet<>(Arrays.asList(
-      "A",    // Amortization             → A_Amortization
-      "BMP",  // Bill of Mat. Production  → M_Production
-      "GLJ",  // G/L Journal              → GL_Journal
-      "GR",   // Goods Receipt            → M_InOut
-      "GS",   // Goods Shipment           → M_InOut
-      "INV",  // Inventory                → M_Inventory
-      "LC",   // Landed Cost              → M_LandedCost
-      "LCC",  // Landed Cost Cost         → M_LC_Cost
-      "MI",   // Matched Invoices         → M_MatchInv
-      "M",    // Movements                → M_Movement
-      "PI",   // Purchase Invoice         → C_Invoice
-      "RMR",  // Return Material Receipt  → M_InOut
-      "RVS",  // Return to Vendor Ship.   → M_InOut
-      "SI",   // Sales Invoice            → C_Invoice
-      "T"     // Transaction              → FIN_Finacc_Transaction
+  private static final Map<String, String> DOCUMENT_TYPE_CODE_TO_TABLE_ID = new HashMap<>();
+
+  static {
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("A",   "800060");                                // A_Amortization
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("BMP", "325");                                   // M_Production
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("BS",  "D4C23A17190649E7B78F55A05AF3438C");      // FIN_BankStatement
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("CA",  "D022B92163074E5E82449C8E0B5AFDF6");      // M_CostAdjustment
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("DD",  "30721072789F410E9606D2235CB2A226");       // FIN_Doubtful_Debt
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("GLJ", "224");                                   // GL_Journal
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("GR",  "319");                                   // M_InOut
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("GS",  "319");                                   // M_InOut
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("IC",  "800168");                                // M_Internal_Consumption
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("INV", "321");                                   // M_Inventory
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("LC",  "082F967CDF7245EB9A150941F326C45C");      // M_LandedCost
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("LCC", "55A984C314FD4C4FB5E7C32DE36BB07B");      // M_LC_Cost
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("MI",  "472");                                   // M_MatchInv
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("M",   "323");                                   // M_Movement
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("PIN", "D1A97202E832470285C9B1EB026D54E2");      // FIN_Payment
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("POT", "D1A97202E832470285C9B1EB026D54E2");      // FIN_Payment
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("PI",  "318");                                   // C_Invoice
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("R",   "B1B7075C46934F0A9FD4C4D0F1457B42");      // FIN_Reconciliation
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("RMR", "319");                                   // M_InOut
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("RVS", "319");                                   // M_InOut
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("SI",  "318");                                   // C_Invoice
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("T",   "4D8C3B3C31D1410DA046140C9F024D17");      // FIN_Finacc_Transaction
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("WE",  "486");                                   // S_TimeExpense
+  }
+
+  /**
+   * Document type codes that are <em>never</em> shown in the filter dropdown, regardless of
+   * {@code c_acctschema_table} state. These tables exist in the accounting schema but the APRM
+   * module intentionally disables direct bulk-posting on them ({@code POSTED = 'D'} on all
+   * documents) — accounting flows through {@code FIN_Finacc_Transaction} ({@code T}) instead.
+   *
+   * <p>To re-enable any of these (e.g. if APRM posting is later reconfigured), remove its code
+   * from this set.
+   */
+  private static final Set<String> APRM_DISABLED_TYPES = new HashSet<>(Arrays.asList(
+      "BS",   // FIN_BankStatement  — in c_acctschema_table but all docs posted='D'
+      "PIN",  // FIN_Payment        — in c_acctschema_table but 99.9% posted='D'
+      "POT",  // FIN_Payment        — same as PIN
+      "R"     // FIN_Reconciliation — in c_acctschema_table but ~89% posted='D'
   ));
 
   private static final String KEY_TABLE_ID = "tableId";
@@ -247,22 +260,45 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     return NeoResponse.ok(body);
   }
 
-  /** Returns only the document types in {@link #ENABLED_DOCUMENT_TYPE_CODES}, in that order. */
+  /**
+   * Returns document types from {@link #DOCUMENT_TYPE_REF_ID} whose backing table is actively
+   * configured for accounting ({@code c_acctschema_table.isactive = 'Y'}), excluding
+   * {@link #APRM_DISABLED_TYPES}. The check is dynamic — new document types whose modules
+   * register a {@code c_acctschema_table} entry are picked up automatically.
+   */
   private JSONArray refListDocumentTypes() throws Exception {
+    Set<String> accountedTableIds = getTablesWithActiveAccounting();
     JSONArray options = new JSONArray();
     Reference ref = OBDal.getInstance().get(Reference.class, DOCUMENT_TYPE_REF_ID);
     if (ref == null) return options;
     String lang = OBContext.getOBContext().getLanguage().getLanguage();
     for (org.openbravo.model.ad.domain.List item : ref.getADListList()) {
       if (!item.isActive()) continue;
-      if (!ENABLED_DOCUMENT_TYPE_CODES.contains(item.getSearchKey())) continue;
+      String code = item.getSearchKey();
+      if (APRM_DISABLED_TYPES.contains(code)) continue;
+      String tableId = DOCUMENT_TYPE_CODE_TO_TABLE_ID.get(code);
+      if (tableId == null || !accountedTableIds.contains(tableId)) continue;
       JSONObject opt = new JSONObject();
-      opt.put("value", item.getSearchKey());
+      opt.put("value", code);
       String label = getTranslatedName(item, lang);
       opt.put("label", label != null ? label : item.getName());
       options.put(opt);
     }
     return options;
+  }
+
+  /** Returns the set of {@code AD_Table_ID} values that have at least one active accounting schema entry. */
+  @SuppressWarnings("unchecked")
+  private Set<String> getTablesWithActiveAccounting() {
+    List<Object> rows = OBDal.getInstance().getSession()
+        .createNativeQuery(
+            "SELECT DISTINCT ad_table_id FROM c_acctschema_table WHERE isactive = 'Y'")
+        .list();
+    Set<String> ids = new HashSet<>();
+    for (Object row : rows) {
+      if (row instanceof String) ids.add((String) row);
+    }
+    return ids;
   }
 
   private JSONArray buildAccountingStatusOptions() throws Exception {
