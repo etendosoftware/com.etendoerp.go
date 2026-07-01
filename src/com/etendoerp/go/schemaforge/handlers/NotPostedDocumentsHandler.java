@@ -290,7 +290,7 @@ public class NotPostedDocumentsHandler implements NeoHandler {
    * {@link #APRM_DISABLED_TYPES}. The check is dynamic — new document types whose modules
    * register a {@code c_acctschema_table} entry are picked up automatically.
    */
-  private JSONArray refListDocumentTypes() throws Exception {
+  JSONArray refListDocumentTypes() throws Exception {
     Set<String> accountedTableIds = getTablesWithActiveAccounting();
     JSONArray options = new JSONArray();
     Reference ref = OBDal.getInstance().get(Reference.class, DOCUMENT_TYPE_REF_ID);
@@ -367,28 +367,40 @@ public class NotPostedDocumentsHandler implements NeoHandler {
 
     JSONArray array = new JSONArray();
     for (Map<String, Object> row : rows) {
-      Object docType = row.get("documentType");
-      String tableId = docType instanceof String
-          ? DOCUMENT_TYPE_TO_TABLE_ID.get(docType.toString()) : null;
-
-      // Drop APRM-managed types: they appear with posted='N' before the BG process runs,
-      // but direct bulk-posting on them is disabled by APRM design. Posting must go through
-      // FIN_Finacc_Transaction; attempting it here always fails.
-      if (tableId != null && APRM_DISABLED_TABLE_IDS.contains(tableId)) {
-        continue;
+      JSONObject j = buildRow(row);
+      if (j != null) {
+        array.put(j);
       }
-
-      JSONObject j = new JSONObject();
-      for (Map.Entry<String, Object> e : row.entrySet()) {
-        j.put(e.getKey(), e.getValue() != null ? e.getValue() : JSONObject.NULL);
-      }
-      j.put(KEY_TABLE_ID, tableId != null ? tableId : JSONObject.NULL);
-      array.put(j);
     }
     JSONObject body = new JSONObject();
     body.put("rows", array);
     body.put("total", array.length());
     return NeoResponse.ok(body);
+  }
+
+  /**
+   * Converts one raw {@link NoPostedDocumentDS} row into the JSON shape served to the frontend,
+   * enriched with {@code tableId}. Returns {@code null} when the row's document type is
+   * APRM-managed ({@link #APRM_DISABLED_TABLE_IDS}) — such rows must never reach the frontend,
+   * since direct bulk-posting on them always fails by APRM design.
+   *
+   * <p>Package-private so it can be unit-tested without a live {@link NoPostedDocumentDS}.
+   */
+  JSONObject buildRow(Map<String, Object> row) throws Exception {
+    Object docType = row.get("documentType");
+    String tableId = docType instanceof String
+        ? DOCUMENT_TYPE_TO_TABLE_ID.get(docType.toString()) : null;
+
+    if (tableId != null && APRM_DISABLED_TABLE_IDS.contains(tableId)) {
+      return null;
+    }
+
+    JSONObject j = new JSONObject();
+    for (Map.Entry<String, Object> e : row.entrySet()) {
+      j.put(e.getKey(), e.getValue() != null ? e.getValue() : JSONObject.NULL);
+    }
+    j.put(KEY_TABLE_ID, tableId != null ? tableId : JSONObject.NULL);
+    return j;
   }
 
   /**
@@ -411,7 +423,7 @@ public class NotPostedDocumentsHandler implements NeoHandler {
    *   <li>{@code DateTo}            ← {@code dateTo}</li>
    * </ul>
    */
-  private Map<String, String> buildDsParams(Map<String, String> params) throws Exception {
+  Map<String, String> buildDsParams(Map<String, String> params) throws Exception {
     Map<String, String> dsParams = new HashMap<>();
     dsParams.put("_org", OBContext.getOBContext().getCurrentOrganization().getId());
 
