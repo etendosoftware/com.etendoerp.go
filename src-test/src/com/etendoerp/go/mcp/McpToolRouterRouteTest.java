@@ -45,6 +45,7 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -124,6 +125,13 @@ class McpToolRouterRouteTest {
     obContextMock.when(() -> OBContext.setAdminMode()).thenAnswer(inv -> null);
     obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
 
+    // The router now delegates argument validation to the (statically mocked) support
+    // class. Run the REAL validation logic so the "Missing arguments" / "Missing required
+    // argument: <key>" assertions stay meaningful. validateArgs is a static, side-effect-free
+    // method (throws IllegalArgumentException) so thenCallRealMethod is safe here.
+    supportMock.when(() -> McpToolRouterSupport.validateArgs(any(), any(String[].class)))
+        .thenCallRealMethod();
+
     router = new McpToolRouter();
   }
 
@@ -173,20 +181,27 @@ class McpToolRouterRouteTest {
     return tab;
   }
 
-  @SuppressWarnings("unchecked")
+  /**
+   * Prime the (statically mocked) support class so spec resolution returns {@code spec}.
+   * The router delegates BOTH {@code authorizeSpecAccess} and every handler's spec lookup
+   * to {@link McpToolRouterSupport#findActiveSpecByName}, so stubbing that one method covers
+   * the whole route. {@code hasSpecAccess} is also stubbed to grant access by default.
+   */
   private void setupSpecLookup(SFSpec spec) {
-    OBCriteria<SFSpec> specCriteria = mock(OBCriteria.class);
-    when(mockOBDal.createCriteria(SFSpec.class)).thenReturn(specCriteria);
-    when(specCriteria.list()).thenReturn(List.of(spec));
+    supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
+        .thenReturn(spec);
     supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString()))
         .thenReturn(true);
   }
 
-  @SuppressWarnings("unchecked")
+  /**
+   * Prime the (statically mocked) support class so entity resolution returns {@code entity}
+   * and the entity's AD_Tab returns {@code tab}. Mirrors what the old OBDal-based criteria
+   * setup produced before the router delegated entity lookup to the support class.
+   */
   private void setupEntityLookup(SFEntity entity, Tab tab) {
-    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
-    when(mockOBDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
-    when(entityCriteria.list()).thenReturn(List.of(entity));
+    supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
+        .thenReturn(entity);
     when(entity.getADTab()).thenReturn(tab);
   }
 
@@ -634,11 +649,11 @@ class McpToolRouterRouteTest {
 
     @Test
     @DisplayName("unknown spec returns error")
-    @SuppressWarnings("unchecked")
     void unknownSpecReturnsError() throws Exception {
-      OBCriteria<SFSpec> specCriteria = mock(OBCriteria.class);
-      when(mockOBDal.createCriteria(SFSpec.class)).thenReturn(specCriteria);
-      when(specCriteria.list()).thenReturn(Collections.emptyList());
+      // The router delegates spec resolution to the support class, which throws
+      // OBException("Spec not found: <name>") when no active spec matches.
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
+          .thenThrow(new OBException("Spec not found: " + SPEC_NAME));
 
       JSONObject args = buildCrudArgs();
       JSONObject result = router.route("neo_list", args, READ_SCOPES);
@@ -650,14 +665,13 @@ class McpToolRouterRouteTest {
 
     @Test
     @DisplayName("unknown entity returns error")
-    @SuppressWarnings("unchecked")
     void unknownEntityReturnsError() throws Exception {
       SFSpec spec = mockSpec();
       setupSpecLookup(spec);
 
-      OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
-      when(mockOBDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
-      when(entityCriteria.list()).thenReturn(Collections.emptyList());
+      // Spec resolves, but entity resolution throws OBException("Entity not found: <name>").
+      supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
+          .thenThrow(new OBException("Entity not found: " + ENTITY_NAME));
 
       JSONObject args = buildCrudArgs();
       JSONObject result = router.route("neo_list", args, READ_SCOPES);
@@ -669,15 +683,15 @@ class McpToolRouterRouteTest {
 
     @Test
     @DisplayName("entity without AD_Tab returns error")
-    @SuppressWarnings("unchecked")
     void entityWithoutTabReturnsError() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
       setupSpecLookup(spec);
 
-      OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
-      when(mockOBDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
-      when(entityCriteria.list()).thenReturn(List.of(entity));
+      // Entity resolves but has no linked AD_Tab. The router's own getAdTabOrThrow
+      // (still private in McpToolRouter) raises "No AD_Tab linked to entity: <name>".
+      supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
+          .thenReturn(entity);
       when(entity.getADTab()).thenReturn(null);
 
       JSONObject args = buildCrudArgs();
@@ -753,7 +767,10 @@ class McpToolRouterRouteTest {
     @Test
     @DisplayName("unexpected exception is caught and returned as error content")
     void unexpectedExceptionReturnedAsError() throws Exception {
-      when(mockOBDal.createCriteria(SFSpec.class))
+      // An unexpected DAL failure now surfaces through the delegated spec lookup
+      // (authorizeSpecAccess → findActiveSpecByName). The router's catch-all must
+      // wrap it as error content.
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
           .thenThrow(new RuntimeException("Database connection lost"));
 
       JSONObject args = buildCrudArgs();
@@ -767,7 +784,7 @@ class McpToolRouterRouteTest {
     @Test
     @DisplayName("exception inside adminMode still returns error content (finally restores mode)")
     void exceptionInsideAdminModeReturnsError() throws Exception {
-      when(mockOBDal.createCriteria(SFSpec.class))
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
           .thenThrow(new RuntimeException("fail"));
 
       JSONObject args = buildCrudArgs();
