@@ -220,12 +220,24 @@ final class PaymentRegistrationService {
         crit.addOrderBy(FIN_FinancialAccount.PROPERTY_NAME, true);
 
         String allowProp = allowProperty(isReceipt);
+        Currency invoiceCurrency = invoice.getCurrency();
 
         JSONArray arr = new JSONArray();
         for (FIN_FinancialAccount acc : crit.list()) {
-          appendAccountItem(arr, acc, allowProp);
+          appendAccountItem(arr, acc, allowProp, invoiceCurrency);
         }
-        return itemsResponse(arr);
+        JSONObject resp = new JSONObject();
+        resp.put(KEY_ITEMS, arr);
+        resp.put(KEY_TOTAL_COUNT, arr.length());
+        FIN_PaymentMethod invoiceMethod = resolveInvoiceMethod(invoice);
+        if (invoiceMethod != null) {
+          resp.put("defaultMethodId", invoiceMethod.getId());
+        }
+        String bpAccountId = businessPartnerAccountId(invoice, isReceipt);
+        if (bpAccountId != null) {
+          resp.put("bpPreferredAccountId", bpAccountId);
+        }
+        return new NeoResponse(200, resp);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -236,14 +248,20 @@ final class PaymentRegistrationService {
     }
   }
 
-  /** Appends one account item if it has at least one valid payment method for the direction. */
-  private static void appendAccountItem(JSONArray arr, FIN_FinancialAccount acc, String allowProp)
-      throws Exception {
+  /**
+   * Appends one account item if it has at least one valid payment method for the direction
+   * and its currency matches the invoice's (accounts with no currency are always kept).
+   */
+  private static void appendAccountItem(JSONArray arr, FIN_FinancialAccount acc, String allowProp,
+      Currency invoiceCurrency) throws Exception {
+    if (acc.getCurrency() != null && invoiceCurrency != null
+        && !acc.getCurrency().getId().equals(invoiceCurrency.getId())) {
+      return;
+    }
     OBCriteria<FinAccPaymentMethod> methodCrit = OBDal.getInstance()
         .createCriteria(FinAccPaymentMethod.class);
     methodCrit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, acc));
     methodCrit.add(Restrictions.eq(allowProp, Boolean.TRUE));
-    methodCrit.setMaxResults(1);
     List<FinAccPaymentMethod> methods = methodCrit.list();
     if (methods.isEmpty()) {
       return;
@@ -255,11 +273,40 @@ final class PaymentRegistrationService {
       item.put("currency", acc.getCurrency().getISOCode());
       item.put("currencyId", acc.getCurrency().getId());
     }
+    JSONArray methodIds = new JSONArray();
+    JSONArray defaultForMethodIds = new JSONArray();
+    for (FinAccPaymentMethod fapm : methods) {
+      if (fapm.getPaymentMethod() == null) {
+        continue;
+      }
+      methodIds.put(fapm.getPaymentMethod().getId());
+      if (Boolean.TRUE.equals(fapm.isDefault())) {
+        defaultForMethodIds.put(fapm.getPaymentMethod().getId());
+      }
+    }
+    item.put("paymentMethodIds", methodIds);
+    item.put("defaultForMethodIds", defaultForMethodIds);
     FIN_PaymentMethod defaultMethod = methods.get(0).getPaymentMethod();
     if (defaultMethod != null) {
       item.put("defaultPaymentMethod", defaultMethod.getName());
     }
     arr.put(item);
+  }
+
+  /**
+   * The business partner's preferred financial account for the given direction
+   * (its "Account" for receipts, "PO Financial Account" for payments), mirroring
+   * Classic's {@code AddPaymentDefaultValuesHandler} priority before the
+   * {@code FinAccPaymentMethod.default} flag.
+   */
+  private static String businessPartnerAccountId(Invoice invoice, boolean isReceipt) {
+    if (invoice.getBusinessPartner() == null) {
+      return null;
+    }
+    FIN_FinancialAccount bpAccount = isReceipt
+        ? invoice.getBusinessPartner().getAccount()
+        : invoice.getBusinessPartner().getPOFinancialAccount();
+    return bpAccount != null ? bpAccount.getId() : null;
   }
 
   // ─── PAYMENTS: list payments linked to an invoice ──────────────────────────
@@ -759,10 +806,7 @@ final class PaymentRegistrationService {
   private static FIN_PaymentMethod resolvePaymentMethod(FIN_FinancialAccount account,
       Invoice invoice, boolean isReceipt) {
 
-    FIN_PaymentMethod invoiceMethod = invoice.getPaymentMethod();
-    if (invoiceMethod == null && invoice.getBusinessPartner() != null) {
-      invoiceMethod = invoice.getBusinessPartner().getPaymentMethod();
-    }
+    FIN_PaymentMethod invoiceMethod = resolveInvoiceMethod(invoice);
 
     String allowProp = allowProperty(isReceipt);
     if (invoiceMethod != null && isMethodAllowed(account, invoiceMethod, allowProp)) {
@@ -776,6 +820,15 @@ final class PaymentRegistrationService {
     fallback.setMaxResults(1);
     List<FinAccPaymentMethod> methods = fallback.list();
     return methods.isEmpty() ? null : methods.get(0).getPaymentMethod();
+  }
+
+  /** The invoice's own payment method, falling back to its business partner's. */
+  private static FIN_PaymentMethod resolveInvoiceMethod(Invoice invoice) {
+    FIN_PaymentMethod invoiceMethod = invoice.getPaymentMethod();
+    if (invoiceMethod == null && invoice.getBusinessPartner() != null) {
+      invoiceMethod = invoice.getBusinessPartner().getPaymentMethod();
+    }
+    return invoiceMethod;
   }
 
   /** True when {@code method} is configured for {@code account} in the given direction. */
