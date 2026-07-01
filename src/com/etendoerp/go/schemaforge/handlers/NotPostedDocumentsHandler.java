@@ -110,6 +110,8 @@ public class NotPostedDocumentsHandler implements NeoHandler {
    * <p>Source: {@code SELECT tablename, ad_table_id FROM ad_table WHERE tablename IN (...)}.
    * Full matrix: {@code docs/generated-custom-windows/not-posted-documents.md}.
    */
+  private static final String FIN_PAYMENT_TABLE_ID = "D1A97202E832470285C9B1EB026D54E2";
+
   private static final Map<String, String> DOCUMENT_TYPE_CODE_TO_TABLE_ID = new HashMap<>();
 
   static {
@@ -127,8 +129,8 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("LCC", "55A984C314FD4C4FB5E7C32DE36BB07B");      // M_LC_Cost
     DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("MI",  "472");                                   // M_MatchInv
     DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("M",   "323");                                   // M_Movement
-    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("PIN", "D1A97202E832470285C9B1EB026D54E2");      // FIN_Payment
-    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("POT", "D1A97202E832470285C9B1EB026D54E2");      // FIN_Payment
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("PIN", FIN_PAYMENT_TABLE_ID);                    // FIN_Payment
+    DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("POT", FIN_PAYMENT_TABLE_ID);                    // FIN_Payment
     DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("PI",  "318");                                   // C_Invoice
     DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("R",   "B1B7075C46934F0A9FD4C4D0F1457B42");      // FIN_Reconciliation
     DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("RMR", "319");                                   // M_InOut
@@ -158,6 +160,8 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   private static final String KEY_ACCOUNTING_STATUS = "accountingStatus";
   private static final String KEY_RECORD_ID = "recordId";
   private static final String KEY_SUCCESS = "success";
+  private static final String KEY_VALUE = "value";
+  private static final String KEY_LABEL = "label";
 
   /**
    * Maps accounting status search keys to their {@code AD_Ref_List.ad_ref_list_id} (UUID).
@@ -222,10 +226,8 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     DOCUMENT_TYPE_TO_TABLE_ID.put("Amortization", "800060");    // A_Amortization
     DOCUMENT_TYPE_TO_TABLE_ID.put("GL Journal", "224");         // GL_Journal
     DOCUMENT_TYPE_TO_TABLE_ID.put("Inventory", "321");          // M_Inventory
-    // APRM types — included so tableId resolves for the APRM_DISABLED_TABLE_IDS filter below;
-    // rows with these tableIds are dropped in buildDocumentGrid before reaching the frontend.
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Payment In",     "D1A97202E832470285C9B1EB026D54E2"); // FIN_Payment
-    DOCUMENT_TYPE_TO_TABLE_ID.put("Payment Out",    "D1A97202E832470285C9B1EB026D54E2"); // FIN_Payment
+    DOCUMENT_TYPE_TO_TABLE_ID.put("Payment In",     FIN_PAYMENT_TABLE_ID);               // FIN_Payment
+    DOCUMENT_TYPE_TO_TABLE_ID.put("Payment Out",    FIN_PAYMENT_TABLE_ID);               // FIN_Payment
     DOCUMENT_TYPE_TO_TABLE_ID.put("Bank Statement", "D4C23A17190649E7B78F55A05AF3438C"); // FIN_BankStatement
     DOCUMENT_TYPE_TO_TABLE_ID.put("Reconciliation", "B1B7075C46934F0A9FD4C4D0F1457B42"); // FIN_Reconciliation
   }
@@ -295,16 +297,19 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     if (ref == null) return options;
     String lang = OBContext.getOBContext().getLanguage().getLanguage();
     for (org.openbravo.model.ad.domain.List item : ref.getADListList()) {
-      if (!item.isActive()) continue;
       String code = item.getSearchKey();
-      if (APRM_DISABLED_TYPES.contains(code)) continue;
       String tableId = DOCUMENT_TYPE_CODE_TO_TABLE_ID.get(code);
-      if (tableId == null || !accountedTableIds.contains(tableId)) continue;
-      JSONObject opt = new JSONObject();
-      opt.put("value", code);
-      String label = getTranslatedName(item, lang);
-      opt.put("label", label != null ? label : item.getName());
-      options.put(opt);
+      boolean enabled = item.isActive()
+          && !APRM_DISABLED_TYPES.contains(code)
+          && tableId != null
+          && accountedTableIds.contains(tableId);
+      if (enabled) {
+        JSONObject opt = new JSONObject();
+        opt.put(KEY_VALUE, code);
+        String label = getTranslatedName(item, lang);
+        opt.put(KEY_LABEL, label != null ? label : item.getName());
+        options.put(opt);
+      }
     }
     return options;
   }
@@ -329,8 +334,8 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     for (String[] opt : ACCOUNTING_STATUS_FILTER_OPTIONS) {
       String firstKey = opt[0].split(",")[0];
       JSONObject o = new JSONObject();
-      o.put("value", opt[0]);
-      o.put("label", labels.getOrDefault(firstKey, opt[1]));
+      o.put(KEY_VALUE, opt[0]);
+      o.put(KEY_LABEL, labels.getOrDefault(firstKey, opt[1]));
       arr.put(o);
     }
     return arr;
@@ -363,8 +368,8 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     JSONArray array = new JSONArray();
     for (Map<String, Object> row : rows) {
       Object docType = row.get("documentType");
-      String tableId = (docType instanceof String)
-          ? DOCUMENT_TYPE_TO_TABLE_ID.get((String) docType) : null;
+      String tableId = docType instanceof String
+          ? DOCUMENT_TYPE_TO_TABLE_ID.get(docType.toString()) : null;
 
       // Drop APRM-managed types: they appear with posted='N' before the BG process runs,
       // but direct bulk-posting on them is disabled by APRM design. Posting must go through
@@ -513,9 +518,9 @@ public class NotPostedDocumentsHandler implements NeoHandler {
         continue;
       }
       JSONObject opt = new JSONObject();
-      opt.put("value", item.getSearchKey());
+      opt.put(KEY_VALUE, item.getSearchKey());
       String label = getTranslatedName(item, lang);
-      opt.put("label", label != null ? label : item.getName());
+      opt.put(KEY_LABEL, label != null ? label : item.getName());
       options.put(opt);
     }
     return options;
