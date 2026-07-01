@@ -4,6 +4,9 @@ out/
 web/
 *.class
 
+# Local hook logs (pre-push / pre-commit)
+tmp/
+
 # IDE
 .idea/
 *.iml

@@ -10,8 +10,11 @@ FAIL="\033[31m✘\033[0m"
 GLOBAL_EXIT=0
 
 # ── 1. Record order (UUID ascending) ────────────────────────────
+# Mirror the CI workflow (.github/workflows/xml-order-check.yml), which validates
+# ALL sourcedata XMLs — not just ETGO_*. This catches out-of-order records in
+# shared dictionary files such as AD_COLUMN.xml and AD_ELEMENT.xml too.
 echo "── Record order ──"
-for xml_file in "$SD"/ETGO_*.xml; do
+for xml_file in "$SD"/*.xml; do
   [ -f "$xml_file" ] || continue
   basename="$(basename "$xml_file")"
 

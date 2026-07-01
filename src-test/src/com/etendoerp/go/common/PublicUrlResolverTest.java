@@ -19,18 +19,44 @@ package com.etendoerp.go.common;
 
 import static org.junit.Assert.assertEquals;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
+
+import java.util.Properties;
 
 import javax.servlet.http.HttpServletRequest;
 
 import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.base.session.OBPropertiesProvider;
 
 /** Tests public URL resolution for proxied OAuth2/MCP deployments. */
 public class PublicUrlResolverTest {
 
+  private MockedStatic<OBPropertiesProvider> propertiesMock;
+
+  /**
+   * Isolate the resolver from the ambient Openbravo.properties: the production
+   * {@code readProperty} falls back to {@code OBPropertiesProvider} when a System
+   * property is absent, so a developer's local config (e.g. {@code etgo.mcp.public.url})
+   * would otherwise leak into these assertions. Returning empty properties forces the
+   * tests to exercise only what they set via System properties / the request fallback.
+   */
+  @Before
+  public void mockOpenbravoProperties() {
+    OBPropertiesProvider provider = mock(OBPropertiesProvider.class);
+    when(provider.getOpenbravoProperties()).thenReturn(new Properties());
+    propertiesMock = mockStatic(OBPropertiesProvider.class);
+    propertiesMock.when(OBPropertiesProvider::getInstance).thenReturn(provider);
+  }
+
   @After
   public void clearProperties() {
+    if (propertiesMock != null) {
+      propertiesMock.close();
+    }
     System.clearProperty(PublicUrlResolver.MCP_PUBLIC_URL_PROPERTY);
     System.clearProperty(PublicUrlResolver.OAUTH2_PUBLIC_URL_PROPERTY);
     System.clearProperty(PublicUrlResolver.APP_BASE_URL_PROPERTY);

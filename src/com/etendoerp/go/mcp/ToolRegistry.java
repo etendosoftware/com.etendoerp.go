@@ -36,6 +36,7 @@ import org.openbravo.model.ad.ui.Window;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * Generates MCP tool definitions dynamically based on ETGO_SF_SPEC configuration
@@ -74,6 +75,10 @@ public class ToolRegistry {
     // Always add neo_discover if user can read
     if (permissions.canRead) {
       tools.add(buildDiscoverTool());
+      tools.add(buildDocsTool());
+      // neo_widget wraps the handler-backed business widgets (gap G4, ETP-4284). It is a
+      // built-in read tool, not gated on any accessible window spec.
+      tools.add(buildWidgetTool());
     }
 
     // Query all active specs
@@ -117,7 +122,11 @@ public class ToolRegistry {
         tools.add(buildProcessTool(spec.getName(), spec));
         return;
       }
-      if ("R".equals(specType) && hasProcessAccess(spec) && permissions.canReport) {
+      // A generate_ tool is emitted only for NEO-native callable report specs backed by a
+      // Java qualifier handler. Non-callable report specs get no tool and surface as
+      // not configured via neo discover.
+      if ("R".equals(specType) && permissions.canReport
+          && NeoReportCallability.isReportCallable(spec)) {
         tools.add(buildReportTool(spec.getName(), spec));
       }
     } catch (Exception e) {
@@ -126,6 +135,11 @@ public class ToolRegistry {
   }
 
   private void addWindowSpec(SFSpec spec, List<String> accessibleWindowSpecs) {
+    // The dashboard/widget spec is handler-backed (no AD_Tab) and is exposed via the
+    // neo_widget tool, so it must not pollute the CRUD spec enum (ETP-4284 / G4).
+    if (McpToolRouterSupport.isWidgetSpec(spec)) {
+      return;
+    }
     Window window = spec.getADWindow();
     if (window == null || NeoAccessUtils.hasWindowAccess(window.getId())) {
       accessibleWindowSpecs.add(spec.getName());
@@ -139,6 +153,12 @@ public class ToolRegistry {
 
   private void registerCrudTools(List<McpToolDefinition> tools, List<String> accessibleWindowSpecs,
       ScopePermissions permissions) {
+    // Register the amortization plan tool independently of window specs availability:
+    // it is a built-in endpoint that does not require a window spec to be accessible.
+    if (permissions.canProcess) {
+      tools.add(buildGenerateAmortizationPlanTool());
+    }
+
     if (accessibleWindowSpecs.isEmpty()) {
       return;
     }
@@ -154,7 +174,27 @@ public class ToolRegistry {
       tools.add(buildUpdateTool(accessibleWindowSpecs));
       tools.add(buildDeleteTool(accessibleWindowSpecs));
       tools.add(buildBatchTool());
+      tools.add(buildActionTool(accessibleWindowSpecs));
     }
+  }
+
+  // ── Amortization plan tool ─────────────────────────────────────────────
+
+  private McpToolDefinition buildGenerateAmortizationPlanTool() {
+    Map<String, Object> properties = new LinkedHashMap<>();
+    Map<String, Object> assetIdProp = new HashMap<>();
+    assetIdProp.put(McpConstants.KEY_DESCRIPTION,
+        "The ID of the asset to generate the amortization plan for");
+    assetIdProp.put("type", McpConstants.TYPE_STRING);
+    properties.put("assetId", assetIdProp);
+
+    return new McpToolDefinition(
+        McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN,
+        "Generate an amortization plan for an asset. Fires the native A_Asset_Post process "
+            + "and returns the resulting plan summary (periods, amounts, dates). "
+            + "The asset must be configured for depreciation and must not already have a plan.",
+        buildObjectSchema(properties, java.util.Arrays.asList("assetId"))
+    );
   }
 
   // ── Tool name resolution ──────────────────────────────────────────────
@@ -171,6 +211,11 @@ public class ToolRegistry {
    * @return the spec name, or null if not resolvable
    */
   public static String resolveSpecName(String toolName, org.codehaus.jettison.json.JSONObject arguments) {
+    // Static tools (e.g. docs) are not tied to any spec
+    if ("docs".equals(toolName)) {
+      return null;
+    }
+
     // CRUD tools carry spec in arguments
     if (isCrudTool(toolName)) {
       return arguments != null ? arguments.optString("spec", null) : null;
@@ -203,6 +248,9 @@ public class ToolRegistry {
       case "neo_defaults":
       case "neo_schema":
       case "neo_batch":
+      case "neo_action":
+      case McpConstants.TOOL_NEO_WIDGET:
+      case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
         return true;
       default:
         return false;
@@ -221,6 +269,96 @@ public class ToolRegistry {
             + "Returns spec names, types, entities, and available HTTP methods. "
             + "Use this first to discover what specs and entities are available.",
         schema);
+  }
+
+  // ── Docs tool (Context7 documentation lookup) ─────────────────────────
+
+  private McpToolDefinition buildDocsTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("topic", stringProp(
+        "Term/topic to search in the Etendo Go docs (e.g. 'finance', 'payment')."));
+    props.put("tokens", intProp(
+        "Approximate max size of the returned docs (default 5000, clamped to 500-20000)."));
+    props.put("type", stringProp(
+        "Response format: 'txt' (default) or 'json'."));
+
+    return new McpToolDefinition(
+        "docs",
+        "Search the Etendo Go documentation (etendosoftware/etendo-go-docs via Context7) "
+            + "for a given topic and return the relevant documentation text inline. "
+            + "Use this to look up how-tos, concepts, and reference material before "
+            + "answering questions about Etendo Go.",
+        buildObjectSchema(props, List.of("topic")));
+  }
+
+  // ── Widget tool (business widgets enum, gap G4) ───────────────────────
+
+  /**
+   * Canonical mapping of {@code neo_widget} enum value → backing {@code dashboard}
+   * spec entity name (whose {@code Java_Qualifier} resolves the {@code NeoHandler}).
+   * Single source of truth shared with {@link McpToolRouter#handleWidget}.
+   * Order is preserved for a stable enum/description listing.
+   */
+  static final Map<String, String> WIDGET_ENTITY_BY_NAME;
+  /** Per-widget semantic descriptions surfaced to the agent in the enum. */
+  static final Map<String, String> WIDGET_DESCRIPTION_BY_NAME;
+  static {
+    Map<String, String> entities = new LinkedHashMap<>();
+    entities.put(McpConstants.WIDGET_KPIS, McpConstants.WIDGET_KPIS);
+    entities.put(McpConstants.WIDGET_REVENUE_TREND, "trends");
+    entities.put(McpConstants.WIDGET_PENDING_TASKS, McpConstants.WIDGET_PENDING_TASKS);
+    entities.put(McpConstants.WIDGET_ACTIVITY, McpConstants.WIDGET_ACTIVITY);
+    entities.put(McpConstants.WIDGET_RECENT_INVOICES, McpConstants.WIDGET_RECENT_INVOICES);
+    entities.put(McpConstants.WIDGET_BEST_PRODUCTS, McpConstants.WIDGET_BEST_PRODUCTS);
+    entities.put(McpConstants.WIDGET_BEST_SELLERS, McpConstants.WIDGET_BEST_SELLERS);
+    entities.put(McpConstants.WIDGET_PENDING_AMOUNTS, McpConstants.WIDGET_PENDING_AMOUNTS);
+    entities.put(McpConstants.WIDGET_TOP_CLIENTS, McpConstants.WIDGET_TOP_CLIENTS);
+    WIDGET_ENTITY_BY_NAME = java.util.Collections.unmodifiableMap(entities);
+
+    Map<String, String> desc = new LinkedHashMap<>();
+    desc.put(McpConstants.WIDGET_KPIS, "Summary KPI cards: revenue this month, pending invoices, and "
+        + "other headline business metrics with trend percentages.");
+    desc.put(McpConstants.WIDGET_REVENUE_TREND, "Monthly revenue series (parallel labels/values arrays) "
+        + "for charting the revenue trend over the last 12 months.");
+    desc.put(McpConstants.WIDGET_PENDING_TASKS, "Actionable pending tasks and alerts (overdue invoices, "
+        + "pending receptions/shipments, collections/payments due).");
+    desc.put(McpConstants.WIDGET_ACTIVITY, "Recent activity feed (invoices paid, documents posted, notes).");
+    desc.put(McpConstants.WIDGET_RECENT_INVOICES, "Most recent completed sales invoices (newest first).");
+    desc.put(McpConstants.WIDGET_BEST_PRODUCTS, "Best-performing products by revenue/quantity.");
+    desc.put(McpConstants.WIDGET_BEST_SELLERS, "Best-selling sales reps / sellers ranking.");
+    desc.put(McpConstants.WIDGET_PENDING_AMOUNTS, "Outstanding receivable/payable amounts pending collection.");
+    desc.put(McpConstants.WIDGET_TOP_CLIENTS, "Top clients ranked by revenue.");
+    WIDGET_DESCRIPTION_BY_NAME = java.util.Collections.unmodifiableMap(desc);
+  }
+
+  /**
+   * Build the {@code neo_widget} tool: a single enum tool wrapping the 9 handler-backed
+   * business widgets (gap G4, ETP-4284). The enum value selects the widget; {@code params}
+   * is a free-form object forwarded to the handler (e.g. {@code {"range": "30d"}}).
+   */
+  private McpToolDefinition buildWidgetTool() {
+    StringBuilder enumDesc = new StringBuilder(
+        "Business widget to invoke. Available widgets:\n");
+    for (Map.Entry<String, String> e : WIDGET_DESCRIPTION_BY_NAME.entrySet()) {
+      enumDesc.append("- ").append(e.getKey()).append(": ").append(e.getValue()).append('\n');
+    }
+
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put(McpConstants.PARAM_WIDGET,
+        enumProp(enumDesc.toString(), new ArrayList<>(WIDGET_ENTITY_BY_NAME.keySet())));
+    props.put(McpConstants.PARAM_PARAMS, objectProp(
+        "Optional parameters forwarded to the widget. Most widgets accept "
+            + "'range' (e.g. '7d', '30d', '90d', '12m') to scope the period; "
+            + "omit for the widget's default window."));
+
+    return new McpToolDefinition(
+        McpConstants.TOOL_NEO_WIDGET,
+        "Get pre-computed business analytics from an Etendo Go dashboard widget "
+            + "(KPIs, revenue trend, pending tasks, activity, top clients, best sellers/products, "
+            + "recent invoices, pending amounts). Returns the widget's JSON payload "
+            + "{response:{data,count}}. Use this for business analysis instead of neo_list; "
+            + "these widgets aggregate data that has no single CRUD entity.",
+        buildObjectSchema(props, List.of(McpConstants.PARAM_WIDGET)));
   }
 
   // ── CRUD tools (registered once with spec enum) ───────────────────────
@@ -329,6 +467,9 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME_WITH_EXAMPLE));
     props.put(McpConstants.PARAM_PARENT_ID, stringProp(
         "Optional parent record ID for child entities (e.g. order ID when getting line defaults)"));
+    props.put(McpConstants.PARAM_ASSET_ID, stringProp(
+        "Optional asset ID for computing dynamic defaults that depend on a specific asset "
+            + "(e.g. the amortization header name derived from the asset name and start date)"));
 
     return new McpToolDefinition(
         "neo_defaults",
@@ -428,6 +569,27 @@ public class ToolRegistry {
         buildObjectSchema(props, List.of("spec", "entity")));
   }
 
+  // ── Action tool ────────────────────────────────────────────────────────
+
+  private McpToolDefinition buildActionTool(List<String> specNames) {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
+    props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
+    props.put("id", stringProp("Record ID to act upon"));
+    props.put("action", stringProp(
+        "Column name of the button field to trigger (e.g. 'Processed', 'Processing')"));
+    props.put(McpConstants.PARAM_PARAMETERS, objectProp(
+        "Optional JSON parameters to pass to the process (e.g. docAction value)"));
+
+    return new McpToolDefinition(
+        "neo_action",
+        "Fire a type:button action on a record and return the process result. "
+            + "Use neo_schema to discover available button fields and their action names. "
+            + "Returns {processResult: success|error|warning, processMessage: ...}.",
+        buildObjectSchema(props,
+            List.of("spec", McpConstants.PARAM_ENTITY, "id", "action")));
+  }
+
   // ── Process tool ───────────────────────────────────────────────────────
 
   private McpToolDefinition buildProcessTool(String specName, SFSpec spec) {
@@ -441,7 +603,7 @@ public class ToolRegistry {
     Map<String, Object> paramProps = buildProcessParamSchema(spec);
 
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put("parameters", objectPropWithProperties("Process input parameters", paramProps));
+    props.put(McpConstants.PARAM_PARAMETERS, objectPropWithProperties("Process input parameters", paramProps));
 
     return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
   }
@@ -458,7 +620,7 @@ public class ToolRegistry {
     Map<String, Object> paramProps = buildProcessParamSchema(spec);
 
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put("parameters", objectPropWithProperties("Report input parameters", paramProps));
+    props.put(McpConstants.PARAM_PARAMETERS, objectPropWithProperties("Report input parameters", paramProps));
     props.put("format", stringProp("Output format: pdf, xlsx, csv (default: pdf)", false));
 
     return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));

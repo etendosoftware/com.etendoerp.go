@@ -25,8 +25,13 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -47,12 +52,18 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
  * Unit tests for {@link McpToolRouterSupport}.
@@ -61,6 +72,16 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class McpToolRouterSupportTest {
+
+  @Test
+  @DisplayName("Utility class hides its constructor")
+  void utilityClassHidesConstructor() throws ReflectiveOperationException {
+    Constructor<McpToolRouterSupport> constructor = McpToolRouterSupport.class.getDeclaredConstructor();
+    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
+    constructor.setAccessible(true);
+    constructor.newInstance();
+  }
+
 
   private static Object invokeStatic(String methodName, Class<?>[] paramTypes, Object... args)
       throws Exception {
@@ -295,6 +316,46 @@ class McpToolRouterSupportTest {
       SFSpec spec = mock(SFSpec.class);
       assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "X"));
     }
+
+    /**
+     * ETP-4284 / G4: the dashboard (widget) spec is handler-backed (no AD_Tab) and is
+     * surfaced via neo_widget, so it must be excluded from the type-W CRUD discovery
+     * catalog regardless of window access.
+     */
+    @Test
+    void dashboardWidgetSpecIsExcludedFromDiscovery() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn(McpConstants.SPEC_DASHBOARD);
+
+      assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "W"),
+          "dashboard/widget spec must never surface through the W discovery catalog");
+    }
+  }
+
+  // ─── isWidgetSpec ───────────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("isWidgetSpec (ETP-4284 / G4)")
+  class IsWidgetSpec {
+
+    @Test
+    void dashboardSpecIsWidgetSpec() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn(McpConstants.SPEC_DASHBOARD);
+      assertTrue(McpToolRouterSupport.isWidgetSpec(spec));
+    }
+
+    @Test
+    void otherSpecIsNotWidgetSpec() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("sales-order");
+      assertFalse(McpToolRouterSupport.isWidgetSpec(spec));
+    }
+
+    @Test
+    void nullSpecIsNotWidgetSpec() {
+      assertFalse(McpToolRouterSupport.isWidgetSpec(null));
+    }
   }
 
   // ─── buildDiscoverSpec ──────────────────────────────────────────────
@@ -354,8 +415,61 @@ class McpToolRouterSupportTest {
       when(spec.getName()).thenReturn("aging");
       when(spec.getDescription()).thenReturn(null);
 
-      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
-      assertTrue(result.getBoolean("isReport"));
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+        assertTrue(result.getBoolean("isReport"));
+      }
+    }
+
+    /**
+     * ETP-4255: discover output for a CALLABLE report spec (NEO-native handler backed)
+     * carries {@code callable:true} and omits status/message.
+     */
+    @Test
+    void callableReportSpecCarriesCallableTrueWithoutStatus() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("aging");
+      when(spec.getDescription()).thenReturn(null);
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(true);
+
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+
+        assertTrue(result.getBoolean("isReport"));
+        assertTrue(result.getBoolean("callable"));
+        assertFalse(result.has("status"));
+        assertFalse(result.has("message"));
+      }
+    }
+
+    /**
+     * ETP-4255: discover output for a NON-callable report spec carries {@code callable:false}
+     * plus the stable {@code not_configured_for_report_generation} status and a human message.
+     */
+    @Test
+    void nonCallableReportSpecCarriesStatusAndMessage() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("invoice-report");
+      when(spec.getDescription()).thenReturn(null);
+
+      try (MockedStatic<NeoReportCallability> callabilityMock =
+          mockStatic(NeoReportCallability.class)) {
+        callabilityMock.when(() -> NeoReportCallability.isReportCallable(spec)).thenReturn(false);
+        callabilityMock.when(() -> NeoReportCallability.buildNotConfiguredMessage("invoice-report"))
+            .thenCallRealMethod();
+
+        JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "R", null);
+
+        assertTrue(result.getBoolean("isReport"));
+        assertFalse(result.getBoolean("callable"));
+        assertEquals(NeoReportCallability.STATUS_NOT_CONFIGURED, result.getString("status"));
+        assertTrue(result.getString("message").contains("not configured"));
+      }
     }
 
     @Test
@@ -367,6 +481,70 @@ class McpToolRouterSupportTest {
       JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
       assertFalse(result.has("isReport"));
     }
+
+    @Test
+    void agentPromptIsIncludedWhenPresent() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("purchase-order");
+      when(spec.getDescription()).thenReturn(null);
+      when(spec.getAgentPrompt()).thenReturn("Always confirm before completing the order.");
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      assertEquals("Always confirm before completing the order.", result.getString("agentPrompt"));
+    }
+
+    @Test
+    void blankAgentPromptIsOmitted() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("purchase-order");
+      when(spec.getDescription()).thenReturn(null);
+      when(spec.getAgentPrompt()).thenReturn("   ");
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      assertFalse(result.has("agentPrompt"));
+    }
+
+    @Test
+    void nullAgentPromptIsOmitted() throws Exception {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("purchase-order");
+      when(spec.getDescription()).thenReturn(null);
+      when(spec.getAgentPrompt()).thenReturn(null);
+
+      JSONObject result = McpToolRouterSupport.buildDiscoverSpec(spec, "W", null);
+      assertFalse(result.has("agentPrompt"));
+    }
+  }
+
+  @Test
+  void schemaFieldsIncludeAgentPromptWhenProvided() throws Exception {
+    org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
+    org.openbravo.model.ad.datamodel.Table table = mock(org.openbravo.model.ad.datamodel.Table.class);
+    org.openbravo.model.ad.datamodel.Column col =
+        mock(org.openbravo.model.ad.datamodel.Column.class);
+
+    when(tab.getTable()).thenReturn(table);
+    when(table.getDBTableName()).thenReturn("C_Order");
+    when(table.getADColumnList()).thenReturn(java.util.List.of(col));
+    when(col.getId()).thenReturn("COL1");
+    when(col.isActive()).thenReturn(true);
+    when(col.getDBColumnName()).thenReturn("C_BPartner_ID");
+    when(col.getName()).thenReturn("Business Partner");
+    when(col.isMandatory()).thenReturn(false);
+    when(col.isUseAutomaticSequence()).thenReturn(false);
+    when(col.getDefaultValue()).thenReturn(null);
+
+    JSONArray fields = McpToolRouterSupport.buildSchemaFieldsArray(
+        tab,
+        null,
+        java.util.Map.of(),
+        java.util.Map.of(),
+        java.util.Map.of("COL1", "  Pick the correct customer.  "),
+        java.util.Set.of(),
+        java.util.Set.of());
+
+    JSONObject field = fields.getJSONObject(0);
+    assertEquals("Pick the correct customer.", field.getString("agentPrompt"));
   }
 
   // ─── isMandatoryValueMissing ────────────────────────────────────────
@@ -1029,6 +1207,344 @@ class McpToolRouterSupportTest {
       when(table.getADColumnList()).thenReturn(java.util.List.of(col));
 
       assertNull(McpToolRouterSupport.findColumn(tab, "notMatching", null));
+    }
+  }
+
+  // ─── addButtonInfo ──────────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("addButtonInfo")
+  class AddButtonInfo {
+
+    private MockedStatic<NeoAccessHelper> accessHelperMock;
+
+    @BeforeEach
+    void setUp() {
+      accessHelperMock = mockStatic(NeoAccessHelper.class);
+    }
+
+    @AfterEach
+    void tearDown() {
+      accessHelperMock.close();
+    }
+
+    @Test
+    @DisplayName("buttonColumnWithObuiappProcessEmitsAllFields")
+    void buttonColumnWithObuiappProcessEmitsAllFields() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      org.openbravo.client.application.Process obuiappProcess = mock(
+          org.openbravo.client.application.Process.class);
+
+      when(col.getDBColumnName()).thenReturn("Processed");
+      when(col.getProcess()).thenReturn(null);
+      when(col.getOBUIAPPProcess()).thenReturn(obuiappProcess);
+      when(obuiappProcess.getName()).thenReturn("Complete Order");
+      when(obuiappProcess.getId()).thenReturn("OBUIAPP-PROC-001");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
+          fieldObj, col);
+
+      assertEquals("Y", fieldObj.getString("triggerValue"));
+      assertEquals("Processed", fieldObj.getString("action"));
+      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertEquals("OBUIAPP", fieldObj.getString("processType"));
+      assertEquals("Complete Order", fieldObj.getString("processName"));
+      assertEquals("OBUIAPP-PROC-001", fieldObj.getString("processId"));
+    }
+
+    @Test
+    @DisplayName("buttonColumnWithClassicProcessEmitsAllFields")
+    void buttonColumnWithClassicProcessEmitsAllFields() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      Process classicProcess = mock(Process.class);
+
+      when(col.getDBColumnName()).thenReturn("DocAction");
+      when(col.getProcess()).thenReturn(classicProcess);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(classicProcess.getName()).thenReturn("Post Document");
+      when(classicProcess.getId()).thenReturn("CLASSIC-PROC-001");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
+          fieldObj, col);
+
+      assertEquals("Y", fieldObj.getString("triggerValue"));
+      assertEquals("DocAction", fieldObj.getString("action"));
+      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertEquals("Classic", fieldObj.getString("processType"));
+      assertEquals("Post Document", fieldObj.getString("processName"));
+      assertEquals("CLASSIC-PROC-001", fieldObj.getString("processId"));
+    }
+
+    @Test
+    @DisplayName("buttonColumnWithNoProcessEmitsOnlyTrigger")
+    void buttonColumnWithNoProcessEmitsOnlyTrigger() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+
+      when(col.getDBColumnName()).thenReturn("Posted");
+      when(col.getProcess()).thenReturn(null);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      accessHelperMock.when(
+          () -> NeoAccessHelper.resolveFallbackObuiappProcess(col)).thenReturn(null);
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addButtonInfo",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
+          fieldObj, col);
+
+      assertEquals("Y", fieldObj.getString("triggerValue"));
+      assertEquals("Posted", fieldObj.getString("action"));
+      assertEquals("neo_action", fieldObj.getString("invokeVia"));
+      assertFalse(fieldObj.has("processType"));
+      assertFalse(fieldObj.has("processName"));
+      assertFalse(fieldObj.has("processId"));
+    }
+
+    @Test
+    @DisplayName("buildSchemaFieldButtonIncludesTriggerValue")
+    void buildSchemaFieldButtonIncludesTriggerValue() throws Exception {
+      // Set up column with ref "28" (button)
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      org.openbravo.model.ad.domain.Reference ref = mock(
+          org.openbravo.model.ad.domain.Reference.class);
+      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
+      org.openbravo.model.ad.datamodel.Table table = mock(
+          org.openbravo.model.ad.datamodel.Table.class);
+
+      when(ref.getId()).thenReturn("28");
+      when(col.getReference()).thenReturn(ref);
+      when(col.getDBColumnName()).thenReturn("Processed");
+      when(col.getName()).thenReturn("Processed");
+      when(col.isMandatory()).thenReturn(false);
+      when(col.isUseAutomaticSequence()).thenReturn(false);
+      when(col.getDefaultValue()).thenReturn(null);
+      when(col.getProcess()).thenReturn(null);
+      when(col.getOBUIAPPProcess()).thenReturn(null);
+      when(col.getId()).thenReturn("col-processed-id");
+      when(tab.getTable()).thenReturn(table);
+      when(table.getDBTableName()).thenReturn("C_Order");
+
+      accessHelperMock.when(
+          () -> NeoAccessHelper.resolveFallbackObuiappProcess(col)).thenReturn(null);
+
+      JSONObject result = (JSONObject) invokeStatic("buildSchemaField",
+          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
+              org.openbravo.model.ad.ui.Tab.class,
+              org.openbravo.base.model.Entity.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Set.class },
+          col, tab, null,
+          new java.util.HashMap<>(),
+          new java.util.HashMap<>(),
+          new java.util.HashMap<>(),
+          new java.util.HashSet<>());
+
+      assertEquals("button", result.getString("type"));
+      assertEquals("Y", result.getString("triggerValue"));
+      assertEquals("Processed", result.getString("action"));
+      assertEquals("neo_action", result.getString("invokeVia"));
+    }
+  }
+
+  // ─── buildSchemaField — businessCritical flag ───────────────────────
+
+  @Nested
+  @DisplayName("buildSchemaField — businessCritical flag")
+  class BuildSchemaFieldBusinessCritical {
+
+    private MockedStatic<NeoAccessHelper> accessHelperMock;
+
+    @BeforeEach
+    void setUp() {
+      accessHelperMock = mockStatic(NeoAccessHelper.class);
+    }
+
+    @AfterEach
+    void tearDown() {
+      accessHelperMock.close();
+    }
+
+    private org.openbravo.model.ad.datamodel.Column buildStringColumn(String colId) {
+      org.openbravo.model.ad.datamodel.Column col = mock(
+          org.openbravo.model.ad.datamodel.Column.class);
+      org.openbravo.model.ad.domain.Reference ref = mock(
+          org.openbravo.model.ad.domain.Reference.class);
+      when(ref.getId()).thenReturn("10"); // string
+      when(col.getReference()).thenReturn(ref);
+      when(col.getDBColumnName()).thenReturn("Description");
+      when(col.getName()).thenReturn("Description");
+      when(col.isMandatory()).thenReturn(false);
+      when(col.isUseAutomaticSequence()).thenReturn(false);
+      when(col.getDefaultValue()).thenReturn(null);
+      when(col.getId()).thenReturn(colId);
+      return col;
+    }
+
+    private org.openbravo.model.ad.ui.Tab buildTab() {
+      org.openbravo.model.ad.ui.Tab tab = mock(org.openbravo.model.ad.ui.Tab.class);
+      org.openbravo.model.ad.datamodel.Table table = mock(
+          org.openbravo.model.ad.datamodel.Table.class);
+      when(tab.getTable()).thenReturn(table);
+      when(table.getDBTableName()).thenReturn("C_Order");
+      return tab;
+    }
+
+    @Test
+    @DisplayName("businessCritical true when flag set in map")
+    void businessCriticalTrueWhenFlagSet() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = buildStringColumn("col-desc-1");
+      org.openbravo.model.ad.ui.Tab tab = buildTab();
+
+      Map<String, Boolean> businessCriticalMap = new HashMap<>();
+      businessCriticalMap.put("col-desc-1", true);
+
+      JSONObject result = (JSONObject) invokeStatic("buildSchemaField",
+          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
+              org.openbravo.model.ad.ui.Tab.class,
+              org.openbravo.base.model.Entity.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Set.class },
+          col, tab, null,
+          new java.util.HashMap<>(),
+          businessCriticalMap,
+          new java.util.HashMap<>(),
+          new java.util.HashSet<>());
+
+      assertTrue(result.getBoolean("businessCritical"));
+    }
+
+    @Test
+    @DisplayName("businessCritical false when flag absent from map — no NPE")
+    void businessCriticalFalseWhenFlagAbsent() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = buildStringColumn("col-desc-2");
+      org.openbravo.model.ad.ui.Tab tab = buildTab();
+
+      JSONObject result = (JSONObject) invokeStatic("buildSchemaField",
+          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
+              org.openbravo.model.ad.ui.Tab.class,
+              org.openbravo.base.model.Entity.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Set.class },
+          col, tab, null,
+          new java.util.HashMap<>(),
+          new java.util.HashMap<>(),
+          new java.util.HashMap<>(),
+          new java.util.HashSet<>());
+
+      assertFalse(result.getBoolean("businessCritical"));
+    }
+
+    @Test
+    @DisplayName("businessCritical false when map contains explicit false")
+    void businessCriticalFalseWhenExplicitFalse() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = buildStringColumn("col-desc-3");
+      org.openbravo.model.ad.ui.Tab tab = buildTab();
+
+      Map<String, Boolean> businessCriticalMap = new HashMap<>();
+      businessCriticalMap.put("col-desc-3", false);
+
+      JSONObject result = (JSONObject) invokeStatic("buildSchemaField",
+          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class,
+              org.openbravo.model.ad.ui.Tab.class,
+              org.openbravo.base.model.Entity.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Map.class,
+              java.util.Set.class },
+          col, tab, null,
+          new java.util.HashMap<>(),
+          businessCriticalMap,
+          new java.util.HashMap<>(),
+          new java.util.HashSet<>());
+
+      assertFalse(result.getBoolean("businessCritical"));
+    }
+  }
+
+  // ─── loadFieldMetadata — businessCritical mapping ───────────────────
+
+  @Nested
+  @DisplayName("loadFieldMetadata — businessCritical mapping")
+  class LoadFieldMetadata {
+
+    @Mock private OBDal mockOBDal;
+    private MockedStatic<OBDal> obDalMock;
+
+    @BeforeEach
+    void setUp() {
+      obDalMock = mockStatic(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(mockOBDal);
+    }
+
+    @AfterEach
+    void tearDown() {
+      obDalMock.close();
+    }
+
+    @SuppressWarnings("unchecked")
+    private OBCriteria<SFField> mockFieldCriteria(List<SFField> fields) {
+      OBCriteria<SFField> crit = mock(OBCriteria.class);
+      when(mockOBDal.createCriteria(SFField.class)).thenReturn(crit);
+      when(crit.list()).thenReturn(fields);
+      return crit;
+    }
+
+    private SFField buildSFField(String columnId, Boolean businessCritical) {
+      SFField field = mock(SFField.class);
+      Column col = mock(Column.class);
+      when(col.getId()).thenReturn(columnId);
+      when(field.getADColumn()).thenReturn(col);
+      when(field.isBusinessCritical()).thenReturn(businessCritical);
+      return field;
+    }
+
+    @Test
+    @DisplayName("field with isBusinessCritical=true maps to true in result map")
+    void fieldWithTrueMapsToTrue() {
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getId()).thenReturn("entity-1");
+      mockFieldCriteria(List.of(buildSFField("col-1", true)));
+
+      McpToolRouterSupport.FieldMetadata meta = McpToolRouterSupport.loadFieldMetadata(sfEntity);
+
+      assertTrue(meta.businessCriticalByColumnId.get("col-1"));
+    }
+
+    @Test
+    @DisplayName("field with isBusinessCritical=false maps to false in result map")
+    void fieldWithFalseMapsToFalse() {
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getId()).thenReturn("entity-2");
+      mockFieldCriteria(List.of(buildSFField("col-2", false)));
+
+      McpToolRouterSupport.FieldMetadata meta = McpToolRouterSupport.loadFieldMetadata(sfEntity);
+
+      assertFalse(meta.businessCriticalByColumnId.get("col-2"));
+    }
+
+    @Test
+    @DisplayName("field with isBusinessCritical=null maps to false — no NPE")
+    void fieldWithNullMapsToFalse() {
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getId()).thenReturn("entity-3");
+      mockFieldCriteria(List.of(buildSFField("col-3", null)));
+
+      McpToolRouterSupport.FieldMetadata meta = McpToolRouterSupport.loadFieldMetadata(sfEntity);
+
+      assertFalse(meta.businessCriticalByColumnId.get("col-3"));
     }
   }
 

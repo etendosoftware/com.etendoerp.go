@@ -25,6 +25,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -38,8 +39,10 @@ import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -62,6 +65,7 @@ import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.ad.utility.Sequence;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.client.kernel.KernelUtils;
 
 import com.etendoerp.go.schemaforge.NeoMandatoryFieldValidator;
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -1250,12 +1254,23 @@ public class NeoDefaultsServiceTest {
         .build();
 
     try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
          MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
              mockStatic(NeoDefaultsCascadeHelper.class)) {
       ModelProvider mp = mock(ModelProvider.class);
       modelMock.when(ModelProvider::getInstance).thenReturn(mp);
       when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
+      OBDal obDal = mock(OBDal.class);
+      @SuppressWarnings("unchecked")
+      OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+      when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+      when(sfFieldCriteria.list()).thenReturn(Collections.emptyList());
+      when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
       calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
 
       // Two-arg overload — should run cascade by default
@@ -1650,7 +1665,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
 
-      String result = NeoDefaultsService.resolveFirstOrgForClient("CLIENT-1");
+      String result = NeoDefaultsSqlHelper.resolveFirstOrgForClient("CLIENT-1");
 
       assertEquals("ORG-ABC", result);
       verify(ps).setString(1, "CLIENT-1");
@@ -1672,7 +1687,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
 
-      String result = NeoDefaultsService.resolveFirstOrgForClient("CLIENT-1");
+      String result = NeoDefaultsSqlHelper.resolveFirstOrgForClient("CLIENT-1");
 
       assertNull(result);
     }
@@ -1686,7 +1701,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
 
-      String result = NeoDefaultsService.resolveFirstOrgForClient("CLIENT-1");
+      String result = NeoDefaultsSqlHelper.resolveFirstOrgForClient("CLIENT-1");
 
       assertNull("Exception should be swallowed and null returned", result);
     }
@@ -1793,14 +1808,157 @@ public class NeoDefaultsServiceTest {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // coerceBooleanDefault — via reflection (100% branch coverage)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  public void testCoerceBooleanDefaultNullEntityReturnsValueUnchanged() throws Exception {
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        null, "depreciate", "Y");
+    assertEquals("Y", result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultNonStringValueReturnsUnchanged() throws Exception {
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        mock(Entity.class), "depreciate", 42);
+    assertEquals(42, result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultNullPropertyReturnsValueUnchanged() throws Exception {
+    Entity entity = mock(Entity.class);
+    when(entity.getProperty("depreciate")).thenReturn(null);
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "Y");
+    assertEquals("Y", result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultNotPrimitiveReturnsValueUnchanged() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("businessPartner")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(false);
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "businessPartner", "Y");
+    assertEquals("Y", result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultNullPrimitiveTypeReturnsValueUnchanged() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("depreciate")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    // getPrimitiveObjectType() returns Class<?> — use doReturn to avoid wildcard compile error
+    doReturn(null).when(prop).getPrimitiveObjectType();
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "Y");
+    assertEquals("Y", result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultNonBooleanTypeReturnsValueUnchanged() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("name")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(String.class).when(prop).getPrimitiveObjectType();
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "name", "Y");
+    assertEquals("Y", result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultYValueReturnsTrueBoolean() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("depreciate")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(Boolean.class).when(prop).getPrimitiveObjectType();
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "Y");
+    assertEquals(Boolean.TRUE, result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultTrueLowerCaseReturnsTrueBoolean() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("depreciate")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(Boolean.class).when(prop).getPrimitiveObjectType();
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "true");
+    assertEquals(Boolean.TRUE, result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultTrueMixedCaseReturnsTrueBoolean() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("depreciate")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(Boolean.class).when(prop).getPrimitiveObjectType();
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "TRUE");
+    assertEquals(Boolean.TRUE, result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultNValueReturnsFalseBoolean() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("depreciate")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(Boolean.class).when(prop).getPrimitiveObjectType();
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "N");
+    assertEquals(Boolean.FALSE, result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultFalseValueReturnsFalseBoolean() throws Exception {
+    Entity entity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(entity.getProperty("depreciate")).thenReturn(prop);
+    when(prop.isPrimitive()).thenReturn(true);
+    doReturn(Boolean.class).when(prop).getPrimitiveObjectType();
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "false");
+    assertEquals(Boolean.FALSE, result);
+  }
+
+  @Test
+  public void testCoerceBooleanDefaultGetPropertyThrowsReturnsValueUnchanged() throws Exception {
+    Entity entity = mock(Entity.class);
+    when(entity.getProperty("depreciate")).thenThrow(new RuntimeException("property not found"));
+    Object result = invokePrivate("coerceBooleanDefault",
+        new Class<?>[]{ Entity.class, String.class, Object.class },
+        entity, "depreciate", "Y");
+    assertEquals("Y", result);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // parseSQLExpression — via reflection
   // ═══════════════════════════════════════════════════════════════════════════
 
   @Test
   public void testParseSQLExpressionBasicSubstitution() throws Exception {
     ArrayList<String> params = new ArrayList<>();
-    String sql = (String) invokePrivate("parseSQLExpression",
-        new Class<?>[]{ String.class, ArrayList.class },
+    String sql = NeoDefaultsSqlHelper.parseSQLExpression(
         "@SQL=SELECT name FROM ad_org WHERE ad_org_id = '@#AD_Org_ID@'", params);
 
     assertEquals("SELECT name FROM ad_org WHERE ad_org_id = ?", sql);
@@ -1811,8 +1969,7 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testParseSQLExpressionMultipleParams() throws Exception {
     ArrayList<String> params = new ArrayList<>();
-    String sql = (String) invokePrivate("parseSQLExpression",
-        new Class<?>[]{ String.class, ArrayList.class },
+    String sql = NeoDefaultsSqlHelper.parseSQLExpression(
         "@SQL=SELECT id FROM t WHERE col1 = '@A@' AND col2 = '@B@'", params);
 
     assertEquals("SELECT id FROM t WHERE col1 = ? AND col2 = ?", sql);
@@ -1824,8 +1981,7 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testParseSQLExpressionNoParams() throws Exception {
     ArrayList<String> params = new ArrayList<>();
-    String sql = (String) invokePrivate("parseSQLExpression",
-        new Class<?>[]{ String.class, ArrayList.class },
+    String sql = NeoDefaultsSqlHelper.parseSQLExpression(
         "@SQL=SELECT 1 FROM DUAL", params);
 
     assertEquals("SELECT 1 FROM DUAL", sql);
@@ -1835,8 +1991,7 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testParseSQLExpressionNullReturnsEmpty() throws Exception {
     ArrayList<String> params = new ArrayList<>();
-    String sql = (String) invokePrivate("parseSQLExpression",
-        new Class<?>[]{ String.class, ArrayList.class },
+    String sql = NeoDefaultsSqlHelper.parseSQLExpression(
         null, params);
 
     assertEquals("", sql);
@@ -1846,8 +2001,7 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testParseSQLExpressionEmptyReturnsEmpty() throws Exception {
     ArrayList<String> params = new ArrayList<>();
-    String sql = (String) invokePrivate("parseSQLExpression",
-        new Class<?>[]{ String.class, ArrayList.class },
+    String sql = NeoDefaultsSqlHelper.parseSQLExpression(
         "  ", params);
 
     assertEquals("", sql);
@@ -1857,8 +2011,7 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testParseSQLExpressionUnpairedAtSign() throws Exception {
     ArrayList<String> params = new ArrayList<>();
-    String sql = (String) invokePrivate("parseSQLExpression",
-        new Class<?>[]{ String.class, ArrayList.class },
+    String sql = NeoDefaultsSqlHelper.parseSQLExpression(
         "@SQL=SELECT 1 WHERE x = @incomplete", params);
 
     // Unpaired @ — remainder appended
@@ -1869,8 +2022,7 @@ public class NeoDefaultsServiceTest {
   @Test
   public void testParseSQLExpressionParamWithoutQuotes() throws Exception {
     ArrayList<String> params = new ArrayList<>();
-    String sql = (String) invokePrivate("parseSQLExpression",
-        new Class<?>[]{ String.class, ArrayList.class },
+    String sql = NeoDefaultsSqlHelper.parseSQLExpression(
         "@SQL=SELECT id FROM t WHERE col = @MyParam@", params);
 
     assertEquals("SELECT id FROM t WHERE col = ?", sql);
@@ -2424,8 +2576,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = (String) invokePrivate("resolveDbColumnDefault",
-          new Class<?>[]{ String.class, String.class }, "C_Order", "IsActive");
+      String result = NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Order", "IsActive");
 
       assertEquals("N", result);
     }
@@ -2447,8 +2598,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = (String) invokePrivate("resolveDbColumnDefault",
-          new Class<?>[]{ String.class, String.class }, "C_Order", "Description");
+      String result = NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Order", "Description");
 
       assertNull(result);
     }
@@ -2470,8 +2620,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = (String) invokePrivate("resolveDbColumnDefault",
-          new Class<?>[]{ String.class, String.class }, "C_Order", "Description");
+      String result = NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Order", "Description");
 
       assertNull(result);
     }
@@ -2492,8 +2641,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = (String) invokePrivate("resolveDbColumnDefault",
-          new Class<?>[]{ String.class, String.class }, "C_Order", "Description");
+      String result = NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Order", "Description");
 
       assertNull(result);
     }
@@ -2516,8 +2664,7 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = (String) invokePrivate("resolveDbColumnDefault",
-          new Class<?>[]{ String.class, String.class }, "C_Order", "Line");
+      String result = NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Order", "Line");
 
       assertEquals("0", result);
     }
@@ -2533,10 +2680,635 @@ public class NeoDefaultsServiceTest {
     try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = (String) invokePrivate("resolveDbColumnDefault",
-          new Class<?>[]{ String.class, String.class }, "C_Order", "Line");
+      String result = NeoDefaultsSqlHelper.resolveDbColumnDefault("C_Order", "Line");
 
       assertNull(result);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // resolveOrFirstComboOption — via reflection
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  public void testResolveOrFirstComboOptionReturnsResolvedWhenNotNull() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(mock(SFEntity.class))
+        .obContext(mock(OBContext.class))
+        .build();
+    Column column = mock(Column.class);
+
+    // When resolved is non-null it must be returned verbatim, without touching the selector.
+    try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+      Object result = invokePrivate("resolveOrFirstComboOption",
+          new Class<?>[]{ NeoContext.class, Column.class, Object.class },
+          ctx, column, "ALREADY-RESOLVED");
+
+      assertEquals("ALREADY-RESOLVED", result);
+      selectorMock.verify(() -> NeoSelectorService.getBaseReferenceId(any(Column.class)),
+          never());
+    }
+  }
+
+  @Test
+  public void testResolveOrFirstComboOptionFallsBackToFirstComboOption() throws Exception {
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(mock(SFEntity.class))
+        .obContext(mock(OBContext.class))
+        .build();
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn("C_Reject_Reason_ID");
+
+    JSONObject item = new JSONObject();
+    item.put("id", "FIRST-OPTION-ID");
+    JSONArray items = new JSONArray();
+    items.put(item);
+    JSONObject selectorBody = new JSONObject();
+    selectorBody.put("items", items);
+    NeoResponse selectorResp = NeoResponse.ok(selectorBody);
+
+    // baseRefId "17" is a List reference (FIC combo) so resolveFirstComboOption proceeds.
+    try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+      selectorMock.when(() -> NeoSelectorService.getBaseReferenceId(column)).thenReturn("17");
+      selectorMock.when(() -> NeoSelectorService.hasObuiselSelector(column)).thenReturn(false);
+      selectorMock.when(() -> NeoSelectorService.querySelectorByColumn(
+          eq(column), eq("C_Reject_Reason_ID"), eq(null), eq(1), eq(0), any()))
+          .thenReturn(selectorResp);
+
+      Object result = invokePrivate("resolveOrFirstComboOption",
+          new Class<?>[]{ NeoContext.class, Column.class, Object.class },
+          ctx, column, null);
+
+      assertEquals("FIRST-OPTION-ID", result);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // getSfFieldColumns — via reflection
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testGetSfFieldColumnsUpperCasesAndSkipsNulls() throws Exception {
+    // Field with a valid lowercase column name → expected upper-cased.
+    SFField fieldWithColumn = mock(SFField.class);
+    Column adColumn = mock(Column.class);
+    when(adColumn.getDBColumnName()).thenReturn("documentno");
+    when(fieldWithColumn.getADColumn()).thenReturn(adColumn);
+
+    // Field whose adColumn is null → skipped.
+    SFField fieldNullColumn = mock(SFField.class);
+    when(fieldNullColumn.getADColumn()).thenReturn(null);
+
+    // A null SFField entry → skipped.
+    List<SFField> fields = Arrays.asList(fieldWithColumn, fieldNullColumn, null);
+
+    Set<String> result = (Set<String>) invokePrivate("getSfFieldColumns",
+        new Class<?>[]{ List.class }, fields);
+
+    assertEquals("Only the field with a column name should be included", 1, result.size());
+    assertTrue("Column name must be upper-cased", result.contains("DOCUMENTNO"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testGetSfFieldColumnsHandlesNullList() throws Exception {
+    Set<String> result = (Set<String>) invokePrivate("getSfFieldColumns",
+        new Class<?>[]{ List.class }, new Object[]{ null });
+
+    assertNotNull(result);
+    assertTrue("Result should be empty for a null field list", result.isEmpty());
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // isColumnReferencingParentTab — Issue 1 fix: discriminate FK target entities
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Helper to invoke the private static {@code isColumnReferencingParentTab} via reflection.
+   */
+  private static boolean invokeIsColumnReferencingParentTab(Column column, NeoContext ctx)
+      throws Exception {
+    return (Boolean) invokePrivate(
+        "isColumnReferencingParentTab",
+        new Class<?>[]{ Column.class, NeoContext.class },
+        column, ctx);
+  }
+
+  /**
+   * IRCPT-1: ctx is null → returns true (permissive fallback).
+   */
+  @Test
+  public void testIsColumnReferencingParentTabNullCtxReturnsTrue() throws Exception {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn("A_Amortization_ID");
+
+    boolean result = invokeIsColumnReferencingParentTab(column, null);
+
+    assertTrue("null ctx should fall back to true", result);
+  }
+
+  /**
+   * IRCPT-2: ctx.getAdTab() is null → returns true (permissive fallback).
+   */
+  @Test
+  public void testIsColumnReferencingParentTabNullTabReturnsTrue() throws Exception {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn("A_Amortization_ID");
+
+    NeoContext ctx = NeoContext.builder().adTab(null).build();
+
+    boolean result = invokeIsColumnReferencingParentTab(column, ctx);
+
+    assertTrue("null adTab should fall back to true", result);
+  }
+
+  /**
+   * IRCPT-3: column's target entity matches parent tab's table entity → true (the real FK case).
+   */
+  @Test
+  public void testIsColumnReferencingParentTabMatchingEntityReturnsTrue() throws Exception {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn("A_Amortization_ID");
+
+    Tab childTab = mock(Tab.class);
+    Table childTable = mock(Table.class);
+    when(childTab.getTable()).thenReturn(childTable);
+    when(childTable.getId()).thenReturn("CHILD-TABLE-ID");
+
+    Tab parentTab = mock(Tab.class);
+    Table parentTable = mock(Table.class);
+    when(parentTab.getTable()).thenReturn(parentTable);
+    when(parentTable.getId()).thenReturn("PARENT-TABLE-ID");
+
+    NeoContext ctx = NeoContext.builder().adTab(childTab).build();
+
+    // The shared entity instance: parentEntity == prop.getTargetEntity()
+    Entity sharedEntity = mock(Entity.class);
+    Entity childEntity = mock(Entity.class);
+    Property prop = mock(Property.class);
+    when(prop.getTargetEntity()).thenReturn(sharedEntity);
+    when(childEntity.getPropertyByColumnName("A_Amortization_ID", false)).thenReturn(prop);
+
+    try (MockedStatic<KernelUtils> kernelMock = mockStatic(KernelUtils.class);
+         MockedStatic<ModelProvider> modelProviderMock = mockStatic(ModelProvider.class)) {
+
+      KernelUtils kernelUtils = mock(KernelUtils.class);
+      kernelMock.when(KernelUtils::getInstance).thenReturn(kernelUtils);
+      when(kernelUtils.getParentTab(childTab)).thenReturn(parentTab);
+
+      ModelProvider mp = mock(ModelProvider.class);
+      modelProviderMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("PARENT-TABLE-ID")).thenReturn(sharedEntity);
+      when(mp.getEntityByTableId("CHILD-TABLE-ID")).thenReturn(childEntity);
+
+      boolean result = invokeIsColumnReferencingParentTab(column, ctx);
+
+      assertTrue("matching target entity should return true", result);
+    }
+  }
+
+  // buildSfFieldDefaultsMap — via reflection
+  //
+  // Verifies the CREATE path uses ETGO_SF_FIELD.defaultvalue overrides and that
+  // columns without an SFField entry fall back to the AD_Column default.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * When an SFField has a non-blank defaultValue, buildSfFieldDefaultsMap must include it
+   * keyed by the DB column name in upper-case.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBuildSfFieldDefaultsMapIncludesNonBlankDefaultValues() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+
+    SFField sfField = mock(SFField.class);
+    Column adColumn = mock(Column.class);
+    when(adColumn.getDBColumnName()).thenReturn("CalculateType");
+    when(sfField.getADColumn()).thenReturn(adColumn);
+    // ETGO_SF_FIELD override "TI" — the AD_Column default would be "PE"
+    when(sfField.getDefaultValue()).thenReturn("TI");
+
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(obDal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+
+    SFEntity sfEntity = mock(SFEntity.class);
+    when(sfEntity.getId()).thenReturn("entity-assets");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(mock(OBContext.class))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      ctxMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+
+      Map<String, String> result = (Map<String, String>) invokePrivate(
+          "buildSfFieldDefaultsMap",
+          new Class<?>[]{ NeoContext.class }, ctx);
+
+      assertNotNull(result);
+      assertEquals("Should contain exactly one entry", 1, result.size());
+      // Key must be upper-cased DB column name; value must be the SFField override
+      assertEquals("TI", result.get("CALCULATETYPE"));
+    }
+  }
+
+  /**
+   * When an SFField has a blank or null defaultValue, buildSfFieldDefaultsMap must NOT include
+   * it — blank entries must be absent so resolveFieldDefault falls back to AD_Column default.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBuildSfFieldDefaultsMapExcludesBlankAndNullDefaultValues() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+
+    // SFField with null defaultValue
+    SFField sfFieldNull = mock(SFField.class);
+    Column colNull = mock(Column.class);
+    when(colNull.getDBColumnName()).thenReturn("Depreciate");
+    when(sfFieldNull.getADColumn()).thenReturn(colNull);
+    when(sfFieldNull.getDefaultValue()).thenReturn(null);
+
+    // SFField with blank defaultValue
+    SFField sfFieldBlank = mock(SFField.class);
+    Column colBlank = mock(Column.class);
+    when(colBlank.getDBColumnName()).thenReturn("DocStatus");
+    when(sfFieldBlank.getADColumn()).thenReturn(colBlank);
+    when(sfFieldBlank.getDefaultValue()).thenReturn("   ");
+
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Arrays.asList(sfFieldNull, sfFieldBlank));
+    when(obDal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+
+    SFEntity sfEntity = mock(SFEntity.class);
+    when(sfEntity.getId()).thenReturn("entity-1");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(mock(OBContext.class))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      ctxMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+
+      Map<String, String> result = (Map<String, String>) invokePrivate(
+          "buildSfFieldDefaultsMap",
+          new Class<?>[]{ NeoContext.class }, ctx);
+
+      assertNotNull(result);
+      assertTrue("Blank/null SFField defaults must not be included", result.isEmpty());
+    }
+  }
+
+  /**
+   * When ctx or ctx.getSfEntity() is null, buildSfFieldDefaultsMap returns an empty map
+   * (no NPE) and the caller falls back entirely to AD_Column defaults.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBuildSfFieldDefaultsMapReturnsEmptyWhenCtxOrEntityIsNull() throws Exception {
+    // null ctx
+    Map<String, String> resultNullCtx = (Map<String, String>) invokePrivate(
+        "buildSfFieldDefaultsMap",
+        new Class<?>[]{ NeoContext.class }, new Object[]{ null });
+    assertNotNull(resultNullCtx);
+    assertTrue(resultNullCtx.isEmpty());
+
+    // ctx with null sfEntity
+    NeoContext ctxNullEntity = NeoContext.builder()
+        .sfEntity(null)
+        .obContext(mock(OBContext.class))
+        .build();
+    Map<String, String> resultNullEntity = (Map<String, String>) invokePrivate(
+        "buildSfFieldDefaultsMap",
+        new Class<?>[]{ NeoContext.class }, ctxNullEntity);
+    assertNotNull(resultNullEntity);
+    assertTrue(resultNullEntity.isEmpty());
+  }
+
+  /**
+   * When an SFField has a null AD_Column reference, buildSfFieldDefaultsMap skips that entry
+   * (null-safe) so it does not throw and the other valid entries are still included.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBuildSfFieldDefaultsMapSkipsNullAdColumn() throws Exception {
+    OBDal obDal = mock(OBDal.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+
+    // SFField with null adColumn — must be skipped
+    SFField sfFieldNullCol = mock(SFField.class);
+    when(sfFieldNullCol.getADColumn()).thenReturn(null);
+    when(sfFieldNullCol.getDefaultValue()).thenReturn("TI");
+
+    // SFField with a valid adColumn — must be included
+    SFField sfFieldValid = mock(SFField.class);
+    Column validCol = mock(Column.class);
+    when(validCol.getDBColumnName()).thenReturn("CalculateType");
+    when(sfFieldValid.getADColumn()).thenReturn(validCol);
+    when(sfFieldValid.getDefaultValue()).thenReturn("TI");
+
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Arrays.asList(sfFieldNullCol, sfFieldValid));
+    when(obDal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+
+    SFEntity sfEntity = mock(SFEntity.class);
+    when(sfEntity.getId()).thenReturn("entity-1");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(mock(OBContext.class))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      ctxMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+
+      Map<String, String> result = (Map<String, String>) invokePrivate(
+          "buildSfFieldDefaultsMap",
+          new Class<?>[]{ NeoContext.class }, ctx);
+
+      assertEquals("Only the valid SFField entry should be included", 1, result.size());
+      assertEquals("TI", result.get("CALCULATETYPE"));
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // injectMandatoryDefaults — ETGO_SF_FIELD default honoured on CREATE path
+  //
+  // These are the regression tests for the bug described in ETP-4230:
+  // the CREATE path must use ETGO_SF_FIELD.defaultvalue (not AD_Column default)
+  // for columns that have a per-window override, exactly as /defaults does.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * When a column has an ETGO_SF_FIELD default ("TI"), the CREATE path must inject "TI",
+   * NOT the AD_Column default ("PE").  This is the core regression test for ETP-4230.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testInjectMandatoryDefaultsUsesSfFieldDefaultOverAdColumnDefault()
+      throws Exception {
+    // --- Setup ---
+    JSONObject body = new JSONObject();
+    Tab adTab = mock(Tab.class);
+    Table table = mock(Table.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    OBContext obContext = mock(OBContext.class);
+    Entity dalEntity = mock(Entity.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    OBDal obDal = mock(OBDal.class);
+
+    // The AD column: DB name "CalculateType", mandatory, NOT a key/audit column.
+    Column calcTypeCol = mock(Column.class);
+    when(calcTypeCol.getDBColumnName()).thenReturn("CalculateType");
+    when(calcTypeCol.isMandatory()).thenReturn(true);
+    when(calcTypeCol.isActive()).thenReturn(true);
+    when(calcTypeCol.isKeyColumn()).thenReturn(false);
+    // AD_Column default is "PE" — this is what the bug returned before the fix
+    when(calcTypeCol.getDefaultValue()).thenReturn("PE");
+    when(calcTypeCol.isLinkToParentColumn()).thenReturn(false);
+    when(calcTypeCol.isUseAutomaticSequence()).thenReturn(false);
+
+    // DAL property
+    Property calcTypeProp = mock(Property.class);
+    when(calcTypeProp.getName()).thenReturn("calculateType");
+    when(calcTypeProp.isAuditInfo()).thenReturn(false);
+    when(calcTypeProp.isPrimitive()).thenReturn(true);
+    when(dalEntity.getPropertyByColumnName("CalculateType")).thenReturn(calcTypeProp);
+
+    when(adTab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("TABLE-ASSETS");
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(calcTypeCol));
+
+    // SFField for this column: defaultValue = "TI" (the ETGO_SF_FIELD override)
+    SFField sfField = mock(SFField.class);
+    when(sfField.getADColumn()).thenReturn(calcTypeCol);
+    when(sfField.getDefaultValue()).thenReturn("TI");
+    @SuppressWarnings("unchecked")
+    OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+    when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+    when(sfFieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+
+    when(sfEntity.getId()).thenReturn("entity-assets");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<NeoParentValuesLoader> parentMock =
+             mockStatic(NeoParentValuesLoader.class)) {
+
+      ModelProvider mp = mock(ModelProvider.class);
+      modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("TABLE-ASSETS")).thenReturn(dalEntity);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
+          .thenReturn(dalEntity);
+      sequenceMock.when(() -> SequenceUtils.isSequence(calcTypeCol)).thenReturn(false);
+      parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
+          .thenReturn(java.util.Collections.emptyMap());
+      // Utility.getDefault called with "TI" (the SFField override), not "PE" (AD_Column default)
+      utilityMock.when(() -> Utility.getDefault(any(), eq(vars), eq("CalculateType"),
+          eq("TI"), anyString(), eq("")))
+          .thenReturn("TI");
+
+      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+
+      assertTrue("calculateType must be injected", body.has("calculateType"));
+      assertEquals(
+          "CREATE path must use ETGO_SF_FIELD default 'TI', not AD_Column default 'PE'",
+          "TI", body.getString("calculateType"));
+    }
+  }
+
+  /**
+   * IRCPT-4: column's target entity does NOT match parent tab's table entity → false.
+   * This is the A_Asset_ID bug case — the column FK points to A_Asset, not A_Amortization.
+   */
+  @Test
+  public void testIsColumnReferencingParentTabNonMatchingEntityReturnsFalse() throws Exception {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn("A_Asset_ID");
+
+    Tab childTab = mock(Tab.class);
+    Table childTable = mock(Table.class);
+    when(childTab.getTable()).thenReturn(childTable);
+    when(childTable.getId()).thenReturn("CHILD-TABLE-ID");
+
+    Tab parentTab = mock(Tab.class);
+    Table parentTable = mock(Table.class);
+    when(parentTab.getTable()).thenReturn(parentTable);
+    when(parentTable.getId()).thenReturn("PARENT-TABLE-ID");
+
+    NeoContext ctx = NeoContext.builder().adTab(childTab).build();
+
+    // parentEntity and the column's target entity are DIFFERENT mocks
+    Entity parentEntity = mock(Entity.class);   // A_Amortization entity
+    Entity assetEntity = mock(Entity.class);    // A_Asset entity — different instance
+    Entity childEntity = mock(Entity.class);    // child line entity
+    Property prop = mock(Property.class);
+    when(prop.getTargetEntity()).thenReturn(assetEntity); // FK points to A_Asset
+    when(childEntity.getPropertyByColumnName("A_Asset_ID", false)).thenReturn(prop);
+
+    try (MockedStatic<KernelUtils> kernelMock = mockStatic(KernelUtils.class);
+         MockedStatic<ModelProvider> modelProviderMock = mockStatic(ModelProvider.class)) {
+
+      KernelUtils kernelUtils = mock(KernelUtils.class);
+      kernelMock.when(KernelUtils::getInstance).thenReturn(kernelUtils);
+      when(kernelUtils.getParentTab(childTab)).thenReturn(parentTab);
+
+      ModelProvider mp = mock(ModelProvider.class);
+      modelProviderMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("PARENT-TABLE-ID")).thenReturn(parentEntity);
+      when(mp.getEntityByTableId("CHILD-TABLE-ID")).thenReturn(childEntity);
+
+      boolean result = invokeIsColumnReferencingParentTab(column, ctx);
+
+      assertFalse("A_Asset_ID pointing to A_Asset should NOT match the parent A_Amortization entity",
+          result);
+    }
+  }
+
+  /**
+   * IRCPT-5: getParentTab throws → returns true (error fallback, preserve legacy behavior).
+   */
+  @Test
+  public void testIsColumnReferencingParentTabExceptionReturnsTrue() throws Exception {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn("A_Amortization_ID");
+
+    Tab childTab = mock(Tab.class);
+    NeoContext ctx = NeoContext.builder().adTab(childTab).build();
+
+    try (MockedStatic<KernelUtils> kernelMock = mockStatic(KernelUtils.class)) {
+      KernelUtils kernelUtils = mock(KernelUtils.class);
+      kernelMock.when(KernelUtils::getInstance).thenReturn(kernelUtils);
+      when(kernelUtils.getParentTab(childTab)).thenThrow(new RuntimeException("KernelUtils boom"));
+
+      boolean result = invokeIsColumnReferencingParentTab(column, ctx);
+
+      assertTrue("exception during resolution should fall back to true", result);
+    }
+  }
+
+  /**
+   * When a column has NO ETGO_SF_FIELD default configured, the CREATE path must fall back to
+   * the AD_Column default — verifying no regression for the common case.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testInjectMandatoryDefaultsFallsBackToAdColumnDefaultWhenNoSfFieldDefault()
+      throws Exception {
+    JSONObject body = new JSONObject();
+    Tab adTab = mock(Tab.class);
+    Table table = mock(Table.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    OBContext obContext = mock(OBContext.class);
+    Entity dalEntity = mock(Entity.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    OBDal obDal = mock(OBDal.class);
+
+    // AD column with a default of "DR"
+    Column docStatusCol = mock(Column.class);
+    when(docStatusCol.getDBColumnName()).thenReturn("DocStatus");
+    when(docStatusCol.isMandatory()).thenReturn(true);
+    when(docStatusCol.isActive()).thenReturn(true);
+    when(docStatusCol.isKeyColumn()).thenReturn(false);
+    when(docStatusCol.getDefaultValue()).thenReturn("DR");
+    when(docStatusCol.isLinkToParentColumn()).thenReturn(false);
+    when(docStatusCol.isUseAutomaticSequence()).thenReturn(false);
+
+    Property docStatusProp = mock(Property.class);
+    when(docStatusProp.getName()).thenReturn("documentStatus");
+    when(docStatusProp.isAuditInfo()).thenReturn(false);
+    when(docStatusProp.isPrimitive()).thenReturn(true);
+    when(dalEntity.getPropertyByColumnName("DocStatus")).thenReturn(docStatusProp);
+
+    when(adTab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("TABLE-DOC");
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(docStatusCol));
+
+    // SFField exists but has NO defaultValue (null) — AD_Column default must be used
+    SFField sfField = mock(SFField.class);
+    when(sfField.getADColumn()).thenReturn(docStatusCol);
+    when(sfField.getDefaultValue()).thenReturn(null);
+    @SuppressWarnings("unchecked")
+    OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+    when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+    when(sfFieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+
+    when(sfEntity.getId()).thenReturn("entity-doc");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<NeoParentValuesLoader> parentMock =
+             mockStatic(NeoParentValuesLoader.class)) {
+
+      ModelProvider mp = mock(ModelProvider.class);
+      modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("TABLE-DOC")).thenReturn(dalEntity);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
+          .thenReturn(dalEntity);
+      sequenceMock.when(() -> SequenceUtils.isSequence(docStatusCol)).thenReturn(false);
+      parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
+          .thenReturn(java.util.Collections.emptyMap());
+      // Utility.getDefault is called with "DR" (the AD_Column default, because SFField has null)
+      utilityMock.when(() -> Utility.getDefault(any(), eq(vars), eq("DocStatus"),
+          eq("DR"), anyString(), eq("")))
+          .thenReturn("DR");
+
+      NeoDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+
+      assertTrue("documentStatus must be injected", body.has("documentStatus"));
+      assertEquals(
+          "Without ETGO_SF_FIELD default, AD_Column default 'DR' must be used",
+          "DR", body.getString("documentStatus"));
     }
   }
 }

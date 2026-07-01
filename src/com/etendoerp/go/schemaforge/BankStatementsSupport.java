@@ -18,13 +18,24 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.model.ModelProvider;
 
 /**
  * Stateless helpers shared across {@link BankStatementsHandler}: statement
@@ -34,6 +45,145 @@ import org.apache.commons.lang3.StringUtils;
  * limit; every method here is pure (no DB, no OBContext) and trivially testable.
  */
 public final class BankStatementsSupport {
+
+  private static final Logger log = LogManager.getLogger(BankStatementsSupport.class);
+
+  private static final String FIELD_AMOUNT = "amount";
+
+  /** JSON/SQL key for the bank-statement-line description field. */
+  static final String FIELD_DESCRIPTION = "description";
+
+  // Cached result of the C43 column existence check (null = not yet checked).
+  private static volatile Boolean c43DescColumn;
+
+  /**
+   * SQL expression for the description column of {@code FIN_BankStatementLine}.
+   * Prefers {@code bsl.description}; when the optional C43 module column
+   * {@code bsl.em_c43_description} exists (detected via {@link ModelProvider},
+   * database-agnostic), falls back to it so C43-imported statements show the
+   * concept text that Classic stores in that extension column.
+   *
+   * <p>Result is cached after the first call (the module set is fixed at runtime).
+   *
+   * @return SQL expression string, never {@code null}
+   */
+  public static String descriptionExpr() {
+    Boolean cached = c43DescColumn;
+    if (cached == null) {
+      try {
+        org.openbravo.base.model.Entity entity =
+            ModelProvider.getInstance().getEntityByTableName("FIN_BankStatementLine");
+        cached = entity != null && entity.getProperties().stream()
+            .anyMatch(p -> "em_c43_description".equalsIgnoreCase(p.getColumnName()));
+      } catch (Exception e) {
+        log.debug("Could not check C43 column existence via ModelProvider; defaulting to false", e);
+        cached = Boolean.FALSE;
+      }
+      c43DescColumn = cached;
+    }
+    return Boolean.TRUE.equals(cached)
+        ? "COALESCE(NULLIF(TRIM(bsl.description), ''), NULLIF(TRIM(bsl.em_c43_description), ''), '')"
+        : "COALESCE(bsl.description, '')";
+  }
+
+  /**
+   * Maps one {@code LINES_SQL_HEAD} result row to the line JSON contract.
+   * Extracted here (away from BankStatementsHandler) to keep the handler
+   * within the per-class method-count limit.
+   *
+   * @param rs an open {@link java.sql.ResultSet} positioned on the current row
+   * @return a JSON object representing the bank-statement line
+   * @throws Exception if any ResultSet accessor throws
+   */
+  public static JSONObject mapLineRow(ResultSet rs) throws Exception {
+    BigDecimal credit = nullSafeBigDecimal(rs.getBigDecimal("cramount"));
+    BigDecimal debit  = nullSafeBigDecimal(rs.getBigDecimal("dramount"));
+    JSONObject row = new JSONObject();
+    row.put("id", rs.getString("fin_bankstatementline_id"));
+    row.put("lineNo", rs.getLong("line"));
+    row.put("date", formatDate(rs.getTimestamp("datetrx")));
+    row.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString(FIELD_DESCRIPTION)));
+    row.put("reference",      StringUtils.trimToEmpty(rs.getString("referenceno")));
+    row.put("bpartnerName",   StringUtils.trimToEmpty(rs.getString("bpartnername")));
+    row.put("bpartnerId",     StringUtils.trimToEmpty(rs.getString("c_bpartner_id")));
+    row.put("bpartnerFkName", StringUtils.trimToEmpty(rs.getString("bpartner_fk_name")));
+    row.put("glItemId",       StringUtils.trimToEmpty(rs.getString("c_glitem_id")));
+    row.put("glItemName",     StringUtils.trimToEmpty(rs.getString("glitem_name")));
+    row.put("in",     credit);
+    row.put("out",    debit);
+    row.put(FIELD_AMOUNT, credit.subtract(debit));
+    boolean matched = rs.getString("fin_finacc_transaction_id") != null;
+    row.put("matched", matched);
+    // 1:N reconcile group (option B): split sub-lines share this id so they can be re-grouped.
+    row.put("matchGroupId", StringUtils.trimToEmpty(rs.getString("em_etgo_match_group_id")));
+    row.put("txns", buildLineTxns(rs, matched));
+    return row;
+  }
+
+  /**
+   * Collapses the split sub-lines of a 1:N reconciliation back into a single display line.
+   * Sub-lines that share a non-blank {@code matchGroupId} are merged into the first occurrence:
+   * their {@code txns[]} are concatenated and their {@code in}/{@code out}/{@code amount} summed,
+   * so the line shows the original amount and ALL the transactions it was reconciled against.
+   * Lines without a match group pass through unchanged, preserving order.
+   *
+   * @param lines the raw lines array from the statement-lines query
+   * @return a new array with 1:N split sub-lines collapsed into their group head
+   * @throws JSONException if JSON access fails
+   */
+  public static JSONArray mergeMatchGroups(JSONArray lines) throws JSONException {
+    JSONArray result = new JSONArray();
+    Map<String, JSONObject> heads = new LinkedHashMap<>();
+    for (int i = 0; i < lines.length(); i++) {
+      JSONObject line = lines.getJSONObject(i);
+      String groupId = line.optString("matchGroupId", "");
+      JSONObject head = StringUtils.isBlank(groupId) ? null : heads.get(groupId);
+      if (StringUtils.isBlank(groupId) || head == null) {
+        // Lines without a group, or the first occurrence of a group, pass through as-is.
+        if (StringUtils.isNotBlank(groupId)) {
+          heads.put(groupId, line);
+        }
+        result.put(line);
+      } else {
+        mergeSubLineIntoHead(head, line);
+      }
+    }
+    return result;
+  }
+
+  /** Appends the txns of {@code line} into {@code head} and accumulates in/out/amount. */
+  private static void mergeSubLineIntoHead(JSONObject head, JSONObject line) throws JSONException {
+    JSONArray headTxns = head.optJSONArray("txns");
+    if (headTxns == null) {
+      headTxns = new JSONArray();
+      head.put("txns", headTxns);
+    }
+    JSONArray lineTxns = line.optJSONArray("txns");
+    if (lineTxns != null) {
+      for (int j = 0; j < lineTxns.length(); j++) {
+        headTxns.put(lineTxns.get(j));
+      }
+    }
+    head.put("in", jsonBigDecimal(head, "in").add(jsonBigDecimal(line, "in")));
+    head.put("out", jsonBigDecimal(head, "out").add(jsonBigDecimal(line, "out")));
+    head.put(FIELD_AMOUNT, jsonBigDecimal(head, FIELD_AMOUNT).add(jsonBigDecimal(line, FIELD_AMOUNT)));
+    // The merged group is reconciled only while it still carries transactions. After a reactivate
+    // the sub-lines keep the match-group tag but lose their transaction, so deriving "matched" from
+    // the accumulated txns (instead of forcing true) lets the line fall back to "not reconciled".
+    head.put("matched", headTxns.length() > 0);
+  }
+
+  private static BigDecimal jsonBigDecimal(JSONObject o, String key) {
+    Object v = o.opt(key);
+    if (v == null) {
+      return BigDecimal.ZERO;
+    }
+    try {
+      return new BigDecimal(v.toString());
+    } catch (NumberFormatException e) {
+      return BigDecimal.ZERO;
+    }
+  }
 
   private static final DateTimeFormatter ISO_UTC =
       DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
@@ -135,5 +285,76 @@ public final class BankStatementsSupport {
    */
   public static String truncate(String s, int max) {
     return s.length() > max ? s.substring(0, max) : s;
+  }
+
+  /**
+   * Collects the requested statement ids: the comma-separated {@code multi}
+   * (used by the multi-statement CSV export) takes precedence, falling back to
+   * the single {@code single} id used by the inline/detail line views.
+   *
+   * @param multi  comma-separated statement ids, or blank
+   * @param single a single statement id, used when {@code multi} is blank
+   * @return the parsed, trimmed ids (possibly empty, never {@code null})
+   */
+  public static List<String> parseStatementIds(String multi, String single) {
+    List<String> ids = new ArrayList<>();
+    if (StringUtils.isNotBlank(multi)) {
+      for (String id : multi.split(",")) {
+        if (StringUtils.isNotBlank(id)) {
+          ids.add(id.trim());
+        }
+      }
+    } else if (StringUtils.isNotBlank(single)) {
+      ids.add(single.trim());
+    }
+    return ids;
+  }
+
+  /**
+   * True when a manual statement line carries no meaningful data (no
+   * description / counterparty / G-L item / reference and zero amounts).
+   *
+   * @param l the line JSON from the create/update request body
+   * @return whether the line is effectively empty
+   */
+  public static boolean isBlankLine(JSONObject l) {
+    return StringUtils.isBlank(l.optString(FIELD_DESCRIPTION, null))
+        && StringUtils.isBlank(l.optString("bpartnerName", null))
+        && StringUtils.isBlank(l.optString("bpartnerId", null))
+        && StringUtils.isBlank(l.optString("glItemId", null))
+        && StringUtils.isBlank(l.optString("reference", null))
+        && parseAmount(l.optString("in", null)).signum() == 0
+        && parseAmount(l.optString("out", null)).signum() == 0;
+  }
+
+  /**
+   * Builds the {@code txns[]} array for a statement line from the joined
+   * transaction columns of the lines query. The relationship is 1:1 today, so
+   * the array has 0 or 1 element; the shape is kept array-based so a future 1:N
+   * reconciliation only changes the query, not the contract.
+   *
+   * @param rs      the lines result set positioned on the current row
+   * @param matched whether the line has a linked financial-account transaction
+   * @return the transactions array (empty when {@code matched} is false)
+   * @throws Exception if reading the result set or building the JSON fails
+   */
+  public static JSONArray buildLineTxns(ResultSet rs, boolean matched) throws Exception {
+    JSONArray txns = new JSONArray();
+    if (!matched) {
+      return txns;
+    }
+    JSONObject t = new JSONObject();
+    t.put("transactionId", StringUtils.trimToEmpty(rs.getString("fin_finacc_transaction_id")));
+    t.put("documentNo", StringUtils.trimToEmpty(rs.getString("txn_documentno")));
+    t.put("date", formatDate(rs.getTimestamp("txn_date")));
+    t.put("contact", StringUtils.trimToEmpty(rs.getString("txn_contact")));
+    t.put(FIELD_DESCRIPTION, StringUtils.trimToEmpty(rs.getString("txn_description")));
+    t.put("trxType", StringUtils.trimToEmpty(rs.getString("txn_trxtype")));
+    t.put("paymentStatus", StringUtils.trimToEmpty(rs.getString("txn_status")));
+    t.put(FIELD_AMOUNT, nullSafeBigDecimal(rs.getBigDecimal("txn_amount")));
+    t.put("paymentId", StringUtils.trimToEmpty(rs.getString("txn_payment_id")));
+    t.put("paymentIsReceipt", StringUtils.trimToEmpty(rs.getString("txn_payment_isreceipt")));
+    txns.put(t);
+    return txns;
   }
 }

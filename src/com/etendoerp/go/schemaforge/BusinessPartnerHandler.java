@@ -31,6 +31,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 /**
  * Pre/post-save hook for the businessPartner entity in the contacts spec.
@@ -52,6 +53,15 @@ import org.openbravo.dal.service.OBDal;
  *       only when the record's current {@code name} is blank in the database.</li>
  * </ul>
  *
+ * <p>On GET (single record, i.e. {@code /contacts/businessPartner/{id}}):
+ * <ul>
+ *   <li>{@code afterHandle()} fills the {@code etgoEmail} field with the email of one
+ *       of the partner's contacts ({@code ad_user.email}) when the partner's own email
+ *       field ({@code EM_Etgo_Email}) is blank. Company partners normally hold the email
+ *       on their contacts, not on the partner record itself; the document Send modal
+ *       autofills this value as the default recipient.</li>
+ * </ul>
+ *
  * <p>Registered via {@code JAVA_QUALIFIER = 'businessPartnerHandler'} on the
  * ETGO_SF_ENTITY record for the contacts spec's businessPartner entity.
  */
@@ -59,6 +69,7 @@ import org.openbravo.dal.service.OBDal;
 public class BusinessPartnerHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(BusinessPartnerHandler.class);
+  private static final String RESPONSE_KEY = "response";
   private static final String FIELD_SEARCH_KEY = "searchKey";
   private static final String FIELD_NAME = "name";
 
@@ -67,6 +78,7 @@ public class BusinessPartnerHandler implements NeoHandler {
       "vendorBlocking");
   private static final String FIELD_FIRSTNAME = "etgoFirstname";
   private static final String FIELD_LASTNAME = "etgoLastname";
+  private static final String FIELD_EMAIL = "etgoEmail";
 
   /**
    * Concatenates non-blank parts separated by a single space.
@@ -94,21 +106,53 @@ public class BusinessPartnerHandler implements NeoHandler {
     return new String[]{ "", "", "" };
   }
 
-  private static String extractRecordId(JSONObject body) {
+  /**
+   * Returns the first record under {@code response.data} (or top-level {@code data}),
+   * or {@code null} when the body has no record array.
+   */
+  private static JSONObject firstRecord(JSONObject body) {
     try {
-      JSONObject response = body.optJSONObject("response");
-      if (response == null) {
-        return null;
-      }
-      JSONArray data = response.optJSONArray("data");
+      JSONObject response = body.optJSONObject(RESPONSE_KEY);
+      JSONArray data = (response != null) ? response.optJSONArray("data") : body.optJSONArray("data");
       if (data == null || data.length() == 0) {
         return null;
       }
-      String id = data.getJSONObject(0).optString("id", null);
-      return StringUtils.isNotBlank(id) ? id : null;
+      return data.getJSONObject(0);
     } catch (Exception e) {
       return null;
     }
+  }
+
+  private static String extractRecordId(JSONObject body) {
+    JSONObject recordNode = firstRecord(body);
+    if (recordNode == null) {
+      return null;
+    }
+    String id = recordNode.optString("id", null);
+    return StringUtils.isNotBlank(id) ? id : null;
+  }
+
+  /**
+   * Looks up the email of one active contact ({@code ad_user}) of the given business
+   * partner. Returns the oldest active contact's email, or {@code null} when no
+   * contact has a valid email.
+   */
+  private static String queryContactEmail(String bPartnerId) throws Exception {
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(
+        "SELECT email FROM ad_user"
+            + " WHERE c_bpartner_id = ? AND isactive = 'Y'"
+            + "   AND email IS NOT NULL AND position('@' in email) > 0"
+            + " ORDER BY created"
+            + " LIMIT 1")) {
+      ps.setString(1, bPartnerId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          return StringUtils.trimToNull(rs.getString(1));
+        }
+      }
+    }
+    return null;
   }
 
   private static String queryIdentifier(String recordId) throws Exception {
@@ -136,7 +180,7 @@ public class BusinessPartnerHandler implements NeoHandler {
 
   private static void patchSearchKeyInResponse(JSONObject body, String identifier) {
     try {
-      JSONObject response = body.optJSONObject("response");
+      JSONObject response = body.optJSONObject(RESPONSE_KEY);
       if (response == null) {
         return;
       }
@@ -236,7 +280,12 @@ public class BusinessPartnerHandler implements NeoHandler {
 
   @Override
   public NeoResponse afterHandle(NeoContext ctx) {
-    if (!"POST".equals(ctx.getHttpMethod())) {
+    String method = ctx.getHttpMethod();
+    if ("GET".equals(method)) {
+      return fillContactEmailFallback(ctx);
+    }
+    boolean isWrite = "POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method);
+    if (!isWrite) {
       return null;
     }
     NeoResponse previousResult = ctx.getPreviousResult();
@@ -244,19 +293,101 @@ public class BusinessPartnerHandler implements NeoHandler {
       return null;
     }
     try {
-      String recordId = extractRecordId(previousResult.getBody());
-      if (recordId == null) {
+      JSONObject body = previousResult.getBody();
+      boolean modified = false;
+
+      if ("POST".equals(method)) {
+        String recordId = extractRecordId(body);
+        if (recordId != null) {
+          String identifier = queryIdentifier(recordId);
+          if (StringUtils.isNotBlank(identifier)) {
+            updateSearchKey(recordId, identifier);
+            patchSearchKeyInResponse(body, identifier);
+            modified = true;
+          }
+        }
+      }
+
+      modified |= injectViesMessage(body);
+      return modified ? NeoResponse.ok(body) : null;
+    } catch (Exception e) {
+      log.error("BusinessPartnerHandler: error in afterHandle()", e);
+      return null;
+    }
+  }
+
+  /**
+   * If the saved record has {@code oBTIKTaxIDKey = '2'} and a resolved VIES status (V or I),
+   * injects a {@code messages} array at the root of the response body so the frontend
+   * (useEntity.js, line: {@code data?.messages}) can show the toast.
+   */
+  private static boolean injectViesMessage(JSONObject body) {
+    try {
+      JSONObject response = body.optJSONObject(RESPONSE_KEY);
+      if (response == null) {
+        return false;
+      }
+      JSONArray data = response.optJSONArray("data");
+      if (data == null || data.length() == 0) {
+        return false;
+      }
+      JSONObject savedRecord = data.getJSONObject(0);
+      String taxIdKey = savedRecord.optString("oBTIKTaxIDKey", null);
+      if (!"2".equals(taxIdKey)) {
+        return false;
+      }
+      String viesStatus = savedRecord.optString("oBTIKVIESStatus", null);
+      if (viesStatus == null || "P".equals(viesStatus)) {
+        return false;
+      }
+
+      boolean valid = "V".equals(viesStatus);
+      JSONObject msg = new JSONObject();
+      msg.put("type", valid ? "success" : "warning");
+      msg.put("title", OBMessageUtils.messageBD(valid ? "OBTIK_ViesValidTitle" : "OBTIK_ViesInvalidTitle"));
+      msg.put("text", OBMessageUtils.messageBD(valid ? "OBTIK_ViesValidText" : "OBTIK_ViesInvalidText"));
+
+      JSONArray messages = new JSONArray();
+      messages.put(msg);
+      body.put("messages", messages);
+      return true;
+    } catch (Exception e) {
+      log.warn("BusinessPartnerHandler: could not inject VIES message", e);
+      return false;
+    }
+  }
+
+  /**
+   * On a single-record GET, injects a contact email into {@code etgoEmail} when the
+   * partner's own email field is blank, so the document Send modal has a default
+   * recipient to propose. Returns {@code null} (keeping the default CRUD result) for
+   * list fetches, partners that already carry an email, or when no contact email exists.
+   */
+  private NeoResponse fillContactEmailFallback(NeoContext ctx) {
+    String recordId = ctx.getRecordId();
+    if (StringUtils.isBlank(recordId)) {
+      return null; // list fetch — no single partner to resolve
+    }
+    NeoResponse previousResult = ctx.getPreviousResult();
+    if (previousResult == null || previousResult.getBody() == null) {
+      return null;
+    }
+    JSONObject recordNode = firstRecord(previousResult.getBody());
+    if (recordNode == null) {
+      return null;
+    }
+    if (recordNode.optString(FIELD_EMAIL, "").contains("@")) {
+      return null; // partner already has its own email
+    }
+    try {
+      String contactEmail = queryContactEmail(recordId);
+      if (StringUtils.isBlank(contactEmail)) {
         return null;
       }
-      String identifier = queryIdentifier(recordId);
-      if (StringUtils.isBlank(identifier)) {
-        return null;
-      }
-      updateSearchKey(recordId, identifier);
-      patchSearchKeyInResponse(previousResult.getBody(), identifier);
+      recordNode.put(FIELD_EMAIL, contactEmail);
       return NeoResponse.ok(previousResult.getBody());
     } catch (Exception e) {
-      log.error("BusinessPartnerHandler: error updating searchKey from em_etgo_identifier", e);
+      log.warn("BusinessPartnerHandler: could not resolve contact email fallback for bp={}", recordId, e);
       return null;
     }
   }

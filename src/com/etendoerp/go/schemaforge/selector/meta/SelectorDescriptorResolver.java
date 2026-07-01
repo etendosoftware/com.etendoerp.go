@@ -124,6 +124,10 @@ public final class SelectorDescriptorResolver {
     if (entity.hasProperty(PROP_SEARCH_KEY)) {
       return PROP_SEARCH_KEY;
     }
+    // Accounting combination — no name/searchKey; use the combination string (e.g. "7810-0000-000")
+    if (entity.hasProperty("combination")) {
+      return "combination";
+    }
     return "id";
   }
 
@@ -284,6 +288,11 @@ public final class SelectorDescriptorResolver {
       return;
     }
     addIfPropertyExists(searchableProps, targetEntity, displayProp);
+    // Expand non-primitive identifier FKs (e.g. AccountingCombination.account)
+    // into their referenced entity's own identifier sub-paths so search matches
+    // the rendered label (e.g. "account.searchKey", "account.name") and not only
+    // the local display property (e.g. the combination code string).
+    addReferencedIdentifierPaths(searchableProps, targetEntity);
     // When displayProp resolves to an identifier alias (e.g. "_identifier")
     // it is not a real DAL property, so fall back to name/searchKey which the
     // identifier clause typically combines.
@@ -306,6 +315,34 @@ public final class SelectorDescriptorResolver {
     }
     if (entity.hasProperty(property)) {
       addIfAbsent(props, property);
+    }
+  }
+
+  /**
+   * Expand each non-primitive identifier property (a FK) into searchable paths
+   * built from the referenced entity's own primitive identifier properties.
+   *
+   * <p>Example: {@code AccountingCombination} has a single, non-primitive
+   * identifier {@code account} (FK to {@code C_ElementValue}). The rendered label
+   * combines {@code account.searchKey} and {@code account.name}, but neither is a
+   * local property, so the default fallback only searches the combination code.
+   * This adds {@code "account.searchKey"} and {@code "account.name"} so typing
+   * part of the account name matches.
+   *
+   * <p>No-op for entities whose identifier is primitive (e.g. {@code name}), so
+   * standard selectors (Business Partner, UOM) are unaffected.
+   */
+  private static void addReferencedIdentifierPaths(List<String> props, Entity entity) {
+    for (Property idProp : entity.getIdentifierProperties()) {
+      Entity targetEntity = idProp.isPrimitive() ? null : idProp.getTargetEntity();
+      if (targetEntity == null) {
+        continue;
+      }
+      for (Property refIdProp : targetEntity.getIdentifierProperties()) {
+        if (refIdProp.isPrimitive()) {
+          addIfAbsent(props, idProp.getName() + "." + refIdProp.getName());
+        }
+      }
     }
   }
 

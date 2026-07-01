@@ -16,6 +16,7 @@
  */
 package com.etendoerp.go.onboarding;
 
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -46,18 +47,33 @@ public final class OnboardingDatasetDefinition {
   );
 
   private static final Set<String> INCLUDED_TABLES = Set.of(
+      "AD_ORG_ACCTSCHEMA",
       "AD_ORG_WAREHOUSE",
       "AD_SEQUENCE",
+      "C_ACCTSCHEMA",
+      "C_ACCTSCHEMA_DEFAULT",
+      "C_ACCTSCHEMA_ELEMENT",
+      "C_ACCTSCHEMA_GL",
+      "C_ACCTSCHEMA_TABLE",
       "C_BP_GROUP",
       "C_BP_TAXCATEGORY",
       "C_CALENDAR",
       "C_DOCTYPE",
+      "C_ELEMENT",
+      "C_ELEMENTVALUE",
+      "C_ELEMENTVALUE_TRL",
       "C_LOCATION",
       "C_PAYMENTTERM",
       "C_PERIOD",
-      "C_TAX",
-      "C_TAXCATEGORY",
+      "C_PERIODCONTROL",
+      // NOTE: C_TAX and C_TAXCATEGORY are intentionally NOT imported per-client. They are now
+      // provisioned at system level (ad_client_id = '0') and shared by every tenant; imported
+      // products and the client-level C_BP_TAXCATEGORY reference those system rows directly. The
+      // per-client posting accounts (C_TAX_ACCT) ARE still client-level and are created by
+      // OnboardingAccountingWiringService against the system taxes.
+      "C_VALIDCOMBINATION",
       "C_YEAR",
+      "ETGO_TRANSACTION_TYPE",
       "FIN_FINACC_PAYMENTMETHOD",
       "FIN_FINANCIAL_ACCOUNT",
       "FIN_MATCHING_ALGORITHM",
@@ -78,8 +94,16 @@ public final class OnboardingDatasetDefinition {
       "CREATEDBY",
       "UPDATED",
       "UPDATEDBY",
-      "SALESREP_ID",
-      "AD_LANGUAGE"
+      "SALESREP_ID"
+  );
+
+  /**
+   * Columns stripped only for specific tables. {@code C_ELEMENT.AD_TREE_ID} points to GOClient's
+   * own account-element tree; importing it would carry a cross-tenant reference. It is stripped here
+   * and re-pointed to the new tenant's own EV tree by {@link OnboardingAccountingWiringService}.
+   */
+  private static final Map<String, Set<String>> STRIPPED_FIELDS_BY_TABLE = Map.of(
+      "C_ELEMENT", Set.of("AD_TREE_ID")
   );
 
   private OnboardingDatasetDefinition() {
@@ -95,6 +119,25 @@ public final class OnboardingDatasetDefinition {
 
   public static Set<String> getStrippedFields() {
     return STRIPPED_FIELDS;
+  }
+
+  /**
+   * Returns whether a column must be stripped from a given table during normalization.
+   * Combines the global {@link #STRIPPED_FIELDS} with per-table overrides.
+   *
+   * @param tableName  the sourcedata table name (case-insensitive)
+   * @param columnName the column name
+   * @return {@code true} when the column should be omitted from the normalized dataset
+   */
+  public static boolean isStrippedColumn(String tableName, String columnName) {
+    if (STRIPPED_FIELDS.contains(columnName)) {
+      return true;
+    }
+    if (tableName == null) {
+      return false;
+    }
+    Set<String> perTable = STRIPPED_FIELDS_BY_TABLE.get(tableName.toUpperCase());
+    return perTable != null && perTable.contains(columnName);
   }
 
   /**

@@ -18,7 +18,6 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
-import java.io.OutputStream;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -31,9 +30,15 @@ import org.openbravo.model.ad.ui.Process;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
 /**
- * Process and report spec endpoint collaborator for {@link NeoServlet}.
- * Handles POST requests against process-type and report-type specs by
- * delegating to {@link NeoProcessService} and {@link NeoReportService}.
+ * Process spec endpoint collaborator for {@link NeoServlet}.
+ * Handles POST requests against process-type specs by delegating to
+ * {@link NeoProcessService}.
+ *
+ * <p>Report-type spec POST handling was removed per ETP-4255: Etendo Go/NEO/MCP
+ * no longer execute Jasper/AD_Process reports. Report generation is NEO-native via
+ * {@code NeoHandler} beans; non-callable report specs are served by
+ * {@link NeoRequestRouter} with a stable {@code not_configured_for_report_generation}
+ * status.</p>
  */
 class NeoProcessReportEndpoint {
 
@@ -64,50 +69,6 @@ class NeoProcessReportEndpoint {
       log.error("Error executing process spec '{}': {}", spec.getName(), e.getMessage(), e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Process execution error: " + e.getMessage());
-    }
-  }
-
-  /**
-   * Handle a report-type spec POST. Reads the request body for exportType and params,
-   * resolves report metadata, sets response headers, then streams the report output.
-   */
-  void handleReportSpec(SFSpec spec, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    try {
-      Process adProcess = spec.getProcess();
-      if (adProcess == null) {
-        servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-            "Report spec has no linked AD_Process");
-        return;
-      }
-
-      JSONObject body = NeoRequestBodyParser.parseJsonObjectOrEmpty(
-          NeoRequestBodyParser.readRequestBody(request));
-      String exportType = body.optString("exportType", "PDF");
-      JSONObject params = body.optJSONObject("params");
-      if (params == null) {
-        params = new JSONObject();
-      }
-
-      NeoReportService.ReportMetadata meta =
-          NeoReportService.resolveReportMetadata(adProcess, exportType);
-
-      response.setStatus(HttpServletResponse.SC_OK);
-      response.setContentType(meta.getContentType());
-      response.setHeader("Content-Disposition",
-          "attachment; filename=\"" + meta.getFilename() + "\"");
-
-      OutputStream out = response.getOutputStream();
-      NeoReportService.generateReport(adProcess, params, exportType, out);
-      out.flush();
-
-    } catch (Exception e) {
-      log.error("Error generating report for spec '{}': {}",
-          spec.getName(), e.getMessage(), e);
-      if (!response.isCommitted()) {
-        servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-            "Report generation failed: " + e.getMessage());
-      }
     }
   }
 }

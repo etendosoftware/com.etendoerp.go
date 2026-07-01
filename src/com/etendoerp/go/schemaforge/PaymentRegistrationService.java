@@ -20,7 +20,9 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.text.ParseException;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import javax.servlet.http.HttpServletResponse;
@@ -44,7 +46,6 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBDateUtils;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
-import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
@@ -70,6 +71,25 @@ final class PaymentRegistrationService {
 
   private static final Logger log = LogManager.getLogger(PaymentRegistrationService.class);
 
+  // Error messages
+  private static final String MSG_INVOICE_NOT_FOUND = "Invoice not found";
+  private static final String MSG_INVOICE_ID_REQUIRED = "Invoice ID is required";
+  private static final String MSG_NO_PENDING_PSD =
+      "No pending payment schedule details found for this installment";
+
+  // JSON response keys
+  private static final String KEY_DOCUMENT_NO = "documentNo";
+  private static final String KEY_AMOUNT = "amount";
+  private static final String KEY_STATUS = "status";
+  private static final String KEY_RESPONSE = "response";
+  private static final String KEY_DATA = "data";
+  private static final String KEY_ITEMS = "items";
+  private static final String KEY_TOTAL_COUNT = "totalCount";
+  private static final String KEY_RECEIPT = "receipt";
+
+  // OBError type returned by FIN_AddPayment.processPayment on failure
+  private static final String STATUS_ERROR = "Error";
+
   private PaymentRegistrationService() {
   }
 
@@ -90,7 +110,7 @@ final class PaymentRegistrationService {
 
     Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
     if (invoice == null) {
-      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Invoice not found");
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_INVOICE_NOT_FOUND);
     }
 
     FIN_PaymentSchedule schedule = OBDal.getInstance().get(FIN_PaymentSchedule.class, scheduleId);
@@ -120,82 +140,51 @@ final class PaymentRegistrationService {
           "Financial account not found");
     }
 
-    // FIX #3 — currency compatibility: reject multi-currency until exchange rate UI is added
-    Currency invoiceCurrency = invoice.getCurrency();
-    Currency accountCurrency = account.getCurrency();
-    if (invoiceCurrency != null && accountCurrency != null
-        && !invoiceCurrency.getId().equals(accountCurrency.getId())) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "The selected account currency (" + accountCurrency.getISOCode()
-              + ") does not match the invoice currency (" + invoiceCurrency.getISOCode()
-              + "). Multi-currency payments must be processed from Etendo Classic.");
+    try {
+      FIN_Payment payment = registerPaymentCore(invoice, schedule, amount, paymentDate, account,
+          isReceipt);
+      return builtPaymentResponse(payment);
+    } catch (OBException e) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     }
+  }
 
-    List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(scheduleId);
+  /**
+   * Core payment creation + processing against an invoice installment, returning the persisted,
+   * processed {@link FIN_Payment}. Processing auto-creates the FIN_FinaccTransaction in the
+   * account (type BPD/BPW per ARR/APP). Throws {@link OBException} on any business validation
+   * failure (currency mismatch, no pending installment, no payment method, missing doc type,
+   * closed period, processing error). Shared by {@link #doRegisterPayment} (sales/purchase invoice
+   * handlers) and the bank-reconciliation "pay invoice" flow. Callers pass already-loaded,
+   * non-null entities.
+   */
+  static FIN_Payment registerPaymentCore(Invoice invoice, FIN_PaymentSchedule schedule,
+      BigDecimal amount, Date paymentDate, FIN_FinancialAccount account, boolean isReceipt)
+      throws Exception {
+
+    assertCurrencyMatch(invoice.getCurrency(), account.getCurrency());
+
+    List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(schedule.getId());
     if (pendingPSDs.isEmpty()) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "No pending payment schedule details found for this installment");
+      throw new OBException(MSG_NO_PENDING_PSD);
     }
 
-    BusinessPartner bp = invoice.getBusinessPartner();
     Organization org = invoice.getOrganization();
 
-    // FIX #2 — resolve the payment method valid for this account
     FIN_PaymentMethod paymentMethod = resolvePaymentMethod(account, invoice, isReceipt);
     if (paymentMethod == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "No payment method configured for this financial account. "
-              + "Please configure a payment method in the financial account settings.");
+      throw new OBException("No payment method configured for this financial account. "
+          + "Please configure a payment method in the financial account settings.");
     }
 
-    String docTypeCode = isReceipt ? "ARR" : "APP";
-    DocumentType docType = FIN_Utility.getDocumentType(org, docTypeCode);
-    if (docType == null) {
-      throw new OBException(
-          "Document type for " + (isReceipt ? "Receipts (ARR)" : "Payments (APP)")
-              + " not found for the organization.");
-    }
-
-    // FIX #1 — check accounting period is open
+    DocumentType docType = resolveArApDocType(org, isReceipt);
     checkPeriodOpen(invoice, docType, paymentDate);
 
-    String docNo = FIN_Utility.getDocumentNo(docType, "FIN_Payment");
-    VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
-    RequestContext.get().setVariableSecureApp(vars);
-
-    FIN_Payment payment = new AdvPaymentMngtDao().getNewPayment(
-        isReceipt, org, docType, docNo, bp, paymentMethod, account,
-        "0", paymentDate, "", invoiceCurrency, BigDecimal.ONE, amount);
-
-    payment.setAmount(amount);
-    // FIX #3 — use the proper helper instead of hardcoding 1:1
-    FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, BigDecimal.ONE, amount);
-    OBDal.getInstance().save(payment);
-    OBDal.getInstance().flush();
-
+    FIN_Payment payment = createDraftPayment(new AdvPaymentMngtDao(), isReceipt, invoice,
+        paymentMethod, account, paymentDate, amount);
     linkPSDsToPayment(pendingPSDs, payment, amount);
-
-    OBError result = FIN_AddPayment.processPayment(vars,
-        new DalConnectionProvider(false), "P", payment, "");
-    OBDal.getInstance().flush();
-
-    if ("Error".equalsIgnoreCase(result.getType())) {
-      throw new OBException(result.getMessage());
-    }
-
-    JSONObject data = new JSONObject();
-    data.put("id", payment.getId());
-    data.put("documentNo", payment.getDocumentNo());
-    data.put("amount", payment.getAmount());
-    data.put("status", result.getType());
-    data.put("message", result.getMessage());
-
-    JSONObject responseData = new JSONObject();
-    responseData.put("data", data);
-    JSONObject wrapper = new JSONObject();
-    wrapper.put("response", responseData);
-
-    return NeoResponse.created(wrapper);
+    processOrThrow(payment);
+    return payment;
   }
 
   // ─── ACCOUNTS: return accounts compatible with the invoice's org ───────────
@@ -207,14 +196,14 @@ final class PaymentRegistrationService {
   static NeoResponse handleListAccounts(NeoContext context, boolean isReceipt) {
     String invoiceId = context.getRecordId();
     if (StringUtils.isBlank(invoiceId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invoice ID is required");
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_INVOICE_ID_REQUIRED);
     }
     try {
       OBContext.setAdminMode(true);
       try {
         Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
         if (invoice == null) {
-          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Invoice not found");
+          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_INVOICE_NOT_FOUND);
         }
 
         OrganizationStructureProvider osp = OBContext.getOBContext()
@@ -230,42 +219,13 @@ final class PaymentRegistrationService {
         }
         crit.addOrderBy(FIN_FinancialAccount.PROPERTY_NAME, true);
 
-        String allowProp = isReceipt
-            ? FinAccPaymentMethod.PROPERTY_PAYINALLOW
-            : FinAccPaymentMethod.PROPERTY_PAYOUTALLOW;
+        String allowProp = allowProperty(isReceipt);
 
         JSONArray arr = new JSONArray();
         for (FIN_FinancialAccount acc : crit.list()) {
-          // Only include accounts that have at least one valid payment method configured
-          OBCriteria<FinAccPaymentMethod> methodCrit = OBDal.getInstance()
-              .createCriteria(FinAccPaymentMethod.class);
-          methodCrit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, acc));
-          methodCrit.add(Restrictions.eq(allowProp, Boolean.TRUE));
-          methodCrit.setMaxResults(1);
-          List<FinAccPaymentMethod> methods = methodCrit.list();
-          if (methods.isEmpty()) {
-            continue; // skip accounts with no valid payment methods
-          }
-
-          JSONObject item = new JSONObject();
-          item.put("id", acc.getId());
-          item.put("label", acc.getName());
-          if (acc.getCurrency() != null) {
-            item.put("currency", acc.getCurrency().getISOCode());
-            item.put("currencyId", acc.getCurrency().getId());
-          }
-          // Expose default payment method name (informational, not sent back in registerPayment)
-          FIN_PaymentMethod defaultMethod = methods.get(0).getPaymentMethod();
-          if (defaultMethod != null) {
-            item.put("defaultPaymentMethod", defaultMethod.getName());
-          }
-          arr.put(item);
+          appendAccountItem(arr, acc, allowProp);
         }
-
-        JSONObject resp = new JSONObject();
-        resp.put("items", arr);
-        resp.put("totalCount", arr.length());
-        return new NeoResponse(200, resp);
+        return itemsResponse(arr);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -276,13 +236,38 @@ final class PaymentRegistrationService {
     }
   }
 
+  /** Appends one account item if it has at least one valid payment method for the direction. */
+  private static void appendAccountItem(JSONArray arr, FIN_FinancialAccount acc, String allowProp)
+      throws Exception {
+    OBCriteria<FinAccPaymentMethod> methodCrit = OBDal.getInstance()
+        .createCriteria(FinAccPaymentMethod.class);
+    methodCrit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, acc));
+    methodCrit.add(Restrictions.eq(allowProp, Boolean.TRUE));
+    methodCrit.setMaxResults(1);
+    List<FinAccPaymentMethod> methods = methodCrit.list();
+    if (methods.isEmpty()) {
+      return;
+    }
+    JSONObject item = new JSONObject();
+    item.put("id", acc.getId());
+    item.put("label", acc.getName());
+    if (acc.getCurrency() != null) {
+      item.put("currency", acc.getCurrency().getISOCode());
+      item.put("currencyId", acc.getCurrency().getId());
+    }
+    FIN_PaymentMethod defaultMethod = methods.get(0).getPaymentMethod();
+    if (defaultMethod != null) {
+      item.put("defaultPaymentMethod", defaultMethod.getName());
+    }
+    arr.put(item);
+  }
+
   // ─── PAYMENTS: list payments linked to an invoice ──────────────────────────
 
-  @SuppressWarnings("unchecked")
   static NeoResponse handleListPayments(NeoContext context) {
     String invoiceId = context.getRecordId();
     if (StringUtils.isBlank(invoiceId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invoice ID is required");
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_INVOICE_ID_REQUIRED);
     }
     try {
       OBContext.setAdminMode(true);
@@ -300,31 +285,14 @@ final class PaymentRegistrationService {
 
         JSONArray arr = new JSONArray();
         for (FIN_Payment p : invoicePayments) {
-          JSONObject item = new JSONObject();
-          item.put("id", p.getId());
-          item.put("documentNo", p.getDocumentNo());
-          item.put("amount", p.getAmount());
-          item.put("paymentDate", p.getPaymentDate() != null
-              ? JsonUtils.createDateFormat().format(p.getPaymentDate()) : null);
-          item.put("status", p.getStatus());
-          item.put("receipt", p.isReceipt());
-          if (p.getAccount() != null) {
-            item.put("accountId", p.getAccount().getId());
-            item.put("accountName", p.getAccount().getName());
-            item.put("accountCurrency", p.getAccount().getCurrency() != null
-                ? p.getAccount().getCurrency().getISOCode() : null);
-          }
-          if (p.getPaymentMethod() != null) {
-            item.put("paymentMethod", p.getPaymentMethod().getName());
-          }
-          arr.put(item);
+          arr.put(paymentListItem(p));
         }
 
         JSONObject data = new JSONObject();
-        data.put("data", arr);
+        data.put(KEY_DATA, arr);
         data.put("count", arr.length());
         JSONObject wrapper = new JSONObject();
-        wrapper.put("response", data);
+        wrapper.put(KEY_RESPONSE, data);
         return new NeoResponse(200, wrapper);
       } finally {
         OBContext.restorePreviousMode();
@@ -336,10 +304,424 @@ final class PaymentRegistrationService {
     }
   }
 
-  // ─── PRIVATE HELPERS ───────────────────────────────────────────────────────
+  private static JSONObject paymentListItem(FIN_Payment p) throws Exception {
+    JSONObject item = new JSONObject();
+    item.put("id", p.getId());
+    item.put(KEY_DOCUMENT_NO, p.getDocumentNo());
+    item.put(KEY_AMOUNT, p.getAmount());
+    item.put("paymentDate", p.getPaymentDate() != null
+        ? JsonUtils.createDateFormat().format(p.getPaymentDate()) : null);
+    item.put(KEY_STATUS, p.getStatus());
+    item.put("processed", p.isProcessed());
+    item.put(KEY_RECEIPT, p.isReceipt());
+    if (p.getAccount() != null) {
+      item.put("accountId", p.getAccount().getId());
+      item.put("accountName", p.getAccount().getName());
+      item.put("accountCurrency", p.getAccount().getCurrency() != null
+          ? p.getAccount().getCurrency().getISOCode() : null);
+    }
+    if (p.getPaymentMethod() != null) {
+      item.put("paymentMethod", p.getPaymentMethod().getName());
+    }
+    return item;
+  }
+
+  // ─── PAYMENT METHODS: list methods valid for the invoice's accounts ────────
 
   /**
-   * FIX #1 — Validates that the accounting period is open for the given payment date.
+   * Lists the distinct payment methods configured (in the invoice's direction)
+   * for financial accounts in the natural org tree of the invoice.
+   */
+  static NeoResponse handleListPaymentMethods(NeoContext context, boolean isReceipt) {
+    String invoiceId = context.getRecordId();
+    if (StringUtils.isBlank(invoiceId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_INVOICE_ID_REQUIRED);
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+        if (invoice == null) {
+          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_INVOICE_NOT_FOUND);
+        }
+        Set<String> naturalTree = OBContext.getOBContext()
+            .getOrganizationStructureProvider(invoice.getClient().getId())
+            .getNaturalTree(invoice.getOrganization().getId());
+
+        OBCriteria<FinAccPaymentMethod> crit = OBDal.getInstance()
+            .createCriteria(FinAccPaymentMethod.class);
+        crit.setFilterOnReadableOrganization(false);
+        crit.add(Restrictions.eq(allowProperty(isReceipt), Boolean.TRUE));
+
+        Map<String, String> distinct = new LinkedHashMap<>();
+        for (FinAccPaymentMethod fapm : crit.list()) {
+          collectMethodInTree(distinct, fapm, naturalTree);
+        }
+
+        JSONArray arr = new JSONArray();
+        for (Map.Entry<String, String> e : distinct.entrySet()) {
+          JSONObject item = new JSONObject();
+          item.put("id", e.getKey());
+          item.put("label", e.getValue());
+          arr.put(item);
+        }
+        return itemsResponse(arr);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("Error listing payment methods for invoice {}: {}", invoiceId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Failed to list payment methods");
+    }
+  }
+
+  /** Adds the method behind {@code fapm} to {@code distinct} when its account is in the org tree. */
+  private static void collectMethodInTree(Map<String, String> distinct, FinAccPaymentMethod fapm,
+      Set<String> naturalTree) {
+    FIN_FinancialAccount acc = fapm.getAccount();
+    if (acc == null || acc.getOrganization() == null
+        || (!naturalTree.isEmpty() && !naturalTree.contains(acc.getOrganization().getId()))) {
+      return;
+    }
+    FIN_PaymentMethod pm = fapm.getPaymentMethod();
+    if (pm != null && !distinct.containsKey(pm.getId())) {
+      distinct.put(pm.getId(), pm.getName());
+    }
+  }
+
+  // ─── CREDIT SOURCES: consumable credit / saldo a favor of the BP ───────────
+
+  /**
+   * Lists the consumable funding sources for the invoice's business partner:
+   *   - 'abono'  : pending credit-memo / return payment-schedule details (amount &lt; 0)
+   *   - 'credit' : available accumulated credit lines (generatedCredit minus usedCredit)
+   */
+  static NeoResponse handleListCreditSources(NeoContext context, boolean isReceipt) {
+    String invoiceId = context.getRecordId();
+    if (StringUtils.isBlank(invoiceId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_INVOICE_ID_REQUIRED);
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+        if (invoice == null) {
+          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_INVOICE_NOT_FOUND);
+        }
+        if (invoice.getBusinessPartner() == null) {
+          return itemsResponse(new JSONArray());
+        }
+        String bpId = invoice.getBusinessPartner().getId();
+        JSONArray arr = new JSONArray();
+        appendAbonoSources(arr, bpId, invoiceId, isReceipt);
+        appendAccumulatedCredit(arr, bpId, isReceipt);
+        return itemsResponse(arr);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("Error listing credit sources for invoice {}: {}", invoiceId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Failed to list credit sources");
+    }
+  }
+
+  /** Appends pending credit-memo / return PSDs (negative amount) of the BP. */
+  private static void appendAbonoSources(JSONArray arr, String bpId, String invoiceId,
+      boolean isReceipt) throws Exception {
+    String hql = "select psd from FIN_Payment_ScheduleDetail psd "
+        + "where psd.invoicePaymentSchedule.invoice.businessPartner.id = :bp "
+        + "and psd.invoicePaymentSchedule.invoice.salesTransaction = :receipt "
+        + "and psd.paymentDetails is null and psd.amount < 0 "
+        + "and psd.invoicePaymentSchedule.invoice.id <> :inv "
+        + "order by psd.invoicePaymentSchedule.invoice.invoiceDate desc";
+    List<FIN_PaymentScheduleDetail> abonos = OBDal.getInstance().getSession()
+        .createQuery(hql, FIN_PaymentScheduleDetail.class)
+        .setParameter("bp", bpId)
+        .setParameter(KEY_RECEIPT, isReceipt)
+        .setParameter("inv", invoiceId)
+        .setMaxResults(50)
+        .list();
+    for (FIN_PaymentScheduleDetail psd : abonos) {
+      Invoice ncInv = psd.getInvoicePaymentSchedule().getInvoice();
+      JSONObject item = new JSONObject();
+      item.put("id", psd.getId());
+      item.put("kind", "abono");
+      item.put("psdId", psd.getId());
+      item.put("doc", ncInv.getDocumentNo());
+      item.put("date", ncInv.getInvoiceDate() != null
+          ? JsonUtils.createDateFormat().format(ncInv.getInvoiceDate()) : null);
+      item.put("note", ncInv.getDocumentType() != null ? ncInv.getDocumentType().getName() : "");
+      item.put("avail", psd.getAmount().abs());
+      arr.put(item);
+    }
+  }
+
+  /** Appends accumulated-credit payments of the BP with available credit (generated minus used). */
+  private static void appendAccumulatedCredit(JSONArray arr, String bpId, boolean isReceipt)
+      throws Exception {
+    String hql = "select p from FIN_Payment p "
+        + "where p.businessPartner.id = :bp and p.receipt = :receipt "
+        + "and (coalesce(p.generatedCredit, 0) - coalesce(p.usedCredit, 0)) > 0 "
+        + "order by p.paymentDate desc";
+    List<FIN_Payment> credits = OBDal.getInstance().getSession()
+        .createQuery(hql, FIN_Payment.class)
+        .setParameter("bp", bpId)
+        .setParameter(KEY_RECEIPT, isReceipt)
+        .setMaxResults(50)
+        .list();
+    for (FIN_Payment src : credits) {
+      BigDecimal avail = nullToZero(src.getGeneratedCredit()).subtract(nullToZero(src.getUsedCredit()));
+      if (avail.signum() <= 0) {
+        // Defensive: the HQL already excludes fully-consumed credit, but never
+        // expose a zero/negative-availability row if one slips through.
+        continue;
+      }
+      JSONObject item = new JSONObject();
+      item.put("id", src.getId());
+      item.put("kind", "credit");
+      item.put("paymentId", src.getId());
+      item.put("doc", src.getDocumentNo());
+      item.put("date", src.getPaymentDate() != null
+          ? JsonUtils.createDateFormat().format(src.getPaymentDate()) : null);
+      item.put("note", src.getDescription());
+      item.put("avail", avail);
+      arr.put(item);
+    }
+  }
+
+  // ─── ADVANCED: draft/confirm + payment method + credit consumption ─────────
+
+  /**
+   * Two-step modal payment registration. Mirrors the proven Add-Payment sequence:
+   * create the payment, consume the selected credit/abono PSDs as negative details,
+   * apply the cash-funded portion to the invoice installment, and — when confirming —
+   * register any over-payment as generated credit (or refund) and process it.
+   *
+   * Body: {@code scheduleId, actual_payment, payment_date, fin_financial_account_id,
+   * fin_paymentmethod_id?, process('draft'|'confirm'), creditSources[], overpaymentAction?}.
+   * On {@code process='draft'} the payment is created but NOT processed (stays DR).
+   */
+  static NeoResponse doRegisterPaymentAdvanced(String invoiceId, JSONObject body, boolean isReceipt)
+      throws Exception {
+
+    Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+    if (invoice == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_INVOICE_NOT_FOUND);
+    }
+    String scheduleId = body.optString("scheduleId", null);
+    if (OBDal.getInstance().get(FIN_PaymentSchedule.class, scheduleId) == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Payment schedule not found");
+    }
+    BigDecimal cash;
+    try {
+      cash = new BigDecimal(body.optString("actual_payment", ""));
+    } catch (NumberFormatException e) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid amount format");
+    }
+    Date paymentDate;
+    try {
+      paymentDate = JsonUtils.createDateFormat().parse(body.optString("payment_date", ""));
+    } catch (ParseException e) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Invalid date format");
+    }
+    FIN_FinancialAccount account = OBDal.getInstance()
+        .get(FIN_FinancialAccount.class, body.optString("fin_financial_account_id", null));
+    if (account == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Financial account not found");
+    }
+
+    boolean doProcess = !"draft".equalsIgnoreCase(body.optString("process", "confirm"));
+    String overpaymentAction = body.optString("overpaymentAction", null);
+
+    assertCurrencyMatch(invoice.getCurrency(), account.getCurrency());
+
+    Organization org = invoice.getOrganization();
+    FIN_PaymentMethod paymentMethod = resolveRequestedMethod(
+        account, invoice, isReceipt, body.optString("fin_paymentmethod_id", null));
+    if (paymentMethod == null) {
+      throw new OBException("No payment method configured for this financial account.");
+    }
+    DocumentType docType = resolveArApDocType(org, isReceipt);
+    checkPeriodOpen(invoice, docType, paymentDate);
+
+    AdvPaymentMngtDao dao = new AdvPaymentMngtDao();
+    FIN_Payment payment = createDraftPayment(dao, isReceipt, invoice,
+        paymentMethod, account, paymentDate, cash);
+
+    BigDecimal totalFunded = PaymentCreditConsumer.consume(payment, body.optJSONArray("creditSources"));
+
+    List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(scheduleId);
+    if (pendingPSDs.isEmpty()) {
+      throw new OBException(MSG_NO_PENDING_PSD);
+    }
+    BigDecimal funds = cash.add(totalFunded);
+    BigDecimal invoiceApplied = sumAmounts(pendingPSDs).min(funds).max(BigDecimal.ZERO);
+    linkPSDsToPayment(pendingPSDs, payment, invoiceApplied);
+    OBDal.getInstance().save(payment);
+    OBDal.getInstance().flush();
+
+    // Draft: created and linked but NOT processed — no transaction, no accounting.
+    if (doProcess) {
+      applyOverpaymentAndProcess(payment, dao, org, funds, invoiceApplied, overpaymentAction);
+    }
+    return builtPaymentResponse(payment);
+  }
+
+  /** Processes a previously-saved draft payment (Borrador → Depositado). */
+  static NeoResponse confirmDraftPayment(String paymentId) throws Exception {
+    FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
+    if (payment == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Payment not found");
+    }
+    processOrThrow(payment);
+    return builtPaymentResponse(payment);
+  }
+
+  // ─── ADVANCED HELPERS ──────────────────────────────────────────────────────
+
+  /** Registers the over-payment (generated credit or refund) and processes the payment. */
+  private static void applyOverpaymentAndProcess(FIN_Payment payment, AdvPaymentMngtDao dao,
+      Organization org, BigDecimal funds, BigDecimal invoiceApplied, String overpaymentAction)
+      throws Exception {
+    VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
+    RequestContext.get().setVariableSecureApp(vars);
+    DalConnectionProvider conn = new DalConnectionProvider(false);
+
+    BigDecimal leftover = funds.subtract(invoiceApplied);
+    boolean overpaid = leftover.compareTo(BigDecimal.ZERO) > 0;
+    if (overpaid) {
+      FIN_PaymentScheduleDetail creditPsd = dao.getNewPaymentScheduleDetail(org, leftover);
+      dao.getNewPaymentDetail(payment, creditPsd, leftover, BigDecimal.ZERO, false, null);
+      OBDal.getInstance().flush();
+    }
+
+    failOnError(FIN_AddPayment.processPayment(vars, conn, "P", payment, ""));
+    OBDal.getInstance().flush();
+
+    if (overpaid && "refund".equalsIgnoreCase(overpaymentAction)) {
+      FIN_Payment refund = FIN_AddPayment.createRefundPayment(conn, vars, payment,
+          leftover.negate(), null);
+      failOnError(FIN_AddPayment.processPayment(vars, conn, "P", refund, "",
+          "(" + payment.getId() + ")"));
+      OBDal.getInstance().flush();
+    }
+  }
+
+  /**
+   * Resolves the payment method: the explicitly-requested one when valid for the
+   * account, otherwise the invoice/account default (see {@link #resolvePaymentMethod}).
+   */
+  private static FIN_PaymentMethod resolveRequestedMethod(FIN_FinancialAccount account,
+      Invoice invoice, boolean isReceipt, String requestedId) {
+    if (StringUtils.isNotBlank(requestedId)) {
+      FIN_PaymentMethod requested = OBDal.getInstance().get(FIN_PaymentMethod.class, requestedId);
+      if (requested != null && isMethodAllowed(account, requested, allowProperty(isReceipt))) {
+        return requested;
+      }
+    }
+    return resolvePaymentMethod(account, invoice, isReceipt);
+  }
+
+  // ─── SHARED HELPERS ─────────────────────────────────────────────────────────
+
+  /** Builds the standard {response:{data:{id,documentNo,amount,status,processed}}} envelope. */
+  private static NeoResponse builtPaymentResponse(FIN_Payment payment) throws Exception {
+    JSONObject data = new JSONObject();
+    data.put("id", payment.getId());
+    data.put(KEY_DOCUMENT_NO, payment.getDocumentNo());
+    data.put(KEY_AMOUNT, payment.getAmount());
+    data.put(KEY_STATUS, payment.getStatus());
+    data.put("processed", payment.isProcessed());
+    JSONObject responseData = new JSONObject();
+    responseData.put(KEY_DATA, data);
+    JSONObject wrapper = new JSONObject();
+    wrapper.put(KEY_RESPONSE, responseData);
+    return NeoResponse.created(wrapper);
+  }
+
+  /** Builds the standard {items:[...], totalCount:n} listing envelope. */
+  private static NeoResponse itemsResponse(JSONArray arr) throws Exception {
+    JSONObject resp = new JSONObject();
+    resp.put(KEY_ITEMS, arr);
+    resp.put(KEY_TOTAL_COUNT, arr.length());
+    return new NeoResponse(200, resp);
+  }
+
+  /** Rejects multi-currency payments (no exchange-rate UI yet). */
+  private static void assertCurrencyMatch(Currency invoiceCurrency, Currency accountCurrency) {
+    if (invoiceCurrency != null && accountCurrency != null
+        && !invoiceCurrency.getId().equals(accountCurrency.getId())) {
+      throw new OBException("The selected account currency (" + accountCurrency.getISOCode()
+          + ") does not match the invoice currency (" + invoiceCurrency.getISOCode()
+          + "). Multi-currency payments must be processed from Etendo Classic.");
+    }
+  }
+
+  /** Resolves the ARR (receipts) / APP (payments) document type for the org, or throws. */
+  private static DocumentType resolveArApDocType(Organization org, boolean isReceipt) {
+    DocumentType docType = FIN_Utility.getDocumentType(org, isReceipt ? "ARR" : "APP");
+    if (docType == null) {
+      throw new OBException("Document type for " + (isReceipt ? "Receipts (ARR)" : "Payments (APP)")
+          + " not found for the organization.");
+    }
+    return docType;
+  }
+
+  /** Creates and persists a draft FIN_Payment (not processed yet) with its transaction amount. */
+  private static FIN_Payment createDraftPayment(AdvPaymentMngtDao dao, boolean isReceipt,
+      Invoice invoice, FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account,
+      Date paymentDate, BigDecimal amount) throws Exception {
+    DocumentType docType = resolveArApDocType(invoice.getOrganization(), isReceipt);
+    String docNo = FIN_Utility.getDocumentNo(docType, "FIN_Payment");
+    VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
+    RequestContext.get().setVariableSecureApp(vars);
+    FIN_Payment payment = dao.getNewPayment(isReceipt, invoice.getOrganization(), docType, docNo,
+        invoice.getBusinessPartner(), paymentMethod, account, "0", paymentDate, "",
+        invoice.getCurrency(), BigDecimal.ONE, amount);
+    payment.setAmount(amount);
+    FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, BigDecimal.ONE, amount);
+    OBDal.getInstance().save(payment);
+    OBDal.getInstance().flush();
+    return payment;
+  }
+
+  /** Processes the payment with action "P" and throws on a business error. */
+  private static void processOrThrow(FIN_Payment payment) throws Exception {
+    VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
+    RequestContext.get().setVariableSecureApp(vars);
+    failOnError(FIN_AddPayment.processPayment(vars, new DalConnectionProvider(false),
+        "P", payment, ""));
+    OBDal.getInstance().flush();
+  }
+
+  private static void failOnError(OBError result) {
+    if (STATUS_ERROR.equalsIgnoreCase(result.getType())) {
+      throw new OBException(result.getMessage());
+    }
+  }
+
+  private static String allowProperty(boolean isReceipt) {
+    return isReceipt
+        ? FinAccPaymentMethod.PROPERTY_PAYINALLOW
+        : FinAccPaymentMethod.PROPERTY_PAYOUTALLOW;
+  }
+
+  private static BigDecimal nullToZero(BigDecimal value) {
+    return value == null ? BigDecimal.ZERO : value;
+  }
+
+  private static BigDecimal sumAmounts(List<FIN_PaymentScheduleDetail> psds) {
+    BigDecimal total = BigDecimal.ZERO;
+    for (FIN_PaymentScheduleDetail psd : psds) {
+      total = total.add(psd.getAmount());
+    }
+    return total;
+  }
+
+  /**
+   * Validates that the accounting period is open for the given payment date.
    * Mirrors Classic's AddPaymentActionHandler check.
    */
   private static void checkPeriodOpen(Invoice invoice, DocumentType docType, Date paymentDate) {
@@ -353,7 +735,7 @@ final class PaymentRegistrationService {
           && legalEntity.getOrganizationType().isLegalEntityWithAccounting();
 
       if (!orgLegalWithAccounting) {
-        return; // org without accounting — no period restriction
+        return;
       }
 
       String docBaseType = docType != null ? docType.getDocumentCategory() : "";
@@ -367,17 +749,12 @@ final class PaymentRegistrationService {
       throw e;
     } catch (Exception e) {
       log.warn("Could not check period open for invoice {}: {}", invoice.getId(), e.getMessage());
-      // Non-fatal: let the payment proceed and let Etendo's internal checks handle it
     }
   }
 
   /**
-   * FIX #2 — Resolves the payment method to use, based on the financial account's configuration.
-   *
-   * Priority:
-   *  1. Invoice's payment method, if configured for the account (FinAccPaymentMethod)
-   *  2. First active payment method configured for the account
-   *  3. null (caller must handle)
+   * Resolves the payment method to use, based on the financial account's configuration.
+   * Priority: invoice's own method (if valid for the account), else first valid method, else null.
    */
   private static FIN_PaymentMethod resolvePaymentMethod(FIN_FinancialAccount account,
       Invoice invoice, boolean isReceipt) {
@@ -387,35 +764,30 @@ final class PaymentRegistrationService {
       invoiceMethod = invoice.getBusinessPartner().getPaymentMethod();
     }
 
-    String allowProp = isReceipt
-        ? FinAccPaymentMethod.PROPERTY_PAYINALLOW
-        : FinAccPaymentMethod.PROPERTY_PAYOUTALLOW;
-
-    // Try invoice's own payment method first
-    if (invoiceMethod != null) {
-      OBCriteria<FinAccPaymentMethod> crit = OBDal.getInstance()
-          .createCriteria(FinAccPaymentMethod.class);
-      crit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, account));
-      crit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_PAYMENTMETHOD, invoiceMethod));
-      crit.add(Restrictions.eq(allowProp, Boolean.TRUE));
-      crit.setMaxResults(1);
-      if (!crit.list().isEmpty()) {
-        return invoiceMethod;
-      }
+    String allowProp = allowProperty(isReceipt);
+    if (invoiceMethod != null && isMethodAllowed(account, invoiceMethod, allowProp)) {
+      return invoiceMethod;
     }
 
-    // Fall back to first valid method for this account
     OBCriteria<FinAccPaymentMethod> fallback = OBDal.getInstance()
         .createCriteria(FinAccPaymentMethod.class);
     fallback.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, account));
     fallback.add(Restrictions.eq(allowProp, Boolean.TRUE));
     fallback.setMaxResults(1);
     List<FinAccPaymentMethod> methods = fallback.list();
-    if (!methods.isEmpty()) {
-      return methods.get(0).getPaymentMethod();
-    }
+    return methods.isEmpty() ? null : methods.get(0).getPaymentMethod();
+  }
 
-    return null;
+  /** True when {@code method} is configured for {@code account} in the given direction. */
+  private static boolean isMethodAllowed(FIN_FinancialAccount account, FIN_PaymentMethod method,
+      String allowProp) {
+    OBCriteria<FinAccPaymentMethod> crit = OBDal.getInstance()
+        .createCriteria(FinAccPaymentMethod.class);
+    crit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, account));
+    crit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_PAYMENTMETHOD, method));
+    crit.add(Restrictions.eq(allowProp, Boolean.TRUE));
+    crit.setMaxResults(1);
+    return !crit.list().isEmpty();
   }
 
   private static void linkPSDsToPayment(List<FIN_PaymentScheduleDetail> psds,
@@ -431,7 +803,6 @@ final class PaymentRegistrationService {
     }
   }
 
-  @SuppressWarnings("unchecked")
   private static List<FIN_PaymentScheduleDetail> findPendingPSDs(String scheduleId) {
     OBCriteria<FIN_PaymentScheduleDetail> criteria = OBDal.getInstance()
         .createCriteria(FIN_PaymentScheduleDetail.class);

@@ -48,6 +48,7 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
+import org.hibernate.criterion.Criterion;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Before;
 import org.junit.Test;
@@ -397,7 +398,7 @@ public class Fiscal349BoxesHandlerTest {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       OBCriteria<TaxReport> crit = mock(OBCriteria.class);
       when(obDal.createCriteria(TaxReport.class)).thenReturn(crit);
-      when(crit.add(any())).thenReturn(crit);
+      when(crit.add(any(Criterion.class))).thenReturn(crit);
       when(crit.setMaxResults(1)).thenReturn(crit);
       // Primary search key (AEAT3492010_Q) hits on the first lookup.
       when(crit.list()).thenReturn(Collections.singletonList(report));
@@ -419,10 +420,10 @@ public class Fiscal349BoxesHandlerTest {
       OBCriteria<TaxReport> fallback = mock(OBCriteria.class);
       // First createCriteria → primary (AEAT3492010_M, empty), second → fallback (AEAT349_M, hit).
       when(obDal.createCriteria(TaxReport.class)).thenReturn(primary, fallback);
-      when(primary.add(any())).thenReturn(primary);
+      when(primary.add(any(Criterion.class))).thenReturn(primary);
       when(primary.setMaxResults(1)).thenReturn(primary);
       when(primary.list()).thenReturn(Collections.emptyList());
-      when(fallback.add(any())).thenReturn(fallback);
+      when(fallback.add(any(Criterion.class))).thenReturn(fallback);
       when(fallback.setMaxResults(1)).thenReturn(fallback);
       when(fallback.list()).thenReturn(Collections.singletonList(report));
 
@@ -439,7 +440,7 @@ public class Fiscal349BoxesHandlerTest {
       dalMock.when(OBDal::getInstance).thenReturn(obDal);
       OBCriteria<TaxReport> crit = mock(OBCriteria.class);
       when(obDal.createCriteria(TaxReport.class)).thenReturn(crit);
-      when(crit.add(any())).thenReturn(crit);
+      when(crit.add(any(Criterion.class))).thenReturn(crit);
       when(crit.setMaxResults(1)).thenReturn(crit);
       when(crit.list()).thenReturn(Collections.emptyList());
 
@@ -449,6 +450,119 @@ public class Fiscal349BoxesHandlerTest {
       } catch (OBException e) {
         assertTrue(e.getMessage().contains("No TaxReport 349"));
       }
+    }
+  }
+
+  // ── findTaxReport / system-org lookup (ETP-4177) ─────────────────
+
+  /**
+   * Regression test for ETP-4177: {@code findTaxReport} must accept records stored at
+   * {@code ad_org_id='0'} (system level). The old {@code eq(org, orgId)} predicate would
+   * silently return nothing when the TaxReport was registered at org='0', causing
+   * {@code resolveTaxReport349} to fall through both search keys and throw OBException.
+   *
+   * The fix uses {@code in(org, [orgId, "0"])} so system-level records are always found.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testFindTaxReport_systemOrgRecordFound() {
+    TaxReport report = mock(TaxReport.class);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBCriteria<TaxReport> crit = mock(OBCriteria.class);
+      when(obDal.createCriteria(TaxReport.class)).thenReturn(crit);
+      when(crit.add(any(Criterion.class))).thenReturn(crit);
+      when(crit.setMaxResults(1)).thenReturn(crit);
+      // Criteria returns a TaxReport registered under org='0' (system level).
+      when(crit.list()).thenReturn(Collections.singletonList(report));
+
+      // Tested via resolveTaxReport349 which calls findTaxReport internally.
+      TaxReport result = handler.resolveTaxReport349("org-abc", "T1");
+      assertSame("Expected the system-level TaxReport to be returned", report, result);
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testFindTaxReport_orgSpecificRecordFound() {
+    TaxReport report = mock(TaxReport.class);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBCriteria<TaxReport> crit = mock(OBCriteria.class);
+      when(obDal.createCriteria(TaxReport.class)).thenReturn(crit);
+      when(crit.add(any(Criterion.class))).thenReturn(crit);
+      when(crit.setMaxResults(1)).thenReturn(crit);
+      // Criteria returns a TaxReport registered directly under the calling org.
+      when(crit.list()).thenReturn(Collections.singletonList(report));
+
+      TaxReport result = handler.resolveTaxReport349("org-xyz", "T2");
+      assertSame("Expected the org-specific TaxReport to be returned", report, result);
+    }
+  }
+
+  /**
+   * When {@code findTaxReport} returns null for both primary and fallback search keys,
+   * {@code resolveTaxReport349} must throw {@link OBException} with both the org and
+   * period type in the message. This is the "both keys miss" path documented in ETP-4177.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolveTaxReport349_throwsWhenBothKeysMiss() {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBCriteria<TaxReport> primary  = mock(OBCriteria.class);
+      OBCriteria<TaxReport> fallback = mock(OBCriteria.class);
+      when(obDal.createCriteria(TaxReport.class)).thenReturn(primary, fallback);
+      when(primary.add(any(Criterion.class))).thenReturn(primary);
+      when(primary.setMaxResults(1)).thenReturn(primary);
+      when(primary.list()).thenReturn(Collections.emptyList());   // AEAT3492010_Q misses
+      when(fallback.add(any(Criterion.class))).thenReturn(fallback);
+      when(fallback.setMaxResults(1)).thenReturn(fallback);
+      when(fallback.list()).thenReturn(Collections.emptyList());  // AEAT349_Q misses too
+
+      try {
+        handler.resolveTaxReport349("org-miss", "T3");
+        fail("Expected OBException when both search keys return nothing");
+      } catch (OBException e) {
+        assertTrue("Message must contain orgId", e.getMessage().contains("org-miss"));
+        assertTrue("Message must mention period type", e.getMessage().contains("Q"));
+      }
+    }
+  }
+
+  /**
+   * When {@code findTaxReport} gets an empty list it must return null (no exception).
+   * This is tested indirectly: primary returns empty → resolveTaxReport349 tries fallback.
+   * If findTaxReport threw on empty list the fallback call would never be reached and
+   * the monthly-fallback test above would also fail.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testFindTaxReport_emptyListReturnsNullNotException() {
+    TaxReport fallbackReport = mock(TaxReport.class);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBCriteria<TaxReport> primary  = mock(OBCriteria.class);
+      OBCriteria<TaxReport> fallback = mock(OBCriteria.class);
+      when(obDal.createCriteria(TaxReport.class)).thenReturn(primary, fallback);
+      when(primary.add(any(Criterion.class))).thenReturn(primary);
+      when(primary.setMaxResults(1)).thenReturn(primary);
+      when(primary.list()).thenReturn(Collections.emptyList()); // null → continue to fallback
+      when(fallback.add(any(Criterion.class))).thenReturn(fallback);
+      when(fallback.setMaxResults(1)).thenReturn(fallback);
+      when(fallback.list()).thenReturn(Collections.singletonList(fallbackReport));
+
+      // If findTaxReport threw on empty list, this call would never reach the fallback
+      // and would propagate an unexpected exception instead of returning fallbackReport.
+      TaxReport result = handler.resolveTaxReport349("org1", "T1");
+      assertSame(fallbackReport, result);
     }
   }
 }

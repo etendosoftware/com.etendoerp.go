@@ -25,6 +25,7 @@ import java.io.OutputStream;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.sun.net.httpserver.HttpServer;
@@ -60,6 +61,37 @@ public class ApiGatewayEmailProviderAdapterTest {
     assertEquals("Lucas", payload.getJSONObject("data").getString("name"));
     assertFalse(payload.has("from"));
     assertFalse(payload.has("sender"));
+  }
+
+  @Test
+  public void advertisesMultiRecipientAndCcCapabilityForSes() {
+    EmailProviderConfig config = new EmailProviderConfig("https://provider.example/send", "secret",
+        true, 1200);
+    ApiGatewayEmailProviderAdapter adapter = new ApiGatewayEmailProviderAdapter(config,
+        new CapturingTransport(new EmailProviderResponse(202, "{}")));
+
+    assertTrue(adapter.supportsMultipleRecipients());
+    assertTrue(adapter.supportsCcChannel());
+  }
+
+  @Test
+  public void sendsMultiRecipientPayloadAsArraysWithCc() throws Exception {
+    CapturingTransport transport = new CapturingTransport(new EmailProviderResponse(202, "{}"));
+    EmailProviderConfig config = new EmailProviderConfig("https://provider.example/send", "secret",
+        true, 1200);
+    ApiGatewayEmailProviderAdapter adapter = new ApiGatewayEmailProviderAdapter(config, transport);
+
+    EmailRecipientSet recipients = EmailRecipientSet.of(
+        Arrays.asList("primary@example.com", "second@example.com"),
+        Arrays.asList("cc@example.com"));
+    adapter.send(new EmailProviderRequest(recipients, "sales-invoice-send", new JSONObject(), null));
+
+    JSONObject payload = new JSONObject(transport.body);
+    assertEquals(2, payload.getJSONArray("to").length());
+    assertEquals("primary@example.com", payload.getJSONArray("to").getString(0));
+    assertEquals("second@example.com", payload.getJSONArray("to").getString(1));
+    assertEquals(1, payload.getJSONArray("cc").length());
+    assertEquals("cc@example.com", payload.getJSONArray("cc").getString(0));
   }
 
   @Test

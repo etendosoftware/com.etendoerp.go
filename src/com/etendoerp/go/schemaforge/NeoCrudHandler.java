@@ -57,6 +57,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
@@ -92,9 +93,16 @@ class NeoCrudHandler {
           "vendorBlocking"));
 
   private final NeoServlet servlet;
+  private final NeoTelemetryService telemetryService;
 
   NeoCrudHandler(NeoServlet servlet) {
+    this(servlet, NeoTelemetryService.runtime());
+  }
+
+  NeoCrudHandler(NeoServlet servlet, NeoTelemetryService telemetryService) {
     this.servlet = servlet;
+    this.telemetryService = telemetryService == null ? NeoTelemetryService.runtime()
+        : telemetryService;
   }
 
   /**
@@ -149,6 +157,12 @@ class NeoCrudHandler {
     }
     NeoResponse neoResponse = dispatchCrudRequest(entity, neoContext, request, response);
     if (neoResponse != null) {
+      // Generic CSV export: when the GET carries export=csv, stream the rows the
+      // handler produced as a CSV attachment instead of the JSON envelope.
+      if ("GET".equals(method)
+          && NeoCsvExportService.tryExport(neoResponse, queryParams, response)) {
+        return;
+      }
       servlet.writeResponse(response, neoResponse);
     }
   }
@@ -187,6 +201,15 @@ class NeoCrudHandler {
    * Dispatches a CRUD request to the appropriate handler (hooked or default).
    */
   private NeoResponse dispatchCrudRequest(SFEntity entity, NeoContext neoContext,
+      HttpServletRequest request, HttpServletResponse response) {
+    if (NeoTelemetryService.isWriteMethod(neoContext.getHttpMethod())) {
+      return telemetryService.measureBackendOperation(neoContext,
+          () -> dispatchCrudRequestInternal(entity, neoContext, request, response));
+    }
+    return dispatchCrudRequestInternal(entity, neoContext, request, response);
+  }
+
+  private NeoResponse dispatchCrudRequestInternal(SFEntity entity, NeoContext neoContext,
       HttpServletRequest request, HttpServletResponse response) {
     String javaQualifier = entity.getJavaQualifier();
     if (StringUtils.isNotBlank(javaQualifier)) {
@@ -549,7 +572,7 @@ class NeoCrudHandler {
     NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields,
         effectiveProtected);
     long t1 = System.nanoTime();
-    DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context);
+    DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context, effectiveProtected);
     NeoDefaultsCascadeHelper.removeEmptyFkValues(filteredBody, adTab);
     long t2 = System.nanoTime();
     log.info(
@@ -843,16 +866,7 @@ class NeoCrudHandler {
     predicates.add("e." + resolvedProperty + " IS NOT NULL");
 
     String tabWhere = adTab.getHqlwhereclause();
-    if (StringUtils.isNotBlank(tabWhere)) {
-      if (parentId != null && tabWhere.contains("@")) {
-        tabWhere = resolveTabWhereTokens(adTab, tabWhere, parentId);
-      }
-      if (!tabWhere.contains("@")) {
-        // Skip when unresolved @session_tokens@ remain — OBQuery can't bind
-        // them and the list fetch relies on DefaultJsonDataService to resolve.
-        predicates.add("(" + tabWhere + ")");
-      }
-    }
+    addTabWherePredicate(adTab, tabWhere, parentId, predicates);
     if (parentId != null && adTab.getTabLevel() != null && adTab.getTabLevel() > 0) {
       String parentFilter = resolveParentFilter(adTab, parentId);
       if (StringUtils.isNotBlank(parentFilter)) {
@@ -899,6 +913,19 @@ class NeoCrudHandler {
           dalEntityName, resolvedProperty, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Failed to compute distinct values");
+    }
+  }
+
+  private void addTabWherePredicate(Tab adTab, String tabWhere, String parentId, List<String> predicates) {
+    if (StringUtils.isNotBlank(tabWhere)) {
+      if (parentId != null && tabWhere.contains("@")) {
+        tabWhere = resolveTabWhereTokens(adTab, tabWhere, parentId);
+      }
+      if (!tabWhere.contains("@")) {
+        // Skip when unresolved @session_tokens@ remain — OBQuery can't bind
+        // them and the list fetch relies on DefaultJsonDataService to resolve.
+        predicates.add("(" + tabWhere + ")");
+      }
     }
   }
 

@@ -43,6 +43,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -132,13 +133,33 @@ public class EtendoGoJwtServletTest {
   }
 
   @Test
+  public void registerWeakPasswordReturnsWeakPasswordError() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/register");
+    when(req.getContentType()).thenReturn("application/json");
+    JSONObject body = new JSONObject();
+    body.put("email", "weak@test.com");
+    body.put("password", "weak");
+    body.put("name", "Weak User");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("WEAK_PASSWORD", respBody.getJSONObject("error").getString("code"));
+  }
+
+  @Test
   public void registerExistingEmailReturnsBadRequest() throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = mockRequest("/register");
     when(req.getContentType()).thenReturn("application/json");
     JSONObject body = new JSONObject();
     body.put("email", "exists@test.com");
-    body.put("password", "pass123");
+    body.put("password", "Str0ng!Pass1");
     body.put("name", "Test User");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
 
@@ -166,7 +187,7 @@ public class EtendoGoJwtServletTest {
     when(req.getContentType()).thenReturn("application/json");
     JSONObject body = new JSONObject();
     body.put("email", "new@test.com");
-    body.put("password", "pass123");
+    body.put("password", "Str0ng!Pass1");
     body.put("name", "New User");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
 
@@ -202,7 +223,7 @@ public class EtendoGoJwtServletTest {
     when(req.getContentType()).thenReturn("application/json");
     JSONObject body = new JSONObject();
     body.put("email", "localized@test.com");
-    body.put("password", "pass123");
+    body.put("password", "Str0ng!Pass1");
     body.put("name", "Localized User");
     body.put("language", " es_ES ");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
@@ -236,7 +257,7 @@ public class EtendoGoJwtServletTest {
     when(req.getContentType()).thenReturn("application/json");
     JSONObject body = new JSONObject();
     body.put("email", "new@test.com");
-    body.put("password", "pass123");
+    body.put("password", "Str0ng!Pass1");
     body.put("name", "New User");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
 
@@ -322,6 +343,164 @@ public class EtendoGoJwtServletTest {
     assertEquals(400, resp.status);
   }
 
+  // ===================== POST /sso/google =====================
+
+  @Test
+  public void ssoGoogleNewAccountCreatesSsoAccount() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/sso/google");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"credential\":\"id-token\"}")));
+    EtendoGoSsoAssertion assertion = new EtendoGoSsoAssertion("google", "google-sub",
+        "user@gmail.com", "Google User", true);
+    EtendoGoJwtServlet ssoServlet = new EtendoGoJwtServlet(new TransactionalAuthEmailSender(),
+        (request, rawBody) -> assertion);
+
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("acct-1");
+    when(account.getEmail()).thenReturn("user@gmail.com");
+    when(account.getName()).thenReturn("Google User");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
+          "google", "google-sub")).thenReturn(null);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@gmail.com"))
+          .thenReturn(null);
+      dalMock.when(() -> EtendoGoJwtDalHelper.createSsoAccount(eq("user@gmail.com"),
+          eq("Google User"), eq("google"), eq("google-sub"), eq("user@gmail.com"),
+          anyString(), any(Date.class))).thenReturn(account);
+
+      ssoServlet.doPost(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("success", respBody.getString("status"));
+    assertEquals("sso", respBody.getString("authMethod"));
+    assertNotNull(respBody.getString("token"));
+  }
+
+  @Test
+  public void ssoGoogleExistingLocalAccountRequiresAuthoritativeEmail() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/sso/google");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"credential\":\"id-token\"}")));
+    EtendoGoSsoAssertion assertion = new EtendoGoSsoAssertion("google", "google-sub",
+        "user@example.com", "Google User", false);
+    EtendoGoJwtServlet ssoServlet = new EtendoGoJwtServlet(new TransactionalAuthEmailSender(),
+        (request, rawBody) -> assertion);
+
+    Account account = mock(Account.class);
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
+          "google", "google-sub")).thenReturn(null);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@example.com"))
+          .thenReturn(account);
+
+      ssoServlet.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.linkSsoIdentityIfCompatible(
+          any(Account.class), anyString(), anyString(), anyString()), never());
+    }
+
+    assertEquals(409, resp.status);
+  }
+
+  @Test
+  public void ssoGoogleExistingLocalAccountLinksAuthoritativeEmail() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/sso/google");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"credential\":\"id-token\"}")));
+    EtendoGoSsoAssertion assertion = new EtendoGoSsoAssertion("google", "google-sub",
+        "user@gmail.com", "Google User", true);
+    EtendoGoJwtServlet ssoServlet = new EtendoGoJwtServlet(new TransactionalAuthEmailSender(),
+        (request, rawBody) -> assertion);
+
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("acct-1");
+    when(account.getEmail()).thenReturn("user@gmail.com");
+    when(account.getName()).thenReturn("Google User");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
+          "google", "google-sub")).thenReturn(null);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@gmail.com"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.linkSsoIdentityIfCompatible(account,
+          "google", "google-sub", "user@gmail.com")).thenReturn(true);
+
+      ssoServlet.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.updateSsoSession(
+          eq(account), eq("user@gmail.com"), anyString(), any(Date.class)));
+    }
+
+    assertEquals(200, resp.status);
+  }
+
+  @Test
+  public void ssoUnsupportedProviderReturnsNotFound() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/sso/example");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader("{}")));
+
+    servlet.doPost(req, resp.response);
+
+    assertEquals(404, resp.status);
+  }
+
+  @Test
+  public void ssoProviderMismatchReturnsUnauthorized() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/sso/example");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader("{}")));
+    EtendoGoSsoProviderRegistry registry = EtendoGoSsoProviderRegistry.singleProvider("example",
+        (request, rawBody) -> new EtendoGoSsoAssertion("other", "sub", "user@example.com",
+            "User", true));
+    EtendoGoJwtServlet ssoServlet = new EtendoGoJwtServlet(new TransactionalAuthEmailSender(),
+        registry);
+
+    ssoServlet.doPost(req, resp.response);
+
+    assertEquals(401, resp.status);
+  }
+
+  @Test
+  public void ssoVerifierReceivesRawBodyWithLineBreaks() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/sso/google");
+    String rawBody = "{\n  \"credential\":\"id-token\"\n}";
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(rawBody)));
+    AtomicReference<String> receivedBody = new AtomicReference<>();
+    EtendoGoJwtServlet ssoServlet = new EtendoGoJwtServlet(new TransactionalAuthEmailSender(),
+        (request, verifierRawBody) -> {
+          receivedBody.set(verifierRawBody);
+          return new EtendoGoSsoAssertion("google", "google-sub", "user@gmail.com",
+              "Google User", true);
+        });
+
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("acct-1");
+    when(account.getEmail()).thenReturn("user@gmail.com");
+    when(account.getName()).thenReturn("Google User");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
+          "google", "google-sub")).thenReturn(account);
+
+      ssoServlet.doPost(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    assertEquals(rawBody, receivedBody.get());
+  }
+
   // ===================== POST /password-reset/request =====================
 
   @Test
@@ -364,6 +543,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
       dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
           .thenCallRealMethod();
 
@@ -400,6 +580,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
       dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
           .thenCallRealMethod();
 
@@ -437,6 +618,7 @@ public class EtendoGoJwtServletTest {
       publicUrlMock.when(PublicUrlResolver::resolveConfiguredAppBaseUrl).thenReturn(null);
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
       dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
           .thenCallRealMethod();
 
@@ -470,6 +652,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
       dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
           .thenCallRealMethod();
 
@@ -502,6 +685,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("user@test.com"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
       dalMock.when(() -> EtendoGoJwtDalHelper.capturePasswordResetToken(account))
           .thenCallRealMethod();
 
@@ -522,7 +706,7 @@ public class EtendoGoJwtServletTest {
     HttpServletRequest req = mockRequest("/password-reset/confirm");
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
-        "{\"token\":\"bad-token\",\"password\":\"new-pass\"}")));
+        "{\"token\":\"bad-token\",\"password\":\"Str0ng!Pass1\"}")));
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
@@ -541,7 +725,7 @@ public class EtendoGoJwtServletTest {
     HttpServletRequest req = mockRequest("/password-reset/confirm");
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
-        "{\"token\":\"valid-token\",\"password\":\"new-pass\"}")));
+        "{\"token\":\"valid-token\",\"password\":\"Str0ng!Pass1\"}")));
 
     Account account = mock(Account.class);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
@@ -569,7 +753,7 @@ public class EtendoGoJwtServletTest {
     when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
-        "{\"currentPassword\":\"wrong\",\"newPassword\":\"new-pass\"}")));
+        "{\"currentPassword\":\"wrong\",\"newPassword\":\"Str0ng!Pass1\"}")));
 
     Account account = mock(Account.class);
     when(account.getPasswordHash()).thenReturn(testPasswordHash("old-pass"));
@@ -577,6 +761,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
 
       servlet.doPost(req, resp.response);
     }
@@ -593,7 +778,7 @@ public class EtendoGoJwtServletTest {
     when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
     when(req.getContentType()).thenReturn("application/json");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
-        "{\"currentPassword\":\"old-pass\",\"newPassword\":\"new-pass\"}")));
+        "{\"currentPassword\":\"old-pass\",\"newPassword\":\"Str0ng!Pass1\"}")));
 
     Account account = mock(Account.class);
     when(account.getId()).thenReturn("acct-1");
@@ -605,6 +790,7 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
           .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
 
       servletWithEmailSender.doPost(req, resp.response);
 
@@ -820,6 +1006,199 @@ public class EtendoGoJwtServletTest {
     assertEquals(401, resp.status);
   }
 
+  // ===================== GET/POST /onboarding/draft =====================
+
+  @Test
+  public void onboardingDraftGetMissingTokenReturnsUnauthorized() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/onboarding/draft");
+
+    // Mock OBContext so the admin-context setup in resolveAuthenticatedAccount is a
+    // no-op (as in the sibling draft tests); without a Bearer header the request must
+    // still short-circuit to 401 before any account lookup.
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(401, resp.status);
+  }
+
+  @Test
+  public void onboardingDraftGetReturnsStoredDraft() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/onboarding/draft", "valid-token");
+    Account account = mock(Account.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.getOnboardingDraft(account))
+          .thenReturn("{\"step\":2,\"form\":{\"fullName\":\"Jane\"}}");
+
+      servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("success", respBody.getString("status"));
+    assertEquals(2, respBody.getJSONObject("draft").getInt("step"));
+    assertEquals("Jane", respBody.getJSONObject("draft").getJSONObject("form")
+        .getString("fullName"));
+  }
+
+  @Test
+  public void onboardingDraftGetIgnoresInvalidStoredJson() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/onboarding/draft", "valid-token");
+    Account account = mock(Account.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.getOnboardingDraft(account)).thenReturn("not json");
+
+      servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertTrue(respBody.isNull("draft"));
+  }
+
+  @Test
+  public void onboardingDraftSaveSanitizesAllowedFieldsAndClampsStep() throws Exception {
+    ResponseCapture resp = mockResponse();
+    JSONObject body = onboardingDraftBody(99, "Jane", "secret");
+    HttpServletRequest req = authenticatedJsonRequest("/onboarding/draft", "valid-token", body);
+    Account account = mock(Account.class);
+    ArgumentCaptor<String> storedDraftCaptor = ArgumentCaptor.forClass(String.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.updateOnboardingDraft(eq(account),
+          storedDraftCaptor.capture()));
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject storedDraft = new JSONObject(storedDraftCaptor.getValue());
+    assertEquals(2, storedDraft.getInt("step"));
+    assertEquals("Jane", storedDraft.getJSONObject("form").getString("fullName"));
+    assertTrue(!storedDraft.getJSONObject("form").has("password"));
+  }
+
+  @Test
+  public void onboardingDraftSaveNullDraftClearsStoredDraft() throws Exception {
+    ResponseCapture resp = mockResponse();
+    JSONObject body = new JSONObject();
+    body.put("draft", JSONObject.NULL);
+    HttpServletRequest req = authenticatedJsonRequest("/onboarding/draft", "valid-token", body);
+    Account account = mock(Account.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.updateOnboardingDraft(eq(account),
+          eq((String) null)));
+    }
+
+    assertEquals(200, resp.status);
+    JSONObject respBody = new JSONObject(resp.body());
+    assertEquals("success", respBody.getString("status"));
+  }
+
+  @Test
+  public void onboardingDraftSaveInvalidJsonReturnsBadRequestWithoutPersisting() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/onboarding/draft", "valid-token");
+    when(req.getContentType()).thenReturn("application/json");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader("not json")));
+    Account account = mock(Account.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.updateOnboardingDraft(any(Account.class),
+          anyString()), never());
+    }
+
+    assertEquals(400, resp.status);
+  }
+
+  @Test
+  public void onboardingDraftSaveOversizedDraftReturnsBadRequestWithoutPersisting()
+      throws Exception {
+    ResponseCapture resp = mockResponse();
+    JSONObject body = onboardingDraftBody(1, repeated("A", 4_050), null);
+    HttpServletRequest req = authenticatedJsonRequest("/onboarding/draft", "valid-token", body);
+    Account account = mock(Account.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doPost(req, resp.response);
+
+      dalMock.verify(() -> EtendoGoJwtDalHelper.updateOnboardingDraft(any(Account.class),
+          anyString()), never());
+    }
+
+    assertEquals(400, resp.status);
+  }
+
+  @Test
+  public void environmentsSuccessExpandsEachNonStarOrganization() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/environments", "valid-token");
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("user@test.com");
+    User environmentUser = mock(User.class);
+    Client client = mock(Client.class);
+    Organization firstOrg = mockOrganization("ORG-1", "Main Org");
+    Organization secondOrg = mockOrganization("ORG-2", "Second Org");
+    when(environmentUser.getClient()).thenReturn(client);
+    when(environmentUser.getId()).thenReturn("USER-1");
+    when(environmentUser.getUsername()).thenReturn("admin@test.com");
+    when(environmentUser.getName()).thenReturn("Admin User");
+    when(client.getId()).thenReturn("CLIENT-1");
+    when(client.getName()).thenReturn("Client One");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.findEnvironmentUsersByAccountEmail("user@test.com"))
+          .thenReturn(List.of(environmentUser));
+      dalMock.when(() -> EtendoGoJwtDalHelper.findNonStarOrganizations("CLIENT-1"))
+          .thenReturn(List.of(firstOrg, secondOrg));
+      dalMock.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(any(Client.class),
+          any(Organization.class), any(User.class))).thenCallRealMethod();
+
+      servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    JSONArray environments = new JSONObject(resp.body()).getJSONArray("environments");
+    assertEquals(2, environments.length());
+    assertEquals("ORG-1", environments.getJSONObject(0).getString("orgId"));
+    assertEquals("ORG-2", environments.getJSONObject(1).getString("orgId"));
+  }
+
   // ===================== Helpers =====================
 
   private static String testPasswordHash(String password) throws Exception {
@@ -835,6 +1214,51 @@ public class EtendoGoJwtServletTest {
     HttpServletRequest request = mock(HttpServletRequest.class);
     when(request.getPathInfo()).thenReturn(pathInfo);
     return request;
+  }
+
+  private static HttpServletRequest authenticatedRequest(String pathInfo, String token) {
+    HttpServletRequest request = mockRequest(pathInfo);
+    when(request.getHeader("Authorization")).thenReturn("Bearer " + token);
+    return request;
+  }
+
+  private static HttpServletRequest authenticatedJsonRequest(String pathInfo, String token,
+      JSONObject body) throws Exception {
+    HttpServletRequest request = authenticatedRequest(pathInfo, token);
+    when(request.getContentType()).thenReturn("application/json");
+    when(request.getReader()).thenReturn(new BufferedReader(new StringReader(body.toString())));
+    return request;
+  }
+
+  private static JSONObject onboardingDraftBody(int step, String fullName, String disallowedValue)
+      throws Exception {
+    JSONObject form = new JSONObject();
+    form.put("fullName", fullName);
+    form.put("currency", "EUR");
+    if (disallowedValue != null) {
+      form.put("password", disallowedValue);
+    }
+    JSONObject draft = new JSONObject();
+    draft.put("step", step);
+    draft.put("form", form);
+    JSONObject body = new JSONObject();
+    body.put("draft", draft);
+    return body;
+  }
+
+  private static String repeated(String value, int count) {
+    StringBuilder builder = new StringBuilder(value.length() * count);
+    for (int i = 0; i < count; i++) {
+      builder.append(value);
+    }
+    return builder.toString();
+  }
+
+  private static Organization mockOrganization(String id, String name) {
+    Organization organization = mock(Organization.class);
+    when(organization.getId()).thenReturn(id);
+    when(organization.getName()).thenReturn(name);
+    return organization;
   }
 
   private static ResponseCapture mockResponse() throws Exception {

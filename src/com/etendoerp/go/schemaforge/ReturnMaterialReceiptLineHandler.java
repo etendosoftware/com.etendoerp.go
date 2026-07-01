@@ -1,0 +1,78 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+package com.etendoerp.go.schemaforge;
+
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.Map;
+
+import javax.inject.Named;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.service.OBDal;
+
+/**
+ * Post-hook for the Return Material Receipt line entity.
+ *
+ * Injects {@code orderQuantity} (original delivered qty from canceled source line)
+ * and {@code productCode} (M_Product.Value / search key) into every GET response.
+ */
+@Named("returnMaterialReceiptLineHandler")
+public class ReturnMaterialReceiptLineHandler implements NeoHandler {
+
+  private static final Logger log = LogManager.getLogger(ReturnMaterialReceiptLineHandler.class);
+
+  @Override
+  public NeoResponse handle(NeoContext context) {
+    return null;
+  }
+
+  @Override
+  public NeoResponse afterHandle(NeoContext context) {
+    try {
+      NeoResponse previousResult = context.getPreviousResult();
+      JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
+      if (dataArr == null || previousResult == null) {
+        return null;
+      }
+      JSONObject body = previousResult.getBody();
+      List<String> lineIds = NeoHandlerUtils.collectIds(dataArr);
+      Map<String, ReturnShipmentUtils.LineData> lineDataMap = ReturnShipmentUtils.fetchLineData(lineIds, log);
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject rec = dataArr.getJSONObject(i);
+        String id = rec.optString("id", null);
+        ReturnShipmentUtils.LineData ld = lineDataMap.get(id);
+        if (ld != null) {
+          if (ld.qty != null) {
+            rec.put("orderQuantity", ld.qty);
+          }
+          if (ld.productCode != null) {
+            rec.put("productCode", ld.productCode);
+          }
+        }
+      }
+      return NeoResponse.ok(body);
+    } catch (Exception e) {
+      log.error("Error enriching return-material-receipt lines", e);
+      return context.getPreviousResult();
+    }
+  }
+
+}

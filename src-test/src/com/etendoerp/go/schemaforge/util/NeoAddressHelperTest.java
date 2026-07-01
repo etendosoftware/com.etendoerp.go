@@ -22,6 +22,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Modifier;
+
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -32,6 +35,16 @@ import org.openbravo.model.common.geography.Region;
  * Unit tests for {@link NeoAddressHelper}.
  */
 class NeoAddressHelperTest {
+
+  @Test
+  @DisplayName("Utility class hides its constructor")
+  void utilityClassHidesConstructor() throws ReflectiveOperationException {
+    Constructor<NeoAddressHelper> constructor = NeoAddressHelper.class.getDeclaredConstructor();
+    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
+    constructor.setAccessible(true);
+    constructor.newInstance();
+  }
+
 
   @Nested
   @DisplayName("formatCityLine")

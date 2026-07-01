@@ -18,18 +18,30 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.DocumentType;
 
 /**
  * Unit tests for {@link SalesInvoiceHeaderHandler}.
@@ -308,5 +320,428 @@ public class SalesInvoiceHeaderHandlerTest {
     assertEquals(500.0, resultData.getJSONObject(0).getDouble("grandTotalAmount"), 0.005); // unchanged
     assertEquals(300.0, resultData.getJSONObject(1).getDouble("grandTotalAmount"), 0.005); // unchanged
     assertEquals(447.10, resultData.getJSONObject(2).getDouble("grandTotalAmount"), 0.005); // adjusted
+  }
+
+  // ── enrichSourceInvoice() ──────────────────────────────────────────────────
+
+  /**
+   * Builds a context for detail GET (recordId != null).
+   */
+  private static NeoContext getDetailCtx(String recordId) {
+    return NeoContext.builder()
+        .specName("sales-invoice")
+        .entityName("header")
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId(recordId)
+        .build();
+  }
+
+  /**
+   * Builds a minimal invoice response body.
+   */
+  private static JSONObject invoiceBodyNoDiscount(String id) throws JSONException {
+    JSONObject invoice = new JSONObject()
+        .put("id", id)
+        .put("processed", false)
+        .put("etgoTotalDiscount", 0.0)
+        .put("grandTotalAmount", 100.0)
+        .put("outstandingAmount", 100.0);
+    return new JSONObject().put("response", new JSONObject().put("data", new JSONArray().put(invoice)));
+  }
+
+  /**
+   * Verifies that enrichSourceInvoice injects both sourceReturnReceipt and sourceInvoice
+   * when the SQL query finds a return receipt linked to an original invoice.
+   */
+  @Test
+  public void testEnrichSourceInvoiceInjectsBothFieldsWhenReturnReceiptAndInvoiceFound() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString("ret_id")).thenReturn("ret-001");
+      when(rs.getString("ret_doc")).thenReturn("RRET-001");
+      when(rs.getString("ret_status")).thenReturn("CO");
+      when(rs.getString("inv_id")).thenReturn("inv-orig-001");
+      when(rs.getString("inv_doc")).thenReturn("INV-ORIG-001");
+
+      JSONObject body = invoiceBodyNoDiscount("inv-001");
+      NeoContext ctx = getDetailCtx("inv-001");
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+
+      JSONObject retReceipt = rec.getJSONObject("sourceReturnReceipt");
+      assertEquals("ret-001", retReceipt.getString("id"));
+      assertEquals("RRET-001", retReceipt.getString("documentNo"));
+      assertEquals("CO", retReceipt.getString("documentStatus"));
+
+      JSONObject sourceInvoice = rec.getJSONObject("sourceInvoice");
+      assertEquals("inv-orig-001", sourceInvoice.getString("id"));
+      assertEquals("INV-ORIG-001", sourceInvoice.getString("documentNo"));
+    }
+  }
+
+  /**
+   * Verifies that enrichSourceInvoice injects only sourceReturnReceipt (no sourceInvoice key)
+   * when the SQL row has a return receipt but no original invoice (inv_id = null).
+   */
+  @Test
+  public void testEnrichSourceInvoiceInjectsOnlyReturnReceiptWhenNoOriginalInvoice() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString("ret_id")).thenReturn("ret-002");
+      when(rs.getString("ret_doc")).thenReturn("RRET-002");
+      when(rs.getString("ret_status")).thenReturn("DR");
+      when(rs.getString("inv_id")).thenReturn(null); // no original invoice
+
+      JSONObject body = invoiceBodyNoDiscount("inv-002");
+      NeoContext ctx = getDetailCtx("inv-002");
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+
+      assertNotNull(rec.optJSONObject("sourceReturnReceipt"));
+      assertFalse(rec.has("sourceInvoice"));
+    }
+  }
+
+  /**
+   * Verifies that neither sourceReturnReceipt nor sourceInvoice is injected
+   * when the SQL returns no rows (regular invoice, no Canceled_Inoutline_ID).
+   */
+  @Test
+  public void testEnrichSourceInvoiceInjectsNothingWhenNoRowsFound() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      JSONObject body = invoiceBodyNoDiscount("inv-003");
+      NeoContext ctx = getDetailCtx("inv-003");
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+
+      assertFalse(rec.has("sourceReturnReceipt"));
+      assertFalse(rec.has("sourceInvoice"));
+    }
+  }
+
+  /**
+   * Verifies that enrichSourceInvoice is NOT called for list GET (recordId == null),
+   * so neither sourceReturnReceipt nor sourceInvoice appears in list results.
+   */
+  @Test
+  public void testEnrichSourceInvoiceNotCalledForListView() throws Exception {
+    JSONObject body = invoiceBody(false, 0.0, 100.0, 100.0);
+    NeoContext ctx = getCtx(); // recordId = null — list view
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    // No OBDal mock needed — enrichSourceInvoice should not be reached
+    NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+    assertNotNull(result);
+    JSONObject rec = result.getBody()
+        .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+
+    assertFalse(rec.has("sourceReturnReceipt"));
+    assertFalse(rec.has("sourceInvoice"));
+  }
+
+  // ── classifyDocType (via resolveSubtype) ──────────────────────────────────
+
+  /**
+   * Test accessor subclass that exposes resolveSubtype for direct testing.
+   */
+  private static class TestableSalesHandler extends SalesInvoiceHeaderHandler {
+    public String callResolveSubtype(String docTypeId) {
+      return resolveSubtype(docTypeId);
+    }
+  }
+
+  @Test
+  public void resolveSubtype_blankDocTypeId_returnsFac() {
+    TestableSalesHandler h = new TestableSalesHandler();
+    assertEquals("FAC", h.callResolveSubtype(null));
+    assertEquals("FAC", h.callResolveSubtype(""));
+    assertEquals("FAC", h.callResolveSubtype("   "));
+  }
+
+  @Test
+  public void resolveSubtype_docTypeNotFound_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(DocumentType.class, "dt-missing")).thenReturn(null);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-missing"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_arcCategory_returnsNc() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARC");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("NC", h.callResolveSubtype("dt-arc"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_ariRmCategory_returnsDev() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI_RM");
+      when(dal.get(DocumentType.class, "dt-ari-rm")).thenReturn(dt);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("DEV", h.callResolveSubtype("dt-ari-rm"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_ariCategory_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI");
+      when(dal.get(DocumentType.class, "dt-ari")).thenReturn(dt);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-ari"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_otherCategory_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("MMO");
+      when(dal.get(DocumentType.class, "dt-other")).thenReturn(dt);
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-other"));
+    }
+  }
+
+  @Test
+  public void resolveSubtype_dbException_returnsFac() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(DocumentType.class, "dt-err"))
+          .thenThrow(new RuntimeException("DB error"));
+
+      TestableSalesHandler h = new TestableSalesHandler();
+      assertEquals("FAC", h.callResolveSubtype("dt-err"));
+    }
+  }
+
+  // ── afterHandle(): amount negation for NC / DEV subtypes ─────────────────
+
+  /**
+   * Builds a body for NC/DEV subtype tests with a specific transactionDocument field.
+   */
+  private static JSONObject invoiceBodyWithDocType(String docTypeId, double grand, double outstanding)
+      throws Exception {
+    JSONObject invoice = new JSONObject()
+        .put("transactionDocument", docTypeId)
+        .put("processed", false)
+        .put("etgoTotalDiscount", 0.0)
+        .put("grandTotalAmount", grand)
+        .put("outstandingAmount", outstanding);
+    return new JSONObject().put("response", new JSONObject().put("data", new JSONArray().put(invoice)));
+  }
+
+  /**
+   * Verifies that grandTotalAmount and outstandingAmount are negated for NC (credit memo)
+   * subtype records when amounts are positive.
+   */
+  @Test
+  public void afterHandle_ncSubtype_negatesPositiveAmounts() throws Exception {
+    JSONObject body = invoiceBodyWithDocType("dt-arc", 150.0, 100.0);
+    NeoContext ctx = getCtx(); // list mode — no recordId, no enrichSourceInvoice call
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARC");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("NC", rec.getString("arInvoiceSubtype"));
+      assertEquals(-150.0, rec.getDouble("grandTotalAmount"), 0.001);
+      assertEquals(-100.0, rec.getDouble("outstandingAmount"), 0.001);
+    }
+  }
+
+  /**
+   * Verifies that grandTotalAmount and outstandingAmount are negated for DEV (return invoice)
+   * subtype records when amounts are positive.
+   */
+  @Test
+  public void afterHandle_devSubtype_negatesPositiveAmounts() throws Exception {
+    JSONObject body = invoiceBodyWithDocType("dt-ari-rm", 200.0, 200.0);
+    NeoContext ctx = getCtx(); // list mode
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARI_RM");
+      when(dal.get(DocumentType.class, "dt-ari-rm")).thenReturn(dt);
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("DEV", rec.getString("arInvoiceSubtype"));
+      assertEquals(-200.0, rec.getDouble("grandTotalAmount"), 0.001);
+      assertEquals(-200.0, rec.getDouble("outstandingAmount"), 0.001);
+    }
+  }
+
+  /**
+   * Verifies that non-positive amounts are NOT negated — the guard {@code grand > 0} must hold.
+   */
+  @Test
+  public void afterHandle_ncSubtype_doesNotNegateZeroOrNegativeAmounts() throws Exception {
+    JSONObject body = invoiceBodyWithDocType("dt-arc", 0.0, -50.0);
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      DocumentType dt = mock(DocumentType.class);
+      when(dt.getDocumentCategory()).thenReturn("ARC");
+      when(dal.get(DocumentType.class, "dt-arc")).thenReturn(dt);
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals(0.0, rec.getDouble("grandTotalAmount"), 0.001);   // unchanged
+      assertEquals(-50.0, rec.getDouble("outstandingAmount"), 0.001); // already negative, unchanged
+    }
+  }
+
+  // ── afterHandle(): enrichDocTypeLocked in detail view ───────────────────
+
+  /**
+   * Verifies that {@code docTypeLocked = true} is injected for detail-view GET responses
+   * (i.e., when context carries a recordId).
+   */
+  @Test
+  public void afterHandle_detailView_enrichesDocTypeLocked() throws Exception {
+    JSONObject body = invoiceBodyNoDiscount("inv-lock");
+    NeoContext ctx = getDetailCtx("inv-lock");
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false); // no return receipt found
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertTrue("docTypeLocked must be true in detail view", rec.getBoolean("docTypeLocked"));
+    }
+  }
+
+  /**
+   * Verifies that a SQL exception in enrichSourceInvoice is caught silently —
+   * afterHandle still returns a valid response without rethrowing.
+   */
+  @Test
+  public void testEnrichSourceInvoiceSqlExceptionCaughtSilently() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenThrow(new SQLException("connection closed"));
+
+      JSONObject body = invoiceBodyNoDiscount("inv-004");
+      NeoContext ctx = getDetailCtx("inv-004");
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = new SalesInvoiceHeaderHandler().afterHandle(ctx);
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+    }
   }
 }

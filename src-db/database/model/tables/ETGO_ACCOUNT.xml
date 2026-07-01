@@ -37,7 +37,7 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="PASSWORD_HASH" primaryKey="false" required="true" type="VARCHAR" size="512" autoIncrement="false">
+      <column name="PASSWORD_HASH" primaryKey="false" required="false" type="VARCHAR" size="512" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
@@ -65,6 +65,26 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="AUTH_PROVIDER" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EXTERNAL_SUBJECT" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EXTERNAL_EMAIL" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="LAST_SSO_LOGIN" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ONBOARDING_DRAFT" primaryKey="false" required="false" type="VARCHAR" size="4000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_ACCOUNT_CLI_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
@@ -79,6 +99,10 @@
       </foreign-key>
       <unique name="ETGO_ACCOUNT_EMAIL_UQ">
         <unique-column name="EMAIL"/>
+      </unique>
+      <unique name="ETGO_ACCOUNT_SSO_UQ">
+        <unique-column name="AUTH_PROVIDER"/>
+        <unique-column name="EXTERNAL_SUBJECT"/>
       </unique>
       <check name="ETGO_ACCOUNT_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
     </table>

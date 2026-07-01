@@ -100,9 +100,9 @@ final class NeoReturnReceiptService {
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "No lines specified");
         }
 
-        if (hasExistingReturn(source)) {
+        if (hasExistingReturn(shipmentId)) {
           return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-              "A return already exists for this shipment");
+              "A return already exists for shipment: " + shipmentId);
         }
 
         DocumentType docType = findReturnDocType(source, salesTransaction);
@@ -231,23 +231,22 @@ final class NeoReturnReceiptService {
     return results.isEmpty() ? null : results.get(0);
   }
 
-  @SuppressWarnings("java:S2077")
-  private static boolean hasExistingReturn(ShipmentInOut source) {
-    String sql =
-        "SELECT COUNT(*) FROM m_inoutline ril " +
-        "JOIN m_inout rio ON rio.m_inout_id = ril.m_inout_id " +
-        "WHERE ril.canceled_inoutline_id IN (" +
-        "  SELECT sil.m_inoutline_id FROM m_inoutline sil " +
-        "  WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'" +
-        ") AND ril.isactive = 'Y' AND rio.isactive = 'Y' AND rio.docstatus NOT IN ('VO', 'CL')";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, source.getId());
-      try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() && rs.getInt(1) > 0;
+  private static boolean hasExistingReturn(String shipmentId) {
+    String sql = "SELECT COUNT(*) FROM m_inout io"
+        + " JOIN m_inoutline iol ON iol.m_inout_id = io.m_inout_id"
+        + " WHERE iol.canceled_inoutline_id IN"
+        + " (SELECT m_inoutline_id FROM m_inoutline WHERE m_inout_id = ?)"
+        + " AND io.isactive = 'Y'";
+    try {
+      Connection conn = OBDal.getInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, shipmentId);
+        try (ResultSet rs = ps.executeQuery()) {
+          return rs.next() && rs.getInt(1) > 0;
+        }
       }
     } catch (Exception e) {
-      log.warn("Error checking existing return for {}: {}", source.getId(), e.getMessage());
+      log.warn("Could not check for existing return of {}: {}", shipmentId, e.getMessage());
       return false;
     }
   }

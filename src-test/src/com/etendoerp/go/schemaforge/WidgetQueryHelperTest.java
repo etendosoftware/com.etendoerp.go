@@ -20,6 +20,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -38,6 +40,16 @@ import org.junit.jupiter.params.provider.ValueSource;
  * don't require database mocking.
  */
 class WidgetQueryHelperTest {
+
+  @Test
+  @DisplayName("Utility class hides its constructor")
+  void utilityClassHidesConstructor() throws ReflectiveOperationException {
+    Constructor<WidgetQueryHelper> constructor = WidgetQueryHelper.class.getDeclaredConstructor();
+    assertEquals(Modifier.PRIVATE, constructor.getModifiers() & Modifier.PRIVATE);
+    constructor.setAccessible(true);
+    constructor.newInstance();
+  }
+
 
   /**
    * Uses reflection to invoke the package-private rangeToSqlDateFrom.

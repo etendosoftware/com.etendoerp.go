@@ -32,9 +32,11 @@ import org.openbravo.model.common.invoice.Invoice;
 
 /**
  * Checks that an exchange rate exists to convert an invoice's currency to the org's functional
- * currency, used to block completion when none is available (ETP-4030). Invoked from the NEO invoice
- * header handlers' pre-hook ({@link AbstractOrderHeaderHandler#validateExchangeRateBeforeComplete}),
- * since NEO completion calls {@code C_Invoice_Post0} directly and bypasses {@code ProcessInvoiceHook}s.
+ * currency, used to block completion when none is available (ETP-4030). Invoked from
+ * {@link InvoiceCompletionRateHook} to cover the classic backoffice UI completion path.
+ *
+ * <p>The NEO/headless completion path no longer calls this validator: ETP-4027 moves the
+ * exchange-rate check to the frontend, triggered when the user changes the document currency.
  *
  * <p>Precedence mirrors core: the document-level rate ({@link ConversionRateDoc}, manual or synced)
  * wins over the general {@code C_Conversion_Rate} spot table.
