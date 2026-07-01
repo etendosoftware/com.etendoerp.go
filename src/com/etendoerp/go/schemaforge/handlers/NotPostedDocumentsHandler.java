@@ -19,8 +19,10 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import javax.inject.Inject;
 import javax.inject.Named;
@@ -94,6 +96,50 @@ public class NotPostedDocumentsHandler implements NeoHandler {
       { "i",   "Invalid Account" },
       { "p",   "Period Closed"   },
   };
+
+  /**
+   * Document type codes (AD_Ref_List.value for reference {@link #DOCUMENT_TYPE_REF_ID}) that are
+   * shown in the UI filter dropdown.  Only codes whose backing Etendo table has accounting
+   * configured AND where bulk posting actually works in a standard installation are listed.
+   *
+   * <p><b>To enable a document type:</b> add its code here and verify it appears in
+   * {@code c_acctschema_table} with {@code isactive='Y'}.
+   *
+   * <p><b>To disable a document type:</b> remove its code from this set.
+   *
+   * <p>Full accounting-support matrix and rationale: see
+   * {@code docs/generated-custom-windows/not-posted-documents.md}
+   * §"Document type accounting support".
+   *
+   * <p><b>Current exclusions</b> (see doc for full reasoning):
+   * <ul>
+   *   <li>{@code BS, PIN, POT, R} — APRM module disables direct posting on these tables
+   *       ({@code FIN_BankStatement}, {@code FIN_Payment}, {@code FIN_Reconciliation});
+   *       accounting flows through {@code FIN_Finacc_Transaction} ({@code T}) instead.</li>
+   *   <li>{@code IC} — {@code M_Internal_Consumption} has no {@code c_acctschema_table} entry.</li>
+   *   <li>{@code WE} — {@code S_TimeExpense} has no {@code c_acctschema_table} entry.</li>
+   *   <li>{@code DD} — {@code FIN_Doubtful_Debt}: in {@code c_acctschema_table} but 0 documents
+   *       in this installation; enable when/if activated.</li>
+   *   <li>{@code CA} — {@code M_CostAdjustment}: same as DD.</li>
+   * </ul>
+   */
+  static final Set<String> ENABLED_DOCUMENT_TYPE_CODES = new LinkedHashSet<>(Arrays.asList(
+      "A",    // Amortization             → A_Amortization
+      "BMP",  // Bill of Mat. Production  → M_Production
+      "GLJ",  // G/L Journal              → GL_Journal
+      "GR",   // Goods Receipt            → M_InOut
+      "GS",   // Goods Shipment           → M_InOut
+      "INV",  // Inventory                → M_Inventory
+      "LC",   // Landed Cost              → M_LandedCost
+      "LCC",  // Landed Cost Cost         → M_LC_Cost
+      "MI",   // Matched Invoices         → M_MatchInv
+      "M",    // Movements                → M_Movement
+      "PI",   // Purchase Invoice         → C_Invoice
+      "RMR",  // Return Material Receipt  → M_InOut
+      "RVS",  // Return to Vendor Ship.   → M_InOut
+      "SI",   // Sales Invoice            → C_Invoice
+      "T"     // Transaction              → FIN_Finacc_Transaction
+  ));
 
   private static final String KEY_TABLE_ID = "tableId";
   private static final String KEY_ACCOUNTING_STATUS = "accountingStatus";
@@ -196,9 +242,27 @@ public class NotPostedDocumentsHandler implements NeoHandler {
 
   private NeoResponse buildFilterOptions() throws Exception {
     JSONObject body = new JSONObject();
-    body.put("documentTypes", refListOptions(DOCUMENT_TYPE_REF_ID));
+    body.put("documentTypes", refListDocumentTypes());
     body.put("accountingStatuses", buildAccountingStatusOptions());
     return NeoResponse.ok(body);
+  }
+
+  /** Returns only the document types in {@link #ENABLED_DOCUMENT_TYPE_CODES}, in that order. */
+  private JSONArray refListDocumentTypes() throws Exception {
+    JSONArray options = new JSONArray();
+    Reference ref = OBDal.getInstance().get(Reference.class, DOCUMENT_TYPE_REF_ID);
+    if (ref == null) return options;
+    String lang = OBContext.getOBContext().getLanguage().getLanguage();
+    for (org.openbravo.model.ad.domain.List item : ref.getADListList()) {
+      if (!item.isActive()) continue;
+      if (!ENABLED_DOCUMENT_TYPE_CODES.contains(item.getSearchKey())) continue;
+      JSONObject opt = new JSONObject();
+      opt.put("value", item.getSearchKey());
+      String label = getTranslatedName(item, lang);
+      opt.put("label", label != null ? label : item.getName());
+      options.put(opt);
+    }
+    return options;
   }
 
   private JSONArray buildAccountingStatusOptions() throws Exception {
