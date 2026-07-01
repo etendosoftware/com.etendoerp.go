@@ -222,6 +222,28 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     DOCUMENT_TYPE_TO_TABLE_ID.put("Amortization", "800060");    // A_Amortization
     DOCUMENT_TYPE_TO_TABLE_ID.put("GL Journal", "224");         // GL_Journal
     DOCUMENT_TYPE_TO_TABLE_ID.put("Inventory", "321");          // M_Inventory
+    // APRM types — included so tableId resolves for the APRM_DISABLED_TABLE_IDS filter below;
+    // rows with these tableIds are dropped in buildDocumentGrid before reaching the frontend.
+    DOCUMENT_TYPE_TO_TABLE_ID.put("Payment In",     "D1A97202E832470285C9B1EB026D54E2"); // FIN_Payment
+    DOCUMENT_TYPE_TO_TABLE_ID.put("Payment Out",    "D1A97202E832470285C9B1EB026D54E2"); // FIN_Payment
+    DOCUMENT_TYPE_TO_TABLE_ID.put("Bank Statement", "D4C23A17190649E7B78F55A05AF3438C"); // FIN_BankStatement
+    DOCUMENT_TYPE_TO_TABLE_ID.put("Reconciliation", "B1B7075C46934F0A9FD4C4D0F1457B42"); // FIN_Reconciliation
+  }
+
+  /**
+   * Table IDs for document types in {@link #APRM_DISABLED_TYPES}, derived at class-load time.
+   * Any grid row whose resolved {@code tableId} is in this set is silently dropped — these
+   * documents cannot be bulk-posted through this window regardless of their current status.
+   */
+  private static final Set<String> APRM_DISABLED_TABLE_IDS = new HashSet<>();
+
+  static {
+    for (String code : APRM_DISABLED_TYPES) {
+      String tableId = DOCUMENT_TYPE_CODE_TO_TABLE_ID.get(code);
+      if (tableId != null) {
+        APRM_DISABLED_TABLE_IDS.add(tableId);
+      }
+    }
   }
 
   @Inject
@@ -340,16 +362,22 @@ public class NotPostedDocumentsHandler implements NeoHandler {
 
     JSONArray array = new JSONArray();
     for (Map<String, Object> row : rows) {
+      Object docType = row.get("documentType");
+      String tableId = (docType instanceof String)
+          ? DOCUMENT_TYPE_TO_TABLE_ID.get((String) docType) : null;
+
+      // Drop APRM-managed types: they appear with posted='N' before the BG process runs,
+      // but direct bulk-posting on them is disabled by APRM design. Posting must go through
+      // FIN_Finacc_Transaction; attempting it here always fails.
+      if (tableId != null && APRM_DISABLED_TABLE_IDS.contains(tableId)) {
+        continue;
+      }
+
       JSONObject j = new JSONObject();
       for (Map.Entry<String, Object> e : row.entrySet()) {
         j.put(e.getKey(), e.getValue() != null ? e.getValue() : JSONObject.NULL);
       }
-      // Enrich with tableId so the frontend can call POST /action/post without extra lookups.
-      Object docType = row.get("documentType");
-      if (docType instanceof String) {
-        String tableId = DOCUMENT_TYPE_TO_TABLE_ID.get(docType);
-        j.put(KEY_TABLE_ID, tableId != null ? tableId : JSONObject.NULL);
-      }
+      j.put(KEY_TABLE_ID, tableId != null ? tableId : JSONObject.NULL);
       array.put(j);
     }
     JSONObject body = new JSONObject();
