@@ -169,10 +169,12 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       List<String> names = toolNames(tools);
-      // Read access always yields neo_discover + the docs tool when no specs exist.
+      // Read access always yields neo_discover + docs + neo_widget when no specs exist
+      // (neo_widget is a built-in read tool, ETP-4284).
       assertTrue(names.contains("neo_discover"));
       assertTrue(names.contains("docs"));
-      assertEquals(2, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
+      assertEquals(3, tools.size());
     }
 
     @Test
@@ -277,13 +279,14 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No CRUD tools since there are no accessible window specs; only the
-      // read-scope baseline tools (neo_discover + docs) are present.
+      // read-scope baseline tools (neo_discover + docs + neo_widget) are present.
       assertFalse(names.contains("neo_list"));
       assertFalse(names.contains("neo_get"));
       assertFalse(names.contains("neo_create"));
       assertTrue(names.contains("neo_discover"));
       assertTrue(names.contains("docs"));
-      assertEquals(2, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
+      assertEquals(3, tools.size());
     }
 
     @Test
@@ -382,14 +385,15 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No window specs => no CRUD/window tools. Only the read-scope baseline
-      // tools (neo_discover + docs) are present.
+      // tools (neo_discover + docs + neo_widget) are present.
       assertFalse(names.contains("neo_list"));
       assertFalse(names.contains("neo_create"));
       assertFalse(names.contains("neo_update"));
       assertFalse(names.contains("neo_delete"));
       assertTrue(names.contains("neo_discover"));
       assertTrue(names.contains("docs"));
-      assertEquals(2, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
+      assertEquals(3, tools.size());
     }
   }
 
@@ -1286,6 +1290,208 @@ class ToolRegistryGenerateToolsTest {
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
       assertTrue(toolNames(tools).contains("neo_action"));
+    }
+  }
+
+  // ── neo_widget tool (business widgets, gap G4 / ETP-4284) ─────────────────
+
+  @Nested
+  @DisplayName("generateTools — neo_widget tool (ETP-4284)")
+  class NeoWidgetToolTests {
+
+    /** The 9 widget enum values the tool must expose, in canonical order. */
+    private static final List<String> EXPECTED_WIDGETS = List.of(
+        "kpis", "revenue-trend", "pending-tasks", "activity", "recent-invoices",
+        "best-products", "best-sellers", "pending-amounts", "top-clients");
+
+    private McpToolDefinition findWidgetTool(List<McpToolDefinition> tools) {
+      return tools.stream()
+          .filter(t -> McpConstants.TOOL_NEO_WIDGET.equals(t.getName()))
+          .findFirst()
+          .orElse(null);
+    }
+
+    @Test
+    @DisplayName("neo:read scope registers neo_widget even with no specs")
+    void readScopeRegistersWidgetTool() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+
+      assertTrue(toolNames(tools).contains(McpConstants.TOOL_NEO_WIDGET),
+          "neo_widget must be registered as a read tool");
+    }
+
+    @Test
+    @DisplayName("neo:* scope registers neo_widget")
+    void wildcardScopeRegistersWidgetTool() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:*"));
+
+      assertTrue(toolNames(tools).contains(McpConstants.TOOL_NEO_WIDGET));
+    }
+
+    @Test
+    @DisplayName("write-only scope (no read) does NOT register neo_widget")
+    void writeOnlyScopeDoesNotRegisterWidgetTool() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
+
+      assertFalse(toolNames(tools).contains(McpConstants.TOOL_NEO_WIDGET),
+          "neo_widget must NOT be registered without read access");
+    }
+
+    @Test
+    @DisplayName("neo_widget exposes the 9 widget enum values")
+    @SuppressWarnings("unchecked")
+    void widgetToolHasNineEnumValues() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+      McpToolDefinition widgetTool = findWidgetTool(tools);
+      assertNotNull(widgetTool, "neo_widget tool must be present");
+
+      Map<String, Object> schema = widgetTool.getInputSchema();
+      Map<String, Object> props = (Map<String, Object>) schema.get("properties");
+      assertNotNull(props);
+      Map<String, Object> widgetProp = (Map<String, Object>) props.get(McpConstants.PARAM_WIDGET);
+      assertNotNull(widgetProp, "neo_widget must declare a 'widget' property");
+
+      List<String> enumValues = (List<String>) widgetProp.get("enum");
+      assertNotNull(enumValues, "widget property must declare an enum");
+      assertEquals(9, enumValues.size(), "neo_widget must expose exactly 9 widgets");
+      for (String widget : EXPECTED_WIDGETS) {
+        assertTrue(enumValues.contains(widget), "enum must contain widget '" + widget + "'");
+      }
+    }
+
+    @Test
+    @DisplayName("neo_widget requires the 'widget' argument and accepts optional 'params'")
+    @SuppressWarnings("unchecked")
+    void widgetToolRequiresWidgetAndAcceptsParams() {
+      mockSpecCriteria(Collections.emptyList());
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+      McpToolDefinition widgetTool = findWidgetTool(tools);
+      assertNotNull(widgetTool);
+
+      Map<String, Object> schema = widgetTool.getInputSchema();
+      List<String> required = (List<String>) schema.get("required");
+      assertNotNull(required);
+      assertTrue(required.contains(McpConstants.PARAM_WIDGET),
+          "'widget' must be a required argument");
+      assertFalse(required.contains(McpConstants.PARAM_PARAMS),
+          "'params' must be optional");
+
+      Map<String, Object> props = (Map<String, Object>) schema.get("properties");
+      assertTrue(props.containsKey(McpConstants.PARAM_PARAMS),
+          "neo_widget must declare an optional 'params' property");
+    }
+
+    @Test
+    @DisplayName("dashboard/widget spec is NOT added to the CRUD spec enum")
+    @SuppressWarnings("unchecked")
+    void dashboardSpecExcludedFromCrudSpecEnum() {
+      // A normal window spec plus the dashboard (widget) spec — only the window spec
+      // may surface in the CRUD spec enum; dashboard is exposed via neo_widget.
+      SFSpec windowSpec = createWindowSpec(SPEC_SALES_ORDER);
+      when(windowSpec.getADWindow()).thenReturn(null);
+
+      SFSpec dashboardSpec = createWindowSpec(McpConstants.SPEC_DASHBOARD);
+      when(dashboardSpec.getADWindow()).thenReturn(null);
+
+      mockSpecCriteria(List.of(windowSpec, dashboardSpec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+
+      McpToolDefinition listTool = tools.stream()
+          .filter(t -> "neo_list".equals(t.getName()))
+          .findFirst()
+          .orElse(null);
+      assertNotNull(listTool, "neo_list must still be produced for the window spec");
+
+      Map<String, Object> props = (Map<String, Object>) listTool.getInputSchema().get("properties");
+      Map<String, Object> specProp = (Map<String, Object>) props.get("spec");
+      List<String> enumValues = (List<String>) specProp.get("enum");
+      assertNotNull(enumValues);
+      assertTrue(enumValues.contains(SPEC_SALES_ORDER));
+      assertFalse(enumValues.contains(McpConstants.SPEC_DASHBOARD),
+          "dashboard spec must NOT appear in the CRUD spec enum (ETP-4284 / G4)");
+    }
+
+    @Test
+    @DisplayName("a dashboard-only catalog produces no CRUD tools")
+    void dashboardOnlyCatalogProducesNoCrudTools() {
+      SFSpec dashboardSpec = createWindowSpec(McpConstants.SPEC_DASHBOARD);
+      when(dashboardSpec.getADWindow()).thenReturn(null);
+      mockSpecCriteria(List.of(dashboardSpec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
+      List<String> names = toolNames(tools);
+
+      // No CRUD tools — the only specs is the dashboard, which is skipped. Only the
+      // read-scope baseline tools (neo_discover + docs + neo_widget) are present.
+      assertFalse(names.contains("neo_list"));
+      assertFalse(names.contains("neo_get"));
+      assertTrue(names.contains("neo_discover"));
+      assertTrue(names.contains("docs"));
+      assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
+    }
+
+    @Test
+    @DisplayName("isCrudTool returns true for neo_widget (spec resolution skipped)")
+    void isCrudToolReturnsTrueForNeoWidget() {
+      assertTrue(ToolRegistry.isCrudTool(McpConstants.TOOL_NEO_WIDGET));
+    }
+
+    @Test
+    @DisplayName("resolveSpecName returns null for neo_widget (no spec arg)")
+    void resolveSpecNameReturnsNullForNeoWidget() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put(McpConstants.PARAM_WIDGET, "kpis");
+
+      // isCrudTool == true, so resolveSpecName reads "spec" from args — absent, hence null.
+      assertNull(ToolRegistry.resolveSpecName(McpConstants.TOOL_NEO_WIDGET, args));
+    }
+
+    @Test
+    @DisplayName("WIDGET_ENTITY_BY_NAME maps every enum value to its backing entity")
+    void widgetEntityMapHasCanonicalMapping() {
+      Map<String, String> map = ToolRegistry.WIDGET_ENTITY_BY_NAME;
+      assertEquals(9, map.size(), "exactly 9 widgets must be mapped");
+      for (String widget : EXPECTED_WIDGETS) {
+        assertNotNull(map.get(widget), "widget '" + widget + "' must map to an entity");
+      }
+      // Identity mappings for most widgets, but revenue-trend maps to the 'trends' entity.
+      assertEquals("kpis", map.get("kpis"));
+      assertEquals("trends", map.get("revenue-trend"));
+      assertEquals("pending-tasks", map.get("pending-tasks"));
+      assertEquals("top-clients", map.get("top-clients"));
+    }
+
+    @Test
+    @DisplayName("WIDGET_ENTITY_BY_NAME is immutable")
+    void widgetEntityMapIsImmutable() {
+      try {
+        ToolRegistry.WIDGET_ENTITY_BY_NAME.put("hacked", "nope");
+        org.junit.jupiter.api.Assertions.fail("WIDGET_ENTITY_BY_NAME must be unmodifiable");
+      } catch (UnsupportedOperationException expected) {
+        // expected
+      }
+    }
+
+    @Test
+    @DisplayName("each widget has a semantic description surfaced to the agent")
+    void everyWidgetHasDescription() {
+      Map<String, String> desc = ToolRegistry.WIDGET_DESCRIPTION_BY_NAME;
+      assertEquals(9, desc.size());
+      for (String widget : EXPECTED_WIDGETS) {
+        String text = desc.get(widget);
+        assertNotNull(text, "widget '" + widget + "' must have a description");
+        assertFalse(text.isBlank(), "widget '" + widget + "' description must not be blank");
+      }
     }
   }
 }
