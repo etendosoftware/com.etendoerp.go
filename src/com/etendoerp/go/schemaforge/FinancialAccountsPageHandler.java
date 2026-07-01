@@ -96,7 +96,9 @@ public class FinancialAccountsPageHandler implements NeoHandler {
   private static final String ACCOUNTS_SQL =
       "SELECT fa.fin_financial_account_id, fa.name, fa.type, fa.currentbalance, "
           + "       fa.c_currency_id, cur.iso_code, fa.iban, fa.isdefault, fa.isactive, "
-          + "       fa.em_psd2_masked_pan, fa.em_psd2_connection_status "
+          + "       fa.em_psd2_masked_pan, fa.em_psd2_connection_status, "
+          + "       COALESCE(fa.em_etgo_date_tolerance, 3), "
+          + "       COALESCE(fa.em_etgo_amount_tolerance, 0) "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
           + " WHERE fa.ad_client_id = ? "
@@ -194,6 +196,9 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           row.active = "Y".equals(rs.getString(9));
           row.maskedPan = StringUtils.trimToEmpty(rs.getString(10));
           row.psd2Connected = "CO".equals(rs.getString(11));
+          row.dateTolerance = rs.getInt(12);
+          BigDecimal amtTol = rs.getBigDecimal(13);
+          row.amountTolerance = amtTol != null ? amtTol : BigDecimal.ZERO;
           rows.add(row);
         }
       }
@@ -238,6 +243,8 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("isDefault", account.isDefault);
       json.put("active", account.active);
       json.put("pendingCount", pendingByAccount.getOrDefault(account.id, 0));
+      json.put("dateTolerance", account.dateTolerance);
+      json.put("amountTolerance", account.amountTolerance);
       arr.put(json);
     }
     return arr;
@@ -320,6 +327,10 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     boolean psd2Connected = false;
     /** Whether a PSD2 sync is pending. Not tracked server-side yet; reserved for the list sync badge. */
     boolean psd2Pending = false;
+    /** Days of margin allowed between bank line and transaction dates. Default 3. */
+    int dateTolerance = 3;
+    /** Maximum % difference allowed when matching amounts. Default 0 (exact match). */
+    BigDecimal amountTolerance = BigDecimal.ZERO;
 
     AccountRow(String id, String name, String type, BigDecimal currentBalance,
         Currency currency, String iban, boolean isDefault) {

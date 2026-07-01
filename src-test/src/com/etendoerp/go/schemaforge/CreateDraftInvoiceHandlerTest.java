@@ -72,11 +72,13 @@ import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.invoice.InvoiceTax;
 import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.PaymentTerm;
+import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 import org.openbravo.model.pricing.pricelist.PriceList;
@@ -2726,6 +2728,581 @@ public class CreateDraftInvoiceHandlerTest {
           .thenThrow(new RuntimeException("query error"));
 
       assertNull(new CreateDraftInvoiceHandler().findLinkedInvoiceLine("sl-err"));
+    }
+  }
+
+  // ── recalculateTotals ─────────────────────────────────────────────────────
+
+  @Test
+  public void testRecalculateTotalsNoLinesSetsTotalsToZero() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.emptyList());
+
+      new CreateDraftInvoiceHandler().recalculateTotals(invoice);
+      verify(invoice).setSummedLineAmount(new BigDecimal("0.00"));
+      verify(invoice).setGrandTotalAmount(new BigDecimal("0.00"));
+      verify(dal).save(invoice);
+    }
+  }
+
+  @Test
+  public void testRecalculateTotalsLineWithoutTaxAccumulatesNet() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(il.getInvoicedQuantity()).thenReturn(new BigDecimal("2"));
+      when(il.getUnitPrice()).thenReturn(new BigDecimal("50"));
+      when(il.getLineNetAmount()).thenReturn(new BigDecimal("100"));
+      when(il.getTax()).thenReturn(null);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getInvoiceLineList()).thenReturn(Collections.singletonList(il));
+
+      new CreateDraftInvoiceHandler().recalculateTotals(invoice);
+      verify(invoice).setSummedLineAmount(new BigDecimal("100.00"));
+      verify(invoice).setGrandTotalAmount(new BigDecimal("100.00"));
+    }
+  }
+
+  @Test
+  public void testRecalculateTotalsCreatesInvoiceTaxAndBackfillsLineNetAmount() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      OBProvider provider = mock(OBProvider.class);
+      InvoiceTax invoiceTax = mock(InvoiceTax.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(InvoiceTax.class)).thenReturn(invoiceTax);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+
+      TaxRate taxRate = mock(TaxRate.class);
+      when(taxRate.getId()).thenReturn("tax-1");
+      when(taxRate.getRate()).thenReturn(new BigDecimal("21"));
+      when(taxRate.isSummaryLevel()).thenReturn(false);
+
+      TaxRate summaryTax = mock(TaxRate.class);
+      when(summaryTax.isSummaryLevel()).thenReturn(true);
+
+      InvoiceLine lineWithoutNet = mock(InvoiceLine.class);
+      when(lineWithoutNet.getInvoicedQuantity()).thenReturn(new BigDecimal("2"));
+      when(lineWithoutNet.getUnitPrice()).thenReturn(new BigDecimal("10"));
+      when(lineWithoutNet.getLineNetAmount()).thenReturn(null);
+      when(lineWithoutNet.getTax()).thenReturn(taxRate);
+
+      InvoiceLine summaryLine = mock(InvoiceLine.class);
+      when(summaryLine.getInvoicedQuantity()).thenReturn(BigDecimal.ONE);
+      when(summaryLine.getUnitPrice()).thenReturn(new BigDecimal("50"));
+      when(summaryLine.getLineNetAmount()).thenReturn(new BigDecimal("50"));
+      when(summaryLine.getTax()).thenReturn(summaryTax);
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getInvoiceLineList()).thenReturn(Arrays.asList(lineWithoutNet, summaryLine));
+      when(invoice.getClient()).thenReturn(mock(Client.class));
+      when(invoice.getOrganization()).thenReturn(mock(Organization.class));
+
+      new CreateDraftInvoiceHandler().recalculateTotals(invoice);
+
+      verify(lineWithoutNet).setLineNetAmount(new BigDecimal("20.00"));
+      verify(invoiceTax).setTaxableAmount(new BigDecimal("20.00"));
+      verify(invoiceTax).setTaxAmount(new BigDecimal("4.20"));
+      verify(invoice).setSummedLineAmount(new BigDecimal("70.00"));
+      verify(invoice).setGrandTotalAmount(new BigDecimal("74.20"));
+      verify(dal).save(invoiceTax);
+      verify(dal).save(invoice);
+    }
+  }
+
+  // ── createShipmentInvoiceLine ─────────────────────────────────────────────
+
+  @Test
+  public void testCreateShipmentInvoiceLineNoOrderLineNoLinkedInvoiceZeroPrices() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(mock(Product.class));
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(null);
+
+      Invoice invoice = mock(Invoice.class);
+      CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+        @Override
+        protected InvoiceLine findLinkedInvoiceLine(String id) { return null; }
+      };
+      InvoiceLine result = handler.createShipmentInvoiceLine(invoice, sl, new BigDecimal("3"), 10L);
+
+      assertEquals(il, result);
+      verify(il).setUnitPrice(BigDecimal.ZERO);
+      verify(il).setListPrice(BigDecimal.ZERO);
+      verify(il).setLineNetAmount(BigDecimal.ZERO);
+    }
+  }
+
+  @Test
+  public void testCreateShipmentInvoiceLineNoOrderLineFallsBackToLinkedInvoicePrices() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      InvoiceLine sourceIL = mock(InvoiceLine.class);
+      when(sourceIL.getUnitPrice()).thenReturn(new BigDecimal("15"));
+      when(sourceIL.getListPrice()).thenReturn(new BigDecimal("18"));
+      when(sourceIL.getPriceLimit()).thenReturn(new BigDecimal("12"));
+      when(sourceIL.getTax()).thenReturn(mock(TaxRate.class));
+      when(sourceIL.getSalesOrderLine()).thenReturn(null);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(mock(Product.class));
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(null);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+
+      CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+        @Override
+        protected InvoiceLine findLinkedInvoiceLine(String id) { return sourceIL; }
+      };
+      handler.createShipmentInvoiceLine(invoice, sl, new BigDecimal("4"), 10L);
+
+      verify(il).setUnitPrice(new BigDecimal("15"));
+      verify(il).setListPrice(new BigDecimal("18"));
+      verify(il).setLineNetAmount(new BigDecimal("60.00"));
+    }
+  }
+
+  @Test
+  public void testCreateShipmentInvoiceLineWithOrderLineCopiesPrices() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("10"));
+      when(ol.getListPrice()).thenReturn(new BigDecimal("12"));
+      when(ol.getPriceLimit()).thenReturn(new BigDecimal("8"));
+      when(ol.getTax()).thenReturn(mock(TaxRate.class));
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(mock(Product.class));
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("2"), 10L);
+
+      verify(il).setUnitPrice(new BigDecimal("10"));
+      verify(il).setListPrice(new BigDecimal("12"));
+      verify(il).setLineNetAmount(new BigDecimal("20.00"));
+    }
+  }
+
+  // ── applyPricesFromOrderLine (via createShipmentInvoiceLine) ─────────────
+
+  @Test
+  public void testApplyPricesFromOrderLineUsesOrderListPriceWhenPositive() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("20"));
+      when(ol.getListPrice()).thenReturn(new BigDecimal("25"));
+      when(ol.getPriceLimit()).thenReturn(new BigDecimal("18"));
+      TaxRate tax = mock(TaxRate.class);
+      when(ol.getTax()).thenReturn(tax);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(mock(Product.class));
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(null);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("2"), 10L);
+
+      verify(il).setUnitPrice(new BigDecimal("20"));
+      verify(il).setListPrice(new BigDecimal("25"));
+      verify(il).setLineNetAmount(new BigDecimal("40.00"));
+      verify(il).setTax(tax);
+      verify(il).setSalesOrderLine(ol);
+    }
+  }
+
+  @Test
+  public void testApplyPricesFromOrderLineNullListPriceFallsBackToUnitPrice() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn("prod-1");
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("15"));
+      when(ol.getListPrice()).thenReturn(null);
+      when(ol.getPriceLimit()).thenReturn(null);
+      when(ol.getTax()).thenReturn(null);
+      when(ol.getProduct()).thenReturn(product);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(product);
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(null);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("3"), 10L);
+
+      verify(il).setListPrice(new BigDecimal("15"));
+    }
+  }
+
+  // ── applyPricesFromInvoiceLine (via createShipmentInvoiceLine) ────────────
+
+  @Test
+  public void testApplyPricesFromInvoiceLineCopiesTaxAndSalesOrderLine() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      TaxRate tax = mock(TaxRate.class);
+      OrderLine orderLine = mock(OrderLine.class);
+
+      InvoiceLine sourceIL = mock(InvoiceLine.class);
+      when(sourceIL.getUnitPrice()).thenReturn(new BigDecimal("8"));
+      when(sourceIL.getListPrice()).thenReturn(new BigDecimal("10"));
+      when(sourceIL.getPriceLimit()).thenReturn(new BigDecimal("6"));
+      when(sourceIL.getTax()).thenReturn(tax);
+      when(sourceIL.getSalesOrderLine()).thenReturn(orderLine);
+      when(sourceIL.getProduct()).thenReturn(null);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(mock(Product.class));
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(null);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(null);
+
+      CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+        @Override
+        protected InvoiceLine findLinkedInvoiceLine(String id) { return sourceIL; }
+      };
+      handler.createShipmentInvoiceLine(invoice, sl, new BigDecimal("2"), 10L);
+
+      verify(il).setUnitPrice(new BigDecimal("8"));
+      verify(il).setListPrice(new BigDecimal("10"));
+      verify(il).setLineNetAmount(new BigDecimal("16.00"));
+      verify(il).setTax(tax);
+      verify(il).setSalesOrderLine(orderLine);
+    }
+  }
+
+  @Test
+  public void testApplyPricesFromInvoiceLineNullTaxAndNullOrderLineSkipsBothSetters() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      InvoiceLine sourceIL = mock(InvoiceLine.class);
+      when(sourceIL.getUnitPrice()).thenReturn(new BigDecimal("5"));
+      when(sourceIL.getListPrice()).thenReturn(new BigDecimal("7"));
+      when(sourceIL.getPriceLimit()).thenReturn(null);
+      when(sourceIL.getTax()).thenReturn(null);
+      when(sourceIL.getSalesOrderLine()).thenReturn(null);
+      when(sourceIL.getProduct()).thenReturn(null);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(mock(Product.class));
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(null);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(null);
+
+      CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
+        @Override
+        protected InvoiceLine findLinkedInvoiceLine(String id) { return sourceIL; }
+      };
+      handler.createShipmentInvoiceLine(invoice, sl, new BigDecimal("1"), 10L);
+
+      verify(il, never()).setTax(any());
+      verify(il, never()).setSalesOrderLine(any());
+    }
+  }
+
+  // ── resolveListPriceFromPriceList (via createShipmentInvoiceLine) ─────────
+
+  @Test
+  public void testResolveListPriceNullProductIdReturnsFallback() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("9"));
+      when(ol.getListPrice()).thenReturn(BigDecimal.ZERO);
+      when(ol.getPriceLimit()).thenReturn(null);
+      when(ol.getTax()).thenReturn(null);
+      when(ol.getProduct()).thenReturn(null);
+
+      PriceList priceList = mock(PriceList.class);
+      when(priceList.getId()).thenReturn("pl-1");
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(priceList);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(mock(Product.class));
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("1"), 10L);
+
+      verify(il).setListPrice(new BigDecimal("9"));
+    }
+  }
+
+  @Test
+  public void testResolveListPriceNullPriceListIdReturnsFallback() {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn("prod-X");
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("12"));
+      when(ol.getListPrice()).thenReturn(BigDecimal.ZERO);
+      when(ol.getPriceLimit()).thenReturn(null);
+      when(ol.getTax()).thenReturn(null);
+      when(ol.getProduct()).thenReturn(product);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(null);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(product);
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("1"), 10L);
+
+      verify(il).setListPrice(new BigDecimal("12"));
+    }
+  }
+
+  @Test
+  public void testResolveListPriceDbReturnsZeroPriceFallsBackToUnitPrice() throws Exception {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      java.sql.Connection conn = mock(java.sql.Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+      when(rs.next()).thenReturn(true);
+      when(rs.getBigDecimal(1)).thenReturn(BigDecimal.ZERO);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn("prod-2");
+      PriceList priceList = mock(PriceList.class);
+      when(priceList.getId()).thenReturn("pl-2");
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("11"));
+      when(ol.getListPrice()).thenReturn(BigDecimal.ZERO);
+      when(ol.getPriceLimit()).thenReturn(null);
+      when(ol.getTax()).thenReturn(null);
+      when(ol.getProduct()).thenReturn(product);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(product);
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(priceList);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("1"), 10L);
+
+      verify(il).setListPrice(new BigDecimal("11"));
+    }
+  }
+
+  @Test
+  public void testResolveListPriceDbReturnsPositivePriceUsesIt() throws Exception {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      java.sql.Connection conn = mock(java.sql.Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      java.sql.PreparedStatement ps = mock(java.sql.PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      java.sql.ResultSet rs = mock(java.sql.ResultSet.class);
+      when(rs.next()).thenReturn(true);
+      when(rs.getBigDecimal(1)).thenReturn(new BigDecimal("30"));
+      when(ps.executeQuery()).thenReturn(rs);
+
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn("prod-3");
+      PriceList priceList = mock(PriceList.class);
+      when(priceList.getId()).thenReturn("pl-3");
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("20"));
+      when(ol.getListPrice()).thenReturn(BigDecimal.ZERO);
+      when(ol.getPriceLimit()).thenReturn(null);
+      when(ol.getTax()).thenReturn(null);
+      when(ol.getProduct()).thenReturn(product);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(product);
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(priceList);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("1"), 10L);
+
+      verify(il).setListPrice(new BigDecimal("30"));
+    }
+  }
+
+  @Test
+  public void testResolveListPriceDbExceptionFallsBackToUnitPrice() throws Exception {
+    try (MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      InvoiceLine il = mock(InvoiceLine.class);
+      when(provider.get(InvoiceLine.class)).thenReturn(il);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      java.sql.Connection conn = mock(java.sql.Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenThrow(new java.sql.SQLException("db down"));
+
+      Product product = mock(Product.class);
+      when(product.getId()).thenReturn("prod-4");
+      PriceList priceList = mock(PriceList.class);
+      when(priceList.getId()).thenReturn("pl-4");
+
+      OrderLine ol = mock(OrderLine.class);
+      when(ol.getUnitPrice()).thenReturn(new BigDecimal("18"));
+      when(ol.getListPrice()).thenReturn(BigDecimal.ZERO);
+      when(ol.getPriceLimit()).thenReturn(null);
+      when(ol.getTax()).thenReturn(null);
+      when(ol.getProduct()).thenReturn(product);
+
+      ShipmentInOutLine sl = mock(ShipmentInOutLine.class);
+      when(sl.getOrganization()).thenReturn(mock(Organization.class));
+      when(sl.getProduct()).thenReturn(product);
+      when(sl.getUOM()).thenReturn(null);
+      when(sl.getSalesOrderLine()).thenReturn(ol);
+
+      Currency currency = mock(Currency.class);
+      when(currency.getStandardPrecision()).thenReturn(2L);
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(invoice.getPriceList()).thenReturn(priceList);
+
+      new CreateDraftInvoiceHandler().createShipmentInvoiceLine(invoice, sl, new BigDecimal("1"), 10L);
+
+      verify(il).setListPrice(new BigDecimal("18"));
     }
   }
 

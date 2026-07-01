@@ -36,6 +36,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
@@ -899,6 +900,148 @@ public class AutoMatchSupportTest {
   }
 
   // ---------------------------------------------------------------------------
+  // computeAmountTolerance
+  // ---------------------------------------------------------------------------
+
+  /**
+   * When the percentage is 0 the floor tolerance (0.01) is returned, preserving the
+   * behaviour that existed before per-account tolerances were introduced.
+   */
+  @Test
+  public void testComputeAmountToleranceZeroPctReturnsFloor() {
+    BigDecimal result = AutoMatchSupport.computeAmountTolerance(
+        new BigDecimal("100.00"), BigDecimal.ZERO);
+    assertEquals(0, new BigDecimal("0.01").compareTo(result));
+  }
+
+  /**
+   * 2% of 100.00 = 2.00 which exceeds the floor of 0.01, so the derived value is returned.
+   */
+  @Test
+  public void testComputeAmountTolerance2PctOf100Returns2() {
+    BigDecimal result = AutoMatchSupport.computeAmountTolerance(
+        new BigDecimal("100.00"), new BigDecimal("2"));
+    assertEquals(0, new BigDecimal("2.00").compareTo(result));
+  }
+
+  /**
+   * 10% of 50.00 = 5.00 which exceeds the floor of 0.01, so the derived value is returned.
+   */
+  @Test
+  public void testComputeAmountTolerance10PctOf50Returns5() {
+    BigDecimal result = AutoMatchSupport.computeAmountTolerance(
+        new BigDecimal("50.00"), new BigDecimal("10"));
+    assertEquals(0, new BigDecimal("5.00").compareTo(result));
+  }
+
+  /**
+   * A null percentage behaves the same as 0 — the floor tolerance is returned.
+   */
+  @Test
+  public void testComputeAmountToleranceNullPctReturnsFloor() {
+    BigDecimal result = AutoMatchSupport.computeAmountTolerance(
+        new BigDecimal("100.00"), null);
+    assertEquals(0, new BigDecimal("0.01").compareTo(result));
+  }
+
+  // ---------------------------------------------------------------------------
+  // withinDateWindow
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Two dates two days apart are within a 3-day window.
+   */
+  @Test
+  public void testWithinDateWindow2DaysApartWithin3DaysWindow() {
+    Calendar cal = Calendar.getInstance();
+    Date base = cal.getTime();
+    cal.add(Calendar.DAY_OF_MONTH, 2);
+    Date plus2 = cal.getTime();
+    assertTrue(AutoMatchSupport.withinDateWindow(base, plus2, 3));
+  }
+
+  /**
+   * Two dates four days apart fall outside a 3-day window.
+   */
+  @Test
+  public void testWithinDateWindow4DaysApartOutside3DaysWindow() {
+    Calendar cal = Calendar.getInstance();
+    Date base = cal.getTime();
+    cal.add(Calendar.DAY_OF_MONTH, 4);
+    Date plus4 = cal.getTime();
+    assertFalse(AutoMatchSupport.withinDateWindow(base, plus4, 3));
+  }
+
+  /**
+   * Same date with a zero-day window is within range (diff = 0 &lt;= 0).
+   */
+  @Test
+  public void testWithinDateWindowSameDateZeroDaysWindow() {
+    Date same = new Date();
+    assertTrue(AutoMatchSupport.withinDateWindow(same, same, 0));
+  }
+
+  /**
+   * A null date on either side always returns true (missing date means no constraint).
+   */
+  @Test
+  public void testWithinDateWindowNullDateAlwaysTrue() {
+    assertTrue(AutoMatchSupport.withinDateWindow(null, new Date(), 3));
+    assertTrue(AutoMatchSupport.withinDateWindow(new Date(), null, 3));
+    assertTrue(AutoMatchSupport.withinDateWindow(null, null, 3));
+  }
+
+  // ---------------------------------------------------------------------------
+  // findSignalGroup — date tolerance (5-arg overload)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * With dateTolDays=0 only transactions on exactly the same date as the line are included.
+   * A same-partner pair where one transaction is on a different day is excluded, leaving no
+   * 1:N group to return.
+   */
+  @Test
+  public void testFindSignalGroupZeroDateTolExcludesOtherDayTransactions() {
+    // Line date: today.
+    Calendar cal = Calendar.getInstance();
+    Date lineDate = cal.getTime();
+
+    // Build the line BSL with that date.
+    FIN_BankStatementLine line = bslLine("L-DATE", "150.00", "0.00");
+    lenient().when(line.getTransactionDate()).thenReturn(lineDate);
+
+    // Same partner, but one is tomorrow — should be excluded when dateTolDays=0.
+    BusinessPartner bp = mock(BusinessPartner.class);
+    lenient().when(bp.getId()).thenReturn("BP-DATE");
+    FIN_FinaccTransaction today = txnWithPartnerAndDate("T-TODAY", "100.00", bp, lineDate);
+    cal.add(Calendar.DAY_OF_MONTH, 1);
+    Date tomorrow = cal.getTime();
+    FIN_FinaccTransaction tmrw = txnWithPartnerAndDate("T-TOMORROW", "50.00", bp, tomorrow);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+      @SuppressWarnings("unchecked")
+      org.hibernate.query.Query<FIN_FinaccTransaction> query =
+          mock(org.hibernate.query.Query.class);
+      when(session.createQuery(anyString(), eq(FIN_FinaccTransaction.class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.list()).thenReturn(Arrays.asList(today, tmrw));
+
+      // Zero-day tolerance: tomorrow's transaction is outside the window → pool has only "today".
+      // One-element pool → matchByKey requires >= 2 → empty result.
+      List<FIN_FinaccTransaction> result =
+          AutoMatchSupport.findSignalGroup("ACC-DATE", line, new HashSet<>(),
+              new BigDecimal("0.01"), 0);
+
+      assertTrue("zero-day window should exclude transactions from other days",
+          result.isEmpty());
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Builders for the new tests
   // ---------------------------------------------------------------------------
 
@@ -950,6 +1093,19 @@ public class AutoMatchSupportTest {
     lenient().when(t.getFinPayment()).thenReturn(p);
     lenient().when(t.getDepositAmount()).thenReturn(new BigDecimal(amount));
     lenient().when(t.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    return t;
+  }
+
+  /** A positive-amount transaction mock attached to a partner and carrying a specific date. */
+  private static FIN_FinaccTransaction txnWithPartnerAndDate(String id, String amount,
+      BusinessPartner bp, Date date) {
+    FIN_FinaccTransaction t = mock(FIN_FinaccTransaction.class);
+    lenient().when(t.getId()).thenReturn(id);
+    lenient().when(t.getBusinessPartner()).thenReturn(bp);
+    lenient().when(t.getFinPayment()).thenReturn(null);
+    lenient().when(t.getDepositAmount()).thenReturn(new BigDecimal(amount));
+    lenient().when(t.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    lenient().when(t.getTransactionDate()).thenReturn(date);
     return t;
   }
 }

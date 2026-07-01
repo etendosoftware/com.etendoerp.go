@@ -234,7 +234,7 @@ final class NeoReturnReceiptService {
   private static boolean hasExistingReturn(String shipmentId) {
     String sql = "SELECT COUNT(*) FROM m_inout io"
         + " JOIN m_inoutline iol ON iol.m_inout_id = io.m_inout_id"
-        + " WHERE iol.m_inoutline_id_cancel IN"
+        + " WHERE iol.canceled_inoutline_id IN"
         + " (SELECT m_inoutline_id FROM m_inoutline WHERE m_inout_id = ?)"
         + " AND io.isactive = 'Y'";
     try {
