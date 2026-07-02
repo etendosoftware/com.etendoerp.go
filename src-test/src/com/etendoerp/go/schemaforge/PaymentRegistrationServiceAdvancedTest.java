@@ -662,7 +662,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("Advanced register rejects an empty installment with no pending PSDs")
-  void testAdvancedEmptyPendingPsdsThrows() throws Exception {
+  void testAdvancedEmptyPendingPsdsThrows() {
     stubAdvancedBasics();
     stubPendingPSDs(); // empty
 
@@ -707,7 +707,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("confirmDraftPayment surfaces a processing error as an exception")
-  void testConfirmDraftPaymentProcessingError() throws Exception {
+  void testConfirmDraftPaymentProcessingError() {
     when(dal.get(FIN_Payment.class, NEW_PAY_ID)).thenReturn(newPayment);
     OBError error = mock(OBError.class);
     when(error.getType()).thenReturn(ERROR_TYPE);
