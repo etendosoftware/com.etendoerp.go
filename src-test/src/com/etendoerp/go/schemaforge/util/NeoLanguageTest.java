@@ -21,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -97,7 +99,7 @@ class NeoLanguageTest {
     assertNull(NeoLanguage.resolveActive("ES_es"));       // wrong casing
     // Short-circuits before any admin-mode/DB work.
     obContext.verify(() -> OBContext.setAdminMode(true), never());
-    verify(obDalInstance, never()).createCriteria(any());
+    verify(obDalInstance, never()).createCriteria(any(Class.class));
   }
 
   @Test
@@ -179,6 +181,42 @@ class NeoLanguageTest {
     Supplier<String> body = () -> "value";
     assertEquals("value", NeoLanguage.withLanguage(null, body));
     // No context interaction at all.
+    obContext.verify(OBContext::getOBContext, never());
+  }
+
+  @Test
+  @DisplayName("applyToContext sets the resolved language on the context in admin mode")
+  void applyToContextAppliesLanguage() {
+    Language es = mock(Language.class);
+    stubLanguageQuery(es);
+    OBContext ctx = mock(OBContext.class);
+    obContext.when(OBContext::getOBContext).thenReturn(ctx);
+
+    NeoLanguage.applyToContext("es_ES");
+
+    verify(ctx).setLanguage(es);
+    // setLanguage must run inside admin mode, which is always restored.
+    obContext.verify(() -> OBContext.setAdminMode(true), atLeastOnce());
+    obContext.verify(OBContext::restorePreviousMode, atLeastOnce());
+  }
+
+  @Test
+  @DisplayName("applyToContext swallows errors and still restores admin mode")
+  void applyToContextSwallowsErrors() {
+    Language es = mock(Language.class);
+    stubLanguageQuery(es);
+    OBContext ctx = mock(OBContext.class);
+    obContext.when(OBContext::getOBContext).thenReturn(ctx);
+    doThrow(new RuntimeException("boom")).when(ctx).setLanguage(es);
+
+    NeoLanguage.applyToContext("es_ES"); // must not propagate
+    obContext.verify(OBContext::restorePreviousMode, atLeastOnce());
+  }
+
+  @Test
+  @DisplayName("applyToContext is a no-op for an invalid code (never touches the context language)")
+  void applyToContextNoopForInvalidCode() {
+    NeoLanguage.applyToContext("nope");
     obContext.verify(OBContext::getOBContext, never());
   }
 }

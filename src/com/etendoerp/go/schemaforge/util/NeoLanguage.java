@@ -92,16 +92,52 @@ public final class NeoLanguage {
   }
 
   /**
+   * Resolve {@code code} and apply it to the current {@link OBContext} as the request
+   * language, swallowing any error so this translation-only concern never fails the
+   * request. No-op when the code is malformed / unknown / inactive.
+   *
+   * <p>The {@code setLanguage} MUST run inside admin mode: reading the resolved
+   * {@link Language} entity (e.g. its RTL flag) is not permitted under a restricted
+   * NEO role, so doing it outside admin mode throws an entity-access error that would
+   * abort the request. Used by {@code NeoAuthenticator} for the {@code Accept-Language}
+   * header.
+   *
+   * @param code an Etendo language code such as {@code es_ES}
+   */
+  public static void applyToContext(String code) {
+    boolean adminMode = false;
+    try {
+      OBContext.setAdminMode(true);
+      adminMode = true;
+      Language language = resolveActive(code);
+      if (language != null) {
+        OBContext.getOBContext().setLanguage(language);
+      }
+    } catch (Exception e) {
+      log.warn("Could not apply requested language '{}': {}", code, e.getMessage());
+    } finally {
+      if (adminMode) {
+        OBContext.restorePreviousMode();
+      }
+    }
+  }
+
+  /**
    * The effective language of the current NEO request — the GO locale once
    * {@code NeoAuthenticator} has applied the {@code Accept-Language} header.
-   * Returns {@code null} only if there is no {@link OBContext}.
+   *
+   * @return the current request language, or {@code null} if there is no {@link OBContext}
    */
   public static Language current() {
     OBContext ob = OBContext.getOBContext();
     return ob != null ? ob.getLanguage() : null;
   }
 
-  /** The current request language code (e.g. {@code es_ES}), or {@code null}. */
+  /**
+   * The current request language code (e.g. {@code es_ES}).
+   *
+   * @return the current language code, or {@code null} if there is no request language
+   */
   public static String currentCode() {
     Language language = current();
     return language != null ? language.getLanguage() : null;
