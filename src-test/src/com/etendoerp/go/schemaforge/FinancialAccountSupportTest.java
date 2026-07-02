@@ -42,6 +42,8 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
 /**
@@ -60,6 +62,14 @@ import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
  *   <li>createAccount: when no matching algorithm exists the FA is still built and persisted.</li>
  *   <li>findCurrencyByIsoCode: blank / null input short-circuits to null without the DAL;
  *       a found code returns the currency (uppercased, active filter); a missing code returns null.</li>
+ *   <li>assignDefaultPaymentMethods: Cash/Bank/Card accounts get their type's methods linked, the
+ *       first one flagged as default; a method not found in the catalog is skipped without
+ *       throwing; an existing link is left untouched (idempotent, no extra save); an unmapped
+ *       type and the "nothing created" case never call {@code OBDal.flush()}. Tested end-to-end
+ *       against the real static method (moved here from {@code FinancialAccountHandler} — see
+ *       {@code FinancialAccountHandlerTest#testAfterHandlePostAssignsForCreatedAccount} for the
+ *       hook-delegation test), since {@code findPaymentMethodByName}/{@code linkExists}/
+ *       {@code createLink} are private and cannot be stubbed individually.</li>
  * </ul>
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
@@ -238,6 +248,227 @@ public class FinancialAccountSupportTest {
       when(criteria.uniqueResult()).thenReturn(null);
 
       assertNull(FinancialAccountSupport.findCurrencyByIsoCode("ZZZ"));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // assignDefaultPaymentMethods
+  // ---------------------------------------------------------------------------
+
+  /** A Cash account gets Efectivo linked and flagged as its default payment method. */
+  @Test
+  public void testAssignDefaultPaymentMethodsCashLinksEfectivoAsDefault() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(account.getType()).thenReturn("C");
+    when(account.getClient()).thenReturn(client);
+    when(account.getOrganization()).thenReturn(org);
+    FIN_PaymentMethod cash = mock(FIN_PaymentMethod.class);
+    FinAccPaymentMethod link = mock(FinAccPaymentMethod.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_PaymentMethod> methodCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_PaymentMethod.class)).thenReturn(methodCriteria);
+      when(methodCriteria.uniqueResult()).thenReturn(cash);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FinAccPaymentMethod> linkCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FinAccPaymentMethod.class)).thenReturn(linkCriteria);
+      when(linkCriteria.uniqueResult()).thenReturn(null);
+
+      OBProvider provider = mock(OBProvider.class);
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FinAccPaymentMethod.class)).thenReturn(link);
+
+      FinancialAccountSupport.assignDefaultPaymentMethods(account);
+
+      verify(link).setClient(client);
+      verify(link).setOrganization(org);
+      verify(link).setAccount(account);
+      verify(link).setPaymentMethod(cash);
+      verify(link).setDefault(true);
+      verify(dal).save(link);
+      verify(dal).flush();
+    }
+  }
+
+  /**
+   * A Bank account links its three configured methods (Transferencia bancaria, Cheque,
+   * Tarjeta), with only the first (Transferencia bancaria) flagged as default.
+   */
+  @Test
+  public void testAssignDefaultPaymentMethodsBankLinksThreeMethodsTransferDefault() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(account.getType()).thenReturn("B");
+    when(account.getClient()).thenReturn(client);
+    when(account.getOrganization()).thenReturn(org);
+
+    FIN_PaymentMethod transfer = mock(FIN_PaymentMethod.class);
+    FIN_PaymentMethod check = mock(FIN_PaymentMethod.class);
+    FIN_PaymentMethod card = mock(FIN_PaymentMethod.class);
+    FinAccPaymentMethod transferLink = mock(FinAccPaymentMethod.class);
+    FinAccPaymentMethod checkLink = mock(FinAccPaymentMethod.class);
+    FinAccPaymentMethod cardLink = mock(FinAccPaymentMethod.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      // One criteria mock per method lookup, returned in call order (Transfer, Check, Card —
+      // the iteration order of PAYMENT_METHODS_BY_TYPE.get("B")).
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_PaymentMethod> transferCriteria = mock(OBCriteria.class);
+      when(transferCriteria.uniqueResult()).thenReturn(transfer);
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_PaymentMethod> checkCriteria = mock(OBCriteria.class);
+      when(checkCriteria.uniqueResult()).thenReturn(check);
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_PaymentMethod> cardCriteria = mock(OBCriteria.class);
+      when(cardCriteria.uniqueResult()).thenReturn(card);
+      when(dal.createCriteria(FIN_PaymentMethod.class))
+          .thenReturn(transferCriteria, checkCriteria, cardCriteria);
+
+      // No existing links for any of the three lookups.
+      @SuppressWarnings("unchecked")
+      OBCriteria<FinAccPaymentMethod> linkCriteria = mock(OBCriteria.class);
+      when(linkCriteria.uniqueResult()).thenReturn(null);
+      when(dal.createCriteria(FinAccPaymentMethod.class)).thenReturn(linkCriteria);
+
+      OBProvider provider = mock(OBProvider.class);
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FinAccPaymentMethod.class))
+          .thenReturn(transferLink, checkLink, cardLink);
+
+      FinancialAccountSupport.assignDefaultPaymentMethods(account);
+
+      verify(transferLink).setPaymentMethod(transfer);
+      verify(transferLink).setDefault(true);
+      verify(checkLink).setPaymentMethod(check);
+      verify(checkLink).setDefault(false);
+      verify(cardLink).setPaymentMethod(card);
+      verify(cardLink).setDefault(false);
+      verify(dal, times(3)).save(any());
+      verify(dal).flush();
+    }
+  }
+
+  /** A Card account links only Tarjeta, flagged as its default. */
+  @Test
+  public void testAssignDefaultPaymentMethodsCardLinksTarjetaAsDefault() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(account.getType()).thenReturn("CA");
+    when(account.getClient()).thenReturn(client);
+    when(account.getOrganization()).thenReturn(org);
+    FIN_PaymentMethod card = mock(FIN_PaymentMethod.class);
+    FinAccPaymentMethod link = mock(FinAccPaymentMethod.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_PaymentMethod> methodCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_PaymentMethod.class)).thenReturn(methodCriteria);
+      when(methodCriteria.uniqueResult()).thenReturn(card);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FinAccPaymentMethod> linkCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FinAccPaymentMethod.class)).thenReturn(linkCriteria);
+      when(linkCriteria.uniqueResult()).thenReturn(null);
+
+      OBProvider provider = mock(OBProvider.class);
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FinAccPaymentMethod.class)).thenReturn(link);
+
+      FinancialAccountSupport.assignDefaultPaymentMethods(account);
+
+      verify(link).setPaymentMethod(card);
+      verify(link).setDefault(true);
+      verify(dal, times(1)).save(any());
+      verify(dal).flush();
+    }
+  }
+
+  /** An account type with no mapping links nothing and never touches the DAL. */
+  @Test
+  public void testAssignDefaultPaymentMethodsUnknownTypeDoesNothing() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("ZZ");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      FinancialAccountSupport.assignDefaultPaymentMethods(account);
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * A payment method missing from the catalog (e.g. deactivated/renamed) is skipped without
+   * throwing, and nothing is created or flushed for it.
+   */
+  @Test
+  public void testAssignDefaultPaymentMethodsMethodNotFoundSkipsWithoutThrowing() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("C");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_PaymentMethod> methodCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_PaymentMethod.class)).thenReturn(methodCriteria);
+      when(methodCriteria.uniqueResult()).thenReturn(null);
+
+      FinancialAccountSupport.assignDefaultPaymentMethods(account);
+
+      obProvider.verifyNoInteractions();
+      verify(dal, never()).save(any());
+      verify(dal, never()).flush();
+    }
+  }
+
+  /**
+   * An existing link is left untouched (idempotent): no new link is created, and — since
+   * nothing was created — {@code OBDal.flush()} is never called either.
+   */
+  @Test
+  public void testAssignDefaultPaymentMethodsExistingLinkIsIdempotentAndDoesNotFlush() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getType()).thenReturn("C");
+    FIN_PaymentMethod cash = mock(FIN_PaymentMethod.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_PaymentMethod> methodCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_PaymentMethod.class)).thenReturn(methodCriteria);
+      when(methodCriteria.uniqueResult()).thenReturn(cash);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FinAccPaymentMethod> linkCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FinAccPaymentMethod.class)).thenReturn(linkCriteria);
+      when(linkCriteria.uniqueResult()).thenReturn(mock(FinAccPaymentMethod.class));
+
+      FinancialAccountSupport.assignDefaultPaymentMethods(account);
+
+      obProvider.verifyNoInteractions();
+      verify(dal, never()).save(any());
+      verify(dal, never()).flush();
     }
   }
 }

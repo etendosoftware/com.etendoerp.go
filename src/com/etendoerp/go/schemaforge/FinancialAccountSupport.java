@@ -18,8 +18,14 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBCriteria;
@@ -28,6 +34,8 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
 /**
@@ -44,6 +52,32 @@ import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
  * account is usable for import and reconciliation without it.
  */
 final class FinancialAccountSupport {
+
+  private static final Logger log = LogManager.getLogger(FinancialAccountSupport.class);
+
+  // Default payment methods seeded by the onboarding dataset (GOClient sampledata),
+  // matched by name. it1 has no payment-method management screen and exactly these
+  // four fixed methods, so name matching is acceptable; if methods ever become
+  // localizable or renameable this must migrate to a stable key.
+  private static final String METHOD_CASH = "Efectivo";
+  private static final String METHOD_TRANSFER = "Transferencia bancaria";
+  private static final String METHOD_CHECK = "Cheque";
+  private static final String METHOD_CARD = "Tarjeta";
+
+  /**
+   * Maps each financial-account type to the payment methods that must be auto-assigned
+   * on creation. The first method in each list becomes the account's default. Mirrors
+   * the static links shipped in the onboarding dataset for the seeded accounts.
+   */
+  private static final Map<String, List<String>> PAYMENT_METHODS_BY_TYPE = buildMethodsByType();
+
+  private static Map<String, List<String>> buildMethodsByType() {
+    Map<String, List<String>> map = new LinkedHashMap<>();
+    map.put("C", Arrays.asList(METHOD_CASH));
+    map.put("B", Arrays.asList(METHOD_TRANSFER, METHOD_CHECK, METHOD_CARD));
+    map.put("CA", Arrays.asList(METHOD_CARD));
+    return map;
+  }
 
   private FinancialAccountSupport() {
   }
@@ -117,5 +151,70 @@ final class FinancialAccountSupport {
     criteria.addOrderBy(MatchingAlgorithm.PROPERTY_NAME, true);
     criteria.setMaxResults(1);
     return (MatchingAlgorithm) criteria.uniqueResult();
+  }
+
+  /**
+   * Links the default payment methods that correspond to {@code account}'s type
+   * ({@link #PAYMENT_METHODS_BY_TYPE}), so a Cash/Bank/Card account is usable for
+   * receipts/payments without manual setup. Idempotent: existing links are left
+   * untouched. Failures never propagate — callers persist the account first, so the
+   * assignment is always best-effort on top of an already-committed record.
+   *
+   * <p>Shared by {@link FinancialAccountHandler#afterHandle} (manual "sin conexión"
+   * creation) and {@link FinancialAccountPsd2Handler#handleCreateAndLink} (Salt Edge
+   * "create and link" flow), so every financial account gets the same treatment
+   * regardless of how it was created.
+   */
+  static void assignDefaultPaymentMethods(FIN_FinancialAccount account) {
+    List<String> methodNames = PAYMENT_METHODS_BY_TYPE.get(account.getType());
+    if (methodNames == null || methodNames.isEmpty()) {
+      return;
+    }
+    boolean created = false;
+    for (int i = 0; i < methodNames.size(); i++) {
+      String methodName = methodNames.get(i);
+      FIN_PaymentMethod method = findPaymentMethodByName(methodName);
+      if (method == null) {
+        log.warn("assignDefaultPaymentMethods: payment method '{}' not found; skipping", methodName);
+      } else if (!linkExists(account, method)) {
+        createLink(account, method, i == 0);
+        created = true;
+      }
+    }
+    if (created) {
+      OBDal.getInstance().flush();
+    }
+  }
+
+  private static FIN_PaymentMethod findPaymentMethodByName(String name) {
+    OBCriteria<FIN_PaymentMethod> criteria =
+        OBDal.getInstance().createCriteria(FIN_PaymentMethod.class);
+    criteria.add(Restrictions.eq(FIN_PaymentMethod.PROPERTY_NAME, name));
+    criteria.add(Restrictions.eq(FIN_PaymentMethod.PROPERTY_ACTIVE, true));
+    criteria.setMaxResults(1);
+    return (FIN_PaymentMethod) criteria.uniqueResult();
+  }
+
+  private static boolean linkExists(FIN_FinancialAccount account, FIN_PaymentMethod method) {
+    OBCriteria<FinAccPaymentMethod> criteria =
+        OBDal.getInstance().createCriteria(FinAccPaymentMethod.class);
+    criteria.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, account));
+    criteria.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_PAYMENTMETHOD, method));
+    criteria.setMaxResults(1);
+    return criteria.uniqueResult() != null;
+  }
+
+  private static void createLink(FIN_FinancialAccount account, FIN_PaymentMethod method,
+      boolean isDefault) {
+    FinAccPaymentMethod link = OBProvider.getInstance().get(FinAccPaymentMethod.class);
+    link.setClient(account.getClient());
+    link.setOrganization(account.getOrganization());
+    link.setAccount(account);
+    link.setPaymentMethod(method);
+    link.setDefault(isDefault);
+    // payinAllow/payoutAllow (true), execution type ("M") and the invoice-paid
+    // statuses come from the entity's column defaults — Manual, allowing both
+    // receipts and payments, matching the onboarding dataset.
+    OBDal.getInstance().save(link);
   }
 }
