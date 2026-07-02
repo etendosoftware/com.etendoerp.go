@@ -155,10 +155,34 @@ public class OnboardingDefaultCustomerService {
     return (BusinessPartner) criteria.uniqueResult();
   }
 
+  /**
+   * Resolves the business partner group (category) to assign to the onboarding default customer.
+   *
+   * <p>Prefers the group explicitly flagged {@code ISDEFAULT='Y'} (e.g. "Consumidor Final" in the
+   * GOClient dataset). This is REQUIRED, not cosmetic: the dataset now ships four groups
+   * ("Acreedor", "Cliente", "Consumidor Final", "Proveedor"), and alphabetical order places
+   * "Acreedor" first. An alphabetical-only lookup would therefore silently reassign the default
+   * customer to "Acreedor" instead of "Consumidor Final". Falls back to the alphabetical lookup only
+   * when no group is flagged default, so legacy tenants provisioned before {@code ISDEFAULT} was set
+   * on any group keep resolving deterministically.
+   */
   protected Category resolveBusinessPartnerGroup(String clientId) {
+    Client client = OBDal.getInstance().get(Client.class, clientId);
+    Category defaultGroup = resolveDefaultBusinessPartnerGroup(client);
+    if (defaultGroup != null) {
+      return defaultGroup;
+    }
     OBCriteria<Category> criteria = OBDal.getInstance().createCriteria(Category.class);
-    criteria.add(Restrictions.eq(Category.PROPERTY_CLIENT,
-        OBDal.getInstance().get(Client.class, clientId)));
+    criteria.add(Restrictions.eq(Category.PROPERTY_CLIENT, client));
+    criteria.addOrder(Order.asc(Category.PROPERTY_NAME));
+    criteria.setMaxResults(1);
+    return (Category) criteria.uniqueResult();
+  }
+
+  protected Category resolveDefaultBusinessPartnerGroup(Client client) {
+    OBCriteria<Category> criteria = OBDal.getInstance().createCriteria(Category.class);
+    criteria.add(Restrictions.eq(Category.PROPERTY_CLIENT, client));
+    criteria.add(Restrictions.eq(Category.PROPERTY_DEFAULT, true));
     criteria.addOrder(Order.asc(Category.PROPERTY_NAME));
     criteria.setMaxResults(1);
     return (Category) criteria.uniqueResult();

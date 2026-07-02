@@ -543,11 +543,49 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
     String clientId = client.getId();
     String schemaId = ledger.getId();
     runEntityAcctInsert(BP_GROUP_ACCT_SQL, clientId, schemaId);
+    overrideAcreedorGroupAccounts(clientId, schemaId);
     runEntityAcctInsert(PRODUCT_CATEGORY_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(BP_CUSTOMER_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(BP_VENDOR_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(PRODUCT_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(TAX_ACCT_SQL, clientId, schemaId);
+  }
+
+  /**
+   * Overrides the "Acreedor" business-partner group's posting accounts (Gap A2 refinement) with the
+   * two dedicated accounts requested for that group, instead of leaving it on the generic
+   * {@code C_ACCTSCHEMA_DEFAULT} values that {@link #runEntityAcctInsert(String, String, String)}
+   * just inserted for {@code BP_GROUP_ACCT_SQL}. Runs right after that call, in the same {@link #wire}
+   * transaction.
+   *
+   * <p>Only two of the three accounts suggested during the gap investigation are wired here:
+   * <ul>
+   *   <li>{@code v_liability_acct} ("Vendor Liability" / "Cuenta acreedor") → account {@code 41000000}</li>
+   *   <li>{@code notinvoicedreceivables_acct} ("Non-Invoiced Receivables" / "Recibos no facturados de
+   *       acreedor") → account {@code 41090000}</li>
+   * </ul>
+   * The third candidate slot ({@code v_liability_services_acct}, "Anticipo de acreedores" /
+   * {@code 4170000000}) is intentionally left untouched pending confirmation from the reporter on the
+   * Jira ticket; do not seed it until that is resolved.
+   *
+   * <p>Accounts are resolved per-client via {@code C_ValidCombination} joined by account {@code value}
+   * against the tenant's OWN accounting schema — never a hardcoded GOClient-specific combination id —
+   * so this works for every tenant's own copy of the imported chart, not just the template client.
+   * The update is a no-op (0 rows) when the tenant has no "Acreedor" group, no {@code C_BP_Group_Acct}
+   * row yet for this schema (should not happen given the call order), or either account code is
+   * missing from the tenant's chart; all of those are defensively guarded rather than assumed.
+   */
+  protected void overrideAcreedorGroupAccounts(String clientId, String schemaId) {
+    int rows = OBDal.getInstance().getSession()
+        .createNativeQuery(ACREEDOR_GROUP_ACCT_OVERRIDE_SQL)
+        .setParameter("clientId", clientId)
+        .setParameter("schemaId", schemaId)
+        .setParameter("liabilityAcctValue", ACREEDOR_LIABILITY_ACCT_VALUE)
+        .setParameter("notInvoicedReceivablesAcctValue", ACREEDOR_NOT_INVOICED_RECEIVABLES_ACCT_VALUE)
+        .executeUpdate();
+    if (rows > 0 && log.isDebugEnabled()) {
+      log.debug("Overrode Acreedor group posting accounts for client {}", clientId);
+    }
   }
 
   /** Runs one {@code INSERT … SELECT} posting-account statement and logs the rows created. */
@@ -567,6 +605,42 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   // 11). Named params :clientId / :schemaId are bound as values; ad_org_id is inherited from each
   // source entity; PKs are minted with get_uuid(); NOT EXISTS makes each statement idempotent.
   // ---------------------------------------------------------------------------------------------
+
+  /** {@code C_BP_Group.VALUE} of the "Acreedor" group whose accounts get overridden. */
+  private static final String ACREEDOR_GROUP_VALUE = "Acreedor";
+
+  /** Account code for "Vendor Liability" / "Cuenta acreedor". */
+  private static final String ACREEDOR_LIABILITY_ACCT_VALUE = "41000000";
+
+  /** Account code for "Non-Invoiced Receivables" / "Recibos no facturados de acreedor". */
+  private static final String ACREEDOR_NOT_INVOICED_RECEIVABLES_ACCT_VALUE = "41090000";
+
+  /**
+   * Overrides {@code v_liability_acct} and {@code notinvoicedreceivables_acct} on the tenant's
+   * "Acreedor" {@code C_BP_Group_Acct} row for {@code :schemaId}, resolving both accounts by
+   * {@code value} against the tenant's OWN {@code C_ValidCombination} rows (never a hardcoded
+   * cross-tenant combination id). No-op (0 rows) when the group, its acct row, or either account
+   * value is missing for this tenant/schema — all defensively guarded.
+   */
+  private static final String ACREEDOR_GROUP_ACCT_OVERRIDE_SQL =
+      "UPDATE c_bp_group_acct a"
+      + " SET v_liability_acct = liability.c_validcombination_id,"
+      + "     notinvoicedreceivables_acct = notinvoiced.c_validcombination_id"
+      + " FROM c_bp_group g,"
+      + "   c_validcombination liability, c_elementvalue liability_ev,"
+      + "   c_validcombination notinvoiced, c_elementvalue notinvoiced_ev"
+      + " WHERE a.c_bp_group_id = g.c_bp_group_id"
+      + "   AND a.c_acctschema_id = :schemaId"
+      + "   AND g.ad_client_id = :clientId"
+      + "   AND g.value = '" + ACREEDOR_GROUP_VALUE + "'"
+      + "   AND liability.ad_client_id = :clientId"
+      + "   AND liability.c_acctschema_id = :schemaId"
+      + "   AND liability.account_id = liability_ev.c_elementvalue_id"
+      + "   AND liability_ev.value = :liabilityAcctValue"
+      + "   AND notinvoiced.ad_client_id = :clientId"
+      + "   AND notinvoiced.c_acctschema_id = :schemaId"
+      + "   AND notinvoiced.account_id = notinvoiced_ev.c_elementvalue_id"
+      + "   AND notinvoiced_ev.value = :notInvoicedReceivablesAcctValue";
 
   private static final String BP_GROUP_ACCT_SQL =
       "INSERT INTO c_bp_group_acct ("
