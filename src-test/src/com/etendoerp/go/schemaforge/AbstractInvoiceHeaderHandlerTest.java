@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -40,16 +41,20 @@ import java.util.Map;
 
 import javax.servlet.http.HttpServletResponse;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
@@ -116,6 +121,21 @@ public class AbstractInvoiceHeaderHandlerTest {
     public void callEnrichDocTypeLocked(JSONObject rec) throws Exception {
       enrichDocTypeLocked(rec);
     }
+  }
+
+  // ── ETP-4029: currency / exchange-rate hooks — test doubles ─────────────────
+
+  /**
+   * Exposes the package-private {@code autoCreateOrUpdateConversionRateDocument(String)}
+   * overload for direct testing (it's declared {@code protected static} on the abstract
+   * class, so a subclass reference is enough — no instance state needed).
+   */
+  private static void callAutoCreateOrUpdate(String invoiceId) {
+    AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(invoiceId);
+  }
+
+  private static void callAutoCreateOrUpdate(NeoContext ctx) {
+    AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(ctx);
   }
 
   private final TestHandler handler = new TestHandler();
@@ -475,8 +495,12 @@ public class AbstractInvoiceHeaderHandlerTest {
 
   @Test
   public void persistOriginInvoice_extractsIdFromPostResponse() throws Exception {
+    // Real shape produced by DefaultJsonDataService.add() for POST/create: response.data is
+    // always a JSONArray with exactly one element — never a plain JSONObject. See
+    // NeoHandlerUtils#extractCreatedIdFromPreviousResult javadoc for the underlying rationale.
     JSONObject data = new JSONObject().put("id", "new-inv-from-post");
-    JSONObject response = new JSONObject().put("data", data);
+    JSONArray dataArray = new JSONArray().put(data);
+    JSONObject response = new JSONObject().put("data", dataArray);
     JSONObject respBody = new JSONObject().put("response", response);
     NeoResponse prevResult = new NeoResponse(201, respBody);
 
@@ -988,6 +1012,961 @@ public class AbstractInvoiceHeaderHandlerTest {
           .thenReturn(Collections.emptyMap());
 
       assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+    }
+  }
+
+  // ── ETP-4029: blockCalloutCurrencyUpdate ─────────────────────────────────────
+
+  @Test
+  public void blockCalloutCurrencyUpdate_currencyPushedByOtherTrigger_removesIt() throws Exception {
+    JSONObject updates = new JSONObject().put("currency", "EUR-id").put("otherField", "x");
+
+    AbstractInvoiceHeaderHandler.blockCalloutCurrencyUpdate(updates, "businessPartner");
+
+    assertTrue(!updates.has("currency"));
+    assertTrue(updates.has("otherField"));
+  }
+
+  @Test
+  public void blockCalloutCurrencyUpdate_currencyIsTheTriggerField_keepsIt() throws Exception {
+    JSONObject updates = new JSONObject().put("currency", "USD-id");
+
+    AbstractInvoiceHeaderHandler.blockCalloutCurrencyUpdate(updates, "currency");
+
+    assertEquals("USD-id", updates.getString("currency"));
+  }
+
+  @Test
+  public void blockCalloutCurrencyUpdate_nullUpdates_doesNotThrow() {
+    // Must be a no-op guard: null updates map is a valid callout response shape.
+    AbstractInvoiceHeaderHandler.blockCalloutCurrencyUpdate(null, "businessPartner");
+  }
+
+  @Test
+  public void blockCalloutCurrencyUpdate_updatesWithoutCurrencyKey_noop() throws Exception {
+    JSONObject updates = new JSONObject().put("otherField", "unchanged");
+
+    AbstractInvoiceHeaderHandler.blockCalloutCurrencyUpdate(updates, "otherField");
+
+    assertEquals("unchanged", updates.getString("otherField"));
+    assertTrue(!updates.has("currency"));
+  }
+
+  // ── ETP-4029: checkExchangeRateWarning ───────────────────────────────────────
+
+  @Test
+  public void checkExchangeRateWarning_nullFormState_noop() throws Exception {
+    JSONObject body = new JSONObject();
+    JSONObject requestBody = new JSONObject().put("value", "usd-id");
+
+    AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, null, "currency");
+
+    assertTrue(!body.has("messages"));
+  }
+
+  @Test
+  public void checkExchangeRateWarning_triggerFieldNotCurrency_noop() throws Exception {
+    JSONObject body = new JSONObject();
+    JSONObject requestBody = new JSONObject().put("value", "usd-id");
+    JSONObject formState = new JSONObject()
+        .put("currencyid", "usd-id").put("invoiceDate", "2026-07-01");
+
+    AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "businessPartner");
+
+    assertTrue(!body.has("messages"));
+  }
+
+  @Test
+  public void checkExchangeRateWarning_currencyChangeNoRateAvailable_appendsWarning() throws Exception {
+    JSONObject body = new JSONObject();
+    JSONObject requestBody = new JSONObject().put("value", "usd-id");
+    JSONObject formState = new JSONObject()
+        .put("currencyid", "usd-id").put("invoiceDate", "2026-07-01");
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+
+      OBContext obContext = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      Client client = mock(Client.class);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+      when(obContext.getCurrentOrganization()).thenReturn(org);
+      when(obContext.getCurrentClient()).thenReturn(client);
+      when(org.getId()).thenReturn("org-1");
+      when(client.getId()).thenReturn("client-1");
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      // hasConversionRate queries via OBDal.getInstance().getConnection() — return no rows.
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false); // no conversion rate found
+
+      AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currency");
+
+      assertTrue(body.has("messages"));
+      org.codehaus.jettison.json.JSONArray messages = body.getJSONArray("messages");
+      assertEquals(1, messages.length());
+      assertEquals("WARNING", messages.getJSONObject(0).getString("type"));
+      assertEquals("noExchangeRateAvailable", messages.getJSONObject(0).getString("text"));
+    }
+  }
+
+  @Test
+  public void checkExchangeRateWarning_currencyChangeRateExists_noWarning() throws Exception {
+    JSONObject body = new JSONObject();
+    JSONObject requestBody = new JSONObject().put("value", "usd-id");
+    JSONObject formState = new JSONObject()
+        .put("currencyid", "usd-id").put("invoiceDate", "2026-07-01");
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+
+      OBContext obContext = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      Client client = mock(Client.class);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+      when(obContext.getCurrentOrganization()).thenReturn(org);
+      when(obContext.getCurrentClient()).thenReturn(client);
+      when(org.getId()).thenReturn("org-1");
+      when(client.getId()).thenReturn("client-1");
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true); // conversion rate exists
+
+      AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currency");
+
+      assertTrue(!body.has("messages"));
+    }
+  }
+
+  @Test
+  public void checkExchangeRateWarning_sameCurrencyAsOrg_noWarning() throws Exception {
+    JSONObject body = new JSONObject();
+    JSONObject requestBody = new JSONObject().put("value", "eur-id");
+    JSONObject formState = new JSONObject()
+        .put("currencyid", "eur-id").put("invoiceDate", "2026-07-01");
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+
+      OBContext obContext = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+      when(obContext.getCurrentOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-1");
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currency");
+
+      assertTrue(!body.has("messages"));
+    }
+  }
+
+  @Test
+  public void checkExchangeRateWarning_blankInvoiceDate_noWarning() throws Exception {
+    JSONObject body = new JSONObject();
+    JSONObject requestBody = new JSONObject().put("value", "usd-id");
+    JSONObject formState = new JSONObject().put("currencyid", "usd-id").put("invoiceDate", "");
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+
+      OBContext obContext = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+      when(obContext.getCurrentOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-1");
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currency");
+
+      assertTrue(!body.has("messages"));
+    }
+  }
+
+  @Test
+  public void checkExchangeRateWarning_valueFallsBackToFormStateCurrencyId() throws Exception {
+    // requestBody carries no "value" — must fall back to formState.currencyid.
+    JSONObject body = new JSONObject();
+    JSONObject requestBody = new JSONObject();
+    JSONObject formState = new JSONObject()
+        .put("currencyid", "usd-id").put("invoiceDate", "2026-07-01");
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+
+      OBContext obContext = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      Client client = mock(Client.class);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+      when(obContext.getCurrentOrganization()).thenReturn(org);
+      when(obContext.getCurrentClient()).thenReturn(client);
+      when(org.getId()).thenReturn("org-1");
+      when(client.getId()).thenReturn("client-1");
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currencyid");
+
+      assertTrue(body.has("messages"));
+    }
+  }
+
+  @Test
+  public void checkExchangeRateWarning_hasConversionRateThrows_failsOpenNoWarning() throws Exception {
+    // hasConversionRate's own catch block returns true (fail-open) on any exception —
+    // so an unexpected DB failure must NOT produce a false warning.
+    JSONObject body = new JSONObject();
+    JSONObject requestBody = new JSONObject().put("value", "usd-id");
+    JSONObject formState = new JSONObject()
+        .put("currencyid", "usd-id").put("invoiceDate", "2026-07-01");
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+
+      OBContext obContext = mock(OBContext.class);
+      Organization org = mock(Organization.class);
+      Client client = mock(Client.class);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+      when(obContext.getCurrentOrganization()).thenReturn(org);
+      when(obContext.getCurrentClient()).thenReturn(client);
+      when(org.getId()).thenReturn("org-1");
+      when(client.getId()).thenReturn("client-1");
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("connection lost"));
+
+      AbstractInvoiceHeaderHandler.checkExchangeRateWarning(body, requestBody, formState, "currency");
+
+      assertTrue(!body.has("messages"));
+    }
+  }
+
+  // ── ETP-4029: autoCreateOrUpdateConversionRateDocument(String) ───────────────
+
+  @Test
+  public void autoCreateOrUpdate_blankInvoiceId_noDbCalls() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      callAutoCreateOrUpdate("");
+      callAutoCreateOrUpdate((String) null);
+
+      Mockito.verifyNoInteractions(dal);
+    }
+  }
+
+  @Test
+  public void autoCreateOrUpdate_invoiceNotFound_noop() {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "inv-missing")).thenReturn(null);
+
+      callAutoCreateOrUpdate("inv-missing");
+
+      Mockito.verify(dal, Mockito.never()).getConnection();
+    }
+  }
+
+  @Test
+  public void autoCreateOrUpdate_invoiceCurrencyNull_noop() {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Invoice invoice = mock(Invoice.class);
+      when(dal.get(Invoice.class, "inv-no-currency")).thenReturn(invoice);
+      when(invoice.getCurrency()).thenReturn(null);
+
+      callAutoCreateOrUpdate("inv-no-currency");
+
+      Mockito.verify(dal, Mockito.never()).getConnection();
+    }
+  }
+
+  @Test
+  public void autoCreateOrUpdate_sameAsOrgCurrency_noop() {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      Currency currency = mock(Currency.class);
+      Organization org = mock(Organization.class);
+      when(dal.get(Invoice.class, "inv-same-cur")).thenReturn(invoice);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(currency.getId()).thenReturn("eur-id");
+      when(invoice.getOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-1");
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      callAutoCreateOrUpdate("inv-same-cur");
+
+      Mockito.verify(dal, Mockito.never()).getConnection();
+    }
+  }
+
+  @Test
+  public void autoCreateOrUpdate_orgCurrencyUnresolved_noop() {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      Currency currency = mock(Currency.class);
+      Organization org = mock(Organization.class);
+      when(dal.get(Invoice.class, "inv-no-org-cur")).thenReturn(invoice);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(currency.getId()).thenReturn("usd-id");
+      when(invoice.getOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-unresolved");
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-unresolved")).thenReturn(null);
+
+      callAutoCreateOrUpdate("inv-no-org-cur");
+
+      Mockito.verify(dal, Mockito.never()).getConnection();
+    }
+  }
+
+  @Test
+  public void autoCreateOrUpdate_nullRateOverride_noop() {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      Currency currency = mock(Currency.class);
+      Organization org = mock(Organization.class);
+      when(dal.get(Invoice.class, "inv-no-rate")).thenReturn(invoice);
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(currency.getId()).thenReturn("usd-id");
+      when(invoice.getOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-1");
+      when(invoice.getETGOCurrencyRate()).thenReturn(null);
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      callAutoCreateOrUpdate("inv-no-rate");
+
+      Mockito.verify(dal, Mockito.never()).getConnection();
+    }
+  }
+
+  /**
+   * Happy path — insert branch: no existing {@code C_Conversion_Rate_Document} row.
+   * Verifies docRate = 1/rate and foreignAmount = grandTotal × docRate are computed
+   * correctly and passed to the INSERT statement.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void autoCreateOrUpdate_insertBranch_correctDocRateAndForeignAmount() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBContext obContext = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-1");
+      when(obContext.getUser()).thenReturn(user);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      Currency currency = mock(Currency.class);
+      Organization org = mock(Organization.class);
+      Client client = mock(Client.class);
+      when(dal.get(Invoice.class, "inv-insert")).thenReturn(invoice);
+      when(invoice.getId()).thenReturn("inv-insert");
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(currency.getId()).thenReturn("usd-id");
+      when(invoice.getOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-1");
+      when(invoice.getClient()).thenReturn(client);
+      when(client.getId()).thenReturn("client-1");
+      // rate (org→doc) = 2.0 → docRate (doc→org) = 0.5
+      when(invoice.getETGOCurrencyRate()).thenReturn(new BigDecimal("2.0"));
+      when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("100.00"));
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+
+      // findConversionRateDocumentId (SELECT) → no existing row.
+      PreparedStatement findPs = mock(PreparedStatement.class);
+      ResultSet findRs = mock(ResultSet.class);
+      when(findRs.next()).thenReturn(false);
+      when(findPs.executeQuery()).thenReturn(findRs);
+
+      PreparedStatement insertPs = mock(PreparedStatement.class);
+
+      when(conn.prepareStatement(anyString()))
+          .thenReturn(findPs)
+          .thenReturn(insertPs);
+
+      callAutoCreateOrUpdate("inv-insert");
+
+      verify(session).refresh(invoice);
+      verify(insertPs).executeUpdate();
+      verify(insertPs).setString(eq(6), eq("inv-insert"));
+      verify(insertPs).setString(eq(7), eq("usd-id"));
+      verify(insertPs).setString(eq(8), eq("eur-id"));
+
+      ArgumentCaptor<BigDecimal> captor =
+          ArgumentCaptor.forClass(BigDecimal.class);
+      verify(insertPs, times(2)).setBigDecimal(any(Integer.class), captor.capture());
+      BigDecimal capturedDocRate = captor.getAllValues().get(0);
+      BigDecimal capturedForeignAmount = captor.getAllValues().get(1);
+      assertEquals(0, new BigDecimal("0.5").compareTo(capturedDocRate.stripTrailingZeros()));
+      // foreignAmount = 100.00 × 0.5 = 50.00
+      assertEquals(0, new BigDecimal("50.00").compareTo(capturedForeignAmount));
+    }
+  }
+
+  /**
+   * Regression test — real-world scenario manually verified end-to-end in the browser
+   * (invoice 1000157, GO + Classic Etendo + accounting journal report all agreed): a USD
+   * sales invoice with header rate (org→doc) 1.20 and grandTotalAmount 339.02 must produce
+   * docRate = 1/1.20 = 0.833333333333 (scale 12, HALF_UP — matches the production
+   * {@code BigDecimal.ONE.divide(rate, 12, RoundingMode.HALF_UP)} call) and
+   * foreignAmount = 339.02 × 0.833333333333 rounded HALF_UP to 2 decimals = 282.52. That
+   * same 282.52 was independently confirmed by Etendo core's accounting engine, which posted
+   * a balanced journal entry (Debit 282.52 = Credit 256.84 + Credit 25.68) from this exact
+   * {@code C_Conversion_Rate_Document} row — our code is only responsible for this rate/
+   * foreign_amount pair, not for the net/tax split, which is out of scope here.
+   */
+  @Test
+  public void autoCreateOrUpdate_realWorldInvoice1000157_pinsExactRateAndForeignAmount()
+      throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBContext obContext = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-1000157");
+      when(obContext.getUser()).thenReturn(user);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      Currency currency = mock(Currency.class);
+      Organization org = mock(Organization.class);
+      Client client = mock(Client.class);
+      when(dal.get(Invoice.class, "inv-1000157")).thenReturn(invoice);
+      when(invoice.getId()).thenReturn("inv-1000157");
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(currency.getId()).thenReturn("usd-id");
+      when(invoice.getOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-1");
+      when(invoice.getClient()).thenReturn(client);
+      when(client.getId()).thenReturn("client-1");
+      // EM_ETGO_Currency_Rate (org→doc) as observed on the real header.
+      when(invoice.getETGOCurrencyRate()).thenReturn(new BigDecimal("1.20"));
+      // grandTotalAmount as observed on the real invoice (339.02 USD).
+      when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("339.02"));
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+
+      PreparedStatement findPs = mock(PreparedStatement.class);
+      ResultSet findRs = mock(ResultSet.class);
+      when(findRs.next()).thenReturn(false);
+      when(findPs.executeQuery()).thenReturn(findRs);
+
+      PreparedStatement insertPs = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString()))
+          .thenReturn(findPs)
+          .thenReturn(insertPs);
+
+      callAutoCreateOrUpdate("inv-1000157");
+
+      verify(insertPs).executeUpdate();
+
+      ArgumentCaptor<BigDecimal> captor = ArgumentCaptor.forClass(BigDecimal.class);
+      verify(insertPs, times(2)).setBigDecimal(any(Integer.class), captor.capture());
+      BigDecimal capturedDocRate = captor.getAllValues().get(0);
+      BigDecimal capturedForeignAmount = captor.getAllValues().get(1);
+
+      // docRate = BigDecimal.ONE.divide(1.20, 12, HALF_UP) = 0.833333333333
+      assertEquals(0, new BigDecimal("0.833333333333").compareTo(capturedDocRate));
+      // foreignAmount = 339.02 × 0.833333333333, HALF_UP to 2 decimals = 282.52 — matches
+      // both the manually verified C_Conversion_Rate_Document.foreign_amount and the
+      // Debit total (282.52) posted by Classic's accounting engine for this invoice.
+      assertEquals(0, new BigDecimal("282.52").compareTo(capturedForeignAmount));
+    }
+  }
+
+  /**
+   * Second real value for variety, proving the formula generalizes beyond the single
+   * hardcoded 1.20/339.02 case above — a different, still-realistic rate/total combination
+   * (EUR-denominated purchase invoice equivalent: rate 0.85, grandTotal 500.00). The
+   * production method is shared between sales and purchase invoices, so this also confirms
+   * there is no direction-specific bug in the formula.
+   */
+  @Test
+  public void autoCreateOrUpdate_differentRealisticRate_generalizesFormula() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBContext obContext = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-purchase");
+      when(obContext.getUser()).thenReturn(user);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      Currency currency = mock(Currency.class);
+      Organization org = mock(Organization.class);
+      Client client = mock(Client.class);
+      when(dal.get(Invoice.class, "inv-purchase")).thenReturn(invoice);
+      when(invoice.getId()).thenReturn("inv-purchase");
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(currency.getId()).thenReturn("usd-id");
+      when(invoice.getOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-1");
+      when(invoice.getClient()).thenReturn(client);
+      when(client.getId()).thenReturn("client-1");
+      when(invoice.getETGOCurrencyRate()).thenReturn(new BigDecimal("0.85"));
+      when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("500.00"));
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+
+      PreparedStatement findPs = mock(PreparedStatement.class);
+      ResultSet findRs = mock(ResultSet.class);
+      when(findRs.next()).thenReturn(false);
+      when(findPs.executeQuery()).thenReturn(findRs);
+
+      PreparedStatement insertPs = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString()))
+          .thenReturn(findPs)
+          .thenReturn(insertPs);
+
+      callAutoCreateOrUpdate("inv-purchase");
+
+      ArgumentCaptor<BigDecimal> captor = ArgumentCaptor.forClass(BigDecimal.class);
+      verify(insertPs, times(2)).setBigDecimal(any(Integer.class), captor.capture());
+      BigDecimal capturedDocRate = captor.getAllValues().get(0);
+      BigDecimal capturedForeignAmount = captor.getAllValues().get(1);
+
+      // docRate = BigDecimal.ONE.divide(0.85, 12, HALF_UP) = 1.176470588235
+      assertEquals(0, new BigDecimal("1.176470588235").compareTo(capturedDocRate));
+      // foreignAmount = 500.00 × 1.176470588235, HALF_UP to 2 decimals = 588.24
+      assertEquals(0, new BigDecimal("588.24").compareTo(capturedForeignAmount));
+    }
+  }
+
+  /**
+   * Rounding-boundary case: rate = 3 produces a repeating decimal (1/3 = 0.333...), so the
+   * scale-12 HALF_UP truncation of docRate and the subsequent scale-2 HALF_UP rounding of
+   * foreignAmount both land on a non-obvious digit — a good canary for any future change to
+   * the divide/multiply scale or rounding mode in the production method.
+   */
+  @Test
+  public void autoCreateOrUpdate_repeatingDecimalRate_roundsHalfUpAtBothScales()
+      throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBContext obContext = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-rounding");
+      when(obContext.getUser()).thenReturn(user);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      Currency currency = mock(Currency.class);
+      Organization org = mock(Organization.class);
+      Client client = mock(Client.class);
+      when(dal.get(Invoice.class, "inv-rounding")).thenReturn(invoice);
+      when(invoice.getId()).thenReturn("inv-rounding");
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(currency.getId()).thenReturn("usd-id");
+      when(invoice.getOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-1");
+      when(invoice.getClient()).thenReturn(client);
+      when(client.getId()).thenReturn("client-1");
+      when(invoice.getETGOCurrencyRate()).thenReturn(new BigDecimal("3"));
+      when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("10.00"));
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+
+      PreparedStatement findPs = mock(PreparedStatement.class);
+      ResultSet findRs = mock(ResultSet.class);
+      when(findRs.next()).thenReturn(false);
+      when(findPs.executeQuery()).thenReturn(findRs);
+
+      PreparedStatement insertPs = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString()))
+          .thenReturn(findPs)
+          .thenReturn(insertPs);
+
+      callAutoCreateOrUpdate("inv-rounding");
+
+      ArgumentCaptor<BigDecimal> captor = ArgumentCaptor.forClass(BigDecimal.class);
+      verify(insertPs, times(2)).setBigDecimal(any(Integer.class), captor.capture());
+      BigDecimal capturedDocRate = captor.getAllValues().get(0);
+      BigDecimal capturedForeignAmount = captor.getAllValues().get(1);
+
+      // docRate = BigDecimal.ONE.divide(3, 12, HALF_UP) = 0.333333333333
+      assertEquals(0, new BigDecimal("0.333333333333").compareTo(capturedDocRate));
+      // foreignAmount = 10.00 × 0.333333333333, HALF_UP to 2 decimals = 3.33
+      assertEquals(0, new BigDecimal("3.33").compareTo(capturedForeignAmount));
+    }
+  }
+
+  /**
+   * Happy path — update branch: an existing row is found, so the UPDATE path runs
+   * instead of INSERT.
+   */
+  @Test
+  public void autoCreateOrUpdate_updateBranch_whenRecordExists() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBContext obContext = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-2");
+      when(obContext.getUser()).thenReturn(user);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      Currency currency = mock(Currency.class);
+      Organization org = mock(Organization.class);
+      when(dal.get(Invoice.class, "inv-update")).thenReturn(invoice);
+      when(invoice.getId()).thenReturn("inv-update");
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(currency.getId()).thenReturn("usd-id");
+      when(invoice.getOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-1");
+      when(invoice.getETGOCurrencyRate()).thenReturn(new BigDecimal("2.0"));
+      when(invoice.getGrandTotalAmount()).thenReturn(new BigDecimal("200.00"));
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+
+      PreparedStatement findPs = mock(PreparedStatement.class);
+      ResultSet findRs = mock(ResultSet.class);
+      when(findRs.next()).thenReturn(true); // existing row found
+      when(findRs.getString(1)).thenReturn("existing-crd-id");
+      when(findPs.executeQuery()).thenReturn(findRs);
+
+      PreparedStatement updatePs = mock(PreparedStatement.class);
+
+      when(conn.prepareStatement(anyString()))
+          .thenReturn(findPs)
+          .thenReturn(updatePs);
+
+      callAutoCreateOrUpdate("inv-update");
+
+      verify(updatePs).executeUpdate();
+      verify(updatePs).setString(eq(4), eq("existing-crd-id"));
+      // Only two prepareStatement calls: the SELECT and the UPDATE — no INSERT attempted.
+      verify(conn, times(2)).prepareStatement(anyString());
+    }
+  }
+
+  /**
+   * Regression test for the bug fixed today (manual QA on a real invoice): before
+   * {@code session.refresh(invoice)} was added, {@code getGrandTotalAmount()} could return
+   * the stale pre-line-insert total because Hibernate's L1 cache returned an already-loaded
+   * Invoice instance. This test proves refresh() happens BEFORE the total is read, using a
+   * mock that returns a different (stale) value the first time and only the fresh value once
+   * refresh() has been invoked.
+   */
+  @Test
+  public void autoCreateOrUpdate_refreshesBeforeReadingGrandTotal() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBContext obContext = mock(OBContext.class);
+      org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+      when(user.getId()).thenReturn("user-3");
+      when(obContext.getUser()).thenReturn(user);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      Currency currency = mock(Currency.class);
+      Organization org = mock(Organization.class);
+      Client client = mock(Client.class);
+      when(dal.get(Invoice.class, "inv-refresh")).thenReturn(invoice);
+      when(invoice.getId()).thenReturn("inv-refresh");
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(currency.getId()).thenReturn("usd-id");
+      when(invoice.getOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-1");
+      when(invoice.getClient()).thenReturn(client);
+      when(client.getId()).thenReturn("client-1");
+      when(invoice.getETGOCurrencyRate()).thenReturn(BigDecimal.ONE);
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      // Track whether refresh() has been called; grandTotalAmount reflects the PRE-refresh
+      // (stale) value until refresh() runs, then the POST-refresh (correct) value.
+      final boolean[] refreshed = {false};
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+      Mockito.doAnswer(invocation -> {
+        refreshed[0] = true;
+        return null;
+      }).when(session).refresh(invoice);
+      when(invoice.getGrandTotalAmount()).thenAnswer(invocation ->
+          refreshed[0] ? new BigDecimal("500.00") : new BigDecimal("0.00"));
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+
+      PreparedStatement findPs = mock(PreparedStatement.class);
+      ResultSet findRs = mock(ResultSet.class);
+      when(findRs.next()).thenReturn(false);
+      when(findPs.executeQuery()).thenReturn(findRs);
+
+      PreparedStatement insertPs = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString()))
+          .thenReturn(findPs)
+          .thenReturn(insertPs);
+
+      callAutoCreateOrUpdate("inv-refresh");
+
+      verify(session).refresh(invoice);
+      // foreignAmount = grandTotal(500.00, POST-refresh) × docRate(1.0) = 500.00 — proves
+      // the total was read AFTER refresh(), not the stale 0.00 pre-refresh value.
+      ArgumentCaptor<BigDecimal> captor =
+          ArgumentCaptor.forClass(BigDecimal.class);
+      verify(insertPs, times(2)).setBigDecimal(any(Integer.class), captor.capture());
+      BigDecimal capturedForeignAmount = captor.getAllValues().get(1);
+      assertEquals(0, new BigDecimal("500.00").compareTo(capturedForeignAmount));
+    }
+  }
+
+  @Test
+  public void autoCreateOrUpdate_exceptionDuringUpsert_swallowed() {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "inv-boom")).thenThrow(new RuntimeException("DB down"));
+
+      // Must not throw.
+      callAutoCreateOrUpdate("inv-boom");
+    }
+  }
+
+  // ── ETP-4029: autoCreateOrUpdateConversionRateDocument(NeoContext) overload ──
+
+  @Test
+  public void autoCreateOrUpdateFromContext_getMethod_noop() {
+    NeoContext ctx = NeoContext.builder().httpMethod("GET").recordId("inv-1").build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      callAutoCreateOrUpdate(ctx);
+
+      Mockito.verifyNoInteractions(dal);
+    }
+  }
+
+  @Test
+  public void autoCreateOrUpdateFromContext_deleteMethod_noop() {
+    NeoContext ctx = NeoContext.builder().httpMethod("DELETE").recordId("inv-1").build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      callAutoCreateOrUpdate(ctx);
+
+      Mockito.verifyNoInteractions(dal);
+    }
+  }
+
+  @Test
+  public void autoCreateOrUpdateFromContext_patchWithRecordId_resolvesAndDelegates() {
+    NeoContext ctx = NeoContext.builder().httpMethod("PATCH").recordId("inv-patch").build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      // invoice not found → no-op, but proves resolveInvoiceIdFromContext used recordId directly
+      when(dal.get(Invoice.class, "inv-patch")).thenReturn(null);
+
+      callAutoCreateOrUpdate(ctx);
+
+      verify(dal).get(Invoice.class, "inv-patch");
+    }
+  }
+
+  @Test
+  public void autoCreateOrUpdateFromContext_postResolvesIdFromPreviousResult() throws Exception {
+    JSONArray dataArray = new JSONArray().put(new JSONObject().put("id", "inv-from-post"));
+    JSONObject response = new JSONObject().put("data", dataArray);
+    JSONObject respBody = new JSONObject().put("response", response);
+    NeoResponse prevResult = new NeoResponse(201, respBody);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").recordId(null).previousResult(prevResult).build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "inv-from-post")).thenReturn(null);
+
+      callAutoCreateOrUpdate(ctx);
+
+      verify(dal).get(Invoice.class, "inv-from-post");
+    }
+  }
+
+  @Test
+  public void autoCreateOrUpdateFromContext_putResolvesViaRecordId() {
+    NeoContext ctx = NeoContext.builder().httpMethod("PUT").recordId("inv-put").build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "inv-put")).thenReturn(null);
+
+      callAutoCreateOrUpdate(ctx);
+
+      verify(dal).get(Invoice.class, "inv-put");
     }
   }
 }

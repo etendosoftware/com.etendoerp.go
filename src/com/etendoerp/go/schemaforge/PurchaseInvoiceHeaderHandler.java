@@ -82,6 +82,9 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   @Inject
   private DocumentPostingService postingService;
 
+  @Inject
+  private CurrencyOptionsHandler currencyOptionsHandler;
+
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
@@ -110,14 +113,42 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
     return NeoHeaderActionRouter.dispatch(
         context,
+        currencyOptionsHandler,
         cloneRecordHandler,
         registerPaymentOutHandler,
         siiSendHandler,
         tbaiXmlgeneratorHandler);
   }
 
+  /**
+   * Post-callout hook (ETP-4029): blocks callout-driven currency updates and appends an
+   * exchange-rate warning when the user directly changes the invoice currency. Mirrors
+   * {@code AbstractOrderHeaderHandler#afterCallout}.
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    try {
+      NeoResponse previous = context.getPreviousResult();
+      if (previous == null || previous.getBody() == null) {
+        return null;
+      }
+      JSONObject body = previous.getBody();
+      JSONObject updates = body.optJSONObject("updates");
+      JSONObject requestBody = context.getRequestBody();
+      String triggerField = requestBody != null ? requestBody.optString("field", "") : "";
+      JSONObject formState = requestBody != null ? requestBody.optJSONObject("formState") : null;
+
+      blockCalloutCurrencyUpdate(updates, triggerField);
+      checkExchangeRateWarning(body, requestBody, formState, triggerField);
+    } catch (Exception e) {
+      log.warn("[ETP-4029] afterCallout failed (non-fatal): {}", e.getMessage());
+    }
+    return null; // mutations applied in-place; dispatcher merges nothing extra
+  }
+
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    autoCreateOrUpdateConversionRateDocument(context);
     try {
       // POST/PUT: persist origin invoice relationship after the record is saved
       if (NeoEndpointType.CRUD.equals(context.getEndpointType())

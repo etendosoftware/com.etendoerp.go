@@ -230,6 +230,10 @@ public class InvoiceFromOrderSupport {
         log.info("[ETP-4027] Created C_Conversion_Rate_Document {} for invoice {} (docRate={}, eTGORate={})",
             newId, invoice.getId(), docRate, rate);
       }
+
+      // ETP-4029: also persist the rate on the invoice column so summaries/lists can display it.
+      invoice.setETGOCurrencyRate(rate);
+      OBDal.getInstance().save(invoice);
     } catch (Exception e) {
       log.warn("[ETP-4027] propagateOrderRateToInvoice failed for order {} → invoice {}: {}",
           order.getId(), invoice.getId(), e.getMessage());

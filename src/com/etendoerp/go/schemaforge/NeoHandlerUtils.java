@@ -111,6 +111,42 @@ final class NeoHandlerUtils {
     return ids;
   }
 
+  /**
+   * Extracts the {@code id} of a just-created record from a POST/create response, read via
+   * {@code context.getPreviousResult()}.
+   *
+   * <p>For {@code add()} (POST/create) requests, Etendo's {@code DefaultJsonDataService} always
+   * serializes {@code response.data} as a {@code JSONArray} containing exactly one element — the
+   * created record — never a plain {@code JSONObject}. Calling {@code optJSONObject("data")} on
+   * that response returns {@code null} silently (org.codehaus.jettison.json.JSONObject#optJSONObject
+   * returns {@code null} whenever the value at the key is not itself a {@code JSONObject}, with no
+   * exception raised), so callers that need the created record's ID after a POST must read
+   * {@code data} as an array and pull the first element, which is what this method does.
+   *
+   * @param context the current NeoContext; only {@code getPreviousResult()} is used
+   * @return the created record's {@code id}, or {@code null} if it could not be resolved
+   */
+  static String extractCreatedIdFromPreviousResult(NeoContext context) {
+    try {
+      NeoResponse prev = context.getPreviousResult();
+      if (prev == null || prev.getBody() == null) {
+        return null;
+      }
+      JSONObject response = prev.getBody().optJSONObject("response");
+      if (response == null) {
+        return null;
+      }
+      JSONArray data = response.optJSONArray("data");
+      if (data == null || data.length() == 0) {
+        return null;
+      }
+      return data.getJSONObject(0).optString("id", null);
+    } catch (Exception e) {
+      log.debug("Could not extract created record ID from POST response: {}", e.getMessage());
+      return null;
+    }
+  }
+
   private static final Logger log = LogManager.getLogger(NeoHandlerUtils.class);
 
   /**

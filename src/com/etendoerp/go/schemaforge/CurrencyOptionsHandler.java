@@ -34,15 +34,19 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 
 /**
  * Returns the set of currencies that have a defined conversion to/from the order's org currency,
  * scoped to the order's own client and org, for the order's date period.
  *
- * <p>Exposed as an ACTION on both sales-order and purchase-order header entities:
+ * <p>Exposed as an ACTION on sales-order, purchase-order, sales-invoice and purchase-invoice
+ * header entities:
  * <pre>GET /sws/neo/sales-order/header/{orderId}/action/currencyOptions</pre>
  * <pre>GET /sws/neo/purchase-order/header/{orderId}/action/currencyOptions</pre>
+ * <pre>GET /sws/neo/sales-invoice/header/{invoiceId}/action/currencyOptions</pre>
+ * <pre>GET /sws/neo/purchase-invoice/header/{invoiceId}/action/currencyOptions</pre>
  *
  * <p>Response:
  * <pre>[
@@ -90,22 +94,36 @@ public class CurrencyOptionsHandler implements NeoHandler {
       LocalDate orderDate;
 
       if (isNew) {
-        // New record: fall back to session context (org/client not yet bound to an order)
+        // New record: fall back to session context (org/client not yet bound to a document)
         OBContext obCtx = OBContext.getOBContext();
         orgId    = obCtx.getCurrentOrganization().getId();
         clientId = obCtx.getCurrentClient().getId();
         orderDate = LocalDate.now();
       } else {
-        Order order = OBDal.getInstance().get(Order.class, recordId);
-        if (order == null) {
-          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Order not found: " + recordId);
+        String specName = context.getSpecName();
+        if (specName != null && specName.contains("invoice")) {
+          Invoice invoice = OBDal.getInstance().get(Invoice.class, recordId);
+          if (invoice == null) {
+            return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Invoice not found: " + recordId);
+          }
+          orgId    = invoice.getOrganization().getId();
+          clientId = invoice.getClient().getId();
+          orderDate = invoice.getInvoiceDate() != null
+              ? java.time.Instant.ofEpochMilli(invoice.getInvoiceDate().getTime())
+                  .atZone(java.time.ZoneId.systemDefault()).toLocalDate()
+              : LocalDate.now();
+        } else {
+          Order order = OBDal.getInstance().get(Order.class, recordId);
+          if (order == null) {
+            return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Order not found: " + recordId);
+          }
+          orgId    = order.getOrganization().getId();
+          clientId = order.getClient().getId();
+          orderDate = order.getOrderDate() != null
+              ? java.time.Instant.ofEpochMilli(order.getOrderDate().getTime())
+                  .atZone(java.time.ZoneId.systemDefault()).toLocalDate()
+              : LocalDate.now();
         }
-        orgId    = order.getOrganization().getId();
-        clientId = order.getClient().getId();
-        orderDate = order.getOrderDate() != null
-            ? java.time.Instant.ofEpochMilli(order.getOrderDate().getTime())
-                .atZone(java.time.ZoneId.systemDefault()).toLocalDate()
-            : LocalDate.now();
       }
 
       String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
