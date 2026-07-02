@@ -27,7 +27,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.model.ad.system.Language;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
@@ -126,10 +125,7 @@ class NeoAuthenticator {
     // same "GO locale of the request" is used by selectors (ETP-4304) and messages
     // (ETP-4306). Only well-formed, active xx_YY codes are honored; otherwise the
     // context default stands.
-    Language language = NeoLanguage.resolveActive(request.getHeader("Accept-Language"));
-    if (language != null) {
-      OBContext.getOBContext().setLanguage(language);
-    }
+    NeoLanguage.applyToContext(request.getHeader("Accept-Language"));
   }
 
   boolean hasWindowAccess(String windowId) {

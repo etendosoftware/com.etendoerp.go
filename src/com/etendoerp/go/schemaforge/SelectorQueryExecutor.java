@@ -34,6 +34,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import com.etendoerp.go.schemaforge.selector.meta.RichFieldMeta;
 import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
+import com.etendoerp.go.schemaforge.util.NeoTrl;
 
 /**
  * Executes resolved selector query plans against DAL/HQL and maps rows into selector responses.
@@ -119,9 +121,7 @@ final class SelectorQueryExecutor {
 
     JSONArray items = buildSimpleSelectorItems(dataQuery.list(), meta);
 
-    if (language != null && !"en_US".equals(language)) {
-      enrichCountryTranslations(items, meta.entityName, language);
-    }
+    enrichTranslations(items, meta.entityName, resolveEnrichLanguage(language));
 
     return SelectorResponseSupport.buildSelectorResponse(items, new JSONArray(), totalCount, limit, offset);
   }
@@ -200,6 +200,8 @@ final class SelectorQueryExecutor {
       SelectorAuxResolver.appendAuxFields(item, bob, meta.auxFields);
       items.put(item);
     }
+
+    enrichTranslations(items, meta.entityName, resolveEnrichLanguage(null));
 
     return SelectorResponseSupport.buildSelectorResponse(items, columns, totalCount, limit, offset);
   }
@@ -316,46 +318,40 @@ final class SelectorQueryExecutor {
   }
 
   /**
-   * Post-processes a selector result to replace English country names with translated names
-   * from the {@code CountryTrl} entity for the requested language.
-   * Falls back silently to the original name when no translation is found.
+   * The language to resolve selector-value translations into: the GO locale already applied to the
+   * request by {@code NeoAuthenticator} ({@link NeoLanguage#currentCode()}), falling back to an
+   * explicit {@code language} context param when there is no request locale.
    */
-  private static void enrichCountryTranslations(JSONArray items, String entityName, String language) {
-    if (!"Country".equals(entityName)) {
+  private static String resolveEnrichLanguage(String contextParamLanguage) {
+    String current = NeoLanguage.currentCode();
+    return current != null ? current : contextParamLanguage;
+  }
+
+  /**
+   * Replaces base-language selector labels with their {@code *_Trl} translation for {@code language}
+   * when one exists, for any translatable entity (UoM, Country, …). Entity identifiers are not
+   * translated by Etendo, so this is what makes selector values honor the GO locale (ETP-4304).
+   * Falls back silently to the original label when there is no translation.
+   */
+  private static void enrichTranslations(JSONArray items, String entityName, String language)
+      throws Exception {
+    if (items.length() == 0 || StringUtils.isBlank(language)) {
       return;
     }
-    try {
-      List<String> ids = new ArrayList<>();
-      for (int i = 0; i < items.length(); i++) {
-        ids.add(items.getJSONObject(i).getString("id"));
+    List<String> ids = new ArrayList<>();
+    for (int i = 0; i < items.length(); i++) {
+      ids.add(items.getJSONObject(i).getString("id"));
+    }
+    Map<String, String> translations = NeoTrl.translatedNames(entityName, ids, language);
+    if (translations.isEmpty()) {
+      return;
+    }
+    for (int i = 0; i < items.length(); i++) {
+      JSONObject item = items.getJSONObject(i);
+      String translated = translations.get(item.getString("id"));
+      if (translated != null) {
+        item.put(FIELD_LABEL, translated);
       }
-      if (ids.isEmpty()) {
-        return;
-      }
-      OBQuery<BaseOBObject> trlQuery = OBDal.getInstance().createQuery("CountryTrl",
-          "as t where t.language.language = :lang and t.country.id in :ids");
-      trlQuery.setNamedParameter("lang", language);
-      trlQuery.setNamedParameter("ids", ids);
-
-      Map<String, String> translations = new HashMap<>();
-      for (BaseOBObject trl : trlQuery.list()) {
-        BaseOBObject country = (BaseOBObject) trl.get("country");
-        String name = (String) trl.get("name");
-        if (country != null && StringUtils.isNotBlank(name)) {
-          translations.put(country.getId().toString(), name);
-        }
-      }
-
-      for (int i = 0; i < items.length(); i++) {
-        JSONObject item = items.getJSONObject(i);
-        String id = item.getString("id");
-        String translated = translations.get(id);
-        if (translated != null) {
-          item.put(FIELD_LABEL, translated);
-        }
-      }
-    } catch (Exception e) {
-      log.debug("Country translation enrichment failed for language {}: {}", language, e.getMessage());
     }
   }
 }
