@@ -19,6 +19,9 @@ final class PaymentActionHandlerSupport {
   private static final String ACCOUNTS_ACTION = "invoiceAccounts";
   private static final String METHODS_ACTION = "invoicePaymentMethods";
   private static final String CREDIT_SOURCES_ACTION = "invoiceCreditSources";
+  private static final String PIS_STATUS_ACTION = "pisPaymentStatus";
+  private static final String PIS_SUPPLIER_ACCOUNTS_ACTION = "pisSupplierAccounts";
+  private static final String PIS_TEMPLATES_ACTION = "pisTemplates";
   private static final String CONFIRM_ACTION = "confirmPayment";
 
   private static final String FIELD_PAYMENT_ID = "paymentId";
@@ -78,6 +81,15 @@ final class PaymentActionHandlerSupport {
     }
     if (CREDIT_SOURCES_ACTION.equals(fieldName)) {
       return PaymentRegistrationService.handleListCreditSources(context, isReceipt);
+    }
+    if (PIS_STATUS_ACTION.equals(fieldName)) {
+      return PaymentRegistrationService.handlePisPaymentStatus(context);
+    }
+    if (PIS_SUPPLIER_ACCOUNTS_ACTION.equals(fieldName)) {
+      return PaymentRegistrationService.handleListSupplierBankAccounts(context, isReceipt);
+    }
+    if (PIS_TEMPLATES_ACTION.equals(fieldName)) {
+      return PaymentRegistrationService.handlePisTemplates(context);
     }
     return null;
   }

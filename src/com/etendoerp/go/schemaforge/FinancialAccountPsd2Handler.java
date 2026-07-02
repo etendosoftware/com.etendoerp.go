@@ -39,6 +39,8 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
@@ -597,7 +599,50 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
       finAcc.setPsd2Provider(provider);
       OBDal.getInstance().save(finAcc);
     }
+    disableAutomaticDepositForTransferMethod(finAcc);
     return warning;
+  }
+
+  /**
+   * Scope note (ETP-4406): this is called ONLY from this Etendo Go bridge, never from Classic's
+   * own PSD2 connect flow (Classic calls {@link SaltEdgeAccountLinkHelper} directly through its
+   * own action handlers in the PSD2 module, which this method never touches). Etendo Go is
+   * introducing a new payment flow where the bank transaction is created by the PIS callback
+   * once Salt Edge confirms execution, not by the local "process payment" step — so once an
+   * account is connected to PSD2 via this SPA, its transfer payment method(s) must stop
+   * auto-creating a {@code FIN_Finacc_Transaction} on save, or the transaction would be created
+   * twice (once locally, once by the PSD2 callback). Classic's flow is untouched and keeps
+   * creating transactions the way it always has.
+   * <p>
+   * Judgment call: {@code FIN_PaymentMethod} has no explicit "is transfer" flag in this model —
+   * same heuristic as {@code PaymentRegistrationService.isTransferMethod}, matched here directly
+   * on the method name (contains "transfer"/"transferencia", case-insensitive). Both
+   * {@code Automatic Deposit} and {@code Automatic Withdrawn} are cleared regardless of the
+   * account's AR/AP direction, since PIS becomes the source of truth for this account either way.
+   */
+  private void disableAutomaticDepositForTransferMethod(FIN_FinancialAccount finAcc) {
+    OBCriteria<FinAccPaymentMethod> crit = OBDal.getInstance()
+        .createCriteria(FinAccPaymentMethod.class);
+    crit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, finAcc));
+    int updated = 0;
+    for (FinAccPaymentMethod fapm : crit.list()) {
+      FIN_PaymentMethod method = fapm.getPaymentMethod();
+      if (method == null || method.getName() == null) {
+        continue;
+      }
+      if (StringUtils.containsIgnoreCase(method.getName(), "transfer")
+          || StringUtils.containsIgnoreCase(method.getName(), "transferencia")) {
+        fapm.setAutomaticDeposit(false);
+        fapm.setAutomaticWithdrawn(false);
+        OBDal.getInstance().save(fapm);
+        updated++;
+      }
+    }
+    if (updated > 0) {
+      OBDal.getInstance().flush();
+      log.info("PSD2 connect (Etendo Go): disabled Automatic Deposit/Withdrawn on {} transfer "
+          + "payment method row(s) for account {}", updated, finAcc.getId());
+    }
   }
 
   /**
