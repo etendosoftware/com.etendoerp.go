@@ -19,6 +19,8 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.text.ParseException;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -460,9 +462,18 @@ final class PaymentRegistrationService {
           return itemsResponse(new JSONArray());
         }
         String bpId = invoice.getBusinessPartner().getId();
+        List<DatedSource> sources = new ArrayList<>();
+        collectAbonoSources(sources, bpId, invoiceId, isReceipt);
+        collectAccumulatedCredit(sources, bpId, isReceipt);
+        // Merge both kinds into a single list ordered by each row's own date — invoice
+        // date for saldo a favor (abono), payment date for credit — most recent first.
+        // The two kinds are NOT grouped separately; they interleave by date.
+        sources.sort(Comparator.comparing(
+            (DatedSource s) -> s.date, Comparator.nullsLast(Comparator.naturalOrder())).reversed());
         JSONArray arr = new JSONArray();
-        appendAbonoSources(arr, bpId, invoiceId, isReceipt);
-        appendAccumulatedCredit(arr, bpId, isReceipt);
+        for (DatedSource s : sources) {
+          arr.put(s.item);
+        }
         return itemsResponse(arr);
       } finally {
         OBContext.restorePreviousMode();
@@ -474,8 +485,19 @@ final class PaymentRegistrationService {
     }
   }
 
-  /** Appends pending credit-memo / return PSDs (negative amount) of the BP. */
-  private static void appendAbonoSources(JSONArray arr, String bpId, String invoiceId,
+  /** Pairs a credit-source JSON item with the raw date used to sort it against the other kind. */
+  private static final class DatedSource {
+    private final Date date;
+    private final JSONObject item;
+
+    private DatedSource(Date date, JSONObject item) {
+      this.date = date;
+      this.item = item;
+    }
+  }
+
+  /** Collects pending credit-memo / return PSDs (negative amount) of the BP. */
+  private static void collectAbonoSources(List<DatedSource> sources, String bpId, String invoiceId,
       boolean isReceipt) throws Exception {
     String hql = "select psd from FIN_Payment_ScheduleDetail psd "
         + "where psd.invoicePaymentSchedule.invoice.businessPartner.id = :bp "
@@ -501,13 +523,13 @@ final class PaymentRegistrationService {
           ? JsonUtils.createDateFormat().format(ncInv.getInvoiceDate()) : null);
       item.put("note", ncInv.getDocumentType() != null ? ncInv.getDocumentType().getName() : "");
       item.put("avail", psd.getAmount().abs());
-      arr.put(item);
+      sources.add(new DatedSource(ncInv.getInvoiceDate(), item));
     }
   }
 
-  /** Appends accumulated-credit payments of the BP with available credit (generated minus used). */
-  private static void appendAccumulatedCredit(JSONArray arr, String bpId, boolean isReceipt)
-      throws Exception {
+  /** Collects accumulated-credit payments of the BP with available credit (generated minus used). */
+  private static void collectAccumulatedCredit(List<DatedSource> sources, String bpId,
+      boolean isReceipt) throws Exception {
     String hql = "select p from FIN_Payment p "
         + "where p.businessPartner.id = :bp and p.receipt = :receipt "
         + "and (coalesce(p.generatedCredit, 0) - coalesce(p.usedCredit, 0)) > 0 "
@@ -534,7 +556,7 @@ final class PaymentRegistrationService {
           ? JsonUtils.createDateFormat().format(src.getPaymentDate()) : null);
       item.put("note", src.getDescription());
       item.put("avail", avail);
-      arr.put(item);
+      sources.add(new DatedSource(src.getPaymentDate(), item));
     }
   }
 
