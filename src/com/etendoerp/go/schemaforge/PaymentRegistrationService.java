@@ -467,9 +467,12 @@ final class PaymentRegistrationService {
         collectAccumulatedCredit(sources, bpId, isReceipt);
         // Merge both kinds into a single list ordered by each row's own date — invoice
         // date for saldo a favor (abono), payment date for credit — most recent first.
-        // The two kinds are NOT grouped separately; they interleave by date.
+        // The two kinds are NOT grouped separately; they interleave by date. Reversing
+        // must happen INSIDE nullsLast (reverseOrder), not around the whole comparator —
+        // wrapping .reversed() around nullsLast(...) flips its null handling too, sending
+        // null dates first instead of last.
         sources.sort(Comparator.comparing(
-            (DatedSource s) -> s.date, Comparator.nullsLast(Comparator.naturalOrder())).reversed());
+            (DatedSource s) -> s.date, Comparator.nullsLast(Comparator.reverseOrder())));
         JSONArray arr = new JSONArray();
         for (DatedSource s : sources) {
           arr.put(s.item);
