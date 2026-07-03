@@ -163,3 +163,52 @@ The frontend (`OnboardingPage.jsx`) fetches the draft when an authenticated
 account has zero environments, restores step + form, shows a one-time
 "progress restored" banner, and autosaves changes debounced (1.5 s) while the
 wizard is visible and not running.
+
+## Startup Access Self-Healer (`NeoAccessStartup`)
+
+`com.etendoerp.go.startup.NeoAccessStartup` is an `ApplicationInitializer`
+(`@ApplicationScoped` + `@ComponentProvider.Qualifier`) that grants — idempotently,
+on every application startup — the `WindowAccess` / `ProcessAccess` that automatic
+roles are missing for module-shipped NEO windows/processes.
+
+### Why it exists
+
+Window access for automatic roles (`ad_role.ismanual='N'`) is normally created by
+two DB triggers, both gated by `IF AD_isTriggerEnabled()='N' THEN RETURN;`:
+
+- `AD_WINDOW_TRG` (AFTER INSERT on `AD_WINDOW`) — inserts `ad_window_access` for all
+  existing non-manual roles.
+- `AD_ROLE_TRG` (INSERT/UPDATE on `AD_ROLE`) — rebuilds window/process/form access
+  for non-manual roles by UserLevel (destructive: it DELETEs then re-inserts).
+
+Module windows install via `update.database`, which runs with **triggers disabled**,
+so `AD_WINDOW_TRG` never fires for them. The base GOClient sampledata ships no
+`AD_WINDOW_ACCESS.xml` and its roles do not go through onboarding (`CreateRoleStep`).
+Net result: on a clean install nothing grants those roles access to module windows
+(e.g. "Match Rule" `24963D64E83B4543A7F6BD248CF944EE`, Verifactu/SII/TBAI windows).
+
+### Behavior
+
+1. `initialize()` spawns a daemon thread so it never blocks (nor fails) startup.
+2. The worker first waits for `SessionInfo.isInitialized()` (poll ~100 ms, ~60 s
+   timeout, then proceed) — borrowing a DAL connection too early hits the
+   `ad_context_info` temp-table problem.
+3. Under `OBContext.setAdminMode()`, it selects all roles with `active = true` and
+   `manual = false`, skips the system client (`'0'`), and for each remaining role
+   grants any missing access:
+   - active `SFSpec` of `specType='W'` with a non-null window → `WindowAccess`
+     (client = role's client, org `'0'`, `editableField = true`),
+   - active `SFSpec` of `specType='P'` with a non-null process → `ProcessAccess`,
+   - only when the role does not already have it (existing ids queried per role).
+4. One `flush()` + `commitAndClose()`. On any error it logs and
+   `rollbackAndClose()`s — startup is never allowed to fail.
+
+The grant logic mirrors `CreateRoleStep` exactly, so freshly onboarded tenants and
+self-healed existing tenants converge on the same access set.
+
+### Invariants
+
+- **INSERT-only into the access tables.** It never touches `AD_WINDOW` nor any
+  `AD_ROLE` row, so it can never trigger `AD_ROLE_TRG`'s destructive rebuild.
+- **Idempotent.** Re-running on the next restart grants nothing new.
+- **No SQL migration.** Existing databases self-heal on the next Tomcat restart.

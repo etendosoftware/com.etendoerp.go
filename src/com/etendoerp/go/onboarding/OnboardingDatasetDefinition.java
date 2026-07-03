@@ -50,6 +50,8 @@ public final class OnboardingDatasetDefinition {
       "AD_ORG_ACCTSCHEMA",
       "AD_ORG_WAREHOUSE",
       "AD_SEQUENCE",
+      "A_ASSET_GROUP",
+      "A_ASSET_GROUP_ACCT",
       "C_ACCTSCHEMA",
       "C_ACCTSCHEMA_DEFAULT",
       "C_ACCTSCHEMA_ELEMENT",
