@@ -99,7 +99,7 @@ final class NeoSequencePreviewHelper {
    *   This method passes empty doctype strings and is only kept for callers outside the
    *   two-pass defaults flow (e.g., injectMandatoryDefaults).
    */
-  @Deprecated
+  @Deprecated // NOSONAR java:S1133 — intentionally deprecated, still used by NeoDefaultsService; see Javadoc for the migration plan
   static String resolveSequencePreview(Column adColumn, VariablesSecureApp vars,
       DalConnectionProvider conn, String windowId, NeoContext ctx) {
     try {
