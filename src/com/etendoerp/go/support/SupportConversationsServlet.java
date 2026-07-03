@@ -20,15 +20,10 @@ package com.etendoerp.go.support;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -62,18 +57,33 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *
  * Conversations and messages are persisted in PostgreSQL tables
  * (etgo_support_conversation, etgo_support_message) created on first use.
+ *
+ * Outbound ADK/Jira integration lives in {@link SupportIntegrationClient}; inbound Jira
+ * webhook parsing lives in {@link SupportJiraWebhookHandler}. This class owns the HTTP
+ * request/response contract and conversation persistence.
  */
 public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
   private static final Logger log = LogManager.getLogger(SupportConversationsServlet.class);
 
   private static final String CONTENT_TYPE_JSON = "application/json";
-  private static final String HEADER_CONTENT_TYPE = "Content-Type";
   private static final String HEADER_AUTHORIZATION = "Authorization";
   private static final String CHARSET_UTF8      = "UTF-8";
   private static final String FIELD_MESSAGE     = "message";
+  private static final String FIELD_MESSAGES    = "messages";
+  private static final String FIELD_CONVERSATIONS = "conversations";
+  private static final String FIELD_CONVERSATION  = "conversation";
+  private static final String FIELD_CONVERSATION_ID = "conversationId";
   private static final String FIELD_STATUS      = "status";
   private static final String FIELD_ERROR       = "error";
+  private static final String FIELD_SUBJECT     = "subject";
+  private static final String FIELD_LAST_MESSAGE_COL = "last_message";
+  private static final String FIELD_UNREAD      = "unread";
+  private static final String FIELD_RATED       = "rated";
+  private static final String MSG_INTERNAL_ERROR = "Internal error";
+  private static final String MSG_CONVERSATION_NOT_FOUND = "Conversation not found";
+  private static final String HEADER_INTERNAL_SECRET = "X-Internal-Secret";
+  private static final String MSG_INVALID_SECRET = "Invalid secret";
 
   private static final String SENDER_AI    = "ai";
   private static final String SENDER_USER  = "user";
@@ -83,22 +93,8 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private static final String AI_STUB_REPLY =
       "Hola, soy ValerIA. En este momento no puedo conectarme con el servicio de IA. Por favor intenta de nuevo en un momento.";
 
-  private static final String ADK_BASE_URL =
-      System.getProperty("support.adk.url", "http://localhost:8000");
-  private static final String ADK_APP_NAME = "agent";
   private static final String WEBHOOK_SECRET =
       System.getProperty("support.webhook.secret", "");
-  private static final String JIRA_BOT_EMAIL =
-      System.getProperty("support.jira.bot.email", "");
-  private static final String JIRA_URL =
-      System.getProperty("support.jira.url", "https://etendoproject.atlassian.net");
-  private static final String JIRA_USERNAME =
-      System.getProperty("support.jira.username", "info@smfconsulting.es");
-  private static final String JIRA_API_TOKEN =
-      System.getProperty("support.jira.token", "");
-  private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
-      .connectTimeout(Duration.ofSeconds(10))
-      .build();
 
   // DDL — created once on first request
   private static final AtomicBoolean TABLES_READY = new AtomicBoolean(false);
@@ -162,7 +158,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     }
 
     String[] parts = pathInfo.split("/");
-    if (parts.length == 4 && "conversations".equals(parts[1]) && "messages".equals(parts[3])) {
+    if (parts.length == 4 && FIELD_CONVERSATIONS.equals(parts[1]) && FIELD_MESSAGES.equals(parts[3])) {
       handleGetMessages(response, userId, parts[2]);
       return;
     }
@@ -175,27 +171,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     String pathInfo = request.getPathInfo();
     if (pathInfo == null) pathInfo = "/";
 
-    // Unauthenticated internal / webhook endpoints
-    if ("/jira-webhook".equals(pathInfo)) {
-      ensureTablesExist();
-      handleJiraWebhook(request, response);
-      return;
-    }
-    if ("/internal/set-ticket".equals(pathInfo)) {
-      ensureTablesExist();
-      handleSetTicket(request, response);
-      return;
-    }
-    if ("/internal/set-human-takeover".equals(pathInfo)) {
-      ensureTablesExist();
-      handleSetHumanTakeover(request, response);
-      return;
-    }
-    if ("/internal/reset-human-takeover".equals(pathInfo)) {
-      ensureTablesExist();
-      handleResetHumanTakeover(request, response);
-      return;
-    }
+    if (dispatchInternalRoute(pathInfo, request, response)) return;
 
     String userId = authenticateAndGetUserId(request, response);
     if (userId == null) return;
@@ -206,29 +182,61 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       return;
     }
 
-    String[] parts = pathInfo.split("/");
-    if (parts.length >= 4 && "conversations".equals(parts[1])) {
-      String convId = parts[2];
-      String action = parts[3];
-      if ("messages".equals(action)) {
-        handleSendMessage(request, response, userId, convId);
-        return;
-      }
-      if ("rating".equals(action)) {
-        handleSubmitRating(request, response, userId, convId);
-        return;
-      }
-      if ("close".equals(action)) {
-        handleCloseConversation(response, userId, convId);
-        return;
-      }
-      if ("reopen".equals(action)) {
-        handleReopenConversation(response, userId, convId);
-        return;
-      }
-    }
+    if (dispatchConversationAction(pathInfo, request, response, userId)) return;
 
     writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + pathInfo);
+  }
+
+  /** Unauthenticated internal / webhook endpoints. Returns true if the request was handled. */
+  private boolean dispatchInternalRoute(String pathInfo, HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    if ("/jira-webhook".equals(pathInfo)) {
+      ensureTablesExist();
+      SupportJiraWebhookHandler.handle(request, response);
+      return true;
+    }
+    if ("/internal/set-ticket".equals(pathInfo)) {
+      ensureTablesExist();
+      handleSetTicket(request, response);
+      return true;
+    }
+    if ("/internal/set-human-takeover".equals(pathInfo)) {
+      ensureTablesExist();
+      handleSetHumanTakeover(request, response);
+      return true;
+    }
+    if ("/internal/reset-human-takeover".equals(pathInfo)) {
+      ensureTablesExist();
+      handleResetHumanTakeover(request, response);
+      return true;
+    }
+    return false;
+  }
+
+  /** Routes /conversations/:id/{messages,rating,close,reopen}. Returns true if handled. */
+  private boolean dispatchConversationAction(String pathInfo, HttpServletRequest request,
+      HttpServletResponse response, String userId) throws IOException {
+    String[] parts = pathInfo.split("/");
+    if (parts.length < 4 || !FIELD_CONVERSATIONS.equals(parts[1])) return false;
+    String convId = parts[2];
+    String action = parts[3];
+    if (FIELD_MESSAGES.equals(action)) {
+      handleSendMessage(request, response, userId, convId);
+      return true;
+    }
+    if ("rating".equals(action)) {
+      handleSubmitRating(request, response, userId, convId);
+      return true;
+    }
+    if ("close".equals(action)) {
+      handleCloseConversation(response, userId, convId);
+      return true;
+    }
+    if ("reopen".equals(action)) {
+      handleReopenConversation(response, userId, convId);
+      return true;
+    }
+    return false;
   }
 
   // --- Endpoint handlers ---
@@ -249,25 +257,25 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
             while (rs.next()) {
               JSONObject conv = new JSONObject();
               conv.put("id",           rs.getString("id"));
-              conv.put("subject",      rs.getString("subject"));
-              conv.put("status",       rs.getString("status"));
+              conv.put(FIELD_SUBJECT,  rs.getString(FIELD_SUBJECT));
+              conv.put(FIELD_STATUS,   rs.getString(FIELD_STATUS));
               conv.put("lastActivity", toIso(rs.getString("last_activity")));
-              conv.put("lastMessage",  rs.getString("last_message") != null ? rs.getString("last_message") : "");
-              conv.put("unread",       rs.getBoolean("unread"));
-              conv.put("rated",        rs.getBoolean("rated"));
+              conv.put("lastMessage",  rs.getString(FIELD_LAST_MESSAGE_COL) != null ? rs.getString(FIELD_LAST_MESSAGE_COL) : "");
+              conv.put(FIELD_UNREAD,   rs.getBoolean(FIELD_UNREAD));
+              conv.put(FIELD_RATED,    rs.getBoolean(FIELD_RATED));
               arr.put(conv);
             }
           }
         }
         JSONObject result = new JSONObject();
-        result.put("conversations", arr);
+        result.put(FIELD_CONVERSATIONS, arr);
         writeJson(response, HttpServletResponse.SC_OK, result);
       } finally {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
       log.error("Error listing conversations for user {}", userId, e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
     }
   }
 
@@ -320,9 +328,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         // AI reply
         JSONArray attachments = body.optJSONArray("attachments");
         String locale = body.optString("locale", "es");
-        String userEmail = getUserEmail(conn, userId);
-        createAdkSession(userId, convId, locale, userEmail);
-        String aiReplyText = sendToAdk(userId, convId, firstMessage, attachments);
+        String userEmail = SupportIntegrationClient.getUserEmail(conn, userId);
+        SupportIntegrationClient.createAdkSession(userId, convId, locale, userEmail);
+        String aiReplyText = SupportIntegrationClient.sendToAdk(userId, convId, firstMessage, attachments);
         if (aiReplyText == null) aiReplyText = AI_STUB_REPLY;
 
         String msgId2    = newId();
@@ -333,15 +341,15 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         updateConvSummary(conn, convId, aiReplyText, aiNow);
 
         JSONObject result = new JSONObject();
-        result.put("conversation", buildConvSummary(conn, convId));
-        result.put("messages", buildMessageArray(conn, convId));
+        result.put(FIELD_CONVERSATION, buildConvSummary(conn, convId));
+        result.put(FIELD_MESSAGES, buildMessageArray(conn, convId));
         writeJson(response, HttpServletResponse.SC_CREATED, result);
       } finally {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
       log.error("Error creating conversation for user {}", userId, e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
     }
   }
 
@@ -352,7 +360,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       try {
         Connection conn = OBDal.getInstance().getConnection();
         if (!conversationBelongsToUser(conn, convId, userId)) {
-          writeError(response, HttpServletResponse.SC_NOT_FOUND, "Conversation not found");
+          writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
           return;
         }
         // Mark as read
@@ -362,14 +370,14 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
           ps.executeUpdate();
         }
         JSONObject result = new JSONObject();
-        result.put("messages", buildMessageArray(conn, convId));
+        result.put(FIELD_MESSAGES, buildMessageArray(conn, convId));
         writeJson(response, HttpServletResponse.SC_OK, result);
       } finally {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
       log.error("Error loading messages for conversation {}", convId, e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
     }
   }
 
@@ -395,7 +403,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       try {
         Connection conn = OBDal.getInstance().getConnection();
         if (!conversationBelongsToUser(conn, convId, userId)) {
-          writeError(response, HttpServletResponse.SC_NOT_FOUND, "Conversation not found");
+          writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
           return;
         }
         String convStatus = getConvStatus(conn, convId);
@@ -429,10 +437,10 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
           }
           final String finalKey = jiraKey;
           final String finalText = text;
-          new Thread(() -> postJiraComment(finalKey, finalText), "jira-comment").start();
+          new Thread(() -> SupportIntegrationClient.postJiraComment(finalKey, finalText), "jira-comment").start();
           JSONObject result = new JSONObject();
-          result.put("messages",     buildMessageArray(conn, convId));
-          result.put("conversation", buildConvSummary(conn, convId));
+          result.put(FIELD_MESSAGES,     buildMessageArray(conn, convId));
+          result.put(FIELD_CONVERSATION, buildConvSummary(conn, convId));
           writeJson(response, HttpServletResponse.SC_OK, result);
           return;
         }
@@ -442,7 +450,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         JSONObject stateDelta = new JSONObject()
             .put("human_takeover", false)
             .put("human_takeover_synced", true);
-        String aiReplyText = sendToAdk(userId, convId, text, attachments, stateDelta);
+        String aiReplyText = SupportIntegrationClient.sendToAdk(userId, convId, text, attachments, stateDelta);
         if (aiReplyText == null) aiReplyText = AI_STUB_REPLY;
 
         String aiNow = Instant.now().toString();
@@ -450,15 +458,15 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         updateConvSummary(conn, convId, aiReplyText, aiNow);
 
         JSONObject result = new JSONObject();
-        result.put("messages",     buildMessageArray(conn, convId));
-        result.put("conversation", buildConvSummary(conn, convId));
+        result.put(FIELD_MESSAGES,     buildMessageArray(conn, convId));
+        result.put(FIELD_CONVERSATION, buildConvSummary(conn, convId));
         writeJson(response, HttpServletResponse.SC_OK, result);
       } finally {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
       log.error("Error sending message to conversation {}", convId, e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
     }
   }
 
@@ -484,7 +492,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       try {
         Connection conn = OBDal.getInstance().getConnection();
         if (!conversationBelongsToUser(conn, convId, userId)) {
-          writeError(response, HttpServletResponse.SC_NOT_FOUND, "Conversation not found");
+          writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
           return;
         }
         String comment = body.optString("comment", "").trim();
@@ -510,8 +518,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         final int finalScore = score;
         final String finalComment = comment;
         new Thread(() -> {
-          postJiraComment(finalJiraKey, buildFeedbackComment(finalScore, finalComment));
-          postJiraCsatLabel(finalJiraKey, finalScore);
+          SupportIntegrationClient.postJiraComment(finalJiraKey,
+              SupportIntegrationClient.buildFeedbackComment(finalScore, finalComment));
+          SupportIntegrationClient.postJiraCsatLabel(finalJiraKey, finalScore);
         }, "jira-csat-feedback").start();
 
         JSONObject result = new JSONObject();
@@ -522,7 +531,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       }
     } catch (Exception e) {
       log.error("Error submitting rating for conversation {}", convId, e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
     }
   }
 
@@ -533,7 +542,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       try {
         Connection conn = OBDal.getInstance().getConnection();
         if (!conversationBelongsToUser(conn, convId, userId)) {
-          writeError(response, HttpServletResponse.SC_NOT_FOUND, "Conversation not found");
+          writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
           return;
         }
         try (PreparedStatement ps = conn.prepareStatement(
@@ -542,14 +551,14 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
           ps.executeUpdate();
         }
         JSONObject result = new JSONObject();
-        result.put("conversation", buildConvSummary(conn, convId));
+        result.put(FIELD_CONVERSATION, buildConvSummary(conn, convId));
         writeJson(response, HttpServletResponse.SC_OK, result);
       } finally {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
       log.error("Error closing conversation {}", convId, e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
     }
   }
 
@@ -560,7 +569,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       try {
         Connection conn = OBDal.getInstance().getConnection();
         if (!conversationBelongsToUser(conn, convId, userId)) {
-          writeError(response, HttpServletResponse.SC_NOT_FOUND, "Conversation not found");
+          writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
           return;
         }
         String now = Instant.now().toString();
@@ -574,15 +583,15 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         insertMessage(conn, newId(), convId, SENDER_AI, AI_AGENT_NAME,
             "La conversación ha sido reabierta. ¿En qué más puedo ayudarte?", now);
         JSONObject result = new JSONObject();
-        result.put("conversation", buildConvSummary(conn, convId));
-        result.put("messages", buildMessageArray(conn, convId));
+        result.put(FIELD_CONVERSATION, buildConvSummary(conn, convId));
+        result.put(FIELD_MESSAGES, buildMessageArray(conn, convId));
         writeJson(response, HttpServletResponse.SC_OK, result);
       } finally {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
       log.error("Error reopening conversation {}", convId, e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
     }
   }
 
@@ -590,7 +599,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
   private String authenticateAndGetUserId(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    String authHeader = request.getHeader("Authorization");
+    String authHeader = request.getHeader(HEADER_AUTHORIZATION);
     if (authHeader == null || !authHeader.startsWith("Bearer ")) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
           "Missing or invalid Authorization header");
@@ -612,20 +621,21 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     }
   }
 
-  // --- Jira webhook & internal set-ticket ---
+  // --- Internal webhook endpoints (ticket linking / human takeover) ---
+
+  private static boolean isInvalidWebhookSecret(HttpServletRequest request) {
+    return !WEBHOOK_SECRET.isEmpty() && !WEBHOOK_SECRET.equals(request.getHeader(HEADER_INTERNAL_SECRET));
+  }
 
   private void handleSetTicket(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    if (!WEBHOOK_SECRET.isEmpty()) {
-      String s = request.getHeader("X-Internal-Secret");
-      if (!WEBHOOK_SECRET.equals(s)) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid secret");
-        return;
-      }
+    if (isInvalidWebhookSecret(request)) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, MSG_INVALID_SECRET);
+      return;
     }
     JSONObject body = parseBody(request, response);
     if (body == null) return;
-    String convId      = body.optString("conversationId", "");
+    String convId      = body.optString(FIELD_CONVERSATION_ID, "");
     String jiraKey     = body.optString("jiraTicketKey", "");
     if (convId.isEmpty() || jiraKey.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, "conversationId and jiraTicketKey required");
@@ -640,7 +650,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
           ps.setString(1, jiraKey);
           ps.setString(2, convId);
           if (ps.executeUpdate() == 0) {
-            writeError(response, HttpServletResponse.SC_NOT_FOUND, "Conversation not found");
+            writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
             return;
           }
         }
@@ -651,22 +661,19 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       }
     } catch (Exception e) {
       log.error("Error in set-ticket", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
     }
   }
 
   private void handleSetHumanTakeover(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    if (!WEBHOOK_SECRET.isEmpty()) {
-      String s = request.getHeader("X-Internal-Secret");
-      if (!WEBHOOK_SECRET.equals(s)) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid secret");
-        return;
-      }
+    if (isInvalidWebhookSecret(request)) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, MSG_INVALID_SECRET);
+      return;
     }
     JSONObject body = parseBody(request, response);
     if (body == null) return;
-    String convId = body.optString("conversationId", "");
+    String convId = body.optString(FIELD_CONVERSATION_ID, "");
     if (convId.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, "conversationId required");
       return;
@@ -679,7 +686,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
             "UPDATE etgo_support_conversation SET human_takeover = true WHERE id = ?")) {
           ps.setString(1, convId);
           if (ps.executeUpdate() == 0) {
-            writeError(response, HttpServletResponse.SC_NOT_FOUND, "Conversation not found");
+            writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
             return;
           }
         }
@@ -690,22 +697,19 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       }
     } catch (Exception e) {
       log.error("Error in set-human-takeover", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
     }
   }
 
   private void handleResetHumanTakeover(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    if (!WEBHOOK_SECRET.isEmpty()) {
-      String s = request.getHeader("X-Internal-Secret");
-      if (!WEBHOOK_SECRET.equals(s)) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid secret");
-        return;
-      }
+    if (isInvalidWebhookSecret(request)) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, MSG_INVALID_SECRET);
+      return;
     }
     JSONObject body = parseBody(request, response);
     if (body == null) return;
-    String convId  = body.optString("conversationId", "");
+    String convId  = body.optString(FIELD_CONVERSATION_ID, "");
     String jiraKey = body.optString("jiraTicketKey", "");
     if (convId.isEmpty() && jiraKey.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, "conversationId or jiraTicketKey required");
@@ -730,7 +734,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
           }
         }
         if (rows == 0) {
-          writeError(response, HttpServletResponse.SC_NOT_FOUND, "Conversation not found");
+          writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
           return;
         }
         log.info("Human takeover reset for conversation '{}' / jira '{}'", convId, jiraKey);
@@ -740,251 +744,8 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       }
     } catch (Exception e) {
       log.error("Error in reset-human-takeover", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
     }
-  }
-
-  private void handleJiraWebhook(HttpServletRequest request, HttpServletResponse response)
-      throws IOException {
-    if (!WEBHOOK_SECRET.isEmpty()) {
-      String s = request.getHeader("X-Webhook-Secret");
-      if (!WEBHOOK_SECRET.equals(s)) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid secret");
-        return;
-      }
-    }
-
-    // Try to parse JSON body; if empty (e.g. Jira Automation sends no body), fall back to query params
-    String jiraKey   = null;
-    String commentId = null;
-    String authorEmail = "";
-    String authorName  = "Agente de soporte";
-    String text        = null;
-
-    JSONObject body = parseBodySilent(request);
-    if (body != null && body.length() > 0) {
-      // Standard Jira system webhook or manually configured automation body
-      JSONObject issue = body.optJSONObject("issue");
-      if (issue == null) { writeRaw(response, 200, "{\"status\":\"ignored\"}"); return; }
-      jiraKey = issue.optString("key", "");
-      if (jiraKey.isEmpty()) { writeRaw(response, 200, "{\"status\":\"ignored\"}"); return; }
-
-      JSONObject comment = body.optJSONObject("comment");
-      if (comment == null) {
-        // Check for assignee-change-back-to-bot (jira:issue_updated with no comment)
-        JSONObject fields = issue.optJSONObject("fields");
-        if (fields != null) {
-          JSONObject assignee = fields.optJSONObject("assignee");
-          String assigneeEmail = assignee != null ? assignee.optString("emailAddress", "") : "";
-          if (isBotEmail(assigneeEmail)) {
-            handleAssigneeReset(response, jiraKey);
-            return;
-          }
-        }
-        // Check for ticket resolved/closed (status transition to Done)
-        JSONObject changelog = body.optJSONObject("changelog");
-        if (changelog != null) {
-          JSONArray items = changelog.optJSONArray("items");
-          if (items != null) {
-            for (int i = 0; i < items.length(); i++) {
-              JSONObject item = items.optJSONObject(i);
-              if (item != null && "status".equals(item.optString("field", ""))
-                  && "Done".equalsIgnoreCase(item.optString("toString", ""))) {
-                handleTicketClosed(response, jiraKey);
-                return;
-              }
-            }
-          }
-        }
-        writeRaw(response, 200, "{\"status\":\"ignored\"}");
-        return;
-      }
-
-      commentId = comment.optString("id", newId());
-      if (!comment.optBoolean("jsdPublic", true)) {
-        writeRaw(response, 200, "{\"status\":\"skipped_internal\"}");
-        return;
-      }
-      JSONObject author = comment.optJSONObject("author");
-      authorEmail = author != null ? author.optString("emailAddress", "") : "";
-      authorName  = author != null ? author.optString("displayName", "Agente de soporte") : "Agente de soporte";
-      text = extractAdfText(comment.opt("body")).trim();
-    } else {
-      // Jira Automation webhook: data comes from query params.
-      // Configure automation URL: ...?issueKey={{issue.key}}&commentId={{comment.id}}&authorName={{comment.author.displayName}}&authorEmail={{comment.author.emailAddress}}&commentText={{comment.body}}
-      jiraKey     = request.getParameter("issueKey");
-      commentId   = request.getParameter("commentId");
-      authorName  = nvl(request.getParameter("authorName"), "Agente de soporte");
-      authorEmail = nvl(request.getParameter("authorEmail"), "");
-      text        = nvl(request.getParameter("commentText"), "");
-      if (jiraKey == null || jiraKey.isEmpty()) {
-        writeRaw(response, 200, "{\"status\":\"ignored_no_key\"}");
-        return;
-      }
-      // Jira Automation assignee-reset trigger:
-      // URL: .../jira-webhook?action=assignee_reset&issueKey={{issue.key}}&authorEmail={{issue.assignee.emailAddress}}
-      if ("assignee_reset".equals(nvl(request.getParameter("action"), ""))) {
-        if (isBotEmail(authorEmail)) {
-          handleAssigneeReset(response, jiraKey);
-        } else {
-          writeRaw(response, 200, "{\"status\":\"ignored_not_bot\"}");
-        }
-        return;
-      }
-      // Jira Automation ticket-closed trigger:
-      // URL: .../jira-webhook?action=ticket_closed&issueKey={{issue.key}}
-      if ("ticket_closed".equals(nvl(request.getParameter("action"), ""))) {
-        handleTicketClosed(response, jiraKey);
-        return;
-      }
-      if (commentId == null) commentId = newId();
-    }
-
-    try {
-
-      if (!JIRA_BOT_EMAIL.isEmpty() && JIRA_BOT_EMAIL.equalsIgnoreCase(authorEmail)) {
-        writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "skipped_bot"));
-        return;
-      }
-
-      if (text == null || text.trim().isEmpty()) {
-        writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "empty_body"));
-        return;
-      }
-      text = text.trim();
-
-      String externalId = "jira:" + jiraKey + ":" + commentId;
-
-      OBContext.setAdminMode(true);
-      try {
-        Connection conn = OBDal.getInstance().getConnection();
-        String convId = null;
-        try (PreparedStatement ps = conn.prepareStatement(
-            "SELECT id FROM etgo_support_conversation WHERE jira_ticket_key = ? LIMIT 1")) {
-          ps.setString(1, jiraKey);
-          try (ResultSet rs = ps.executeQuery()) { if (rs.next()) convId = rs.getString("id"); }
-        }
-        if (convId == null) { writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "no_conversation")); return; }
-
-        String ts = Instant.now().toString();
-        try (PreparedStatement ps = conn.prepareStatement(
-            "INSERT INTO etgo_support_message (id, conversation_id, sender, sender_name, text, timestamp, external_id)" +
-            " VALUES (?, ?, 'human', ?, ?, ?::timestamptz, ?)" +
-            " ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO NOTHING")) {
-          ps.setString(1, newId());
-          ps.setString(2, convId);
-          ps.setString(3, authorName);
-          ps.setString(4, text);
-          ps.setString(5, ts);
-          ps.setString(6, externalId);
-          ps.executeUpdate();
-        }
-        updateConvSummary(conn, convId, text, ts);
-        try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET unread = true WHERE id = ?")) {
-          ps.setString(1, convId);
-          ps.executeUpdate();
-        }
-        log.info("Jira comment {} ({}) stored in conversation {}", commentId, authorName, convId);
-        writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "ok").put("conversationId", convId));
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.error("Error processing Jira webhook", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
-    }
-  }
-
-  private void handleAssigneeReset(HttpServletResponse response, String jiraKey) throws IOException {
-    try {
-      OBContext.setAdminMode(true);
-      try {
-        Connection conn = OBDal.getInstance().getConnection();
-        try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET human_takeover = false WHERE jira_ticket_key = ?")) {
-          ps.setString(1, jiraKey);
-          int rows = ps.executeUpdate();
-          log.info("Human takeover reset via assignee event for Jira ticket {} ({} row(s))", jiraKey, rows);
-        }
-        writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "ok").put("jiraTicketKey", jiraKey));
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.error("Error resetting human takeover for ticket {}", jiraKey, e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
-    }
-  }
-
-  private void handleTicketClosed(HttpServletResponse response, String jiraKey) throws IOException {
-    try {
-      OBContext.setAdminMode(true);
-      try {
-        Connection conn = OBDal.getInstance().getConnection();
-        String convId = null;
-        try (PreparedStatement ps = conn.prepareStatement(
-            "SELECT id FROM etgo_support_conversation WHERE jira_ticket_key = ? LIMIT 1")) {
-          ps.setString(1, jiraKey);
-          try (ResultSet rs = ps.executeQuery()) { if (rs.next()) convId = rs.getString("id"); }
-        }
-        if (convId == null) {
-          writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "no_conversation"));
-          return;
-        }
-        String ts = Instant.now().toString();
-        try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET status = 'closed', unread = true, last_activity = ?::timestamptz WHERE id = ?")) {
-          ps.setString(1, ts);
-          ps.setString(2, convId);
-          ps.executeUpdate();
-        }
-        log.info("Conversation {} closed via Jira ticket {} resolution", convId, jiraKey);
-        writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "ok").put("conversationId", convId));
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.error("Error closing conversation for ticket {}", jiraKey, e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal error");
-    }
-  }
-
-  private boolean isBotEmail(String email) {
-    if (email == null || email.isEmpty()) return false;
-    return (!JIRA_BOT_EMAIL.isEmpty() && JIRA_BOT_EMAIL.equalsIgnoreCase(email))
-        || JIRA_USERNAME.equalsIgnoreCase(email);
-  }
-
-  private static String extractAdfText(Object node) {
-    if (node == null) return "";
-    if (node instanceof String) {
-      String s = ((String) node).trim();
-      if (s.startsWith("{")) {
-        try { return extractAdfText(new JSONObject(s)); } catch (Exception e) { return s; }
-      }
-      return s;
-    }
-    if (node instanceof JSONObject) {
-      JSONObject obj = (JSONObject) node;
-      String type = obj.optString("type", "");
-      if ("text".equals(type)) return obj.optString("text", "");
-      if ("hardBreak".equals(type)) return "\n";
-      StringBuilder sb = new StringBuilder();
-      JSONArray content = obj.optJSONArray("content");
-      if (content != null) {
-        for (int i = 0; i < content.length(); i++) {
-          Object child = content.opt(i);
-          if (child instanceof JSONObject) sb.append(extractAdfText((JSONObject) child));
-        }
-      }
-      boolean isBlock = "paragraph".equals(type) || "heading".equals(type) ||
-          "bulletList".equals(type) || "orderedList".equals(type) ||
-          "listItem".equals(type) || "codeBlock".equals(type) || "blockquote".equals(type);
-      if (isBlock && sb.length() > 0 && sb.charAt(sb.length() - 1) != '\n') sb.append('\n');
-      return sb.toString();
-    }
-    return "";
   }
 
   // --- Schema bootstrap ---
@@ -1032,7 +793,8 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     }
   }
 
-  private void updateConvSummary(Connection conn, String convId, String lastMsg, String ts)
+  /** Package-private: also used by {@link SupportJiraWebhookHandler} when storing an inbound Jira comment. */
+  static void updateConvSummary(Connection conn, String convId, String lastMsg, String ts)
       throws SQLException {
     try (PreparedStatement ps = conn.prepareStatement(
         "UPDATE etgo_support_conversation" +
@@ -1062,7 +824,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         "SELECT status FROM etgo_support_conversation WHERE id = ?")) {
       ps.setString(1, convId);
       try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() ? rs.getString("status") : STATUS_OPEN;
+        return rs.next() ? rs.getString(FIELD_STATUS) : STATUS_OPEN;
       }
     }
   }
@@ -1077,12 +839,12 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         if (!rs.next()) return new JSONObject();
         JSONObject obj = new JSONObject();
         obj.put("id",           rs.getString("id"));
-        obj.put("subject",      rs.getString("subject"));
-        obj.put("status",       rs.getString("status"));
+        obj.put(FIELD_SUBJECT,  rs.getString(FIELD_SUBJECT));
+        obj.put(FIELD_STATUS,   rs.getString(FIELD_STATUS));
         obj.put("lastActivity", toIso(rs.getString("last_activity")));
-        obj.put("lastMessage",  rs.getString("last_message") != null ? rs.getString("last_message") : "");
-        obj.put("unread",       rs.getBoolean("unread"));
-        obj.put("rated",        rs.getBoolean("rated"));
+        obj.put("lastMessage",  rs.getString(FIELD_LAST_MESSAGE_COL) != null ? rs.getString(FIELD_LAST_MESSAGE_COL) : "");
+        obj.put(FIELD_UNREAD,   rs.getBoolean(FIELD_UNREAD));
+        obj.put(FIELD_RATED,    rs.getBoolean(FIELD_RATED));
         return obj;
       }
     }
@@ -1099,7 +861,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         while (rs.next()) {
           JSONObject msg = new JSONObject();
           msg.put("id",             rs.getString("id"));
-          msg.put("conversationId", rs.getString("conversation_id"));
+          msg.put(FIELD_CONVERSATION_ID, rs.getString("conversation_id"));
           msg.put("sender",         rs.getString("sender"));
           msg.put("senderName",     rs.getString("sender_name"));
           msg.put("text",           rs.getString("text"));
@@ -1125,156 +887,15 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     return s;
   }
 
-  private static String newId() {
+  /** Package-private: also used by {@link SupportJiraWebhookHandler} to mint message/comment ids. */
+  static String newId() {
     return java.util.UUID.randomUUID().toString().replace("-", "");
-  }
-
-  // --- ADK integration ---
-
-  private String getUserEmail(Connection conn, String userId) {
-    // ad_user.email is blank for self-service/portal accounts (username IS the email
-    // there, e.g. GOuser-style logins) and for generic seed accounts (admin, goadmin).
-    // Fall back to username when it looks like an email so those tickets still carry
-    // a real reporter instead of silently dropping to JIRA_REPORTER_EMAIL.
-    try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT email, username FROM ad_user WHERE ad_user_id = ?")) {
-      ps.setString(1, userId);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          String email = rs.getString("email");
-          if (email != null && !email.isEmpty()) return email;
-          String username = rs.getString("username");
-          if (username != null && username.contains("@")) return username;
-        }
-      }
-    } catch (SQLException e) {
-      log.warn("Failed to look up email for user {}: {}", userId, e.getMessage());
-    }
-    return null;
-  }
-
-  private void createAdkSession(String userId, String sessionId, String locale, String userEmail) {
-    String url = ADK_BASE_URL + "/apps/" + ADK_APP_NAME + "/users/" + userId + "/sessions/" + sessionId;
-    try {
-      // The body IS the initial state dict directly — NOT wrapped in a "state" key.
-      // Seeding it here (once, at session creation) is the only reliable channel:
-      // stateDelta on POST /run does not propagate to callback state in this ADK
-      // version (verified — human_takeover_synced has the same latent gap). This is
-      // also how the Jira ticket's Reporter ends up being the real end user instead
-      // of the JIRA_REPORTER_EMAIL fallback (jira_client.py's raiseOnBehalfOf reads
-      // state["user_email"]).
-      JSONObject state = new JSONObject().put("locale", locale);
-      if (userEmail != null && !userEmail.isEmpty()) {
-        state.put("user_email", userEmail);
-      }
-      String body = state.toString();
-      HttpRequest req = HttpRequest.newBuilder()
-          .uri(URI.create(url))
-          .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_JSON)
-          .POST(HttpRequest.BodyPublishers.ofString(body, java.nio.charset.StandardCharsets.UTF_8))
-          .timeout(Duration.ofSeconds(10))
-          .build();
-      HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
-      log.debug("ADK session created: {} (locale={}, user_email={}) → {}", sessionId, locale, userEmail, resp.statusCode());
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      log.warn("Failed to create ADK session {}: {}", sessionId, e.getMessage());
-    } catch (Exception e) {
-      log.warn("Failed to create ADK session {}: {}", sessionId, e.getMessage());
-    }
-  }
-
-  private String sendToAdk(String userId, String sessionId, String text, JSONArray attachments) {
-    return sendToAdk(userId, sessionId, text, attachments, null);
-  }
-
-  private String sendToAdk(String userId, String sessionId, String text, JSONArray attachments, JSONObject stateDelta) {
-    try {
-      JSONArray parts = new JSONArray();
-      parts.put(new JSONObject().put("text", text));
-
-      if (attachments != null) {
-        for (int i = 0; i < attachments.length(); i++) {
-          JSONObject att = attachments.optJSONObject(i);
-          if (att == null) continue;
-          String mimeType = att.optString("mimeType", "application/octet-stream");
-          String name = att.optString("name", "archivo");
-          String textContent = att.optString("text", "");
-          if (!textContent.isEmpty()) {
-            parts.put(new JSONObject().put("text",
-                "--- Archivo adjunto: " + name + " ---\n" + textContent + "\n---"));
-            continue;
-          }
-          String data = att.optString("data", "");
-          if (data.isEmpty()) continue;
-          if (mimeType.startsWith("image/") || "application/pdf".equals(mimeType)) {
-            parts.put(new JSONObject().put("inlineData",
-                new JSONObject().put("mimeType", mimeType).put("data", data)));
-          } else {
-            parts.put(new JSONObject().put("text", "[Archivo adjunto: " + name + "]"));
-          }
-        }
-      }
-
-      JSONObject newMessage = new JSONObject().put("role", "user").put("parts", parts);
-      JSONObject body = new JSONObject()
-          .put("appName", ADK_APP_NAME)
-          .put("userId",  userId)
-          .put("sessionId", sessionId)
-          .put("streaming", false)
-          .put("newMessage", newMessage);
-      if (stateDelta != null) body.put("stateDelta", stateDelta);
-
-      HttpRequest req = HttpRequest.newBuilder()
-          .uri(URI.create(ADK_BASE_URL + "/run"))
-          .header("Content-Type", "application/json")
-          .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
-          .timeout(Duration.ofSeconds(120))
-          .build();
-      HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
-      if (resp.statusCode() != 200) {
-        log.warn("ADK /run returned {}: {}", resp.statusCode(), resp.body());
-        return null;
-      }
-      return parseAdkResponse(resp.body());
-    } catch (Exception e) {
-      log.warn("ADK /run failed: {}", e.getMessage());
-      return null;
-    }
-  }
-
-  private String parseAdkResponse(String json) {
-    try {
-      JSONArray events = new JSONArray(json);
-      StringBuilder sb = new StringBuilder();
-      for (int i = 0; i < events.length(); i++) {
-        JSONObject event = events.optJSONObject(i);
-        if (event == null || !event.has("content")) continue;
-        String author = event.optString("author", "");
-        if (author.contains("triage")) continue;
-        JSONObject content = event.optJSONObject("content");
-        if (content == null || !"model".equals(content.optString("role"))) continue;
-        JSONArray parts = content.optJSONArray("parts");
-        if (parts == null) continue;
-        for (int j = 0; j < parts.length(); j++) {
-          JSONObject part = parts.optJSONObject(j);
-          if (part == null) continue;
-          String partText = part.optString("text", "");
-          if (!partText.isEmpty()) sb.append(partText);
-        }
-      }
-      String result = sb.toString().trim();
-      return result.isEmpty() ? null : result;
-    } catch (Exception e) {
-      log.warn("Failed to parse ADK response: {}", e.getMessage());
-      return null;
-    }
   }
 
   // --- HTTP utilities ---
 
   /** Parse request body without writing an error response on failure (returns null on parse error). */
-  private JSONObject parseBodySilent(HttpServletRequest request) {
+  static JSONObject parseBodySilent(HttpServletRequest request) {
     try {
       StringBuilder sb = new StringBuilder();
       try (BufferedReader reader = request.getReader()) {
@@ -1287,97 +908,6 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     } catch (Exception e) {
       return null;
     }
-  }
-
-  private void postJiraComment(String jiraKey, String userMessage) {
-    if (jiraKey == null || jiraKey.isEmpty() || JIRA_API_TOKEN.isEmpty()) return;
-    try {
-      String credentials = java.util.Base64.getEncoder()
-          .encodeToString((JIRA_USERNAME + ":" + JIRA_API_TOKEN).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-
-      // Escape message for JSON
-      String escaped = userMessage
-          .replace("\\", "\\\\")
-          .replace("\"", "\\\"")
-          .replace("\n", "\\n")
-          .replace("\r", "\\r")
-          .replace("\t", "\\t");
-
-      // Jira API v3 with ADF body — built as literal string to avoid JSONObject serialization issues
-      String payload = "{" +
-          "\"body\":{\"type\":\"doc\",\"version\":1,\"content\":[{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"" + escaped + "\"}]}]}," +
-          "\"properties\":[{\"key\":\"sd.public.comment\",\"value\":{\"internal\":true}}]" +
-          "}";
-
-      HttpRequest req = HttpRequest.newBuilder()
-          .uri(URI.create(JIRA_URL + "/rest/api/3/issue/" + jiraKey + "/comment"))
-          .header("Content-Type", "application/json")
-          .header("Authorization", "Basic " + credentials)
-          .POST(HttpRequest.BodyPublishers.ofString(payload, java.nio.charset.StandardCharsets.UTF_8))
-          .timeout(Duration.ofSeconds(10))
-          .build();
-      HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
-      if (resp.statusCode() >= 200 && resp.statusCode() < 300) {
-        log.info("Jira comment posted to {} ← {}", jiraKey, resp.statusCode());
-      } else {
-        log.warn("Jira comment FAILED for {} ← {}: {}", jiraKey, resp.statusCode(), resp.body().substring(0, Math.min(200, resp.body().length())));
-      }
-    } catch (Exception e) {
-      log.warn("Failed to post Jira comment to {}: {}", jiraKey, e.getMessage());
-    }
-  }
-
-  private String buildFeedbackComment(int score, String comment) {
-    StringBuilder sb = new StringBuilder("⭐ Valoración de satisfacción: ").append(score).append("/5");
-    if (comment != null && !comment.isEmpty()) {
-      sb.append("\n\nComentario del cliente: ").append(comment);
-    }
-    return sb.toString();
-  }
-
-  // The native JSM CSAT feedback endpoint (POST .../request/{key}/feedback) requires the
-  // caller to be the ticket's reporter — a service account is always rejected with 403.
-  // A label is a reliable stand-in: filterable via JQL (labels = "csat-4") and only needs
-  // ordinary edit-issue permission, which the service account already has.
-  private void postJiraCsatLabel(String jiraKey, int score) {
-    if (jiraKey == null || jiraKey.isEmpty() || JIRA_API_TOKEN.isEmpty()) return;
-    try {
-      String credentials = java.util.Base64.getEncoder()
-          .encodeToString((JIRA_USERNAME + ":" + JIRA_API_TOKEN).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-
-      String payload = "{\"update\":{\"labels\":[{\"add\":\"csat-" + score + "\"}]}}";
-
-      HttpRequest req = HttpRequest.newBuilder()
-          .uri(URI.create(JIRA_URL + "/rest/api/3/issue/" + jiraKey))
-          .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_JSON)
-          .header(HEADER_AUTHORIZATION, "Basic " + credentials)
-          .method("PUT", HttpRequest.BodyPublishers.ofString(payload, java.nio.charset.StandardCharsets.UTF_8))
-          .timeout(Duration.ofSeconds(10))
-          .build();
-      HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
-      if (resp.statusCode() >= 200 && resp.statusCode() < 300) {
-        log.info("Jira CSAT label 'csat-{}' added to {} ← {}", score, jiraKey, resp.statusCode());
-      } else {
-        log.warn("Jira CSAT label FAILED for {} ← {}: {}", jiraKey, resp.statusCode(),
-            resp.body().substring(0, Math.min(200, resp.body().length())));
-      }
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      log.warn("Failed to add Jira CSAT label to {}: {}", jiraKey, e.getMessage());
-    } catch (Exception e) {
-      log.warn("Failed to add Jira CSAT label to {}: {}", jiraKey, e.getMessage());
-    }
-  }
-
-  private static String nvl(String value, String fallback) {
-    return (value != null && !value.isEmpty()) ? value : fallback;
-  }
-
-  private void writeRaw(HttpServletResponse response, int status, String json) throws IOException {
-    response.setStatus(status);
-    response.setContentType(CONTENT_TYPE_JSON);
-    response.setCharacterEncoding(CHARSET_UTF8);
-    response.getWriter().write(json);
   }
 
   private JSONObject parseBody(HttpServletRequest request, HttpServletResponse response)
@@ -1395,7 +925,16 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     }
   }
 
-  private void writeJson(HttpServletResponse response, int status, JSONObject body)
+  /** Package-private: also used by {@link SupportJiraWebhookHandler} to write raw webhook acks. */
+  static void writeRaw(HttpServletResponse response, int status, String json) throws IOException {
+    response.setStatus(status);
+    response.setContentType(CONTENT_TYPE_JSON);
+    response.setCharacterEncoding(CHARSET_UTF8);
+    response.getWriter().write(json);
+  }
+
+  /** Package-private: also used by {@link SupportJiraWebhookHandler}. */
+  static void writeJson(HttpServletResponse response, int status, JSONObject body)
       throws IOException {
     response.setStatus(status);
     response.setContentType(CONTENT_TYPE_JSON);
@@ -1405,7 +944,8 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     }
   }
 
-  private void writeError(HttpServletResponse response, int status, String message)
+  /** Package-private: also used by {@link SupportJiraWebhookHandler}. */
+  static void writeError(HttpServletResponse response, int status, String message)
       throws IOException {
     ProtocolErrorAdapters.writeRestError(response, status, message,
         FIELD_MESSAGE, FIELD_STATUS, FIELD_ERROR);
