@@ -67,6 +67,9 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   /** Generic-organization id; client-level chart records and their tree nodes live here. */
   private static final String GENERIC_ORG_ID = "0";
 
+  /** Native-query bind-parameter name for the target client id, reused across this class's SQL. */
+  private static final String PARAM_CLIENT_ID = "clientId";
+
   /**
    * Source AD_Tree id of GOClient's chart-of-accounts (EV) tree as it ships in the bundled
    * {@code AD_TREENODE.xml}. The hierarchy is read from this tree only; the org-specific orphan tree
@@ -341,7 +344,7 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
         .createNativeQuery(ELEMENT_TREENODE_SQL)
         .setParameter("treeId", treeId)
         .setParameter("nodeId", nodeId)
-        .setParameter("clientId", clientId)
+        .setParameter(PARAM_CLIENT_ID, clientId)
         .setParameter("parentId", parentId)
         .setParameter("seqno", seqno)
         .executeUpdate();
@@ -596,7 +599,7 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   protected void overrideAcreedorGroupAccounts(String clientId, String schemaId) {
     int rows = OBDal.getInstance().getSession()
         .createNativeQuery(ACREEDOR_GROUP_ACCT_OVERRIDE_SQL)
-        .setParameter("clientId", clientId)
+        .setParameter(PARAM_CLIENT_ID, clientId)
         .setParameter("schemaId", schemaId)
         .setParameter("liabilityAcctValue", ACREEDOR_LIABILITY_ACCT_VALUE)
         .setParameter("notInvoicedReceivablesAcctValue", ACREEDOR_NOT_INVOICED_RECEIVABLES_ACCT_VALUE)
@@ -643,26 +646,26 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
    */
   protected void ensureAcreedorPrepaymentAccount(String clientId, String schemaId) {
     OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_GROUP_INSERT_SQL)
-        .setParameter("clientId", clientId).executeUpdate();
+        .setParameter(PARAM_CLIENT_ID, clientId).executeUpdate();
     OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_SUBGROUP_INSERT_SQL)
-        .setParameter("clientId", clientId).executeUpdate();
+        .setParameter(PARAM_CLIENT_ID, clientId).executeUpdate();
     OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_LEAF_INSERT_SQL)
-        .setParameter("clientId", clientId).executeUpdate();
+        .setParameter(PARAM_CLIENT_ID, clientId).executeUpdate();
     OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_VALIDCOMBINATION_INSERT_SQL)
-        .setParameter("clientId", clientId).executeUpdate();
+        .setParameter(PARAM_CLIENT_ID, clientId).executeUpdate();
     OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_GROUP_REPARENT_SQL)
-        .setParameter("clientId", clientId).executeUpdate();
+        .setParameter(PARAM_CLIENT_ID, clientId).executeUpdate();
     OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_SUBGROUP_REPARENT_SQL)
-        .setParameter("clientId", clientId).executeUpdate();
+        .setParameter(PARAM_CLIENT_ID, clientId).executeUpdate();
     OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_LEAF_REPARENT_SQL)
-        .setParameter("clientId", clientId).executeUpdate();
+        .setParameter(PARAM_CLIENT_ID, clientId).executeUpdate();
   }
 
   /** Runs one {@code INSERT … SELECT} posting-account statement and logs the rows created. */
   protected void runEntityAcctInsert(String sql, String clientId, String schemaId) {
     int rows = OBDal.getInstance().getSession()
         .createNativeQuery(sql)
-        .setParameter("clientId", clientId)
+        .setParameter(PARAM_CLIENT_ID, clientId)
         .setParameter("schemaId", schemaId)
         .executeUpdate();
     if (rows > 0 && log.isDebugEnabled()) {
