@@ -316,6 +316,46 @@ class McpToolRouterSupportTest {
       SFSpec spec = mock(SFSpec.class);
       assertTrue(McpToolRouterSupport.hasSpecAccess(spec, "X"));
     }
+
+    /**
+     * ETP-4284 / G4: the dashboard (widget) spec is handler-backed (no AD_Tab) and is
+     * surfaced via neo_widget, so it must be excluded from the type-W CRUD discovery
+     * catalog regardless of window access.
+     */
+    @Test
+    void dashboardWidgetSpecIsExcludedFromDiscovery() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn(McpConstants.SPEC_DASHBOARD);
+
+      assertFalse(McpToolRouterSupport.hasSpecAccess(spec, "W"),
+          "dashboard/widget spec must never surface through the W discovery catalog");
+    }
+  }
+
+  // ─── isWidgetSpec ───────────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("isWidgetSpec (ETP-4284 / G4)")
+  class IsWidgetSpec {
+
+    @Test
+    void dashboardSpecIsWidgetSpec() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn(McpConstants.SPEC_DASHBOARD);
+      assertTrue(McpToolRouterSupport.isWidgetSpec(spec));
+    }
+
+    @Test
+    void otherSpecIsNotWidgetSpec() {
+      SFSpec spec = mock(SFSpec.class);
+      when(spec.getName()).thenReturn("sales-order");
+      assertFalse(McpToolRouterSupport.isWidgetSpec(spec));
+    }
+
+    @Test
+    void nullSpecIsNotWidgetSpec() {
+      assertFalse(McpToolRouterSupport.isWidgetSpec(null));
+    }
   }
 
   // ─── buildDiscoverSpec ──────────────────────────────────────────────
