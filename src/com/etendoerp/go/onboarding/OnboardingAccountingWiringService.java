@@ -602,8 +602,18 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
         .setParameter("notInvoicedReceivablesAcctValue", ACREEDOR_NOT_INVOICED_RECEIVABLES_ACCT_VALUE)
         .setParameter("prepaymentAcctValue", ACREEDOR_PREPAYMENT_ACCT_VALUE)
         .executeUpdate();
-    if (rows > 0 && log.isDebugEnabled()) {
-      log.debug("Overrode Acreedor group posting accounts for client {}", clientId);
+    if (rows > 0) {
+      if (log.isDebugEnabled()) {
+        log.debug("Overrode Acreedor group posting accounts for client {}", clientId);
+      }
+    } else {
+      // Silent 0-row outcome previously masked a real defect (client D94AED60C3E0494AAFD44B8A05BB5CFC,
+      // "acreedortest": the 41700000 combination did not exist yet when this ran, so the whole
+      // 3-column UPDATE no-opped). Surface it so a future recurrence is diagnosable instead of only
+      // discoverable by manually inspecting C_BP_Group_Acct on a live tenant.
+      log.warn("Acreedor group posting-account override affected 0 rows for client {}; the group, its"
+          + " C_BP_Group_Acct row, or one of the 3 target accounts' C_ValidCombination may be missing",
+          clientId);
     }
   }
 
@@ -617,12 +627,15 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
    * ({@code elementtype='AC'}) is used — never a hardcoded GOClient element id — so this places the
    * new account exactly where {@link #resolveTenantElementValueTree} / {@link #wireAccountElementTree}
    * already expect it. Inserting the {@code elementlevel='S'} leaf fires the standard core
-   * {@code c_elementvalue_trg()} trigger, which auto-creates the row's {@code C_VALIDCOMBINATION} for
-   * this schema (no manual insert needed — the same trigger-based defaulting
-   * {@link #overrideAcreedorGroupAccounts} already relies on for {@code C_BP_Group_Acct} via
-   * {@code c_bp_group_trg()}). The trigger also auto-attaches an {@code AD_TREENODE} row to the tree
-   * ROOT; this method re-parents the three new nodes to mirror the sibling {@code 407}/{@code 4070}/
-   * {@code 40700000} nodes afterward.
+   * {@code c_elementvalue_trg()} trigger, which is DESIGNED to auto-create the row's
+   * {@code C_VALIDCOMBINATION} for this schema — the same trigger-based defaulting
+   * {@link #overrideAcreedorGroupAccounts} relies on for {@code C_BP_Group_Acct} via
+   * {@code c_bp_group_trg()}. In practice this cascade is NOT reliably visible across this
+   * onboarding chain's several sequential native-query calls (confirmed on a real tenant — see
+   * {@link #ACREEDOR_PREPAYMENT_VALIDCOMBINATION_INSERT_SQL}), so this method ALSO defensively
+   * inserts the combination itself, idempotent against the same key the trigger uses. The trigger
+   * also auto-attaches an {@code AD_TREENODE} row to the tree ROOT; this method re-parents the three
+   * new nodes to mirror the sibling {@code 407}/{@code 4070}/{@code 40700000} nodes afterward.
    *
    * <p>No-op when the tenant has no {@code 407} sibling to mirror (defensive; should not happen for a
    * GOClient-derived tenant) or when the account already exists (guarded by the same
@@ -634,6 +647,8 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
     OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_SUBGROUP_INSERT_SQL)
         .setParameter("clientId", clientId).executeUpdate();
     OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_LEAF_INSERT_SQL)
+        .setParameter("clientId", clientId).executeUpdate();
+    OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_VALIDCOMBINATION_INSERT_SQL)
         .setParameter("clientId", clientId).executeUpdate();
     OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_GROUP_REPARENT_SQL)
         .setParameter("clientId", clientId).executeUpdate();
@@ -770,6 +785,40 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
       + " WHERE s.ad_client_id = :clientId"
       + "   AND NOT EXISTS (SELECT 1 FROM c_elementvalue x WHERE x.c_element_id = ae.c_element_id AND x.value = '41700000')"
       + " ORDER BY ae.c_element_id LIMIT 1";
+
+  /**
+   * Defensively creates the {@code C_VALIDCOMBINATION} row(s) for the {@code 41700000} leaf, one per
+   * {@code C_AcctSchema} wired to its element via {@code C_AcctSchema_Element} (elementtype
+   * {@code 'AC'}) — mirroring exactly what {@code c_elementvalue_trg()} does for a normal
+   * {@code elementlevel='S'} insert.
+   *
+   * <p><b>Why this is needed despite the trigger:</b> live-tenant evidence (client
+   * {@code D94AED60C3E0494AAFD44B8A05BB5CFC}, "acreedortest") showed the trigger's cascade is NOT
+   * reliably visible across this onboarding chain's multiple sequential {@code createNativeQuery}
+   * calls spanning several service steps — the account was created (confirmed) but ended up with
+   * ZERO {@code C_VALIDCOMBINATION} rows, which silently defeated {@link
+   * #overrideAcreedorGroupAccounts} (its {@code UPDATE} joins all three target accounts with INNER
+   * JOINs, so a single missing combination zeroes out the whole statement, including the two
+   * accounts that WOULD have resolved fine). The sibling corrective fix
+   * ({@code R9-bp-category-seed.sql}) does not hit this — verified on GOClient, where it runs as
+   * plain SQL in one Postgres transaction via the data-fix runner and the trigger cascade is
+   * reliably visible to the very next statement in the same transaction. The Java onboarding path
+   * cannot make that same guarantee (multiple service objects, potentially fresh transactions per
+   * native-query call), so it must not depend on it. This INSERT is guarded by {@code NOT EXISTS} on
+   * {@code (account_id, c_acctschema_id)} — the same key the trigger itself relies on — so it is a
+   * no-op both when the trigger DID create the row and on every re-run.
+   */
+  private static final String ACREEDOR_PREPAYMENT_VALIDCOMBINATION_INSERT_SQL =
+      "INSERT INTO c_validcombination ("
+      + "  c_validcombination_id, ad_client_id, ad_org_id, isactive, created, createdby, updated,"
+      + "  updatedby, alias, combination, description, isfullyqualified, c_acctschema_id, account_id)"
+      + " SELECT get_uuid(), :clientId, ev.ad_org_id, 'Y', now(), '0', now(), '0',"
+      + "   ev.value, ev.value, '', 'Y', ae.c_acctschema_id, ev.c_elementvalue_id"
+      + " FROM c_elementvalue ev"
+      + " JOIN c_acctschema_element ae ON ae.c_element_id = ev.c_element_id AND ae.elementtype = 'AC'"
+      + " WHERE ev.ad_client_id = :clientId AND ev.value = '41700000'"
+      + "   AND NOT EXISTS (SELECT 1 FROM c_validcombination vc"
+      + "     WHERE vc.account_id = ev.c_elementvalue_id AND vc.c_acctschema_id = ae.c_acctschema_id)";
 
   /**
    * Re-parents the auto-created (attached-to-root by {@code c_elementvalue_trg()}) {@code 417}
