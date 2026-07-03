@@ -236,6 +236,10 @@ public class OnboardingAccountingWiringServiceTest {
   public void testProvisionEntityPostingAccountsRunsSixInsertsWithClientAndSchemaId() {
     // Use a double that records inserts but keeps the REAL provisionEntityPostingAccounts body,
     // so the six runEntityAcctInsert calls (and their ordering of clientId/schemaId) are exercised.
+    // ensureAcreedorPrepaymentAccount()/overrideAcreedorGroupAccounts() are stubbed by
+    // InsertRecordingService: they bypass the runEntityAcctInsert seam and hit
+    // OBDal.getInstance().getSession() directly, so leaving them real would reach an uninitialized
+    // Hibernate session in this pure-unit test.
     InsertRecordingService service = new InsertRecordingService();
     Client client = mock(Client.class);
     when(client.getId()).thenReturn("C1");
@@ -250,6 +254,10 @@ public class OnboardingAccountingWiringServiceTest {
       assertEquals("S1", insert.schemaId);
       assertTrue("each insert must carry a non-empty SQL", insert.sql != null && !insert.sql.isEmpty());
     }
+    assertEquals("Acreedor prepayment account provisioning must run once", 1,
+        service.ensureAcreedorPrepaymentAccountCount);
+    assertEquals("Acreedor group posting-account override must run once", 1,
+        service.overrideAcreedorGroupAccountsCount);
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -869,14 +877,29 @@ public class OnboardingAccountingWiringServiceTest {
   /**
    * Records {@code runEntityAcctInsert} calls while preserving the real
    * {@code provisionEntityPostingAccounts} body, so the production statement-dispatch logic is the
-   * code actually under test.
+   * code actually under test. {@code ensureAcreedorPrepaymentAccount} and
+   * {@code overrideAcreedorGroupAccounts} are also stubbed (call counts only) because — unlike
+   * {@code runEntityAcctInsert} — they run their native queries directly against
+   * {@code OBDal.getInstance().getSession()} rather than through the recording seam.
    */
   private static final class InsertRecordingService extends OnboardingAccountingWiringService {
     final List<AcctInsert> acctInserts = new ArrayList<>();
+    int ensureAcreedorPrepaymentAccountCount;
+    int overrideAcreedorGroupAccountsCount;
 
     @Override
     protected void runEntityAcctInsert(String sql, String clientId, String schemaId) {
       acctInserts.add(new AcctInsert(sql, clientId, schemaId));
+    }
+
+    @Override
+    protected void ensureAcreedorPrepaymentAccount(String clientId, String schemaId) {
+      ensureAcreedorPrepaymentAccountCount++;
+    }
+
+    @Override
+    protected void overrideAcreedorGroupAccounts(String clientId, String schemaId) {
+      overrideAcreedorGroupAccountsCount++;
     }
   }
 }
