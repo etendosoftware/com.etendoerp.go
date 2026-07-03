@@ -406,9 +406,22 @@ final class McpToolRouterSupport {
 
   private static void addDefaultExpression(JSONObject fieldObj, Column col) throws JSONException {
     String defaultExpr = col.getDefaultValue();
-    if (defaultExpr != null && !defaultExpr.trim().isEmpty()) {
-      fieldObj.put("defaultExpression", defaultExpr.trim());
+    if (defaultExpr == null || defaultExpr.trim().isEmpty()) {
+      return;
     }
+    defaultExpr = defaultExpr.trim();
+    boolean isLegacyZeroFkSentinel = "0".equals(defaultExpr)
+        && col.getDBColumnName().toUpperCase().endsWith("_ID");
+    if (isLegacyZeroFkSentinel) {
+      // "0" is a legacy AD placeholder meaning "resolve via callout/session logic" — it is not a
+      // usable FK value. The resolved value is tenant-scoped (per client/org), so it must never be
+      // baked into this structural schema; report shape/format only and point to neo_defaults.
+      fieldObj.put("defaultSource", "server");
+      fieldObj.put("defaultFormat", "32-char hex ID (FK)");
+      fieldObj.put("defaultHint", "Resolved per-tenant at request time — call neo_defaults to get the value");
+      return;
+    }
+    fieldObj.put("defaultExpression", defaultExpr);
   }
 
   private static void addVisibility(JSONObject fieldObj, String visibility, boolean mandatory)
