@@ -518,26 +518,6 @@ public class NotPostedDocumentsHandler implements NeoHandler {
 
   // ── AD_Ref_List helpers ───────────────────────────────────────────────────────
 
-  private JSONArray refListOptions(String referenceId) throws Exception {
-    JSONArray options = new JSONArray();
-    Reference ref = OBDal.getInstance().get(Reference.class, referenceId);
-    if (ref == null) {
-      return options;
-    }
-    String lang = OBContext.getOBContext().getLanguage().getLanguage();
-    for (org.openbravo.model.ad.domain.List item : ref.getADListList()) {
-      if (!item.isActive()) {
-        continue;
-      }
-      JSONObject opt = new JSONObject();
-      opt.put(KEY_VALUE, item.getSearchKey());
-      String label = getTranslatedName(item, lang);
-      opt.put(KEY_LABEL, label != null ? label : item.getName());
-      options.put(opt);
-    }
-    return options;
-  }
-
   private String getTranslatedName(org.openbravo.model.ad.domain.List item, String lang) {
     try {
       for (ListTrl trl : item.getADListTrlList()) {
