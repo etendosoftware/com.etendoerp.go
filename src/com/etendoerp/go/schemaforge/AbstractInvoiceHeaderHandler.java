@@ -516,6 +516,32 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   /**
+   * Shared {@code afterCallout} body (ETP-4029): blocks callout-driven currency updates and
+   * appends an exchange-rate warning when the user directly changes the invoice currency.
+   * Identical for both {@link PurchaseInvoiceHeaderHandler} and {@link SalesInvoiceHeaderHandler}
+   * — each subclass's {@code afterCallout()} override should just delegate here.
+   */
+  protected NeoResponse handleCurrencyAfterCallout(NeoContext context) {
+    try {
+      NeoResponse previous = context.getPreviousResult();
+      if (previous == null || previous.getBody() == null) {
+        return null;
+      }
+      JSONObject body = previous.getBody();
+      JSONObject updates = body.optJSONObject("updates");
+      JSONObject requestBody = context.getRequestBody();
+      String triggerField = requestBody != null ? requestBody.optString("field", "") : "";
+      JSONObject formState = requestBody != null ? requestBody.optJSONObject("formState") : null;
+
+      blockCalloutCurrencyUpdate(updates, triggerField);
+      checkExchangeRateWarning(body, requestBody, formState, triggerField);
+    } catch (Exception e) {
+      log.warn("[ETP-4029] afterCallout failed (non-fatal): {}", e.getMessage());
+    }
+    return null; // mutations applied in-place; dispatcher merges nothing extra
+  }
+
+  /**
    * Checks whether a {@code C_Conversion_Rate} row exists for the given currency pair
    * and date, scoped to the current client and org (including global org '0').
    *

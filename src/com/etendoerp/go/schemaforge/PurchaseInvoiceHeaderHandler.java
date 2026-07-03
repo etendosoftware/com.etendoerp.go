@@ -127,23 +127,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
    */
   @Override
   public NeoResponse afterCallout(NeoContext context) {
-    try {
-      NeoResponse previous = context.getPreviousResult();
-      if (previous == null || previous.getBody() == null) {
-        return null;
-      }
-      JSONObject body = previous.getBody();
-      JSONObject updates = body.optJSONObject("updates");
-      JSONObject requestBody = context.getRequestBody();
-      String triggerField = requestBody != null ? requestBody.optString("field", "") : "";
-      JSONObject formState = requestBody != null ? requestBody.optJSONObject("formState") : null;
-
-      blockCalloutCurrencyUpdate(updates, triggerField);
-      checkExchangeRateWarning(body, requestBody, formState, triggerField);
-    } catch (Exception e) {
-      log.warn("[ETP-4029] afterCallout failed (non-fatal): {}", e.getMessage());
-    }
-    return null; // mutations applied in-place; dispatcher merges nothing extra
+    return handleCurrencyAfterCallout(context);
   }
 
   @Override
