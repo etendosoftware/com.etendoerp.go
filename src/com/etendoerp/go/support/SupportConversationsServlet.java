@@ -68,6 +68,8 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private static final Logger log = LogManager.getLogger(SupportConversationsServlet.class);
 
   private static final String CONTENT_TYPE_JSON = "application/json";
+  private static final String HEADER_CONTENT_TYPE = "Content-Type";
+  private static final String HEADER_AUTHORIZATION = "Authorization";
   private static final String CHARSET_UTF8      = "UTF-8";
   private static final String FIELD_MESSAGE     = "message";
   private static final String FIELD_STATUS      = "status";
@@ -1168,12 +1170,15 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       String body = state.toString();
       HttpRequest req = HttpRequest.newBuilder()
           .uri(URI.create(url))
-          .header("Content-Type", "application/json")
+          .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_JSON)
           .POST(HttpRequest.BodyPublishers.ofString(body, java.nio.charset.StandardCharsets.UTF_8))
           .timeout(Duration.ofSeconds(10))
           .build();
       HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
       log.debug("ADK session created: {} (locale={}, user_email={}) → {}", sessionId, locale, userEmail, resp.statusCode());
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      log.warn("Failed to create ADK session {}: {}", sessionId, e.getMessage());
     } catch (Exception e) {
       log.warn("Failed to create ADK session {}: {}", sessionId, e.getMessage());
     }
@@ -1344,8 +1349,8 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
       HttpRequest req = HttpRequest.newBuilder()
           .uri(URI.create(JIRA_URL + "/rest/api/3/issue/" + jiraKey))
-          .header("Content-Type", "application/json")
-          .header("Authorization", "Basic " + credentials)
+          .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_JSON)
+          .header(HEADER_AUTHORIZATION, "Basic " + credentials)
           .method("PUT", HttpRequest.BodyPublishers.ofString(payload, java.nio.charset.StandardCharsets.UTF_8))
           .timeout(Duration.ofSeconds(10))
           .build();
@@ -1356,6 +1361,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         log.warn("Jira CSAT label FAILED for {} ← {}: {}", jiraKey, resp.statusCode(),
             resp.body().substring(0, Math.min(200, resp.body().length())));
       }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      log.warn("Failed to add Jira CSAT label to {}: {}", jiraKey, e.getMessage());
     } catch (Exception e) {
       log.warn("Failed to add Jira CSAT label to {}: {}", jiraKey, e.getMessage());
     }
