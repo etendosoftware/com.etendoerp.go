@@ -115,11 +115,6 @@ final class AutoMatchSupport {
   }
 
   private static List<FIN_FinaccTransaction> loadUnreconciledSameSign(String accountId,
-      BigDecimal target, java.util.Set<String> usedTxnIds) {
-    return loadUnreconciledSameSign(accountId, target, usedTxnIds, DEFAULT_DATE_TOL_DAYS, null);
-  }
-
-  private static List<FIN_FinaccTransaction> loadUnreconciledSameSign(String accountId,
       BigDecimal target, java.util.Set<String> usedTxnIds, int dateToleranceDays,
       java.util.Date lineDate) {
     String hql = "select ft from " + FIN_FinaccTransaction.ENTITY_NAME + " as ft"
