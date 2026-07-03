@@ -317,7 +317,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
         // AI reply
         JSONArray attachments = body.optJSONArray("attachments");
-        createAdkSession(userId, convId);
+        String locale = body.optString("locale", "es");
+        String userEmail = getUserEmail(conn, userId);
+        createAdkSession(userId, convId, locale, userEmail);
         String aiReplyText = sendToAdk(userId, convId, firstMessage, attachments);
         if (aiReplyText == null) aiReplyText = AI_STUB_REPLY;
 
@@ -493,6 +495,23 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
           ps.setString(3, convId);
           ps.executeUpdate();
         }
+
+        String jiraKey = null;
+        try (PreparedStatement ps = conn.prepareStatement(
+            "SELECT jira_ticket_key FROM etgo_support_conversation WHERE id = ?")) {
+          ps.setString(1, convId);
+          try (ResultSet rs = ps.executeQuery()) {
+            if (rs.next()) jiraKey = rs.getString("jira_ticket_key");
+          }
+        }
+        final String finalJiraKey = jiraKey;
+        final int finalScore = score;
+        final String finalComment = comment;
+        new Thread(() -> {
+          postJiraComment(finalJiraKey, buildFeedbackComment(finalScore, finalComment));
+          postJiraCsatLabel(finalJiraKey, finalScore);
+        }, "jira-csat-feedback").start();
+
         JSONObject result = new JSONObject();
         result.put(FIELD_STATUS, "success");
         writeJson(response, HttpServletResponse.SC_OK, result);
@@ -1110,17 +1129,51 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
   // --- ADK integration ---
 
-  private void createAdkSession(String userId, String sessionId) {
+  private String getUserEmail(Connection conn, String userId) {
+    // ad_user.email is blank for self-service/portal accounts (username IS the email
+    // there, e.g. GOuser-style logins) and for generic seed accounts (admin, goadmin).
+    // Fall back to username when it looks like an email so those tickets still carry
+    // a real reporter instead of silently dropping to JIRA_REPORTER_EMAIL.
+    try (PreparedStatement ps = conn.prepareStatement(
+        "SELECT email, username FROM ad_user WHERE ad_user_id = ?")) {
+      ps.setString(1, userId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          String email = rs.getString("email");
+          if (email != null && !email.isEmpty()) return email;
+          String username = rs.getString("username");
+          if (username != null && username.contains("@")) return username;
+        }
+      }
+    } catch (SQLException e) {
+      log.warn("Failed to look up email for user {}: {}", userId, e.getMessage());
+    }
+    return null;
+  }
+
+  private void createAdkSession(String userId, String sessionId, String locale, String userEmail) {
     String url = ADK_BASE_URL + "/apps/" + ADK_APP_NAME + "/users/" + userId + "/sessions/" + sessionId;
     try {
+      // The body IS the initial state dict directly — NOT wrapped in a "state" key.
+      // Seeding it here (once, at session creation) is the only reliable channel:
+      // stateDelta on POST /run does not propagate to callback state in this ADK
+      // version (verified — human_takeover_synced has the same latent gap). This is
+      // also how the Jira ticket's Reporter ends up being the real end user instead
+      // of the JIRA_REPORTER_EMAIL fallback (jira_client.py's raiseOnBehalfOf reads
+      // state["user_email"]).
+      JSONObject state = new JSONObject().put("locale", locale);
+      if (userEmail != null && !userEmail.isEmpty()) {
+        state.put("user_email", userEmail);
+      }
+      String body = state.toString();
       HttpRequest req = HttpRequest.newBuilder()
           .uri(URI.create(url))
           .header("Content-Type", "application/json")
-          .POST(HttpRequest.BodyPublishers.ofString("{}"))
+          .POST(HttpRequest.BodyPublishers.ofString(body, java.nio.charset.StandardCharsets.UTF_8))
           .timeout(Duration.ofSeconds(10))
           .build();
       HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
-      log.debug("ADK session created: {} → {}", sessionId, resp.statusCode());
+      log.debug("ADK session created: {} (locale={}, user_email={}) → {}", sessionId, locale, userEmail, resp.statusCode());
     } catch (Exception e) {
       log.warn("Failed to create ADK session {}: {}", sessionId, e.getMessage());
     }
@@ -1266,6 +1319,45 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       }
     } catch (Exception e) {
       log.warn("Failed to post Jira comment to {}: {}", jiraKey, e.getMessage());
+    }
+  }
+
+  private String buildFeedbackComment(int score, String comment) {
+    StringBuilder sb = new StringBuilder("⭐ Valoración de satisfacción: ").append(score).append("/5");
+    if (comment != null && !comment.isEmpty()) {
+      sb.append("\n\nComentario del cliente: ").append(comment);
+    }
+    return sb.toString();
+  }
+
+  // The native JSM CSAT feedback endpoint (POST .../request/{key}/feedback) requires the
+  // caller to be the ticket's reporter — a service account is always rejected with 403.
+  // A label is a reliable stand-in: filterable via JQL (labels = "csat-4") and only needs
+  // ordinary edit-issue permission, which the service account already has.
+  private void postJiraCsatLabel(String jiraKey, int score) {
+    if (jiraKey == null || jiraKey.isEmpty() || JIRA_API_TOKEN.isEmpty()) return;
+    try {
+      String credentials = java.util.Base64.getEncoder()
+          .encodeToString((JIRA_USERNAME + ":" + JIRA_API_TOKEN).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+      String payload = "{\"update\":{\"labels\":[{\"add\":\"csat-" + score + "\"}]}}";
+
+      HttpRequest req = HttpRequest.newBuilder()
+          .uri(URI.create(JIRA_URL + "/rest/api/3/issue/" + jiraKey))
+          .header("Content-Type", "application/json")
+          .header("Authorization", "Basic " + credentials)
+          .method("PUT", HttpRequest.BodyPublishers.ofString(payload, java.nio.charset.StandardCharsets.UTF_8))
+          .timeout(Duration.ofSeconds(10))
+          .build();
+      HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
+      if (resp.statusCode() >= 200 && resp.statusCode() < 300) {
+        log.info("Jira CSAT label 'csat-{}' added to {} ← {}", score, jiraKey, resp.statusCode());
+      } else {
+        log.warn("Jira CSAT label FAILED for {} ← {}: {}", jiraKey, resp.statusCode(),
+            resp.body().substring(0, Math.min(200, resp.body().length())));
+      }
+    } catch (Exception e) {
+      log.warn("Failed to add Jira CSAT label to {}: {}", jiraKey, e.getMessage());
     }
   }
 
