@@ -135,7 +135,7 @@ final class SupportJiraWebhookHandler {
     if (items == null) return false;
     for (int i = 0; i < items.length(); i++) {
       JSONObject item = items.optJSONObject(i);
-      if (item != null && "status".equals(item.optString("field", ""))
+      if (item != null && FIELD_STATUS.equals(item.optString("field", ""))
           && "Done".equalsIgnoreCase(item.optString("toString", ""))) {
         return true;
       }
