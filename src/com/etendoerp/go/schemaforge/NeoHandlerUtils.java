@@ -63,6 +63,32 @@ final class NeoHandlerUtils {
     return (dataArr == null || dataArr.length() == 0) ? null : dataArr;
   }
 
+  /** Unpacked callout-response fields, as extracted by {@link #extractCalloutFields}. */
+  record CalloutFields(JSONObject body, JSONObject updates, JSONObject requestBody,
+      String triggerField, JSONObject formState) {}
+
+  /**
+   * Unpacks the fields both order and invoice {@code afterCallout} hooks need: the previous
+   * callout response body, its {@code updates} map, the request body, the field that triggered
+   * the callout, and the {@code formState}. Shared because both hierarchies (orders, invoices)
+   * apply the same currency-callout policy (block callout-driven currency changes, warn on
+   * missing exchange rate) on top of this same shape.
+   *
+   * @return {@code null} when there's no previous result/body to work with
+   */
+  static CalloutFields extractCalloutFields(NeoContext context) {
+    NeoResponse previous = context.getPreviousResult();
+    if (previous == null || previous.getBody() == null) {
+      return null;
+    }
+    JSONObject body = previous.getBody();
+    JSONObject updates = body.optJSONObject("updates");
+    JSONObject requestBody = context.getRequestBody();
+    String triggerField = requestBody != null ? requestBody.optString("field", "") : "";
+    JSONObject formState = requestBody != null ? requestBody.optJSONObject("formState") : null;
+    return new CalloutFields(body, updates, requestBody, triggerField, formState);
+  }
+
   /**
    * Fetches the next document number for an M_InOut (or similar) record.
    *

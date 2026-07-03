@@ -523,18 +523,12 @@ public abstract class AbstractInvoiceHeaderHandler {
    */
   protected NeoResponse handleCurrencyAfterCallout(NeoContext context) {
     try {
-      NeoResponse previous = context.getPreviousResult();
-      if (previous == null || previous.getBody() == null) {
+      NeoHandlerUtils.CalloutFields fields = NeoHandlerUtils.extractCalloutFields(context);
+      if (fields == null) {
         return null;
       }
-      JSONObject body = previous.getBody();
-      JSONObject updates = body.optJSONObject("updates");
-      JSONObject requestBody = context.getRequestBody();
-      String triggerField = requestBody != null ? requestBody.optString("field", "") : "";
-      JSONObject formState = requestBody != null ? requestBody.optJSONObject("formState") : null;
-
-      blockCalloutCurrencyUpdate(updates, triggerField);
-      checkExchangeRateWarning(body, requestBody, formState, triggerField);
+      blockCalloutCurrencyUpdate(fields.updates(), fields.triggerField());
+      checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
     } catch (Exception e) {
       log.warn("[ETP-4029] afterCallout failed (non-fatal): {}", e.getMessage());
     }
