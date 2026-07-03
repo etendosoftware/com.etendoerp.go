@@ -169,7 +169,7 @@ final class SupportIntegrationClient {
     }
   }
 
-  private static void appendAttachmentParts(JSONArray parts, JSONArray attachments) throws JSONException {
+  static void appendAttachmentParts(JSONArray parts, JSONArray attachments) throws JSONException {
     if (attachments == null) return;
     for (int i = 0; i < attachments.length(); i++) {
       JSONObject att = attachments.optJSONObject(i);
@@ -178,7 +178,7 @@ final class SupportIntegrationClient {
     }
   }
 
-  private static void appendSingleAttachmentPart(JSONArray parts, JSONObject att) throws JSONException {
+  static void appendSingleAttachmentPart(JSONArray parts, JSONObject att) throws JSONException {
     String mimeType = att.optString("mimeType", "application/octet-stream");
     String name = att.optString("name", "archivo");
     String textContent = att.optString("text", "");
@@ -197,7 +197,7 @@ final class SupportIntegrationClient {
     }
   }
 
-  private static String parseAdkResponse(String json) {
+  static String parseAdkResponse(String json) {
     try {
       JSONArray events = new JSONArray(json);
       StringBuilder sb = new StringBuilder();
@@ -212,7 +212,7 @@ final class SupportIntegrationClient {
     }
   }
 
-  private static void appendEventText(StringBuilder sb, JSONObject event) {
+  static void appendEventText(StringBuilder sb, JSONObject event) {
     if (event == null || !event.has("content")) return;
     String author = event.optString("author", "");
     if (author.contains("triage")) return;

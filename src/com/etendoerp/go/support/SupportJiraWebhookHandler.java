@@ -85,7 +85,7 @@ final class SupportJiraWebhookHandler {
 
   // --- Standard Jira system webhook (JSON body) ---
 
-  private static JiraWebhookComment parseStandardJiraWebhook(HttpServletResponse response, JSONObject body)
+  static JiraWebhookComment parseStandardJiraWebhook(HttpServletResponse response, JSONObject body)
       throws IOException {
     JSONObject issue = body.optJSONObject("issue");
     if (issue == null) { writeIgnored(response); return null; }
@@ -111,7 +111,7 @@ final class SupportJiraWebhookHandler {
   }
 
   /** No "comment" field: either an assignee-change-back-to-bot or a status transition to Done. */
-  private static void handleJiraNonCommentEvent(HttpServletResponse response, JSONObject issue, JSONObject body,
+  static void handleJiraNonCommentEvent(HttpServletResponse response, JSONObject issue, JSONObject body,
       String jiraKey) throws IOException {
     JSONObject fields = issue.optJSONObject("fields");
     if (fields != null) {
@@ -129,7 +129,7 @@ final class SupportJiraWebhookHandler {
     writeIgnored(response);
   }
 
-  private static boolean isStatusTransitionToDone(JSONObject changelog) {
+  static boolean isStatusTransitionToDone(JSONObject changelog) {
     if (changelog == null) return false;
     JSONArray items = changelog.optJSONArray("items");
     if (items == null) return false;
@@ -143,13 +143,13 @@ final class SupportJiraWebhookHandler {
     return false;
   }
 
-  private static void writeIgnored(HttpServletResponse response) throws IOException {
+  static void writeIgnored(HttpServletResponse response) throws IOException {
     SupportConversationsServlet.writeRaw(response, 200, RESP_IGNORED);
   }
 
   // --- Jira Automation webhook (query params) ---
 
-  private static JiraWebhookComment parseAutomationJiraWebhook(HttpServletRequest request,
+  static JiraWebhookComment parseAutomationJiraWebhook(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     String jiraKey     = request.getParameter("issueKey");
     String commentId   = request.getParameter("commentId");
@@ -299,7 +299,7 @@ final class SupportJiraWebhookHandler {
     }
   }
 
-  private static boolean isBotEmail(String email) {
+  static boolean isBotEmail(String email) {
     if (email == null || email.isEmpty()) return false;
     return (!JIRA_BOT_EMAIL.isEmpty() && JIRA_BOT_EMAIL.equalsIgnoreCase(email))
         || JIRA_USERNAME.equalsIgnoreCase(email);
@@ -307,14 +307,14 @@ final class SupportJiraWebhookHandler {
 
   // --- Jira ADF (Atlassian Document Format) comment body parsing ---
 
-  private static String extractAdfText(Object node) {
+  static String extractAdfText(Object node) {
     if (node == null) return "";
     if (node instanceof String) return extractAdfTextFromString((String) node);
     if (node instanceof JSONObject) return extractAdfTextFromObject((JSONObject) node);
     return "";
   }
 
-  private static String extractAdfTextFromString(String raw) {
+  static String extractAdfTextFromString(String raw) {
     String s = raw.trim();
     if (!s.startsWith("{")) return s;
     try {
@@ -324,7 +324,7 @@ final class SupportJiraWebhookHandler {
     }
   }
 
-  private static String extractAdfTextFromObject(JSONObject obj) {
+  static String extractAdfTextFromObject(JSONObject obj) {
     String type = obj.optString("type", "");
     if ("text".equals(type)) return obj.optString("text", "");
     if ("hardBreak".equals(type)) return "\n";
@@ -342,17 +342,17 @@ final class SupportJiraWebhookHandler {
     return sb.toString();
   }
 
-  private static boolean isBlockType(String type) {
+  static boolean isBlockType(String type) {
     return "paragraph".equals(type) || "heading".equals(type) ||
         "bulletList".equals(type) || "orderedList".equals(type) ||
         "listItem".equals(type) || "codeBlock".equals(type) || "blockquote".equals(type);
   }
 
-  private static String nvl(String value, String fallback) {
+  static String nvl(String value, String fallback) {
     return (value != null && !value.isEmpty()) ? value : fallback;
   }
 
-  private static final class JiraWebhookComment {
+  static final class JiraWebhookComment {
     final String jiraKey;
     final String commentId;
     final String authorName;
