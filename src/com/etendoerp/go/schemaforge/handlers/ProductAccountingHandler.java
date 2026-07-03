@@ -17,23 +17,7 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
-import java.util.List;
-
 import javax.inject.Named;
-
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
-import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
-import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
-
-import com.etendoerp.go.schemaforge.NeoContext;
-import com.etendoerp.go.schemaforge.NeoEndpointType;
-import com.etendoerp.go.schemaforge.NeoHandler;
-import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
  * NeoHandler for the {@code accounting} entity in the Product window.
@@ -49,53 +33,10 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * the ETGO_SF_ENTITY record for the product accounting tab.
  */
 @Named("productAccountingHandler")
-public class ProductAccountingHandler implements NeoHandler {
-
-  private static final Logger log = LogManager.getLogger(ProductAccountingHandler.class);
-
-  private static final String FIELD_ACCOUNTING_SCHEMA = "accountingSchema";
-  private static final String HTTP_POST = "POST";
+public class ProductAccountingHandler extends AbstractAccountingSchemaAutoFillHandler {
 
   @Override
-  public NeoResponse handle(NeoContext context) {
-    if (context.getEndpointType() != NeoEndpointType.CRUD) {
-      return null;
-    }
-    if (!HTTP_POST.equalsIgnoreCase(context.getHttpMethod())) {
-      return null;
-    }
-    JSONObject body = context.getRequestBody();
-    if (body == null) {
-      return null;
-    }
-    // Only fill when the field is absent or explicitly null
-    if (!body.isNull(FIELD_ACCOUNTING_SCHEMA) && body.has(FIELD_ACCOUNTING_SCHEMA)) {
-      return null;
-    }
-    try {
-      String schemaId = resolveDefaultSchemaId();
-      if (schemaId != null) {
-        body.put(FIELD_ACCOUNTING_SCHEMA, schemaId);
-        log.debug("Auto-filled accountingSchema={} for product accounting line", schemaId);
-      }
-    } catch (Exception e) {
-      log.warn("Could not auto-fill accountingSchema for product accounting line", e);
-    }
-    return null; // continue with default CRUD
-  }
-
-  private static String resolveDefaultSchemaId() {
-    OBContext.setAdminMode();
-    try {
-      String clientId = OBContext.getOBContext().getCurrentClient().getId();
-      OBCriteria<AcctSchema> crit = OBDal.getInstance().createCriteria(AcctSchema.class);
-      crit.add(Restrictions.eq(AcctSchema.PROPERTY_CLIENT + ".id", clientId));
-      crit.add(Restrictions.eq(AcctSchema.PROPERTY_ACTIVE, true));
-      crit.setMaxResults(1);
-      List<AcctSchema> list = crit.list();
-      return list.isEmpty() ? null : list.get(0).getId();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+  protected String describeContext() {
+    return "product accounting line";
   }
 }
