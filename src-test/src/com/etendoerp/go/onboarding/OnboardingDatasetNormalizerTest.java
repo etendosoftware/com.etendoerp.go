@@ -302,6 +302,34 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
+   * ETP-4245 (R11, TC-41 follow-up, "Jorge's list", 2026-07-06): verifies that a freshly-provisioned
+   * tenant is born with the 6 previously-NULL {@code C_ACCTSCHEMA_DEFAULT} Defaults-tab accounts
+   * (doubtful debt, bad debt expense/revenue, allowance for doubtful debt, deferred product
+   * expense/revenue) populated from GOClient's own chart of accounts, instead of NULL. Also asserts
+   * the write-off account combination id is retained UNCHANGED — it is deliberately NOT re-mapped to
+   * the screenshot's account (65000000); the product owner confirmed the existing value (account
+   * 69400000, the same combination reused for bad-debt expense) is correct.
+   */
+  @Test
+  public void testNormalizerIncludesAcctSchemaDefaultDoubtfulDebtAndDeferredAccounts() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    // New 6 (ETP-4245 R11 gap closure) — C_ValidCombination ids resolved against GOClient's chart.
+    assertTrue("DoubtfulDebt_Acct (43600000) missing", xml.contains("B745085187C74232849D0468C5780413"));
+    assertTrue("BadDebtExpense_Acct (69400000) missing", xml.contains("997A522BF1124E029E99AB31CF2540F9"));
+    assertTrue("BadDebtRevenue_Acct (79400000) missing", xml.contains("2EAB8BDA6BD84FF0B04AFFFCA105DC53"));
+    assertTrue("AllowanceForDoubtful_Acct (49000000) missing",
+        xml.contains("35D2EC0EA8584EBE85C056293D1AA7E2"));
+    assertTrue("P_Def_Expense_Acct (48000000) missing", xml.contains("801F214F5D434636935E753EF244816F"));
+    assertTrue("P_Def_Revenue_Acct (48500000) missing", xml.contains("032942D16A9F417B88564FDAF211E4D9"));
+
+    // Regression guard: write-off must stay at the DB-authoritative 69400000 combination — never
+    // "fixed" to the screenshot's 65000000 combination.
+    assertTrue("WriteOff_Acct must remain 69400000 (override confirmed, not the screenshot's 65000000)",
+        xml.contains("997A522BF1124E029E99AB31CF2540F9"));
+  }
+
+  /**
    * Verifies that non-primitive reference columns route their raw value through the injected
    * {@link OnboardingDatasetNormalizer.ReferenceIdResolver} and emit the resolver-returned id rather
    * than the raw code. The {@code AD_LANGUAGE} column on {@code C_ELEMENTVALUE_TRL} is an
