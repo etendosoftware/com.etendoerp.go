@@ -138,16 +138,20 @@ public class SeedReferenceDataStep implements OnboardingStep {
       ctx.setFinancialAccountId(cashAccount.getId());
 
       // 11. Create payment methods
-      FIN_PaymentMethod cashMethod = createPaymentMethod(client, org, "Cash", "DEP", "WIT");
-      FIN_PaymentMethod bankMethod = createPaymentMethod(client, org, "Bank Transfer", null, null);
+      FIN_PaymentMethod cashMethod = createPaymentMethod(client, org, "Cash", "DEP", "WIT", false);
+      FIN_PaymentMethod bankMethod = createPaymentMethod(client, org, "Bank Transfer", "DEP", "WIT",
+          true);
       createPaymentTerm(client, org, "I", "Immediate", 0L);
       createPaymentTerm(client, org, "30D", "30 Days", 30L);
 
-      // 12. Link payment methods to financial accounts (4 combinations)
-      createFinAccPaymentMethod(client, org, cashAccount, cashMethod, "DEP", "WIT");
-      createFinAccPaymentMethod(client, org, cashAccount, bankMethod, null, null);
-      createFinAccPaymentMethod(client, org, bankAccount, cashMethod, "DEP", "WIT");
-      createFinAccPaymentMethod(client, org, bankAccount, bankMethod, null, null);
+      // 12. Link payment methods to financial accounts (4 combinations). Upon Deposit/Withdrawal
+      // Use and the Automatic Deposit/Withdrawn flags always mirror the payment method master
+      // (see createFinAccPaymentMethod) — a per-account row must never diverge from what its
+      // payment method is configured to do.
+      createFinAccPaymentMethod(client, org, cashAccount, cashMethod);
+      createFinAccPaymentMethod(client, org, cashAccount, bankMethod);
+      createFinAccPaymentMethod(client, org, bankAccount, cashMethod);
+      createFinAccPaymentMethod(client, org, bankAccount, bankMethod);
 
       // 13. Update org with calendar, currency, and period control
       org.setCalendar(calendar);
@@ -450,7 +454,7 @@ public class SeedReferenceDataStep implements OnboardingStep {
   }
 
   private FIN_PaymentMethod createPaymentMethod(Client client, Organization org, String name,
-      String uponDepositUse, String uponWithdrawalUse) {
+      String uponDepositUse, String uponWithdrawalUse, boolean wireTransfer) {
     FIN_PaymentMethod method = OBProvider.getInstance().get(FIN_PaymentMethod.class);
     method.setNewOBObject(true);
     method.setClient(client);
@@ -469,24 +473,19 @@ public class SeedReferenceDataStep implements OnboardingStep {
     method.setPayoutDeferred(false);
     method.setPayinIsMulticurrency(false);
     method.setPayoutIsMulticurrency(false);
-    if (uponDepositUse != null) {
-      method.setUponDepositUse(uponDepositUse);
-    }
-    if (uponWithdrawalUse != null) {
-      method.setUponWithdrawalUse(uponWithdrawalUse);
-    }
-    if (uponDepositUse == null) {
-      // Bank Transfer uses clearing
-      method.setINUponClearingUse("CLE");
-      method.setOUTUponClearingUse("CLE");
+    method.setUponDepositUse(uponDepositUse);
+    method.setUponWithdrawalUse(uponWithdrawalUse);
+    if (wireTransfer) {
+      // PSD2 module extension column (EM_PSD2_Is_Bank_Transfer): required for the Salt Edge
+      // PIS "Generate Bank Payment" flow to recognize this method as a wire transfer.
+      method.setPSD2IsBankTransfer(true);
     }
     OBDal.getInstance().save(method);
     return method;
   }
 
   private void createFinAccPaymentMethod(Client client, Organization org,
-      FIN_FinancialAccount account, FIN_PaymentMethod method,
-      String uponDepositUse, String uponWithdrawalUse) {
+      FIN_FinancialAccount account, FIN_PaymentMethod method) {
     FinAccPaymentMethod fapm = OBProvider.getInstance().get(FinAccPaymentMethod.class);
     fapm.setNewOBObject(true);
     fapm.setClient(client);
@@ -495,8 +494,8 @@ public class SeedReferenceDataStep implements OnboardingStep {
     fapm.setPaymentMethod(method);
     fapm.setAutomaticReceipt(false);
     fapm.setAutomaticPayment(false);
-    fapm.setAutomaticDeposit(true);
-    fapm.setAutomaticWithdrawn(true);
+    fapm.setAutomaticDeposit(method.isAutomaticDeposit());
+    fapm.setAutomaticWithdrawn(method.isAutomaticWithdrawn());
     fapm.setPayinAllow(true);
     fapm.setPayoutAllow(true);
     fapm.setPayinExecutionType("M");
@@ -508,13 +507,8 @@ public class SeedReferenceDataStep implements OnboardingStep {
     fapm.setDefault(false);
     fapm.setPayinInvoicepaidstatus("RPR");
     fapm.setPayoutInvoicepaidstatus("PPM");
-    if (uponDepositUse != null) {
-      fapm.setUponDepositUse(uponDepositUse);
-      fapm.setUponWithdrawalUse(uponWithdrawalUse);
-    } else {
-      fapm.setINUponClearingUse("CLE");
-      fapm.setOUTUponClearingUse("CLE");
-    }
+    fapm.setUponDepositUse(method.getUponDepositUse());
+    fapm.setUponWithdrawalUse(method.getUponWithdrawalUse());
     OBDal.getInstance().save(fapm);
   }
 

@@ -36,6 +36,9 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
+import java.util.Collections;
+import java.util.List;
+
 import javax.servlet.http.HttpServletRequest;
 
 import org.codehaus.jettison.json.JSONObject;
@@ -48,7 +51,10 @@ import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
@@ -238,7 +244,13 @@ public class FinancialAccountPsd2HandlerConnectTest {
     }
   }
 
-  /** disconnect delegates to the helper and reports the boolean result. */
+  /**
+   * disconnect delegates to the helper and reports the boolean result. On a successful disconnect
+   * (ETP-4406) the handler also restores {@code Automatic Withdrawn} on the account's transfer
+   * payment method(s); this account has none, so that restore is a no-op — the empty
+   * {@code FinAccPaymentMethod} criteria is stubbed so it does not hit a real Hibernate session.
+   * The transfer-restore behavior itself is covered in {@code FinancialAccountPsd2HandlerLinkTest}.
+   */
   @Test
   public void testDisconnectReturnsHelperResult() throws Exception {
     JSONObject body = new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
@@ -248,10 +260,14 @@ public class FinancialAccountPsd2HandlerConnectTest {
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       stubObContext(obContext);
       linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc))
           .thenReturn(true);
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubFinAccPaymentMethods(dal, Collections.emptyList());
 
       NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
 
@@ -298,6 +314,19 @@ public class FinancialAccountPsd2HandlerConnectTest {
         mock(org.openbravo.dal.service.OBCriteria.class);
     when(dal.createCriteria(FinaccConnection.class)).thenReturn(criteria);
     when(criteria.uniqueResult()).thenReturn(result);
+  }
+
+  /**
+   * Stubs {@code dal.createCriteria(FinAccPaymentMethod.class)} so the ETP-4406 restore step run at
+   * the end of a successful {@code disconnect} returns the given rows instead of hitting a real
+   * Hibernate session. Pass an empty list when the transfer-restore behavior is not under test.
+   */
+  @SuppressWarnings("unchecked")
+  private static void stubFinAccPaymentMethods(OBDal dal, List<FinAccPaymentMethod> methods) {
+    OBCriteria<FinAccPaymentMethod> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(FinAccPaymentMethod.class)).thenReturn(crit);
+    when(crit.add(any())).thenReturn(crit);
+    when(crit.list()).thenReturn(methods);
   }
 
   private static JSONObject dataOf(NeoResponse response) throws Exception {
