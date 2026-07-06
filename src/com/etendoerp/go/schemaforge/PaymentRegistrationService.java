@@ -63,10 +63,13 @@ import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.JsonUtils;
 
+import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 import com.etendoerp.psd2.bank.integration.data.PisPayment;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationPISUtils;
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.PISPaymentDao;
+import com.etendoerp.psd2.bank.integration.utils.PISTransactionUtils;
 
 /**
  * Shared payment registration logic for both sales-invoice and purchase-invoice handlers.
@@ -102,6 +105,9 @@ final class PaymentRegistrationService {
   private static final String KEY_PIS_PAYMENT_URL = "pisPaymentUrl";
   private static final String KEY_PIS_STATUS = "pisStatus";
   private static final String PIS_STATUS_REQUESTED = "requested";
+  private static final String KEY_VIA_PIS = "viaPis";
+  // The PSD2_PIS_PAYMENT.status ref-list has no "cancelled" value; "failed" marks an undone attempt.
+  private static final String PIS_STATUS_UNDONE = "failed";
 
   // PIS request fields sent by the SPA (mirror the classic "Generate Bank Payment" dialog).
   private static final String FIELD_PIS_TEMPLATE = "pisTemplate";
@@ -404,7 +410,19 @@ final class PaymentRegistrationService {
     if (p.getPaymentMethod() != null) {
       item.put("paymentMethod", p.getPaymentMethod().getName());
     }
+    // A linked PSD2_PIS_PAYMENT row means this payment was initiated through the Salt Edge PIS
+    // flow (this popup), not just a manually-recorded bank transfer — surfaced in the SPA's
+    // payment history as a "Realizado vía PSD2" badge. PisPayment is a plain DAL entity (no
+    // PSD2-module method needed), so this is queried directly here.
+    item.put(KEY_VIA_PIS, hasLinkedPisPayment(p));
     return item;
+  }
+
+  private static boolean hasLinkedPisPayment(FIN_Payment p) {
+    OBCriteria<PisPayment> criteria = OBDal.getInstance().createCriteria(PisPayment.class);
+    criteria.add(Restrictions.eq(PisPayment.PROPERTY_PAYMENT, p));
+    criteria.setMaxResults(1);
+    return criteria.uniqueResult() != null;
   }
 
   // ─── PAYMENT METHODS: list methods valid for the invoice's accounts ────────
@@ -616,6 +634,20 @@ final class PaymentRegistrationService {
         if (pisPayment == null) {
           return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "PIS payment not found");
         }
+        // Actively refresh from Salt Edge instead of trusting a possibly-stale local value.
+        // The async POST webhook that would otherwise keep this in sync can't reach a
+        // non-publicly-reachable (e.g. local dev) server, and Etendo Go's own return_to routes
+        // to its own SPA callback (see PisPaymentBridge), bypassing PisPaymentCallback's
+        // synchronous refresh-on-browser-return. Best-effort: a Salt Edge/network failure here
+        // just leaves the stored status as-is for the next poll tick to retry.
+        if (!isTerminalPisStatus(pisPayment.getStatus())) {
+          try {
+            refreshPisStatusFromSaltEdge(pisPayment);
+          } catch (Exception e) {
+            log.warn("Could not refresh PIS payment {} status from Salt Edge: {}", pisPaymentId,
+                e.getMessage());
+          }
+        }
         JSONObject data = new JSONObject();
         data.put(KEY_STATUS, pisPayment.getStatus());
         return new NeoResponse(200, data);
@@ -627,6 +659,111 @@ final class PaymentRegistrationService {
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Failed to fetch PIS payment status");
     }
+  }
+
+  /** True once a PIS payment can no longer change — no point re-querying Salt Edge for it. */
+  private static boolean isTerminalPisStatus(String status) {
+    return StringUtils.equalsAnyIgnoreCase(status, BankIntegrationConstants.PIS_STATUS_EXECUTED,
+        PIS_STATUS_UNDONE, "settled");
+  }
+
+  /**
+   * Actively fetches {@code pisPayment}'s current status from Salt Edge, persists it, and creates
+   * the {@code FIN_Finacc_Transaction} when the status is {@code executed}. Mirrors the reconcile
+   * sequence {@code PisPaymentCallback#doGet} runs on browser-return, but done here because Etendo
+   * Go's own SPA callback bypasses that servlet and the async webhook can't reach a local server.
+   * Composes only public PSD2 APIs (no PSD2 logic is duplicated or altered).
+   */
+  private static void refreshPisStatusFromSaltEdge(PisPayment pisPayment) {
+    String apiKey = BankIntegrationUtils.getPsd2ApiKey(OBContext.getOBContext().getCurrentClient());
+    BankIntegrationPISUtils.PISPaymentStatus status = BankIntegrationPISUtils.showPayment(apiKey,
+        pisPayment.getSaltedgePayment());
+    PISPaymentDao.updateStatusWithAttributes(pisPayment, status);
+    OBDal.getInstance().save(pisPayment);
+    OBDal.getInstance().flush();
+    if (BankIntegrationConstants.PIS_STATUS_EXECUTED.equals(status.getStatus())) {
+      PISTransactionUtils.createFinancialTransactionIfEligible(pisPayment);
+    }
+  }
+
+  /**
+   * Undoes a PIS payment that was created (status {@code PPM}) but never authorized/executed at
+   * the bank: reactivates and DELETES the {@link FIN_Payment} through the official
+   * {@code com.etendoerp.payment.removal} flow (which also refreshes the invoice's paid status),
+   * and marks the {@code PSD2_PIS_PAYMENT} row as {@code cancelled} for audit. Body:
+   * {@code {pisPaymentId}}.
+   *
+   * <p>Refuses only when the transfer is already past the point of no return — the Salt Edge status
+   * is beyond {@code authorizing} (authorized / processing / executed / settled) — so we never undo a
+   * payment whose money has actually moved. A locally auto-created {@code FIN_Finacc_Transaction}
+   * (account still had Automatic Deposit/Withdrawn on) does NOT block the undo: the reactivation
+   * mode {@code "R"} removes it too.
+   */
+  static NeoResponse handleCancelPisPayment(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    String pisPaymentId = body != null ? body.optString(FIELD_PIS_PAYMENT_ID, null) : null;
+    if (StringUtils.isBlank(pisPaymentId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "pisPaymentId is required");
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        PisPayment pisPayment = OBDal.getInstance().get(PisPayment.class, pisPaymentId);
+        if (pisPayment == null) {
+          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "PIS payment not found");
+        }
+        if (!isCancellablePisStatus(pisPayment.getStatus())) {
+          throw new OBException("The bank transfer is already in progress and can no longer be "
+              + "undone from here.");
+        }
+        FIN_Payment payment = pisPayment.getPayment();
+        // Detach + mark the PIS record as undone (status "failed") first, so removing the payment
+        // does not hit the PSD2_PIS_PAYMENT → FIN_Payment foreign key, while keeping the row as an
+        // audit trail. ("cancelled" is not a valid value in the status ref-list.)
+        pisPayment.setStatus(PIS_STATUS_UNDONE);
+        pisPayment.setPayment(null);
+        OBDal.getInstance().save(pisPayment);
+        OBDal.getInstance().flush();
+
+        if (payment != null) {
+          // "R" = "Reactivate and Delete Lines" (com.etendoerp.payment.removal reactivation mode):
+          // reverts the payment AND its auto-created FIN_Finacc_Transaction, un-applying it from the
+          // invoice; then delete the payment record entirely. Works whether the payment stayed in
+          // PPM or a transaction was created (account still had Automatic Deposit/Withdrawn on).
+          String paymentId = payment.getId();
+          PaymentRemovalUtil.reactivate(paymentId, "R");
+          FIN_Payment reactivated = OBDal.getInstance().get(FIN_Payment.class, paymentId);
+          if (reactivated != null) {
+            PaymentRemovalUtil.remove(reactivated);
+          }
+        }
+        JSONObject data = new JSONObject();
+        data.put("cancelled", true);
+        return new NeoResponse(200, data);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (OBException e) {
+      OBDal.getInstance().rollbackAndClose();
+      log.warn("Cancel PIS payment {} failed: {}", pisPaymentId, e.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+    } catch (Exception e) {
+      OBDal.getInstance().rollbackAndClose();
+      log.error("Error cancelling PIS payment {}: {}", pisPaymentId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Failed to cancel PIS payment");
+    }
+  }
+
+  /**
+   * True when a PIS payment can still be safely undone: it has not advanced past {@code authorizing}
+   * (so no SCA-authorized / processing / executed / settled transfer is reversed). Blank/unknown is
+   * treated as cancellable (freshly created).
+   */
+  private static boolean isCancellablePisStatus(String status) {
+    return StringUtils.isBlank(status)
+        || StringUtils.equalsAnyIgnoreCase(status, PIS_STATUS_REQUESTED, "initiated", "authorizing",
+            PIS_STATUS_UNDONE);
   }
 
   /**

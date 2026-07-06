@@ -22,6 +22,7 @@ final class PaymentActionHandlerSupport {
   private static final String PIS_STATUS_ACTION = "pisPaymentStatus";
   private static final String PIS_SUPPLIER_ACCOUNTS_ACTION = "pisSupplierAccounts";
   private static final String PIS_TEMPLATES_ACTION = "pisTemplates";
+  private static final String PIS_CANCEL_ACTION = "cancelPisPayment";
   private static final String CONFIRM_ACTION = "confirmPayment";
 
   private static final String FIELD_PAYMENT_ID = "paymentId";
@@ -90,6 +91,9 @@ final class PaymentActionHandlerSupport {
     }
     if (PIS_TEMPLATES_ACTION.equals(fieldName)) {
       return PaymentRegistrationService.handlePisTemplates(context);
+    }
+    if (PIS_CANCEL_ACTION.equals(fieldName)) {
+      return PaymentRegistrationService.handleCancelPisPayment(context);
     }
     return null;
   }
