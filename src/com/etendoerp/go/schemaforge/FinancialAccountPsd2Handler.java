@@ -465,6 +465,10 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
 
     FIN_FinancialAccount finAcc = FinancialAccountSupport.createAccount(currentClient(),
         OBContext.getOBContext().getCurrentOrganization(), currency, name, type);
+    // Mirrors the manual "sin conexión" creation flow (FinancialAccountHandler.afterHandle):
+    // a Salt Edge-created account must also come pre-wired with the payment methods that
+    // correspond to its type, with one marked as default.
+    FinancialAccountSupport.assignDefaultPaymentMethods(finAcc);
 
     String warning = linkAccount(finAcc, connectionId, saltEdgeAccountId, node, details, apiKey);
     JSONObject data = new JSONObject();
