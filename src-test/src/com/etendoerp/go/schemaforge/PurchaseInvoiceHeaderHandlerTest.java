@@ -606,6 +606,73 @@ public class PurchaseInvoiceHeaderHandlerTest {
     }
   }
 
+  /**
+   * ACTION-shape completion request (POST /action/documentAction with
+   * {@code fieldValues.documentAction=CO} — the shape sent by the draft-mode confirm button) must
+   * also recalculate the discount BEFORE completing. The CRUD-shape ordering is covered above;
+   * this closes the shape-coverage gap noted during the ETP-4388 QA pass (only the CRUD shape was
+   * exercised for the discount-before-completion regression, on either AR or AP).
+   */
+  @Test
+  public void handle_actionShapeCompletionAction_recalculatesDiscountBeforeCompleting()
+      throws Exception {
+    JSONObject fieldValues = new JSONObject().put("documentAction", "CO");
+    JSONObject body = new JSONObject().put("fieldValues", fieldValues);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("documentAction")
+        .recordId("inv-action-discount-co")
+        .requestBody(body)
+        .build();
+
+    VariablesSecureApp vars = new VariablesSecureApp("u", "c", "o", "r", "en_US");
+    OBError success = new OBError();
+    success.setType("Success");
+
+    ProcessInvoiceUtil processInvoiceUtil = mock(ProcessInvoiceUtil.class);
+    when(processInvoiceUtil.process(
+        Mockito.eq("inv-action-discount-co"), Mockito.eq("CO"), Mockito.eq(""), Mockito.eq(""), Mockito.eq(""),
+        any(), any()))
+        .thenReturn(success);
+
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      // validateLineQtyBeforeComplete guard: no linked shipment lines → passes.
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any())).thenReturn(vars);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+      when(dal.get(Process.class, "111")).thenReturn(mock(Process.class));
+
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+
+      InOrder order = Mockito.inOrder(totalDiscountService, processInvoiceUtil);
+      order.verify(totalDiscountService).recalculate("inv-action-discount-co", true);
+      order.verify(processInvoiceUtil).process(
+          Mockito.eq("inv-action-discount-co"), Mockito.eq("CO"), Mockito.eq(""), Mockito.eq(""), Mockito.eq(""),
+          any(), any());
+    }
+  }
+
   // ── getInvoiceSubtypeKey ──────────────────────────────────────────────────
 
   /**
