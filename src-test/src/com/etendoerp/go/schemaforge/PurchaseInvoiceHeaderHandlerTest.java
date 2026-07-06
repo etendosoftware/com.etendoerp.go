@@ -40,15 +40,21 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Rule;
 import org.junit.Test;
+import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnit;
 import org.mockito.junit.MockitoRule;
+import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
+import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
+import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 
@@ -507,6 +513,96 @@ public class PurchaseInvoiceHeaderHandlerTest {
 
       NeoResponse result = handler.afterHandle(ctx);
       assertNull(result);
+    }
+  }
+
+  // ── handle() — ETP-4388: discount recalculation must precede completion ─────
+
+  /**
+   * Regression for the review finding on ETP-4388: {@code completeInvoiceIfNeeded} must not
+   * short-circuit {@code handle()} before {@code applyTotalDiscountBeforeComplete} runs, or the
+   * discount line would be stale/missing when the document is completed. Verifies both that
+   * {@code totalDiscountService.recalculate(...)} is actually invoked for a completion request,
+   * and that it runs BEFORE {@code ProcessInvoiceUtil.process(...)}.
+   */
+  @Test
+  public void handle_completionAction_recalculatesDiscountBeforeCompleting() throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-discount-co")
+        .requestBody(body)
+        .build();
+
+    VariablesSecureApp vars = new VariablesSecureApp("u", "c", "o", "r", "en_US");
+    OBError success = new OBError();
+    success.setType("Success");
+
+    ProcessInvoiceUtil processInvoiceUtil = mock(ProcessInvoiceUtil.class);
+    when(processInvoiceUtil.process(
+        Mockito.eq("inv-discount-co"), Mockito.eq("CO"), Mockito.eq(""), Mockito.eq(""), Mockito.eq(""),
+        any(), any()))
+        .thenReturn(success);
+
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      // validateLineQtyBeforeComplete guard: no linked shipment lines → passes.
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any())).thenReturn(vars);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+      when(dal.get(Process.class, "111")).thenReturn(mock(Process.class));
+
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+
+      InOrder order = Mockito.inOrder(totalDiscountService, processInvoiceUtil);
+      order.verify(totalDiscountService).recalculate("inv-discount-co", true);
+      order.verify(processInvoiceUtil).process(
+          Mockito.eq("inv-discount-co"), Mockito.eq("CO"), Mockito.eq(""), Mockito.eq(""), Mockito.eq(""),
+          any(), any());
+    }
+  }
+
+  /**
+   * Non-completion requests must not trigger discount recalculation at all — only the CO path
+   * does (guarded by {@code applyTotalDiscountBeforeComplete}'s own completion check).
+   */
+  @Test
+  public void handle_nonCompletionAction_doesNotRecalculateDiscount() throws Exception {
+    JSONObject body = new JSONObject().put("someOtherField", "x");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-not-completing")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      handler.handle(ctx);
+
+      Mockito.verifyNoInteractions(totalDiscountService);
     }
   }
 

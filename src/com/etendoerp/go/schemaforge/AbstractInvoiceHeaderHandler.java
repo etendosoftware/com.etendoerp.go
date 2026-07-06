@@ -379,8 +379,24 @@ public abstract class AbstractInvoiceHeaderHandler {
    * fixes, just moved one layer down. {@link WeldUtils#getInstanceFromStaticBeanManager} returns
    * a fully Weld-managed reference, so {@code hooks} is populated correctly.
    *
-   * <p>Call this AFTER {@link #validateLineQtyBeforeComplete(NeoContext)} in {@code handle()} so
-   * pre-completion validation can still block the request before the real process runs.
+   * <p>Call this AFTER {@link #validateLineQtyBeforeComplete(NeoContext)} AND AFTER
+   * {@link AbstractOrderHeaderHandler#applyTotalDiscountBeforeComplete} in {@code handle()}, so
+   * (1) pre-completion validation can still block the request before the real process runs, and
+   * (2) the total-discount line already reflects the final set of product lines before it is
+   * read/posted by {@link ProcessInvoiceUtil#process}. Calling this BEFORE the discount
+   * recalculation would complete the document with a stale or missing discount line.
+   *
+   * <p><b>Session-lifecycle note (deliberate divergence):</b> unlike every other handler in this
+   * module — which only {@code .flush()} the DAL session and leave the final commit to the
+   * request-scoped {@code DalThreadCleaner} — {@link ProcessInvoiceUtil#process} internally calls
+   * {@code OBDal.getInstance().commitAndClose()} (success) / {@code .rollbackAndClose()} (error),
+   * fully closing the current Hibernate session mid-request. This mirrors classic UI behavior
+   * (the method is shared with the classic completion path) and is required for its internal
+   * {@code ProcessInstance}/{@code CallProcess} bookkeeping. It is safe here because the very next
+   * statement performs a DAL read ({@code OBDal.getInstance().get(Process.class, ...)}), which
+   * transparently reopens the session — the same characteristic already relied upon by
+   * {@code GlJournalHeaderHandler#completeJournal} via {@code FIN_AddPaymentFromJournal}. Do not
+   * remove or reorder that read without re-verifying this assumption.
    *
    * @param context the current NeoContext
    * @return a {@link NeoResponse} translating the completion result, or {@code null} if this is
@@ -397,6 +413,10 @@ public abstract class AbstractInvoiceHeaderHandler {
     }
     try {
       VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(context.getObContext());
+      // Plain DalConnectionProvider, not wrapped in a RequestContext/pushRequestContextVars scope
+      // (the pattern used elsewhere in NeoProcessService.java for classic-code invocations):
+      // neither the Verifactu nor the TBAI ProcessInvoiceHook reads RequestContext today, so this
+      // is a non-issue in practice. Revisit if a future hook needs request-scoped context.
       ConnectionProvider conn = new DalConnectionProvider(false);
       ProcessInvoiceUtil processInvoiceUtil =
           WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class);
@@ -405,6 +425,11 @@ public abstract class AbstractInvoiceHeaderHandler {
       // non-null. Empty strings are the correct null-safe default for a normal "CO" completion.
       OBError result = processInvoiceUtil.process(invoiceId, "CO", "", "", "", vars, conn);
       Process process = OBDal.getInstance().get(Process.class, COMPLETE_PROCESS_ID_INVOICE);
+      if (process == null) {
+        log.error("[INVOICE-COMPLETE] Process record {} not found", COMPLETE_PROCESS_ID_INVOICE);
+        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Completion process configuration missing");
+      }
       return NeoProcessService.translateClassicResult(result, process);
     } catch (Exception e) {
       log.error("[INVOICE-COMPLETE] Completion failed for invoice {}: {}",

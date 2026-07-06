@@ -97,6 +97,9 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     if (lineQtyError != null) {
       return lineQtyError;
     }
+    // Must run BEFORE completeInvoiceIfNeeded: the discount line has to reflect the final set of
+    // product lines before ProcessInvoiceUtil.process() completes/posts the document (ETP-4388).
+    AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
     NeoResponse completionResponse = completeInvoiceIfNeeded(context);
     if (completionResponse != null) {
       return completionResponse;
@@ -111,7 +114,6 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         return originError;
       }
     }
-    AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
     return NeoHeaderActionRouter.dispatch(
         context,
         cloneRecordHandler,
