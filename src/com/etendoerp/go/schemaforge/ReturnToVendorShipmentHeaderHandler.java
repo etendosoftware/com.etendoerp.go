@@ -47,7 +47,7 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  * {@code importReceiptLines}, {@code createReturnInvoice}, and {@code cloneRecord}.
  *
  * <p>Injects {@code sourceReceiptDocNo}, {@code sourceReceipts}, {@code returnInvoices},
- * and {@code linesCount} into every GET response via {@code afterHandle}.
+ * {@code linesCount} and {@code invoiceStatus} into every GET response via {@code afterHandle}.
  */
 @Named("returnToVendorShipmentHeaderHandler")
 public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
@@ -359,13 +359,14 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
       Map<String, List<JSONObject>> receiptsMap = ReturnShipmentUtils.fetchSourceDocuments(ids);
       Map<String, List<JSONObject>> returnInvoicesMap = ReturnShipmentUtils.fetchReturnInvoices(ids);
       Map<String, Integer> lineCountMap = ReturnShipmentUtils.fetchLineCounts(ids);
+      Map<String, Integer> invoiceStatusMap = ReturnShipmentUtils.fetchInvoiceStatuses(ids);
 
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
         String id = rec.optString("id", null);
         ReturnShipmentUtils.enrichReturnRecord(rec, id, receiptsMap,
             FIELD_SOURCE_RECEIPTS, FIELD_SOURCE_RECEIPT_DOC_NO,
-            returnInvoicesMap, lineCountMap);
+            returnInvoicesMap, lineCountMap, invoiceStatusMap);
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {
