@@ -92,14 +92,19 @@ class SupportConversationsServletTest {
   }
 
   /**
-   * Mocks OBContext/OBDal with a single Connection/PreparedStatement pair that answers
-   * every {@code prepareStatement(...)} call the same way (matches the DDL loop in
+   * Mocks OBDal with a single Connection/PreparedStatement pair that answers every
+   * {@code prepareStatement(...)} call the same way (matches the DDL loop in
    * {@code ensureTablesExist} harmlessly, and drives whatever query the handler under
    * test issues). Returns the PreparedStatement mock so individual tests can further
    * stub {@code executeQuery()}/{@code executeUpdate()} results.
+   *
+   * <p>Callers must still keep an open {@code MockedStatic<OBContext>} in their
+   * try-with-resources for the duration of the call under test, so that the real
+   * {@code OBContext.setAdminMode}/{@code restorePreviousMode} calls become safe no-ops
+   * instead of touching a real Openbravo context — this helper doesn't need to
+   * reference it directly to rely on that.
    */
-  private static PreparedStatement mockDb(MockedStatic<OBContext> ctxMock, MockedStatic<OBDal> dalMock)
-      throws Exception {
+  private static PreparedStatement mockDb(MockedStatic<OBDal> dalMock) throws Exception {
     OBDal obDal = mock(OBDal.class);
     Connection conn = mock(Connection.class);
     PreparedStatement ps = mock(PreparedStatement.class);
@@ -198,7 +203,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
 
         new SupportConversationsServlet().doGet(request, response);
@@ -217,7 +222,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
 
         new SupportConversationsServlet().doGet(request, response);
@@ -245,7 +250,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         ResultSet emptyRs = emptyResultSet();
         when(ps.executeQuery()).thenReturn(emptyRs);
 
@@ -265,7 +270,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         ResultSet rs = mock(ResultSet.class);
         when(rs.next()).thenReturn(true, false);
         when(rs.getString("id")).thenReturn("conv-1");
@@ -323,7 +328,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         ResultSet emptyRs = emptyResultSet();
         when(ps.executeQuery()).thenReturn(emptyRs);
 
@@ -343,7 +348,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         ResultSet belongsRs = mock(ResultSet.class);
         when(belongsRs.next()).thenReturn(true);
         ResultSet msgRs = mock(ResultSet.class);
@@ -374,7 +379,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
 
         new SupportConversationsServlet().doGet(request, response);
@@ -415,7 +420,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
 
         new SupportConversationsServlet().doPost(request, response);
@@ -443,7 +448,7 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
 
         new SupportConversationsServlet().doPost(request, response);
@@ -464,7 +469,7 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
         when(ps.executeUpdate()).thenReturn(1);
 
@@ -484,7 +489,7 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
 
         new SupportConversationsServlet().doPost(request, response);
@@ -504,7 +509,7 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
         when(ps.executeUpdate()).thenReturn(0);
 
@@ -525,7 +530,7 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
         when(ps.executeUpdate()).thenReturn(1);
 
@@ -545,7 +550,7 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
 
         new SupportConversationsServlet().doPost(request, response);
@@ -565,7 +570,7 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
         when(ps.executeUpdate()).thenReturn(1);
 
@@ -586,7 +591,7 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
         when(ps.executeUpdate()).thenReturn(1);
 
@@ -606,7 +611,7 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
 
         new SupportConversationsServlet().doPost(request, response);
@@ -650,7 +655,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
 
         new SupportConversationsServlet().doPost(request, response);
@@ -669,7 +674,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
 
         new SupportConversationsServlet().doPost(request, response);
@@ -688,7 +693,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
 
         new SupportConversationsServlet().doPost(request, response);
@@ -708,7 +713,7 @@ class SupportConversationsServletTest {
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
            MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
         when(ps.executeUpdate()).thenReturn(1);
         ResultSet summaryRs = mock(ResultSet.class);
@@ -748,7 +753,7 @@ class SupportConversationsServletTest {
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
            MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
         when(ps.executeUpdate()).thenReturn(1);
         ResultSet summaryRs = mock(ResultSet.class);
@@ -809,7 +814,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
 
         new SupportConversationsServlet().doPost(request, response);
@@ -828,7 +833,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         ResultSet emptyRs = emptyResultSet();
         when(ps.executeQuery()).thenReturn(emptyRs);
 
@@ -848,7 +853,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         ResultSet belongsRs = mock(ResultSet.class);
         when(belongsRs.next()).thenReturn(true);
         ResultSet statusRs = mock(ResultSet.class);
@@ -872,7 +877,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
         when(ps.executeUpdate()).thenReturn(1);
 
@@ -915,7 +920,7 @@ class SupportConversationsServletTest {
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
            MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
         when(ps.executeUpdate()).thenReturn(1);
 
@@ -964,7 +969,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
 
         new SupportConversationsServlet().doPost(request, response);
@@ -983,7 +988,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
 
         new SupportConversationsServlet().doPost(request, response);
@@ -1002,7 +1007,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         ResultSet emptyRs = emptyResultSet();
         when(ps.executeQuery()).thenReturn(emptyRs);
 
@@ -1023,7 +1028,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
         when(ps.executeUpdate()).thenReturn(1);
 
@@ -1062,7 +1067,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
         when(ps.executeUpdate()).thenReturn(1);
         ResultSet belongsRs = mock(ResultSet.class);
@@ -1089,7 +1094,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         ResultSet emptyRs = emptyResultSet();
         when(ps.executeQuery()).thenReturn(emptyRs);
 
@@ -1109,7 +1114,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
         when(ps.executeUpdate()).thenReturn(1);
         ResultSet belongsRs = mock(ResultSet.class);
@@ -1137,7 +1142,7 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(ctxMock, dalMock);
+        PreparedStatement ps = mockDb(dalMock);
         when(ps.execute()).thenReturn(true);
 
         new SupportConversationsServlet().doPost(request, response);
@@ -1145,5 +1150,23 @@ class SupportConversationsServletTest {
 
       assertTrue(capture.toString().contains("Unknown endpoint"));
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // newId
+  // -------------------------------------------------------------------------
+
+  @Test
+  @DisplayName("newId returns a 32-character lowercase hex string with no dashes")
+  void newIdReturnsHexUuid() {
+    String id = SupportConversationsServlet.newId();
+
+    assertTrue(id.matches("[0-9a-f]{32}"));
+  }
+
+  @Test
+  @DisplayName("newId returns a different value on each call")
+  void newIdIsUnique() {
+    assertTrue(!SupportConversationsServlet.newId().equals(SupportConversationsServlet.newId()));
   }
 }
