@@ -260,6 +260,48 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
+   * ETP-4245 (TC-40): verifies that a freshly-provisioned tenant is born with all 8 accounting
+   * dimensions on {@code C_ACCTSCHEMA_ELEMENT} — the 2 mandatory ones (Organization, Account) plus
+   * all 6 optional ones (Project, Bus.Partner, Product, Cost Center, User1, User2) — instead of just
+   * 5. Cost Center/User1/User2 were entirely missing from the shipped dataset before this fix; the
+   * pre-existing 5 are asserted too as a regression guard so a future edit cannot silently drop one.
+   */
+  @Test
+  public void testNormalizerIncludesAllEightAccountingDimensions() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    // Pre-existing 5 (regression guard).
+    assertTrue("Organization (OO) element missing", xml.contains("23C4FD2DE4514B1EB8966CC4FA0BEE90"));
+    assertTrue("Account (AC) element missing", xml.contains("C3EA91A712AB44BAA2B3935A78795AA8"));
+    assertTrue("Project (PJ) element missing", xml.contains("11632D226E424B269F0D1847DCECA106"));
+    assertTrue("Bus.Partner (BP) element missing", xml.contains("2A954DBDB2664001A4AEF8F9C83C73B3"));
+    assertTrue("Product (PR) element missing", xml.contains("3A0D3FCBC7634DBCA660AAFA44045B7F"));
+
+    // New 3 (ETP-4245 gap closure).
+    assertTrue("Cost Center (CC) element missing", xml.contains("081FC9AAACF84A91985EF9A14F547A8C"));
+    assertTrue("User 1 (U1) element missing", xml.contains("54EE6A5A91474E8A90A0A4239A8D740B"));
+    assertTrue("User 2 (U2) element missing", xml.contains("C2FE16188CB64DF0BCEC38DD4DF38918"));
+
+    assertTrue("CC elementtype value missing", xml.contains("<elementtype>CC</elementtype>"));
+    assertTrue("U1 elementtype value missing", xml.contains("<elementtype>U1</elementtype>"));
+    assertTrue("U2 elementtype value missing", xml.contains("<elementtype>U2</elementtype>"));
+  }
+
+  /**
+   * ETP-4245 (TC-38): verifies the accounting schema ships fully predefined for posting — Allow
+   * Negatives and Centrally Maintained both {@code Y} — instead of the previous {@code N}/{@code N}
+   * defaults, so a new tenant never needs manual configuration of these flags.
+   */
+  @Test
+  public void testNormalizerAccountingSchemaIsPredefinedForPosting() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue("allownegative must be Y", xml.contains("<allownegative>Y</allownegative>"));
+    assertTrue("iscentrallymaintained must be Y",
+        xml.contains("<iscentrallymaintained>Y</iscentrallymaintained>"));
+  }
+
+  /**
    * Verifies that non-primitive reference columns route their raw value through the injected
    * {@link OnboardingDatasetNormalizer.ReferenceIdResolver} and emit the resolver-returned id rather
    * than the raw code. The {@code AD_LANGUAGE} column on {@code C_ELEMENTVALUE_TRL} is an
