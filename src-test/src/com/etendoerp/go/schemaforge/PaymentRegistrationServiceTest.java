@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -67,11 +68,6 @@ import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.psd2.bank.integration.data.PisPayment;
-import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
-import com.etendoerp.psd2.bank.integration.utils.BankIntegrationPISUtils;
-import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
-import com.etendoerp.psd2.bank.integration.utils.PISPaymentDao;
-import com.etendoerp.psd2.bank.integration.utils.PISTransactionUtils;
 
 /**
  * Unit tests for {@link PaymentRegistrationService}.
@@ -101,6 +97,7 @@ class PaymentRegistrationServiceTest {
   private MockedStatic<OBContext> obContextMock;
 
   @BeforeEach
+  @SuppressWarnings("unchecked")
   void setUp() {
     obDalMock = mockStatic(OBDal.class);
     obContextMock = mockStatic(OBContext.class);
@@ -108,6 +105,15 @@ class PaymentRegistrationServiceTest {
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
     obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
     when(obDal.getSession()).thenReturn(session);
+
+    // paymentListItem (exercised by every handleListPayments test with a non-empty result)
+    // calls PisPaymentService.hasLinkedPisPayment for the "viaPis" badge — stub it here once
+    // so every test gets a real, non-null OBCriteria instead of Mockito's default null.
+    OBCriteria<PisPayment> pisPaymentCriteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(PisPayment.class)).thenReturn(pisPaymentCriteria);
+    when(pisPaymentCriteria.add(any(Criterion.class))).thenReturn(pisPaymentCriteria);
+    when(pisPaymentCriteria.setMaxResults(anyInt())).thenReturn(pisPaymentCriteria);
+    when(pisPaymentCriteria.uniqueResult()).thenReturn(null);
   }
 
   @AfterEach
@@ -1528,114 +1534,4 @@ class PaymentRegistrationServiceTest {
     assertTrue(payItem.isNull("accountCurrency"));
   }
 
-  // ========================================================================
-  // handlePisPaymentStatus tests
-  // ========================================================================
-
-  private NeoContext pisStatusContext(String pisPaymentId) throws Exception {
-    JSONObject body = new JSONObject().put("pisPaymentId", pisPaymentId);
-    return NeoContext.builder()
-        .httpMethod("POST")
-        .endpointType(NeoEndpointType.CRUD)
-        .requestBody(body)
-        .build();
-  }
-
-  /**
-   * Verifies that when the locally stored PIS status is NOT terminal (e.g. "authorizing"),
-   * the handler actively refreshes it from Salt Edge through the private
-   * {@code refreshPisStatusFromSaltEdge} helper, which composes the public PSD2 statics
-   * ({@link BankIntegrationUtils#getPsd2ApiKey}, {@link BankIntegrationPISUtils#showPayment},
-   * {@link PISPaymentDao#updateStatusWithAttributes}). The response reflects the status
-   * persisted onto the entity by that refresh (simulated here via a second stubbed
-   * {@code getStatus()} return, mirroring the refresh mutating the entity in place).
-   */
-  @Test
-  void testHandlePisPaymentStatusNonTerminalRefreshesFromSaltEdge() throws Exception {
-    NeoContext context = pisStatusContext("pis-1");
-
-    PisPayment pisPayment = mock(PisPayment.class);
-    when(obDal.get(PisPayment.class, "pis-1")).thenReturn(pisPayment);
-    // First read (terminal-status check) sees "authorizing"; after the refresh call the
-    // entity is presumed updated in place, so the second read (building the response)
-    // reflects the new value persisted by updateStatusWithAttributes.
-    when(pisPayment.getStatus()).thenReturn("authorizing", BankIntegrationConstants.PIS_STATUS_EXECUTED);
-    when(pisPayment.getSaltedgePayment()).thenReturn("se-pay-1");
-
-    Client client = mock(Client.class);
-    when(obContext.getCurrentClient()).thenReturn(client);
-
-    BankIntegrationPISUtils.PISPaymentStatus refreshed =
-        mock(BankIntegrationPISUtils.PISPaymentStatus.class);
-    when(refreshed.getStatus()).thenReturn(BankIntegrationConstants.PIS_STATUS_EXECUTED);
-
-    try (MockedStatic<BankIntegrationUtils> bankUtilsMock = mockStatic(BankIntegrationUtils.class);
-         MockedStatic<BankIntegrationPISUtils> pisUtilsMock = mockStatic(BankIntegrationPISUtils.class);
-         MockedStatic<PISPaymentDao> pisDaoMock = mockStatic(PISPaymentDao.class);
-         MockedStatic<PISTransactionUtils> pisTxMock = mockStatic(PISTransactionUtils.class)) {
-      bankUtilsMock.when(() -> BankIntegrationUtils.getPsd2ApiKey(client)).thenReturn("api-key-1");
-      pisUtilsMock.when(() -> BankIntegrationPISUtils.showPayment("api-key-1", "se-pay-1"))
-          .thenReturn(refreshed);
-
-      NeoResponse response = PaymentRegistrationService.handlePisPaymentStatus(context);
-
-      assertEquals(200, response.getHttpStatus());
-      assertEquals(BankIntegrationConstants.PIS_STATUS_EXECUTED,
-          response.getBody().getString("status"));
-      pisUtilsMock.verify(() -> BankIntegrationPISUtils.showPayment("api-key-1", "se-pay-1"));
-      // executed => the financial transaction is created
-      pisTxMock.verify(() -> PISTransactionUtils.createFinancialTransactionIfEligible(pisPayment));
-    }
-  }
-
-  /**
-   * Verifies the short-circuit optimization: when the locally stored status is already
-   * terminal ("executed"), the handler does NOT call out to Salt Edge at all.
-   */
-  @Test
-  void testHandlePisPaymentStatusTerminalStatusSkipsRefresh() throws Exception {
-    NeoContext context = pisStatusContext("pis-2");
-
-    PisPayment pisPayment = mock(PisPayment.class);
-    when(obDal.get(PisPayment.class, "pis-2")).thenReturn(pisPayment);
-    when(pisPayment.getStatus()).thenReturn(BankIntegrationConstants.PIS_STATUS_EXECUTED);
-
-    try (MockedStatic<BankIntegrationPISUtils> pisUtilsMock =
-             mockStatic(BankIntegrationPISUtils.class)) {
-      NeoResponse response = PaymentRegistrationService.handlePisPaymentStatus(context);
-
-      assertEquals(200, response.getHttpStatus());
-      assertEquals(BankIntegrationConstants.PIS_STATUS_EXECUTED,
-          response.getBody().getString("status"));
-      pisUtilsMock.verify(() -> BankIntegrationPISUtils.showPayment(anyString(), anyString()),
-          never());
-    }
-  }
-
-  /**
-   * Verifies that a failure while refreshing from Salt Edge (e.g. the API key lookup blows
-   * up) is swallowed: the handler still returns HTTP 200 with whatever status was already
-   * stored locally before the failed refresh attempt, instead of propagating the exception.
-   */
-  @Test
-  void testHandlePisPaymentStatusRefreshFailureFallsBackToStoredStatus() throws Exception {
-    NeoContext context = pisStatusContext("pis-3");
-
-    PisPayment pisPayment = mock(PisPayment.class);
-    when(obDal.get(PisPayment.class, "pis-3")).thenReturn(pisPayment);
-    when(pisPayment.getStatus()).thenReturn("authorizing");
-
-    Client client = mock(Client.class);
-    when(obContext.getCurrentClient()).thenReturn(client);
-
-    try (MockedStatic<BankIntegrationUtils> bankUtilsMock = mockStatic(BankIntegrationUtils.class)) {
-      bankUtilsMock.when(() -> BankIntegrationUtils.getPsd2ApiKey(client))
-          .thenThrow(new RuntimeException("Salt Edge unreachable"));
-
-      NeoResponse response = PaymentRegistrationService.handlePisPaymentStatus(context);
-
-      assertEquals(200, response.getHttpStatus());
-      assertEquals("authorizing", response.getBody().getString("status"));
-    }
-  }
 }

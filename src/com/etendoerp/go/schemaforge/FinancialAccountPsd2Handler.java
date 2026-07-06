@@ -619,7 +619,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
    * Deposit} (Payment IN) is left as configured.
    * <p>
    * Judgment call: {@code FIN_PaymentMethod} has no explicit "is transfer" flag in this model —
-   * same heuristic as {@code PaymentRegistrationService.isTransferMethod}, matched here directly
+   * same heuristic as {@code PisPaymentService.isTransferMethod}, matched here directly
    * on the method name (contains "transfer"/"transferencia", case-insensitive).
    */
   private void disableAutomaticWithdrawnForTransferMethod(FIN_FinancialAccount finAcc) {

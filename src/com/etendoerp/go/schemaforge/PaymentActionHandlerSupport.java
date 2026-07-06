@@ -84,16 +84,16 @@ final class PaymentActionHandlerSupport {
       return PaymentRegistrationService.handleListCreditSources(context, isReceipt);
     }
     if (PIS_STATUS_ACTION.equals(fieldName)) {
-      return PaymentRegistrationService.handlePisPaymentStatus(context);
+      return PisPaymentService.handlePisPaymentStatus(context);
     }
     if (PIS_SUPPLIER_ACCOUNTS_ACTION.equals(fieldName)) {
-      return PaymentRegistrationService.handleListSupplierBankAccounts(context, isReceipt);
+      return PisPaymentService.handleListSupplierBankAccounts(context);
     }
     if (PIS_TEMPLATES_ACTION.equals(fieldName)) {
-      return PaymentRegistrationService.handlePisTemplates(context);
+      return PisPaymentService.handlePisTemplates();
     }
     if (PIS_CANCEL_ACTION.equals(fieldName)) {
-      return PaymentRegistrationService.handleCancelPisPayment(context);
+      return PisPaymentService.handleCancelPisPayment(context);
     }
     return null;
   }

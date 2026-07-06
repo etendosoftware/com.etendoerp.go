@@ -216,8 +216,8 @@ public class FinancialAccountHandler implements NeoHandler {
         defaults = new JSONObject();
         body.put("defaults", defaults);
       }
-      defaults.put("currency", clientCurrency.getId());
-      defaults.put("currency$_identifier", clientCurrency.getISOCode());
+      defaults.put(FIELD_CURRENCY, clientCurrency.getId());
+      defaults.put(FIELD_CURRENCY + "$_identifier", clientCurrency.getISOCode());
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("financial-account afterHandle: failed to inject client currency default", e);
