@@ -35,8 +35,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -348,6 +350,121 @@ class PaymentRegistrationServiceAdvancedTest {
     assertEquals(0, response.getBody().getInt("totalCount"));
   }
 
+  @Test
+  @DisplayName("Abono and credit sources are merged into a single date-descending list, "
+      + "interleaved by kind")
+  void testListCreditSourcesInterleavesByDateDescending() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+
+    // Abono rows: sorted by the originating credit-note/return invoice date.
+    FIN_PaymentScheduleDetail abono1 = abonoPsd("abono-1", new BigDecimal("-10.00"), "NC/001",
+        date("2026-07-02"), "Credit Memo");
+    FIN_PaymentScheduleDetail abono2 = abonoPsd("abono-2", new BigDecimal("-20.00"), "NC/002",
+        date("2026-06-30"), "Credit Memo");
+    stubAbonoQuery(Arrays.asList(abono1, abono2));
+
+    // Credit rows: sorted by the originating payment's payment date.
+    FIN_Payment credit1 = creditPayment("credit-1", "CR/001", new BigDecimal("100"),
+        new BigDecimal("0"), date("2026-07-01"));
+    FIN_Payment credit2 = creditPayment("credit-2", "CR/002", new BigDecimal("50"),
+        new BigDecimal("0"), date("2026-06-29"));
+    stubCreditQuery(Arrays.asList(credit1, credit2));
+
+    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray(ITEMS);
+    assertEquals(4, items.length());
+
+    // Expected merged order (most recent first), interleaving the two kinds:
+    // abono(07-02), credit(07-01), abono(06-30), credit(06-29) — neither a pure
+    // "all abono then all credit" nor a pure "all credit then all abono" block.
+    JSONObject first = items.getJSONObject(0);
+    assertEquals(KIND_ABONO, first.getString("kind"));
+    assertEquals("abono-1", first.getString("id"));
+
+    JSONObject second = items.getJSONObject(1);
+    assertEquals(KIND_CREDIT, second.getString("kind"));
+    assertEquals("credit-1", second.getString("id"));
+
+    JSONObject third = items.getJSONObject(2);
+    assertEquals(KIND_ABONO, third.getString("kind"));
+    assertEquals("abono-2", third.getString("id"));
+
+    JSONObject fourth = items.getJSONObject(3);
+    assertEquals(KIND_CREDIT, fourth.getString("kind"));
+    assertEquals("credit-2", fourth.getString("id"));
+  }
+
+  @Test
+  @DisplayName("A source with a null date is not lost and sorts after every dated source")
+  void testListCreditSourcesNullDateSortsLast() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+
+    FIN_PaymentScheduleDetail abonoNoDate = abonoPsd("abono-null", new BigDecimal("-15.00"),
+        "NC/003", null, "Credit Memo");
+    stubAbonoQuery(Collections.singletonList(abonoNoDate));
+
+    FIN_Payment creditDated = creditPayment("credit-dated", "CR/003", new BigDecimal("30"),
+        new BigDecimal("0"), date("2026-06-15"));
+    stubCreditQuery(Collections.singletonList(creditDated));
+
+    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray(ITEMS);
+    assertEquals(2, items.length());
+    assertEquals("credit-dated", items.getJSONObject(0).getString("id"));
+    assertEquals("abono-null", items.getJSONObject(1).getString("id"));
+  }
+
+  @Test
+  @DisplayName("With no credit sources, abono-only results stay ordered by invoice date desc")
+  void testListCreditSourcesOnlyAbonoOrderedByInvoiceDateDesc() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+
+    FIN_PaymentScheduleDetail older = abonoPsd("abono-old", new BigDecimal("-5.00"), "NC/010",
+        date("2026-06-01"), "Credit Memo");
+    FIN_PaymentScheduleDetail newer = abonoPsd("abono-new", new BigDecimal("-5.00"), "NC/011",
+        date("2026-06-20"), "Credit Memo");
+    stubAbonoQuery(Arrays.asList(older, newer));
+    stubCreditQuery(Collections.emptyList());
+
+    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray(ITEMS);
+    assertEquals(2, items.length());
+    assertEquals("abono-new", items.getJSONObject(0).getString("id"));
+    assertEquals("abono-old", items.getJSONObject(1).getString("id"));
+  }
+
+  @Test
+  @DisplayName("With no abono sources, credit-only results stay ordered by payment date desc")
+  void testListCreditSourcesOnlyCreditOrderedByPaymentDateDesc() throws Exception {
+    NeoContext context = creditSourcesContext();
+    stubInvoiceWithBp();
+
+    stubAbonoQuery(Collections.emptyList());
+
+    FIN_Payment older = creditPayment("credit-old", "CR/010", new BigDecimal("40"),
+        new BigDecimal("0"), date("2026-05-01"));
+    FIN_Payment newer = creditPayment("credit-new", "CR/011", new BigDecimal("60"),
+        new BigDecimal("0"), date("2026-05-20"));
+    stubCreditQuery(Arrays.asList(older, newer));
+
+    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray(ITEMS);
+    assertEquals(2, items.length());
+    assertEquals("credit-new", items.getJSONObject(0).getString("id"));
+    assertEquals("credit-old", items.getJSONObject(1).getString("id"));
+  }
+
   // ════════════════════════════════════════════════════════════════════════
   // handleListPaymentMethods
   // ════════════════════════════════════════════════════════════════════════
@@ -545,7 +662,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("Advanced register rejects an empty installment with no pending PSDs")
-  void testAdvancedEmptyPendingPsdsThrows() throws Exception {
+  void testAdvancedEmptyPendingPsdsThrows() {
     stubAdvancedBasics();
     stubPendingPSDs(); // empty
 
@@ -590,7 +707,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @DisplayName("confirmDraftPayment surfaces a processing error as an exception")
-  void testConfirmDraftPaymentProcessingError() throws Exception {
+  void testConfirmDraftPaymentProcessingError() {
     when(dal.get(FIN_Payment.class, NEW_PAY_ID)).thenReturn(newPayment);
     OBError error = mock(OBError.class);
     when(error.getType()).thenReturn(ERROR_TYPE);
@@ -650,6 +767,41 @@ class PaymentRegistrationServiceAdvancedTest {
     when(q.setParameter(anyString(), any())).thenReturn(q);
     when(q.setMaxResults(anyInt())).thenReturn(q);
     when(q.list()).thenReturn(result);
+  }
+
+  /** Builds a mock 'abono' (pending negative credit-memo/return) PSD, sortable by invoice date. */
+  private FIN_PaymentScheduleDetail abonoPsd(String id, BigDecimal amount, String docNo,
+      Date invoiceDate, String docTypeName) {
+    FIN_PaymentScheduleDetail psd = mock(FIN_PaymentScheduleDetail.class);
+    when(psd.getId()).thenReturn(id);
+    when(psd.getAmount()).thenReturn(amount);
+    FIN_PaymentSchedule ps = mock(FIN_PaymentSchedule.class);
+    Invoice ncInvoice = mock(Invoice.class);
+    DocumentType ncType = mock(DocumentType.class);
+    when(ncType.getName()).thenReturn(docTypeName);
+    when(ncInvoice.getDocumentNo()).thenReturn(docNo);
+    when(ncInvoice.getInvoiceDate()).thenReturn(invoiceDate);
+    when(ncInvoice.getDocumentType()).thenReturn(ncType);
+    when(ps.getInvoice()).thenReturn(ncInvoice);
+    when(psd.getInvoicePaymentSchedule()).thenReturn(ps);
+    return psd;
+  }
+
+  /** Builds a mock accumulated-credit payment, sortable by payment date. */
+  private FIN_Payment creditPayment(String id, String docNo, BigDecimal generatedCredit,
+      BigDecimal usedCredit, Date paymentDate) {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getId()).thenReturn(id);
+    when(payment.getDocumentNo()).thenReturn(docNo);
+    when(payment.getGeneratedCredit()).thenReturn(generatedCredit);
+    when(payment.getUsedCredit()).thenReturn(usedCredit);
+    when(payment.getPaymentDate()).thenReturn(paymentDate);
+    when(payment.getDescription()).thenReturn("desc");
+    return payment;
+  }
+
+  private Date date(String yyyyMMdd) throws Exception {
+    return new SimpleDateFormat("yyyy-MM-dd").parse(yyyyMMdd);
   }
 
   private FinAccPaymentMethod fapm(FIN_FinancialAccount acc, FIN_PaymentMethod pm) {
