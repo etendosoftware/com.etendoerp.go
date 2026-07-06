@@ -400,7 +400,12 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         "neo_create",
-        "Create a new record in a NEO Headless API spec.",
+        "Create a new record in a NEO Headless API spec. "
+            + "Recommended: call neo_defaults first to get the initial/base set of field values "
+            + "for this record type, then build the fields object by overriding only the values "
+            + "the user actually wants to change on top of that base — instead of asking the "
+            + "user for every field or guessing values that already have a sensible default "
+            + "(document number, dates, prices, etc.).",
         buildObjectSchema(props,
           List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS)));
   }
@@ -473,8 +478,13 @@ public class ToolRegistry {
 
     return new McpToolDefinition(
         "neo_defaults",
-        "Get default field values for creating a new record. "
-            + "Optional — neo_create auto-fills defaults, so only call this if you need to inspect default values before creating.",
+        "Get the initial/base set of field values for a new record — field types, which fields "
+            + "are required vs optional, and computed/system defaults (document number, dates, "
+            + "prices, etc.). Recommended: call this BEFORE neo_create, then use its result as "
+            + "the starting point and only override the fields the user actually wants to set — "
+            + "instead of asking the user for every value from scratch. neo_create will still "
+            + "auto-fill any field you omit, but calling this first lets you see the full base "
+            + "dataset up front.",
         buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY)));
   }
 
