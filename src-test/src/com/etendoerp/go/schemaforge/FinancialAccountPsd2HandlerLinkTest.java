@@ -80,6 +80,7 @@ public class FinancialAccountPsd2HandlerLinkTest {
   private static final String LINK_WARNING = "consent expires soon";
   private static final String ACTION_LINK = "link";
   private static final String ACTION_CREATE_AND_LINK = "createAndLink";
+  private static final String ACTION_DISCONNECT = "disconnect";
 
   private FinancialAccountPsd2Handler handler;
 
@@ -715,7 +716,129 @@ public class FinancialAccountPsd2HandlerLinkTest {
     }
   }
 
+  // ── handleDisconnect: restoreAutomaticWithdrawnForTransferMethod (ETP-4406) ─
+
+  /**
+   * When {@code disconnectFinancialAccount} succeeds and the account has a transfer-named
+   * {@code FinAccPaymentMethod} row, {@code handleDisconnect} must restore {@code Automatic Withdrawn}
+   * (Payment OUT) to {@code true} on it — the inverse of the connect-time clear — so that, with no
+   * PIS callback in play anymore, processing a payment once again auto-creates its
+   * {@code FIN_Finacc_Transaction}. {@code Automatic Deposit} (Payment IN) is left untouched.
+   */
+  @Test
+  public void testDisconnectRestoresAutomaticWithdrawnForTransferPaymentMethod() throws Exception {
+    JSONObject body = disconnectBody();
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    FIN_PaymentMethod transferMethod = mock(FIN_PaymentMethod.class);
+    when(transferMethod.getName()).thenReturn("Transferencia bancaria");
+    FinAccPaymentMethod transferFapm = mock(FinAccPaymentMethod.class);
+    when(transferFapm.getPaymentMethod()).thenReturn(transferMethod);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc))
+          .thenReturn(true);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubFinAccPaymentMethods(dal, Collections.singletonList(transferFapm));
+
+      NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(dataOf(response).getBoolean("disconnected"));
+      verify(transferFapm).setAutomaticWithdrawn(true);
+      verify(transferFapm, never()).setAutomaticDeposit(anyBoolean());
+      verify(dal).save(transferFapm);
+      verify(dal).flush();
+    }
+  }
+
+  /**
+   * On a successful disconnect, a {@code FinAccPaymentMethod} row whose payment method name does NOT
+   * contain "transfer"/"transferencia" (e.g. Cash) must be left completely untouched — no
+   * {@code Automatic Withdrawn} restore is applied to non-transfer methods.
+   */
+  @Test
+  public void testDisconnectLeavesNonTransferPaymentMethodUnchanged() throws Exception {
+    JSONObject body = disconnectBody();
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    FIN_PaymentMethod cashMethod = mock(FIN_PaymentMethod.class);
+    when(cashMethod.getName()).thenReturn("Efectivo");
+    FinAccPaymentMethod cashFapm = mock(FinAccPaymentMethod.class);
+    when(cashFapm.getPaymentMethod()).thenReturn(cashMethod);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc))
+          .thenReturn(true);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubFinAccPaymentMethods(dal, Collections.singletonList(cashFapm));
+
+      NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(dataOf(response).getBoolean("disconnected"));
+      verify(cashFapm, never()).setAutomaticWithdrawn(anyBoolean());
+      verify(cashFapm, never()).setAutomaticDeposit(anyBoolean());
+      verify(dal, never()).save(cashFapm);
+    }
+  }
+
+  /**
+   * When {@code disconnectFinancialAccount} returns {@code false} (the disconnect did not succeed),
+   * {@code handleDisconnect} must NOT restore {@code Automatic Withdrawn} — the transfer method's
+   * PIS-driven behavior stays in place because the account is still connected. The response reports
+   * {@code disconnected=false} and no {@code FinAccPaymentMethod} row is touched (the restore path,
+   * which would create a {@code FinAccPaymentMethod} criteria, is never reached).
+   */
+  @Test
+  public void testDisconnectDoesNotRestoreWhenDisconnectFails() throws Exception {
+    JSONObject body = disconnectBody();
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    FIN_PaymentMethod transferMethod = mock(FIN_PaymentMethod.class);
+    when(transferMethod.getName()).thenReturn("Transferencia bancaria");
+    FinAccPaymentMethod transferFapm = mock(FinAccPaymentMethod.class);
+    when(transferFapm.getPaymentMethod()).thenReturn(transferMethod);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc))
+          .thenReturn(false);
+
+      NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
+
+      assertEquals(200, response.getHttpStatus());
+      assertEquals(false, dataOf(response).getBoolean("disconnected"));
+      // Disconnect failed → no restore, the transfer method's Automatic Withdrawn is left as-is.
+      verify(transferFapm, never()).setAutomaticWithdrawn(anyBoolean());
+    }
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
+
+  private static JSONObject disconnectBody() throws Exception {
+    return new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
+  }
 
   private static JSONObject linkBody() throws Exception {
     return new JSONObject()

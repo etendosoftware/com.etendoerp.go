@@ -82,6 +82,11 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.service.db.DalConnectionProvider;
 
+import com.etendoerp.psd2.bank.integration.data.PisPayment;
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationPISUtils;
+import com.etendoerp.psd2.bank.integration.utils.PISPaymentDao;
+
 /**
  * Mockito unit tests for the ETP-4331 two-step Cobros/Pagos flow in
  * {@link PaymentRegistrationService}:
@@ -658,6 +663,88 @@ class PaymentRegistrationServiceAdvancedTest {
         any(), any(), eq(newPayment), eq(new BigDecimal("-50.00")), any()));
     finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
         any(), any(), eq("P"), eq(refundPayment), eq(""), anyString()));
+  }
+
+  // ════════════════════════════════════════════════════════════════════════
+  // doRegisterPaymentAdvanced - PIS (bank transfer) branch
+  // ════════════════════════════════════════════════════════════════════════
+
+  /**
+   * When {@code pis=true} and the account/method/currency are PIS-eligible, the confirm flow
+   * dispatches to {@link PisPaymentService#applyOverpaymentAndInitiatePis}: it processes the
+   * payment to PPM and initiates the Salt Edge transfer, returning the PIS payment URL, the local
+   * PIS payment id, and status "requested" on top of the base payment envelope.
+   */
+  @Test
+  @DisplayName("PIS confirm initiates the bank transfer and returns the requested PIS response")
+  @SuppressWarnings("unchecked")
+  void testAdvancedPisConfirmInitiatesBankTransfer() throws Exception {
+    stubAdvancedBasics();
+    stubPendingPSDs(new BigDecimal("100.00"));
+
+    // PIS eligibility: connected PSD2 account, transfer method, EUR invoice.
+    when(account.getPSD2ConnectionStatus())
+        .thenReturn(BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED);
+    when(method.getName()).thenReturn("Bank Transfer");
+    when(currency.getISOCode()).thenReturn("EUR");
+
+    // hasFinTransaction => 0 (no transaction created at processing time, as expected for PIS).
+    Query<Long> countQuery = mock(Query.class);
+    when(session.createQuery(anyString(), eq(Long.class))).thenReturn(countQuery);
+    when(countQuery.setParameter(anyString(), any())).thenReturn(countQuery);
+    when(countQuery.uniqueResult()).thenReturn(0L);
+
+    BankIntegrationPISUtils.PISCreatePaymentResult bridgeResult =
+        mock(BankIntegrationPISUtils.PISCreatePaymentResult.class);
+    when(bridgeResult.getPaymentId()).thenReturn("se-adv-1");
+    when(bridgeResult.getPaymentUrl()).thenReturn("https://sca.saltedge/adv");
+    PisPayment localPis = mock(PisPayment.class);
+    when(localPis.getId()).thenReturn("local-adv-1");
+
+    JSONObject body = advancedBody("100.00", CONFIRM)
+        .put("pis", true)
+        .put("pisTemplate", "SEPA")
+        .put("pisCreditorIban", "ES9121000418450200051332");
+
+    try (MockedStatic<PisPaymentBridge> bridgeMock = mockStatic(PisPaymentBridge.class);
+         MockedStatic<PISPaymentDao> pisDaoMock = mockStatic(PISPaymentDao.class)) {
+      bridgeMock.when(() -> PisPaymentBridge.initiatePisPayment(eq(newPayment), any(), any()))
+          .thenReturn(bridgeResult);
+      pisDaoMock.when(() -> PISPaymentDao.findBySaltedgePaymentId("se-adv-1")).thenReturn(localPis);
+
+      NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+          INVOICE_ID, body, true);
+
+      assertEquals(201, response.getHttpStatus());
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals("https://sca.saltedge/adv", data.getString("pisPaymentUrl"));
+      assertEquals("local-adv-1", data.getString("pisPaymentId"));
+      assertEquals("requested", data.getString("pisStatus"));
+      bridgeMock.verify(() -> PisPaymentBridge.initiatePisPayment(eq(newPayment), any(), any()));
+      // No refund path is ever taken for PIS (funds have not moved yet).
+      finAddPaymentMock.verify(
+          () -> FIN_AddPayment.createRefundPayment(any(), any(), any(), any(), any()), never());
+    }
+  }
+
+  /**
+   * A {@code pis=true} confirm against a NON-PSD2-connected account fails eligibility before any
+   * payment is processed: {@code validatePisEligibility} throws {@link OBException}.
+   */
+  @Test
+  @DisplayName("PIS confirm rejects a non-PSD2-connected account before processing")
+  void testAdvancedPisRejectsUnconnectedAccount() throws Exception {
+    stubAdvancedBasics();
+    when(account.getPSD2ConnectionStatus()).thenReturn("NC");
+    when(method.getName()).thenReturn("Bank Transfer");
+    when(currency.getISOCode()).thenReturn("EUR");
+
+    JSONObject body = advancedBody("100.00", CONFIRM).put("pis", true);
+
+    assertThrows(OBException.class,
+        () -> PaymentRegistrationService.doRegisterPaymentAdvanced(INVOICE_ID, body, true));
+    finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
+        any(), any(), anyString(), any(), anyString()), never());
   }
 
   @Test

@@ -24,40 +24,53 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
 
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Criterion;
+import org.hibernate.query.Query;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.advpaymentmngt.dao.AdvPaymentMngtDao;
+import org.openbravo.advpaymentmngt.process.FIN_AddPayment;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.common.businesspartner.BankAccount;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import org.openbravo.service.db.DalConnectionProvider;
+import org.hibernate.Session;
 
 import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 import com.etendoerp.psd2.bank.integration.data.PisPayment;
@@ -547,5 +560,248 @@ class PisPaymentServiceTest {
     when(crit.uniqueResult()).thenReturn(null);
 
     assertFalse(PisPaymentService.hasLinkedPisPayment(payment));
+  }
+
+  // ========================================================================
+  // handlePisTemplates error branch
+  // ========================================================================
+
+  /**
+   * Any failure while building the reference-list query (e.g. the DAL throws) is mapped to a
+   * 500 by the catch-all, rather than propagating out of the handler.
+   */
+  @Test
+  void testHandlePisTemplatesErrorReturns500() {
+    Language language = mock(Language.class);
+    when(language.getLanguage()).thenReturn("en_US");
+    when(obContext.getLanguage()).thenReturn(language);
+    when(obDal.createCriteria(org.openbravo.model.ad.domain.List.class))
+        .thenThrow(new RuntimeException("DAL down"));
+
+    NeoResponse response = PisPaymentService.handlePisTemplates();
+
+    assertEquals(500, response.getHttpStatus());
+  }
+
+  // ========================================================================
+  // handleCancelPisPayment generic-exception branch
+  // ========================================================================
+
+  /**
+   * A non-{@link OBException} failure during the reactivate/remove sequence is caught by the
+   * generic handler: it rolls back and returns 500 (distinct from the 400 OBException path).
+   */
+  @Test
+  void testHandleCancelPisPaymentGenericExceptionReturns500AndRollsBack() throws Exception {
+    PisPayment pisPayment = mock(PisPayment.class);
+    FIN_Payment linkedPayment = mock(FIN_Payment.class);
+    when(obDal.get(PisPayment.class, "pis-err")).thenReturn(pisPayment);
+    when(pisPayment.getStatus()).thenReturn("requested");
+    when(pisPayment.getPayment()).thenReturn(linkedPayment);
+    when(linkedPayment.getId()).thenReturn("pay-err");
+
+    try (MockedStatic<PaymentRemovalUtil> removalMock = mockStatic(PaymentRemovalUtil.class)) {
+      removalMock.when(() -> PaymentRemovalUtil.reactivate("pay-err", "R"))
+          .thenThrow(new RuntimeException("reactivation blew up"));
+
+      NeoResponse response = PisPaymentService.handleCancelPisPayment(pisIdContext("pis-err"));
+
+      assertEquals(500, response.getHttpStatus());
+      verify(obDal).rollbackAndClose();
+    }
+  }
+
+  // ========================================================================
+  // handleListSupplierBankAccounts error branch + name fallbacks
+  // ========================================================================
+
+  /** A DAL failure while listing bank accounts is mapped to a 500 by the catch-all. */
+  @Test
+  void testHandleListSupplierBankAccountsErrorReturns500() {
+    Invoice invoice = mock(Invoice.class);
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(obDal.get(Invoice.class, "inv-err")).thenReturn(invoice);
+    when(invoice.getBusinessPartner()).thenReturn(bp);
+    when(obDal.createCriteria(BankAccount.class)).thenThrow(new RuntimeException("DAL down"));
+
+    NeoResponse response =
+        PisPaymentService.handleListSupplierBankAccounts(invoiceContext("inv-err"));
+
+    assertEquals(500, response.getHttpStatus());
+  }
+
+  /**
+   * The display name for a supplier bank account falls back through name → bank name → account
+   * number: a blank name uses the bank name, and when both name and bank name are blank the
+   * account number is used.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandleListSupplierBankAccountsNameFallsBackToBankNameThenAccountNo()
+      throws JSONException {
+    Invoice invoice = mock(Invoice.class);
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(obDal.get(Invoice.class, "inv-fb")).thenReturn(invoice);
+    when(invoice.getBusinessPartner()).thenReturn(bp);
+
+    BankAccount blankNameUsesBank = mock(BankAccount.class);
+    when(blankNameUsesBank.getIBAN()).thenReturn("ES0000000000000000000001");
+    when(blankNameUsesBank.getName()).thenReturn("");
+    when(blankNameUsesBank.getBankName()).thenReturn("Banco Falso");
+
+    BankAccount blankNameAndBankUsesAccountNo = mock(BankAccount.class);
+    when(blankNameAndBankUsesAccountNo.getIBAN()).thenReturn("ES0000000000000000000002");
+    when(blankNameAndBankUsesAccountNo.getName()).thenReturn(null);
+    when(blankNameAndBankUsesAccountNo.getBankName()).thenReturn(null);
+    when(blankNameAndBankUsesAccountNo.getAccountNo()).thenReturn("ACC-777");
+
+    OBCriteria<BankAccount> crit = mock(OBCriteria.class);
+    when(obDal.createCriteria(BankAccount.class)).thenReturn(crit);
+    when(crit.add(any(Criterion.class))).thenReturn(crit);
+    when(crit.addOrderBy(anyString(), anyBoolean())).thenReturn(crit);
+    when(crit.list()).thenReturn(Arrays.asList(blankNameUsesBank, blankNameAndBankUsesAccountNo));
+
+    NeoResponse response = PisPaymentService.handleListSupplierBankAccounts(invoiceContext("inv-fb"));
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals("Banco Falso",
+        response.getBody().getJSONArray("items").getJSONObject(0).getString("name"));
+    assertEquals("ACC-777",
+        response.getBody().getJSONArray("items").getJSONObject(1).getString("name"));
+  }
+
+  // ========================================================================
+  // applyOverpaymentAndInitiatePis tests
+  // ========================================================================
+
+  /** Stubs {@code OBDal.getSession()...uniqueResult()} for {@code hasFinTransaction}. */
+  @SuppressWarnings("unchecked")
+  private void stubFinTransactionCount(Long count) {
+    Session session = mock(Session.class);
+    Query<Long> query = mock(Query.class);
+    when(obDal.getSession()).thenReturn(session);
+    when(session.createQuery(anyString(), eq(Long.class))).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.uniqueResult()).thenReturn(count);
+  }
+
+  private FIN_Payment processedPaymentMock() {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(payment.getId()).thenReturn("pay-pis");
+    when(payment.getDocumentNo()).thenReturn("PAY-PIS-1");
+    when(payment.getAmount()).thenReturn(new BigDecimal("100.00"));
+    when(payment.getStatus()).thenReturn("PPM");
+    when(payment.isProcessed()).thenReturn(true);
+    return payment;
+  }
+
+  /**
+   * The non-overpaid path ({@code funds == invoiceApplied}): no credit PSD is created, the
+   * payment is processed to PPM, the bank transfer is initiated through the PSD2 bridge, and the
+   * response carries the Salt Edge payment URL, the local PIS payment id, and status "requested".
+   */
+  @Test
+  void testApplyOverpaymentAndInitiatePisNonOverpaidReturnsRequestedResponse() throws Exception {
+    FIN_Payment payment = processedPaymentMock();
+    AdvPaymentMngtDao dao = mock(AdvPaymentMngtDao.class);
+    Organization org = mock(Organization.class);
+    JSONObject pisInput = new JSONObject().put("template", "SEPA");
+
+    OBError okResult = mock(OBError.class);
+    when(okResult.getType()).thenReturn("Success");
+
+    BankIntegrationPISUtils.PISCreatePaymentResult bridgeResult =
+        mock(BankIntegrationPISUtils.PISCreatePaymentResult.class);
+    when(bridgeResult.getPaymentId()).thenReturn("se-pay-99");
+    when(bridgeResult.getPaymentUrl()).thenReturn("https://sca.saltedge/authorize");
+
+    PisPayment localPis = mock(PisPayment.class);
+    when(localPis.getId()).thenReturn("local-pis-99");
+
+    stubFinTransactionCount(0L);
+
+    try (MockedStatic<NeoDefaultsService> defaultsMock = mockStatic(NeoDefaultsService.class);
+         MockedStatic<RequestContext> reqCtxMock = mockStatic(RequestContext.class);
+         MockedStatic<FIN_AddPayment> addPayMock = mockStatic(FIN_AddPayment.class);
+         MockedStatic<PisPaymentBridge> bridgeMock = mockStatic(PisPaymentBridge.class);
+         MockedStatic<PISPaymentDao> pisDaoMock = mockStatic(PISPaymentDao.class);
+         MockedConstruction<DalConnectionProvider> connCtor =
+             mockConstruction(DalConnectionProvider.class)) {
+      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenReturn(mock(VariablesSecureApp.class));
+      reqCtxMock.when(RequestContext::get).thenReturn(mock(RequestContext.class));
+      addPayMock.when(() -> FIN_AddPayment.processPayment(any(), any(), anyString(), any(),
+          anyString())).thenReturn(okResult);
+      bridgeMock.when(() -> PisPaymentBridge.initiatePisPayment(eq(payment), eq(pisInput), any()))
+          .thenReturn(bridgeResult);
+      pisDaoMock.when(() -> PISPaymentDao.findBySaltedgePaymentId("se-pay-99"))
+          .thenReturn(localPis);
+
+      NeoResponse response = PisPaymentService.applyOverpaymentAndInitiatePis(payment, dao, org,
+          new BigDecimal("100.00"), new BigDecimal("100.00"), pisInput, null);
+
+      assertEquals(201, response.getHttpStatus());
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals("https://sca.saltedge/authorize", data.getString("pisPaymentUrl"));
+      assertEquals("local-pis-99", data.getString("pisPaymentId"));
+      assertEquals("requested", data.getString("pisStatus"));
+      // No leftover => no credit PSD created.
+      verify(dao, never()).getNewPaymentScheduleDetail(any(), any());
+    }
+  }
+
+  /**
+   * The overpaid + "refund" path: the leftover is registered as a credit PSD (refund is skipped
+   * for PIS because the funds have not moved yet), the payment is still processed and the bank
+   * transfer initiated. The credit detail creation is what proves the overpaid branch ran.
+   */
+  @Test
+  void testApplyOverpaymentAndInitiatePisOverpaidRefundKeepsLeftoverAsCredit() throws Exception {
+    FIN_Payment payment = processedPaymentMock();
+    AdvPaymentMngtDao dao = mock(AdvPaymentMngtDao.class);
+    Organization org = mock(Organization.class);
+    JSONObject pisInput = new JSONObject().put("template", "SEPA");
+
+    OBError okResult = mock(OBError.class);
+    when(okResult.getType()).thenReturn("Success");
+
+    BankIntegrationPISUtils.PISCreatePaymentResult bridgeResult =
+        mock(BankIntegrationPISUtils.PISCreatePaymentResult.class);
+    when(bridgeResult.getPaymentId()).thenReturn("se-pay-ov");
+    when(bridgeResult.getPaymentUrl()).thenReturn("https://sca.saltedge/ov");
+
+    // A financial transaction already exists here => exercises the hasFinTransaction warning too.
+    stubFinTransactionCount(1L);
+
+    try (MockedStatic<NeoDefaultsService> defaultsMock = mockStatic(NeoDefaultsService.class);
+         MockedStatic<RequestContext> reqCtxMock = mockStatic(RequestContext.class);
+         MockedStatic<FIN_AddPayment> addPayMock = mockStatic(FIN_AddPayment.class);
+         MockedStatic<PisPaymentBridge> bridgeMock = mockStatic(PisPaymentBridge.class);
+         MockedStatic<PISPaymentDao> pisDaoMock = mockStatic(PISPaymentDao.class);
+         MockedConstruction<DalConnectionProvider> connCtor =
+             mockConstruction(DalConnectionProvider.class)) {
+      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenReturn(mock(VariablesSecureApp.class));
+      reqCtxMock.when(RequestContext::get).thenReturn(mock(RequestContext.class));
+      addPayMock.when(() -> FIN_AddPayment.processPayment(any(), any(), anyString(), any(),
+          anyString())).thenReturn(okResult);
+      bridgeMock.when(() -> PisPaymentBridge.initiatePisPayment(eq(payment), eq(pisInput), any()))
+          .thenReturn(bridgeResult);
+      // findBySaltedgePaymentId returns null here => localPisPaymentId stays null in the response.
+      pisDaoMock.when(() -> PISPaymentDao.findBySaltedgePaymentId("se-pay-ov")).thenReturn(null);
+
+      NeoResponse response = PisPaymentService.applyOverpaymentAndInitiatePis(payment, dao, org,
+          new BigDecimal("150.00"), new BigDecimal("100.00"), pisInput, "refund");
+
+      assertEquals(201, response.getHttpStatus());
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals("https://sca.saltedge/ov", data.getString("pisPaymentUrl"));
+      assertEquals("requested", data.getString("pisStatus"));
+      assertFalse(data.has("pisPaymentId") && !data.isNull("pisPaymentId"));
+      // leftover = 150 - 100 = 50 kept as generated credit (never refunded).
+      verify(dao).getNewPaymentScheduleDetail(eq(org), eq(new BigDecimal("50.00")));
+      verify(dao).getNewPaymentDetail(eq(payment), any(), eq(new BigDecimal("50.00")),
+          eq(BigDecimal.ZERO), eq(false), any());
+    }
   }
 }
