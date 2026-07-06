@@ -92,9 +92,6 @@ final class PaymentRegistrationService {
   private static final String KEY_TOTAL_COUNT = "totalCount";
   private static final String KEY_RECEIPT = "receipt";
   private static final String KEY_LABEL = "label";
-
-  // PIS (bank transfer via Salt Edge) — only the flag used by this class' own registration flow;
-  // the rest of the PIS request/response keys live in PisPaymentService.
   private static final String FIELD_PIS = "pis";
   private static final String KEY_VIA_PIS = "viaPis";
 
