@@ -44,12 +44,17 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
@@ -67,6 +72,7 @@ import org.openbravo.model.common.invoice.ReversedInvoice;
  *   <li>{@code enrichOriginInvoice}</li>
  *   <li>{@code enrichInvoiceSubtype}</li>
  *   <li>{@code enrichDocTypeLocked}</li>
+ *   <li>{@code completeInvoiceIfNeeded} (ETP-4388 — Verifactu/ProcessInvoiceHook dispatch fix)</li>
  * </ul>
  */
 public class AbstractInvoiceHeaderHandlerTest {
@@ -988,6 +994,262 @@ public class AbstractInvoiceHeaderHandlerTest {
           .thenReturn(Collections.emptyMap());
 
       assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+    }
+  }
+
+  // ── completeInvoiceIfNeeded — ETP-4388 ───────────────────────────────────────
+
+  /**
+   * Not a completion request (plain GET) → returns null immediately, no CDI/DB interaction.
+   */
+  @Test
+  public void completeInvoiceIfNeeded_nonCompleteAction_returnsNull() {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-1")
+        .build();
+    assertNull(AbstractInvoiceHeaderHandler.completeInvoiceIfNeeded(ctx));
+  }
+
+  /**
+   * PATCH with documentAction != "CO" is not a completion request → returns null.
+   */
+  @Test
+  public void completeInvoiceIfNeeded_docActionNotCO_returnsNull() throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "RE");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-1")
+        .requestBody(body)
+        .build();
+    assertNull(AbstractInvoiceHeaderHandler.completeInvoiceIfNeeded(ctx));
+  }
+
+  /**
+   * Completion action with a blank record id → 400, no CDI/DB interaction attempted.
+   */
+  @Test
+  public void completeInvoiceIfNeeded_completeActionWithBlankRecordId_returns400() throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("")
+        .requestBody(body)
+        .build();
+
+    NeoResponse result = AbstractInvoiceHeaderHandler.completeInvoiceIfNeeded(ctx);
+
+    assertNotNull(result);
+    assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+  }
+
+  /**
+   * Completion action with a null record id → 400.
+   */
+  @Test
+  public void completeInvoiceIfNeeded_completeActionWithNullRecordId_returns400() throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId(null)
+        .requestBody(body)
+        .build();
+
+    NeoResponse result = AbstractInvoiceHeaderHandler.completeInvoiceIfNeeded(ctx);
+
+    assertNotNull(result);
+    assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+  }
+
+  /**
+   * CRUD PATCH completion action: obtains {@link ProcessInvoiceUtil} via
+   * {@link WeldUtils#getInstanceFromStaticBeanManager}, calls {@code process(...)} with the
+   * expected args (id, "CO", empty void-date/supplier-reference defaults, vars, conn), and
+   * translates a success {@link OBError} into a 200 response.
+   */
+  @Test
+  public void completeInvoiceIfNeeded_success_invokesProcessInvoiceUtilAndReturnsOk() throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-complete-1")
+        .requestBody(body)
+        .obContext(null)
+        .build();
+
+    VariablesSecureApp vars = new VariablesSecureApp("u", "c", "o", "r", "en_US");
+    OBError success = new OBError();
+    success.setType("Success");
+    success.setMessage("Document completed");
+
+    ProcessInvoiceUtil processInvoiceUtil = mock(ProcessInvoiceUtil.class);
+    when(processInvoiceUtil.process(
+        eq("inv-complete-1"), eq("CO"), eq(""), eq(""), eq(""), any(), any()))
+        .thenReturn(success);
+
+    try (MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+
+      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any())).thenReturn(vars);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Process process = mock(Process.class);
+      when(dal.get(Process.class, "111")).thenReturn(process);
+
+      NeoResponse result = AbstractInvoiceHeaderHandler.completeInvoiceIfNeeded(ctx);
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      verify(processInvoiceUtil).process(
+          eq("inv-complete-1"), eq("CO"), eq(""), eq(""), eq(""), eq(vars), any());
+    }
+  }
+
+  /**
+   * An error {@link OBError} (e.g. a business-rule failure inside {@code ProcessInvoiceUtil})
+   * is translated into a 400 error response carrying the OBError message.
+   */
+  @Test
+  public void completeInvoiceIfNeeded_errorOBError_returns400WithMessage() throws Exception {
+    JSONObject fieldValues = new JSONObject().put("documentAction", "CO");
+    JSONObject body = new JSONObject().put("fieldValues", fieldValues);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("documentAction")
+        .recordId("inv-complete-err")
+        .requestBody(body)
+        .build();
+
+    VariablesSecureApp vars = new VariablesSecureApp("u", "c", "o", "r", "en_US");
+    OBError error = new OBError();
+    error.setType("Error");
+    error.setTitle("Error");
+    error.setMessage("BP currency is not set");
+
+    ProcessInvoiceUtil processInvoiceUtil = mock(ProcessInvoiceUtil.class);
+    when(processInvoiceUtil.process(
+        eq("inv-complete-err"), eq("CO"), eq(""), eq(""), eq(""), any(), any()))
+        .thenReturn(error);
+
+    try (MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+
+      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any())).thenReturn(vars);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Process.class, "111")).thenReturn(mock(Process.class));
+
+      NeoResponse result = AbstractInvoiceHeaderHandler.completeInvoiceIfNeeded(ctx);
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertTrue(result.getBody().toString().contains("BP currency is not set"));
+    }
+  }
+
+  /**
+   * An unexpected exception while resolving CDI/session state (e.g. Weld unavailable) is caught
+   * and translated into a 500 — never propagated to the caller.
+   */
+  @Test
+  public void completeInvoiceIfNeeded_unexpectedException_returns500() throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-complete-boom")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class)) {
+      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenThrow(new RuntimeException("session unavailable"));
+
+      NeoResponse result = AbstractInvoiceHeaderHandler.completeInvoiceIfNeeded(ctx);
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, result.getHttpStatus());
+    }
+  }
+
+  /**
+   * The ACTION endpoint (POST /action/documentAction with fieldValues.documentAction=CO — the
+   * shape sent by the draft-mode confirm button) also triggers completion, using the same
+   * detection as {@code validateLineQtyBeforeComplete}.
+   */
+  @Test
+  public void completeInvoiceIfNeeded_actionEndpointFieldValuesShape_triggersCompletion()
+      throws Exception {
+    JSONObject fieldValues = new JSONObject().put("documentAction", "CO");
+    JSONObject body = new JSONObject().put("fieldValues", fieldValues);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("documentAction")
+        .recordId("inv-action-complete")
+        .requestBody(body)
+        .build();
+
+    VariablesSecureApp vars = new VariablesSecureApp("u", "c", "o", "r", "en_US");
+    OBError success = new OBError();
+    success.setType("Success");
+
+    ProcessInvoiceUtil processInvoiceUtil = mock(ProcessInvoiceUtil.class);
+    when(processInvoiceUtil.process(
+        eq("inv-action-complete"), eq("CO"), eq(""), eq(""), eq(""), any(), any()))
+        .thenReturn(success);
+
+    try (MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+
+      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any())).thenReturn(vars);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Process.class, "111")).thenReturn(mock(Process.class));
+
+      NeoResponse result = AbstractInvoiceHeaderHandler.completeInvoiceIfNeeded(ctx);
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+    }
+  }
+
+  /**
+   * Regression safety: a normal (non-completion) CRUD PATCH does not attempt CDI/process
+   * resolution at all — verifies no interaction with WeldUtils occurs.
+   */
+  @Test
+  public void completeInvoiceIfNeeded_regularPatchWithoutDocumentAction_returnsNullNoWeldLookup()
+      throws Exception {
+    JSONObject body = new JSONObject().put("invoiceDate", "2026-07-03");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-regular")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      assertNull(AbstractInvoiceHeaderHandler.completeInvoiceIfNeeded(ctx));
+      weldMock.verifyNoInteractions();
     }
   }
 }

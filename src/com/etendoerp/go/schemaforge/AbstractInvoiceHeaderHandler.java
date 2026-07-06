@@ -28,17 +28,24 @@ import java.util.Map;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
+import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
+import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.database.ConnectionProvider;
+import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.ReversedInvoice;
+import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * Abstract base class for AP and AR invoice header handlers.
@@ -345,6 +352,91 @@ public abstract class AbstractInvoiceHeaderHandler {
    */
   protected void enrichDocTypeLocked(JSONObject rec) throws Exception {
     rec.put("docTypeLocked", true);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Completion (documentAction=CO) — routes through the ProcessInvoiceHook chain
+  // ---------------------------------------------------------------------------
+
+  /** AD_Process_ID for {@code C_Invoice.DocAction}, used internally by {@link ProcessInvoiceUtil}. */
+  private static final String COMPLETE_PROCESS_ID_INVOICE = "111";
+
+  /**
+   * Runs the real core invoice-completion process ({@link ProcessInvoiceUtil#process}) when the
+   * request is a completion action (documentAction=CO), short-circuiting NEO's default dispatch.
+   *
+   * <p>For {@code C_Invoice.DocAction} (AD_Process 111, a raw DB procedure with no
+   * {@code JavaClassName}), NEO's generic dispatch runs {@code C_Invoice_Post0} directly via
+   * {@code CallProcess} and never touches {@link ProcessInvoiceUtil} or the
+   * {@code ProcessInvoiceHook} CDI extension point — so hooks such as the Verifactu (and TBAI)
+   * billing-registration hooks never fire when an invoice is completed through NEO, even though
+   * they fire correctly from the classic UI. This method restores that behavior for NEO.
+   *
+   * <p><b>Must be obtained through Weld.</b> {@link ProcessInvoiceUtil} is a plain class with an
+   * {@code @Inject @Any Instance<ProcessInvoiceHook> hooks} field; that field is only populated
+   * when the instance itself is CDI-managed. Calling {@code new ProcessInvoiceUtil()} would leave
+   * {@code hooks} empty and silently skip every hook — reproducing the exact bug this method
+   * fixes, just moved one layer down. {@link WeldUtils#getInstanceFromStaticBeanManager} returns
+   * a fully Weld-managed reference, so {@code hooks} is populated correctly.
+   *
+   * <p>Call this AFTER {@link #validateLineQtyBeforeComplete(NeoContext)} AND AFTER
+   * {@link AbstractOrderHeaderHandler#applyTotalDiscountBeforeComplete} in {@code handle()}, so
+   * (1) pre-completion validation can still block the request before the real process runs, and
+   * (2) the total-discount line already reflects the final set of product lines before it is
+   * read/posted by {@link ProcessInvoiceUtil#process}. Calling this BEFORE the discount
+   * recalculation would complete the document with a stale or missing discount line.
+   *
+   * <p><b>Session-lifecycle note (deliberate divergence):</b> unlike every other handler in this
+   * module — which only {@code .flush()} the DAL session and leave the final commit to the
+   * request-scoped {@code DalThreadCleaner} — {@link ProcessInvoiceUtil#process} internally calls
+   * {@code OBDal.getInstance().commitAndClose()} (success) / {@code .rollbackAndClose()} (error),
+   * fully closing the current Hibernate session mid-request. This mirrors classic UI behavior
+   * (the method is shared with the classic completion path) and is required for its internal
+   * {@code ProcessInstance}/{@code CallProcess} bookkeeping. It is safe here because the very next
+   * statement performs a DAL read ({@code OBDal.getInstance().get(Process.class, ...)}), which
+   * transparently reopens the session — the same characteristic already relied upon by
+   * {@code GlJournalHeaderHandler#completeJournal} via {@code FIN_AddPaymentFromJournal}. Do not
+   * remove or reorder that read without re-verifying this assumption.
+   *
+   * @param context the current NeoContext
+   * @return a {@link NeoResponse} translating the completion result, or {@code null} if this is
+   *     not a completion request (caller should continue to the default dispatch)
+   */
+  protected static NeoResponse completeInvoiceIfNeeded(NeoContext context) {
+    if (!isInvoiceCompleteAction(context)) {
+      return null;
+    }
+    String invoiceId = context.getRecordId();
+    if (StringUtils.isBlank(invoiceId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Missing invoice record id for completion");
+    }
+    try {
+      VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(context.getObContext());
+      // Plain DalConnectionProvider, not wrapped in a RequestContext/pushRequestContextVars scope
+      // (the pattern used elsewhere in NeoProcessService.java for classic-code invocations):
+      // neither the Verifactu nor the TBAI ProcessInvoiceHook reads RequestContext today, so this
+      // is a non-issue in practice. Revisit if a future hook needs request-scoped context.
+      ConnectionProvider conn = new DalConnectionProvider(false);
+      ProcessInvoiceUtil processInvoiceUtil =
+          WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class);
+      // Void-date/supplier-reference params are only consulted for the void action (docAction RC).
+      // ProcessInvoiceUtil calls .isEmpty() on the date strings unconditionally, so they must be
+      // non-null. Empty strings are the correct null-safe default for a normal "CO" completion.
+      OBError result = processInvoiceUtil.process(invoiceId, "CO", "", "", "", vars, conn);
+      Process process = OBDal.getInstance().get(Process.class, COMPLETE_PROCESS_ID_INVOICE);
+      if (process == null) {
+        log.error("[INVOICE-COMPLETE] Process record {} not found", COMPLETE_PROCESS_ID_INVOICE);
+        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Completion process configuration missing");
+      }
+      return NeoProcessService.translateClassicResult(result, process);
+    } catch (Exception e) {
+      log.error("[INVOICE-COMPLETE] Completion failed for invoice {}: {}",
+          invoiceId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Invoice completion failed: " + e.getMessage());
+    }
   }
 
   // ---------------------------------------------------------------------------
