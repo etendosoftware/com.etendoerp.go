@@ -67,6 +67,9 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   /** Generic-organization id; client-level chart records and their tree nodes live here. */
   private static final String GENERIC_ORG_ID = "0";
 
+  /** Native-query bind-parameter name for the target client id, reused across this class's SQL. */
+  private static final String PARAM_CLIENT_ID = "clientId";
+
   /**
    * Source AD_Tree id of GOClient's chart-of-accounts (EV) tree as it ships in the bundled
    * {@code AD_TREENODE.xml}. The hierarchy is read from this tree only; the org-specific orphan tree
@@ -341,7 +344,7 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
         .createNativeQuery(ELEMENT_TREENODE_SQL)
         .setParameter("treeId", treeId)
         .setParameter("nodeId", nodeId)
-        .setParameter("clientId", clientId)
+        .setParameter(PARAM_CLIENT_ID, clientId)
         .setParameter("parentId", parentId)
         .setParameter("seqno", seqno)
         .executeUpdate();
@@ -543,6 +546,8 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
     String clientId = client.getId();
     String schemaId = ledger.getId();
     runEntityAcctInsert(BP_GROUP_ACCT_SQL, clientId, schemaId);
+    ensureAcreedorPrepaymentAccount(clientId, schemaId);
+    overrideAcreedorGroupAccounts(clientId, schemaId);
     runEntityAcctInsert(PRODUCT_CATEGORY_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(BP_CUSTOMER_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(BP_VENDOR_ACCT_SQL, clientId, schemaId);
@@ -550,11 +555,117 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
     runEntityAcctInsert(TAX_ACCT_SQL, clientId, schemaId);
   }
 
+  /**
+   * Overrides the "Acreedor" business-partner group's posting accounts (Gap A2 refinement) with the
+   * three dedicated accounts requested for that group, instead of leaving it on the generic
+   * {@code C_ACCTSCHEMA_DEFAULT} values that {@link #runEntityAcctInsert(String, String, String)}
+   * just inserted for {@code BP_GROUP_ACCT_SQL}. Runs right after that call, in the same {@link #wire}
+   * transaction.
+   *
+   * <p>The three accounts wired here:
+   * <ul>
+   *   <li>{@code v_liability_acct} ("Vendor Liability" / "Cuenta acreedor") → account {@code 41000000}</li>
+   *   <li>{@code notinvoicedreceipts_acct} ("Non-Invoiced Receipts" / "Recibos no facturados de
+   *       acreedor") → account {@code 41090000}</li>
+   *   <li>{@code v_prepayment_acct} ("Vendor Prepayment" / "Anticipo de acreedores") → account
+   *       {@code 41700000}</li>
+   * </ul>
+   *
+   * <p><b>Column-choice note:</b> the second account uses {@code notinvoicedreceipts_acct} ("Recibos
+   * no facturados" — Non-Invoiced Material Receipts), NOT {@code notinvoicedreceivables_acct}
+   * ("Cuenta pendiente no facturable" — Non-Invoiced Receivables, an AR-side concept). An earlier
+   * revision of this method wired the latter by mistake; verified via {@code ad_element}/
+   * {@code ad_element_trl} labels that {@code notinvoicedreceipts_acct} is the correct AP/creditor-side
+   * column, matching what the sibling {@code R9-bp-category-seed} corrective data-fix already uses.
+   * The third account uses {@code v_prepayment_acct} ("Vendor Prepayment" / "Pagos por adelantado del
+   * proveedor"), NOT {@code v_liability_services_acct} ("Vendor Service Liability" / "Pasivo de
+   * servicio del proveedor" — a second liability slot for service-type vendor invoices, unrelated to
+   * an advance). {@code v_prepayment_acct} is literally "advance payment to a vendor", the correct
+   * semantic fit for "Anticipo de acreedores"; confirmed empirically that
+   * {@code C_ACCTSCHEMA_DEFAULT} otherwise defaults it to a generic long-term-payables account, not an
+   * advances account, so this override is meaningful rather than a no-op.
+   *
+   * <p>Account {@code 41700000} ("Anticipos a acreedores") itself is created earlier in the {@link #wire}
+   * chain by {@link #ensureAcreedorPrepaymentAccount(String, String)}, mirroring the existing
+   * {@code 407}/{@code 4070}/{@code 40700000} ("Anticipos a proveedores") chain.
+   *
+   * <p>Accounts are resolved per-client via {@code C_ValidCombination} joined by account {@code value}
+   * against the tenant's OWN accounting schema — never a hardcoded GOClient-specific combination id —
+   * so this works for every tenant's own copy of the imported chart, not just the template client.
+   * The update is a no-op (0 rows) when the tenant has no "Acreedor" group, no {@code C_BP_Group_Acct}
+   * row yet for this schema (should not happen given the call order), or any account code is missing
+   * from the tenant's chart; all of those are defensively guarded rather than assumed.
+   */
+  protected void overrideAcreedorGroupAccounts(String clientId, String schemaId) {
+    int rows = OBDal.getInstance().getSession()
+        .createNativeQuery(ACREEDOR_GROUP_ACCT_OVERRIDE_SQL)
+        .setParameter(PARAM_CLIENT_ID, clientId)
+        .setParameter("schemaId", schemaId)
+        .setParameter("liabilityAcctValue", ACREEDOR_LIABILITY_ACCT_VALUE)
+        .setParameter("notInvoicedReceivablesAcctValue", ACREEDOR_NOT_INVOICED_RECEIVABLES_ACCT_VALUE)
+        .setParameter("prepaymentAcctValue", ACREEDOR_PREPAYMENT_ACCT_VALUE)
+        .executeUpdate();
+    if (rows > 0) {
+      if (log.isDebugEnabled()) {
+        log.debug("Overrode Acreedor group posting accounts for client {}", clientId);
+      }
+    } else {
+      // Silent 0-row outcome previously masked a real defect (client D94AED60C3E0494AAFD44B8A05BB5CFC,
+      // "acreedortest": the 41700000 combination did not exist yet when this ran, so the whole
+      // 3-column UPDATE no-opped). Surface it so a future recurrence is diagnosable instead of only
+      // discoverable by manually inspecting C_BP_Group_Acct on a live tenant.
+      log.warn("Acreedor group posting-account override affected 0 rows for client {}; the group, its"
+          + " C_BP_Group_Acct row, or one of the 3 target accounts' C_ValidCombination may be missing",
+          clientId);
+    }
+  }
+
+  /**
+   * Creates the "Anticipos a acreedores" account chain ({@code 417} → {@code 4170} → {@code 41700000})
+   * under the tenant's own AC-dimension element, mirroring the bundled "Anticipos a proveedores"
+   * ({@code 407} → {@code 4070} → {@code 40700000}) chain one-for-one — this is the onboarding-side
+   * twin of the {@code R9-bp-category-seed} corrective data-fix's Step 2b/2c.
+   *
+   * <p>Only the element actually wired to {@code ledger} via {@code C_AcctSchema_Element}
+   * ({@code elementtype='AC'}) is used — never a hardcoded GOClient element id — so this places the
+   * new account exactly where {@link #resolveTenantElementValueTree} / {@link #wireAccountElementTree}
+   * already expect it. Inserting the {@code elementlevel='S'} leaf fires the standard core
+   * {@code c_elementvalue_trg()} trigger, which is DESIGNED to auto-create the row's
+   * {@code C_VALIDCOMBINATION} for this schema — the same trigger-based defaulting
+   * {@link #overrideAcreedorGroupAccounts} relies on for {@code C_BP_Group_Acct} via
+   * {@code c_bp_group_trg()}. In practice this cascade is NOT reliably visible across this
+   * onboarding chain's several sequential native-query calls (confirmed on a real tenant — see
+   * {@link #ACREEDOR_PREPAYMENT_VALIDCOMBINATION_INSERT_SQL}), so this method ALSO defensively
+   * inserts the combination itself, idempotent against the same key the trigger uses. The trigger
+   * also auto-attaches an {@code AD_TREENODE} row to the tree ROOT; this method re-parents the three
+   * new nodes to mirror the sibling {@code 407}/{@code 4070}/{@code 40700000} nodes afterward.
+   *
+   * <p>No-op when the tenant has no {@code 407} sibling to mirror (defensive; should not happen for a
+   * GOClient-derived tenant) or when the account already exists (guarded by the same
+   * {@code C_ELEMENTVALUE_VALUE} UNIQUE constraint the corrective fix relies on).
+   */
+  protected void ensureAcreedorPrepaymentAccount(String clientId, String schemaId) {
+    OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_GROUP_INSERT_SQL)
+        .setParameter(PARAM_CLIENT_ID, clientId).executeUpdate();
+    OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_SUBGROUP_INSERT_SQL)
+        .setParameter(PARAM_CLIENT_ID, clientId).executeUpdate();
+    OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_LEAF_INSERT_SQL)
+        .setParameter(PARAM_CLIENT_ID, clientId).executeUpdate();
+    OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_VALIDCOMBINATION_INSERT_SQL)
+        .setParameter(PARAM_CLIENT_ID, clientId).executeUpdate();
+    OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_GROUP_REPARENT_SQL)
+        .setParameter(PARAM_CLIENT_ID, clientId).executeUpdate();
+    OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_SUBGROUP_REPARENT_SQL)
+        .setParameter(PARAM_CLIENT_ID, clientId).executeUpdate();
+    OBDal.getInstance().getSession().createNativeQuery(ACREEDOR_PREPAYMENT_LEAF_REPARENT_SQL)
+        .setParameter(PARAM_CLIENT_ID, clientId).executeUpdate();
+  }
+
   /** Runs one {@code INSERT … SELECT} posting-account statement and logs the rows created. */
   protected void runEntityAcctInsert(String sql, String clientId, String schemaId) {
     int rows = OBDal.getInstance().getSession()
         .createNativeQuery(sql)
-        .setParameter("clientId", clientId)
+        .setParameter(PARAM_CLIENT_ID, clientId)
         .setParameter("schemaId", schemaId)
         .executeUpdate();
     if (rows > 0 && log.isDebugEnabled()) {
@@ -567,6 +678,184 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   // 11). Named params :clientId / :schemaId are bound as values; ad_org_id is inherited from each
   // source entity; PKs are minted with get_uuid(); NOT EXISTS makes each statement idempotent.
   // ---------------------------------------------------------------------------------------------
+
+  /** {@code C_BP_Group.VALUE} of the "Acreedor" group whose accounts get overridden. */
+  private static final String ACREEDOR_GROUP_VALUE = "Acreedor";
+
+  /** Account code for "Vendor Liability" / "Cuenta acreedor". */
+  private static final String ACREEDOR_LIABILITY_ACCT_VALUE = "41000000";
+
+  /**
+   * Account code for "Non-Invoiced Receipts" / "Recibos no facturados de acreedor". Note: this maps
+   * to column {@code notinvoicedreceipts_acct}, NOT {@code notinvoicedreceivables_acct} — see the
+   * column-choice note on {@link #overrideAcreedorGroupAccounts}.
+   */
+  private static final String ACREEDOR_NOT_INVOICED_RECEIVABLES_ACCT_VALUE = "41090000";
+
+  /** Account code for "Vendor Prepayment" / "Anticipo de acreedores" ({@code 417}/{@code 4070} chain leaf). */
+  private static final String ACREEDOR_PREPAYMENT_ACCT_VALUE = "41700000";
+
+  /**
+   * Overrides {@code v_liability_acct}, {@code notinvoicedreceipts_acct} and {@code v_prepayment_acct}
+   * on the tenant's "Acreedor" {@code C_BP_Group_Acct} row for {@code :schemaId}, resolving all three
+   * accounts by {@code value} against the tenant's OWN {@code C_ValidCombination} rows (never a
+   * hardcoded cross-tenant combination id). No-op (0 rows) when the group, its acct row, or any
+   * account value is missing for this tenant/schema — all defensively guarded.
+   */
+  private static final String ACREEDOR_GROUP_ACCT_OVERRIDE_SQL =
+      "UPDATE c_bp_group_acct a"
+      + " SET v_liability_acct = liability.c_validcombination_id,"
+      + "     notinvoicedreceipts_acct = notinvoiced.c_validcombination_id,"
+      + "     v_prepayment_acct = prepayment.c_validcombination_id"
+      + " FROM c_bp_group g,"
+      + "   c_validcombination liability, c_elementvalue liability_ev,"
+      + "   c_validcombination notinvoiced, c_elementvalue notinvoiced_ev,"
+      + "   c_validcombination prepayment, c_elementvalue prepayment_ev"
+      + " WHERE a.c_bp_group_id = g.c_bp_group_id"
+      + "   AND a.c_acctschema_id = :schemaId"
+      + "   AND g.ad_client_id = :clientId"
+      + "   AND g.value = '" + ACREEDOR_GROUP_VALUE + "'"
+      + "   AND liability.ad_client_id = :clientId"
+      + "   AND liability.c_acctschema_id = :schemaId"
+      + "   AND liability.account_id = liability_ev.c_elementvalue_id"
+      + "   AND liability_ev.value = :liabilityAcctValue"
+      + "   AND notinvoiced.ad_client_id = :clientId"
+      + "   AND notinvoiced.c_acctschema_id = :schemaId"
+      + "   AND notinvoiced.account_id = notinvoiced_ev.c_elementvalue_id"
+      + "   AND notinvoiced_ev.value = :notInvoicedReceivablesAcctValue"
+      + "   AND prepayment.ad_client_id = :clientId"
+      + "   AND prepayment.c_acctschema_id = :schemaId"
+      + "   AND prepayment.account_id = prepayment_ev.c_elementvalue_id"
+      + "   AND prepayment_ev.value = :prepaymentAcctValue";
+
+  // ---------------------------------------------------------------------------------------------
+  // "Anticipos a acreedores" (417 -> 4170 -> 41700000) element chain, mirroring the bundled
+  // "Anticipos a proveedores" (407 -> 4070 -> 40700000) chain one-for-one. Onboarding-side twin of
+  // R9-bp-category-seed's Step 2b/2c. Only :clientId is bound; the element is resolved dynamically
+  // via C_AcctSchema_Element (elementtype='AC') for the tenant's own schema(s) -- never a hardcoded
+  // GOClient element id. accounttype/accountsign are COPIED from the matching 407/4070/40700000
+  // sibling row. Each INSERT is guarded by NOT EXISTS on (c_element_id, value); each reparent UPDATE
+  // is guarded by IS DISTINCT FROM -- both idempotent, matching the corrective fix's own guards.
+  // ---------------------------------------------------------------------------------------------
+
+  private static final String ACREEDOR_PREPAYMENT_GROUP_INSERT_SQL =
+      "INSERT INTO c_elementvalue ("
+      + "  c_elementvalue_id, ad_client_id, ad_org_id, isactive, created, createdby, updated, updatedby,"
+      + "  value, name, description, accounttype, accountsign, isdoccontrolled, c_element_id,"
+      + "  issummary, postactual, postbudget, postencumbrance, poststatistical, isbankaccount,"
+      + "  isforeigncurrency, showelement, showvaluecond, elementlevel, isalwaysshown)"
+      + " SELECT get_uuid(), :clientId, src407.ad_org_id, 'Y', now(), '0', now(), '0',"
+      + "   '417', 'Anticipos a acreedores', 'Anticipos a acreedores',"
+      + "   src407.accounttype, src407.accountsign, 'N', ae.c_element_id,"
+      + "   'Y', 'Y', 'Y', 'Y', 'Y', 'N', 'N', 'Y', 'A', 'C', 'N'"
+      + " FROM c_acctschema s"
+      + " JOIN c_acctschema_element ae ON ae.c_acctschema_id = s.c_acctschema_id AND ae.elementtype = 'AC'"
+      + " JOIN c_elementvalue src407 ON src407.c_element_id = ae.c_element_id AND src407.value = '407'"
+      + " WHERE s.ad_client_id = :clientId"
+      + "   AND NOT EXISTS (SELECT 1 FROM c_elementvalue x WHERE x.c_element_id = ae.c_element_id AND x.value = '417')"
+      + " ORDER BY ae.c_element_id LIMIT 1";
+
+  private static final String ACREEDOR_PREPAYMENT_SUBGROUP_INSERT_SQL =
+      "INSERT INTO c_elementvalue ("
+      + "  c_elementvalue_id, ad_client_id, ad_org_id, isactive, created, createdby, updated, updatedby,"
+      + "  value, name, description, accounttype, accountsign, isdoccontrolled, c_element_id,"
+      + "  issummary, postactual, postbudget, postencumbrance, poststatistical, isbankaccount,"
+      + "  isforeigncurrency, showelement, showvaluecond, elementlevel, isalwaysshown)"
+      + " SELECT get_uuid(), :clientId, src4070.ad_org_id, 'Y', now(), '0', now(), '0',"
+      + "   '4170', 'Anticipos a acreedores', 'Anticipos a acreedores',"
+      + "   src4070.accounttype, src4070.accountsign, 'N', ae.c_element_id,"
+      + "   'Y', 'Y', 'Y', 'Y', 'Y', 'N', 'N', 'Y', 'A', 'D', 'N'"
+      + " FROM c_acctschema s"
+      + " JOIN c_acctschema_element ae ON ae.c_acctschema_id = s.c_acctschema_id AND ae.elementtype = 'AC'"
+      + " JOIN c_elementvalue src4070 ON src4070.c_element_id = ae.c_element_id AND src4070.value = '4070'"
+      + " WHERE s.ad_client_id = :clientId"
+      + "   AND NOT EXISTS (SELECT 1 FROM c_elementvalue x WHERE x.c_element_id = ae.c_element_id AND x.value = '4170')"
+      + " ORDER BY ae.c_element_id LIMIT 1";
+
+  private static final String ACREEDOR_PREPAYMENT_LEAF_INSERT_SQL =
+      "INSERT INTO c_elementvalue ("
+      + "  c_elementvalue_id, ad_client_id, ad_org_id, isactive, created, createdby, updated, updatedby,"
+      + "  value, name, description, accounttype, accountsign, isdoccontrolled, c_element_id,"
+      + "  issummary, postactual, postbudget, postencumbrance, poststatistical, isbankaccount,"
+      + "  isforeigncurrency, showelement, showvaluecond, elementlevel, isalwaysshown)"
+      + " SELECT get_uuid(), :clientId, src40700000.ad_org_id, 'Y', now(), '0', now(), '0',"
+      + "   '41700000', 'Anticipos a acreedores', 'Anticipos a acreedores',"
+      + "   src40700000.accounttype, src40700000.accountsign, 'N', ae.c_element_id,"
+      + "   'N', 'Y', 'Y', 'Y', 'Y', 'N', 'N', 'Y', 'A', 'S', 'N'"
+      + " FROM c_acctschema s"
+      + " JOIN c_acctschema_element ae ON ae.c_acctschema_id = s.c_acctschema_id AND ae.elementtype = 'AC'"
+      + " JOIN c_elementvalue src40700000 ON src40700000.c_element_id = ae.c_element_id AND src40700000.value = '40700000'"
+      + " WHERE s.ad_client_id = :clientId"
+      + "   AND NOT EXISTS (SELECT 1 FROM c_elementvalue x WHERE x.c_element_id = ae.c_element_id AND x.value = '41700000')"
+      + " ORDER BY ae.c_element_id LIMIT 1";
+
+  /**
+   * Defensively creates the {@code C_VALIDCOMBINATION} row(s) for the {@code 41700000} leaf, one per
+   * {@code C_AcctSchema} wired to its element via {@code C_AcctSchema_Element} (elementtype
+   * {@code 'AC'}) — mirroring exactly what {@code c_elementvalue_trg()} does for a normal
+   * {@code elementlevel='S'} insert.
+   *
+   * <p><b>Why this is needed despite the trigger:</b> live-tenant evidence (client
+   * {@code D94AED60C3E0494AAFD44B8A05BB5CFC}, "acreedortest") showed the trigger's cascade is NOT
+   * reliably visible across this onboarding chain's multiple sequential {@code createNativeQuery}
+   * calls spanning several service steps — the account was created (confirmed) but ended up with
+   * ZERO {@code C_VALIDCOMBINATION} rows, which silently defeated {@link
+   * #overrideAcreedorGroupAccounts} (its {@code UPDATE} joins all three target accounts with INNER
+   * JOINs, so a single missing combination zeroes out the whole statement, including the two
+   * accounts that WOULD have resolved fine). The sibling corrective fix
+   * ({@code R9-bp-category-seed.sql}) does not hit this — verified on GOClient, where it runs as
+   * plain SQL in one Postgres transaction via the data-fix runner and the trigger cascade is
+   * reliably visible to the very next statement in the same transaction. The Java onboarding path
+   * cannot make that same guarantee (multiple service objects, potentially fresh transactions per
+   * native-query call), so it must not depend on it. This INSERT is guarded by {@code NOT EXISTS} on
+   * {@code (account_id, c_acctschema_id)} — the same key the trigger itself relies on — so it is a
+   * no-op both when the trigger DID create the row and on every re-run.
+   */
+  private static final String ACREEDOR_PREPAYMENT_VALIDCOMBINATION_INSERT_SQL =
+      "INSERT INTO c_validcombination ("
+      + "  c_validcombination_id, ad_client_id, ad_org_id, isactive, created, createdby, updated,"
+      + "  updatedby, alias, combination, description, isfullyqualified, c_acctschema_id, account_id)"
+      + " SELECT get_uuid(), :clientId, ev.ad_org_id, 'Y', now(), '0', now(), '0',"
+      + "   ev.value, ev.value, '', 'Y', ae.c_acctschema_id, ev.c_elementvalue_id"
+      + " FROM c_elementvalue ev"
+      + " JOIN c_acctschema_element ae ON ae.c_element_id = ev.c_element_id AND ae.elementtype = 'AC'"
+      + " WHERE ev.ad_client_id = :clientId AND ev.value = '41700000'"
+      + "   AND NOT EXISTS (SELECT 1 FROM c_validcombination vc"
+      + "     WHERE vc.account_id = ev.c_elementvalue_id AND vc.c_acctschema_id = ae.c_acctschema_id)";
+
+  /**
+   * Re-parents the auto-created (attached-to-root by {@code c_elementvalue_trg()}) {@code 417}
+   * AD_TREENODE row to mirror exactly where the sibling {@code 407} node sits.
+   */
+  private static final String ACREEDOR_PREPAYMENT_GROUP_REPARENT_SQL =
+      "UPDATE ad_treenode tn"
+      + " SET parent_id = parent407.parent_id, updated = now(), updatedby = '0'"
+      + " FROM c_elementvalue ev417, c_elementvalue ev407, ad_treenode parent407"
+      + " WHERE tn.node_id = ev417.c_elementvalue_id"
+      + "   AND ev417.ad_client_id = :clientId AND ev417.value = '417'"
+      + "   AND ev407.ad_client_id = :clientId AND ev407.value = '407' AND ev407.c_element_id = ev417.c_element_id"
+      + "   AND parent407.node_id = ev407.c_elementvalue_id AND parent407.ad_tree_id = tn.ad_tree_id"
+      + "   AND tn.parent_id IS DISTINCT FROM parent407.parent_id";
+
+  /** Re-parents the auto-created {@code 4170} AD_TREENODE row under the new {@code 417} row. */
+  private static final String ACREEDOR_PREPAYMENT_SUBGROUP_REPARENT_SQL =
+      "UPDATE ad_treenode tn"
+      + " SET parent_id = ev417.c_elementvalue_id, updated = now(), updatedby = '0'"
+      + " FROM c_elementvalue ev4170, c_elementvalue ev417"
+      + " WHERE tn.node_id = ev4170.c_elementvalue_id"
+      + "   AND ev4170.ad_client_id = :clientId AND ev4170.value = '4170'"
+      + "   AND ev417.ad_client_id = :clientId AND ev417.value = '417' AND ev417.c_element_id = ev4170.c_element_id"
+      + "   AND tn.parent_id IS DISTINCT FROM ev417.c_elementvalue_id";
+
+  /** Re-parents the auto-created {@code 41700000} AD_TREENODE row under the new {@code 4170} row. */
+  private static final String ACREEDOR_PREPAYMENT_LEAF_REPARENT_SQL =
+      "UPDATE ad_treenode tn"
+      + " SET parent_id = ev4170.c_elementvalue_id, updated = now(), updatedby = '0'"
+      + " FROM c_elementvalue ev41700000, c_elementvalue ev4170"
+      + " WHERE tn.node_id = ev41700000.c_elementvalue_id"
+      + "   AND ev41700000.ad_client_id = :clientId AND ev41700000.value = '41700000'"
+      + "   AND ev4170.ad_client_id = :clientId AND ev4170.value = '4170' AND ev4170.c_element_id = ev41700000.c_element_id"
+      + "   AND tn.parent_id IS DISTINCT FROM ev4170.c_elementvalue_id";
 
   private static final String BP_GROUP_ACCT_SQL =
       "INSERT INTO c_bp_group_acct ("

@@ -26,18 +26,22 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
@@ -236,6 +240,10 @@ public class OnboardingAccountingWiringServiceTest {
   public void testProvisionEntityPostingAccountsRunsSixInsertsWithClientAndSchemaId() {
     // Use a double that records inserts but keeps the REAL provisionEntityPostingAccounts body,
     // so the six runEntityAcctInsert calls (and their ordering of clientId/schemaId) are exercised.
+    // ensureAcreedorPrepaymentAccount()/overrideAcreedorGroupAccounts() are stubbed by
+    // InsertRecordingService: they bypass the runEntityAcctInsert seam and hit
+    // OBDal.getInstance().getSession() directly, so leaving them real would reach an uninitialized
+    // Hibernate session in this pure-unit test.
     InsertRecordingService service = new InsertRecordingService();
     Client client = mock(Client.class);
     when(client.getId()).thenReturn("C1");
@@ -250,6 +258,10 @@ public class OnboardingAccountingWiringServiceTest {
       assertEquals("S1", insert.schemaId);
       assertTrue("each insert must carry a non-empty SQL", insert.sql != null && !insert.sql.isEmpty());
     }
+    assertEquals("Acreedor prepayment account provisioning must run once", 1,
+        service.ensureAcreedorPrepaymentAccountCount);
+    assertEquals("Acreedor group posting-account override must run once", 1,
+        service.overrideAcreedorGroupAccountsCount);
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -625,6 +637,128 @@ public class OnboardingAccountingWiringServiceTest {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // overrideAcreedorGroupAccounts() — native query parameter binding, both outcome branches
+  // (real implementation; the SQL text itself is captured rather than referenced by constant,
+  // since ACREEDOR_GROUP_ACCT_OVERRIDE_SQL is a private field of the class under test)
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testOverrideAcreedorGroupAccountsBindsAllFiveParametersWhenRowsAffected() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    NativeQuery query = mock(NativeQuery.class);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(session.createNativeQuery(sqlCaptor.capture())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.executeUpdate()).thenReturn(1);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.overrideAcreedorGroupAccounts("C1", "S1");
+    }
+
+    String sql = sqlCaptor.getValue();
+    assertTrue("override SQL must target c_bp_group_acct", sql.contains("c_bp_group_acct"));
+    assertTrue("override SQL must scope to the Acreedor group", sql.contains("'Acreedor'"));
+    verify(query).setParameter("clientId", "C1");
+    verify(query).setParameter("schemaId", "S1");
+    verify(query).setParameter("liabilityAcctValue", "41000000");
+    verify(query).setParameter("notInvoicedReceivablesAcctValue", "41090000");
+    verify(query).setParameter("prepaymentAcctValue", "41700000");
+    verify(query).executeUpdate();
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testOverrideAcreedorGroupAccountsWarnsWhenZeroRowsAffected() {
+    // Covers the defensive "0 rows" branch (the group, its C_BP_Group_Acct row, or one of the
+    // 3 target accounts' C_ValidCombination may be missing) — see the log.warn on the else path.
+    // All 5 parameters are still bound before the branch check runs, so this asserts the exact
+    // same binding contract holds on the 0-row outcome as on the successful one above.
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    NativeQuery query = mock(NativeQuery.class);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(session.createNativeQuery(sqlCaptor.capture())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.executeUpdate()).thenReturn(0);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      // Must not throw when the defensive 0-row outcome is hit; it only logs a warning.
+      service.overrideAcreedorGroupAccounts("C1", "S1");
+    }
+
+    assertTrue("override SQL must still target c_bp_group_acct on the 0-row outcome",
+        sqlCaptor.getValue().contains("c_bp_group_acct"));
+    verify(query).setParameter("clientId", "C1");
+    verify(query).setParameter("schemaId", "S1");
+    verify(query).setParameter("liabilityAcctValue", "41000000");
+    verify(query).setParameter("notInvoicedReceivablesAcctValue", "41090000");
+    verify(query).setParameter("prepaymentAcctValue", "41700000");
+    verify(query).executeUpdate();
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // ensureAcreedorPrepaymentAccount() — SQL-dispatch sequencing (real implementation)
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testEnsureAcreedorPrepaymentAccountRunsSevenDistinctNativeQueriesBoundToClientId() {
+    // The method fires 7 sequential statements (group/subgroup/leaf INSERT, the defensive
+    // VALIDCOMBINATION INSERT, then 3 AD_TREENODE re-parent UPDATEs) — none conditional, so a
+    // single invocation exercises the whole dispatch chain. schemaId is accepted but intentionally
+    // unused by every one of the 7 statements (they resolve the schema dynamically via
+    // C_AcctSchema_Element instead), so only clientId binding is asserted.
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    NativeQuery query = mock(NativeQuery.class);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(session.createNativeQuery(sqlCaptor.capture())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.executeUpdate()).thenReturn(1);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.ensureAcreedorPrepaymentAccount("C1", "S1");
+    }
+
+    List<String> dispatched = sqlCaptor.getAllValues();
+    assertEquals("group/subgroup/leaf/validcombination inserts + 3 reparent updates", 7,
+        dispatched.size());
+    Set<String> distinctStatements = new HashSet<>(dispatched);
+    assertEquals("all 7 statements must be distinct SQL text", 7, distinctStatements.size());
+
+    // Spot-check the chain mirrors 407/4070/40700000 with the 417/4170/41700000 values, in order.
+    assertTrue("statement 1 must insert the 417 group", dispatched.get(0).contains("'417'"));
+    assertTrue("statement 2 must insert the 4170 subgroup", dispatched.get(1).contains("'4170'"));
+    assertTrue("statement 3 must insert the 41700000 leaf", dispatched.get(2).contains("'41700000'"));
+    assertTrue("statement 4 must defensively create the C_VALIDCOMBINATION row",
+        dispatched.get(3).contains("c_validcombination"));
+    assertTrue("statement 5 must reparent the 417 node", dispatched.get(4).contains("ad_treenode")
+        && dispatched.get(4).contains("'417'"));
+    assertTrue("statement 6 must reparent the 4170 node", dispatched.get(5).contains("ad_treenode")
+        && dispatched.get(5).contains("'4170'"));
+    assertTrue("statement 7 must reparent the 41700000 node", dispatched.get(6).contains("ad_treenode")
+        && dispatched.get(6).contains("'41700000'"));
+
+    verify(session, times(7)).createNativeQuery(anyString());
+    verify(query, times(7)).setParameter("clientId", "C1");
+    verify(query, times(7)).executeUpdate();
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // rebrandImportedChartNames() — real OBCriteria interaction
   // ---------------------------------------------------------------------------------------------
 
@@ -869,14 +1003,29 @@ public class OnboardingAccountingWiringServiceTest {
   /**
    * Records {@code runEntityAcctInsert} calls while preserving the real
    * {@code provisionEntityPostingAccounts} body, so the production statement-dispatch logic is the
-   * code actually under test.
+   * code actually under test. {@code ensureAcreedorPrepaymentAccount} and
+   * {@code overrideAcreedorGroupAccounts} are also stubbed (call counts only) because — unlike
+   * {@code runEntityAcctInsert} — they run their native queries directly against
+   * {@code OBDal.getInstance().getSession()} rather than through the recording seam.
    */
   private static final class InsertRecordingService extends OnboardingAccountingWiringService {
     final List<AcctInsert> acctInserts = new ArrayList<>();
+    int ensureAcreedorPrepaymentAccountCount;
+    int overrideAcreedorGroupAccountsCount;
 
     @Override
     protected void runEntityAcctInsert(String sql, String clientId, String schemaId) {
       acctInserts.add(new AcctInsert(sql, clientId, schemaId));
+    }
+
+    @Override
+    protected void ensureAcreedorPrepaymentAccount(String clientId, String schemaId) {
+      ensureAcreedorPrepaymentAccountCount++;
+    }
+
+    @Override
+    protected void overrideAcreedorGroupAccounts(String clientId, String schemaId) {
+      overrideAcreedorGroupAccountsCount++;
     }
   }
 }

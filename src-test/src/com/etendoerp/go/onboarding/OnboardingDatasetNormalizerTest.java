@@ -193,7 +193,10 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue(xml.contains("30 Días"));
     assertTrue(xml.contains("Inmediato"));
     assertTrue(xml.contains("Efectivo"));
-    assertTrue(xml.contains("Consumidor Final"));
+    // C_BP_GROUP's default group was renamed "Consumidor Final" -> "Cliente" (Feature ETP-4402,
+    // commit 73d412c8, referencedata/sampledata/GOClient/C_BP_GROUP.xml) as part of adding the
+    // "Acreedor" BP category; assert on the current bundled content.
+    assertTrue(xml.contains("Cliente"));
   }
 
   /** Verifies that user-scoped sales representative columns are stripped from product rows. */

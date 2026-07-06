@@ -15,14 +15,12 @@
  * *************************************************************************
  */
 
-package com.etendoerp.go.schemaforge;
+package com.etendoerp.go.schemaforge.handlers;
 
 import javax.inject.Named;
 
-import com.etendoerp.go.schemaforge.handlers.AbstractAccountingSchemaAutoFillHandler;
-
 /**
- * NeoHandler for the {@code accounting} entity in the Product Category window.
+ * NeoHandler for the {@code accounting} entity in the Business Partner Category window.
  *
  * <p>On POST (create), auto-fills {@code accountingSchema} with the default
  * accounting schema for the current client when the field is absent from the
@@ -31,14 +29,14 @@ import com.etendoerp.go.schemaforge.handlers.AbstractAccountingSchemaAutoFillHan
  *
  * <p>All other endpoints pass through to the default service unchanged.
  *
- * <p>Registered via {@code JAVA_QUALIFIER = 'productCategoryAccountingHandler'} on
- * the ETGO_SF_ENTITY record for the product-category accounting tab.
+ * <p>Registered via {@code JAVA_QUALIFIER = 'businessPartnerCategoryAccountingHandler'} on
+ * the ETGO_SF_ENTITY record for the business partner category accounting tab.
  */
-@Named("productCategoryAccountingHandler")
-public class ProductCategoryAccountingHandler extends AbstractAccountingSchemaAutoFillHandler {
+@Named("businessPartnerCategoryAccountingHandler")
+public class BusinessPartnerCategoryAccountingHandler extends AbstractAccountingSchemaAutoFillHandler {
 
   @Override
   protected String describeContext() {
-    return "product-category accounting line";
+    return "business partner category accounting line";
   }
 }
