@@ -97,10 +97,13 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: etendo_core/etendo_schema_forge/package-lock.json
+          registry-url: https://npm.pkg.github.com
 
       - name: Install dependencies
         working-directory: etendo_core/etendo_schema_forge
         run: npm ci || npm install
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run offline regeneration check (make regen-check FROM_CACHE=1)
         working-directory: etendo_core/etendo_schema_forge
@@ -147,7 +150,7 @@ jobs:
                 # offline serializer does not emit, so a textual diff is mostly
                 # noise. The checker parses both sides and prints only the rows /
                 # fields that actually changed.
-                node cli/src/xml-regeneration-check.js "$prev" "$pred" --include-dir sourcedata || true
+                npx sf-xml-regeneration-check "$prev" "$pred" --include-dir sourcedata || true
               else
                 echo "---------------------- $spec: prev/ or predicted/ missing, nothing to diff ----------------------"
               fi
