@@ -858,8 +858,8 @@ final class PaymentRegistrationService {
     } catch (Exception e) {
       log.error("Error listing supplier bank accounts for invoice {}: {}", invoiceId,
           e.getMessage(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Failed to list supplier bank accounts");
+        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Failed to list supplier bank accounts");
     }
   }
 
