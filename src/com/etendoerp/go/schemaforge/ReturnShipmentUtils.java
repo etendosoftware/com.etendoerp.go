@@ -390,13 +390,17 @@ final class ReturnShipmentUtils {
   // SQL helpers – line counts and max line number
   // ---------------------------------------------------------------------------
 
+  /**
+   * Shared shape for a batch "one int per M_InOut id" query: builds the {@code IN (?,?,...)}
+   * placeholder list, binds the ids, and collects column 1 (id) / column 2 (int value) into
+   * a map. {@code sqlTemplate} must contain exactly one {@code %s} for the placeholder list.
+   */
   @SuppressWarnings("java:S2077")
-  static Map<String, Integer> fetchLineCounts(List<String> ids) {
+  private static Map<String, Integer> fetchIntByInOutIds(List<String> ids, String sqlTemplate, String errorContext) {
     Map<String, Integer> result = new HashMap<>();
     if (ids.isEmpty()) return result;
     String placeholders = ids.stream().map(id -> "?").collect(Collectors.joining(","));
-    String sql = "SELECT M_InOut_ID, COUNT(M_InOutLine_ID) FROM M_InOutLine " +
-        "WHERE M_InOut_ID IN (" + placeholders + ") GROUP BY M_InOut_ID";
+    String sql = String.format(sqlTemplate, placeholders);
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
       for (int i = 0; i < ids.size(); i++) ps.setString(i + 1, ids.get(i));
@@ -404,9 +408,15 @@ final class ReturnShipmentUtils {
         while (rs.next()) result.put(rs.getString(1), rs.getInt(2));
       }
     } catch (Exception e) {
-      log.warn("Error fetching line counts: {}", e.getMessage());
+      log.warn("Error {}: {}", errorContext, e.getMessage());
     }
     return result;
+  }
+
+  static Map<String, Integer> fetchLineCounts(List<String> ids) {
+    return fetchIntByInOutIds(ids,
+        "SELECT M_InOut_ID, COUNT(M_InOutLine_ID) FROM M_InOutLine WHERE M_InOut_ID IN (%s) GROUP BY M_InOut_ID",
+        "fetching line counts");
   }
 
   /**
@@ -415,23 +425,10 @@ final class ReturnShipmentUtils {
    * {@code ShipmentInOut} Hibernate entity uses for its computed-column mapping, called
    * explicitly here because list/grid responses don't hydrate full entities.
    */
-  @SuppressWarnings("java:S2077")
   static Map<String, Integer> fetchInvoiceStatuses(List<String> ids) {
-    Map<String, Integer> result = new HashMap<>();
-    if (ids.isEmpty()) return result;
-    String placeholders = ids.stream().map(id -> "?").collect(Collectors.joining(","));
-    String sql = "SELECT M_InOut_ID, C_GETINVOICESTATUSFROMSHIPMENT(M_InOut_ID) FROM M_InOut " +
-        "WHERE M_InOut_ID IN (" + placeholders + ")";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      for (int i = 0; i < ids.size(); i++) ps.setString(i + 1, ids.get(i));
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) result.put(rs.getString(1), rs.getInt(2));
-      }
-    } catch (Exception e) {
-      log.warn("Error fetching invoice statuses: {}", e.getMessage());
-    }
-    return result;
+    return fetchIntByInOutIds(ids,
+        "SELECT M_InOut_ID, C_GETINVOICESTATUSFROMSHIPMENT(M_InOut_ID) FROM M_InOut WHERE M_InOut_ID IN (%s)",
+        "fetching invoice statuses");
   }
 
   @SuppressWarnings("java:S2077")
