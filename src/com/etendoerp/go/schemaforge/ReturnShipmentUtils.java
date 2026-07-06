@@ -62,6 +62,7 @@ final class ReturnShipmentUtils {
   private static final String KEY_RESPONSE = "response";
   private static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
+  private static final String FIELD_INVOICE_STATUS = "invoiceStatus";
 
   private ReturnShipmentUtils() {}
 
@@ -408,6 +409,31 @@ final class ReturnShipmentUtils {
     return result;
   }
 
+  /**
+   * Batch-computes {@code invoiceStatus} (0-100) for a set of shipment/receipt ids using
+   * the core {@code C_GETINVOICESTATUSFROMSHIPMENT} DB function — the same function the
+   * {@code ShipmentInOut} Hibernate entity uses for its computed-column mapping, called
+   * explicitly here because list/grid responses don't hydrate full entities.
+   */
+  @SuppressWarnings("java:S2077")
+  static Map<String, Integer> fetchInvoiceStatuses(List<String> ids) {
+    Map<String, Integer> result = new HashMap<>();
+    if (ids.isEmpty()) return result;
+    String placeholders = ids.stream().map(id -> "?").collect(Collectors.joining(","));
+    String sql = "SELECT M_InOut_ID, C_GETINVOICESTATUSFROMSHIPMENT(M_InOut_ID) FROM M_InOut " +
+        "WHERE M_InOut_ID IN (" + placeholders + ")";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      for (int i = 0; i < ids.size(); i++) ps.setString(i + 1, ids.get(i));
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) result.put(rs.getString(1), rs.getInt(2));
+      }
+    } catch (Exception e) {
+      log.warn("Error fetching invoice statuses: {}", e.getMessage());
+    }
+    return result;
+  }
+
   @SuppressWarnings("java:S2077")
   static long fetchMaxLineNo(String inoutId) {
     String sql = "SELECT COALESCE(MAX(Line), 0) FROM M_InOutLine WHERE M_InOut_ID = ?";
@@ -430,7 +456,8 @@ final class ReturnShipmentUtils {
   static void enrichReturnRecord(JSONObject rec, String id,
       Map<String, List<JSONObject>> sourceDocsMap, String sourceDocsField, String sourceDocNoField,
       Map<String, List<JSONObject>> returnInvoicesMap,
-      Map<String, Integer> lineCountMap) throws Exception {
+      Map<String, Integer> lineCountMap,
+      Map<String, Integer> invoiceStatusMap) throws Exception {
     List<JSONObject> sourceDocs = sourceDocsMap.getOrDefault(id, Collections.emptyList());
     JSONArray sourceDocsArr = new JSONArray();
     for (JSONObject d : sourceDocs) {
@@ -454,6 +481,7 @@ final class ReturnShipmentUtils {
     rec.put("returnInvoices", invoicesArr);
     rec.put("hasReturnInvoice", !invoices.isEmpty());
     rec.put("linesCount", lineCountMap.getOrDefault(id, 0));
+    rec.put(FIELD_INVOICE_STATUS, invoiceStatusMap.getOrDefault(id, 0));
   }
 
   // ---------------------------------------------------------------------------
