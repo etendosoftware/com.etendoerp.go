@@ -420,7 +420,7 @@ public abstract class AbstractInvoiceHeaderHandler {
       ConnectionProvider conn = new DalConnectionProvider(false);
       ProcessInvoiceUtil processInvoiceUtil =
           WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class);
-      // Void-date/supplier-reference params are only consulted for the void ("RC") action;
+      // Void-date/supplier-reference params are only consulted for the void action (docAction RC).
       // ProcessInvoiceUtil calls .isEmpty() on the date strings unconditionally, so they must be
       // non-null. Empty strings are the correct null-safe default for a normal "CO" completion.
       OBError result = processInvoiceUtil.process(invoiceId, "CO", "", "", "", vars, conn);
