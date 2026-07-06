@@ -203,7 +203,9 @@ public class FinancialAccountPsd2HandlerLinkTest {
 
   /**
    * createAndLink happy path creates the FA from the chosen Salt Edge account, links it and returns
-   * a 201 Created with the new account id and name.
+   * a 201 Created with the new account id and name. Also verifies the ETP-4331-adjacent fix: the
+   * newly created account gets its default payment methods assigned (previously this Salt
+   * Edge-created path bypassed the generic CRUD hook that does this for offline-created accounts).
    */
   @Test
   public void testCreateAndLinkHappyReturns201() throws Exception {
@@ -241,6 +243,51 @@ public class FinancialAccountPsd2HandlerLinkTest {
       JSONObject data = dataOf(response);
       assertEquals("FA-NEW", data.getString("financialAccountId"));
       assertEquals("BBVA - Ahorro", data.getString("name"));
+      support.verify(() -> FinancialAccountSupport.assignDefaultPaymentMethods(created));
+    }
+  }
+
+  /**
+   * createAndLink for a Card-type ({@code CA}) account also gets its default payment methods
+   * assigned — the fix applies regardless of the chosen account type, not just Bank.
+   */
+  @Test
+  public void testCreateAndLinkCardTypeAssignsDefaultPaymentMethods() throws Exception {
+    JSONObject body = new JSONObject()
+        .put(PARAM_TYPE, "CA")
+        .put(PARAM_CONNECTION_ID, CONNECTION_ID)
+        .put("saltEdgeAccountId", SALT_EDGE_ACCOUNT_ID);
+    JSONArray nodes = new JSONArray().put(new JSONObject()
+        .put("id", SALT_EDGE_ACCOUNT_ID).put("name", "Tarjeta Oro").put("currency_code", "EUR"));
+    JSONObject details = new JSONObject().put("provider_name", "BBVA");
+    Currency currency = mock(Currency.class);
+    FIN_FinancialAccount created = mock(FIN_FinancialAccount.class);
+    when(created.getId()).thenReturn("FA-CARD-NEW");
+    when(created.getName()).thenReturn("BBVA - Tarjeta Oro");
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<FinancialAccountSupport> support = mockStatic(FinancialAccountSupport.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubObContext(obContext);
+      utils.when(() -> BankIntegrationUtils.getPsd2ApiKey(any())).thenReturn(API_KEY);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
+          .thenReturn(nodes);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
+          .thenReturn(details);
+      support.when(() -> FinancialAccountSupport.findCurrencyByIsoCode("EUR")).thenReturn(currency);
+      support.when(() -> FinancialAccountSupport.createAccount(any(), any(), eq(currency),
+          anyString(), eq("CA"))).thenReturn(created);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(any(), anyString()))
+          .thenReturn(null);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(created),
+          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenReturn("");
+
+      NeoResponse response = handler.handle(postContext(ACTION_CREATE_AND_LINK, body));
+
+      assertEquals(201, response.getHttpStatus());
+      support.verify(() -> FinancialAccountSupport.assignDefaultPaymentMethods(created));
     }
   }
 

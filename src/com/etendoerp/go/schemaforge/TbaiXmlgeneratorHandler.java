@@ -19,9 +19,6 @@ package com.etendoerp.go.schemaforge;
 
 import javax.inject.Named;
 
-import org.codehaus.jettison.json.JSONArray;
-import org.codehaus.jettison.json.JSONObject;
-
 /**
  * NeoHandler delegate for the legacy TicketBAI XML generation button on Sales Invoice.
  *
@@ -42,14 +39,7 @@ public class TbaiXmlgeneratorHandler extends AbstractLegacyInvoiceActionHandler 
 
   @Override
   protected NeoResponse executeAction(String recordId) throws Exception {
-    JSONObject params = new JSONObject();
-    params.put("recordId", recordId);
-    params.put("inpRecordId", recordId);
-    JSONArray recordIds = new JSONArray();
-    recordIds.put(recordId);
-    params.put("recordIds", recordIds);
-
-    return NeoProcessService.executeObuiappClass(PROCESS_CLASS, PROCESS_ID, params);
+    return executeSingleRecordObuiappClass(PROCESS_CLASS, PROCESS_ID, recordId);
   }
 
   @Override
