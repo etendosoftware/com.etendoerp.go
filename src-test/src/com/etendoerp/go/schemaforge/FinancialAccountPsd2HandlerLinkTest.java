@@ -29,6 +29,7 @@ import static com.etendoerp.go.schemaforge.Psd2HandlerTestSupport.stubObContext;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -40,6 +41,9 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+
+import java.util.Collections;
+import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -55,6 +59,8 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
@@ -147,7 +153,8 @@ public class FinancialAccountPsd2HandlerLinkTest {
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
         MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       stubObContext(obContext);
       linkHelper.when(() -> SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc)).thenReturn(API_KEY);
       utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
@@ -158,6 +165,10 @@ public class FinancialAccountPsd2HandlerLinkTest {
           eq(API_KEY))).thenReturn(null);
       linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(finAcc),
           eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenReturn(LINK_WARNING);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubFinAccPaymentMethods(dal, Collections.emptyList());
 
       NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
 
@@ -222,7 +233,8 @@ public class FinancialAccountPsd2HandlerLinkTest {
         MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
         MockedStatic<FinancialAccountSupport> support = mockStatic(FinancialAccountSupport.class);
         MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       stubObContext(obContext);
       utils.when(() -> BankIntegrationUtils.getPsd2ApiKey(any())).thenReturn(API_KEY);
       utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
@@ -236,6 +248,10 @@ public class FinancialAccountPsd2HandlerLinkTest {
           .thenReturn(null);
       linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(created),
           eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenReturn("");
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubFinAccPaymentMethods(dal, Collections.emptyList());
 
       NeoResponse response = handler.handle(postContext(ACTION_CREATE_AND_LINK, body));
 
@@ -269,7 +285,8 @@ public class FinancialAccountPsd2HandlerLinkTest {
         MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
         MockedStatic<FinancialAccountSupport> support = mockStatic(FinancialAccountSupport.class);
         MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       stubObContext(obContext);
       utils.when(() -> BankIntegrationUtils.getPsd2ApiKey(any())).thenReturn(API_KEY);
       utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
@@ -283,6 +300,10 @@ public class FinancialAccountPsd2HandlerLinkTest {
           .thenReturn(null);
       linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(created),
           eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenReturn("");
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubFinAccPaymentMethods(dal, Collections.emptyList());
 
       NeoResponse response = handler.handle(postContext(ACTION_CREATE_AND_LINK, body));
 
@@ -418,6 +439,7 @@ public class FinancialAccountPsd2HandlerLinkTest {
       when(criteria.add(any())).thenReturn(criteria);
       when(criteria.setMaxResults(1)).thenReturn(criteria);
       when(criteria.uniqueResult()).thenReturn(null);
+      stubFinAccPaymentMethods(dal, Collections.emptyList());
 
       NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
 
@@ -475,6 +497,7 @@ public class FinancialAccountPsd2HandlerLinkTest {
       when(criteria.add(any())).thenReturn(criteria);
       when(criteria.setMaxResults(1)).thenReturn(criteria);
       when(criteria.uniqueResult()).thenReturn(null);
+      stubFinAccPaymentMethods(dal, Collections.emptyList());
 
       NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
 
@@ -532,6 +555,7 @@ public class FinancialAccountPsd2HandlerLinkTest {
       // Provider found by code — resolveProvider returns it.
       when(criteria.uniqueResult()).thenReturn(provider);
       doNothing().when(dal).save(finAcc);
+      stubFinAccPaymentMethods(dal, Collections.emptyList());
 
       NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
 
@@ -575,12 +599,119 @@ public class FinancialAccountPsd2HandlerLinkTest {
 
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubFinAccPaymentMethods(dal, Collections.emptyList());
 
       NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
 
       assertEquals(200, response.getHttpStatus());
       // No provider_code → setPsd2Provider must NOT be called.
       verify(finAcc, never()).setPsd2Provider(any());
+    }
+  }
+
+  // ── linkAccount: disableAutomaticWithdrawnForTransferMethod (ETP-4406 fix) ─
+
+  /**
+   * When a linked account has a {@code FinAccPaymentMethod} row whose payment method name contains
+   * "transfer" (matched case-insensitively, same heuristic as
+   * {@code PaymentRegistrationService.isTransferMethod}), {@code linkAccount} must clear only
+   * {@code Automatic Withdrawn} (Payment OUT) on it — {@code Automatic Deposit} (Payment IN) is left
+   * untouched because Etendo Go's Salt Edge PIS flow only initiates outbound transfers.
+   */
+  @Test
+  public void testLinkAccountDisablesAutomaticWithdrawnForTransferPaymentMethod() throws Exception {
+    JSONObject body = linkBody();
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    JSONArray nodes = new JSONArray().put(new JSONObject().put("id", SALT_EDGE_ACCOUNT_ID));
+    // No provider_code in details → resolveProvider returns null, keeping this test focused on
+    // the transfer payment method behavior only.
+    JSONObject details = new JSONObject().put("provider_name", "BBVA");
+
+    FIN_PaymentMethod transferMethod = mock(FIN_PaymentMethod.class);
+    when(transferMethod.getName()).thenReturn("Transferencia bancaria");
+    FinAccPaymentMethod transferFapm = mock(FinAccPaymentMethod.class);
+    when(transferFapm.getPaymentMethod()).thenReturn(transferMethod);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc)).thenReturn(API_KEY);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
+          .thenReturn(nodes);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
+          .thenReturn(details);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(any(), anyString()))
+          .thenReturn(null);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(any(), any(),
+          any(), any(), any())).thenReturn("");
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubFinAccPaymentMethods(dal, Collections.singletonList(transferFapm));
+
+      NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(transferFapm).setAutomaticWithdrawn(false);
+      verify(transferFapm, never()).setAutomaticDeposit(anyBoolean());
+      verify(dal).save(transferFapm);
+      verify(dal).flush();
+    }
+  }
+
+  /**
+   * A {@code FinAccPaymentMethod} row whose payment method name does NOT contain
+   * "transfer"/"transferencia" (e.g. Cash) must be left completely untouched by
+   * {@code linkAccount} — neither {@code Automatic Withdrawn} nor {@code Automatic Deposit} is
+   * modified.
+   */
+  @Test
+  public void testLinkAccountLeavesNonTransferPaymentMethodUnchanged() throws Exception {
+    JSONObject body = linkBody();
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getId()).thenReturn(ACCOUNT_ID);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    JSONArray nodes = new JSONArray().put(new JSONObject().put("id", SALT_EDGE_ACCOUNT_ID));
+    JSONObject details = new JSONObject().put("provider_name", "BBVA");
+
+    FIN_PaymentMethod cashMethod = mock(FIN_PaymentMethod.class);
+    when(cashMethod.getName()).thenReturn("Efectivo");
+    FinAccPaymentMethod cashFapm = mock(FinAccPaymentMethod.class);
+    when(cashFapm.getPaymentMethod()).thenReturn(cashMethod);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc)).thenReturn(API_KEY);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
+          .thenReturn(nodes);
+      utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
+          .thenReturn(details);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(any(), anyString()))
+          .thenReturn(null);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(any(), any(),
+          any(), any(), any())).thenReturn("");
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      stubFinAccPaymentMethods(dal, Collections.singletonList(cashFapm));
+
+      NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
+
+      assertEquals(200, response.getHttpStatus());
+      verify(cashFapm, never()).setAutomaticWithdrawn(anyBoolean());
+      verify(cashFapm, never()).setAutomaticDeposit(anyBoolean());
+      verify(dal, never()).save(cashFapm);
     }
   }
 
@@ -602,5 +733,23 @@ public class FinancialAccountPsd2HandlerLinkTest {
 
   private static JSONObject dataOf(NeoResponse response) throws Exception {
     return response.getBody().getJSONObject("response").getJSONObject("data");
+  }
+
+  /**
+   * Stubs {@code dal.createCriteria(FinAccPaymentMethod.class)} so
+   * {@code disableAutomaticWithdrawnForTransferMethod} (called at the end of every
+   * {@code linkAccount}) returns the given rows instead of hitting a real Hibernate session.
+   * Every test that reaches {@code linkAccount} must call this (with an empty list when the
+   * behavior is not under test), otherwise the unstubbed {@code OBDal.getInstance()} call blows up
+   * and the handler's catch-all turns it into a 500.
+   */
+  @SuppressWarnings("unchecked")
+  private static OBCriteria<FinAccPaymentMethod> stubFinAccPaymentMethods(OBDal dal,
+      List<FinAccPaymentMethod> methods) {
+    OBCriteria<FinAccPaymentMethod> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(FinAccPaymentMethod.class)).thenReturn(crit);
+    when(crit.add(any())).thenReturn(crit);
+    when(crit.list()).thenReturn(methods);
+    return crit;
   }
 }

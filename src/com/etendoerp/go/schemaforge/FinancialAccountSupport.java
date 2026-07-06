@@ -212,9 +212,16 @@ final class FinancialAccountSupport {
     link.setAccount(account);
     link.setPaymentMethod(method);
     link.setDefault(isDefault);
-    // payinAllow/payoutAllow (true), execution type ("M") and the invoice-paid
-    // statuses come from the entity's column defaults — Manual, allowing both
-    // receipts and payments, matching the onboarding dataset.
+    // payinAllow/payoutAllow (true) and execution type ("M") come from the entity's
+    // column defaults — Manual, allowing both receipts and payments. The reconcile/
+    // automatic-use fields below do NOT have a sane default on their own (they default
+    // to "unchecked"/empty), so they must be copied from the payment method master —
+    // otherwise every new account's transaction handling silently diverges from what
+    // the payment method itself is configured to do.
+    link.setUponDepositUse(method.getUponDepositUse());
+    link.setUponWithdrawalUse(method.getUponWithdrawalUse());
+    link.setAutomaticDeposit(method.isAutomaticDeposit());
+    link.setAutomaticWithdrawn(method.isAutomaticWithdrawn());
     OBDal.getInstance().save(link);
   }
 }

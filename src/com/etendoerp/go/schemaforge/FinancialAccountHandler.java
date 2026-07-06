@@ -36,6 +36,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.geography.Country;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
@@ -153,7 +154,13 @@ public class FinancialAccountHandler implements NeoHandler {
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
-    if (!SPEC.equals(context.getSpecName()) || !METHOD_POST.equals(context.getHttpMethod())) {
+    if (!SPEC.equals(context.getSpecName())) {
+      return null;
+    }
+    if (NeoEndpointType.DEFAULTS.equals(context.getEndpointType())) {
+      return injectClientCurrencyDefault(context);
+    }
+    if (!METHOD_POST.equals(context.getHttpMethod())) {
       return null;
     }
     try {
@@ -173,6 +180,51 @@ public class FinancialAccountHandler implements NeoHandler {
     }
     // Keep the original CRUD response untouched.
     return null;
+  }
+
+  /**
+   * Overwrites the generic {@code defaults} response's {@code currency} with the client's
+   * accounting-schema currency (e.g. EUR for GOClient).
+   *
+   * <p>The {@code C_Currency_ID} column has no AD default-value expression, so
+   * {@code NeoDefaultsService}'s generic fallback ({@code resolveFirstComboOption}) picks
+   * whichever active currency sorts first alphabetically (AED) — a real, non-null value, so it
+   * is never left blank for the New Account Wizard to fill in itself. That column is shared by
+   * many core windows, so fixing this dictionary-wide would risk unrelated side effects; scoping
+   * the fix to this handler's post-hook only affects the financial-account spec's own defaults.
+   */
+  private NeoResponse injectClientCurrencyDefault(NeoContext context) {
+    NeoResponse previous = context.getPreviousResult();
+    if (previous == null || previous.getBody() == null) {
+      return null;
+    }
+    try {
+      enterAdminMode();
+      OBCriteria<AcctSchema> crit = OBDal.getInstance().createCriteria(AcctSchema.class);
+      crit.add(Restrictions.eq(AcctSchema.PROPERTY_CLIENT + ".id",
+          OBContext.getOBContext().getCurrentClient().getId()));
+      crit.add(Restrictions.eq(AcctSchema.PROPERTY_ACTIVE, true));
+      crit.setMaxResults(1);
+      AcctSchema schema = (AcctSchema) crit.uniqueResult();
+      Currency clientCurrency = schema != null ? schema.getCurrency() : null;
+      if (clientCurrency == null) {
+        return null;
+      }
+      JSONObject body = previous.getBody();
+      JSONObject defaults = body.optJSONObject("defaults");
+      if (defaults == null) {
+        defaults = new JSONObject();
+        body.put("defaults", defaults);
+      }
+      defaults.put("currency", clientCurrency.getId());
+      defaults.put("currency$_identifier", clientCurrency.getISOCode());
+      return NeoResponse.ok(body);
+    } catch (Exception e) {
+      log.error("financial-account afterHandle: failed to inject client currency default", e);
+      return null;
+    } finally {
+      exitAdminMode();
+    }
   }
 
   /** Reads the persisted record id from the generic CRUD response envelope. */

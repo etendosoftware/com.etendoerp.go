@@ -599,7 +599,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
       finAcc.setPsd2Provider(provider);
       OBDal.getInstance().save(finAcc);
     }
-    disableAutomaticDepositForTransferMethod(finAcc);
+    disableAutomaticWithdrawnForTransferMethod(finAcc);
     return warning;
   }
 
@@ -614,13 +614,15 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
    * twice (once locally, once by the PSD2 callback). Classic's flow is untouched and keeps
    * creating transactions the way it always has.
    * <p>
+   * Only {@code Automatic Withdrawn} (Payment OUT) is cleared — PIS only initiates outbound
+   * transfers (paying suppliers), so incoming deposits are unaffected and {@code Automatic
+   * Deposit} (Payment IN) is left as configured.
+   * <p>
    * Judgment call: {@code FIN_PaymentMethod} has no explicit "is transfer" flag in this model —
    * same heuristic as {@code PaymentRegistrationService.isTransferMethod}, matched here directly
-   * on the method name (contains "transfer"/"transferencia", case-insensitive). Both
-   * {@code Automatic Deposit} and {@code Automatic Withdrawn} are cleared regardless of the
-   * account's AR/AP direction, since PIS becomes the source of truth for this account either way.
+   * on the method name (contains "transfer"/"transferencia", case-insensitive).
    */
-  private void disableAutomaticDepositForTransferMethod(FIN_FinancialAccount finAcc) {
+  private void disableAutomaticWithdrawnForTransferMethod(FIN_FinancialAccount finAcc) {
     OBCriteria<FinAccPaymentMethod> crit = OBDal.getInstance()
         .createCriteria(FinAccPaymentMethod.class);
     crit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, finAcc));
@@ -632,7 +634,6 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
       }
       if (StringUtils.containsIgnoreCase(method.getName(), "transfer")
           || StringUtils.containsIgnoreCase(method.getName(), "transferencia")) {
-        fapm.setAutomaticDeposit(false);
         fapm.setAutomaticWithdrawn(false);
         OBDal.getInstance().save(fapm);
         updated++;
@@ -640,7 +641,7 @@ public class FinancialAccountPsd2Handler implements NeoHandler {
     }
     if (updated > 0) {
       OBDal.getInstance().flush();
-      log.info("PSD2 connect (Etendo Go): disabled Automatic Deposit/Withdrawn on {} transfer "
+      log.info("PSD2 connect (Etendo Go): disabled Automatic Withdrawn on {} transfer "
           + "payment method row(s) for account {}", updated, finAcc.getId());
     }
   }
