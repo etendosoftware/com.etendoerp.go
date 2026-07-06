@@ -906,6 +906,107 @@ class McpToolRouterSupportTest {
           fieldObj, col);
       assertFalse(fieldObj.has("defaultExpression"));
     }
+
+    /**
+     * ETP-4288: "0" is a legacy AD placeholder on FK (`_ID`) columns meaning "resolve via
+     * callout/session logic" — it is not a usable FK value (see DocTypeResolver on the write
+     * path). neo_schema must never surface it as a literal defaultExpression, since an agent
+     * reading only the schema would treat "0" as a valid id and fail on neo_create/neo_update.
+     */
+    @Test
+    void legacyZeroFkSentinelReplacedWithDynamicHint() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
+      when(col.getDefaultValue()).thenReturn("0");
+      when(col.getDBColumnName()).thenReturn("C_DocType_ID");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addDefaultExpression",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
+          fieldObj, col);
+
+      assertFalse(fieldObj.has("defaultExpression"));
+      assertEquals("server", fieldObj.getString("defaultSource"));
+      assertEquals("32-char hex ID (FK)", fieldObj.getString("defaultFormat"));
+      assertEquals("Resolved per-tenant at request time — call neo_defaults to get the value",
+          fieldObj.getString("defaultHint"));
+    }
+
+    /**
+     * ETP-4288: non-FK columns with a legitimate literal "0" default (e.g. ChargeAmt,
+     * EM_Etgo_Total_Discount) must keep reporting it as-is — the sentinel handling only
+     * targets `_ID`-suffixed FK columns.
+     */
+    @Test
+    void nonFkZeroDefaultIsUnaffected() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
+      when(col.getDefaultValue()).thenReturn("0");
+      when(col.getDBColumnName()).thenReturn("ChargeAmt");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addDefaultExpression",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
+          fieldObj, col);
+
+      assertEquals("0", fieldObj.getString("defaultExpression"));
+      assertFalse(fieldObj.has("defaultSource"));
+      assertFalse(fieldObj.has("defaultFormat"));
+      assertFalse(fieldObj.has("defaultHint"));
+    }
+
+    /**
+     * ETP-4288: a real (non-"0") FK default expression, e.g. a session-variable reference
+     * like the currency default, must still be emitted verbatim — the sentinel handling
+     * only intercepts the literal "0" placeholder, not legitimate expressions.
+     */
+    @Test
+    void realFkDefaultExpressionIsPreserved() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
+      when(col.getDefaultValue()).thenReturn("@C_Currency_ID@");
+      when(col.getDBColumnName()).thenReturn("C_Currency_ID");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addDefaultExpression",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
+          fieldObj, col);
+
+      assertEquals("@C_Currency_ID@", fieldObj.getString("defaultExpression"));
+      assertFalse(fieldObj.has("defaultSource"));
+      assertFalse(fieldObj.has("defaultFormat"));
+      assertFalse(fieldObj.has("defaultHint"));
+    }
+
+    /**
+     * ETP-4288: the sentinel handling is generic across any `_ID` FK column, not
+     * special-cased to C_DocType_ID/C_DocTypeTarget_ID — confirmed here with an unrelated
+     * business partner FK column carrying the same "0" placeholder.
+     */
+    @Test
+    void legacyZeroFkSentinelIsGenericAcrossTables() throws Exception {
+      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
+      when(col.getDefaultValue()).thenReturn("0");
+      when(col.getDBColumnName()).thenReturn("C_BPartner_ID");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeStatic("addDefaultExpression",
+          new Class<?>[]{ JSONObject.class, org.openbravo.model.ad.datamodel.Column.class },
+          fieldObj, col);
+
+      assertFalse(fieldObj.has("defaultExpression"));
+      assertEquals("server", fieldObj.getString("defaultSource"));
+      assertEquals("32-char hex ID (FK)", fieldObj.getString("defaultFormat"));
+
+      // Regression guard (rejected design): never bake a resolved instance id into the schema.
+      // No field in this object may carry a 32-char hex value anywhere.
+      java.util.Iterator<String> keys = fieldObj.keys();
+      while (keys.hasNext()) {
+        String key = keys.next();
+        Object value = fieldObj.get(key);
+        if (value instanceof String) {
+          assertFalse(((String) value).matches(".*[0-9A-Fa-f]{32}.*"),
+              "field '" + key + "' must never carry a resolved 32-char hex instance id");
+        }
+      }
+    }
   }
 
   // ─── addVisibility ──────────────────────────────────────────────────
