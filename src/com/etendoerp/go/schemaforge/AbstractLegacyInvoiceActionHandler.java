@@ -20,6 +20,8 @@ package com.etendoerp.go.schemaforge;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 
 /**
@@ -64,4 +66,21 @@ abstract class AbstractLegacyInvoiceActionHandler implements NeoHandler {
   protected abstract NeoResponse executeAction(String recordId) throws Exception;
 
   protected abstract String buildExecutionErrorMessage(Exception e);
+
+  /**
+   * Invokes an OBUIAPP handler class for a single record, building the minimal
+   * {@code recordId}/{@code inpRecordId}/{@code recordIds} payload the shared
+   * {@link NeoProcessService#executeObuiappClass} bridge needs to resolve the input record.
+   */
+  protected static NeoResponse executeSingleRecordObuiappClass(String processClass,
+      String processId, String recordId) throws Exception {
+    JSONObject params = new JSONObject();
+    params.put("recordId", recordId);
+    params.put("inpRecordId", recordId);
+    JSONArray recordIds = new JSONArray();
+    recordIds.put(recordId);
+    params.put("recordIds", recordIds);
+
+    return NeoProcessService.executeObuiappClass(processClass, processId, params);
+  }
 }
