@@ -570,6 +570,8 @@ public class InvoiceFromOrderSupportTest {
 
       // No DB connection should be acquired when rate is null.
       verify(dal, never()).getConnection();
+      // ETP-4029: the invoice column must remain untouched on this no-op path.
+      verify(invoice, never()).setETGOCurrencyRate(any());
     }
   }
 
@@ -592,6 +594,8 @@ public class InvoiceFromOrderSupportTest {
       new InvoiceFromOrderSupport().propagateOrderRateToInvoice(order, invoice);
 
       verify(dal, never()).getConnection();
+      // ETP-4029: no-op path — the rate column must not be set.
+      verify(invoice, never()).setETGOCurrencyRate(any());
     }
   }
 
@@ -626,6 +630,8 @@ public class InvoiceFromOrderSupportTest {
       new InvoiceFromOrderSupport().propagateOrderRateToInvoice(order, invoice);
 
       verify(dal, never()).getConnection();
+      // ETP-4029: same-currency no-op — the rate column must not be set.
+      verify(invoice, never()).setETGOCurrencyRate(any());
     }
   }
 
@@ -672,6 +678,8 @@ public class InvoiceFromOrderSupportTest {
 
       // Only one prepareStatement call for the SELECT — no INSERT.
       verify(conn, times(1)).prepareStatement(anyString());
+      // ETP-4029: the early return happens before the rate is ever persisted on the invoice.
+      verify(invoice, never()).setETGOCurrencyRate(any());
     }
   }
 
@@ -764,6 +772,12 @@ public class InvoiceFromOrderSupportTest {
       BigDecimal capturedDocRate = rateCaptor.getAllValues().get(0);
       // 1 / 2.0 = 0.5, rounded to 12 decimal places.
       assertEquals(0, new BigDecimal("0.5").compareTo(capturedDocRate.stripTrailingZeros()));
+
+      // ETP-4029: success path — the ORIGINAL EM_ETGO_Currency_Rate (org→doc, 2.0), not the
+      // computed docRate, must also be persisted on the invoice column so summaries/lists
+      // can display it, mirroring the source order's rate.
+      verify(invoice).setETGOCurrencyRate(etgoRate);
+      verify(dal).save(invoice);
     }
   }
 
@@ -799,6 +813,8 @@ public class InvoiceFromOrderSupportTest {
       new InvoiceFromOrderSupport().propagateOrderRateToInvoice(order, invoice);
 
       verify(dal, never()).getConnection();
+      // ETP-4029: null org currency no-op — rate must not be set.
+      verify(invoice, never()).setETGOCurrencyRate(any());
     }
   }
 
@@ -869,6 +885,11 @@ public class InvoiceFromOrderSupportTest {
       verify(insertPs).setNull(eq(10), eq(java.sql.Types.NUMERIC));
       verify(insertPs, never()).setBigDecimal(eq(10), any());
       verify(insertPs).executeUpdate();
+
+      // ETP-4029: this is still the success path (INSERT executed) — the rate must be
+      // persisted on the invoice even though foreignAmount itself is null.
+      verify(invoice).setETGOCurrencyRate(new BigDecimal("2.0"));
+      verify(dal).save(invoice);
     }
   }
 
@@ -937,6 +958,11 @@ public class InvoiceFromOrderSupportTest {
 
       // Must NOT throw — exception is swallowed.
       new InvoiceFromOrderSupport().propagateOrderRateToInvoice(order, invoice);
+
+      // ETP-4029: the rate-column write happens AFTER the INSERT succeeds; since the INSERT
+      // threw, the whole method's catch block swallows the exception before reaching that
+      // line, so the invoice column must remain untouched.
+      verify(invoice, never()).setETGOCurrencyRate(any());
     }
   }
 }

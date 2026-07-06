@@ -89,6 +89,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   @Inject
   private DocumentPostingService postingService;
 
+  @Inject
+  private CurrencyOptionsHandler currencyOptionsHandler;
+
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
@@ -117,8 +120,18 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         return lockError;
       }
     }
-    return NeoHeaderActionRouter.dispatch(context, cloneRecordHandler, registerPaymentHandler,
-        siiSendHandler, tbaiXmlgeneratorHandler, createInvoiceShipmentHandler);
+    return NeoHeaderActionRouter.dispatch(context, currencyOptionsHandler, cloneRecordHandler,
+        registerPaymentHandler, siiSendHandler, tbaiXmlgeneratorHandler, createInvoiceShipmentHandler);
+  }
+
+  /**
+   * Post-callout hook (ETP-4029): blocks callout-driven currency updates and appends an
+   * exchange-rate warning when the user directly changes the invoice currency. Mirrors
+   * {@code AbstractOrderHeaderHandler#afterCallout}.
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    return handleCurrencyAfterCallout(context);
   }
 
   /**
@@ -128,6 +141,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    autoCreateOrUpdateConversionRateDocument(context);
     if (!"GET".equals(context.getHttpMethod()) || !NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return null;
     }

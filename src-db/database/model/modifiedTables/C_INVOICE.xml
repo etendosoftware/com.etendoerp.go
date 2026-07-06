@@ -5,5 +5,9 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="EM_ETGO_CURRENCY_RATE" primaryKey="false" required="false" type="DECIMAL" size="20,12" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
     </table>
   </database>
