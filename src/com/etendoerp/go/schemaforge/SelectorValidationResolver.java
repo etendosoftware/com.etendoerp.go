@@ -42,6 +42,15 @@ public final class SelectorValidationResolver {
   private static final Logger log = LogManager.getLogger(SelectorValidationResolver.class);
   private static final String UNRESOLVED_MARKER = "__NEO_UNRESOLVED__";
 
+  /**
+   * Detects a nested {@code (SELECT ...)} subquery inside a validation clause. Such clauses
+   * (e.g. {@code X IN (SELECT ... FROM Fin_Finacc_Paymentmethod WHERE ...)}) reference raw SQL
+   * table names that the generic SQL→HQL translator cannot resolve reliably, so they are dropped
+   * here and handled by a dedicated {@code SelectorContextPolicy} instead.
+   */
+  private static final Pattern NESTED_SUBQUERY = Pattern.compile("\\(\\s*SELECT\\b",
+      Pattern.CASE_INSENSITIVE);
+
   private SelectorValidationResolver() {
   }
 
@@ -228,6 +237,13 @@ public final class SelectorValidationResolver {
     // Skip clauses containing SQL-only functions (no HQL equivalent)
     if (SelectorQueryBuilder.SQL_ONLY_FUNCTIONS.matcher(trimmed).find()) {
       log.debug("Skipping validation clause with SQL-only function: {}", trimmed);
+      return null;
+    }
+
+    // Skip clauses with a nested subquery: the generic translator cannot map raw SQL table names
+    // to HQL entities, so these are handled by a dedicated SelectorContextPolicy instead.
+    if (NESTED_SUBQUERY.matcher(trimmed).find()) {
+      log.debug("Skipping validation clause with nested subquery: {}", trimmed);
       return null;
     }
 
