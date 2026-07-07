@@ -19,7 +19,6 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.HttpBaseServlet;
-import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -237,51 +236,20 @@ public class NeoServlet extends HttpBaseServlet {
   /**
    * Handle request with CDI hooks discovered via Java_Qualifier.
    * The handler acts as a pre+post hook (the handler decides via convention).
+   *
+   * <p>{@code request}/{@code response} are kept in the signature for the HTTP call sites
+   * that already pass them, but the dispatch logic itself needs neither — it lives in
+   * {@link NeoServletSupport#handleWithHooks(String, NeoContext, NeoCrudHandler)} so that
+   * {@link BatchService}'s non-HTTP per-op create path can reach the exact same hook
+   * dispatch without needing servlet request/response objects it does not have.
    */
   NeoResponse handleWithHooks(String javaQualifier, NeoContext context,
       HttpServletRequest request, HttpServletResponse response) {
-    try {
-      NeoHandler handler = lookupHandler(javaQualifier);
-      if (handler == null) {
-        log.warn("No handler found for qualifier '{}', falling back to default", javaQualifier);
-        return crudHandler.handleDefault(context);
-      }
-
-      // Pre-hook
-      NeoResponse preResult = handler.handle(context);
-      if (preResult != null) {
-        context.setPreviousResult(preResult);
-        NeoResponse afterResult = handler.afterHandle(context);
-        return afterResult != null ? afterResult : preResult;
-      }
-
-      // Default service
-      NeoResponse defaultResult = crudHandler.handleDefault(context);
-
-      // Post-hook
-      context.setPreviousResult(defaultResult);
-      NeoResponse afterResult = handler.afterHandle(context);
-      return afterResult != null ? afterResult : defaultResult;
-    } catch (Exception e) {
-      log.error("Error executing hook handler: {}", javaQualifier, e);
-      return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
-    }
+    return NeoServletSupport.handleWithHooks(javaQualifier, context, crudHandler);
   }
 
   NeoHandler lookupHandler(String qualifier) {
-    try {
-      for (NeoHandler handler : WeldUtils.getInstances(NeoHandler.class)) {
-        javax.inject.Named named = handler.getClass().getAnnotation(javax.inject.Named.class);
-        if (named != null && qualifier.equals(named.value())) {
-          return handler;
-        }
-      }
-      log.warn("No NeoHandler found with @Named(\"{}\")", qualifier);
-      return null;
-    } catch (Exception e) {
-      log.error("Failed to lookup handler with qualifier: {}", qualifier, e);
-      return null;
-    }
+    return NeoServletSupport.lookupHandler(qualifier);
   }
 
   void writeResponse(HttpServletResponse response, NeoResponse neoResponse)
