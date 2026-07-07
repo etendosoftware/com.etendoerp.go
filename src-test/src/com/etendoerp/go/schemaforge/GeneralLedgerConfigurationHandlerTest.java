@@ -61,7 +61,7 @@ import org.openbravo.model.financialmgmt.calendar.Calendar;
  * Unit tests for {@link GeneralLedgerConfigurationHandler}.
  *
  * <p>The handler is an org-scoped aggregate over one accounting schema (general / defaults /
- * dimensions / documents / orgInfo / catalogs / meta). These tests isolate the static
+ * dimensions / orgInfo / catalogs / meta). These tests isolate the static
  * {@link OBDal} and {@link OBContext} dependencies with Mockito {@code MockedStatic}, so no DB
  * or CDI container is required. The model graph (organization → ledger → defaults/dimensions)
  * is built from plain mocks.</p>
@@ -69,7 +69,7 @@ import org.openbravo.model.financialmgmt.calendar.Calendar;
  * <p>Coverage:</p>
  * <ul>
  *   <li>routing guards (spec / entity / endpoint type)</li>
- *   <li>GET aggregate shape (all top-level keys, orgInfo calendar + name, meta.documentsBacked=false)</li>
+ *   <li>GET aggregate shape (all top-level keys, orgInfo calendar + name)</li>
  *   <li>POST happy path (a backed `general` field change is written and the refreshed row reflects it)</li>
  *   <li>org resolution failures (no concrete current org, org not found, org without general ledger)</li>
  *   <li>currency not found, accounting combination not found</li>
@@ -318,7 +318,7 @@ class GeneralLedgerConfigurationHandlerTest {
     assertEquals(1, envelope.getJSONArray("data").length());
 
     JSONObject row = aggregateRow(response);
-    for (String key : new String[] { "general", "defaults", "dimensions", "documents",
+    for (String key : new String[] { "general", "defaults", "dimensions",
         "orgInfo", "catalogs", "generalAccounts", "meta" }) {
       assertTrue(row.has(key), "aggregate row must carry the '" + key + "' section");
     }
@@ -335,7 +335,7 @@ class GeneralLedgerConfigurationHandlerTest {
   }
 
   @Test
-  @DisplayName("GET orgInfo carries calendar + organization name; meta.documentsBacked is false")
+  @DisplayName("GET orgInfo carries calendar + organization name")
   void getOrgInfoAndMeta() throws Exception {
     wireOrgWithLedger();
     wireLoadCriteria(Collections.emptyList());
@@ -347,10 +347,7 @@ class GeneralLedgerConfigurationHandlerTest {
     assertEquals("Calendario 2026", orgInfo.getString("fiscalCalendar"));
 
     JSONObject meta = row.getJSONObject("meta");
-    assertFalse(meta.getBoolean("documentsBacked"));
-
-    // Documents are seed rows and read-only — present but not DB-backed.
-    assertTrue(row.getJSONArray("documents").length() > 0);
+    assertEquals("neo", meta.getString("source"));
   }
 
   // ── POST happy path ────────────────────────────────────────────────────────────

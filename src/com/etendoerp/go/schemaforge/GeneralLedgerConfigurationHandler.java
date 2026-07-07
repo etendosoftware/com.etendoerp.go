@@ -76,9 +76,6 @@ import org.openbravo.model.financialmgmt.calendar.Calendar;
  *       sections (`general`, `defaults`, `dimensions`) in one transaction, then returns the
  *       refreshed aggregate row.</li>
  * </ul>
- *
- * <p>`Documentos` intentionally remains read-only and currently unbacked in this dataset. The
- * response carries a note so the frontend can surface that limitation explicitly for PM review.</p>
  */
 @Named("generalLedgerConfigurationHandler")
 public class GeneralLedgerConfigurationHandler implements NeoHandler {
@@ -325,7 +322,6 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     row.put("general", buildGeneral(state));
     row.put("defaults", buildDefaults(state.defaults));
     row.put("dimensions", buildDimensions(state.dimensions));
-    row.put("documents", buildDocumentSeeds());
     row.put("orgInfo", buildOrgInfo(state.organization));
     row.put("catalogs", buildCatalogs(state.schema));
     row.put("generalAccounts", buildGeneralAccounts(state.generalAccounts));
@@ -385,33 +381,6 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     return out;
   }
 
-  private JSONArray buildDocumentSeeds() throws JSONException {
-    JSONArray out = new JSONArray();
-    out.put(documentRow("doc-arc", "glc.doc.salesInvoice", "700", "Ventas de mercaderias"));
-    out.put(documentRow("doc-api", "glc.doc.purchaseInvoice", "600", "Compras de mercaderias"));
-    out.put(documentRow("doc-arn", "glc.doc.salesCreditMemo", "708", "Devoluciones de ventas"));
-    out.put(documentRow("doc-apn", "glc.doc.purchaseCreditMemo", "608", "Devoluciones de compras"));
-    out.put(documentRow("doc-arr", "glc.doc.receipt", "572", "Bancos c/c"));
-    out.put(documentRow("doc-app", "glc.doc.payment", "410", "Acreedores por prestaciones"));
-    JSONObject journal = new JSONObject();
-    journal.put("id", "doc-glj");
-    journal.put("typeKey", "glc.doc.manualJournal");
-    journal.put("journalKey", "glc.doc.generalJournal");
-    out.put(journal);
-    out.put(documentRow("doc-amz", "glc.doc.depreciation", "681", "Amortizacion del inmovilizado"));
-    return out;
-  }
-
-  private JSONObject documentRow(String id, String typeKey, String code, String name) throws JSONException {
-    JSONObject row = new JSONObject();
-    row.put("id", id);
-    row.put("typeKey", typeKey);
-    row.put("accountId", "seed-" + code);
-    row.put("accountCode", code);
-    row.put("accountName", name);
-    return row;
-  }
-
   private JSONObject buildOrgInfo(Organization organization) throws JSONException {
     JSONObject out = new JSONObject();
     out.put("organization", organization.getName() != null ? organization.getName() : JSONObject.NULL);
@@ -469,9 +438,6 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
   private JSONObject buildMeta() throws JSONException {
     JSONObject meta = new JSONObject();
     meta.put("source", "neo");
-    meta.put("documentsBacked", false);
-    meta.put("documentsNote",
-        "Document mappings remain a read-only visual reference until Product confirms the source model.");
     return meta;
   }
 
