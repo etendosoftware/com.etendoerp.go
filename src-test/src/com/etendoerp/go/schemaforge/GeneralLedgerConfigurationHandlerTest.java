@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -52,6 +53,7 @@ import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchemaDefault;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchemaElement;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchemaGL;
 import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 import org.openbravo.model.financialmgmt.calendar.Calendar;
 
@@ -93,6 +95,7 @@ class GeneralLedgerConfigurationHandlerTest {
   private Organization org;
   private AcctSchema schema;
   private AcctSchemaDefault defaults;
+  private AcctSchemaGL generalAccounts;
 
   @BeforeEach
   void setUp() {
@@ -168,6 +171,7 @@ class GeneralLedgerConfigurationHandlerTest {
 
     OBCriteria<AcctSchemaElement> elemCrit = mock(OBCriteria.class);
     when(obDal.createCriteria(AcctSchemaElement.class)).thenReturn(elemCrit);
+    when(elemCrit.setFilterOnActive(anyBoolean())).thenReturn(elemCrit);
     when(elemCrit.add(any())).thenReturn(elemCrit);
     when(elemCrit.addOrder(any())).thenReturn(elemCrit);
     when(elemCrit.list()).thenReturn(dimensions);
@@ -184,6 +188,26 @@ class GeneralLedgerConfigurationHandlerTest {
     when(curCrit.addOrder(any())).thenReturn(curCrit);
     when(curCrit.setMaxResults(anyInt())).thenReturn(curCrit);
     when(curCrit.list()).thenReturn(Collections.emptyList());
+
+    wireGeneralAccountsCriteria();
+  }
+
+  /**
+   * Stubs the {@link AcctSchemaGL} unique-result lookup used by {@code loadState}. Called by
+   * every {@code wireLoadCriteria*} variant so tests that don't care about the general-accounts
+   * row still get a non-null one (mirrors the mandatory {@code AcctSchemaDefault} row).
+   */
+  @SuppressWarnings("unchecked")
+  private void wireGeneralAccountsCriteria() {
+    generalAccounts = mock(AcctSchemaGL.class);
+    when(generalAccounts.getId()).thenReturn("gl-acct-001");
+
+    OBCriteria<AcctSchemaGL> glCrit = mock(OBCriteria.class);
+    when(obDal.createCriteria(AcctSchemaGL.class)).thenReturn(glCrit);
+    when(glCrit.add(any())).thenReturn(glCrit);
+    when(glCrit.addOrder(any())).thenReturn(glCrit);
+    when(glCrit.setMaxResults(anyInt())).thenReturn(glCrit);
+    when(glCrit.uniqueResult()).thenReturn(generalAccounts);
   }
 
   /**
@@ -207,6 +231,7 @@ class GeneralLedgerConfigurationHandlerTest {
 
     OBCriteria<AcctSchemaElement> elemCrit = mock(OBCriteria.class);
     when(obDal.createCriteria(AcctSchemaElement.class)).thenReturn(elemCrit);
+    when(elemCrit.setFilterOnActive(anyBoolean())).thenReturn(elemCrit);
     when(elemCrit.add(any())).thenReturn(elemCrit);
     when(elemCrit.addOrder(any())).thenReturn(elemCrit);
     when(elemCrit.list()).thenReturn(dimensions);
@@ -223,6 +248,8 @@ class GeneralLedgerConfigurationHandlerTest {
     when(curCrit.addOrder(any())).thenReturn(curCrit);
     when(curCrit.setMaxResults(anyInt())).thenReturn(curCrit);
     when(curCrit.list()).thenReturn(currencies);
+
+    wireGeneralAccountsCriteria();
   }
 
   private AcctSchemaElement dimension(String id, String label, boolean active, boolean mandatory,
@@ -292,7 +319,7 @@ class GeneralLedgerConfigurationHandlerTest {
 
     JSONObject row = aggregateRow(response);
     for (String key : new String[] { "general", "defaults", "dimensions", "documents",
-        "orgInfo", "catalogs", "meta" }) {
+        "orgInfo", "catalogs", "generalAccounts", "meta" }) {
       assertTrue(row.has(key), "aggregate row must carry the '" + key + "' section");
     }
 
@@ -793,6 +820,7 @@ class GeneralLedgerConfigurationHandlerTest {
 
     OBCriteria<AcctSchemaElement> elemCrit2 = mock(OBCriteria.class);
     when(obDal.createCriteria(AcctSchemaElement.class)).thenReturn(elemCrit2);
+    when(elemCrit2.setFilterOnActive(anyBoolean())).thenReturn(elemCrit2);
     when(elemCrit2.add(any())).thenReturn(elemCrit2);
     when(elemCrit2.addOrder(any())).thenReturn(elemCrit2);
     when(elemCrit2.list()).thenReturn(Collections.emptyList());
@@ -809,6 +837,8 @@ class GeneralLedgerConfigurationHandlerTest {
     when(curCrit2.addOrder(any())).thenReturn(curCrit2);
     when(curCrit2.setMaxResults(anyInt())).thenReturn(curCrit2);
     when(curCrit2.list()).thenReturn(Collections.emptyList());
+
+    wireGeneralAccountsCriteria();
 
     JSONObject body = new JSONObject()
         .put("selectedOrgId", "body-org")
@@ -867,5 +897,147 @@ class GeneralLedgerConfigurationHandlerTest {
 
     NeoResponse response = handler.handle(getCtx(ORG_ID));
     assertEquals(500, response.getHttpStatus());
+  }
+
+  // ── Group K — dimension deactivate-then-reload regression (item 7) ──────────
+
+  @Test
+  @DisplayName("Deactivating a non-mandatory dimension does not drop it from the very next reload")
+  void deactivatedDimensionSurvivesReload() throws Exception {
+    wireOrgWithLedger();
+    AcctSchemaElement dim = dimension("dim-prod", "Producto", true, false, "PR", 20L);
+    wireLoadCriteria(List.of(dim));
+
+    JSONObject body = new JSONObject().put("dimensions",
+        new JSONArray().put(new JSONObject().put("id", "dim-prod").put("active", false)));
+
+    // Simulate the deactivation actually taking effect for the post-save reload.
+    when(dim.isActive()).thenReturn(false);
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(dim).setActive(false);
+    // The dimensions criteria must not filter on IsActive — the deactivated row is still present
+    // in the refreshed aggregate row, not silently dropped.
+    JSONArray dimensions = aggregateRow(response).getJSONArray("dimensions");
+    assertEquals(1, dimensions.length());
+    assertEquals("dim-prod", dimensions.getJSONObject(0).getString("id"));
+    assertFalse(dimensions.getJSONObject(0).getBoolean("active"));
+  }
+
+  @Test
+  @DisplayName("The dimensions criteria explicitly disables the default active-only filter")
+  void dimensionsCriteriaDisablesFilterOnActive() throws Exception {
+    wireOrgWithLedger();
+    AcctSchemaElement dim = dimension("dim-prod", "Producto", false, false, "PR", 20L);
+    wireLoadCriteria(List.of(dim));
+
+    handler.handle(getCtx(ORG_ID));
+
+    // Captured via the mocked OBCriteria chain: setFilterOnActive(false) must be invoked so
+    // inactive dimensions are still returned.
+    OBCriteria<AcctSchemaElement> elemCrit = obDal.createCriteria(AcctSchemaElement.class);
+    verify(elemCrit).setFilterOnActive(false);
+  }
+
+  // ── Group L — general accounts (item 2) ──────────────────────────────────────
+
+  @Test
+  @DisplayName("GET generalAccounts reflects the AcctSchemaGL row's boolean and account fields")
+  void getGeneralAccountsShape() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+
+    when(generalAccounts.isSuspenseBalancingUse()).thenReturn(true);
+    when(generalAccounts.isSuspenseErrorUse()).thenReturn(false);
+    when(generalAccounts.isCurrencyBalancingUse()).thenReturn(true);
+    when(generalAccounts.isActive()).thenReturn(true);
+    when(generalAccounts.isCreateClosing()).thenReturn(true);
+
+    AccountingCombination retainedEarning = mock(AccountingCombination.class);
+    when(retainedEarning.getId()).thenReturn("combo-retained");
+    when(generalAccounts.getRetainedEarning()).thenReturn(retainedEarning);
+
+    JSONObject row = aggregateRow(handler.handle(getCtx(ORG_ID)));
+    JSONObject ga = row.getJSONObject("generalAccounts");
+
+    assertEquals("gl-acct-001", ga.getString("id"));
+    assertTrue(ga.getBoolean("suspenseBalancingUse"));
+    assertFalse(ga.getBoolean("suspenseErrorUse"));
+    assertTrue(ga.getBoolean("currencyBalancingUse"));
+    assertTrue(ga.getBoolean("active"));
+    assertTrue(ga.getBoolean("createClosing"));
+    assertEquals("combo-retained", ga.getString("retainedEarning"));
+  }
+
+  @Test
+  @DisplayName("POST writes generalAccounts boolean and account fields and saves the row")
+  void postUpdatesGeneralAccounts() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+
+    AccountingCombination combo = mock(AccountingCombination.class);
+    when(combo.getId()).thenReturn("combo-income");
+    when(obDal.get(AccountingCombination.class, "combo-income")).thenReturn(combo);
+
+    JSONObject body = new JSONObject().put("generalAccounts", new JSONObject()
+        .put("suspenseBalancingUse", true)
+        .put("incomeSummary", "combo-income")
+        .put("createClosing", false));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(generalAccounts).setSuspenseBalancingUse(true);
+    verify(generalAccounts).setIncomeSummary(combo);
+    verify(generalAccounts).setCreateClosing(false);
+    verify(obDal).save(generalAccounts);
+  }
+
+  @Test
+  @DisplayName("POST with an unknown generalAccounts combination id returns 400")
+  void postGeneralAccountsCombinationNotFoundReturns400() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(Collections.emptyList());
+    when(obDal.get(AccountingCombination.class, "missing-combo")).thenReturn(null);
+
+    JSONObject body = new JSONObject().put("generalAccounts",
+        new JSONObject().put("retainedEarning", "missing-combo"));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  @Test
+  @DisplayName("GET returns 400 when no AcctSchemaGL row exists for the ledger")
+  @SuppressWarnings("unchecked")
+  void getNoGeneralAccountsReturns400() {
+    wireOrgWithLedger();
+
+    defaults = mock(AcctSchemaDefault.class);
+    OBCriteria<AcctSchemaDefault> defCrit = mock(OBCriteria.class);
+    when(obDal.createCriteria(AcctSchemaDefault.class)).thenReturn(defCrit);
+    when(defCrit.add(any())).thenReturn(defCrit);
+    when(defCrit.addOrder(any())).thenReturn(defCrit);
+    when(defCrit.setMaxResults(anyInt())).thenReturn(defCrit);
+    when(defCrit.uniqueResult()).thenReturn(defaults);
+
+    OBCriteria<AcctSchemaElement> elemCrit = mock(OBCriteria.class);
+    when(obDal.createCriteria(AcctSchemaElement.class)).thenReturn(elemCrit);
+    when(elemCrit.setFilterOnActive(anyBoolean())).thenReturn(elemCrit);
+    when(elemCrit.add(any())).thenReturn(elemCrit);
+    when(elemCrit.addOrder(any())).thenReturn(elemCrit);
+    when(elemCrit.list()).thenReturn(Collections.emptyList());
+
+    OBCriteria<AcctSchemaGL> glCrit = mock(OBCriteria.class);
+    when(obDal.createCriteria(AcctSchemaGL.class)).thenReturn(glCrit);
+    when(glCrit.add(any())).thenReturn(glCrit);
+    when(glCrit.addOrder(any())).thenReturn(glCrit);
+    when(glCrit.setMaxResults(anyInt())).thenReturn(glCrit);
+    when(glCrit.uniqueResult()).thenReturn(null);
+
+    NeoResponse response = handler.handle(getCtx(ORG_ID));
+    assertEquals(400, response.getHttpStatus());
   }
 }
