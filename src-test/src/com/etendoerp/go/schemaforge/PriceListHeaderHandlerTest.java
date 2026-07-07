@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.mockito.ArgumentMatchers.any;
@@ -37,8 +38,10 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.pricing.pricelist.PriceList;
@@ -145,6 +148,89 @@ public class PriceListHeaderHandlerTest {
     NeoContext ctx = NeoContext.builder()
         .httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
     assertNull(new PriceListHeaderHandler().handle(ctx));
+  }
+
+  private static NeoContext postCreateCtx(JSONObject requestBody, OBContext obContext) {
+    return NeoContext.builder()
+        .specName("price-list").entityName("priceList")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .requestBody(requestBody).obContext(obContext).build();
+  }
+
+  /**
+   * Tariffs inherit the organization currency: a POST create without a {@code currency}
+   * field gets the org currency injected into the request body (so the mandatory
+   * C_Currency_ID column is satisfied), and handle() still returns null to continue
+   * to the default create.
+   */
+  @Test
+  public void testHandlePostInjectsOrgCurrencyWhenMissing() throws JSONException {
+    JSONObject body = new JSONObject().put("name", "My Tariff").put("salesPriceList", true);
+    OBContext obContext = mock(OBContext.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("ORG1");
+    when(obContext.getCurrentOrganization()).thenReturn(org);
+
+    try (MockedStatic<OBContext> obCtxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn("CUR1");
+
+      assertNull(new PriceListHeaderHandler().handle(postCreateCtx(body, obContext)));
+      assertEquals("CUR1", body.getString("currency"));
+    }
+  }
+
+  /**
+   * A POST that already carries a currency is left untouched — the org-currency resolver
+   * is never invoked.
+   */
+  @Test
+  public void testHandlePostKeepsExplicitCurrency() throws JSONException {
+    JSONObject body = new JSONObject().put("name", "My Tariff").put("currency", "EXISTING");
+
+    try (MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      assertNull(new PriceListHeaderHandler().handle(postCreateCtx(body, mock(OBContext.class))));
+      assertEquals("EXISTING", body.getString("currency"));
+      curMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * When the org currency cannot be resolved, the body is left without a currency (the
+   * downstream defaults/validation layer handles it) and no exception propagates.
+   */
+  @Test
+  public void testHandlePostLeavesCurrencyUnsetWhenUnresolved() throws JSONException {
+    JSONObject body = new JSONObject().put("name", "My Tariff");
+    OBContext obContext = mock(OBContext.class);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("ORG1");
+    when(obContext.getCurrentOrganization()).thenReturn(org);
+
+    try (MockedStatic<OBContext> obCtxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("ORG1")).thenReturn(null);
+
+      assertNull(new PriceListHeaderHandler().handle(postCreateCtx(body, obContext)));
+      assertFalse(body.has("currency"));
+    }
+  }
+
+  /**
+   * A GET never triggers currency injection (only POST creates need it).
+   */
+  @Test
+  public void testHandleGetDoesNotInjectCurrency() throws JSONException {
+    JSONObject body = new JSONObject().put("name", "My Tariff");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+        .requestBody(body).build();
+
+    try (MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      assertNull(new PriceListHeaderHandler().handle(ctx));
+      assertFalse(body.has("currency"));
+      curMock.verifyNoInteractions();
+    }
   }
 
   // ── guard conditions ──────────────────────────────────────────────────────
