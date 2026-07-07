@@ -14,7 +14,9 @@ name: Base Branch Health Check
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize]
+    # `labeled` lets the escape hatch below re-evaluate as soon as the
+    # 'base-branch-fix' label is applied — no manual "Re-run jobs" needed.
+    types: [opened, reopened, synchronize, labeled]
     branches:
       - main
       - develop
@@ -36,6 +38,44 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
             const baseRef = context.payload.pull_request.base.ref;
+
+            // ── Escape hatch: PR that repairs the base branch ───────────────
+            // A PR labeled 'base-branch-fix' is allowed through even when the
+            // base is red: it IS the change that turns the base green again, so
+            // this gate would otherwise deadlock it (the base can only go green
+            // once this PR merges). Applying the label re-runs this workflow via
+            // the `labeled` event above.
+            //
+            // The bypass is deliberately narrow and auditable: it applies only
+            // to a SINGLE-COMMIT PR carrying the 'base-branch-fix' label. The
+            // one-commit rule is what keeps the bypass from being used to sneak
+            // unrelated work past the gate — a base fix is a focused, reviewable
+            // change. Other labels are intentionally allowed to coexist. If the
+            // commit constraint is violated, the gate fails with a clear message
+            // instead of silently falling back to the base check.
+            const labels = (context.payload.pull_request.labels || []).map(l => l.name);
+            if (labels.includes('base-branch-fix')) {
+              const commitCount = context.payload.pull_request.commits;
+              if (commitCount !== 1) {
+                await core.summary
+                  .addHeading(`Base branch health: ${baseRef}`, 3)
+                  .addRaw(`PR labeled \`base-branch-fix\` has ${commitCount} commits — the bypass requires exactly 1.`)
+                  .write();
+                core.setFailed(
+                  `A 'base-branch-fix' PR must be exactly ONE commit (this one has ${commitCount}). ` +
+                  `Squash it to a single commit, then re-run this check.`
+                );
+                return;
+              }
+              await core.summary
+                .addHeading(`Base branch health: ${baseRef}`, 3)
+                .addRaw(`Skipped — single-commit PR labeled \`base-branch-fix\` (expected to repair the base branch).`)
+                .write();
+              core.info(
+                `PR labeled 'base-branch-fix' with 1 commit → skipping base health gate for '${baseRef}'.`
+              );
+              return;
+            }
 
             // Latest commit on the base branch (NOT the merge base — we want
             // the current tip the PR would merge into).
