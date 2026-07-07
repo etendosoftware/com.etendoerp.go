@@ -65,7 +65,11 @@ import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
  *   <li>assignDefaultPaymentMethods: Cash/Bank/Card accounts get their type's methods linked, the
  *       first one flagged as default; a method not found in the catalog is skipped without
  *       throwing; an existing link is left untouched (idempotent, no extra save); an unmapped
- *       type and the "nothing created" case never call {@code OBDal.flush()}. Tested end-to-end
+ *       type and the "nothing created" case never call {@code OBDal.flush()}. The link also
+ *       copies uponDepositUse/uponWithdrawalUse/automaticDeposit/automaticWithdrawn from the
+ *       master {@link FIN_PaymentMethod} — verified both with truthy values and with
+ *       false/null values to confirm it is a genuine copy, not a hardcoded default. Tested
+ *       end-to-end
  *       against the real static method (moved here from {@code FinancialAccountHandler} — see
  *       {@code FinancialAccountHandlerTest#testAfterHandlePostAssignsForCreatedAccount} for the
  *       hook-delegation test), since {@code findPaymentMethodByName}/{@code linkExists}/
@@ -266,6 +270,10 @@ public class FinancialAccountSupportTest {
     when(account.getOrganization()).thenReturn(org);
     FIN_PaymentMethod cash = mock(FIN_PaymentMethod.class);
     FinAccPaymentMethod link = mock(FinAccPaymentMethod.class);
+    when(cash.getUponDepositUse()).thenReturn("DEP");
+    when(cash.getUponWithdrawalUse()).thenReturn("WIT");
+    when(cash.isAutomaticDeposit()).thenReturn(true);
+    when(cash.isAutomaticWithdrawn()).thenReturn(true);
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
         MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
@@ -293,6 +301,60 @@ public class FinancialAccountSupportTest {
       verify(link).setAccount(account);
       verify(link).setPaymentMethod(cash);
       verify(link).setDefault(true);
+      verify(link).setUponDepositUse("DEP");
+      verify(link).setUponWithdrawalUse("WIT");
+      verify(link).setAutomaticDeposit(true);
+      verify(link).setAutomaticWithdrawn(true);
+      verify(dal).save(link);
+      verify(dal).flush();
+    }
+  }
+
+  /**
+   * Verifies the reconcile/automatic-use fields are a genuine copy from the master
+   * {@link FIN_PaymentMethod} — not a hardcoded constant — by using a master with
+   * {@code false}/{@code null} values and confirming the link mirrors them exactly.
+   */
+  @Test
+  public void testAssignDefaultPaymentMethodsCopiesFalseAndNullReconcileFieldsFromMaster() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(account.getType()).thenReturn("C");
+    when(account.getClient()).thenReturn(client);
+    when(account.getOrganization()).thenReturn(org);
+    FIN_PaymentMethod cash = mock(FIN_PaymentMethod.class);
+    FinAccPaymentMethod link = mock(FinAccPaymentMethod.class);
+    when(cash.getUponDepositUse()).thenReturn(null);
+    when(cash.getUponWithdrawalUse()).thenReturn(null);
+    when(cash.isAutomaticDeposit()).thenReturn(false);
+    when(cash.isAutomaticWithdrawn()).thenReturn(false);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FIN_PaymentMethod> methodCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FIN_PaymentMethod.class)).thenReturn(methodCriteria);
+      when(methodCriteria.uniqueResult()).thenReturn(cash);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<FinAccPaymentMethod> linkCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(FinAccPaymentMethod.class)).thenReturn(linkCriteria);
+      when(linkCriteria.uniqueResult()).thenReturn(null);
+
+      OBProvider provider = mock(OBProvider.class);
+      obProvider.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FinAccPaymentMethod.class)).thenReturn(link);
+
+      FinancialAccountSupport.assignDefaultPaymentMethods(account);
+
+      verify(link).setUponDepositUse(null);
+      verify(link).setUponWithdrawalUse(null);
+      verify(link).setAutomaticDeposit(false);
+      verify(link).setAutomaticWithdrawn(false);
       verify(dal).save(link);
       verify(dal).flush();
     }

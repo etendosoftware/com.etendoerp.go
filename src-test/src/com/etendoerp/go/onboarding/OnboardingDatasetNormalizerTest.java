@@ -193,7 +193,10 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue(xml.contains("30 Días"));
     assertTrue(xml.contains("Inmediato"));
     assertTrue(xml.contains("Efectivo"));
-    assertTrue(xml.contains("Consumidor Final"));
+    // C_BP_GROUP's default group was renamed "Consumidor Final" -> "Cliente" (Feature ETP-4402,
+    // commit 73d412c8, referencedata/sampledata/GOClient/C_BP_GROUP.xml) as part of adding the
+    // "Acreedor" BP category; assert on the current bundled content.
+    assertTrue(xml.contains("Cliente"));
   }
 
   /** Verifies that user-scoped sales representative columns are stripped from product rows. */
@@ -257,6 +260,76 @@ public class OnboardingDatasetNormalizerTest {
 
     assertTrue(xml.contains(wiredElementId));
     assertFalse(xml.contains(orphanElementId));
+  }
+
+  /**
+   * ETP-4245 (TC-40): verifies that a freshly-provisioned tenant is born with all 8 accounting
+   * dimensions on {@code C_ACCTSCHEMA_ELEMENT} — the 2 mandatory ones (Organization, Account) plus
+   * all 6 optional ones (Project, Bus.Partner, Product, Cost Center, User1, User2) — instead of just
+   * 5. Cost Center/User1/User2 were entirely missing from the shipped dataset before this fix; the
+   * pre-existing 5 are asserted too as a regression guard so a future edit cannot silently drop one.
+   */
+  @Test
+  public void testNormalizerIncludesAllEightAccountingDimensions() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    // Pre-existing 5 (regression guard).
+    assertTrue("Organization (OO) element missing", xml.contains("23C4FD2DE4514B1EB8966CC4FA0BEE90"));
+    assertTrue("Account (AC) element missing", xml.contains("C3EA91A712AB44BAA2B3935A78795AA8"));
+    assertTrue("Project (PJ) element missing", xml.contains("11632D226E424B269F0D1847DCECA106"));
+    assertTrue("Bus.Partner (BP) element missing", xml.contains("2A954DBDB2664001A4AEF8F9C83C73B3"));
+    assertTrue("Product (PR) element missing", xml.contains("3A0D3FCBC7634DBCA660AAFA44045B7F"));
+
+    // New 3 (ETP-4245 gap closure).
+    assertTrue("Cost Center (CC) element missing", xml.contains("081FC9AAACF84A91985EF9A14F547A8C"));
+    assertTrue("User 1 (U1) element missing", xml.contains("54EE6A5A91474E8A90A0A4239A8D740B"));
+    assertTrue("User 2 (U2) element missing", xml.contains("C2FE16188CB64DF0BCEC38DD4DF38918"));
+
+    assertTrue("CC elementtype value missing", xml.contains("<elementtype>CC</elementtype>"));
+    assertTrue("U1 elementtype value missing", xml.contains("<elementtype>U1</elementtype>"));
+    assertTrue("U2 elementtype value missing", xml.contains("<elementtype>U2</elementtype>"));
+  }
+
+  /**
+   * ETP-4245 (TC-38): verifies the accounting schema ships fully predefined for posting — Allow
+   * Negatives and Centrally Maintained both {@code Y} — instead of the previous {@code N}/{@code N}
+   * defaults, so a new tenant never needs manual configuration of these flags.
+   */
+  @Test
+  public void testNormalizerAccountingSchemaIsPredefinedForPosting() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue("allownegative must be Y", xml.contains("<allownegative>Y</allownegative>"));
+    assertTrue("iscentrallymaintained must be Y",
+        xml.contains("<iscentrallymaintained>Y</iscentrallymaintained>"));
+  }
+
+  /**
+   * ETP-4245 (R11, TC-41 follow-up, "Jorge's list", 2026-07-06): verifies that a freshly-provisioned
+   * tenant is born with the 6 previously-NULL {@code C_ACCTSCHEMA_DEFAULT} Defaults-tab accounts
+   * (doubtful debt, bad debt expense/revenue, allowance for doubtful debt, deferred product
+   * expense/revenue) populated from GOClient's own chart of accounts, instead of NULL. Also asserts
+   * the write-off account combination id is retained UNCHANGED — it is deliberately NOT re-mapped to
+   * the screenshot's account (65000000); the product owner confirmed the existing value (account
+   * 69400000, the same combination reused for bad-debt expense) is correct.
+   */
+  @Test
+  public void testNormalizerIncludesAcctSchemaDefaultDoubtfulDebtAndDeferredAccounts() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    // New 6 (ETP-4245 R11 gap closure) — C_ValidCombination ids resolved against GOClient's chart.
+    assertTrue("DoubtfulDebt_Acct (43600000) missing", xml.contains("B745085187C74232849D0468C5780413"));
+    assertTrue("BadDebtExpense_Acct (69400000) missing", xml.contains("997A522BF1124E029E99AB31CF2540F9"));
+    assertTrue("BadDebtRevenue_Acct (79400000) missing", xml.contains("2EAB8BDA6BD84FF0B04AFFFCA105DC53"));
+    assertTrue("AllowanceForDoubtful_Acct (49000000) missing",
+        xml.contains("35D2EC0EA8584EBE85C056293D1AA7E2"));
+    assertTrue("P_Def_Expense_Acct (48000000) missing", xml.contains("801F214F5D434636935E753EF244816F"));
+    assertTrue("P_Def_Revenue_Acct (48500000) missing", xml.contains("032942D16A9F417B88564FDAF211E4D9"));
+
+    // Regression guard: write-off must stay at the DB-authoritative 69400000 combination — never
+    // "fixed" to the screenshot's 65000000 combination.
+    assertTrue("WriteOff_Acct must remain 69400000 (override confirmed, not the screenshot's 65000000)",
+        xml.contains("997A522BF1124E029E99AB31CF2540F9"));
   }
 
   /**

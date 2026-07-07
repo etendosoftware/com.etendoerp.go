@@ -115,10 +115,70 @@ public class InvoiceLineHandler implements NeoHandler {
     if (!NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return null;
     }
-    if ("GET".equals(context.getHttpMethod())) {
+    String method = context.getHttpMethod();
+    if ("GET".equals(method)) {
       return DiscountLineFilter.filterFromResponse(context);
     }
+    if ("POST".equals(method) || "PATCH".equals(method) || "PUT".equals(method)) {
+      syncConversionRateDocumentAfterLineSave(context);
+    }
     return null;
+  }
+
+  /**
+   * Re-syncs the parent invoice's {@code C_Conversion_Rate_Document} (rate/foreignAmount)
+   * after a line is added or edited (POST/PATCH/PUT). {@code AbstractInvoiceHeaderHandler
+   * #autoCreateOrUpdateConversionRateDocument} only runs on HEADER saves — since it is bound
+   * per-entity via {@code ETGO_SF_ENTITY.Java_Qualifier} — so nothing re-syncs the document's
+   * {@code foreignAmount} as {@code grandTotalAmount} changes while lines are added after the
+   * header currency/rate was first set (ETP-4029 follow-up gap, confirmed via manual QA on
+   * invoice {@code 200611A7D11E4EE3B3B9DEEA607015D9}).
+   *
+   * <p>Resolves the parent invoice ID the same way {@link #resolveParentInvoiceId(NeoContext,
+   * JSONObject)} does for {@code handle()}, adapted for {@code afterHandle()} where the original
+   * request body is not guaranteed to still carry {@code parentId} (e.g. POST responses only
+   * expose the created line via {@code getPreviousResult()}). Delegates the actual upsert to the
+   * shared {@link AbstractInvoiceHeaderHandler#autoCreateOrUpdateConversionRateDocument(String)}
+   * core — no SQL is duplicated here.
+   *
+   * @param context the current NeoContext (lines entity; {@code getRecordId()} is the LINE id)
+   */
+  private void syncConversionRateDocumentAfterLineSave(NeoContext context) {
+    try {
+      String invoiceId = resolveParentInvoiceIdAfterSave(context);
+      AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(invoiceId);
+    } catch (Exception e) {
+      log.warn("[ETP-4029] Could not sync conversion rate document after line save: {}",
+          e.getMessage());
+    }
+  }
+
+  /**
+   * Resolves the parent invoice ID after a line POST/PATCH/PUT has already completed.
+   * PATCH/PUT: the line record already existed, so {@code context.getRecordId()} is the line ID
+   * and can be looked up directly. POST: the line did not exist yet when the request started, so
+   * the new line ID must be read from {@code context.getPreviousResult()}'s CRUD response body
+   * (mirrors {@code AbstractInvoiceHeaderHandler#resolveInvoiceIdFromContext}'s POST-vs-PATCH
+   * resolution pattern, adapted here because the "record" in this entity is the line, not the
+   * invoice).
+   *
+   * @param context the current NeoContext
+   * @return the parent invoice ID, or {@code null} if it could not be resolved
+   */
+  private String resolveParentInvoiceIdAfterSave(NeoContext context) {
+    String lineId = context.getRecordId();
+    if (StringUtils.isBlank(lineId)) {
+      lineId = extractCreatedLineIdFromPreviousResult(context);
+    }
+    if (StringUtils.isBlank(lineId)) {
+      return null;
+    }
+    InvoiceLine line = OBDal.getInstance().get(InvoiceLine.class, lineId);
+    return (line != null && line.getInvoice() != null) ? line.getInvoice().getId() : null;
+  }
+
+  private String extractCreatedLineIdFromPreviousResult(NeoContext context) {
+    return NeoHandlerUtils.extractCreatedIdFromPreviousResult(context);
   }
 
   /**
