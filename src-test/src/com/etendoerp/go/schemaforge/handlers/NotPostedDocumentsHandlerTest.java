@@ -269,6 +269,77 @@ public class NotPostedDocumentsHandlerTest {
     assertNull(handler.buildRow(row));
   }
 
+  /**
+   * The 5 document types globally excluded by product decision (ETP-4452) must resolve to their
+   * real {@code tableId} via {@link NotPostedDocumentsHandler#DOCUMENT_TYPE_TO_TABLE_ID} (the
+   * defensive fix) AND be dropped from the grid because their table is in
+   * {@code APRM_DISABLED_TABLE_IDS} (the exclusion). Before the fix these labels were absent from
+   * the map, so {@code tableId} resolved to {@code null} and the row was never dropped here.
+   */
+  @Test
+  public void buildRowDropsGloballyExcludedBillOfMaterialsProductionRow() throws Exception {
+    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+    Map<String, Object> row = new HashMap<>();
+    row.put("documentType", "Bill of Materials Production");
+
+    assertNull(handler.buildRow(row));
+  }
+
+  @Test
+  public void buildRowDropsGloballyExcludedDoubtfulDebtRow() throws Exception {
+    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+    Map<String, Object> row = new HashMap<>();
+    row.put("documentType", "Doubtful Debt");
+
+    assertNull(handler.buildRow(row));
+  }
+
+  @Test
+  public void buildRowDropsGloballyExcludedLandedCostRow() throws Exception {
+    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+    Map<String, Object> row = new HashMap<>();
+    row.put("documentType", "Landed Cost");
+
+    assertNull(handler.buildRow(row));
+  }
+
+  @Test
+  public void buildRowDropsGloballyExcludedLandedCostCostRow() throws Exception {
+    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+    Map<String, Object> row = new HashMap<>();
+    row.put("documentType", "Landed Cost Cost");
+
+    assertNull(handler.buildRow(row));
+  }
+
+  @Test
+  public void buildRowDropsGloballyExcludedCostAdjustmentRow() throws Exception {
+    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+    Map<String, Object> row = new HashMap<>();
+    row.put("documentType", "Cost Adjustment");
+
+    assertNull(handler.buildRow(row));
+  }
+
+  /**
+   * Defensive-fix regression guard: even without going through {@code APRM_DISABLED_TABLE_IDS},
+   * {@code DOCUMENT_TYPE_TO_TABLE_ID} must resolve the real table id for these 5 labels — verified
+   * directly on the map so a future removal from {@code APRM_DISABLED_TYPES} (e.g. exclusion
+   * policy change) does not silently regress the {@code tableId} mapping bug.
+   */
+  @Test
+  public void documentTypeToTableIdMapsAllFiveGloballyExcludedLabels() {
+    assertEquals("325", NotPostedDocumentsHandler.DOCUMENT_TYPE_TO_TABLE_ID.get("Bill of Materials Production"));
+    assertEquals("30721072789F410E9606D2235CB2A226",
+        NotPostedDocumentsHandler.DOCUMENT_TYPE_TO_TABLE_ID.get("Doubtful Debt"));
+    assertEquals("082F967CDF7245EB9A150941F326C45C",
+        NotPostedDocumentsHandler.DOCUMENT_TYPE_TO_TABLE_ID.get("Landed Cost"));
+    assertEquals("55A984C314FD4C4FB5E7C32DE36BB07B",
+        NotPostedDocumentsHandler.DOCUMENT_TYPE_TO_TABLE_ID.get("Landed Cost Cost"));
+    assertEquals("D022B92163074E5E82449C8E0B5AFDF6",
+        NotPostedDocumentsHandler.DOCUMENT_TYPE_TO_TABLE_ID.get("Cost Adjustment"));
+  }
+
   @Test
   public void buildRowSetsNullTableIdForUnmappedDocumentType() throws Exception {
     NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
@@ -477,6 +548,49 @@ public class NotPostedDocumentsHandlerTest {
           .thenReturn(ref);
       org.openbravo.model.ad.domain.List paymentIn = mockListItem("PIN", "Payment In", true);
       when(ref.getADListList()).thenReturn(Collections.singletonList(paymentIn));
+
+      OBContext obContext = mock(OBContext.class);
+      Language language = mock(Language.class);
+      when(language.getLanguage()).thenReturn("en_US");
+      when(obContext.getLanguage()).thenReturn(language);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      JSONArray result = new NotPostedDocumentsHandler().refListDocumentTypes();
+
+      assertEquals(0, result.length());
+    }
+  }
+
+  /**
+   * The 5 document types globally excluded by product decision (ETP-4452) must never appear in
+   * the dropdown even when their table has an active accounting schema entry — the tradeoff of
+   * hiding legitimate documents for tenants that actively use them (e.g. QA Testing, F&amp;B
+   * International Group) was accepted by the product owner.
+   */
+  @Test
+  public void refListDocumentTypesExcludesAllFiveGloballyExcludedTypesEvenWhenSchemaActive()
+      throws Exception {
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      mockAccountedTableIds(dal,
+          "325",                                 // M_Production
+          "30721072789F410E9606D2235CB2A226",    // FIN_Doubtful_Debt
+          "082F967CDF7245EB9A150941F326C45C",    // M_LandedCost
+          "55A984C314FD4C4FB5E7C32DE36BB07B",    // M_LC_Cost
+          "D022B92163074E5E82449C8E0B5AFDF6");   // M_CostAdjustment
+
+      Reference ref = mock(Reference.class);
+      when(dal.get(eq(Reference.class), eq(NotPostedDocumentsHandler.DOCUMENT_TYPE_REF_ID)))
+          .thenReturn(ref);
+      java.util.List<org.openbravo.model.ad.domain.List> items = java.util.Arrays.asList(
+          mockListItem("BMP", "Bill of Materials Production", true),
+          mockListItem("DD", "Doubtful Debt", true),
+          mockListItem("LC", "Landed Cost", true),
+          mockListItem("LCC", "Landed Cost Cost", true),
+          mockListItem("CA", "Cost Adjustment", true));
+      when(ref.getADListList()).thenReturn(items);
 
       OBContext obContext = mock(OBContext.class);
       Language language = mock(Language.class);
