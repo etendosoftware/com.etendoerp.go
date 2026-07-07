@@ -142,7 +142,7 @@ class GeneralLedgerConfigurationHandlerTest {
     when(schema.getName()).thenReturn("Spain GAAP");
     when(schema.getGAAP()).thenReturn("ESP");
     when(schema.isAccrual()).thenReturn(true);
-    when(schema.isAutomaticPeriodControl()).thenReturn(false);
+    when(schema.isAllowNegative()).thenReturn(false);
     when(schema.getDescription()).thenReturn("Default ledger");
     when(schema.getCurrency()).thenReturn(null);
 
@@ -498,18 +498,18 @@ class GeneralLedgerConfigurationHandlerTest {
   }
 
   @Test
-  @DisplayName("POST updates automaticPeriodControl boolean field via applyGeneralChanges")
-  void postUpdatesAutomaticPeriodControl() throws Exception {
+  @DisplayName("POST updates allowNegative boolean field via applyGeneralChanges")
+  void postUpdatesAllowNegative() throws Exception {
     wireOrgWithLedger();
     wireLoadCriteria(Collections.emptyList());
 
     JSONObject body = new JSONObject()
-        .put("general", new JSONObject().put("automaticPeriodControl", true));
+        .put("general", new JSONObject().put("allowNegative", true));
 
     NeoResponse response = handler.handle(postCtx(ORG_ID, body));
 
     assertEquals(200, response.getHttpStatus());
-    verify(schema).setAutomaticPeriodControl(true);
+    verify(schema).setAllowNegative(true);
   }
 
   @Test
@@ -795,7 +795,7 @@ class GeneralLedgerConfigurationHandlerTest {
     when(schema2.getName()).thenReturn("Body Ledger");
     when(schema2.getGAAP()).thenReturn("IFRS");
     when(schema2.isAccrual()).thenReturn(false);
-    when(schema2.isAutomaticPeriodControl()).thenReturn(false);
+    when(schema2.isAllowNegative()).thenReturn(false);
     when(schema2.getDescription()).thenReturn(null);
     when(schema2.getCurrency()).thenReturn(null);
 

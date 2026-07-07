@@ -91,7 +91,7 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
   private static final String FIELD_ACCRUAL = "accrual";
   private static final String FIELD_DESCRIPTION = "description";
   private static final String FIELD_CURRENCY = "currency";
-  private static final String FIELD_AUTOMATIC_PERIOD_CONTROL = "automaticPeriodControl";
+  private static final String FIELD_ALLOW_NEGATIVE = "allowNegative";
   private static final String FIELD_ACTIVE = "active";
 
   private static final String FIELD_SUSPENSE_BALANCING_USE = "suspenseBalancingUse";
@@ -338,7 +338,7 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     out.put(FIELD_DESCRIPTION, nullable(state.schema.getDescription()));
     out.put(FIELD_CURRENCY,
         state.schema.getCurrency() != null ? state.schema.getCurrency().getId() : JSONObject.NULL);
-    out.put(FIELD_AUTOMATIC_PERIOD_CONTROL, bool(state.schema.isAutomaticPeriodControl()));
+    out.put(FIELD_ALLOW_NEGATIVE, bool(state.schema.isAllowNegative()));
     return out;
   }
 
@@ -454,8 +454,8 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     if (general.has(FIELD_ACCRUAL)) {
       state.schema.setAccrual(general.optBoolean(FIELD_ACCRUAL));
     }
-    if (general.has(FIELD_AUTOMATIC_PERIOD_CONTROL)) {
-      state.schema.setAutomaticPeriodControl(general.optBoolean(FIELD_AUTOMATIC_PERIOD_CONTROL));
+    if (general.has(FIELD_ALLOW_NEGATIVE)) {
+      state.schema.setAllowNegative(general.optBoolean(FIELD_ALLOW_NEGATIVE));
     }
     if (general.has(FIELD_CURRENCY) && !general.isNull(FIELD_CURRENCY)) {
       String currencyId = trimmedOrNull(general.optString(FIELD_CURRENCY, null));
