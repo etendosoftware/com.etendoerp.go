@@ -55,10 +55,13 @@ import org.openbravo.dal.service.OBDal;
  *   <li>{@code afterHandle()} returns null when {@code previousResult} is null.</li>
  *   <li>{@code afterHandle()} returns null when {@code collectIds} returns an empty list.</li>
  *   <li>{@code afterHandle()} happy path: two rows; the row present in the SQL result gets
- *       {@code etgoValuation} injected, the row absent from the result is left unchanged.</li>
- *   <li>{@code afterHandle()} with a null valuation column ({@code row[1] == null}) → the row
- *       receives {@code BigDecimal.ZERO} (the handler's null-coercion rule).</li>
- *   <li>{@code afterHandle()} swallows any exception thrown inside {@code computeValuations}
+ *       both {@code etgoCost} and {@code etgoValuation} injected, the row absent from the
+ *       result is left unchanged.</li>
+ *   <li>{@code afterHandle()} with a null unit cost column ({@code row[1] == null}) → the row
+ *       receives {@code BigDecimal.ZERO} for {@code etgoCost} (the handler's null-coercion rule).</li>
+ *   <li>{@code afterHandle()} with a null valuation column ({@code row[2] == null}) → the row
+ *       receives {@code BigDecimal.ZERO} for {@code etgoValuation}.</li>
+ *   <li>{@code afterHandle()} swallows any exception thrown inside {@code computeRowValues}
  *       and returns {@code context.getPreviousResult()} unchanged (no rethrow).</li>
  * </ul>
  *
@@ -252,9 +255,10 @@ class BinContentsHandlerTest {
 
   /**
    * Happy-path test: data array with two rows.
-   * The first row (SD-001) is resolved by the SQL query with a known valuation.
+   * The first row (SD-001) is resolved by the SQL query with a known unit cost and valuation.
    * The second row (SD-002) has no entry in the result map.
-   * Asserts that only SD-001 receives {@code etgoValuation}; SD-002 is left unchanged.
+   * Asserts that only SD-001 receives {@code etgoCost} and {@code etgoValuation};
+   * SD-002 is left unchanged.
    */
   @Test
   @SuppressWarnings("unchecked")
@@ -264,8 +268,8 @@ class BinContentsHandlerTest {
         .put(sdRow("SD-002"));
     JSONObject body = wrapData(data);
 
-    // SQL returns one row: SD-001 → valuation 250.50
-    Object[] sqlRow = new Object[]{ "SD-001", new BigDecimal("250.50") };
+    // SQL returns one row: SD-001 → unit cost 25.05, valuation 250.50
+    Object[] sqlRow = new Object[]{ "SD-001", new BigDecimal("25.05"), new BigDecimal("250.50") };
 
     try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
         MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
@@ -287,34 +291,39 @@ class BinContentsHandlerTest {
 
       JSONArray resultData = result.getBody().getJSONObject("response").getJSONArray("data");
 
-      // Row 0 (SD-001) — must have etgoValuation injected
+      // Row 0 (SD-001) — must have etgoCost and etgoValuation injected
       JSONObject row0 = resultData.getJSONObject(0);
+      assertTrue(row0.has("etgoCost"), "SD-001 must have etgoCost set");
       assertTrue(row0.has("etgoValuation"), "SD-001 must have etgoValuation set");
+      assertEquals(new BigDecimal("25.05"), new BigDecimal(row0.getString("etgoCost")),
+          "SD-001 etgoCost must match the SQL result");
       assertEquals(new BigDecimal("250.50"), new BigDecimal(row0.getString("etgoValuation")),
           "SD-001 etgoValuation must match the SQL result");
 
-      // Row 1 (SD-002) — no SQL result → must NOT have etgoValuation
+      // Row 1 (SD-002) — no SQL result → must NOT have etgoCost/etgoValuation
       JSONObject row1 = resultData.getJSONObject(1);
+      assertFalse(row1.has("etgoCost"), "SD-002 must NOT have etgoCost when absent from SQL result");
       assertFalse(row1.has("etgoValuation"), "SD-002 must NOT have etgoValuation when absent from SQL result");
     }
   }
 
   // ---------------------------------------------------------------------------
-  // afterHandle() — null valuation in SQL result → BigDecimal.ZERO
+  // afterHandle() — null unit cost in SQL result → BigDecimal.ZERO
   // ---------------------------------------------------------------------------
 
   /**
-   * When the SQL result row carries a null valuation column ({@code row[1] == null}),
-   * the handler must coerce it to {@code BigDecimal.ZERO} and inject that value.
+   * When the SQL result row carries a null unit cost column ({@code row[1] == null}),
+   * the handler must coerce it to {@code BigDecimal.ZERO} and inject that value as
+   * {@code etgoCost}.
    */
   @Test
   @SuppressWarnings("unchecked")
-  void afterHandle_nullValuationInResult_injectsZero() throws Exception {
+  void afterHandle_nullCostInResult_injectsZero() throws Exception {
     JSONArray data = new JSONArray().put(sdRow("SD-003"));
     JSONObject body = wrapData(data);
 
-    // SQL returns: valuation column is null (product has no M_Costing row)
-    Object[] sqlRow = new Object[]{ "SD-003", null };
+    // SQL returns: unit cost column is null (product has no M_Costing row), valuation is 0
+    Object[] sqlRow = new Object[]{ "SD-003", null, BigDecimal.ZERO };
 
     try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
         MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
@@ -335,6 +344,55 @@ class BinContentsHandlerTest {
           .getJSONObject("response")
           .getJSONArray("data")
           .getJSONObject(0);
+
+      assertTrue(row.has("etgoCost"), "etgoCost must be present even when SQL column is null");
+      assertEquals(BigDecimal.ZERO.toPlainString(),
+          new BigDecimal(row.getString("etgoCost")).toPlainString(),
+          "Null unit cost must be coerced to BigDecimal.ZERO");
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // afterHandle() — null valuation in SQL result → BigDecimal.ZERO
+  // ---------------------------------------------------------------------------
+
+  /**
+   * When the SQL result row carries a null valuation column ({@code row[2] == null}),
+   * the handler must coerce it to {@code BigDecimal.ZERO} and inject that value as
+   * {@code etgoValuation}, independently of the unit cost column.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void afterHandle_nullValuationInResult_injectsZero() throws Exception {
+    JSONArray data = new JSONArray().put(sdRow("SD-004"));
+    JSONObject body = wrapData(data);
+
+    // SQL returns: valuation column is null, unit cost is known
+    Object[] sqlRow = new Object[]{ "SD-004", new BigDecimal("12.00"), null };
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      mockNativeQuery(session, Collections.singletonList(sqlRow));
+
+      NeoContext ctx = getCtx();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = HANDLER.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject row = result.getBody()
+          .getJSONObject("response")
+          .getJSONArray("data")
+          .getJSONObject(0);
+
+      assertTrue(row.has("etgoCost"), "etgoCost must still be set from the non-null column");
+      assertEquals(new BigDecimal("12.00"), new BigDecimal(row.getString("etgoCost")),
+          "etgoCost must match the SQL result when only valuation is null");
 
       assertTrue(row.has("etgoValuation"), "etgoValuation must be present even when SQL column is null");
       assertEquals(BigDecimal.ZERO.toPlainString(),
@@ -389,7 +447,7 @@ class BinContentsHandlerTest {
 
   /**
    * Verifies that a batch of three storage detail rows are all enriched correctly
-   * when the SQL returns a valuation for each id.
+   * when the SQL returns a unit cost and valuation for each id.
    */
   @Test
   @SuppressWarnings("unchecked")
@@ -401,9 +459,9 @@ class BinContentsHandlerTest {
     JSONObject body = wrapData(data);
 
     List<Object[]> sqlRows = Arrays.asList(
-        new Object[]{ "SD-A", new BigDecimal("100.00") },
-        new Object[]{ "SD-B", new BigDecimal("200.00") },
-        new Object[]{ "SD-C", new BigDecimal("300.00") }
+        new Object[]{ "SD-A", new BigDecimal("10.00"), new BigDecimal("100.00") },
+        new Object[]{ "SD-B", new BigDecimal("20.00"), new BigDecimal("200.00") },
+        new Object[]{ "SD-C", new BigDecimal("30.00"), new BigDecimal("300.00") }
     );
 
     try (MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
@@ -424,14 +482,18 @@ class BinContentsHandlerTest {
       JSONArray resultData = result.getBody().getJSONObject("response").getJSONArray("data");
 
       String[][] expected = {
-          { "SD-A", "100.00" },
-          { "SD-B", "200.00" },
-          { "SD-C", "300.00" }
+          { "SD-A", "10.00", "100.00" },
+          { "SD-B", "20.00", "200.00" },
+          { "SD-C", "30.00", "300.00" }
       };
       for (int i = 0; i < expected.length; i++) {
         JSONObject row = resultData.getJSONObject(i);
+        assertTrue(row.has("etgoCost"), "Row " + i + " must have etgoCost");
         assertTrue(row.has("etgoValuation"), "Row " + i + " must have etgoValuation");
         assertEquals(new BigDecimal(expected[i][1]),
+            new BigDecimal(row.getString("etgoCost")),
+            "Row " + i + " etgoCost must match");
+        assertEquals(new BigDecimal(expected[i][2]),
             new BigDecimal(row.getString("etgoValuation")),
             "Row " + i + " etgoValuation must match");
       }

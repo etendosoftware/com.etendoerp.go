@@ -22,10 +22,12 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -65,6 +67,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.model.ad.system.Client;
 
+import com.etendoerp.psd2.bank.integration.data.PisPayment;
+
 /**
  * Unit tests for {@link PaymentRegistrationService}.
  *
@@ -93,6 +97,7 @@ class PaymentRegistrationServiceTest {
   private MockedStatic<OBContext> obContextMock;
 
   @BeforeEach
+  @SuppressWarnings("unchecked")
   void setUp() {
     obDalMock = mockStatic(OBDal.class);
     obContextMock = mockStatic(OBContext.class);
@@ -100,6 +105,15 @@ class PaymentRegistrationServiceTest {
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
     obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
     when(obDal.getSession()).thenReturn(session);
+
+    // paymentListItem (exercised by every handleListPayments test with a non-empty result)
+    // calls PisPaymentService.hasLinkedPisPayment for the "viaPis" badge — stub it here once
+    // so every test gets a real, non-null OBCriteria instead of Mockito's default null.
+    OBCriteria<PisPayment> pisPaymentCriteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(PisPayment.class)).thenReturn(pisPaymentCriteria);
+    when(pisPaymentCriteria.add(any(Criterion.class))).thenReturn(pisPaymentCriteria);
+    when(pisPaymentCriteria.setMaxResults(anyInt())).thenReturn(pisPaymentCriteria);
+    when(pisPaymentCriteria.uniqueResult()).thenReturn(null);
   }
 
   @AfterEach
@@ -1519,4 +1533,5 @@ class PaymentRegistrationServiceTest {
         .getJSONArray("data").getJSONObject(0);
     assertTrue(payItem.isNull("accountCurrency"));
   }
+
 }

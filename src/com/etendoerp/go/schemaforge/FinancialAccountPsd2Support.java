@@ -48,6 +48,8 @@ final class FinancialAccountPsd2Support {
 
   private static final String KEY_DATA = "data";
   private static final String KEY_LOGO_URL = "logo_url";
+  private static final int NAME_MAX_LENGTH = 60;
+  private static final String NAME_SEPARATOR = " - ";
 
   private FinancialAccountPsd2Support() {
   }
@@ -111,15 +113,35 @@ final class FinancialAccountPsd2Support {
     String accountName = StringUtils.trimToEmpty(node.optString(BankIntegrationConstants.NAME, ""));
     boolean hasProvider = StringUtils.isNotBlank(providerName);
     if (hasProvider && StringUtils.isNotBlank(accountName)) {
-      return providerName + " - " + accountName;
+      return combineWithinLimit(providerName, accountName);
     }
     if (hasProvider) {
-      return providerName;
+      return truncateToLimit(providerName);
     }
     if (StringUtils.isNotBlank(accountName)) {
-      return accountName;
+      return truncateToLimit(accountName);
     }
-    return currencyCode + " account";
+    return truncateToLimit(currencyCode + " account");
+  }
+
+  /**
+   * Builds "{providerName} - {accountName}" bounded to {@link #NAME_MAX_LENGTH}. The account
+   * name/IBAN is the more uniquely identifying part (Salt Edge often returns the IBAN itself as
+   * the account name), so the provider name is the one trimmed first when the combination is too
+   * long; if the account name alone still doesn't fit, it is truncated too.
+   */
+  private static String combineWithinLimit(String providerName, String accountName) {
+    int available = NAME_MAX_LENGTH - NAME_SEPARATOR.length() - accountName.length();
+    if (available < 1) {
+      return truncateToLimit(accountName);
+    }
+    String trimmedProvider = providerName.length() > available ? providerName.substring(0, available)
+        : providerName;
+    return trimmedProvider + NAME_SEPARATOR + accountName;
+  }
+
+  private static String truncateToLimit(String value) {
+    return value.length() > NAME_MAX_LENGTH ? value.substring(0, NAME_MAX_LENGTH) : value;
   }
 
   static String fetchProviderLogo(String providerCode, String apiKey) {

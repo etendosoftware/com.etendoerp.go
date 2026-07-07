@@ -18,27 +18,37 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
+import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
+import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.database.ConnectionProvider;
+import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.ReversedInvoice;
+import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * Abstract base class for AP and AR invoice header handlers.
@@ -61,6 +71,8 @@ public abstract class AbstractInvoiceHeaderHandler {
 
   protected static final String FIELD_ORIGIN_INVOICE       = "originInvoice";
   protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
+  private static final String FIELD_CURRENCY = "currency";
+  private static final String FIELD_VALUE = "value";
 
   // ---------------------------------------------------------------------------
   // Abstract contract
@@ -225,30 +237,12 @@ public abstract class AbstractInvoiceHeaderHandler {
     }
   }
 
-  private String resolveInvoiceIdFromContext(NeoContext context) {
+  private static String resolveInvoiceIdFromContext(NeoContext context) {
     if (context.getRecordId() != null) {
       return context.getRecordId();
     }
     // POST: extract newly created record ID from the CRUD response
-    try {
-      NeoResponse prev = context.getPreviousResult();
-      if (prev == null) {
-        return null;
-      }
-      JSONObject responseBody = prev.getBody();
-      if (responseBody == null) {
-        return null;
-      }
-      JSONObject response = responseBody.optJSONObject("response");
-      if (response == null) {
-        return null;
-      }
-      JSONObject data = response.optJSONObject("data");
-      return data != null ? data.optString("id", null) : null;
-    } catch (Exception e) {
-      log.debug("Could not extract invoice ID from POST response: {}", e.getMessage());
-      return null;
-    }
+    return NeoHandlerUtils.extractCreatedIdFromPreviousResult(context);
   }
 
   private void deleteExistingReverseLinks(String invoiceId) {
@@ -345,6 +339,91 @@ public abstract class AbstractInvoiceHeaderHandler {
    */
   protected void enrichDocTypeLocked(JSONObject rec) throws Exception {
     rec.put("docTypeLocked", true);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Completion (documentAction=CO) — routes through the ProcessInvoiceHook chain
+  // ---------------------------------------------------------------------------
+
+  /** AD_Process_ID for {@code C_Invoice.DocAction}, used internally by {@link ProcessInvoiceUtil}. */
+  private static final String COMPLETE_PROCESS_ID_INVOICE = "111";
+
+  /**
+   * Runs the real core invoice-completion process ({@link ProcessInvoiceUtil#process}) when the
+   * request is a completion action (documentAction=CO), short-circuiting NEO's default dispatch.
+   *
+   * <p>For {@code C_Invoice.DocAction} (AD_Process 111, a raw DB procedure with no
+   * {@code JavaClassName}), NEO's generic dispatch runs {@code C_Invoice_Post0} directly via
+   * {@code CallProcess} and never touches {@link ProcessInvoiceUtil} or the
+   * {@code ProcessInvoiceHook} CDI extension point — so hooks such as the Verifactu (and TBAI)
+   * billing-registration hooks never fire when an invoice is completed through NEO, even though
+   * they fire correctly from the classic UI. This method restores that behavior for NEO.
+   *
+   * <p><b>Must be obtained through Weld.</b> {@link ProcessInvoiceUtil} is a plain class with an
+   * {@code @Inject @Any Instance<ProcessInvoiceHook> hooks} field; that field is only populated
+   * when the instance itself is CDI-managed. Calling {@code new ProcessInvoiceUtil()} would leave
+   * {@code hooks} empty and silently skip every hook — reproducing the exact bug this method
+   * fixes, just moved one layer down. {@link WeldUtils#getInstanceFromStaticBeanManager} returns
+   * a fully Weld-managed reference, so {@code hooks} is populated correctly.
+   *
+   * <p>Call this AFTER {@link #validateLineQtyBeforeComplete(NeoContext)} AND AFTER
+   * {@link AbstractOrderHeaderHandler#applyTotalDiscountBeforeComplete} in {@code handle()}, so
+   * (1) pre-completion validation can still block the request before the real process runs, and
+   * (2) the total-discount line already reflects the final set of product lines before it is
+   * read/posted by {@link ProcessInvoiceUtil#process}. Calling this BEFORE the discount
+   * recalculation would complete the document with a stale or missing discount line.
+   *
+   * <p><b>Session-lifecycle note (deliberate divergence):</b> unlike every other handler in this
+   * module — which only {@code .flush()} the DAL session and leave the final commit to the
+   * request-scoped {@code DalThreadCleaner} — {@link ProcessInvoiceUtil#process} internally calls
+   * {@code OBDal.getInstance().commitAndClose()} (success) / {@code .rollbackAndClose()} (error),
+   * fully closing the current Hibernate session mid-request. This mirrors classic UI behavior
+   * (the method is shared with the classic completion path) and is required for its internal
+   * {@code ProcessInstance}/{@code CallProcess} bookkeeping. It is safe here because the very next
+   * statement performs a DAL read ({@code OBDal.getInstance().get(Process.class, ...)}), which
+   * transparently reopens the session — the same characteristic already relied upon by
+   * {@code GlJournalHeaderHandler#completeJournal} via {@code FIN_AddPaymentFromJournal}. Do not
+   * remove or reorder that read without re-verifying this assumption.
+   *
+   * @param context the current NeoContext
+   * @return a {@link NeoResponse} translating the completion result, or {@code null} if this is
+   *     not a completion request (caller should continue to the default dispatch)
+   */
+  protected static NeoResponse completeInvoiceIfNeeded(NeoContext context) {
+    if (!isInvoiceCompleteAction(context)) {
+      return null;
+    }
+    String invoiceId = context.getRecordId();
+    if (StringUtils.isBlank(invoiceId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Missing invoice record id for completion");
+    }
+    try {
+      VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(context.getObContext());
+      // Plain DalConnectionProvider, not wrapped in a RequestContext/pushRequestContextVars scope
+      // (the pattern used elsewhere in NeoProcessService.java for classic-code invocations):
+      // neither the Verifactu nor the TBAI ProcessInvoiceHook reads RequestContext today, so this
+      // is a non-issue in practice. Revisit if a future hook needs request-scoped context.
+      ConnectionProvider conn = new DalConnectionProvider(false);
+      ProcessInvoiceUtil processInvoiceUtil =
+          WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class);
+      // Void-date/supplier-reference params are only consulted for the void action (docAction RC).
+      // ProcessInvoiceUtil calls .isEmpty() on the date strings unconditionally, so they must be
+      // non-null. Empty strings are the correct null-safe default for a normal "CO" completion.
+      OBError result = processInvoiceUtil.process(invoiceId, "CO", "", "", "", vars, conn);
+      Process process = OBDal.getInstance().get(Process.class, COMPLETE_PROCESS_ID_INVOICE);
+      if (process == null) {
+        log.error("[INVOICE-COMPLETE] Process record {} not found", COMPLETE_PROCESS_ID_INVOICE);
+        return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            "Completion process configuration missing");
+      }
+      return NeoProcessService.translateClassicResult(result, process);
+    } catch (Exception e) {
+      log.error("[INVOICE-COMPLETE] Completion failed for invoice {}: {}",
+          invoiceId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Invoice completion failed: " + e.getMessage());
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -468,5 +547,315 @@ public abstract class AbstractInvoiceHeaderHandler {
       return "CO".equals(docAction);
     }
     return false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Currency / exchange-rate hooks (ETP-4029)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Removes a callout-pushed {@code currency} key from the callout {@code updates} map.
+   * Currency on invoices is only ever changed by the user directly, never by a callout
+   * (e.g. business-partner or price-list callouts must not silently move the document's
+   * currency). Mirrors {@code AbstractOrderHeaderHandler#blockCalloutCurrencyUpdate}.
+   *
+   * <p>Call from each subclass's {@code afterCallout()} override.
+   *
+   * @param updates      the callout response's {@code updates} object; may be {@code null}
+   * @param triggerField the field that triggered the callout (from the request body)
+   */
+  protected static void blockCalloutCurrencyUpdate(JSONObject updates, String triggerField) {
+    if (updates != null && updates.has(FIELD_CURRENCY) && !FIELD_CURRENCY.equals(triggerField)) {
+      updates.remove(FIELD_CURRENCY);
+      log.debug("[ETP-4029] Removed callout-driven currency update (trigger={})", triggerField);
+    }
+  }
+
+  /**
+   * Appends a {@code WARNING} message to the callout response body when the user directly
+   * changes the invoice's {@code currency} field and no {@code C_Conversion_Rate} exists for
+   * (docCurrency → orgCurrency, invoiceDate). Mirrors
+   * {@code AbstractOrderHeaderHandler#checkExchangeRateWarning}.
+   *
+   * <p>Call from each subclass's {@code afterCallout()} override.
+   *
+   * @param body         the callout response body; messages are appended in-place
+   * @param requestBody  the original callout request payload (carries {@code field}/{@code value})
+   * @param formState    the callout {@code formState}, carries {@code invoiceDate} as fallback
+   * @param triggerField the field that triggered the callout
+   */
+  protected static void checkExchangeRateWarning(JSONObject body, JSONObject requestBody,
+      JSONObject formState, String triggerField) {
+    if (formState == null) {
+      return;
+    }
+    if (!FIELD_CURRENCY.equals(triggerField) && !"currencyid".equals(triggerField)) {
+      return;
+    }
+    String docCurrencyId = requestBody != null ? requestBody.optString(FIELD_VALUE, "") : "";
+    if (docCurrencyId.isEmpty()) {
+      docCurrencyId = formState.optString("currencyid", "");
+    }
+    String invoiceDate = formState.optString("invoiceDate", "");
+    String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+    String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+    if (!docCurrencyId.isEmpty() && orgCurrencyId != null
+        && !docCurrencyId.equals(orgCurrencyId) && !invoiceDate.isEmpty()
+        && !hasConversionRate(orgCurrencyId, docCurrencyId, invoiceDate)) {
+      appendMessage(body, "WARNING", "noExchangeRateAvailable");
+      log.debug("[ETP-4029] No conversion rate warning added (currency={})", docCurrencyId);
+    }
+  }
+
+  /**
+   * Shared {@code afterCallout} body (ETP-4029): blocks callout-driven currency updates and
+   * appends an exchange-rate warning when the user directly changes the invoice currency.
+   * Identical for both {@link PurchaseInvoiceHeaderHandler} and {@link SalesInvoiceHeaderHandler}
+   * — each subclass's {@code afterCallout()} override should just delegate here.
+   */
+  protected NeoResponse handleCurrencyAfterCallout(NeoContext context) {
+    try {
+      NeoHandlerUtils.CalloutFields fields = NeoHandlerUtils.extractCalloutFields(context);
+      if (fields == null) {
+        return null;
+      }
+      blockCalloutCurrencyUpdate(fields.updates(), fields.triggerField());
+      checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
+    } catch (Exception e) {
+      log.warn("[ETP-4029] afterCallout failed (non-fatal): {}", e.getMessage());
+    }
+    return null; // mutations applied in-place; dispatcher merges nothing extra
+  }
+
+  /**
+   * Checks whether a {@code C_Conversion_Rate} row exists for the given currency pair
+   * and date, scoped to the current client and org (including global org '0').
+   *
+   * @return {@code true} if a rate exists (safe default on error)
+   */
+  @SuppressWarnings("java:S2077")
+  private static boolean hasConversionRate(String fromCurrencyId, String toCurrencyId,
+      String dateStr) {
+    try {
+      java.time.LocalDate localDate = java.time.LocalDate.parse(dateStr.substring(0, 10));
+      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+      String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
+
+      String sql =
+          "SELECT 1 FROM c_conversion_rate"
+        + " WHERE c_currency_id = ?"
+        + " AND c_currency_id_to = ?"
+        + " AND isactive = 'Y'"
+        + " AND ad_client_id = ?"
+        + " AND (ad_org_id = '0' OR ad_org_id = ?)"
+        + " AND validfrom <= ?"
+        + " AND (validto IS NULL OR validto >= ?)"
+        + " LIMIT 1";
+      Connection conn = OBDal.getInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, fromCurrencyId);
+        ps.setString(2, toCurrencyId);
+        ps.setString(3, clientId);
+        ps.setString(4, orgId);
+        ps.setDate(5, java.sql.Date.valueOf(localDate));
+        ps.setDate(6, java.sql.Date.valueOf(localDate));
+        try (ResultSet rs = ps.executeQuery()) {
+          return rs.next();
+        }
+      }
+    } catch (Exception e) {
+      log.warn("[ETP-4029] hasConversionRate check failed (assuming rate exists): {}", e.getMessage());
+      return true; // fail-open: avoid blocking when DB check fails
+    }
+  }
+
+  private static void appendMessage(JSONObject body, String type, String text) {
+    try {
+      org.codehaus.jettison.json.JSONArray messages = body.optJSONArray("messages");
+      if (messages == null) {
+        messages = new org.codehaus.jettison.json.JSONArray();
+        body.put("messages", messages);
+      }
+      JSONObject msg = new JSONObject();
+      msg.put("type", type);
+      msg.put("text", text);
+      messages.put(msg);
+    } catch (Exception e) {
+      log.warn("[ETP-4029] appendMessage failed: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Upserts the {@code C_Conversion_Rate_Document} record for an invoice whenever its currency
+   * differs from the org currency. Runs as a continuous upsert on every successful header save
+   * (PATCH/PUT/POST) — not only when {@code currency}/{@code eTGOCurrencyRate} appears in the
+   * request body — so that {@code foreignAmount} stays in sync as {@code grandTotalAmount}
+   * evolves while lines are added/edited after the currency was first set.
+   *
+   * <p>No-op when the invoice has no currency, the invoice currency equals the org currency,
+   * or no {@code EM_ETGO_Currency_Rate} override has been set on the invoice yet.
+   *
+   * <p>Call unconditionally at the top of each subclass's {@code afterHandle()}, alongside
+   * any other per-save hooks, before their own method-gated (e.g. GET-only) logic.
+   *
+   * <p>Resolves the invoice ID from the header {@code NeoContext} (via
+   * {@link #resolveInvoiceIdFromContext(NeoContext)}) and delegates to
+   * {@link #autoCreateOrUpdateConversionRateDocument(String)}. Handlers that are NOT scoped to
+   * the invoice header entity (e.g. {@link InvoiceLineHandler}, whose {@code NeoContext} carries
+   * the line's own record ID, not the invoice's) must resolve the parent invoice ID themselves
+   * and call the {@code String}-based overload directly instead.
+   *
+   * @param context the current NeoContext; only {@code getHttpMethod()}/{@code getRecordId()}/
+   *                {@code getPreviousResult()} are used
+   */
+  protected static void autoCreateOrUpdateConversionRateDocument(NeoContext context) {
+    String method = context.getHttpMethod();
+    if (!"PATCH".equals(method) && !"PUT".equals(method) && !"POST".equals(method)) {
+      return;
+    }
+    String invoiceId = resolveInvoiceIdFromContext(context);
+    autoCreateOrUpdateConversionRateDocument(invoiceId);
+  }
+
+  /**
+   * Upserts the {@code C_Conversion_Rate_Document} record for the invoice identified by
+   * {@code invoiceId}, whenever its currency differs from the org currency. Same business rule
+   * and no-op conditions as {@link #autoCreateOrUpdateConversionRateDocument(NeoContext)} — this
+   * is the shared core both overloads (and {@link InvoiceLineHandler}) funnel into, so there is
+   * exactly one upsert implementation for {@code C_Conversion_Rate_Document}.
+   *
+   * @param invoiceId the invoice's primary key, already resolved by the caller; no-op if blank
+   */
+  @SuppressWarnings("java:S2077")
+  protected static void autoCreateOrUpdateConversionRateDocument(String invoiceId) {
+    if (StringUtils.isBlank(invoiceId)) {
+      return;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+        if (invoice == null || invoice.getCurrency() == null) {
+          return;
+        }
+        // Force a fresh read of the DB row before trusting grandTotalAmount below. This method
+        // is also invoked from InvoiceLineHandler.afterHandle() (line save), which has already
+        // touched/loaded this same Invoice earlier in the request (via
+        // resolveParentInvoiceIdAfterSave -> InvoiceLine.getInvoice()) — before the line-insert's
+        // c_invoiceline_trg2 DB trigger recalculates C_Invoice.grandtotal. Hibernate's L1 cache
+        // then returns that same stale managed instance here instead of re-querying, so
+        // getGrandTotalAmount() below would reflect the PRE-line-insert total. refresh() re-reads
+        // this entity's scalar columns from the DB in place; unlike the session.clear() pattern in
+        // InvoiceFromOrderSupport#applyOrderDiscountToInvoice, it's safe here because this method
+        // never touches invoice.invoiceLineList/invoiceTaxList collections and never calls
+        // OBDal.save() on the invoice — it only reads a scalar total and writes to the unrelated
+        // C_Conversion_Rate_Document table via raw JDBC, so there's no cascade-refresh/duplicate-
+        // insert risk (the ETP-4015 symptom that motivated the heavier clear()+reload there).
+        OBDal.getInstance().getSession().refresh(invoice);
+        String orgId = invoice.getOrganization().getId();
+        String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+        if (orgCurrencyId == null || orgCurrencyId.equals(invoice.getCurrency().getId())) {
+          return; // nothing to track: same currency as org, or org currency unresolved
+        }
+        BigDecimal rate = invoice.getETGOCurrencyRate();
+        if (rate == null) {
+          return; // no override set yet
+        }
+
+        // EM_ETGO_Currency_Rate is the org→doc multiplyRate (mirrors C_Order semantics).
+        // C_Conversion_Rate_Document.rate is the doc→org multiplier: amount_doc × docRate = amount_org.
+        BigDecimal docRate = BigDecimal.ONE.divide(rate, 12, RoundingMode.HALF_UP);
+        BigDecimal grandTotal = invoice.getGrandTotalAmount();
+        BigDecimal foreignAmount = grandTotal != null
+            ? grandTotal.multiply(docRate).setScale(2, RoundingMode.HALF_UP)
+            : null;
+
+        upsertConversionRateDocument(invoice, orgCurrencyId, docRate, foreignAmount);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("[ETP-4029] autoCreateOrUpdateConversionRateDocument failed for invoice {}: {}",
+          invoiceId, e.getMessage());
+    }
+  }
+
+  private static void upsertConversionRateDocument(Invoice invoice, String orgCurrencyId,
+      BigDecimal docRate, BigDecimal foreignAmount) throws java.sql.SQLException {
+    Connection conn = OBDal.getInstance().getConnection();
+    String existingId = findConversionRateDocumentId(conn, invoice.getId(),
+        invoice.getCurrency().getId(), orgCurrencyId);
+    if (existingId != null) {
+      updateConversionRateDocument(conn, existingId, docRate, foreignAmount);
+    } else {
+      insertConversionRateDocument(conn, invoice, orgCurrencyId, docRate, foreignAmount);
+    }
+  }
+
+  private static String findConversionRateDocumentId(Connection conn, String invoiceId,
+      String docCurrencyId, String orgCurrencyId) throws java.sql.SQLException {
+    String sql =
+        "SELECT c_conversion_rate_document_id FROM c_conversion_rate_document"
+      + " WHERE c_invoice_id = ? AND c_currency_id = ? AND c_currency_id_to = ? LIMIT 1";
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, invoiceId);
+      ps.setString(2, docCurrencyId);
+      ps.setString(3, orgCurrencyId);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getString(1) : null;
+      }
+    }
+  }
+
+  private static void updateConversionRateDocument(Connection conn, String recordId,
+      BigDecimal docRate, BigDecimal foreignAmount) throws java.sql.SQLException {
+    String userId = OBContext.getOBContext().getUser().getId();
+    String sql =
+        "UPDATE c_conversion_rate_document"
+      + " SET rate = ?, foreign_amount = ?, updated = NOW(), updatedby = ?"
+      + " WHERE c_conversion_rate_document_id = ?";
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setBigDecimal(1, docRate);
+      if (foreignAmount != null) {
+        ps.setBigDecimal(2, foreignAmount);
+      } else {
+        ps.setNull(2, java.sql.Types.NUMERIC);
+      }
+      ps.setString(3, userId);
+      ps.setString(4, recordId);
+      ps.executeUpdate();
+      log.info("[ETP-4029] Updated C_Conversion_Rate_Document {} (docRate={})", recordId, docRate);
+    }
+  }
+
+  private static void insertConversionRateDocument(Connection conn, Invoice invoice,
+      String orgCurrencyId, BigDecimal docRate, BigDecimal foreignAmount) throws java.sql.SQLException {
+    String newId = UUID.randomUUID().toString().replace("-", "").toUpperCase();
+    String userId = OBContext.getOBContext().getUser().getId();
+    String sql =
+        "INSERT INTO c_conversion_rate_document ("
+      + " c_conversion_rate_document_id, ad_client_id, ad_org_id, isactive,"
+      + " created, createdby, updated, updatedby,"
+      + " c_invoice_id, c_currency_id, c_currency_id_to, rate, foreign_amount"
+      + ") VALUES (?, ?, ?, 'Y', NOW(), ?, NOW(), ?, ?, ?, ?, ?, ?)";
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, newId);
+      ps.setString(2, invoice.getClient().getId());
+      ps.setString(3, invoice.getOrganization().getId());
+      ps.setString(4, userId);
+      ps.setString(5, userId);
+      ps.setString(6, invoice.getId());
+      ps.setString(7, invoice.getCurrency().getId());
+      ps.setString(8, orgCurrencyId);
+      ps.setBigDecimal(9, docRate);
+      if (foreignAmount != null) {
+        ps.setBigDecimal(10, foreignAmount);
+      } else {
+        ps.setNull(10, java.sql.Types.NUMERIC);
+      }
+      ps.executeUpdate();
+      log.info("[ETP-4029] Created C_Conversion_Rate_Document {} for invoice {} (docRate={})",
+          newId, invoice.getId(), docRate);
+    }
   }
 }

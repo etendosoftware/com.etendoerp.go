@@ -61,6 +61,8 @@ import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.JsonUtils;
 
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
+
 /**
  * Shared payment registration logic for both sales-invoice and purchase-invoice handlers.
  *
@@ -73,21 +75,25 @@ final class PaymentRegistrationService {
 
   private static final Logger log = LogManager.getLogger(PaymentRegistrationService.class);
 
-  // Error messages
-  private static final String MSG_INVOICE_NOT_FOUND = "Invoice not found";
-  private static final String MSG_INVOICE_ID_REQUIRED = "Invoice ID is required";
+  // Error messages — package-visible: shared with PisPaymentService.
+  static final String MSG_INVOICE_NOT_FOUND = "Invoice not found";
+  static final String MSG_INVOICE_ID_REQUIRED = "Invoice ID is required";
   private static final String MSG_NO_PENDING_PSD =
       "No pending payment schedule details found for this installment";
 
   // JSON response keys
   private static final String KEY_DOCUMENT_NO = "documentNo";
   private static final String KEY_AMOUNT = "amount";
-  private static final String KEY_STATUS = "status";
+  // Package-visible: shared with PisPaymentService.
+  static final String KEY_STATUS = "status";
   private static final String KEY_RESPONSE = "response";
   private static final String KEY_DATA = "data";
   private static final String KEY_ITEMS = "items";
   private static final String KEY_TOTAL_COUNT = "totalCount";
   private static final String KEY_RECEIPT = "receipt";
+  private static final String KEY_LABEL = "label";
+  private static final String FIELD_PIS = "pis";
+  private static final String KEY_VIA_PIS = "viaPis";
 
   // OBError type returned by FIN_AddPayment.processPayment on failure
   private static final String STATUS_ERROR = "Error";
@@ -270,10 +276,15 @@ final class PaymentRegistrationService {
     }
     JSONObject item = new JSONObject();
     item.put("id", acc.getId());
-    item.put("label", acc.getName());
+    item.put(KEY_LABEL, acc.getName());
     if (acc.getCurrency() != null) {
       item.put("currency", acc.getCurrency().getISOCode());
       item.put("currencyId", acc.getCurrency().getId());
+    }
+    item.put("psd2Connected", BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
+        .equals(acc.getPSD2ConnectionStatus()));
+    if (acc.getPSD2CardNumber() != null) {
+      item.put("maskedPan", acc.getPSD2CardNumber());
     }
     JSONArray methodIds = new JSONArray();
     JSONArray defaultForMethodIds = new JSONArray();
@@ -372,6 +383,11 @@ final class PaymentRegistrationService {
     if (p.getPaymentMethod() != null) {
       item.put("paymentMethod", p.getPaymentMethod().getName());
     }
+    // A linked PSD2_PIS_PAYMENT row means this payment was initiated through the Salt Edge PIS
+    // flow (this popup), not just a manually-recorded bank transfer — surfaced in the SPA's
+    // payment history as a "Realizado vía PSD2" badge. PisPayment is a plain DAL entity (no
+    // PSD2-module method needed), so this is queried directly here.
+    item.put(KEY_VIA_PIS, PisPaymentService.hasLinkedPisPayment(p));
     return item;
   }
 
@@ -411,7 +427,7 @@ final class PaymentRegistrationService {
         for (Map.Entry<String, String> e : distinct.entrySet()) {
           JSONObject item = new JSONObject();
           item.put("id", e.getKey());
-          item.put("label", e.getValue());
+          item.put(KEY_LABEL, e.getValue());
           arr.put(item);
         }
         return itemsResponse(arr);
@@ -572,8 +588,15 @@ final class PaymentRegistrationService {
    * register any over-payment as generated credit (or refund) and process it.
    *
    * Body: {@code scheduleId, actual_payment, payment_date, fin_financial_account_id,
-   * fin_paymentmethod_id?, process('draft'|'confirm'), creditSources[], overpaymentAction?}.
-   * On {@code process='draft'} the payment is created but NOT processed (stays DR).
+   * fin_paymentmethod_id?, process('draft'|'confirm'), creditSources[], overpaymentAction?,
+   * pis?}. On {@code process='draft'} the payment is created but NOT processed (stays DR).
+   *
+   * <p>When {@code pis=true} the payment is registered as a real bank transfer through the
+   * PSD2 / Salt Edge PIS integration: the {@link FIN_Payment} is created, linked and PROCESSED to
+   * status {@code PPM} ("Payment Made") — applied to the invoice but with NO
+   * {@code FIN_Finacc_Transaction} yet (the transfer method's Automatic flags are cleared by §2b).
+   * The bank transaction is created only once Salt Edge confirms execution, by the PSD2 module's
+   * own {@code PisPaymentCallback}. See {@link PisPaymentService#applyOverpaymentAndInitiatePis}.
    */
   static NeoResponse doRegisterPaymentAdvanced(String invoiceId, JSONObject body, boolean isReceipt)
       throws Exception {
@@ -606,6 +629,7 @@ final class PaymentRegistrationService {
 
     boolean doProcess = !"draft".equalsIgnoreCase(body.optString("process", "confirm"));
     String overpaymentAction = body.optString("overpaymentAction", null);
+    boolean pis = body.optBoolean(FIELD_PIS, false);
 
     assertCurrencyMatch(invoice.getCurrency(), account.getCurrency());
 
@@ -617,6 +641,12 @@ final class PaymentRegistrationService {
     }
     DocumentType docType = resolveArApDocType(org, isReceipt);
     checkPeriodOpen(invoice, docType, paymentDate);
+
+    JSONObject pisInput = null;
+    if (pis) {
+      PisPaymentService.validatePisEligibility(account, paymentMethod, invoice);
+      pisInput = PisPaymentService.extractPisInput(body);
+    }
 
     AdvPaymentMngtDao dao = new AdvPaymentMngtDao();
     FIN_Payment payment = createDraftPayment(dao, isReceipt, invoice,
@@ -636,6 +666,10 @@ final class PaymentRegistrationService {
 
     // Draft: created and linked but NOT processed — no transaction, no accounting.
     if (doProcess) {
+      if (pis) {
+        return PisPaymentService.applyOverpaymentAndInitiatePis(payment, dao, org, funds,
+            invoiceApplied, pisInput, overpaymentAction);
+      }
       applyOverpaymentAndProcess(payment, dao, org, funds, invoiceApplied, overpaymentAction);
     }
     return builtPaymentResponse(payment);
@@ -700,12 +734,22 @@ final class PaymentRegistrationService {
 
   /** Builds the standard {response:{data:{id,documentNo,amount,status,processed}}} envelope. */
   private static NeoResponse builtPaymentResponse(FIN_Payment payment) throws Exception {
+    return wrapCreatedData(basePaymentData(payment));
+  }
+
+  /** Package-visible: also used by {@link PisPaymentService#applyOverpaymentAndInitiatePis}. */
+  static JSONObject basePaymentData(FIN_Payment payment) throws Exception {
     JSONObject data = new JSONObject();
     data.put("id", payment.getId());
     data.put(KEY_DOCUMENT_NO, payment.getDocumentNo());
     data.put(KEY_AMOUNT, payment.getAmount());
     data.put(KEY_STATUS, payment.getStatus());
     data.put("processed", payment.isProcessed());
+    return data;
+  }
+
+  /** Package-visible: also used by {@link PisPaymentService#applyOverpaymentAndInitiatePis}. */
+  static NeoResponse wrapCreatedData(JSONObject data) throws Exception {
     JSONObject responseData = new JSONObject();
     responseData.put(KEY_DATA, data);
     JSONObject wrapper = new JSONObject();
@@ -713,8 +757,11 @@ final class PaymentRegistrationService {
     return NeoResponse.created(wrapper);
   }
 
-  /** Builds the standard {items:[...], totalCount:n} listing envelope. */
-  private static NeoResponse itemsResponse(JSONArray arr) throws Exception {
+  /**
+   * Builds the standard {items:[...], totalCount:n} listing envelope. Package-visible: also
+   * used by {@link PisPaymentService}'s listing actions.
+   */
+  static NeoResponse itemsResponse(JSONArray arr) throws Exception {
     JSONObject resp = new JSONObject();
     resp.put(KEY_ITEMS, arr);
     resp.put(KEY_TOTAL_COUNT, arr.length());
@@ -768,7 +815,8 @@ final class PaymentRegistrationService {
     OBDal.getInstance().flush();
   }
 
-  private static void failOnError(OBError result) {
+  /** Package-visible: also used by {@link PisPaymentService#applyOverpaymentAndInitiatePis}. */
+  static void failOnError(OBError result) {
     if (STATUS_ERROR.equalsIgnoreCase(result.getType())) {
       throw new OBException(result.getMessage());
     }
