@@ -46,7 +46,9 @@ import org.openbravo.dal.service.OBDal;
  * <p>Covers method-guard routing in {@link VerifactuConfigReadyHandler#afterHandle}, id
  * resolution for both PUT/PATCH (from the URL) and POST (from the just-committed CRUD
  * response envelope), the idempotency of {@link VerifactuConfigReadyHandler#markReadyIfNeeded}
- * (already-ready records are left untouched), and that any exception raised while applying the
+ * (fully-adopted records — {@code is_ready='Y'} AND {@code in_vfactu_system} set — are left
+ * untouched, while legacy/partially-migrated records with {@code is_ready='Y'} but a
+ * {@code null} adoption date are backfilled), and that any exception raised while applying the
  * auto-fill is swallowed rather than propagated or turned into an error response.
  */
 public class VerifactuConfigReadyHandlerTest {
@@ -219,7 +221,7 @@ public class VerifactuConfigReadyHandlerTest {
       when(session.createNativeQuery(Mockito.contains("UPDATE"))).thenReturn(nqUpdate);
 
       when(nqSelect.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(nqSelect);
-      when(nqSelect.uniqueResult()).thenReturn("N");
+      when(nqSelect.uniqueResult()).thenReturn(new Object[] { "N", null });
 
       when(nqUpdate.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(nqUpdate);
       when(nqUpdate.executeUpdate()).thenReturn(1);
@@ -246,7 +248,65 @@ public class VerifactuConfigReadyHandlerTest {
       NativeQuery nqSelect = mock(NativeQuery.class);
       when(session.createNativeQuery(Mockito.contains("SELECT"))).thenReturn(nqSelect);
       when(nqSelect.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(nqSelect);
-      when(nqSelect.uniqueResult()).thenReturn("Y");
+      when(nqSelect.uniqueResult())
+          .thenReturn(new Object[] { "Y", java.sql.Timestamp.valueOf("2026-01-01 00:00:00") });
+
+      handler.markReadyIfNeeded(RECORD_ID);
+
+      verify(session, never()).createNativeQuery(Mockito.contains("UPDATE"));
+      verify(dal, never()).flush();
+    }
+  }
+
+  @Test
+  public void markReadyIfNeededBackfillsAdoptionDateForLegacyReadyRecord() {
+    VerifactuConfigReadyHandler handler = new VerifactuConfigReadyHandler();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      @SuppressWarnings("rawtypes")
+      NativeQuery nqSelect = mock(NativeQuery.class);
+      @SuppressWarnings("rawtypes")
+      NativeQuery nqUpdate = mock(NativeQuery.class);
+
+      when(session.createNativeQuery(Mockito.contains("SELECT"))).thenReturn(nqSelect);
+      when(session.createNativeQuery(Mockito.contains("UPDATE"))).thenReturn(nqUpdate);
+
+      when(nqSelect.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(nqSelect);
+      // Legacy/partially-migrated record: is_ready='Y' but in_vfactu_system is still null.
+      when(nqSelect.uniqueResult()).thenReturn(new Object[] { "Y", null });
+
+      when(nqUpdate.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(nqUpdate);
+      when(nqUpdate.executeUpdate()).thenReturn(1);
+
+      handler.markReadyIfNeeded(RECORD_ID);
+
+      verify(session, times(1)).createNativeQuery(Mockito.contains("UPDATE"));
+      verify(dal, times(1)).flush();
+    }
+  }
+
+  @Test
+  public void markReadyIfNeededSkipsWhenRecordNotFound() {
+    VerifactuConfigReadyHandler handler = new VerifactuConfigReadyHandler();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      @SuppressWarnings("rawtypes")
+      NativeQuery nqSelect = mock(NativeQuery.class);
+      when(session.createNativeQuery(Mockito.contains("SELECT"))).thenReturn(nqSelect);
+      when(nqSelect.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(nqSelect);
+      when(nqSelect.uniqueResult()).thenReturn(null);
 
       handler.markReadyIfNeeded(RECORD_ID);
 

@@ -62,7 +62,8 @@ public class VerifactuConfigReadyHandler implements NeoHandler {
   private static final String METHOD_PATCH = "PATCH";
 
   private static final String SELECT_IS_READY_SQL =
-      "SELECT is_ready FROM etvfac_verifactu_config WHERE etvfac_verifactu_config_id = :id";
+      "SELECT is_ready, in_vfactu_system FROM etvfac_verifactu_config "
+          + "WHERE etvfac_verifactu_config_id = :id";
 
   // Timestamp is computed in SQL (now()) rather than passed as a Java Date, matching the
   // convention already used for this kind of native-SQL side effect (see
@@ -110,16 +111,40 @@ public class VerifactuConfigReadyHandler implements NeoHandler {
 
   /**
    * Sets {@code is_ready='Y'} and {@code in_vfactu_system=now()} unless the record is already
-   * marked ready. Idempotent by design: re-saving an already-adopted config (e.g. a later PUT
-   * from {@code VerifactuSection.jsx}) must not reset the original adoption date.
+   * fully adopted, i.e. {@code is_ready='Y'} AND {@code in_vfactu_system IS NOT NULL}.
+   *
+   * <p>Both conditions are checked (not just {@code is_ready}) to also cover legacy or
+   * partially-migrated records that already have {@code is_ready='Y'} but a {@code null}
+   * {@code in_vfactu_system} — {@code InvoiceSendingListener#getAllIssuersWithVfactuConfig()}
+   * requires both fields to be set to schedule an issuer for Verifactu submission, so such a
+   * record must still be backfilled here rather than skipped.
+   *
+   * <p>When the update runs, it unconditionally re-applies {@code SET_READY_SQL} (both
+   * {@code is_ready='Y'} and {@code in_vfactu_system=now()}) instead of only patching the
+   * missing column: re-setting {@code is_ready} to {@code 'Y'} when it is already {@code 'Y'}
+   * is a no-op with no observable difference, and reusing the existing unconditional statement
+   * keeps this method's SQL surface small. This intentionally means a legacy record's adoption
+   * date is backfilled to "now" rather than reconstructed from history, which is acceptable
+   * since there is no reliable original date to recover.
+   *
+   * <p>Idempotent by design for the common case: re-saving an already fully-adopted config
+   * (e.g. a later PUT from {@code VerifactuSection.jsx}) must not reset the original adoption
+   * date, and it does not, since {@code in_vfactu_system} is already non-null in that case.
    */
   void markReadyIfNeeded(String recordId) {
-    Object currentReady = OBDal.getInstance().getSession()
+    Object[] currentState = (Object[]) OBDal.getInstance().getSession()
         .createNativeQuery(SELECT_IS_READY_SQL)
         .setParameter("id", recordId)
         .uniqueResult();
 
-    if ("Y".equals(currentReady)) {
+    if (currentState == null) {
+      // Record not found (e.g. deleted concurrently) — nothing to update.
+      return;
+    }
+
+    boolean isReady = "Y".equals(currentState[0]);
+    boolean hasAdoptionDate = currentState[1] != null;
+    if (isReady && hasAdoptionDate) {
       return;
     }
 
