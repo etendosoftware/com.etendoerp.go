@@ -18,11 +18,8 @@
 package com.etendoerp.go.support;
 
 import java.io.IOException;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.time.Instant;
+import java.util.Date;
+import java.util.List;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -32,8 +29,15 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
+
+import com.etendoerp.go.schemaforge.data.SupportConversation;
+import com.etendoerp.go.schemaforge.data.SupportMessage;
 
 /**
  * Handles the two inbound Jira webhook shapes support chat relies on to mirror human agent
@@ -180,7 +184,7 @@ final class SupportJiraWebhookHandler {
   // --- Persisting the comment as a support message ---
 
   private static void storeJiraWebhookComment(HttpServletResponse response, JiraWebhookComment comment)
-      throws IOException, SQLException, JSONException {
+      throws IOException, JSONException {
     if (!JIRA_BOT_EMAIL.isEmpty() && JIRA_BOT_EMAIL.equalsIgnoreCase(comment.authorEmail)) {
       SupportConversationsServlet.writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "skipped_bot"));
       return;
@@ -194,66 +198,69 @@ final class SupportJiraWebhookHandler {
     String externalId = "jira:" + comment.jiraKey + ":" + comment.commentId;
     OBContext.setAdminMode(true);
     try {
-      Connection conn = OBDal.getInstance().getConnection();
-      String convId = findConversationByJiraKey(conn, comment.jiraKey);
-      if (convId == null) {
+      SupportConversation conv = findConversationByJiraKey(comment.jiraKey);
+      if (conv == null) {
         SupportConversationsServlet.writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "no_conversation"));
         return;
       }
-      String ts = Instant.now().toString();
-      insertJiraMessage(conn, convId, comment.authorName, text, ts, externalId);
-      SupportConversationsServlet.updateConvSummary(conn, convId, text, ts);
-      markConversationUnread(conn, convId);
-      log.info("Jira comment {} ({}) stored in conversation {}", comment.commentId, comment.authorName, convId);
+      if (findMessageByExternalId(externalId) != null) {
+        // Already stored (Jira retry) — ack without duplicating.
+        SupportConversationsServlet.writeJson(response, 200,
+            new JSONObject().put(FIELD_STATUS, "ok").put(FIELD_CONVERSATION_ID, conv.getId()));
+        return;
+      }
+      Date ts = new Date();
+      insertJiraMessage(conv, comment.authorName, text, ts, externalId);
+      SupportConversationsServlet.updateConvSummary(conv.getId(), text, ts);
+      conv.setUnread(true);
+      OBDal.getInstance().save(conv);
+      log.info("Jira comment {} ({}) stored in conversation {}", comment.commentId, comment.authorName, conv.getId());
       SupportConversationsServlet.writeJson(response, 200,
-          new JSONObject().put(FIELD_STATUS, "ok").put(FIELD_CONVERSATION_ID, convId));
+          new JSONObject().put(FIELD_STATUS, "ok").put(FIELD_CONVERSATION_ID, conv.getId()));
     } finally {
       OBContext.restorePreviousMode();
     }
   }
 
-  private static String findConversationByJiraKey(Connection conn, String jiraKey) throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT etgo_support_conversation_id AS id FROM etgo_support_conversation" +
-        " WHERE jira_ticket_key = ? LIMIT 1")) {
-      ps.setString(1, jiraKey);
-      try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() ? rs.getString("id") : null;
-      }
-    }
+  /** Jira webhooks arrive with no per-request tenant to scope to — these lookups must see every
+   * client's rows to resolve the ticket key / dedupe the external id. */
+  private static SupportConversation findConversationByJiraKey(String jiraKey) {
+    OBCriteria<SupportConversation> crit = OBDal.getInstance().createCriteria(SupportConversation.class);
+    crit.setFilterOnReadableClients(false);
+    crit.setFilterOnReadableOrganization(false);
+    crit.add(Restrictions.eq(SupportConversation.PROPERTY_JIRATICKETKEY, jiraKey));
+    crit.setMaxResults(1);
+    return (SupportConversation) crit.uniqueResult();
+  }
+
+  private static SupportMessage findMessageByExternalId(String externalId) {
+    OBCriteria<SupportMessage> crit = OBDal.getInstance().createCriteria(SupportMessage.class);
+    crit.setFilterOnReadableClients(false);
+    crit.setFilterOnReadableOrganization(false);
+    crit.add(Restrictions.eq(SupportMessage.PROPERTY_EXTERNALID, externalId));
+    crit.setMaxResults(1);
+    return (SupportMessage) crit.uniqueResult();
   }
 
   /** Jira comments have no authenticated Etendo requester — tagged as system-created, same tenant
-   * as the owning conversation (see {@link SupportConversationsServlet#getConvClientOrg}). */
-  private static void insertJiraMessage(Connection conn, String convId, String authorName, String text, String ts,
-      String externalId) throws SQLException {
-    String[] clientOrg = SupportConversationsServlet.getConvClientOrg(conn, convId);
-    try (PreparedStatement ps = conn.prepareStatement(
-        "INSERT INTO etgo_support_message" +
-        "  (etgo_support_message_id, ad_client_id, ad_org_id, createdby, updatedby," +
-        "   etgo_support_conversation_id, sender, sender_name, text, msg_date, external_id)" +
-        " VALUES (?, ?, ?, ?, ?, ?, 'human', ?, ?, ?::timestamp, ?)" +
-        " ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO NOTHING")) {
-      ps.setString(1, SupportConversationsServlet.newId());
-      ps.setString(2, clientOrg[0]);
-      ps.setString(3, clientOrg[1]);
-      ps.setString(4, SupportConversationsServlet.SYSTEM_USER_ID);
-      ps.setString(5, SupportConversationsServlet.SYSTEM_USER_ID);
-      ps.setString(6, convId);
-      ps.setString(7, authorName);
-      ps.setString(8, text);
-      ps.setString(9, ts);
-      ps.setString(10, externalId);
-      ps.executeUpdate();
-    }
-  }
-
-  private static void markConversationUnread(Connection conn, String convId) throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(
-        "UPDATE etgo_support_conversation SET unread = 'Y' WHERE etgo_support_conversation_id = ?")) {
-      ps.setString(1, convId);
-      ps.executeUpdate();
-    }
+   * as the owning conversation. */
+  private static void insertJiraMessage(SupportConversation conv, String authorName, String text, Date ts,
+      String externalId) {
+    User systemUser = OBDal.getInstance().get(User.class, SupportConversationsServlet.SYSTEM_USER_ID);
+    SupportMessage msg = OBProvider.getInstance().get(SupportMessage.class);
+    msg.setNewOBObject(true);
+    msg.setId(SupportConversationsServlet.newId());
+    msg.setClient(conv.getClient());
+    msg.setOrganization(conv.getOrganization());
+    msg.setCreatedBy(systemUser);
+    msg.setUpdatedBy(systemUser);
+    msg.setConversation(conv);
+    msg.setSender("human");
+    msg.setSenderName(authorName);
+    msg.setText(text);
+    msg.setMessageDate(ts);
+    msg.setExternalId(externalId);
+    OBDal.getInstance().save(msg);
   }
 
   // --- Jira automation side-effects triggered without a comment ---
@@ -262,13 +269,16 @@ final class SupportJiraWebhookHandler {
     try {
       OBContext.setAdminMode(true);
       try {
-        Connection conn = OBDal.getInstance().getConnection();
-        try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET human_takeover = 'N' WHERE jira_ticket_key = ?")) {
-          ps.setString(1, jiraKey);
-          int rows = ps.executeUpdate();
-          log.info("Human takeover reset via assignee event for Jira ticket {} ({} row(s))", jiraKey, rows);
+        OBCriteria<SupportConversation> crit = OBDal.getInstance().createCriteria(SupportConversation.class);
+        crit.setFilterOnReadableClients(false);
+        crit.setFilterOnReadableOrganization(false);
+        crit.add(Restrictions.eq(SupportConversation.PROPERTY_JIRATICKETKEY, jiraKey));
+        List<SupportConversation> matches = crit.list();
+        for (SupportConversation conv : matches) {
+          conv.setHumanTakeover(false);
+          OBDal.getInstance().save(conv);
         }
+        log.info("Human takeover reset via assignee event for Jira ticket {} ({} row(s))", jiraKey, matches.size());
         SupportConversationsServlet.writeJson(response, 200,
             new JSONObject().put(FIELD_STATUS, "ok").put(FIELD_JIRA_TICKET_KEY, jiraKey));
       } finally {
@@ -284,23 +294,18 @@ final class SupportJiraWebhookHandler {
     try {
       OBContext.setAdminMode(true);
       try {
-        Connection conn = OBDal.getInstance().getConnection();
-        String convId = findConversationByJiraKey(conn, jiraKey);
-        if (convId == null) {
+        SupportConversation conv = findConversationByJiraKey(jiraKey);
+        if (conv == null) {
           SupportConversationsServlet.writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "no_conversation"));
           return;
         }
-        String ts = Instant.now().toString();
-        try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET status = 'closed', unread = 'Y', last_activity = ?::timestamp" +
-            " WHERE etgo_support_conversation_id = ?")) {
-          ps.setString(1, ts);
-          ps.setString(2, convId);
-          ps.executeUpdate();
-        }
-        log.info("Conversation {} closed via Jira ticket {} resolution", convId, jiraKey);
+        conv.setStatus("closed");
+        conv.setUnread(true);
+        conv.setLastActivity(new Date());
+        OBDal.getInstance().save(conv);
+        log.info("Conversation {} closed via Jira ticket {} resolution", conv.getId(), jiraKey);
         SupportConversationsServlet.writeJson(response, 200,
-            new JSONObject().put(FIELD_STATUS, "ok").put(FIELD_CONVERSATION_ID, convId));
+            new JSONObject().put(FIELD_STATUS, "ok").put(FIELD_CONVERSATION_ID, conv.getId()));
       } finally {
         OBContext.restorePreviousMode();
       }

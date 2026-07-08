@@ -22,10 +22,6 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.time.Duration;
 import java.util.Base64;
 
@@ -34,6 +30,8 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
 
 /**
  * Outbound integrations for the support chat: the ADK (ValerIA) agent runtime and the
@@ -75,21 +73,13 @@ final class SupportIntegrationClient {
    * Fall back to username when it looks like an email so those tickets still carry
    * a real reporter instead of silently dropping to the Jira default reporter.
    */
-  static String getUserEmail(Connection conn, String userId) {
-    try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT email, username FROM ad_user WHERE ad_user_id = ?")) {
-      ps.setString(1, userId);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          String email = rs.getString("email");
-          if (email != null && !email.isEmpty()) return email;
-          String username = rs.getString("username");
-          if (username != null && username.contains("@")) return username;
-        }
-      }
-    } catch (SQLException e) {
-      log.warn("Failed to look up email for user {}: {}", userId, e.getMessage());
-    }
+  static String getUserEmail(String userId) {
+    User user = OBDal.getInstance().get(User.class, userId);
+    if (user == null) return null;
+    String email = user.getEmail();
+    if (email != null && !email.isEmpty()) return email;
+    String username = user.getUsername();
+    if (username != null && username.contains("@")) return username;
     return null;
   }
 
