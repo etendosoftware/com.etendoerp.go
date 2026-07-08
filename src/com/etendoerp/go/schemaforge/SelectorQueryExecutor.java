@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
@@ -163,8 +164,22 @@ final class SelectorQueryExecutor {
         meta, search, validationFilter, alias, contextOrganizationId);
     boolean hasSearch = StringUtils.isNotBlank(search) && !meta.searchableProperties.isEmpty();
 
+    // For view-backed selectors whose Value Field is not the entity PK (e.g. Product Complete →
+    // M_Product_Stock_V, one row per product×warehouse×locator), the same value appears in many
+    // rows. Restrict both the count and the data query to one representative row per distinct
+    // valueProperty so the response holds one item per value (no duplicates) and paging math is
+    // correct. Guard mirrors resolveRichItemId exactly: only when valueProperty is a non-PK path.
+    // When the guard is false the where clause is byte-identical to before (zero regression).
+    boolean distinctByValue = meta.valueProperty != null && !"id".equals(meta.valueProperty);
+    String effectiveWhere = distinctByValue
+        ? buildRepresentativeRowWhere(whereClause.getHql(), meta, alias)
+        : whereClause.getHql();
+
+    // count(*) over representative rows == count(distinct valueProperty), because the subquery
+    // yields exactly one row per distinct value. Both count and data use the same OBQuery path,
+    // so Hibernate's automatic readable-client/org filters apply identically to each.
     OBQuery<BaseOBObject> countQuery = OBDal.getInstance()
-        .createQuery(meta.entityName, whereClause.getHql());
+        .createQuery(meta.entityName, effectiveWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, whereClause.getParams());
     NeoSelectorExecutionHelper.bindNamedParameters(countQuery, extraFilterParams);
     if (hasSearch) {
@@ -172,7 +187,7 @@ final class SelectorQueryExecutor {
     }
     int totalCount = countQuery.count();
 
-    String dataWhere = whereClause.getHql() + " ORDER BY " + alias + "." + meta.displayProperty;
+    String dataWhere = effectiveWhere + " ORDER BY " + alias + "." + meta.displayProperty;
     OBQuery<BaseOBObject> dataQuery = OBDal.getInstance().createQuery(meta.entityName, dataWhere);
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, whereClause.getParams());
     NeoSelectorExecutionHelper.bindNamedParameters(dataQuery, extraFilterParams);
@@ -204,11 +219,77 @@ final class SelectorQueryExecutor {
     return SelectorResponseSupport.buildSelectorResponse(items, columns, totalCount, limit, offset);
   }
 
+  /**
+   * Rewrites a rich-selector OBQuery where-string so it returns a single representative row per
+   * distinct {@code valueProperty}. Used only when the selector's Value Field is not the entity PK.
+   *
+   * <p>The representative row is deterministic: the one with the minimum {@code id} within each
+   * value group. The very same filter (the original where conditions) is re-applied inside the
+   * subquery — with the entity alias rewritten to a private sub-alias — so filtering stays
+   * consistent and the chosen representative always satisfies the outer predicate. Because there is
+   * exactly one representative per value, {@code count(*)} over the result equals
+   * {@code count(distinct valueProperty)}, which keeps limit/offset paging math correct.</p>
+   *
+   * <p>Input format is what {@link SelectorQueryBuilder#buildRichQueryWhereClause} produces:
+   * {@code "as e"} or {@code "as e where <conditions>"}. Named parameters that appear in the
+   * original conditions are duplicated into the subquery text, but Hibernate binds each named
+   * parameter to every occurrence, so the existing single binding still applies.</p>
+   */
+  private static String buildRepresentativeRowWhere(String baseWhere, SelectorMeta meta,
+      String alias) {
+    final String whereKeyword = " where ";
+    int whereIdx = StringUtils.indexOfIgnoreCase(baseWhere, whereKeyword);
+    String conditions = (whereIdx >= 0)
+        ? baseWhere.substring(whereIdx + whereKeyword.length())
+        : null;
+
+    String subAlias = alias + "_dv";
+    StringBuilder subQuery = new StringBuilder();
+    subQuery.append("select min(").append(subAlias).append(".id) from ")
+        .append(meta.entityName).append(" ").append(subAlias);
+    if (conditions != null) {
+      subQuery.append(whereKeyword).append(rewriteAlias(conditions, alias, subAlias));
+    }
+    subQuery.append(" group by ").append(subAlias).append(".").append(meta.valueProperty);
+
+    StringBuilder result = new StringBuilder("as ").append(alias).append(whereKeyword);
+    if (conditions != null) {
+      result.append("(").append(conditions).append(")").append(SelectorQueryBuilder.SQL_AND);
+    }
+    result.append(alias).append(".id in (").append(subQuery).append(")");
+    return result.toString();
+  }
+
+  /**
+   * Rewrites {@code <alias>.} property references in an HQL fragment to use {@code <newAlias>.}.
+   * The negative look-behind avoids touching identifiers that merely end in the alias letters
+   * (e.g. {@code table.name}) and leaves named parameters ({@code :search}) untouched.
+   *
+   * <p>KNOWN LIMITATION: this is a purely lexical rewrite — it does not skip string literals. A
+   * WHERE condition embedding {@code <alias>.} inside a single-quoted literal (e.g.
+   * {@code 'see e.g. below'}) would be corrupted. This is safe for every value-field selector in
+   * use today (their resolved HQL where clauses are simple: {@code e.active='Y'} plus org filters,
+   * no literals containing the alias). A future value-field selector with such a literal would
+   * need this rewrite hardened to skip quoted literals before it could be used safely.</p>
+   */
+  private static String rewriteAlias(String hql, String alias, String newAlias) {
+    Pattern aliasRef = Pattern.compile("(?<![\\w.])" + Pattern.quote(alias) + "\\.");
+    return aliasRef.matcher(hql).replaceAll(Matcher.quoteReplacement(newAlias + "."));
+  }
+
   @SuppressWarnings("unchecked")
   private static NeoResponse executeCustomHqlQuery(SelectorMeta meta,
       String search, int limit, int offset, String validationFilter,
       String contextOrganizationId, Map<String, Object> extraFilterParams) throws Exception {
 
+    // KNOWN GAP: distinct-by-valueProperty (see buildRepresentativeRowWhere / executeRichQuery) is
+    // NOT applied here. A raw custom-query selector selects multiple projected columns, so
+    // "SELECT DISTINCT" would dedupe by the full row tuple rather than by valueProperty, and pairing
+    // it with COUNT(DISTINCT valueProperty) would desync count vs. data and break paging. None of
+    // the current value-field selectors are custom_query='Y', so this path is unaffected today.
+    // A future custom-query selector whose Value Field is not the PK would still emit duplicates —
+    // fixing it safely requires collapsing rows by valueProperty at query level, not a blanket
+    // DISTINCT. Left unchanged deliberately to avoid a regression.
     String alias = meta.entityAlias;
     String rawHql = meta.customHql.replace("@additional_filters@", "1=1");
     java.util.regex.Matcher fromMatcher = Pattern.compile("\\sFROM\\s",
