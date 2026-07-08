@@ -206,7 +206,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         try (PreparedStatement ps = conn.prepareStatement(
             "SELECT etgo_support_conversation_id AS id, subject, status, last_activity, last_message, unread, rated" +
             "  FROM etgo_support_conversation" +
-            " WHERE user_id = ? ORDER BY last_activity DESC")) {
+            " WHERE ad_user_id = ? ORDER BY last_activity DESC")) {
           ps.setString(1, userId);
           try (ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
@@ -267,7 +267,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         try (PreparedStatement ps = conn.prepareStatement(
             "INSERT INTO etgo_support_conversation" +
             "  (etgo_support_conversation_id, ad_client_id, ad_org_id, createdby, updatedby," +
-            "   user_id, subject, status, last_activity)" +
+            "   ad_user_id, subject, status, last_activity)" +
             " VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?::timestamp)")) {
           ps.setString(1, convId);
           ps.setString(2, ctx.clientId);
@@ -785,7 +785,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private boolean conversationBelongsToUser(Connection conn, String convId, String userId)
       throws SQLException {
     try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT 1 FROM etgo_support_conversation WHERE etgo_support_conversation_id = ? AND user_id = ?")) {
+        "SELECT 1 FROM etgo_support_conversation WHERE etgo_support_conversation_id = ? AND ad_user_id = ?")) {
       ps.setString(1, convId);
       ps.setString(2, userId);
       try (ResultSet rs = ps.executeQuery()) {

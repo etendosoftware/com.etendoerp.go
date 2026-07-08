@@ -33,7 +33,7 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="USER_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+      <column name="AD_USER_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
@@ -87,7 +87,7 @@
         <index-column name="JIRA_TICKET_KEY"/>
       </index>
       <index name="ETGO_SC_CONV_USER" unique="false">
-        <index-column name="USER_ID"/>
+        <index-column name="AD_USER_ID"/>
         <index-column name="LAST_ACTIVITY"/>
       </index>
       <check name="ETGO_TCONVERSATION_VE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
