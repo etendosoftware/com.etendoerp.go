@@ -158,6 +158,8 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         enrichOriginInvoice(rec, context.getRecordId());
         enrichInvoiceSubtype(rec, getInvoiceSubtypeKey());
         enrichDocTypeLocked(rec);
+        enrichIsRectificative(rec);
+        enrichHasRectifications(rec, context.getRecordId());
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {

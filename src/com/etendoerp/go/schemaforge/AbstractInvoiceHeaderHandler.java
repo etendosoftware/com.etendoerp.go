@@ -212,7 +212,7 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected void persistOriginInvoice(NeoContext context) {
     try {
       JSONObject body = context.getRequestBody();
-      if (body == null) {
+      if (body == null || !body.has(FIELD_ORIGIN_INVOICE)) {
         return;
       }
       String originInvoiceId = body.optString(FIELD_ORIGIN_INVOICE, null);
@@ -339,6 +339,63 @@ public abstract class AbstractInvoiceHeaderHandler {
    */
   protected void enrichDocTypeLocked(JSONObject rec) throws Exception {
     rec.put("docTypeLocked", true);
+  }
+
+  /**
+   * Injects {@code isRectificative} (boolean) into the record.
+   * True when the invoice's document type has {@code EM_Etsg_Isrectificative = 'Y'}.
+   * Returns false when the invoice is a draft with no doctype selected.
+   */
+  @SuppressWarnings("java:S2077")
+  protected void enrichIsRectificative(JSONObject rec) throws Exception {
+    String docTypeId = rec.optString(FIELD_TRANSACTION_DOCUMENT, null);
+    if (StringUtils.isBlank(docTypeId)) {
+      rec.put("isRectificative", false);
+      return;
+    }
+    boolean result = false;
+    try {
+      String sql = "SELECT em_etsg_isrectificative FROM c_doctype WHERE c_doctype_id = ?";
+      Connection conn = OBDal.getReadOnlyInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, docTypeId);
+        try (ResultSet rs = ps.executeQuery()) {
+          if (rs.next()) {
+            result = "Y".equals(rs.getString(1));
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve isRectificative for doctype {}: {}", docTypeId, e.getMessage());
+    }
+    rec.put("isRectificative", result);
+  }
+
+  /**
+   * Injects {@code hasRectifications} (boolean) into the record.
+   * True when the invoice has one or more records in {@code C_Invoice_Reverse}.
+   * Only meaningful in detail view (single record); do not call for list responses.
+   */
+  @SuppressWarnings("java:S2077")
+  protected void enrichHasRectifications(JSONObject rec, String invoiceId) throws Exception {
+    if (StringUtils.isBlank(invoiceId)) {
+      rec.put("hasRectifications", false);
+      return;
+    }
+    boolean result = false;
+    try {
+      String sql = "SELECT 1 FROM c_invoice_reverse WHERE c_invoice_id = ? AND isactive = 'Y' LIMIT 1";
+      Connection conn = OBDal.getReadOnlyInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, invoiceId);
+        try (ResultSet rs = ps.executeQuery()) {
+          result = rs.next();
+        }
+      }
+    } catch (Exception e) {
+      log.warn("Could not check hasRectifications for invoice {}: {}", invoiceId, e.getMessage());
+    }
+    rec.put("hasRectifications", result);
   }
 
   // ---------------------------------------------------------------------------

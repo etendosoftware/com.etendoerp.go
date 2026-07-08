@@ -165,6 +165,8 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         JSONObject rec = dataArr.getJSONObject(0);
         enrichSourceInvoice(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
+        enrichIsRectificative(rec);
+        enrichHasRectifications(rec, context.getRecordId());
         enrichLinkedShipments(rec, context.getRecordId());
       }
       TbaiSyncStatusInjector.inject(dataArr);
