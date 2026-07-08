@@ -207,8 +207,7 @@ public class AmortizationHeaderHandler implements NeoHandler {
       return (Boolean) value;
     }
     String s = value.toString().trim();
-    return "true".equalsIgnoreCase(s) || POSTED_YES.equalsIgnoreCase(s)
-        || "posted".equalsIgnoreCase(s) || "1".equals(s);
+    return "true".equalsIgnoreCase(s) || POSTED_YES.equalsIgnoreCase(s) || "1".equals(s);
   }
 
   /**
