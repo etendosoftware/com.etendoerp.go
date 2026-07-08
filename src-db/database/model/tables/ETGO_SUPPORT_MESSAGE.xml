@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+  <database name="TABLE ETGO_SUPPORT_MESSAGE">
+    <table name="ETGO_SUPPORT_MESSAGE" primaryKey="ETGO_SUPPORT_MESSAGE_PKEY">
+      <column name="ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="CONVERSATION_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SENDER" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SENDER_NAME" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="TEXT" primaryKey="false" required="false" type="CLOB" size="4000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="MSG_DATE" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="EXTERNAL_ID" primaryKey="false" required="false" type="VARCHAR" size="128" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="ETGO_SUPPORT_CONVERSATION" name="ETGO_SC_MSG_CONV_FK">
+        <reference local="CONVERSATION_ID" foreign="ID"/>
+      </foreign-key>
+      <index name="ETGO_SC_MSG_CONV" unique="false">
+        <index-column name="CONVERSATION_ID"/>
+        <index-column name="MSG_DATE"/>
+      </index>
+      <index name="ETGO_SC_MSG_EXTID" unique="true">
+        <index-column name="EXTERNAL_ID"/>
+        <whereClause><![CDATA[EXTERNAL_ID IS NOT NULL]]></whereClause>
+      </index>
+    </table>
+  </database>

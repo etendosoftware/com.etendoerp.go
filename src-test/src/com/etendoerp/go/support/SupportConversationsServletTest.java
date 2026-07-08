@@ -278,8 +278,8 @@ class SupportConversationsServletTest {
         when(rs.getString("status")).thenReturn("open");
         when(rs.getString("last_activity")).thenReturn("2026-07-01 10:00:00.000000-03");
         when(rs.getString("last_message")).thenReturn("Hello");
-        when(rs.getBoolean("unread")).thenReturn(true);
-        when(rs.getBoolean("rated")).thenReturn(false);
+        when(rs.getString("unread")).thenReturn("Y");
+        when(rs.getString("rated")).thenReturn("N");
         when(ps.executeQuery()).thenReturn(rs);
 
         new SupportConversationsServlet().doGet(request, response);
@@ -723,8 +723,8 @@ class SupportConversationsServletTest {
         when(summaryRs.getString("status")).thenReturn("open");
         when(summaryRs.getString("last_activity")).thenReturn("2026-07-01 10:00:00.000000-03");
         when(summaryRs.getString("last_message")).thenReturn("Hola! ¿En qué puedo ayudarte?");
-        when(summaryRs.getBoolean("unread")).thenReturn(false);
-        when(summaryRs.getBoolean("rated")).thenReturn(false);
+        when(summaryRs.getString("unread")).thenReturn("N");
+        when(summaryRs.getString("rated")).thenReturn("N");
         ResultSet messagesRs = emptyResultSet();
         when(ps.executeQuery()).thenReturn(summaryRs, messagesRs);
 
@@ -759,7 +759,6 @@ class SupportConversationsServletTest {
         ResultSet summaryRs = mock(ResultSet.class);
         when(summaryRs.next()).thenReturn(true);
         when(summaryRs.getString(anyString())).thenReturn("value");
-        when(summaryRs.getBoolean(anyString())).thenReturn(false);
         ResultSet emptyRs = emptyResultSet();
         when(ps.executeQuery()).thenReturn(summaryRs, emptyRs);
 
@@ -888,14 +887,13 @@ class SupportConversationsServletTest {
         when(statusRs.getString("status")).thenReturn("open");
         ResultSet takeoverRs = mock(ResultSet.class);
         when(takeoverRs.next()).thenReturn(true);
-        when(takeoverRs.getBoolean("human_takeover")).thenReturn(true);
+        when(takeoverRs.getString("human_takeover")).thenReturn("Y");
         ResultSet jiraKeyRs = mock(ResultSet.class);
         when(jiraKeyRs.next()).thenReturn(true);
         when(jiraKeyRs.getString("jira_ticket_key")).thenReturn("SUP-5");
         ResultSet summaryRs = mock(ResultSet.class);
         when(summaryRs.next()).thenReturn(true);
         when(summaryRs.getString(anyString())).thenReturn("value");
-        when(summaryRs.getBoolean(anyString())).thenReturn(false);
 
         ResultSet emptyRs = emptyResultSet();
         when(ps.executeQuery()).thenReturn(belongsRs, statusRs, takeoverRs, jiraKeyRs, emptyRs, summaryRs);
@@ -931,11 +929,10 @@ class SupportConversationsServletTest {
         when(statusRs.getString("status")).thenReturn("open");
         ResultSet takeoverRs = mock(ResultSet.class);
         when(takeoverRs.next()).thenReturn(true);
-        when(takeoverRs.getBoolean("human_takeover")).thenReturn(false);
+        when(takeoverRs.getString("human_takeover")).thenReturn("N");
         ResultSet summaryRs = mock(ResultSet.class);
         when(summaryRs.next()).thenReturn(true);
         when(summaryRs.getString(anyString())).thenReturn("value");
-        when(summaryRs.getBoolean(anyString())).thenReturn(false);
 
         ResultSet emptyRs = emptyResultSet();
         when(ps.executeQuery()).thenReturn(belongsRs, statusRs, takeoverRs, emptyRs, summaryRs);
@@ -1075,7 +1072,6 @@ class SupportConversationsServletTest {
         ResultSet summaryRs = mock(ResultSet.class);
         when(summaryRs.next()).thenReturn(true);
         when(summaryRs.getString(anyString())).thenReturn("value");
-        when(summaryRs.getBoolean(anyString())).thenReturn(false);
         when(ps.executeQuery()).thenReturn(belongsRs, summaryRs);
 
         new SupportConversationsServlet().doPost(request, response);
@@ -1122,7 +1118,6 @@ class SupportConversationsServletTest {
         ResultSet summaryRs = mock(ResultSet.class);
         when(summaryRs.next()).thenReturn(true);
         when(summaryRs.getString(anyString())).thenReturn("value");
-        when(summaryRs.getBoolean(anyString())).thenReturn(false);
         ResultSet emptyRs = emptyResultSet();
         when(ps.executeQuery()).thenReturn(belongsRs, summaryRs, emptyRs);
 

@@ -225,8 +225,8 @@ final class SupportJiraWebhookHandler {
   private static void insertJiraMessage(Connection conn, String convId, String authorName, String text, String ts,
       String externalId) throws SQLException {
     try (PreparedStatement ps = conn.prepareStatement(
-        "INSERT INTO etgo_support_message (id, conversation_id, sender, sender_name, text, timestamp, external_id)" +
-        " VALUES (?, ?, 'human', ?, ?, ?::timestamptz, ?)" +
+        "INSERT INTO etgo_support_message (id, conversation_id, sender, sender_name, text, msg_date, external_id)" +
+        " VALUES (?, ?, 'human', ?, ?, ?::timestamp, ?)" +
         " ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO NOTHING")) {
       ps.setString(1, SupportConversationsServlet.newId());
       ps.setString(2, convId);
@@ -240,7 +240,7 @@ final class SupportJiraWebhookHandler {
 
   private static void markConversationUnread(Connection conn, String convId) throws SQLException {
     try (PreparedStatement ps = conn.prepareStatement(
-        "UPDATE etgo_support_conversation SET unread = true WHERE id = ?")) {
+        "UPDATE etgo_support_conversation SET unread = 'Y' WHERE id = ?")) {
       ps.setString(1, convId);
       ps.executeUpdate();
     }
@@ -254,7 +254,7 @@ final class SupportJiraWebhookHandler {
       try {
         Connection conn = OBDal.getInstance().getConnection();
         try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET human_takeover = false WHERE jira_ticket_key = ?")) {
+            "UPDATE etgo_support_conversation SET human_takeover = 'N' WHERE jira_ticket_key = ?")) {
           ps.setString(1, jiraKey);
           int rows = ps.executeUpdate();
           log.info("Human takeover reset via assignee event for Jira ticket {} ({} row(s))", jiraKey, rows);
@@ -282,7 +282,7 @@ final class SupportJiraWebhookHandler {
         }
         String ts = Instant.now().toString();
         try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET status = 'closed', unread = true, last_activity = ?::timestamptz WHERE id = ?")) {
+            "UPDATE etgo_support_conversation SET status = 'closed', unread = 'Y', last_activity = ?::timestamp WHERE id = ?")) {
           ps.setString(1, ts);
           ps.setString(2, convId);
           ps.executeUpdate();

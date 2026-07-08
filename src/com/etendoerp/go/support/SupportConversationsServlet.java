@@ -99,36 +99,42 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   // DDL — created once on first request
   private static final AtomicBoolean TABLES_READY = new AtomicBoolean(false);
 
+  // Column types are restricted to what export.database (DDLUtils reverse-engineering) can
+  // represent: TIMESTAMP (not TIMESTAMPTZ), CHAR(1) 'Y'/'N' (not native BOOLEAN), NUMERIC
+  // (not native INTEGER). Constraint names must fit Oracle's 30-char identifier limit, and
+  // "timestamp" is reserved, hence "msg_date" below.
   private static final String DDL_CONVERSATION =
       "CREATE TABLE IF NOT EXISTS etgo_support_conversation (" +
       "  id             VARCHAR(32)  PRIMARY KEY," +
       "  user_id        VARCHAR(255) NOT NULL," +
       "  subject        VARCHAR(255)," +
       "  status         VARCHAR(32)  NOT NULL DEFAULT 'open'," +
-      "  created_at     TIMESTAMPTZ  NOT NULL DEFAULT now()," +
-      "  last_activity  TIMESTAMPTZ  NOT NULL DEFAULT now()," +
+      "  created_at     TIMESTAMP    NOT NULL DEFAULT now()," +
+      "  last_activity  TIMESTAMP    NOT NULL DEFAULT now()," +
       "  last_message   TEXT," +
-      "  unread         BOOLEAN      NOT NULL DEFAULT FALSE," +
-      "  rated          BOOLEAN      NOT NULL DEFAULT FALSE," +
-      "  rating_score   INTEGER," +
+      "  unread         CHAR(1)      NOT NULL DEFAULT 'N'," +
+      "  rated          CHAR(1)      NOT NULL DEFAULT 'N'," +
+      "  rating_score   NUMERIC," +
       "  rating_comment TEXT" +
       ")";
 
   private static final String DDL_MESSAGE =
       "CREATE TABLE IF NOT EXISTS etgo_support_message (" +
       "  id              VARCHAR(32)  PRIMARY KEY," +
-      "  conversation_id VARCHAR(32)  NOT NULL REFERENCES etgo_support_conversation(id)," +
+      "  conversation_id VARCHAR(32)  NOT NULL," +
       "  sender          VARCHAR(32)  NOT NULL," +
       "  sender_name     VARCHAR(255)," +
       "  text            TEXT," +
-      "  timestamp       TIMESTAMPTZ  NOT NULL DEFAULT now()" +
+      "  msg_date        TIMESTAMP    NOT NULL DEFAULT now()," +
+      "  CONSTRAINT etgo_sc_msg_conv_fk FOREIGN KEY (conversation_id)" +
+      "    REFERENCES etgo_support_conversation(id)" +
       ")";
 
   private static final String DDL_IDX_CONV_USER =
       "CREATE INDEX IF NOT EXISTS etgo_sc_conv_user ON etgo_support_conversation(user_id, last_activity DESC)";
 
   private static final String DDL_IDX_MSG_CONV =
-      "CREATE INDEX IF NOT EXISTS etgo_sc_msg_conv ON etgo_support_message(conversation_id, timestamp ASC)";
+      "CREATE INDEX IF NOT EXISTS etgo_sc_msg_conv ON etgo_support_message(conversation_id, msg_date ASC)";
 
   private static final String DDL_MIGRATE_JIRA_KEY =
       "ALTER TABLE etgo_support_conversation ADD COLUMN IF NOT EXISTS jira_ticket_key VARCHAR(64)";
@@ -139,7 +145,66 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private static final String DDL_MIGRATE_MSG_EXTID_IDX =
       "CREATE UNIQUE INDEX IF NOT EXISTS etgo_sc_msg_extid ON etgo_support_message(external_id) WHERE external_id IS NOT NULL";
   private static final String DDL_MIGRATE_HUMAN_TAKEOVER =
-      "ALTER TABLE etgo_support_conversation ADD COLUMN IF NOT EXISTS human_takeover BOOLEAN NOT NULL DEFAULT FALSE";
+      "ALTER TABLE etgo_support_conversation ADD COLUMN IF NOT EXISTS human_takeover CHAR(1) NOT NULL DEFAULT 'N'";
+
+  // One-time fixups for local/dev databases that already had the table created by an older
+  // version of this class (native TIMESTAMPTZ/BOOLEAN/INTEGER, reserved-word "timestamp"
+  // column, auto-named FK over 30 chars) — those broke `export.database`. Idempotent: each
+  // branch only fires while the old shape is still present.
+  private static final String DDL_MIGRATE_FIX_CONVERSATION_TYPES =
+      "DO $mig$ BEGIN" +
+      "  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'etgo_support_conversation'" +
+      "      AND column_name = 'unread' AND data_type = 'boolean') THEN" +
+      "    ALTER TABLE etgo_support_conversation ALTER COLUMN unread DROP DEFAULT;" +
+      "    ALTER TABLE etgo_support_conversation ALTER COLUMN unread TYPE CHAR(1)" +
+      "      USING (CASE WHEN unread THEN 'Y' ELSE 'N' END);" +
+      "    ALTER TABLE etgo_support_conversation ALTER COLUMN unread SET DEFAULT 'N';" +
+      "  END IF;" +
+      "  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'etgo_support_conversation'" +
+      "      AND column_name = 'rated' AND data_type = 'boolean') THEN" +
+      "    ALTER TABLE etgo_support_conversation ALTER COLUMN rated DROP DEFAULT;" +
+      "    ALTER TABLE etgo_support_conversation ALTER COLUMN rated TYPE CHAR(1)" +
+      "      USING (CASE WHEN rated THEN 'Y' ELSE 'N' END);" +
+      "    ALTER TABLE etgo_support_conversation ALTER COLUMN rated SET DEFAULT 'N';" +
+      "  END IF;" +
+      "  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'etgo_support_conversation'" +
+      "      AND column_name = 'human_takeover' AND data_type = 'boolean') THEN" +
+      "    ALTER TABLE etgo_support_conversation ALTER COLUMN human_takeover DROP DEFAULT;" +
+      "    ALTER TABLE etgo_support_conversation ALTER COLUMN human_takeover TYPE CHAR(1)" +
+      "      USING (CASE WHEN human_takeover THEN 'Y' ELSE 'N' END);" +
+      "    ALTER TABLE etgo_support_conversation ALTER COLUMN human_takeover SET DEFAULT 'N';" +
+      "  END IF;" +
+      "  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'etgo_support_conversation'" +
+      "      AND column_name = 'created_at' AND data_type = 'timestamp with time zone') THEN" +
+      "    ALTER TABLE etgo_support_conversation ALTER COLUMN created_at TYPE TIMESTAMP;" +
+      "  END IF;" +
+      "  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'etgo_support_conversation'" +
+      "      AND column_name = 'last_activity' AND data_type = 'timestamp with time zone') THEN" +
+      "    ALTER TABLE etgo_support_conversation ALTER COLUMN last_activity TYPE TIMESTAMP;" +
+      "  END IF;" +
+      "  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'etgo_support_conversation'" +
+      "      AND column_name = 'rating_score' AND data_type = 'integer') THEN" +
+      "    ALTER TABLE etgo_support_conversation ALTER COLUMN rating_score TYPE NUMERIC;" +
+      "  END IF;" +
+      "END $mig$";
+
+  private static final String DDL_MIGRATE_FIX_MESSAGE_TYPES =
+      "DO $mig$ BEGIN" +
+      "  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'etgo_support_message'" +
+      "      AND column_name = 'timestamp') THEN" +
+      "    ALTER TABLE etgo_support_message RENAME COLUMN \"timestamp\" TO msg_date;" +
+      "  END IF;" +
+      "  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'etgo_support_message'" +
+      "      AND column_name = 'msg_date' AND data_type = 'timestamp with time zone') THEN" +
+      "    ALTER TABLE etgo_support_message ALTER COLUMN msg_date TYPE TIMESTAMP;" +
+      "  END IF;" +
+      "  IF EXISTS (SELECT 1 FROM pg_constraint" +
+      "      WHERE conname = 'etgo_support_message_conversation_id_fkey') THEN" +
+      "    ALTER TABLE etgo_support_message DROP CONSTRAINT etgo_support_message_conversation_id_fkey;" +
+      "    ALTER TABLE etgo_support_message ADD CONSTRAINT etgo_sc_msg_conv_fk" +
+      "      FOREIGN KEY (conversation_id) REFERENCES etgo_support_conversation(id);" +
+      "  END IF;" +
+      "END $mig$";
 
   // --- HTTP dispatchers ---
 
@@ -261,8 +326,8 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
               conv.put(FIELD_STATUS,   rs.getString(FIELD_STATUS));
               conv.put("lastActivity", toIso(rs.getString("last_activity")));
               conv.put("lastMessage",  rs.getString(FIELD_LAST_MESSAGE_COL) != null ? rs.getString(FIELD_LAST_MESSAGE_COL) : "");
-              conv.put(FIELD_UNREAD,   rs.getBoolean(FIELD_UNREAD));
-              conv.put(FIELD_RATED,    rs.getBoolean(FIELD_RATED));
+              conv.put(FIELD_UNREAD,   isY(rs.getString(FIELD_UNREAD)));
+              conv.put(FIELD_RATED,    isY(rs.getString(FIELD_RATED)));
               arr.put(conv);
             }
           }
@@ -310,7 +375,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         try (PreparedStatement ps = conn.prepareStatement(
             "INSERT INTO etgo_support_conversation" +
             "  (id, user_id, subject, status, created_at, last_activity, unread, rated)" +
-            " VALUES (?, ?, ?, 'open', ?::timestamptz, ?::timestamptz, false, false)")) {
+            " VALUES (?, ?, ?, 'open', ?::timestamp, ?::timestamp, 'N', 'N')")) {
           ps.setString(1, convId);
           ps.setString(2, userId);
           ps.setString(3, subject);
@@ -365,7 +430,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         }
         // Mark as read
         try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET unread = false WHERE id = ?")) {
+            "UPDATE etgo_support_conversation SET unread = 'N' WHERE id = ?")) {
           ps.setString(1, convId);
           ps.executeUpdate();
         }
@@ -421,7 +486,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
             "SELECT human_takeover FROM etgo_support_conversation WHERE id = ?")) {
           ps.setString(1, convId);
           try (var rs = ps.executeQuery()) {
-            if (rs.next()) humanTakeover = rs.getBoolean("human_takeover");
+            if (rs.next()) humanTakeover = isY(rs.getString("human_takeover"));
           }
         }
 
@@ -498,7 +563,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         String comment = body.optString("comment", "").trim();
         try (PreparedStatement ps = conn.prepareStatement(
             "UPDATE etgo_support_conversation" +
-            "   SET rated = true, rating_score = ?, rating_comment = ?" +
+            "   SET rated = 'Y', rating_score = ?, rating_comment = ?" +
             " WHERE id = ?")) {
           ps.setInt(1, score);
           ps.setString(2, comment);
@@ -574,7 +639,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         }
         String now = Instant.now().toString();
         try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET status = 'open', last_activity = ?::timestamptz WHERE id = ?")) {
+            "UPDATE etgo_support_conversation SET status = 'open', last_activity = ?::timestamp WHERE id = ?")) {
           ps.setString(1, now);
           ps.setString(2, convId);
           ps.executeUpdate();
@@ -683,7 +748,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       try {
         Connection conn = OBDal.getInstance().getConnection();
         try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET human_takeover = true WHERE id = ?")) {
+            "UPDATE etgo_support_conversation SET human_takeover = 'Y' WHERE id = ?")) {
           ps.setString(1, convId);
           if (ps.executeUpdate() == 0) {
             writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
@@ -722,13 +787,13 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         int rows;
         if (!convId.isEmpty()) {
           try (PreparedStatement ps = conn.prepareStatement(
-              "UPDATE etgo_support_conversation SET human_takeover = false WHERE id = ?")) {
+              "UPDATE etgo_support_conversation SET human_takeover = 'N' WHERE id = ?")) {
             ps.setString(1, convId);
             rows = ps.executeUpdate();
           }
         } else {
           try (PreparedStatement ps = conn.prepareStatement(
-              "UPDATE etgo_support_conversation SET human_takeover = false WHERE jira_ticket_key = ?")) {
+              "UPDATE etgo_support_conversation SET human_takeover = 'N' WHERE jira_ticket_key = ?")) {
             ps.setString(1, jiraKey);
             rows = ps.executeUpdate();
           }
@@ -760,7 +825,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
           Connection conn = OBDal.getInstance().getConnection();
           for (String ddl : new String[]{ DDL_CONVERSATION, DDL_MESSAGE, DDL_IDX_CONV_USER, DDL_IDX_MSG_CONV,
               DDL_MIGRATE_JIRA_KEY, DDL_MIGRATE_JIRA_IDX, DDL_MIGRATE_MSG_EXTID, DDL_MIGRATE_MSG_EXTID_IDX,
-              DDL_MIGRATE_HUMAN_TAKEOVER }) {
+              DDL_MIGRATE_HUMAN_TAKEOVER, DDL_MIGRATE_FIX_CONVERSATION_TYPES, DDL_MIGRATE_FIX_MESSAGE_TYPES }) {
             try (PreparedStatement ps = conn.prepareStatement(ddl)) {
               ps.execute();
             }
@@ -781,8 +846,8 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private void insertMessage(Connection conn, String id, String convId, String sender,
       String senderName, String text, String timestamp) throws SQLException {
     try (PreparedStatement ps = conn.prepareStatement(
-        "INSERT INTO etgo_support_message (id, conversation_id, sender, sender_name, text, timestamp)" +
-        " VALUES (?, ?, ?, ?, ?, ?::timestamptz)")) {
+        "INSERT INTO etgo_support_message (id, conversation_id, sender, sender_name, text, msg_date)" +
+        " VALUES (?, ?, ?, ?, ?, ?::timestamp)")) {
       ps.setString(1, id);
       ps.setString(2, convId);
       ps.setString(3, sender);
@@ -798,7 +863,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       throws SQLException {
     try (PreparedStatement ps = conn.prepareStatement(
         "UPDATE etgo_support_conversation" +
-        "   SET last_message = ?, last_activity = ?::timestamptz" +
+        "   SET last_message = ?, last_activity = ?::timestamp" +
         " WHERE id = ?")) {
       ps.setString(1, lastMsg.length() > 120 ? lastMsg.substring(0, 120) + "…" : lastMsg);
       ps.setString(2, ts);
@@ -843,8 +908,8 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         obj.put(FIELD_STATUS,   rs.getString(FIELD_STATUS));
         obj.put("lastActivity", toIso(rs.getString("last_activity")));
         obj.put("lastMessage",  rs.getString(FIELD_LAST_MESSAGE_COL) != null ? rs.getString(FIELD_LAST_MESSAGE_COL) : "");
-        obj.put(FIELD_UNREAD,   rs.getBoolean(FIELD_UNREAD));
-        obj.put(FIELD_RATED,    rs.getBoolean(FIELD_RATED));
+        obj.put(FIELD_UNREAD,   isY(rs.getString(FIELD_UNREAD)));
+        obj.put(FIELD_RATED,    isY(rs.getString(FIELD_RATED)));
         return obj;
       }
     }
@@ -854,8 +919,8 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       throws SQLException, JSONException {
     JSONArray arr = new JSONArray();
     try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT id, conversation_id, sender, sender_name, text, timestamp" +
-        "  FROM etgo_support_message WHERE conversation_id = ? ORDER BY timestamp ASC")) {
+        "SELECT id, conversation_id, sender, sender_name, text, msg_date" +
+        "  FROM etgo_support_message WHERE conversation_id = ? ORDER BY msg_date ASC")) {
       ps.setString(1, convId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
@@ -865,7 +930,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
           msg.put("sender",         rs.getString("sender"));
           msg.put("senderName",     rs.getString("sender_name"));
           msg.put("text",           rs.getString("text"));
-          msg.put("timestamp",      toIso(rs.getString("timestamp")));
+          msg.put("timestamp",      toIso(rs.getString("msg_date")));
           arr.put(msg);
         }
       }
@@ -885,6 +950,11 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     // Normalise UTC offset to Z
     s = s.replace("+00:00", "Z");
     return s;
+  }
+
+  /** Reads an Etendo-style CHAR(1) 'Y'/'N' boolean column. */
+  private static boolean isY(String flag) {
+    return "Y".equals(flag);
   }
 
   /** Package-private: also used by {@link SupportJiraWebhookHandler} to mint message/comment ids. */

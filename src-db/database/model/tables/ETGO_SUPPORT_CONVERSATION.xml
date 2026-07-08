@@ -1,0 +1,64 @@
+<?xml version="1.0"?>
+  <database name="TABLE ETGO_SUPPORT_CONVERSATION">
+    <table name="ETGO_SUPPORT_CONVERSATION" primaryKey="ETGO_SUPPORT_CONVERSATION_PKEY">
+      <column name="ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="USER_ID" primaryKey="false" required="true" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SUBJECT" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="STATUS" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default><![CDATA[open]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATED_AT" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="LAST_ACTIVITY" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="LAST_MESSAGE" primaryKey="false" required="false" type="CLOB" size="4000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UNREAD" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="RATED" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="RATING_SCORE" primaryKey="false" required="false" type="DECIMAL" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="RATING_COMMENT" primaryKey="false" required="false" type="CLOB" size="4000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="JIRA_TICKET_KEY" primaryKey="false" required="false" type="VARCHAR" size="64" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="HUMAN_TAKEOVER" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault/>
+      </column>
+      <index name="ETGO_SC_CONV_JIRA" unique="false">
+        <index-column name="JIRA_TICKET_KEY"/>
+      </index>
+      <index name="ETGO_SC_CONV_USER" unique="false">
+        <index-column name="USER_ID"/>
+        <index-column name="LAST_ACTIVITY"/>
+      </index>
+    </table>
+  </database>
