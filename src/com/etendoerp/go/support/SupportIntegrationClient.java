@@ -231,7 +231,11 @@ final class SupportIntegrationClient {
   // --- Jira comment posting ---
 
   static void postJiraComment(String jiraKey, String userMessage) {
-    if (jiraKey == null || jiraKey.isEmpty() || JIRA_API_TOKEN.isEmpty()) return;
+    if (jiraKey == null || jiraKey.isEmpty()) return;
+    if (JIRA_API_TOKEN.isEmpty()) {
+      log.warn("Jira comment for {} NOT sent: support.jira.token system property is empty", jiraKey);
+      return;
+    }
     try {
       String credentials = Base64.getEncoder()
           .encodeToString((JIRA_USERNAME + ":" + JIRA_API_TOKEN).getBytes(StandardCharsets.UTF_8));
@@ -285,7 +289,11 @@ final class SupportIntegrationClient {
   // A label is a reliable stand-in: filterable via JQL (labels = "csat-4") and only needs
   // ordinary edit-issue permission, which the service account already has.
   static void postJiraCsatLabel(String jiraKey, int score) {
-    if (jiraKey == null || jiraKey.isEmpty() || JIRA_API_TOKEN.isEmpty()) return;
+    if (jiraKey == null || jiraKey.isEmpty()) return;
+    if (JIRA_API_TOKEN.isEmpty()) {
+      log.warn("Jira CSAT label for {} NOT sent: support.jira.token system property is empty", jiraKey);
+      return;
+    }
     try {
       String credentials = Base64.getEncoder()
           .encodeToString((JIRA_USERNAME + ":" + JIRA_API_TOKEN).getBytes(StandardCharsets.UTF_8));
