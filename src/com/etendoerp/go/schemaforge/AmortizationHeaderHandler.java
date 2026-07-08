@@ -19,12 +19,15 @@ package com.etendoerp.go.schemaforge;
 
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.Map;
 
 import javax.inject.Inject;
 import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.Property;
@@ -47,6 +50,22 @@ import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
  * <p>Only fires on the {@link NeoEndpointType#DEFAULTS} endpoint. All other endpoints
  * pass through unchanged.
  *
+ * <p><b>List "Posted" filter (pre-hook).</b> The grid renders {@code Posted} as a boolean
+ * badge, so its column filter sends a criteria entry with a JS boolean value
+ * ({@code {fieldName:"posted", operator:"equals", value:true|false}}). But {@code A_Amortization.Posted}
+ * is Etendo's multi-value Posted-Status list column (a {@code String} DAL property, ~17 codes
+ * where only {@code 'Y'} means posted). Core {@code AdvancedQueryBuilder.getTypeSafeValue} only
+ * converts {@code boolean → 'Y'/'N'} for genuine {@code Boolean} properties, so the raw boolean is
+ * stringified to {@code "true"/"false"} and compared against the varchar column, matching zero rows
+ * for both "Posted" and "Not posted". {@link #handle(NeoContext)} rewrites that single criteria
+ * entry in place before the default CRUD query builds, giving correct binary semantics:
+ * <ul>
+ *   <li>{@code true} (or {@code "true"/"Y"}) → {@code equals 'Y'}  (Posted = 'Y')</li>
+ *   <li>{@code false} (or {@code "false"/"N"}) → {@code notEqual 'Y'}  (Posted &lt;&gt; 'Y', every non-Y code)</li>
+ * </ul>
+ * Only the {@code posted} entry is touched; all other filters, sorting and paging are preserved.
+ * Requests without a posted filter pass through unchanged.
+ *
  * <p>Registered via {@code JAVA_QUALIFIER = 'amortizationHeaderHandler'} on the
  * {@code header} entity of the {@code amortization} ETGO_SF_SPEC record.
  */
@@ -65,6 +84,18 @@ public class AmortizationHeaderHandler implements NeoHandler {
   private static final String NAME_PREFIX = "Amortización - ";
   private static final String NAME_FALLBACK = "Amortización";
 
+  // --- List "Posted" filter rewrite ------------------------------------------------
+  private static final String CRITERIA_PARAM = "criteria";
+  private static final String KEY_FIELD_NAME = "fieldName";
+  private static final String KEY_OPERATOR = "operator";
+  private static final String KEY_VALUE = "value";
+  private static final String KEY_CRITERIA = "criteria";
+  private static final String POSTED_FIELD = "posted";
+  private static final String POSTED_COLUMN = "Posted";
+  private static final String POSTED_YES = "Y";
+  private static final String OPERATOR_EQUALS = "equals";
+  private static final String OPERATOR_NOT_EQUAL = "notEqual";
+
   @Inject
   private DocumentPostingService postingService;
 
@@ -79,8 +110,105 @@ public class AmortizationHeaderHandler implements NeoHandler {
     if (posting != null) {
       return posting;
     }
-    // Pre-hook: nothing to intercept — let the defaults service run first
+    // Rewrite the list "Posted" boolean filter into correct binary String semantics
+    // (Posted = 'Y' / Posted <> 'Y') before the default CRUD query builds. See class Javadoc.
+    rewritePostedFilter(context);
+    // Pre-hook: nothing else to intercept — let the defaults/CRUD service run
     return null;
+  }
+
+  /**
+   * Rewrites the {@code posted} list-filter criteria (if present) in the request query params
+   * so the boolean the grid sends maps to the multi-value {@code Posted} status column. Mutates
+   * the {@link NeoContext#getQueryParams()} map in place — the default CRUD path reads the same
+   * map when it builds the DAL query. No-op when there is no {@code criteria} param or no posted
+   * entry. Never throws: any parse issue leaves the original criteria untouched.
+   */
+  static void rewritePostedFilter(NeoContext context) {
+    if (context == null || context.getQueryParams() == null) {
+      return;
+    }
+    Map<String, String> queryParams = context.getQueryParams();
+    String rawCriteria = queryParams.get(CRITERIA_PARAM);
+    if (rawCriteria == null || rawCriteria.trim().isEmpty()) {
+      return;
+    }
+    try {
+      String rewritten = rewritePostedInCriteria(rawCriteria);
+      if (rewritten != null && !rewritten.equals(rawCriteria)) {
+        queryParams.put(CRITERIA_PARAM, rewritten);
+      }
+    } catch (Exception e) {
+      log.debug("Could not rewrite posted filter criteria, leaving it unchanged: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Parses the raw {@code criteria} JSON (either a bare array of criteria entries or a single
+   * {@code AdvancedCriteria} object), rewrites every {@code posted} leaf, and returns the
+   * re-serialized JSON preserving the original top-level shape.
+   */
+  static String rewritePostedInCriteria(String rawCriteria) throws JSONException {
+    String trimmed = rawCriteria.trim();
+    if (trimmed.startsWith("[")) {
+      JSONArray arr = new JSONArray(trimmed);
+      rewriteCriteriaArray(arr);
+      return arr.toString();
+    }
+    JSONObject obj = new JSONObject(trimmed);
+    rewriteCriteriaObject(obj);
+    return obj.toString();
+  }
+
+  private static void rewriteCriteriaArray(JSONArray arr) throws JSONException {
+    for (int i = 0; i < arr.length(); i++) {
+      JSONObject entry = arr.optJSONObject(i);
+      if (entry != null) {
+        rewriteCriteriaObject(entry);
+      }
+    }
+  }
+
+  /**
+   * Rewrites a single criteria node. Nested {@code AdvancedCriteria} (has a {@code criteria}
+   * array) is recursed into; a leaf whose {@code fieldName} targets the posted field/column has
+   * its {@code operator} and {@code value} rewritten to correct binary status semantics. All
+   * other leaves are left untouched.
+   */
+  private static void rewriteCriteriaObject(JSONObject entry) throws JSONException {
+    JSONArray nested = entry.optJSONArray(KEY_CRITERIA);
+    if (nested != null) {
+      rewriteCriteriaArray(nested);
+      return;
+    }
+    String field = entry.optString(KEY_FIELD_NAME, null);
+    if (!isPostedField(field)) {
+      return;
+    }
+    boolean posted = isPostedTrue(entry.opt(KEY_VALUE));
+    entry.put(KEY_OPERATOR, posted ? OPERATOR_EQUALS : OPERATOR_NOT_EQUAL);
+    entry.put(KEY_VALUE, POSTED_YES);
+  }
+
+  private static boolean isPostedField(String field) {
+    return POSTED_FIELD.equalsIgnoreCase(field) || POSTED_COLUMN.equalsIgnoreCase(field);
+  }
+
+  /**
+   * Interprets a filter value as "posted" (true) vs "not posted" (false). Robust to the value
+   * arriving as a JSON boolean, the strings {@code "true"/"false"}, the status codes
+   * {@code "Y"/"N"}, or {@code "1"}. Anything not recognized as posted is treated as not posted.
+   */
+  private static boolean isPostedTrue(Object value) {
+    if (value == null) {
+      return false;
+    }
+    if (value instanceof Boolean) {
+      return (Boolean) value;
+    }
+    String s = value.toString().trim();
+    return "true".equalsIgnoreCase(s) || POSTED_YES.equalsIgnoreCase(s)
+        || "posted".equalsIgnoreCase(s) || "1".equals(s);
   }
 
   /**
