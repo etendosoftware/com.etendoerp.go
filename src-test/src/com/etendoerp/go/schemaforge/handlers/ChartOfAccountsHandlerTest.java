@@ -58,9 +58,9 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * Unit tests for {@link ChartOfAccountsHandler}.
  *
  * <p>Tests cover pure in-memory helpers (no OBDal or OBContext):
- * {@link ChartOfAccountsHandler#computeDepth computeDepth},
- * {@link ChartOfAccountsHandler#findParentCode4 findParentCode4},
- * {@link ChartOfAccountsHandler#buildAncestorChain buildAncestorChain},
+ * {@link ChartOfAccountsTreeMath#computeDepth computeDepth},
+ * {@link ChartOfAccountsTreeMath#findParentCode4 findParentCode4},
+ * {@link ChartOfAccountsTreeMath#buildAncestorChain buildAncestorChain},
  * {@link ChartOfAccountsHandler#rollupBalances rollupBalances},
  * {@link ChartOfAccountsHandler#toBigDecimal toBigDecimal},
  * {@link ChartOfAccountsHandler#applyIsLeaf applyIsLeaf},
@@ -272,12 +272,12 @@ public class ChartOfAccountsHandlerTest {
   @Test
   public void computeDepthRootNodeIsZero() {
     Map<String, String> parents = Collections.singletonMap("root", null);
-    assertEquals(0, ChartOfAccountsHandler.computeDepth("root", parents));
+    assertEquals(0, ChartOfAccountsTreeMath.computeDepth("root", parents));
   }
 
   @Test
   public void computeDepthNodeNotInMapIsZero() {
-    assertEquals(0, ChartOfAccountsHandler.computeDepth("ghost", Collections.emptyMap()));
+    assertEquals(0, ChartOfAccountsTreeMath.computeDepth("ghost", Collections.emptyMap()));
   }
 
   @Test
@@ -285,7 +285,7 @@ public class ChartOfAccountsHandlerTest {
     Map<String, String> parents = new HashMap<>();
     parents.put("root", null);
     parents.put("child", "root");
-    assertEquals(1, ChartOfAccountsHandler.computeDepth("child", parents));
+    assertEquals(1, ChartOfAccountsTreeMath.computeDepth("child", parents));
   }
 
   @Test
@@ -296,7 +296,7 @@ public class ChartOfAccountsHandlerTest {
     parents.put("level1", "root");
     parents.put("level2", "level1");
     parents.put("leaf", "level2");
-    assertEquals(3, ChartOfAccountsHandler.computeDepth("leaf", parents));
+    assertEquals(3, ChartOfAccountsTreeMath.computeDepth("leaf", parents));
   }
 
   @Test
@@ -309,7 +309,7 @@ public class ChartOfAccountsHandlerTest {
     // Point the last one back to simulate a cycle (no terminating null)
     parents.put("n50", "n0");
 
-    int depth = ChartOfAccountsHandler.computeDepth("n0", parents);
+    int depth = ChartOfAccountsTreeMath.computeDepth("n0", parents);
     // Must be some finite number <= 30 (MAX_TREE_DEPTH constant)
     assertTrue("depth must be capped at MAX_TREE_DEPTH", depth <= 30);
   }
@@ -320,7 +320,7 @@ public class ChartOfAccountsHandlerTest {
   public void findParentCode4ReturnsNullWhenNoParent() {
     Map<String, String> parents = Collections.singletonMap("node", null);
     Map<String, String> values = Collections.singletonMap("node", "1234");
-    assertNull(ChartOfAccountsHandler.findParentCode4("node", parents, values));
+    assertNull(ChartOfAccountsTreeMath.findParentCode4("node", parents, values));
   }
 
   @Test
@@ -332,7 +332,7 @@ public class ChartOfAccountsHandlerTest {
     values.put("leaf", "12345678");
     values.put("parent", "1234");
 
-    assertEquals("1234", ChartOfAccountsHandler.findParentCode4("leaf", parents, values));
+    assertEquals("1234", ChartOfAccountsTreeMath.findParentCode4("leaf", parents, values));
   }
 
   @Test
@@ -347,7 +347,7 @@ public class ChartOfAccountsHandlerTest {
     values.put("p3", "123");      // length 3 — skip
     values.put("gp4", "1234");   // length 4 — match
 
-    assertEquals("1234", ChartOfAccountsHandler.findParentCode4("leaf", parents, values));
+    assertEquals("1234", ChartOfAccountsTreeMath.findParentCode4("leaf", parents, values));
   }
 
   @Test
@@ -359,7 +359,7 @@ public class ChartOfAccountsHandlerTest {
     values.put("leaf", "12345678");
     values.put("parent", "12");  // length 2 — not a match
 
-    assertNull(ChartOfAccountsHandler.findParentCode4("leaf", parents, values));
+    assertNull(ChartOfAccountsTreeMath.findParentCode4("leaf", parents, values));
   }
 
   @Test
@@ -372,7 +372,7 @@ public class ChartOfAccountsHandlerTest {
     values.put("node", "ABCD");   // length 4, but excluded (is the node itself)
     values.put("parent", "AB");   // length 2 — no match
 
-    assertNull(ChartOfAccountsHandler.findParentCode4("node", parents, values));
+    assertNull(ChartOfAccountsTreeMath.findParentCode4("node", parents, values));
   }
 
   // ── findParentCode4Name ───────────────────────────────────────────────────
@@ -382,12 +382,12 @@ public class ChartOfAccountsHandlerTest {
     Map<String, String> parents = Collections.singletonMap("node", null);
     Map<String, String> values = Collections.singletonMap("node", "1234");
     Map<String, String> names = Collections.singletonMap("node", "Test");
-    assertNull(ChartOfAccountsHandler.findParentCode4Name("node", parents, values, names));
+    assertNull(ChartOfAccountsTreeMath.findParentCode4Name("node", parents, values, names));
   }
 
   @Test
   public void findParentCode4NameReturnsNullWhenNodeNotInMap() {
-    assertNull(ChartOfAccountsHandler.findParentCode4Name("ghost",
+    assertNull(ChartOfAccountsTreeMath.findParentCode4Name("ghost",
         Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap()));
   }
 
@@ -402,7 +402,7 @@ public class ChartOfAccountsHandlerTest {
     names.put("parent", "Acreedores");
 
     assertEquals("Acreedores",
-        ChartOfAccountsHandler.findParentCode4Name("leaf", parents, values, names));
+        ChartOfAccountsTreeMath.findParentCode4Name("leaf", parents, values, names));
   }
 
   @Test
@@ -420,7 +420,7 @@ public class ChartOfAccountsHandlerTest {
     names.put("gp4", "GrandParentGroup");
 
     assertEquals("GrandParentGroup",
-        ChartOfAccountsHandler.findParentCode4Name("leaf", parents, values, names));
+        ChartOfAccountsTreeMath.findParentCode4Name("leaf", parents, values, names));
   }
 
   @Test
@@ -433,7 +433,7 @@ public class ChartOfAccountsHandlerTest {
     Map<String, String> names = new HashMap<>();
     names.put("parent", "ShortCode");
 
-    assertNull(ChartOfAccountsHandler.findParentCode4Name("leaf", parents, values, names));
+    assertNull(ChartOfAccountsTreeMath.findParentCode4Name("leaf", parents, values, names));
   }
 
   // ── buildAncestorChain ────────────────────────────────────────────────────
@@ -441,7 +441,7 @@ public class ChartOfAccountsHandlerTest {
   @Test
   public void buildAncestorChainReturnsEmptyArrayForRootNode() throws Exception {
     Map<String, String> parents = Collections.singletonMap("root", null);
-    JSONArray chain = ChartOfAccountsHandler.buildAncestorChain("root", parents,
+    JSONArray chain = ChartOfAccountsTreeMath.buildAncestorChain("root", parents,
         Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
     assertEquals(0, chain.length());
   }
@@ -456,7 +456,7 @@ public class ChartOfAccountsHandlerTest {
     values.put("node", "20000000");
     values.put("parent", "2000");
 
-    JSONArray chain = ChartOfAccountsHandler.buildAncestorChain("node", parents, values,
+    JSONArray chain = ChartOfAccountsTreeMath.buildAncestorChain("node", parents, values,
         Collections.emptyMap(), Collections.emptyMap());
 
     assertEquals(1, chain.length());
@@ -497,7 +497,7 @@ public class ChartOfAccountsHandlerTest {
     levels.put("headingII", "E");
     levels.put("headingI", "E");
 
-    JSONArray chain = ChartOfAccountsHandler.buildAncestorChain("leaf", parents, values, names, levels);
+    JSONArray chain = ChartOfAccountsTreeMath.buildAncestorChain("leaf", parents, values, names, levels);
 
     assertEquals(5, chain.length());
     assertEquals("A", chain.getJSONObject(0).getString("value"));
@@ -519,7 +519,7 @@ public class ChartOfAccountsHandlerTest {
     }
     parents.put("n50", "n0"); // cycle, no terminating null
 
-    JSONArray chain = ChartOfAccountsHandler.buildAncestorChain("n0", parents,
+    JSONArray chain = ChartOfAccountsTreeMath.buildAncestorChain("n0", parents,
         Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
 
     assertTrue("chain must be capped at MAX_TREE_DEPTH", chain.length() <= 30);
@@ -531,7 +531,7 @@ public class ChartOfAccountsHandlerTest {
     parents.put("leaf", "ghost"); // "ghost" has no entry in value/name/level maps
     parents.put("ghost", null);
 
-    JSONArray chain = ChartOfAccountsHandler.buildAncestorChain("leaf", parents,
+    JSONArray chain = ChartOfAccountsTreeMath.buildAncestorChain("leaf", parents,
         Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
 
     assertEquals(1, chain.length());

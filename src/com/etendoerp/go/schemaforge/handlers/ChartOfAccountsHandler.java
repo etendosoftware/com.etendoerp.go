@@ -110,16 +110,13 @@ public class ChartOfAccountsHandler implements NeoHandler {
   private static final int ACCOUNT_CODE_LENGTH = 8;
 
   /**
-   * Exact {@code Value} length used as the grouping level for {@code parentCode4}.
-   * Walk up the parent chain until a node whose {@code Value} has this length is found.
-   */
-  private static final int PARENT_CODE_LENGTH = 4;
-
-  /**
    * Maximum number of hops traversed upward in the tree before bailing out,
    * guarding against circular references in corrupted {@code AD_TreeNode} data.
+   *
+   * <p>Package-private: also used by {@link ChartOfAccountsTreeMath}, which was split out of
+   * this class to keep its method count under the Sonar {@code java:S1448} limit.
    */
-  private static final int MAX_TREE_DEPTH = 30;
+  static final int MAX_TREE_DEPTH = 30;
 
   static final String ERR_INVALID_CODE =
       "El código de cuenta debe tener exactamente 8 dígitos";
@@ -699,7 +696,8 @@ public class ChartOfAccountsHandler implements NeoHandler {
    *   <li>{@code hasChildren} — {@code true} if this node appears as a parent in
    *       {@code AD_TreeNode}.</li>
    *   <li>{@code parentCode4} — {@code Value} of the nearest ancestor whose {@code Value}
-   *       has exactly {@value #PARENT_CODE_LENGTH} characters; JSON null if none found.</li>
+   *       has exactly {@value ChartOfAccountsTreeMath#PARENT_CODE_LENGTH} characters; JSON
+   *       null if none found.</li>
    *   <li>{@code elementLevel} — the node's own {@code C_ElementValue.ElementLevel}
    *       ({@code E}/{@code C}/{@code D}/{@code S}); JSON null if not found.</li>
    *   <li>{@code ancestors} — full ancestor chain, root-to-leaf, node itself excluded; each
@@ -724,128 +722,23 @@ public class ChartOfAccountsHandler implements NeoHandler {
    */
   private void injectHierarchyFields(JSONObject entry, String id, TreeData tree) throws Exception {
     String parentId = tree.nodeParentMap.get(id); // null when root or not in tree
-    int depth = computeDepth(id, tree.nodeParentMap);
+    int depth = ChartOfAccountsTreeMath.computeDepth(id, tree.nodeParentMap);
     boolean hasChildren = tree.parentNodeIds.contains(id);
-    String parentCode4 = findParentCode4(id, tree.nodeParentMap, tree.nodeValueMap);
-    String parentCode4Name = findParentCode4Name(id, tree.nodeParentMap,
+    String parentCode4 = ChartOfAccountsTreeMath.findParentCode4(id, tree.nodeParentMap,
+        tree.nodeValueMap);
+    String parentCode4Name = ChartOfAccountsTreeMath.findParentCode4Name(id, tree.nodeParentMap,
         tree.nodeValueMap, tree.nodeNameMap);
     String elementLevel = tree.nodeElementLevelMap.get(id);
-    JSONArray ancestors = buildAncestorChain(id, tree.nodeParentMap, tree.nodeValueMap,
-        tree.nodeNameMap, tree.nodeElementLevelMap);
+    JSONArray ancestors = ChartOfAccountsTreeMath.buildAncestorChain(id, tree.nodeParentMap,
+        tree.nodeValueMap, tree.nodeNameMap, tree.nodeElementLevelMap);
 
-    entry.put("parentId", orNull(parentId));
+    entry.put("parentId", ChartOfAccountsTreeMath.orNull(parentId));
     entry.put("depth", depth);
     entry.put("hasChildren", hasChildren);
-    entry.put("parentCode4", orNull(parentCode4));
-    entry.put("parentCode4Name", orNull(parentCode4Name));
-    entry.put("elementLevel", orNull(elementLevel));
+    entry.put("parentCode4", ChartOfAccountsTreeMath.orNull(parentCode4));
+    entry.put("parentCode4Name", ChartOfAccountsTreeMath.orNull(parentCode4Name));
+    entry.put("elementLevel", ChartOfAccountsTreeMath.orNull(elementLevel));
     entry.put("ancestors", ancestors);
-  }
-
-  /**
-   * @return {@code value}, or {@link JSONObject#NULL} (the JSON-null sentinel {@code put}
-   *     requires) when {@code value} is {@code null}.
-   */
-  private static Object orNull(String value) {
-    return value != null ? value : JSONObject.NULL;
-  }
-
-  /**
-   * Walks the ancestor chain of {@code nodeId} (starting at its direct parent, excluding the
-   * node itself) and returns it as a {@link JSONArray} ordered root-to-leaf — the shape the
-   * frontend needs to build a genuine N-level nested tree (e.g. {@code A > A.A > A.A.I > 200
-   * > 2000}), matching Etendo Classic's "Combinación de cuentas" grouped view.
-   *
-   * <p>Each entry is {@code {value, name, elementLevel}}. Capped at
-   * {@value #MAX_TREE_DEPTH} hops to guard against circular references.
-   *
-   * @return a possibly-empty {@link JSONArray}; never {@code null}
-   */
-  static JSONArray buildAncestorChain(String nodeId, Map<String, String> nodeParentMap,
-      Map<String, String> nodeValueMap, Map<String, String> nodeNameMap,
-      Map<String, String> nodeElementLevelMap) throws Exception {
-    List<JSONObject> chain = new ArrayList<>();
-    String current = nodeParentMap.get(nodeId); // start at direct parent
-    int guard = 0;
-    while (current != null && guard < MAX_TREE_DEPTH) {
-      String value = nodeValueMap.get(current);
-      String name = nodeNameMap.get(current);
-      String level = nodeElementLevelMap.get(current);
-
-      JSONObject ancestor = new JSONObject();
-      ancestor.put("value", value != null ? value : JSONObject.NULL);
-      ancestor.put("name", name != null ? name : JSONObject.NULL);
-      ancestor.put("elementLevel", level != null ? level : JSONObject.NULL);
-      chain.add(ancestor);
-
-      current = nodeParentMap.get(current);
-      guard++;
-    }
-    Collections.reverse(chain); // root-to-leaf order
-
-    JSONArray result = new JSONArray();
-    for (JSONObject ancestor : chain) {
-      result.put(ancestor);
-    }
-    return result;
-  }
-
-  /**
-   * Computes the depth of {@code nodeId} in the tree by walking up the parent chain.
-   * Returns 0 for roots and for nodes not present in the map.
-   * Capped at {@value #MAX_TREE_DEPTH} to guard against circular references.
-   */
-  static int computeDepth(String nodeId, Map<String, String> nodeParentMap) {
-    int depth = 0;
-    String current = nodeParentMap.get(nodeId); // parent of nodeId
-    int guard = 0;
-    while (current != null && guard < MAX_TREE_DEPTH) {
-      depth++;
-      current = nodeParentMap.get(current);
-      guard++;
-    }
-    return depth;
-  }
-
-  /**
-   * Walks up the ancestor chain of {@code nodeId} and returns the {@code Value}
-   * of the nearest ancestor whose {@code Value} has exactly {@value #PARENT_CODE_LENGTH}
-   * characters, or {@code null} if none is found before the root.
-   *
-   * <p>The node itself is excluded — traversal starts at its direct parent.
-   */
-  static String findParentCode4(String nodeId, Map<String, String> nodeParentMap,
-      Map<String, String> nodeValueMap) {
-    String current = nodeParentMap.get(nodeId); // start at direct parent
-    int guard = 0;
-    while (current != null && guard < MAX_TREE_DEPTH) {
-      String value = nodeValueMap.get(current);
-      if (value != null && value.length() == PARENT_CODE_LENGTH) {
-        return value;
-      }
-      current = nodeParentMap.get(current);
-      guard++;
-    }
-    return null;
-  }
-
-  /**
-   * Returns the {@code Name} of the nearest 4-digit ancestor, or {@code null} if none found.
-   * Mirrors {@link #findParentCode4} but resolves the name instead of the value.
-   */
-  static String findParentCode4Name(String nodeId, Map<String, String> nodeParentMap,
-      Map<String, String> nodeValueMap, Map<String, String> nodeNameMap) {
-    String current = nodeParentMap.get(nodeId);
-    int guard = 0;
-    while (current != null && guard < MAX_TREE_DEPTH) {
-      String value = nodeValueMap.get(current);
-      if (value != null && value.length() == PARENT_CODE_LENGTH) {
-        return nodeNameMap.get(current);
-      }
-      current = nodeParentMap.get(current);
-      guard++;
-    }
-    return null;
   }
 
   // ── C. YTD balances ───────────────────────────────────────────────────────
