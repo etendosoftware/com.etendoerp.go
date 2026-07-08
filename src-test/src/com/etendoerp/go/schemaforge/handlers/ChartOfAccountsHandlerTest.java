@@ -60,6 +60,7 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * <p>Tests cover pure in-memory helpers (no OBDal or OBContext):
  * {@link ChartOfAccountsHandler#computeDepth computeDepth},
  * {@link ChartOfAccountsHandler#findParentCode4 findParentCode4},
+ * {@link ChartOfAccountsHandler#buildAncestorChain buildAncestorChain},
  * {@link ChartOfAccountsHandler#rollupBalances rollupBalances},
  * {@link ChartOfAccountsHandler#toBigDecimal toBigDecimal},
  * {@link ChartOfAccountsHandler#applyIsLeaf applyIsLeaf},
@@ -433,6 +434,110 @@ public class ChartOfAccountsHandlerTest {
     names.put("parent", "ShortCode");
 
     assertNull(ChartOfAccountsHandler.findParentCode4Name("leaf", parents, values, names));
+  }
+
+  // ── buildAncestorChain ────────────────────────────────────────────────────
+
+  @Test
+  public void buildAncestorChainReturnsEmptyArrayForRootNode() throws Exception {
+    Map<String, String> parents = Collections.singletonMap("root", null);
+    JSONArray chain = ChartOfAccountsHandler.buildAncestorChain("root", parents,
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
+    assertEquals(0, chain.length());
+  }
+
+  @Test
+  public void buildAncestorChainExcludesNodeItself() throws Exception {
+    // node → parent (root); node's own value must not appear in its own chain
+    Map<String, String> parents = new HashMap<>();
+    parents.put("node", "parent");
+    parents.put("parent", null);
+    Map<String, String> values = new HashMap<>();
+    values.put("node", "20000000");
+    values.put("parent", "2000");
+
+    JSONArray chain = ChartOfAccountsHandler.buildAncestorChain("node", parents, values,
+        Collections.emptyMap(), Collections.emptyMap());
+
+    assertEquals(1, chain.length());
+    assertEquals("2000", chain.getJSONObject(0).getString("value"));
+  }
+
+  @Test
+  public void buildAncestorChainOrdersRootToLeafForSixLevelPgcExample() throws Exception {
+    // Mirrors the live example from the CoA hierarchy investigation:
+    // 20000000 (S) → 2000 (D) → 200 (C) → A.A.I (E) → A.A (E) → A (E, root)
+    Map<String, String> parents = new HashMap<>();
+    parents.put("leaf", "breakdown");
+    parents.put("breakdown", "account");
+    parents.put("account", "headingIII");
+    parents.put("headingIII", "headingII");
+    parents.put("headingII", "headingI");
+    parents.put("headingI", null);
+
+    Map<String, String> values = new HashMap<>();
+    values.put("leaf", "20000000");
+    values.put("breakdown", "2000");
+    values.put("account", "200");
+    values.put("headingIII", "A.A.I");
+    values.put("headingII", "A.A");
+    values.put("headingI", "A");
+
+    Map<String, String> names = new HashMap<>();
+    names.put("breakdown", "Investigación.");
+    names.put("account", "Investigación.");
+    names.put("headingIII", "I. Inmovilizado intangible.");
+    names.put("headingII", "A) ACTIVO NO CORRIENTE");
+    names.put("headingI", "ACTIVO");
+
+    Map<String, String> levels = new HashMap<>();
+    levels.put("breakdown", "D");
+    levels.put("account", "C");
+    levels.put("headingIII", "E");
+    levels.put("headingII", "E");
+    levels.put("headingI", "E");
+
+    JSONArray chain = ChartOfAccountsHandler.buildAncestorChain("leaf", parents, values, names, levels);
+
+    assertEquals(5, chain.length());
+    assertEquals("A", chain.getJSONObject(0).getString("value"));
+    assertEquals("E", chain.getJSONObject(0).getString("elementLevel"));
+    assertEquals("A.A", chain.getJSONObject(1).getString("value"));
+    assertEquals("A.A.I", chain.getJSONObject(2).getString("value"));
+    assertEquals("200", chain.getJSONObject(3).getString("value"));
+    assertEquals("C", chain.getJSONObject(3).getString("elementLevel"));
+    assertEquals("Investigación.", chain.getJSONObject(3).getString("name"));
+    assertEquals("2000", chain.getJSONObject(4).getString("value"));
+    assertEquals("D", chain.getJSONObject(4).getString("elementLevel"));
+  }
+
+  @Test
+  public void buildAncestorChainCapsAtMaxDepthForCircularReference() throws Exception {
+    Map<String, String> parents = new HashMap<>();
+    for (int i = 0; i < 50; i++) {
+      parents.put("n" + i, "n" + (i + 1));
+    }
+    parents.put("n50", "n0"); // cycle, no terminating null
+
+    JSONArray chain = ChartOfAccountsHandler.buildAncestorChain("n0", parents,
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
+
+    assertTrue("chain must be capped at MAX_TREE_DEPTH", chain.length() <= 30);
+  }
+
+  @Test
+  public void buildAncestorChainUsesJsonNullForMissingValueNameOrLevel() throws Exception {
+    Map<String, String> parents = new HashMap<>();
+    parents.put("leaf", "ghost"); // "ghost" has no entry in value/name/level maps
+    parents.put("ghost", null);
+
+    JSONArray chain = ChartOfAccountsHandler.buildAncestorChain("leaf", parents,
+        Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap());
+
+    assertEquals(1, chain.length());
+    assertTrue(chain.getJSONObject(0).isNull("value"));
+    assertTrue(chain.getJSONObject(0).isNull("name"));
+    assertTrue(chain.getJSONObject(0).isNull("elementLevel"));
   }
 
   // ── rollupBalances ────────────────────────────────────────────────────────
@@ -938,10 +1043,10 @@ public class ChartOfAccountsHandlerTest {
     nodeRowsList.add(new Object[]{"ROOT-0", "0"});   // parentId="0" → covers lines 649-651
     when(nodeQry.list()).thenReturn(nodeRowsList);
 
-    // Non-empty evRows: EV1 and ROOT-0 with value/name → covers lines 665-667
+    // Non-empty evRows: EV1 and ROOT-0 with value/name/elementLevel → covers lines 665-667
     java.util.List<Object> evRowsList = new java.util.ArrayList<>();
-    evRowsList.add(new Object[]{"EV1", "1001", "Caja"});
-    evRowsList.add(new Object[]{"ROOT-0", "1000", "Grupo Caja"});
+    evRowsList.add(new Object[]{"EV1", "1001", "Caja", "S"});
+    evRowsList.add(new Object[]{"ROOT-0", "1000", "Grupo Caja", "D"});
     when(evQry.list()).thenReturn(evRowsList);
 
     when(yearQry.list()).thenReturn(Collections.emptyList()); // no fiscal year
