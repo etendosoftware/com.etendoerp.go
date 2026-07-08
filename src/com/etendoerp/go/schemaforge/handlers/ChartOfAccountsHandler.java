@@ -710,26 +710,44 @@ public class ChartOfAccountsHandler implements NeoHandler {
     for (int i = 0; i < data.length(); i++) {
       JSONObject entry = data.optJSONObject(i);
       String id = entry != null ? entry.optString("id", null) : null;
-      if (entry != null && id != null) {
-        String parentId = tree.nodeParentMap.get(id); // null when root or not in tree
-        int depth = computeDepth(id, tree.nodeParentMap);
-        boolean hasChildren = tree.parentNodeIds.contains(id);
-        String parentCode4 = findParentCode4(id, tree.nodeParentMap, tree.nodeValueMap);
-        String parentCode4Name = findParentCode4Name(id, tree.nodeParentMap,
-            tree.nodeValueMap, tree.nodeNameMap);
-        String elementLevel = tree.nodeElementLevelMap.get(id);
-        JSONArray ancestors = buildAncestorChain(id, tree.nodeParentMap, tree.nodeValueMap,
-            tree.nodeNameMap, tree.nodeElementLevelMap);
-
-        entry.put("parentId", parentId != null ? parentId : JSONObject.NULL);
-        entry.put("depth", depth);
-        entry.put("hasChildren", hasChildren);
-        entry.put("parentCode4", parentCode4 != null ? parentCode4 : JSONObject.NULL);
-        entry.put("parentCode4Name", parentCode4Name != null ? parentCode4Name : JSONObject.NULL);
-        entry.put("elementLevel", elementLevel != null ? elementLevel : JSONObject.NULL);
-        entry.put("ancestors", ancestors);
+      if (entry == null || id == null) {
+        continue;
       }
+      injectHierarchyFields(entry, id, tree);
     }
+  }
+
+  /**
+   * Computes and writes the hierarchy fields (see {@link #applyHierarchyMetadata}) for a
+   * single {@code entry}/{@code id} pair. Split out of {@link #applyHierarchyMetadata} to
+   * keep cognitive complexity low — this method has no loop or nested branching of its own.
+   */
+  private void injectHierarchyFields(JSONObject entry, String id, TreeData tree) throws Exception {
+    String parentId = tree.nodeParentMap.get(id); // null when root or not in tree
+    int depth = computeDepth(id, tree.nodeParentMap);
+    boolean hasChildren = tree.parentNodeIds.contains(id);
+    String parentCode4 = findParentCode4(id, tree.nodeParentMap, tree.nodeValueMap);
+    String parentCode4Name = findParentCode4Name(id, tree.nodeParentMap,
+        tree.nodeValueMap, tree.nodeNameMap);
+    String elementLevel = tree.nodeElementLevelMap.get(id);
+    JSONArray ancestors = buildAncestorChain(id, tree.nodeParentMap, tree.nodeValueMap,
+        tree.nodeNameMap, tree.nodeElementLevelMap);
+
+    entry.put("parentId", orNull(parentId));
+    entry.put("depth", depth);
+    entry.put("hasChildren", hasChildren);
+    entry.put("parentCode4", orNull(parentCode4));
+    entry.put("parentCode4Name", orNull(parentCode4Name));
+    entry.put("elementLevel", orNull(elementLevel));
+    entry.put("ancestors", ancestors);
+  }
+
+  /**
+   * @return {@code value}, or {@link JSONObject#NULL} (the JSON-null sentinel {@code put}
+   *     requires) when {@code value} is {@code null}.
+   */
+  private static Object orNull(String value) {
+    return value != null ? value : JSONObject.NULL;
   }
 
   /**
