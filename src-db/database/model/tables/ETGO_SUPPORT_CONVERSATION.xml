@@ -1,28 +1,44 @@
 <?xml version="1.0"?>
   <database name="TABLE ETGO_SUPPORT_CONVERSATION">
-    <table name="ETGO_SUPPORT_CONVERSATION" primaryKey="ETGO_SUPPORT_CONVERSATION_PKEY">
-      <column name="ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+    <table name="ETGO_SUPPORT_CONVERSATION" primaryKey="ETGO_SUPPORT_CONVERSATION__PK">
+      <column name="ETGO_SUPPORT_CONVERSATION_ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="USER_ID" primaryKey="false" required="true" type="VARCHAR" size="255" autoIncrement="false">
+      <column name="AD_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="SUBJECT" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+      <column name="AD_ORG_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="STATUS" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
-        <default><![CDATA[open]]></default>
+      <column name="ISACTIVE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
         <onCreateDefault/>
       </column>
-      <column name="CREATED_AT" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+      <column name="CREATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
         <default><![CDATA[SYSDATE]]></default>
         <onCreateDefault/>
       </column>
-      <column name="LAST_ACTIVITY" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+      <column name="CREATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
         <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="USER_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SUBJECT" primaryKey="false" required="false" type="VARCHAR" size="200" autoIncrement="false">
+        <default/>
         <onCreateDefault/>
       </column>
       <column name="LAST_MESSAGE" primaryKey="false" required="false" type="CLOB" size="4000" autoIncrement="false">
@@ -37,7 +53,7 @@
         <default><![CDATA[N]]></default>
         <onCreateDefault/>
       </column>
-      <column name="RATING_SCORE" primaryKey="false" required="false" type="DECIMAL" autoIncrement="false">
+      <column name="RATING_SCORE" primaryKey="false" required="false" type="DECIMAL" size="10,0" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
@@ -45,7 +61,7 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="JIRA_TICKET_KEY" primaryKey="false" required="false" type="VARCHAR" size="64" autoIncrement="false">
+      <column name="JIRA_TICKET_KEY" primaryKey="false" required="false" type="VARCHAR" size="200" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
@@ -53,6 +69,20 @@
         <default><![CDATA[N]]></default>
         <onCreateDefault/>
       </column>
+      <column name="LAST_ACTIVITY" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="STATUS" primaryKey="false" required="true" type="VARCHAR" size="200" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_PORTCONVERSATION_LIENT_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_PORTCONVERSATION_RG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
       <index name="ETGO_SC_CONV_JIRA" unique="false">
         <index-column name="JIRA_TICKET_KEY"/>
       </index>
@@ -60,5 +90,9 @@
         <index-column name="USER_ID"/>
         <index-column name="LAST_ACTIVITY"/>
       </index>
+      <check name="ETGO_TCONVERSATION_VE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="HUMAN_TAKEOVER_CHK"><![CDATA[HUMAN_TAKEOVER IN ('Y', 'N')]]></check>
+      <check name="RATED_CHK"><![CDATA[RATED IN ('Y', 'N')]]></check>
+      <check name="UNREAD_CHK"><![CDATA[UNREAD IN ('Y', 'N')]]></check>
     </table>
   </database>

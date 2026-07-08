@@ -214,7 +214,8 @@ final class SupportJiraWebhookHandler {
 
   private static String findConversationByJiraKey(Connection conn, String jiraKey) throws SQLException {
     try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT id FROM etgo_support_conversation WHERE jira_ticket_key = ? LIMIT 1")) {
+        "SELECT etgo_support_conversation_id AS id FROM etgo_support_conversation" +
+        " WHERE jira_ticket_key = ? LIMIT 1")) {
       ps.setString(1, jiraKey);
       try (ResultSet rs = ps.executeQuery()) {
         return rs.next() ? rs.getString("id") : null;
@@ -222,25 +223,34 @@ final class SupportJiraWebhookHandler {
     }
   }
 
+  /** Jira comments have no authenticated Etendo requester — tagged as system-created, same tenant
+   * as the owning conversation (see {@link SupportConversationsServlet#getConvClientOrg}). */
   private static void insertJiraMessage(Connection conn, String convId, String authorName, String text, String ts,
       String externalId) throws SQLException {
+    String[] clientOrg = SupportConversationsServlet.getConvClientOrg(conn, convId);
     try (PreparedStatement ps = conn.prepareStatement(
-        "INSERT INTO etgo_support_message (id, conversation_id, sender, sender_name, text, msg_date, external_id)" +
-        " VALUES (?, ?, 'human', ?, ?, ?::timestamp, ?)" +
+        "INSERT INTO etgo_support_message" +
+        "  (etgo_support_message_id, ad_client_id, ad_org_id, createdby, updatedby," +
+        "   etgo_support_conversation_id, sender, sender_name, text, msg_date, external_id)" +
+        " VALUES (?, ?, ?, ?, ?, ?, 'human', ?, ?, ?::timestamp, ?)" +
         " ON CONFLICT (external_id) WHERE external_id IS NOT NULL DO NOTHING")) {
       ps.setString(1, SupportConversationsServlet.newId());
-      ps.setString(2, convId);
-      ps.setString(3, authorName);
-      ps.setString(4, text);
-      ps.setString(5, ts);
-      ps.setString(6, externalId);
+      ps.setString(2, clientOrg[0]);
+      ps.setString(3, clientOrg[1]);
+      ps.setString(4, SupportConversationsServlet.SYSTEM_USER_ID);
+      ps.setString(5, SupportConversationsServlet.SYSTEM_USER_ID);
+      ps.setString(6, convId);
+      ps.setString(7, authorName);
+      ps.setString(8, text);
+      ps.setString(9, ts);
+      ps.setString(10, externalId);
       ps.executeUpdate();
     }
   }
 
   private static void markConversationUnread(Connection conn, String convId) throws SQLException {
     try (PreparedStatement ps = conn.prepareStatement(
-        "UPDATE etgo_support_conversation SET unread = 'Y' WHERE id = ?")) {
+        "UPDATE etgo_support_conversation SET unread = 'Y' WHERE etgo_support_conversation_id = ?")) {
       ps.setString(1, convId);
       ps.executeUpdate();
     }
@@ -282,7 +292,8 @@ final class SupportJiraWebhookHandler {
         }
         String ts = Instant.now().toString();
         try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET status = 'closed', unread = 'Y', last_activity = ?::timestamp WHERE id = ?")) {
+            "UPDATE etgo_support_conversation SET status = 'closed', unread = 'Y', last_activity = ?::timestamp" +
+            " WHERE etgo_support_conversation_id = ?")) {
           ps.setString(1, ts);
           ps.setString(2, convId);
           ps.executeUpdate();

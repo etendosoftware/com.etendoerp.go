@@ -1,19 +1,47 @@
 <?xml version="1.0"?>
   <database name="TABLE ETGO_SUPPORT_MESSAGE">
-    <table name="ETGO_SUPPORT_MESSAGE" primaryKey="ETGO_SUPPORT_MESSAGE_PKEY">
-      <column name="ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+    <table name="ETGO_SUPPORT_MESSAGE" primaryKey="ETGO_SUPPORT_MESSAGE__PK">
+      <column name="ETGO_SUPPORT_MESSAGE_ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="CONVERSATION_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+      <column name="AD_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="SENDER" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+      <column name="AD_ORG_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="SENDER_NAME" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+      <column name="ISACTIVE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ETGO_SUPPORT_CONVERSATION_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SENDER" primaryKey="false" required="true" type="VARCHAR" size="200" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="SENDER_NAME" primaryKey="false" required="false" type="VARCHAR" size="200" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
@@ -22,23 +50,30 @@
         <onCreateDefault/>
       </column>
       <column name="MSG_DATE" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
-        <default><![CDATA[SYSDATE]]></default>
+        <default/>
         <onCreateDefault/>
       </column>
-      <column name="EXTERNAL_ID" primaryKey="false" required="false" type="VARCHAR" size="128" autoIncrement="false">
+      <column name="EXTERNAL_ID" primaryKey="false" required="false" type="VARCHAR" size="200" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
       <foreign-key foreignTable="ETGO_SUPPORT_CONVERSATION" name="ETGO_SC_MSG_CONV_FK">
-        <reference local="CONVERSATION_ID" foreign="ID"/>
+        <reference local="ETGO_SUPPORT_CONVERSATION_ID" foreign="ETGO_SUPPORT_CONVERSATION_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_SUPPORT_MESSAGE_AD_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_UPPORTMESSAGE_DCLIENT_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
       <index name="ETGO_SC_MSG_CONV" unique="false">
-        <index-column name="CONVERSATION_ID"/>
+        <index-column name="ETGO_SUPPORT_CONVERSATION_ID"/>
         <index-column name="MSG_DATE"/>
       </index>
       <index name="ETGO_SC_MSG_EXTID" unique="true">
         <index-column name="EXTERNAL_ID"/>
         <whereClause><![CDATA[EXTERNAL_ID IS NOT NULL]]></whereClause>
       </index>
+      <check name="ETGO_UPPORTMESSAGE_SACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
     </table>
   </database>

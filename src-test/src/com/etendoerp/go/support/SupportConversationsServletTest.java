@@ -60,6 +60,8 @@ class SupportConversationsServletTest {
 
   private static final String VALID_TOKEN = "Bearer valid-token";
   private static final String USER_ID = "100";
+  private static final String CLIENT_ID = "CLIENT1";
+  private static final String ORG_ID = "ORG1";
 
   private static HttpServletResponse mockResponse(StringWriter capture) throws Exception {
     HttpServletResponse response = mock(HttpServletResponse.class);
@@ -80,12 +82,20 @@ class SupportConversationsServletTest {
     return request;
   }
 
-  /** Stubs {@link SecureWebServicesUtils#decodeToken(String)} to resolve to {@link #USER_ID}. */
+  /** Stubs {@link SecureWebServicesUtils#decodeToken(String)} to resolve to {@link #USER_ID}
+   * (plus {@link #CLIENT_ID}/{@link #ORG_ID}, which {@code authenticate()} also reads to stamp
+   * new conversation rows). */
   private static MockedStatic<SecureWebServicesUtils> mockValidAuth() {
     DecodedJWT jwt = mock(DecodedJWT.class);
-    Claim claim = mock(Claim.class);
-    when(claim.asString()).thenReturn(USER_ID);
-    when(jwt.getClaim("user")).thenReturn(claim);
+    Claim userClaim = mock(Claim.class);
+    when(userClaim.asString()).thenReturn(USER_ID);
+    when(jwt.getClaim("user")).thenReturn(userClaim);
+    Claim clientClaim = mock(Claim.class);
+    when(clientClaim.asString()).thenReturn(CLIENT_ID);
+    when(jwt.getClaim("client")).thenReturn(clientClaim);
+    Claim orgClaim = mock(Claim.class);
+    when(orgClaim.asString()).thenReturn(ORG_ID);
+    when(jwt.getClaim("organization")).thenReturn(orgClaim);
     MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class);
     swsMock.when(() -> SecureWebServicesUtils.decodeToken(anyString())).thenReturn(jwt);
     return swsMock;
@@ -726,7 +736,11 @@ class SupportConversationsServletTest {
         when(summaryRs.getString("unread")).thenReturn("N");
         when(summaryRs.getString("rated")).thenReturn("N");
         ResultSet messagesRs = emptyResultSet();
-        when(ps.executeQuery()).thenReturn(summaryRs, messagesRs);
+        ResultSet clientOrgRs1 = emptyResultSet();
+        ResultSet clientOrgRs2 = emptyResultSet();
+        // Extra leading empty results: getConvClientOrg() runs once per insertMessage() call
+        // (user message + AI reply) before buildConvSummary()/buildMessageArray() run.
+        when(ps.executeQuery()).thenReturn(clientOrgRs1, clientOrgRs2, summaryRs, messagesRs);
 
         sicMock.when(() -> SupportIntegrationClient.getUserEmail(org.mockito.ArgumentMatchers.any(), anyString()))
             .thenReturn("user@example.com");
@@ -760,7 +774,9 @@ class SupportConversationsServletTest {
         when(summaryRs.next()).thenReturn(true);
         when(summaryRs.getString(anyString())).thenReturn("value");
         ResultSet emptyRs = emptyResultSet();
-        when(ps.executeQuery()).thenReturn(summaryRs, emptyRs);
+        ResultSet clientOrgRs1 = emptyResultSet();
+        ResultSet clientOrgRs2 = emptyResultSet();
+        when(ps.executeQuery()).thenReturn(clientOrgRs1, clientOrgRs2, summaryRs, emptyRs);
 
         sicMock.when(() -> SupportIntegrationClient.getUserEmail(org.mockito.ArgumentMatchers.any(), anyString()))
             .thenReturn(null);
@@ -896,7 +912,10 @@ class SupportConversationsServletTest {
         when(summaryRs.getString(anyString())).thenReturn("value");
 
         ResultSet emptyRs = emptyResultSet();
-        when(ps.executeQuery()).thenReturn(belongsRs, statusRs, takeoverRs, jiraKeyRs, emptyRs, summaryRs);
+        ResultSet clientOrgRs = emptyResultSet();
+        // Extra result between statusRs and takeoverRs: getConvClientOrg() inside the
+        // insertMessage() call for the user's own text (this path sends no AI reply message).
+        when(ps.executeQuery()).thenReturn(belongsRs, statusRs, clientOrgRs, takeoverRs, jiraKeyRs, emptyRs, summaryRs);
 
         // postJiraComment() runs on a fire-and-forget background thread the test can't
         // observe (Mockito static mocks are thread-local); it safely no-ops in this
@@ -935,7 +954,11 @@ class SupportConversationsServletTest {
         when(summaryRs.getString(anyString())).thenReturn("value");
 
         ResultSet emptyRs = emptyResultSet();
-        when(ps.executeQuery()).thenReturn(belongsRs, statusRs, takeoverRs, emptyRs, summaryRs);
+        ResultSet clientOrgRs1 = emptyResultSet();
+        ResultSet clientOrgRs2 = emptyResultSet();
+        // Extra results: getConvClientOrg() inside each insertMessage() call (user text, then
+        // the AI reply).
+        when(ps.executeQuery()).thenReturn(belongsRs, statusRs, clientOrgRs1, takeoverRs, clientOrgRs2, emptyRs, summaryRs);
 
         sicMock.when(() -> SupportIntegrationClient.sendToAdk(anyString(), anyString(), anyString(),
                 org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
@@ -1119,7 +1142,9 @@ class SupportConversationsServletTest {
         when(summaryRs.next()).thenReturn(true);
         when(summaryRs.getString(anyString())).thenReturn("value");
         ResultSet emptyRs = emptyResultSet();
-        when(ps.executeQuery()).thenReturn(belongsRs, summaryRs, emptyRs);
+        ResultSet clientOrgRs = emptyResultSet();
+        // Extra result: getConvClientOrg() inside insertMessage() for the reopen system message.
+        when(ps.executeQuery()).thenReturn(belongsRs, clientOrgRs, summaryRs, emptyRs);
 
         new SupportConversationsServlet().doPost(request, response);
       }
