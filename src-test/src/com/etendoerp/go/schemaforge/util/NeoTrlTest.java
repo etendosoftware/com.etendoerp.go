@@ -17,6 +17,8 @@
 package com.etendoerp.go.schemaforge.util;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -165,5 +167,34 @@ class NeoTrlTest {
 
     assertTrue(NeoTrl.translatedNames("UOM", Arrays.asList("U1"), "es_ES").isEmpty());
     obContext.verify(OBContext::restorePreviousMode, atLeastOnce());
+  }
+
+  @Test
+  @DisplayName("resolveSearchMeta returns the *_Trl metadata for a translatable entity")
+  void resolveSearchMetaForTranslatable() {
+    stubUomModel();
+    NeoTrl.TrlSearchMeta meta = NeoTrl.resolveSearchMeta("UOM");
+    assertNotNull(meta);
+    assertEquals("UOMTrl", meta.trlEntityName);
+    assertEquals("uOM", meta.backRefProperty);
+    assertEquals("name", meta.nameProperty);
+  }
+
+  @Test
+  @DisplayName("resolveSearchMeta returns null when the entity has no *_Trl sibling")
+  void resolveSearchMetaNonTranslatable() {
+    Entity base = mock(Entity.class);
+    when(base.getName()).thenReturn("SomeEntity");
+    when(modelInstance.getEntity(eq("SomeEntity"), eq(false))).thenReturn(base);
+    when(modelInstance.getEntity(eq("SomeEntityTrl"), eq(false))).thenReturn(null);
+
+    assertNull(NeoTrl.resolveSearchMeta("SomeEntity"));
+  }
+
+  @Test
+  @DisplayName("resolveSearchMeta returns null for blank input")
+  void resolveSearchMetaBlank() {
+    assertNull(NeoTrl.resolveSearchMeta(null));
+    assertNull(NeoTrl.resolveSearchMeta("  "));
   }
 }

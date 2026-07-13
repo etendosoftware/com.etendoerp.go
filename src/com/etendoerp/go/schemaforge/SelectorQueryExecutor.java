@@ -44,6 +44,7 @@ final class SelectorQueryExecutor {
 
   private static final Logger log = LogManager.getLogger(SelectorQueryExecutor.class);
   private static final String PARAM_SEARCH = "search";
+  private static final String PARAM_SEARCH_LANG = "searchLang";
   private static final String FIELD_LABEL = "label";
   private static final String PARAM_LANGUAGE = "language";
 
@@ -85,7 +86,18 @@ final class SelectorQueryExecutor {
     NeoSelectorExecutionHelper.appendLiteralFilter(hql, validationFilter);
     NeoSelectorExecutionHelper.appendSelectorOrganizationFilter(hql, queryParams, meta,
         contextOrganizationId);
-    NeoSelectorExecutionHelper.appendSimpleSearchFilter(hql, meta.displayProperty, search);
+    // Match the search against the translated name too, so users can search selectors in the GO
+    // locale (e.g. "pie" → Pie/Pie Cúbico), not only the base language (ETP-4304). Falls back to a
+    // base-only filter when the entity has no *_Trl or there is no request language.
+    String searchLang = resolveEnrichLanguage(language);
+    NeoTrl.TrlSearchMeta trlSearch = (StringUtils.isNotBlank(search) && StringUtils.isNotBlank(searchLang))
+        ? NeoTrl.resolveSearchMeta(meta.entityName) : null;
+    if (trlSearch != null) {
+      NeoSelectorExecutionHelper.appendTranslatedSearchFilter(hql, meta.displayProperty, search, trlSearch);
+      queryParams.put(PARAM_SEARCH_LANG, searchLang);
+    } else {
+      NeoSelectorExecutionHelper.appendSimpleSearchFilter(hql, meta.displayProperty, search);
+    }
     if (safeExtraParams != null) {
       queryParams.putAll(safeExtraParams);
     }
@@ -121,7 +133,7 @@ final class SelectorQueryExecutor {
 
     JSONArray items = buildSimpleSelectorItems(dataQuery.list(), meta);
 
-    enrichTranslations(items, meta.entityName, resolveEnrichLanguage(language));
+    enrichTranslations(items, meta.entityName, searchLang);
 
     return SelectorResponseSupport.buildSelectorResponse(items, new JSONArray(), totalCount, limit, offset);
   }

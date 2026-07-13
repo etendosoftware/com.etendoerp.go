@@ -123,6 +123,64 @@ public final class NeoTrl {
     }
   }
 
+  /**
+   * Model metadata needed to filter a base entity by its translated {@code *_Trl} name in HQL:
+   * the trl entity model name, the back-reference property to the base row, and the trl property
+   * holding the translated text.
+   */
+  public static final class TrlSearchMeta {
+    /** The {@code *_Trl} entity model name (e.g. {@code UOMTrl}). */
+    public final String trlEntityName;
+    /** The trl property that references the base row (e.g. {@code uOM}). */
+    public final String backRefProperty;
+    /** The trl property holding the translated text (e.g. {@code name}). */
+    public final String nameProperty;
+
+    /**
+     * Creates a descriptor of a base entity's {@code *_Trl} translation columns.
+     *
+     * @param trlEntityName   the {@code *_Trl} entity model name
+     * @param backRefProperty the trl property referencing the base row
+     * @param nameProperty    the trl property holding the translated text
+     */
+    public TrlSearchMeta(String trlEntityName, String backRefProperty, String nameProperty) {
+      this.trlEntityName = trlEntityName;
+      this.backRefProperty = backRefProperty;
+      this.nameProperty = nameProperty;
+    }
+  }
+
+  /**
+   * Resolve the {@code *_Trl} metadata needed to filter {@code baseEntityName} by its translated
+   * name, or {@code null} when the entity has no usable translation sibling. Pure model lookup (no
+   * DB access) and never throws. Discovery follows the same conventions as {@link #translatedNames}.
+   *
+   * @param baseEntityName the model name of the base entity (e.g. {@code UOM}, {@code Country})
+   * @return the trl search metadata, or {@code null} when the entity is not translatable
+   */
+  public static TrlSearchMeta resolveSearchMeta(String baseEntityName) {
+    if (StringUtils.isBlank(baseEntityName)) {
+      return null;
+    }
+    try {
+      ModelProvider model = ModelProvider.getInstance();
+      Entity base = model.getEntity(baseEntityName, false);
+      Entity trl = base != null ? model.getEntity(baseEntityName + "Trl", false) : null;
+      if (base == null || trl == null) {
+        return null;
+      }
+      Property backRef = findBackReference(trl, base);
+      String nameProperty = resolveNameProperty(base, trl);
+      if (backRef == null || nameProperty == null) {
+        return null;
+      }
+      return new TrlSearchMeta(trl.getName(), backRef.getName(), nameProperty);
+    } catch (Exception e) {
+      log.debug("Trl search-meta resolution failed for entity '{}': {}", baseEntityName, e.getMessage());
+      return null;
+    }
+  }
+
   /** The single FK property on the trl entity that points back to the base entity, or null. */
   private static Property findBackReference(Entity trl, Entity base) {
     for (Property property : trl.getProperties()) {
