@@ -304,7 +304,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
     stubCreditQuery(Arrays.asList(partial, consumed));
 
-    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
 
     assertEquals(200, response.getHttpStatus());
     JSONArray items = response.getBody().getJSONArray(ITEMS);
@@ -337,7 +337,7 @@ class PaymentRegistrationServiceAdvancedTest {
     stubAbonoQuery(Collections.singletonList(abono));
     stubCreditQuery(Collections.emptyList());
 
-    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
 
     assertEquals(200, response.getHttpStatus());
     JSONArray items = response.getBody().getJSONArray(ITEMS);
@@ -357,7 +357,7 @@ class PaymentRegistrationServiceAdvancedTest {
     when(dal.get(Invoice.class, INVOICE_ID)).thenReturn(invoice);
     when(invoice.getBusinessPartner()).thenReturn(null);
 
-    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
 
     assertEquals(200, response.getHttpStatus());
     assertEquals(0, response.getBody().getInt("totalCount"));
@@ -384,7 +384,7 @@ class PaymentRegistrationServiceAdvancedTest {
         new BigDecimal("0"), date("2026-06-29"));
     stubCreditQuery(Arrays.asList(credit1, credit2));
 
-    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
 
     assertEquals(200, response.getHttpStatus());
     JSONArray items = response.getBody().getJSONArray(ITEMS);
@@ -424,7 +424,7 @@ class PaymentRegistrationServiceAdvancedTest {
         new BigDecimal("0"), date("2026-06-15"));
     stubCreditQuery(Collections.singletonList(creditDated));
 
-    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
 
     assertEquals(200, response.getHttpStatus());
     JSONArray items = response.getBody().getJSONArray(ITEMS);
@@ -446,7 +446,7 @@ class PaymentRegistrationServiceAdvancedTest {
     stubAbonoQuery(Arrays.asList(older, newer));
     stubCreditQuery(Collections.emptyList());
 
-    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
 
     assertEquals(200, response.getHttpStatus());
     JSONArray items = response.getBody().getJSONArray(ITEMS);
@@ -469,7 +469,7 @@ class PaymentRegistrationServiceAdvancedTest {
         new BigDecimal("0"), date("2026-05-20"));
     stubCreditQuery(Arrays.asList(older, newer));
 
-    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
 
     assertEquals(200, response.getHttpStatus());
     JSONArray items = response.getBody().getJSONArray(ITEMS);
@@ -778,7 +778,7 @@ class PaymentRegistrationServiceAdvancedTest {
     when(dal.get(FIN_Payment.class, NEW_PAY_ID)).thenReturn(newPayment);
     when(newPayment.isProcessed()).thenReturn(true);
 
-    NeoResponse response = PaymentRegistrationService.confirmDraftPayment(NEW_PAY_ID);
+    NeoResponse response = PaymentDraftEditService.confirmDraftPayment(NEW_PAY_ID);
 
     assertEquals(201, response.getHttpStatus());
     finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
@@ -792,7 +792,7 @@ class PaymentRegistrationServiceAdvancedTest {
   void testConfirmDraftPaymentNotFound() throws Exception {
     when(dal.get(FIN_Payment.class, "missing")).thenReturn(null);
 
-    NeoResponse response = PaymentRegistrationService.confirmDraftPayment("missing");
+    NeoResponse response = PaymentDraftEditService.confirmDraftPayment("missing");
 
     assertEquals(404, response.getHttpStatus());
     finAddPaymentMock.verify(
@@ -811,7 +811,7 @@ class PaymentRegistrationServiceAdvancedTest {
         .thenReturn(error);
 
     OBException ex = assertThrows(OBException.class,
-        () -> PaymentRegistrationService.confirmDraftPayment(NEW_PAY_ID));
+        () -> PaymentDraftEditService.confirmDraftPayment(NEW_PAY_ID));
     assertEquals("boom", ex.getMessage());
   }
 
@@ -824,7 +824,7 @@ class PaymentRegistrationServiceAdvancedTest {
   void testDeleteDraftPaymentNotFoundReturns404() {
     when(dal.get(FIN_Payment.class, "missing")).thenReturn(null);
 
-    NeoResponse response = PaymentRegistrationService.deleteDraftPayment("missing");
+    NeoResponse response = PaymentDraftEditService.deleteDraftPayment("missing");
 
     assertEquals(404, response.getHttpStatus());
     paymentRemovalUtilMock.verify(() -> PaymentRemovalUtil.remove(any()), never());
@@ -837,7 +837,7 @@ class PaymentRegistrationServiceAdvancedTest {
     when(newPayment.isProcessed()).thenReturn(true);
 
     OBException ex = assertThrows(OBException.class,
-        () -> PaymentRegistrationService.deleteDraftPayment(NEW_PAY_ID));
+        () -> PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID));
 
     assertEquals("Cannot delete a processed payment", ex.getMessage());
     paymentRemovalUtilMock.verify(() -> PaymentRemovalUtil.remove(any()), never());
@@ -862,7 +862,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
     stubNoConsumedCredit();
 
-    NeoResponse response = PaymentRegistrationService.deleteDraftPayment(NEW_PAY_ID);
+    NeoResponse response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID);
 
     assertEquals(204, response.getHttpStatus());
     finAddPaymentMock.verify(() -> FIN_AddPayment.updatePaymentDetail(
@@ -893,7 +893,7 @@ class PaymentRegistrationServiceAdvancedTest {
     when(crit.add(any(Criterion.class))).thenReturn(crit);
     when(crit.list()).thenReturn(Collections.singletonList(link));
 
-    NeoResponse response = PaymentRegistrationService.deleteDraftPayment(NEW_PAY_ID);
+    NeoResponse response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID);
 
     assertEquals(204, response.getHttpStatus());
     verify(creditSource).setUsedCredit(new BigDecimal("10"));
@@ -919,7 +919,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
     stubNoConsumedCredit();
 
-    NeoResponse response = PaymentRegistrationService.deleteDraftPayment(NEW_PAY_ID);
+    NeoResponse response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID);
 
     assertEquals(204, response.getHttpStatus());
     finAddPaymentMock.verify(() -> FIN_AddPayment.updatePaymentDetail(
@@ -956,7 +956,7 @@ class PaymentRegistrationServiceAdvancedTest {
 
     stubNoConsumedCredit();
 
-    NeoResponse response = PaymentRegistrationService.deleteDraftPayment(NEW_PAY_ID);
+    NeoResponse response = PaymentDraftEditService.deleteDraftPayment(NEW_PAY_ID);
 
     assertEquals(204, response.getHttpStatus());
     finAddPaymentMock.verify(() -> FIN_AddPayment.updatePaymentDetail(
@@ -1112,7 +1112,7 @@ class PaymentRegistrationServiceAdvancedTest {
     when(linkCrit.setMaxResults(anyInt())).thenReturn(linkCrit);
     when(linkCrit.uniqueResult()).thenReturn(link);
 
-    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
 
     assertEquals(200, response.getHttpStatus());
     JSONArray items = response.getBody().getJSONArray(ITEMS);
@@ -1136,7 +1136,7 @@ class PaymentRegistrationServiceAdvancedTest {
         "NC/020", date("2026-05-10"), "Credit Memo");
     stubEditAbonoQueries(Collections.emptyList(), Collections.singletonList(linkedAbono));
 
-    NeoResponse response = PaymentRegistrationService.handleListCreditSources(context, true);
+    NeoResponse response = PaymentCreditSourcesService.handleListCreditSources(context, true);
 
     assertEquals(200, response.getHttpStatus());
     JSONArray items = response.getBody().getJSONArray(ITEMS);

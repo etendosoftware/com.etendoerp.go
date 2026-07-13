@@ -234,9 +234,9 @@ public class PaymentActionHandlerSupportTest {
     NeoResponse expected = NeoResponse.noContent();
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<PaymentRegistrationService> svcMock =
-             mockStatic(PaymentRegistrationService.class)) {
-      svcMock.when(() -> PaymentRegistrationService.deleteDraftPayment("pay-1"))
+         MockedStatic<PaymentDraftEditService> svcMock =
+             mockStatic(PaymentDraftEditService.class)) {
+      svcMock.when(() -> PaymentDraftEditService.deleteDraftPayment("pay-1"))
           .thenReturn(expected);
 
       NeoResponse resp = PaymentActionHandlerSupport.handle(ctx, true, log);

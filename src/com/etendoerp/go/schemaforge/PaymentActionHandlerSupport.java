@@ -84,7 +84,7 @@ final class PaymentActionHandlerSupport {
       return PaymentRegistrationService.handleListPaymentMethods(context, isReceipt);
     }
     if (CREDIT_SOURCES_ACTION.equals(fieldName)) {
-      return PaymentRegistrationService.handleListCreditSources(context, isReceipt);
+      return PaymentCreditSourcesService.handleListCreditSources(context, isReceipt);
     }
     if (PIS_STATUS_ACTION.equals(fieldName)) {
       return PisPaymentService.handlePisPaymentStatus(context);
@@ -132,10 +132,10 @@ final class PaymentActionHandlerSupport {
       OBContext.setAdminMode(true);
       try {
         if (isConfirm) {
-          return PaymentRegistrationService.confirmDraftPayment(body.optString(FIELD_PAYMENT_ID, null));
+          return PaymentDraftEditService.confirmDraftPayment(body.optString(FIELD_PAYMENT_ID, null));
         }
         if (DELETE_ACTION.equals(fieldName)) {
-          return PaymentRegistrationService.deleteDraftPayment(body.optString(FIELD_PAYMENT_ID, null));
+          return PaymentDraftEditService.deleteDraftPayment(body.optString(FIELD_PAYMENT_ID, null));
         }
         if (isAdvanced(body)) {
           return PaymentRegistrationService.doRegisterPaymentAdvanced(invoiceId, body, isReceipt);
