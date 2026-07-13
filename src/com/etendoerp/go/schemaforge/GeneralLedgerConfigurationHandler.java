@@ -46,6 +46,7 @@ import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchemaDefault;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchemaElement;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchemaGL;
 import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 import org.openbravo.model.financialmgmt.calendar.Calendar;
 
@@ -60,6 +61,7 @@ import org.openbravo.model.financialmgmt.calendar.Calendar;
  *   <li>the active ledger header ({@link AcctSchema})</li>
  *   <li>its single defaults row ({@link AcctSchemaDefault})</li>
  *   <li>its dimensions rows ({@link AcctSchemaElement})</li>
+ *   <li>its single general accounts row ({@link AcctSchemaGL})</li>
  *   <li>org-owned read-only metadata (calendar + organization label)</li>
  * </ul>
  *
@@ -74,9 +76,6 @@ import org.openbravo.model.financialmgmt.calendar.Calendar;
  *       sections (`general`, `defaults`, `dimensions`) in one transaction, then returns the
  *       refreshed aggregate row.</li>
  * </ul>
- *
- * <p>`Documentos` intentionally remains read-only and currently unbacked in this dataset. The
- * response carries a note so the frontend can surface that limitation explicitly for PM review.</p>
  */
 @Named("generalLedgerConfigurationHandler")
 public class GeneralLedgerConfigurationHandler implements NeoHandler {
@@ -92,8 +91,20 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
   private static final String FIELD_ACCRUAL = "accrual";
   private static final String FIELD_DESCRIPTION = "description";
   private static final String FIELD_CURRENCY = "currency";
-  private static final String FIELD_AUTOMATIC_PERIOD_CONTROL = "automaticPeriodControl";
+  private static final String FIELD_ALLOW_NEGATIVE = "allowNegative";
   private static final String FIELD_ACTIVE = "active";
+
+  private static final String FIELD_SUSPENSE_BALANCING_USE = "suspenseBalancingUse";
+  private static final String FIELD_SUSPENSE_BALANCING = "suspenseBalancing";
+  private static final String FIELD_SUSPENSE_ERROR_USE = "suspenseErrorUse";
+  private static final String FIELD_CURRENCY_BALANCING_USE = "currencyBalancingUse";
+  // These four mirror the raw AD property name (see AcctSchemaGL / schema-raw.json) rather than a
+  // cosmetic apiKey, matching the convention already used by DEFAULT_FIELD_MAPPINGS.
+  private static final String FIELD_CURRENCY_BALANCING_ACCOUNT = "currencyBalancingAcct";
+  private static final String FIELD_RETAINED_EARNING = "retainedEarning";
+  private static final String FIELD_INCOME_SUMMARY = "incomeSummary";
+  private static final String FIELD_CFS_ORDER_ACCOUNT = "cFSOrderAccount";
+  private static final String FIELD_REVERSE_PERMANENT_BALANCES = "createClosing";
 
   private static final class DefaultFieldMapping {
     final String apiKey;
@@ -145,7 +156,17 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
       new DefaultFieldMapping("depreciation", AcctSchemaDefault.PROPERTY_DEPRECIATION),
       new DefaultFieldMapping("accumulatedDepreciation", AcctSchemaDefault.PROPERTY_ACCUMULATEDDEPRECIATION),
       new DefaultFieldMapping("disposalGain", AcctSchemaDefault.PROPERTY_DISPOSALGAIN),
-      new DefaultFieldMapping("disposalLoss", AcctSchemaDefault.PROPERTY_DISPOSALLOSS));
+      new DefaultFieldMapping("disposalLoss", AcctSchemaDefault.PROPERTY_DISPOSALLOSS),
+      new DefaultFieldMapping("projectAsset", AcctSchemaDefault.PROPERTY_PROJECTASSET),
+      new DefaultFieldMapping("bankInterestRevenue", AcctSchemaDefault.PROPERTY_BANKINTERESTREVENUE),
+      new DefaultFieldMapping("bankInterestExpense", AcctSchemaDefault.PROPERTY_BANKINTERESTEXPENSE),
+      new DefaultFieldMapping("bankUnidentifiedReceipts", AcctSchemaDefault.PROPERTY_BANKUNIDENTIFIEDRECEIPTS),
+      new DefaultFieldMapping("unallocatedCash", AcctSchemaDefault.PROPERTY_UNALLOCATEDCASH),
+      new DefaultFieldMapping("bankSettlementGain", AcctSchemaDefault.PROPERTY_BANKSETTLEMENTGAIN),
+      new DefaultFieldMapping("bankSettlementLoss", AcctSchemaDefault.PROPERTY_BANKSETTLEMENTLOSS),
+      new DefaultFieldMapping("cashBookExpense", AcctSchemaDefault.PROPERTY_CASHBOOKEXPENSE),
+      new DefaultFieldMapping("cashBookReceipt", AcctSchemaDefault.PROPERTY_CASHBOOKRECEIPT),
+      new DefaultFieldMapping("paymentSelection", AcctSchemaDefault.PROPERTY_PAYMENTSELECTION));
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -194,6 +215,7 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     JSONObject general = body.optJSONObject("general");
     JSONObject defaults = body.optJSONObject("defaults");
     JSONArray dimensions = body.optJSONArray("dimensions");
+    JSONObject generalAccounts = body.optJSONObject("generalAccounts");
 
     if (general != null) {
       applyGeneralChanges(state, general);
@@ -204,10 +226,14 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     if (dimensions != null) {
       applyDimensionChanges(state, dimensions);
     }
+    if (generalAccounts != null) {
+      applyGeneralAccountsChanges(state, generalAccounts);
+    }
 
     OBDal.getInstance().save(state.organization);
     OBDal.getInstance().save(state.schema);
     OBDal.getInstance().save(state.defaults);
+    OBDal.getInstance().save(state.generalAccounts);
     OBDal.getInstance().flush();
 
     AggregateState refreshed = loadState(state.organization);
@@ -252,11 +278,21 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     @SuppressWarnings("unchecked")
     List<AcctSchemaElement> dimensions = OBDal.getInstance()
         .createCriteria(AcctSchemaElement.class)
+        .setFilterOnActive(false)
         .add(Restrictions.eq(AcctSchemaElement.PROPERTY_ACCOUNTINGSCHEMA, schema))
         .addOrder(Order.asc(AcctSchemaElement.PROPERTY_SEQUENCENUMBER))
         .list();
 
-    return new AggregateState(org, schema, defaults, dimensions);
+    AcctSchemaGL generalAccounts = uniqueByProperty(
+        AcctSchemaGL.class,
+        AcctSchemaGL.PROPERTY_ACCOUNTINGSCHEMA,
+        schema,
+        Order.desc(AcctSchemaGL.PROPERTY_UPDATED));
+    if (generalAccounts == null) {
+      throw new OBException("No general accounts row exists for ledger " + schema.getId());
+    }
+
+    return new AggregateState(org, schema, defaults, dimensions, generalAccounts);
   }
 
   private <T extends BaseOBObject> T uniqueByProperty(Class<T> entityClass, String property,
@@ -286,9 +322,9 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     row.put("general", buildGeneral(state));
     row.put("defaults", buildDefaults(state.defaults));
     row.put("dimensions", buildDimensions(state.dimensions));
-    row.put("documents", buildDocumentSeeds());
     row.put("orgInfo", buildOrgInfo(state.organization));
     row.put("catalogs", buildCatalogs(state.schema));
+    row.put("generalAccounts", buildGeneralAccounts(state.generalAccounts));
     row.put("meta", buildMeta());
     return row;
   }
@@ -302,7 +338,7 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     out.put(FIELD_DESCRIPTION, nullable(state.schema.getDescription()));
     out.put(FIELD_CURRENCY,
         state.schema.getCurrency() != null ? state.schema.getCurrency().getId() : JSONObject.NULL);
-    out.put(FIELD_AUTOMATIC_PERIOD_CONTROL, bool(state.schema.isAutomaticPeriodControl()));
+    out.put(FIELD_ALLOW_NEGATIVE, bool(state.schema.isAllowNegative()));
     return out;
   }
 
@@ -311,6 +347,22 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     for (DefaultFieldMapping mapping : DEFAULT_FIELD_MAPPINGS) {
       out.put(mapping.apiKey, toCombinationId(defaults.get(mapping.property)));
     }
+    return out;
+  }
+
+  private JSONObject buildGeneralAccounts(AcctSchemaGL generalAccounts) throws JSONException {
+    JSONObject out = new JSONObject();
+    out.put("id", generalAccounts.getId());
+    out.put(FIELD_SUSPENSE_BALANCING_USE, bool(generalAccounts.isSuspenseBalancingUse()));
+    out.put(FIELD_SUSPENSE_BALANCING, toCombinationId(generalAccounts.getSuspenseBalancing()));
+    out.put(FIELD_SUSPENSE_ERROR_USE, bool(generalAccounts.isSuspenseErrorUse()));
+    out.put(FIELD_CURRENCY_BALANCING_USE, bool(generalAccounts.isCurrencyBalancingUse()));
+    out.put(FIELD_CURRENCY_BALANCING_ACCOUNT, toCombinationId(generalAccounts.getCurrencyBalancingAcct()));
+    out.put(FIELD_RETAINED_EARNING, toCombinationId(generalAccounts.getRetainedEarning()));
+    out.put(FIELD_INCOME_SUMMARY, toCombinationId(generalAccounts.getIncomeSummary()));
+    out.put(FIELD_CFS_ORDER_ACCOUNT, toCombinationId(generalAccounts.getCFSOrderAccount()));
+    out.put(FIELD_ACTIVE, bool(generalAccounts.isActive()));
+    out.put(FIELD_REVERSE_PERMANENT_BALANCES, bool(generalAccounts.isCreateClosing()));
     return out;
   }
 
@@ -327,33 +379,6 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
       out.put(item);
     }
     return out;
-  }
-
-  private JSONArray buildDocumentSeeds() throws JSONException {
-    JSONArray out = new JSONArray();
-    out.put(documentRow("doc-arc", "glc.doc.salesInvoice", "700", "Ventas de mercaderias"));
-    out.put(documentRow("doc-api", "glc.doc.purchaseInvoice", "600", "Compras de mercaderias"));
-    out.put(documentRow("doc-arn", "glc.doc.salesCreditMemo", "708", "Devoluciones de ventas"));
-    out.put(documentRow("doc-apn", "glc.doc.purchaseCreditMemo", "608", "Devoluciones de compras"));
-    out.put(documentRow("doc-arr", "glc.doc.receipt", "572", "Bancos c/c"));
-    out.put(documentRow("doc-app", "glc.doc.payment", "410", "Acreedores por prestaciones"));
-    JSONObject journal = new JSONObject();
-    journal.put("id", "doc-glj");
-    journal.put("typeKey", "glc.doc.manualJournal");
-    journal.put("journalKey", "glc.doc.generalJournal");
-    out.put(journal);
-    out.put(documentRow("doc-amz", "glc.doc.depreciation", "681", "Amortizacion del inmovilizado"));
-    return out;
-  }
-
-  private JSONObject documentRow(String id, String typeKey, String code, String name) throws JSONException {
-    JSONObject row = new JSONObject();
-    row.put("id", id);
-    row.put("typeKey", typeKey);
-    row.put("accountId", "seed-" + code);
-    row.put("accountCode", code);
-    row.put("accountName", name);
-    return row;
   }
 
   private JSONObject buildOrgInfo(Organization organization) throws JSONException {
@@ -413,9 +438,6 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
   private JSONObject buildMeta() throws JSONException {
     JSONObject meta = new JSONObject();
     meta.put("source", "neo");
-    meta.put("documentsBacked", false);
-    meta.put("documentsNote",
-        "Document mappings remain a read-only visual reference until Product confirms the source model.");
     return meta;
   }
 
@@ -432,8 +454,8 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     if (general.has(FIELD_ACCRUAL)) {
       state.schema.setAccrual(general.optBoolean(FIELD_ACCRUAL));
     }
-    if (general.has(FIELD_AUTOMATIC_PERIOD_CONTROL)) {
-      state.schema.setAutomaticPeriodControl(general.optBoolean(FIELD_AUTOMATIC_PERIOD_CONTROL));
+    if (general.has(FIELD_ALLOW_NEGATIVE)) {
+      state.schema.setAllowNegative(general.optBoolean(FIELD_ALLOW_NEGATIVE));
     }
     if (general.has(FIELD_CURRENCY) && !general.isNull(FIELD_CURRENCY)) {
       String currencyId = trimmedOrNull(general.optString(FIELD_CURRENCY, null));
@@ -465,6 +487,56 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
       }
       state.defaults.set(mapping.property, combo);
     }
+  }
+
+  private void applyGeneralAccountsChanges(AggregateState state, JSONObject generalAccounts) {
+    AcctSchemaGL ga = state.generalAccounts;
+    if (generalAccounts.has(FIELD_SUSPENSE_BALANCING_USE)) {
+      ga.setSuspenseBalancingUse(generalAccounts.optBoolean(FIELD_SUSPENSE_BALANCING_USE));
+    }
+    if (generalAccounts.has(FIELD_SUSPENSE_BALANCING)) {
+      ga.setSuspenseBalancing(resolveAccountingCombination(generalAccounts, FIELD_SUSPENSE_BALANCING));
+    }
+    if (generalAccounts.has(FIELD_SUSPENSE_ERROR_USE)) {
+      ga.setSuspenseErrorUse(generalAccounts.optBoolean(FIELD_SUSPENSE_ERROR_USE));
+    }
+    if (generalAccounts.has(FIELD_CURRENCY_BALANCING_USE)) {
+      ga.setCurrencyBalancingUse(generalAccounts.optBoolean(FIELD_CURRENCY_BALANCING_USE));
+    }
+    if (generalAccounts.has(FIELD_CURRENCY_BALANCING_ACCOUNT)) {
+      ga.setCurrencyBalancingAcct(resolveAccountingCombination(generalAccounts, FIELD_CURRENCY_BALANCING_ACCOUNT));
+    }
+    if (generalAccounts.has(FIELD_RETAINED_EARNING)) {
+      ga.setRetainedEarning(resolveAccountingCombination(generalAccounts, FIELD_RETAINED_EARNING));
+    }
+    if (generalAccounts.has(FIELD_INCOME_SUMMARY)) {
+      ga.setIncomeSummary(resolveAccountingCombination(generalAccounts, FIELD_INCOME_SUMMARY));
+    }
+    if (generalAccounts.has(FIELD_CFS_ORDER_ACCOUNT)) {
+      ga.setCFSOrderAccount(resolveAccountingCombination(generalAccounts, FIELD_CFS_ORDER_ACCOUNT));
+    }
+    if (generalAccounts.has(FIELD_ACTIVE)) {
+      ga.setActive(generalAccounts.optBoolean(FIELD_ACTIVE));
+    }
+    if (generalAccounts.has(FIELD_REVERSE_PERMANENT_BALANCES)) {
+      ga.setCreateClosing(generalAccounts.optBoolean(FIELD_REVERSE_PERMANENT_BALANCES));
+    }
+  }
+
+  private AccountingCombination resolveAccountingCombination(JSONObject payload, String key) {
+    Object raw = payload.opt(key);
+    if (raw == null || raw == JSONObject.NULL) {
+      return null;
+    }
+    String id = StringUtils.trimToNull(String.valueOf(raw));
+    if (id == null) {
+      return null;
+    }
+    AccountingCombination combo = OBDal.getInstance().get(AccountingCombination.class, id);
+    if (combo == null) {
+      throw new OBException("Accounting combination not found: " + id);
+    }
+    return combo;
   }
 
   private void applyDimensionChanges(AggregateState state, JSONArray dimensions) throws JSONException {
@@ -569,14 +641,16 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     final AcctSchema schema;
     final AcctSchemaDefault defaults;
     final List<AcctSchemaElement> dimensions;
+    final AcctSchemaGL generalAccounts;
 
     AggregateState(Organization organization, AcctSchema schema, AcctSchemaDefault defaults,
-        List<AcctSchemaElement> dimensions) {
+        List<AcctSchemaElement> dimensions, AcctSchemaGL generalAccounts) {
       this.organization = organization;
       this.schema = schema;
       this.defaults = defaults;
       this.dimensions = dimensions != null ? new ArrayList<>(dimensions) : new ArrayList<>();
       this.dimensions.sort(Comparator.comparing(AcctSchemaElement::getSequenceNumber, Comparator.nullsLast(Long::compareTo)));
+      this.generalAccounts = generalAccounts;
     }
   }
 }
