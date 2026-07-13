@@ -57,9 +57,16 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *   <li><b>B — hierarchy metadata</b> (afterHandle, CRUD GET list): injects
  *       {@code parentId} (direct parent's {@code C_ElementValue_ID}, null if root),
  *       {@code depth} (hops to root; 0 = root), {@code hasChildren} (true if the node has
- *       children in {@code AD_TreeNode}), and {@code parentCode4} (the {@code Value} of the
- *       nearest ancestor whose {@code Value} has exactly 4 characters, null if none).
- *       Uses a single bulk load of the full tree — no N+1 queries.</li>
+ *       children in {@code AD_TreeNode}), {@code parentCode4} (the {@code Value} of the
+ *       nearest ancestor whose {@code Value} has exactly 4 characters, null if none — kept
+ *       for backward compatibility with {@code NewAccountModal}'s parent selector),
+ *       {@code elementLevel} (the node's own {@code C_ElementValue.ElementLevel}: {@code E}
+ *       Heading, {@code C} Account, {@code D} Breakdown, {@code S} Subaccount), and
+ *       {@code ancestors} — the FULL ancestor chain (root-to-leaf order, node itself
+ *       excluded), each entry {@code {value, name, elementLevel}}, mirroring Etendo
+ *       Classic's "Combinación de cuentas" grouped view so the frontend can build a genuine
+ *       N-level nested tree instead of the flat 4-digit grouping. Uses a single bulk load of
+ *       the full tree — no N+1 queries.</li>
  *   <li><b>C — YTD balances</b> (afterHandle, CRUD GET list): injects {@code ytdDebit},
  *       {@code ytdCredit}, and {@code ytdBalance} for the current fiscal year.
  *       Leaf balances are read from {@code fact_acct} in one query; summary-account totals
@@ -103,16 +110,13 @@ public class ChartOfAccountsHandler implements NeoHandler {
   private static final int ACCOUNT_CODE_LENGTH = 8;
 
   /**
-   * Exact {@code Value} length used as the grouping level for {@code parentCode4}.
-   * Walk up the parent chain until a node whose {@code Value} has this length is found.
-   */
-  private static final int PARENT_CODE_LENGTH = 4;
-
-  /**
    * Maximum number of hops traversed upward in the tree before bailing out,
    * guarding against circular references in corrupted {@code AD_TreeNode} data.
+   *
+   * <p>Package-private: also used by {@link ChartOfAccountsTreeMath}, which was split out of
+   * this class to keep its method count under the Sonar {@code java:S1448} limit.
    */
-  private static final int MAX_TREE_DEPTH = 30;
+  static final int MAX_TREE_DEPTH = 30;
 
   static final String ERR_INVALID_CODE =
       "El código de cuenta debe tener exactamente 8 dígitos";
@@ -158,11 +162,13 @@ public class ChartOfAccountsHandler implements NeoHandler {
       "SELECT node_id, parent_id FROM ad_treenode WHERE ad_tree_id = :treeId";
 
   /**
-   * SQL that loads {@code (c_elementvalue_id, value, name)} triples for a given client.
-   * Used to look up account codes/names when walking the tree for {@code parentCode4}.
+   * SQL that loads {@code (c_elementvalue_id, value, name, elementlevel)} rows for a given
+   * client. Used to look up account codes/names/levels when walking the tree for
+   * {@code parentCode4} and for the full {@code ancestors} chain.
    */
   private static final String SQL_LOAD_EV_VALUES =
-      "SELECT c_elementvalue_id, value, name FROM c_elementvalue WHERE ad_client_id = :clientId";
+      "SELECT c_elementvalue_id, value, name, elementlevel "
+      + "FROM c_elementvalue WHERE ad_client_id = :clientId";
 
   /**
    * SQL that finds the {@code c_year_id} for the current fiscal year of a given client.
@@ -581,6 +587,8 @@ public class ChartOfAccountsHandler implements NeoHandler {
    *   <li>{@code nodeParentMap} — {@code nodeId → parentId}; {@code null} value means root.</li>
    *   <li>{@code nodeValueMap} — {@code nodeId → Value} (account code string from
    *       {@code C_ElementValue.Value}).</li>
+   *   <li>{@code nodeElementLevelMap} — {@code nodeId → ElementLevel} ({@code E} Heading,
+   *       {@code C} Account, {@code D} Breakdown, {@code S} Subaccount).</li>
    *   <li>{@code parentNodeIds} — set of nodeIds that have at least one child in the tree.</li>
    * </ul>
    */
@@ -588,13 +596,16 @@ public class ChartOfAccountsHandler implements NeoHandler {
     final Map<String, String> nodeParentMap;
     final Map<String, String> nodeValueMap;
     final Map<String, String> nodeNameMap;
+    final Map<String, String> nodeElementLevelMap;
     final Set<String> parentNodeIds;
 
     TreeData(Map<String, String> nodeParent, Map<String, String> nodeValue,
-        Map<String, String> nodeName, Set<String> parents) {
+        Map<String, String> nodeName, Map<String, String> nodeElementLevel,
+        Set<String> parents) {
       this.nodeParentMap = nodeParent;
       this.nodeValueMap = nodeValue;
       this.nodeNameMap = nodeName;
+      this.nodeElementLevelMap = nodeElementLevel;
       this.parentNodeIds = parents;
     }
   }
@@ -622,7 +633,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
       if (treeRows.isEmpty()) {
         log.debug("ChartOfAccountsHandler: no EV tree found for clientId={}", clientId);
         return new TreeData(Collections.emptyMap(), Collections.emptyMap(),
-            Collections.emptyMap(), Collections.emptySet());
+            Collections.emptyMap(), Collections.emptyMap(), Collections.emptySet());
       }
       String treeId = (String) treeRows.get(0);
 
@@ -658,13 +669,16 @@ public class ChartOfAccountsHandler implements NeoHandler {
 
       Map<String, String> nodeValueMap = new HashMap<>(evRows.size() * 2);
       Map<String, String> nodeNameMap = new HashMap<>(evRows.size() * 2);
+      Map<String, String> nodeElementLevelMap = new HashMap<>(evRows.size() * 2);
       for (Object rawRow : evRows) {
         Object[] row = (Object[]) rawRow;
         nodeValueMap.put((String) row[0], (String) row[1]);
         nodeNameMap.put((String) row[0], (String) row[2]);
+        nodeElementLevelMap.put((String) row[0], row.length > 3 ? (String) row[3] : null);
       }
 
-      return new TreeData(nodeParentMap, nodeValueMap, nodeNameMap, parentNodeIds);
+      return new TreeData(nodeParentMap, nodeValueMap, nodeNameMap, nodeElementLevelMap,
+          parentNodeIds);
 
     } finally {
       OBContext.restorePreviousMode();
@@ -682,86 +696,49 @@ public class ChartOfAccountsHandler implements NeoHandler {
    *   <li>{@code hasChildren} — {@code true} if this node appears as a parent in
    *       {@code AD_TreeNode}.</li>
    *   <li>{@code parentCode4} — {@code Value} of the nearest ancestor whose {@code Value}
-   *       has exactly {@value #PARENT_CODE_LENGTH} characters; JSON null if none found.</li>
+   *       has exactly {@value ChartOfAccountsTreeMath#PARENT_CODE_LENGTH} characters; JSON
+   *       null if none found.</li>
+   *   <li>{@code elementLevel} — the node's own {@code C_ElementValue.ElementLevel}
+   *       ({@code E}/{@code C}/{@code D}/{@code S}); JSON null if not found.</li>
+   *   <li>{@code ancestors} — full ancestor chain, root-to-leaf, node itself excluded; each
+   *       entry is {@code {value, name, elementLevel}}. Empty array for root nodes.</li>
    * </ul>
    */
   private void applyHierarchyMetadata(JSONArray data, TreeData tree) throws Exception {
     for (int i = 0; i < data.length(); i++) {
       JSONObject entry = data.optJSONObject(i);
       String id = entry != null ? entry.optString("id", null) : null;
-      if (entry != null && id != null) {
-        String parentId = tree.nodeParentMap.get(id); // null when root or not in tree
-        int depth = computeDepth(id, tree.nodeParentMap);
-        boolean hasChildren = tree.parentNodeIds.contains(id);
-        String parentCode4 = findParentCode4(id, tree.nodeParentMap, tree.nodeValueMap);
-        String parentCode4Name = findParentCode4Name(id, tree.nodeParentMap,
-            tree.nodeValueMap, tree.nodeNameMap);
-
-        entry.put("parentId", parentId != null ? parentId : JSONObject.NULL);
-        entry.put("depth", depth);
-        entry.put("hasChildren", hasChildren);
-        entry.put("parentCode4", parentCode4 != null ? parentCode4 : JSONObject.NULL);
-        entry.put("parentCode4Name", parentCode4Name != null ? parentCode4Name : JSONObject.NULL);
+      if (entry == null || id == null) {
+        continue;
       }
+      injectHierarchyFields(entry, id, tree);
     }
   }
 
   /**
-   * Computes the depth of {@code nodeId} in the tree by walking up the parent chain.
-   * Returns 0 for roots and for nodes not present in the map.
-   * Capped at {@value #MAX_TREE_DEPTH} to guard against circular references.
+   * Computes and writes the hierarchy fields (see {@link #applyHierarchyMetadata}) for a
+   * single {@code entry}/{@code id} pair. Split out of {@link #applyHierarchyMetadata} to
+   * keep cognitive complexity low — this method has no loop or nested branching of its own.
    */
-  static int computeDepth(String nodeId, Map<String, String> nodeParentMap) {
-    int depth = 0;
-    String current = nodeParentMap.get(nodeId); // parent of nodeId
-    int guard = 0;
-    while (current != null && guard < MAX_TREE_DEPTH) {
-      depth++;
-      current = nodeParentMap.get(current);
-      guard++;
-    }
-    return depth;
-  }
+  private void injectHierarchyFields(JSONObject entry, String id, TreeData tree) throws Exception {
+    String parentId = tree.nodeParentMap.get(id); // null when root or not in tree
+    int depth = ChartOfAccountsTreeMath.computeDepth(id, tree.nodeParentMap);
+    boolean hasChildren = tree.parentNodeIds.contains(id);
+    String parentCode4 = ChartOfAccountsTreeMath.findParentCode4(id, tree.nodeParentMap,
+        tree.nodeValueMap);
+    String parentCode4Name = ChartOfAccountsTreeMath.findParentCode4Name(id, tree.nodeParentMap,
+        tree.nodeValueMap, tree.nodeNameMap);
+    String elementLevel = tree.nodeElementLevelMap.get(id);
+    JSONArray ancestors = ChartOfAccountsTreeMath.buildAncestorChain(id, tree.nodeParentMap,
+        tree.nodeValueMap, tree.nodeNameMap, tree.nodeElementLevelMap);
 
-  /**
-   * Walks up the ancestor chain of {@code nodeId} and returns the {@code Value}
-   * of the nearest ancestor whose {@code Value} has exactly {@value #PARENT_CODE_LENGTH}
-   * characters, or {@code null} if none is found before the root.
-   *
-   * <p>The node itself is excluded — traversal starts at its direct parent.
-   */
-  static String findParentCode4(String nodeId, Map<String, String> nodeParentMap,
-      Map<String, String> nodeValueMap) {
-    String current = nodeParentMap.get(nodeId); // start at direct parent
-    int guard = 0;
-    while (current != null && guard < MAX_TREE_DEPTH) {
-      String value = nodeValueMap.get(current);
-      if (value != null && value.length() == PARENT_CODE_LENGTH) {
-        return value;
-      }
-      current = nodeParentMap.get(current);
-      guard++;
-    }
-    return null;
-  }
-
-  /**
-   * Returns the {@code Name} of the nearest 4-digit ancestor, or {@code null} if none found.
-   * Mirrors {@link #findParentCode4} but resolves the name instead of the value.
-   */
-  static String findParentCode4Name(String nodeId, Map<String, String> nodeParentMap,
-      Map<String, String> nodeValueMap, Map<String, String> nodeNameMap) {
-    String current = nodeParentMap.get(nodeId);
-    int guard = 0;
-    while (current != null && guard < MAX_TREE_DEPTH) {
-      String value = nodeValueMap.get(current);
-      if (value != null && value.length() == PARENT_CODE_LENGTH) {
-        return nodeNameMap.get(current);
-      }
-      current = nodeParentMap.get(current);
-      guard++;
-    }
-    return null;
+    entry.put("parentId", ChartOfAccountsTreeMath.orNull(parentId));
+    entry.put("depth", depth);
+    entry.put("hasChildren", hasChildren);
+    entry.put("parentCode4", ChartOfAccountsTreeMath.orNull(parentCode4));
+    entry.put("parentCode4Name", ChartOfAccountsTreeMath.orNull(parentCode4Name));
+    entry.put("elementLevel", ChartOfAccountsTreeMath.orNull(elementLevel));
+    entry.put("ancestors", ancestors);
   }
 
   // ── C. YTD balances ───────────────────────────────────────────────────────

@@ -308,10 +308,10 @@ public class OnboardingDatasetNormalizerTest {
    * ETP-4245 (R11, TC-41 follow-up, "Jorge's list", 2026-07-06): verifies that a freshly-provisioned
    * tenant is born with the 6 previously-NULL {@code C_ACCTSCHEMA_DEFAULT} Defaults-tab accounts
    * (doubtful debt, bad debt expense/revenue, allowance for doubtful debt, deferred product
-   * expense/revenue) populated from GOClient's own chart of accounts, instead of NULL. Also asserts
-   * the write-off account combination id is retained UNCHANGED — it is deliberately NOT re-mapped to
-   * the screenshot's account (65000000); the product owner confirmed the existing value (account
-   * 69400000, the same combination reused for bad-debt expense) is correct.
+   * expense/revenue) populated from GOClient's own chart of accounts, instead of NULL.
+   *
+   * <p>The write-off assertion that used to live here (asserting 69400000 stayed UNCHANGED) was
+   * superseded by ETP-4452/R12 — see {@link #testNormalizerWriteOffAccountIsAccount65000000()}.</p>
    */
   @Test
   public void testNormalizerIncludesAcctSchemaDefaultDoubtfulDebtAndDeferredAccounts() {
@@ -325,11 +325,23 @@ public class OnboardingDatasetNormalizerTest {
         xml.contains("35D2EC0EA8584EBE85C056293D1AA7E2"));
     assertTrue("P_Def_Expense_Acct (48000000) missing", xml.contains("801F214F5D434636935E753EF244816F"));
     assertTrue("P_Def_Revenue_Acct (48500000) missing", xml.contains("032942D16A9F417B88564FDAF211E4D9"));
+  }
 
-    // Regression guard: write-off must stay at the DB-authoritative 69400000 combination — never
-    // "fixed" to the screenshot's 65000000 combination.
-    assertTrue("WriteOff_Acct must remain 69400000 (override confirmed, not the screenshot's 65000000)",
-        xml.contains("997A522BF1124E029E99AB31CF2540F9"));
+  /**
+   * ETP-4452 (R12, 2026-07-08): the product owner reconfirmed — reversing R11's own confirmation —
+   * that {@code WriteOff_Acct} must resolve to account 65000000 ("Pérdidas de créditos comerciales
+   * incobrables"), not 69400000. Verifies a freshly-provisioned tenant is born with
+   * {@code WRITEOFF_ACCT} pointing at GOClient's own dimensionless combination for 65000000
+   * ({@code CB7E1B51B897403083CDCA20835F6AE9} — the same id already used for
+   * {@code CB_DIFFERENCES_ACCT} in the bundled dataset, since both columns share that account for
+   * this tenant), and NOT at the old 69400000 combination.
+   */
+  @Test
+  public void testNormalizerWriteOffAccountIsAccount65000000() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue("WriteOff_Acct (65000000) missing — expected GOClient's own 65000000 combination id",
+        xml.contains("CB7E1B51B897403083CDCA20835F6AE9"));
   }
 
   /**

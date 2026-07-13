@@ -20,12 +20,10 @@ package com.etendoerp.go.support;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.time.Instant;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.Date;
+import java.util.List;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -35,12 +33,21 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.enterprise.Organization;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
+import com.etendoerp.go.schemaforge.data.SupportConversation;
+import com.etendoerp.go.schemaforge.data.SupportMessage;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -55,8 +62,11 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *   POST /sws/support/conversations/:id/messages             — Send a message
  *   POST /sws/support/conversations/:id/rating               — Submit satisfaction rating
  *
- * Conversations and messages are persisted in PostgreSQL tables
- * (etgo_support_conversation, etgo_support_message) created on first use.
+ * Conversations and messages are persisted via OBDal against the AD-registered entities
+ * {@link SupportConversation}/{@link SupportMessage} (module com.etendoerp.go, DataAccessLevel
+ * Client/Organization). Every new row is tagged with a real ad_client_id/ad_org_id resolved
+ * from the JWT's client/organization claims (same claims NeoServletSupport already reads
+ * elsewhere in this module), instead of being untenanted.
  *
  * Outbound ADK/Jira integration lives in {@link SupportIntegrationClient}; inbound Jira
  * webhook parsing lives in {@link SupportJiraWebhookHandler}. This class owns the HTTP
@@ -77,7 +87,6 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private static final String FIELD_STATUS      = "status";
   private static final String FIELD_ERROR       = "error";
   private static final String FIELD_SUBJECT     = "subject";
-  private static final String FIELD_LAST_MESSAGE_COL = "last_message";
   private static final String FIELD_UNREAD      = "unread";
   private static final String FIELD_RATED       = "rated";
   private static final String MSG_INTERNAL_ERROR = "Internal error";
@@ -96,70 +105,32 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private static final String WEBHOOK_SECRET =
       System.getProperty("support.webhook.secret", "");
 
-  // DDL — created once on first request
-  private static final AtomicBoolean TABLES_READY = new AtomicBoolean(false);
+  /** {@code AD_User_ID} used as {@code createdBy}/{@code updatedBy} for system-triggered
+   * inserts that have no authenticated requester (inbound Jira webhook).
+   * Package-private: also used by {@link SupportJiraWebhookHandler}. */
+  static final String SYSTEM_USER_ID = "0";
 
-  private static final String DDL_CONVERSATION =
-      "CREATE TABLE IF NOT EXISTS etgo_support_conversation (" +
-      "  id             VARCHAR(32)  PRIMARY KEY," +
-      "  user_id        VARCHAR(255) NOT NULL," +
-      "  subject        VARCHAR(255)," +
-      "  status         VARCHAR(32)  NOT NULL DEFAULT 'open'," +
-      "  created_at     TIMESTAMPTZ  NOT NULL DEFAULT now()," +
-      "  last_activity  TIMESTAMPTZ  NOT NULL DEFAULT now()," +
-      "  last_message   TEXT," +
-      "  unread         BOOLEAN      NOT NULL DEFAULT FALSE," +
-      "  rated          BOOLEAN      NOT NULL DEFAULT FALSE," +
-      "  rating_score   INTEGER," +
-      "  rating_comment TEXT" +
-      ")";
-
-  private static final String DDL_MESSAGE =
-      "CREATE TABLE IF NOT EXISTS etgo_support_message (" +
-      "  id              VARCHAR(32)  PRIMARY KEY," +
-      "  conversation_id VARCHAR(32)  NOT NULL REFERENCES etgo_support_conversation(id)," +
-      "  sender          VARCHAR(32)  NOT NULL," +
-      "  sender_name     VARCHAR(255)," +
-      "  text            TEXT," +
-      "  timestamp       TIMESTAMPTZ  NOT NULL DEFAULT now()" +
-      ")";
-
-  private static final String DDL_IDX_CONV_USER =
-      "CREATE INDEX IF NOT EXISTS etgo_sc_conv_user ON etgo_support_conversation(user_id, last_activity DESC)";
-
-  private static final String DDL_IDX_MSG_CONV =
-      "CREATE INDEX IF NOT EXISTS etgo_sc_msg_conv ON etgo_support_message(conversation_id, timestamp ASC)";
-
-  private static final String DDL_MIGRATE_JIRA_KEY =
-      "ALTER TABLE etgo_support_conversation ADD COLUMN IF NOT EXISTS jira_ticket_key VARCHAR(64)";
-  private static final String DDL_MIGRATE_JIRA_IDX =
-      "CREATE INDEX IF NOT EXISTS etgo_sc_conv_jira ON etgo_support_conversation(jira_ticket_key)";
-  private static final String DDL_MIGRATE_MSG_EXTID =
-      "ALTER TABLE etgo_support_message ADD COLUMN IF NOT EXISTS external_id VARCHAR(128)";
-  private static final String DDL_MIGRATE_MSG_EXTID_IDX =
-      "CREATE UNIQUE INDEX IF NOT EXISTS etgo_sc_msg_extid ON etgo_support_message(external_id) WHERE external_id IS NOT NULL";
-  private static final String DDL_MIGRATE_HUMAN_TAKEOVER =
-      "ALTER TABLE etgo_support_conversation ADD COLUMN IF NOT EXISTS human_takeover BOOLEAN NOT NULL DEFAULT FALSE";
+  private static final DateTimeFormatter ISO_NO_ZONE =
+      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS");
 
   // --- HTTP dispatchers ---
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    String userId = authenticateAndGetUserId(request, response);
-    if (userId == null) return;
-    ensureTablesExist();
+    AuthContext ctx = authenticate(request, response);
+    if (ctx == null) return;
 
     String pathInfo = request.getPathInfo();
     if (pathInfo == null) pathInfo = "/";
 
     if ("/conversations".equals(pathInfo) || "/conversations/".equals(pathInfo)) {
-      handleListConversations(response, userId);
+      handleListConversations(response, ctx);
       return;
     }
 
     String[] parts = pathInfo.split("/");
     if (parts.length == 4 && FIELD_CONVERSATIONS.equals(parts[1]) && FIELD_MESSAGES.equals(parts[3])) {
-      handleGetMessages(response, userId, parts[2]);
+      handleGetMessages(response, ctx, parts[2]);
       return;
     }
 
@@ -173,16 +144,15 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
     if (dispatchInternalRoute(pathInfo, request, response)) return;
 
-    String userId = authenticateAndGetUserId(request, response);
-    if (userId == null) return;
-    ensureTablesExist();
+    AuthContext ctx = authenticate(request, response);
+    if (ctx == null) return;
 
     if ("/conversations".equals(pathInfo) || "/conversations/".equals(pathInfo)) {
-      handleCreateConversation(request, response, userId);
+      handleCreateConversation(request, response, ctx);
       return;
     }
 
-    if (dispatchConversationAction(pathInfo, request, response, userId)) return;
+    if (dispatchConversationAction(pathInfo, request, response, ctx)) return;
 
     writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + pathInfo);
   }
@@ -191,22 +161,18 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private boolean dispatchInternalRoute(String pathInfo, HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     if ("/jira-webhook".equals(pathInfo)) {
-      ensureTablesExist();
       SupportJiraWebhookHandler.handle(request, response);
       return true;
     }
     if ("/internal/set-ticket".equals(pathInfo)) {
-      ensureTablesExist();
       handleSetTicket(request, response);
       return true;
     }
     if ("/internal/set-human-takeover".equals(pathInfo)) {
-      ensureTablesExist();
       handleSetHumanTakeover(request, response);
       return true;
     }
     if ("/internal/reset-human-takeover".equals(pathInfo)) {
-      ensureTablesExist();
       handleResetHumanTakeover(request, response);
       return true;
     }
@@ -215,25 +181,25 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
   /** Routes /conversations/:id/{messages,rating,close,reopen}. Returns true if handled. */
   private boolean dispatchConversationAction(String pathInfo, HttpServletRequest request,
-      HttpServletResponse response, String userId) throws IOException {
+      HttpServletResponse response, AuthContext ctx) throws IOException {
     String[] parts = pathInfo.split("/");
     if (parts.length < 4 || !FIELD_CONVERSATIONS.equals(parts[1])) return false;
     String convId = parts[2];
     String action = parts[3];
     if (FIELD_MESSAGES.equals(action)) {
-      handleSendMessage(request, response, userId, convId);
+      handleSendMessage(request, response, ctx, convId);
       return true;
     }
     if ("rating".equals(action)) {
-      handleSubmitRating(request, response, userId, convId);
+      handleSubmitRating(request, response, ctx, convId);
       return true;
     }
     if ("close".equals(action)) {
-      handleCloseConversation(response, userId, convId);
+      handleCloseConversation(response, ctx, convId);
       return true;
     }
     if ("reopen".equals(action)) {
-      handleReopenConversation(response, userId, convId);
+      handleReopenConversation(response, ctx, convId);
       return true;
     }
     return false;
@@ -241,46 +207,32 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
   // --- Endpoint handlers ---
 
-  private void handleListConversations(HttpServletResponse response, String userId)
+  private void handleListConversations(HttpServletResponse response, AuthContext ctx)
       throws IOException {
+    OBContext previous = enterTenantAdminMode(ctx);
     try {
-      OBContext.setAdminMode(true);
-      try {
-        Connection conn = OBDal.getInstance().getConnection();
-        JSONArray arr = new JSONArray();
-        try (PreparedStatement ps = conn.prepareStatement(
-            "SELECT id, subject, status, last_activity, last_message, unread, rated" +
-            "  FROM etgo_support_conversation" +
-            " WHERE user_id = ? ORDER BY last_activity DESC")) {
-          ps.setString(1, userId);
-          try (ResultSet rs = ps.executeQuery()) {
-            while (rs.next()) {
-              JSONObject conv = new JSONObject();
-              conv.put("id",           rs.getString("id"));
-              conv.put(FIELD_SUBJECT,  rs.getString(FIELD_SUBJECT));
-              conv.put(FIELD_STATUS,   rs.getString(FIELD_STATUS));
-              conv.put("lastActivity", toIso(rs.getString("last_activity")));
-              conv.put("lastMessage",  rs.getString(FIELD_LAST_MESSAGE_COL) != null ? rs.getString(FIELD_LAST_MESSAGE_COL) : "");
-              conv.put(FIELD_UNREAD,   rs.getBoolean(FIELD_UNREAD));
-              conv.put(FIELD_RATED,    rs.getBoolean(FIELD_RATED));
-              arr.put(conv);
-            }
-          }
-        }
-        JSONObject result = new JSONObject();
-        result.put(FIELD_CONVERSATIONS, arr);
-        writeJson(response, HttpServletResponse.SC_OK, result);
-      } finally {
-        OBContext.restorePreviousMode();
+      User user = OBDal.getInstance().get(User.class, ctx.userId);
+      OBCriteria<SupportConversation> crit = OBDal.getInstance().createCriteria(SupportConversation.class);
+      crit.add(Restrictions.eq(SupportConversation.PROPERTY_USER, user));
+      crit.addOrderBy(SupportConversation.PROPERTY_LASTACTIVITY, false);
+      JSONArray arr = new JSONArray();
+      for (SupportConversation conv : crit.list()) {
+        arr.put(toConvSummaryJson(conv));
       }
+      JSONObject result = new JSONObject();
+      result.put(FIELD_CONVERSATIONS, arr);
+      writeJson(response, HttpServletResponse.SC_OK, result);
     } catch (Exception e) {
-      log.error("Error listing conversations for user {}", userId, e);
+      log.error("Error listing conversations for user {}", ctx.userId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
+    } finally {
+      restoreTenantContext(previous);
     }
   }
 
   private void handleCreateConversation(HttpServletRequest request, HttpServletResponse response,
-      String userId) throws IOException {
+      AuthContext ctx) throws IOException {
+    String userId = ctx.userId;
     JSONObject body = parseBody(request, response);
     if (body == null) return;
 
@@ -296,93 +248,83 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       return;
     }
 
+    OBContext previous = enterTenantAdminMode(ctx);
     try {
-      OBContext.setAdminMode(true);
-      try {
-        Connection conn = OBDal.getInstance().getConnection();
-        String convId  = newId();
-        String msgId1  = newId();
-        String now     = Instant.now().toString();
-        String subject = firstMessage.length() > 60
-            ? firstMessage.substring(0, 60) + "…" : firstMessage;
+      User user = OBDal.getInstance().get(User.class, userId);
+      Client client = OBDal.getInstance().get(Client.class, ctx.clientId);
+      Organization org = OBDal.getInstance().get(Organization.class, ctx.orgId);
+      String subject = firstMessage.length() > 60
+          ? firstMessage.substring(0, 60) + "…" : firstMessage;
+      Date now = new Date();
 
-        // Insert conversation
-        try (PreparedStatement ps = conn.prepareStatement(
-            "INSERT INTO etgo_support_conversation" +
-            "  (id, user_id, subject, status, created_at, last_activity, unread, rated)" +
-            " VALUES (?, ?, ?, 'open', ?::timestamptz, ?::timestamptz, false, false)")) {
-          ps.setString(1, convId);
-          ps.setString(2, userId);
-          ps.setString(3, subject);
-          ps.setString(4, now);
-          ps.setString(5, now);
-          ps.executeUpdate();
-        }
+      SupportConversation conv = OBProvider.getInstance().get(SupportConversation.class);
+      conv.setNewOBObject(true);
+      conv.setId(newId());
+      conv.setClient(client);
+      conv.setOrganization(org);
+      conv.setUser(user);
+      conv.setSubject(subject);
+      conv.setStatus(STATUS_OPEN);
+      conv.setLastActivity(now);
+      OBDal.getInstance().save(conv);
 
-        // Insert user message
-        insertMessage(conn, msgId1, convId, SENDER_USER, "Tú", firstMessage, now);
+      // Insert user message
+      saveMessage(conv, SENDER_USER, "Tú", firstMessage, now, user);
 
-        // Commit before calling ADK so background set-ticket can see the new conversation row
-        conn.commit();
+      // Commit before calling ADK so background set-ticket can see the new conversation row
+      // (the ADK's callback arrives via a separate HTTP request/transaction). Uses
+      // SessionHandler directly (not a raw JDBC commit) so the Hibernate Transaction stays in
+      // sync and the messages saved afterwards are actually committed at end of request.
+      SessionHandler.getInstance().commitAndStart();
 
-        // AI reply
-        JSONArray attachments = body.optJSONArray("attachments");
-        String locale = body.optString("locale", "es");
-        String userEmail = SupportIntegrationClient.getUserEmail(conn, userId);
-        SupportIntegrationClient.createAdkSession(userId, convId, locale, userEmail);
-        String aiReplyText = SupportIntegrationClient.sendToAdk(userId, convId, firstMessage, attachments);
-        if (aiReplyText == null) aiReplyText = AI_STUB_REPLY;
+      // AI reply
+      JSONArray attachments = body.optJSONArray("attachments");
+      String locale = body.optString("locale", "es");
+      String userEmail = SupportIntegrationClient.getUserEmail(userId);
+      SupportIntegrationClient.createAdkSession(userId, conv.getId(), locale, userEmail);
+      String aiReplyText = SupportIntegrationClient.sendToAdk(userId, conv.getId(), firstMessage, attachments);
+      if (aiReplyText == null) aiReplyText = AI_STUB_REPLY;
 
-        String msgId2    = newId();
-        String aiNow     = Instant.now().toString();
-        insertMessage(conn, msgId2, convId, SENDER_AI, AI_AGENT_NAME, aiReplyText, aiNow);
+      Date aiNow = new Date();
+      saveMessage(conv, SENDER_AI, AI_AGENT_NAME, aiReplyText, aiNow, user);
+      updateConvSummary(conv.getId(), aiReplyText, aiNow);
 
-        // Update conversation summary
-        updateConvSummary(conn, convId, aiReplyText, aiNow);
-
-        JSONObject result = new JSONObject();
-        result.put(FIELD_CONVERSATION, buildConvSummary(conn, convId));
-        result.put(FIELD_MESSAGES, buildMessageArray(conn, convId));
-        writeJson(response, HttpServletResponse.SC_CREATED, result);
-      } finally {
-        OBContext.restorePreviousMode();
-      }
+      JSONObject result = new JSONObject();
+      result.put(FIELD_CONVERSATION, toConvSummaryJson(conv));
+      result.put(FIELD_MESSAGES, buildMessageArray(conv.getId()));
+      writeJson(response, HttpServletResponse.SC_CREATED, result);
     } catch (Exception e) {
       log.error("Error creating conversation for user {}", userId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
+    } finally {
+      restoreTenantContext(previous);
     }
   }
 
-  private void handleGetMessages(HttpServletResponse response, String userId, String convId)
+  private void handleGetMessages(HttpServletResponse response, AuthContext ctx, String convId)
       throws IOException {
+    OBContext previous = enterTenantAdminMode(ctx);
     try {
-      OBContext.setAdminMode(true);
-      try {
-        Connection conn = OBDal.getInstance().getConnection();
-        if (!conversationBelongsToUser(conn, convId, userId)) {
-          writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
-          return;
-        }
-        // Mark as read
-        try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET unread = false WHERE id = ?")) {
-          ps.setString(1, convId);
-          ps.executeUpdate();
-        }
-        JSONObject result = new JSONObject();
-        result.put(FIELD_MESSAGES, buildMessageArray(conn, convId));
-        writeJson(response, HttpServletResponse.SC_OK, result);
-      } finally {
-        OBContext.restorePreviousMode();
+      SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+      if (!belongsToUser(conv, ctx.userId)) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
+        return;
       }
+      conv.setUnread(false);
+      OBDal.getInstance().save(conv);
+      JSONObject result = new JSONObject();
+      result.put(FIELD_MESSAGES, buildMessageArray(convId));
+      writeJson(response, HttpServletResponse.SC_OK, result);
     } catch (Exception e) {
       log.error("Error loading messages for conversation {}", convId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
+    } finally {
+      restoreTenantContext(previous);
     }
   }
 
   private void handleSendMessage(HttpServletRequest request, HttpServletResponse response,
-      String userId, String convId) throws IOException {
+      AuthContext ctx, String convId) throws IOException {
     JSONObject body = parseBody(request, response);
     if (body == null) return;
 
@@ -398,80 +340,62 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       return;
     }
 
+    String userId = ctx.userId;
+    OBContext previous = enterTenantAdminMode(ctx);
     try {
-      OBContext.setAdminMode(true);
-      try {
-        Connection conn = OBDal.getInstance().getConnection();
-        if (!conversationBelongsToUser(conn, convId, userId)) {
-          writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
-          return;
-        }
-        String convStatus = getConvStatus(conn, convId);
-        if (STATUS_CLOSED.equals(convStatus)) {
-          writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Conversation is closed");
-          return;
-        }
-
-        String now = Instant.now().toString();
-        insertMessage(conn, newId(), convId, SENDER_USER, "Tú", text, now);
-
-        // If ticket is assigned to a human agent, block AI response
-        boolean humanTakeover = false;
-        try (PreparedStatement ps = conn.prepareStatement(
-            "SELECT human_takeover FROM etgo_support_conversation WHERE id = ?")) {
-          ps.setString(1, convId);
-          try (var rs = ps.executeQuery()) {
-            if (rs.next()) humanTakeover = rs.getBoolean("human_takeover");
-          }
-        }
-
-        if (humanTakeover) {
-          // Human agent is handling this — forward user message to Jira, send no AI reply
-          String jiraKey = null;
-          try (PreparedStatement ps2 = conn.prepareStatement(
-              "SELECT jira_ticket_key FROM etgo_support_conversation WHERE id = ?")) {
-            ps2.setString(1, convId);
-            try (var rs2 = ps2.executeQuery()) {
-              if (rs2.next()) jiraKey = rs2.getString("jira_ticket_key");
-            }
-          }
-          final String finalKey = jiraKey;
-          final String finalText = text;
-          new Thread(() -> SupportIntegrationClient.postJiraComment(finalKey, finalText), "jira-comment").start();
-          JSONObject result = new JSONObject();
-          result.put(FIELD_MESSAGES,     buildMessageArray(conn, convId));
-          result.put(FIELD_CONVERSATION, buildConvSummary(conn, convId));
-          writeJson(response, HttpServletResponse.SC_OK, result);
-          return;
-        }
-
-        JSONArray attachments = body.optJSONArray("attachments");
-        // Sync human_takeover=false into ADK session state; flag tells agent to skip Jira re-check
-        JSONObject stateDelta = new JSONObject()
-            .put("human_takeover", false)
-            .put("human_takeover_synced", true);
-        String aiReplyText = SupportIntegrationClient.sendToAdk(userId, convId, text, attachments, stateDelta);
-        if (aiReplyText == null) aiReplyText = AI_STUB_REPLY;
-
-        String aiNow = Instant.now().toString();
-        insertMessage(conn, newId(), convId, SENDER_AI, AI_AGENT_NAME, aiReplyText, aiNow);
-        updateConvSummary(conn, convId, aiReplyText, aiNow);
-
-        JSONObject result = new JSONObject();
-        result.put(FIELD_MESSAGES,     buildMessageArray(conn, convId));
-        result.put(FIELD_CONVERSATION, buildConvSummary(conn, convId));
-        writeJson(response, HttpServletResponse.SC_OK, result);
-      } finally {
-        OBContext.restorePreviousMode();
+      SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+      if (!belongsToUser(conv, userId)) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
+        return;
       }
+      if (STATUS_CLOSED.equals(conv.getStatus())) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Conversation is closed");
+        return;
+      }
+
+      User user = conv.getUser();
+      Date now = new Date();
+      saveMessage(conv, SENDER_USER, "Tú", text, now, user);
+
+      // If ticket is assigned to a human agent, block AI response
+      if (Boolean.TRUE.equals(conv.isHumanTakeover())) {
+        // Human agent is handling this — forward user message to Jira, send no AI reply
+        final String finalKey = conv.getJiraTicketKey();
+        final String finalText = text;
+        new Thread(() -> SupportIntegrationClient.postJiraComment(finalKey, finalText), "jira-comment").start();
+        JSONObject result = new JSONObject();
+        result.put(FIELD_MESSAGES,     buildMessageArray(convId));
+        result.put(FIELD_CONVERSATION, toConvSummaryJson(conv));
+        writeJson(response, HttpServletResponse.SC_OK, result);
+        return;
+      }
+
+      JSONArray attachments = body.optJSONArray("attachments");
+      // Sync human_takeover=false into ADK session state; flag tells agent to skip Jira re-check
+      JSONObject stateDelta = new JSONObject()
+          .put("human_takeover", false)
+          .put("human_takeover_synced", true);
+      String aiReplyText = SupportIntegrationClient.sendToAdk(userId, convId, text, attachments, stateDelta);
+      if (aiReplyText == null) aiReplyText = AI_STUB_REPLY;
+
+      Date aiNow = new Date();
+      saveMessage(conv, SENDER_AI, AI_AGENT_NAME, aiReplyText, aiNow, user);
+      updateConvSummary(convId, aiReplyText, aiNow);
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_MESSAGES,     buildMessageArray(convId));
+      result.put(FIELD_CONVERSATION, toConvSummaryJson(conv));
+      writeJson(response, HttpServletResponse.SC_OK, result);
     } catch (Exception e) {
       log.error("Error sending message to conversation {}", convId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
+    } finally {
+      restoreTenantContext(previous);
     }
   }
 
   private void handleSubmitRating(HttpServletRequest request, HttpServletResponse response,
-      String userId, String convId) throws IOException {
+      AuthContext ctx, String convId) throws IOException {
     JSONObject body = parseBody(request, response);
     if (body == null) return;
 
@@ -487,117 +411,127 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       return;
     }
 
+    OBContext previous = enterTenantAdminMode(ctx);
     try {
-      OBContext.setAdminMode(true);
-      try {
-        Connection conn = OBDal.getInstance().getConnection();
-        if (!conversationBelongsToUser(conn, convId, userId)) {
-          writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
-          return;
-        }
-        String comment = body.optString("comment", "").trim();
-        try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation" +
-            "   SET rated = true, rating_score = ?, rating_comment = ?" +
-            " WHERE id = ?")) {
-          ps.setInt(1, score);
-          ps.setString(2, comment);
-          ps.setString(3, convId);
-          ps.executeUpdate();
-        }
-
-        String jiraKey = null;
-        try (PreparedStatement ps = conn.prepareStatement(
-            "SELECT jira_ticket_key FROM etgo_support_conversation WHERE id = ?")) {
-          ps.setString(1, convId);
-          try (ResultSet rs = ps.executeQuery()) {
-            if (rs.next()) jiraKey = rs.getString("jira_ticket_key");
-          }
-        }
-        final String finalJiraKey = jiraKey;
-        final int finalScore = score;
-        final String finalComment = comment;
-        new Thread(() -> {
-          SupportIntegrationClient.postJiraComment(finalJiraKey,
-              SupportIntegrationClient.buildFeedbackComment(finalScore, finalComment));
-          SupportIntegrationClient.postJiraCsatLabel(finalJiraKey, finalScore);
-        }, "jira-csat-feedback").start();
-
-        JSONObject result = new JSONObject();
-        result.put(FIELD_STATUS, "success");
-        writeJson(response, HttpServletResponse.SC_OK, result);
-      } finally {
-        OBContext.restorePreviousMode();
+      SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+      if (!belongsToUser(conv, ctx.userId)) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
+        return;
       }
+      String comment = body.optString("comment", "").trim();
+      conv.setRated(true);
+      conv.setRatingScore((long) score);
+      conv.setRatingComment(comment);
+      OBDal.getInstance().save(conv);
+
+      final String finalJiraKey = conv.getJiraTicketKey();
+      final int finalScore = score;
+      final String finalComment = comment;
+      new Thread(() -> {
+        SupportIntegrationClient.postJiraComment(finalJiraKey,
+            SupportIntegrationClient.buildFeedbackComment(finalScore, finalComment));
+        SupportIntegrationClient.postJiraCsatLabel(finalJiraKey, finalScore);
+      }, "jira-csat-feedback").start();
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, "success");
+      writeJson(response, HttpServletResponse.SC_OK, result);
     } catch (Exception e) {
       log.error("Error submitting rating for conversation {}", convId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
+    } finally {
+      restoreTenantContext(previous);
     }
   }
 
-  private void handleCloseConversation(HttpServletResponse response, String userId, String convId)
+  private void handleCloseConversation(HttpServletResponse response, AuthContext ctx, String convId)
       throws IOException {
+    OBContext previous = enterTenantAdminMode(ctx);
     try {
-      OBContext.setAdminMode(true);
-      try {
-        Connection conn = OBDal.getInstance().getConnection();
-        if (!conversationBelongsToUser(conn, convId, userId)) {
-          writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
-          return;
-        }
-        try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET status = 'closed' WHERE id = ?")) {
-          ps.setString(1, convId);
-          ps.executeUpdate();
-        }
-        JSONObject result = new JSONObject();
-        result.put(FIELD_CONVERSATION, buildConvSummary(conn, convId));
-        writeJson(response, HttpServletResponse.SC_OK, result);
-      } finally {
-        OBContext.restorePreviousMode();
+      SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+      if (!belongsToUser(conv, ctx.userId)) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
+        return;
       }
+      conv.setStatus(STATUS_CLOSED);
+      OBDal.getInstance().save(conv);
+      JSONObject result = new JSONObject();
+      result.put(FIELD_CONVERSATION, toConvSummaryJson(conv));
+      writeJson(response, HttpServletResponse.SC_OK, result);
     } catch (Exception e) {
       log.error("Error closing conversation {}", convId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
+    } finally {
+      restoreTenantContext(previous);
     }
   }
 
-  private void handleReopenConversation(HttpServletResponse response, String userId, String convId)
+  private void handleReopenConversation(HttpServletResponse response, AuthContext ctx, String convId)
       throws IOException {
+    OBContext previous = enterTenantAdminMode(ctx);
     try {
-      OBContext.setAdminMode(true);
-      try {
-        Connection conn = OBDal.getInstance().getConnection();
-        if (!conversationBelongsToUser(conn, convId, userId)) {
-          writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
-          return;
-        }
-        String now = Instant.now().toString();
-        try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET status = 'open', last_activity = ?::timestamptz WHERE id = ?")) {
-          ps.setString(1, now);
-          ps.setString(2, convId);
-          ps.executeUpdate();
-        }
-        // System message to mark reopen in the thread
-        insertMessage(conn, newId(), convId, SENDER_AI, AI_AGENT_NAME,
-            "La conversación ha sido reabierta. ¿En qué más puedo ayudarte?", now);
-        JSONObject result = new JSONObject();
-        result.put(FIELD_CONVERSATION, buildConvSummary(conn, convId));
-        result.put(FIELD_MESSAGES, buildMessageArray(conn, convId));
-        writeJson(response, HttpServletResponse.SC_OK, result);
-      } finally {
-        OBContext.restorePreviousMode();
+      SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+      if (!belongsToUser(conv, ctx.userId)) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
+        return;
       }
+      Date now = new Date();
+      conv.setStatus(STATUS_OPEN);
+      conv.setLastActivity(now);
+      OBDal.getInstance().save(conv);
+      // System message to mark reopen in the thread
+      saveMessage(conv, SENDER_AI, AI_AGENT_NAME,
+          "La conversación ha sido reabierta. ¿En qué más puedo ayudarte?", now, conv.getUser());
+      JSONObject result = new JSONObject();
+      result.put(FIELD_CONVERSATION, toConvSummaryJson(conv));
+      result.put(FIELD_MESSAGES, buildMessageArray(convId));
+      writeJson(response, HttpServletResponse.SC_OK, result);
     } catch (Exception e) {
       log.error("Error reopening conversation {}", convId, e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
+    } finally {
+      restoreTenantContext(previous);
     }
   }
 
   // --- Auth ---
 
-  private String authenticateAndGetUserId(HttpServletRequest request, HttpServletResponse response)
+  /** JWT-derived identity for a request: the AD_User plus the client/org used both to stamp new
+   * rows and to switch the ambient {@code OBContext} (same claims
+   * {@link com.etendoerp.go.schemaforge.NeoServletSupport} uses to build a real context). */
+  private static final class AuthContext {
+    final String userId;
+    final String roleId;
+    final String clientId;
+    final String orgId;
+
+    AuthContext(String userId, String roleId, String clientId, String orgId) {
+      this.userId = userId;
+      this.roleId = roleId;
+      this.clientId = clientId;
+      this.orgId = orgId;
+    }
+  }
+
+  /** Switches the ambient {@code OBContext} to the request's user/role/client/org so {@code OBDal}
+   * criteria queries see this tenant's rows, then enters admin mode on top to bypass entity-level
+   * access checks. The real role (not System Administrator) matters here: {@code OBContext}
+   * computes readable clients from {@code role.getUserLevel()} — a System-level role (like role
+   * "0") always resolves readable clients to {@code ["0"]} regardless of the clientId passed in,
+   * silently hiding every other client's rows even with {@code setAdminMode(true)} active. */
+  private static OBContext enterTenantAdminMode(AuthContext ctx) {
+    OBContext previous = OBContext.getOBContext();
+    OBContext.setOBContext(ctx.userId, ctx.roleId, ctx.clientId, ctx.orgId);
+    OBContext.setAdminMode(true);
+    return previous;
+  }
+
+  private static void restoreTenantContext(OBContext previous) {
+    OBContext.restorePreviousMode();
+    OBContext.setOBContext(previous);
+  }
+
+  private AuthContext authenticate(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     String authHeader = request.getHeader(HEADER_AUTHORIZATION);
     if (authHeader == null || !authHeader.startsWith("Bearer ")) {
@@ -613,7 +547,16 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid token: missing user claim");
         return null;
       }
-      return userId;
+      String roleId = jwt.getClaim("role").asString();
+      if (roleId == null || roleId.isEmpty()) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid token: missing role claim");
+        return null;
+      }
+      String clientId = jwt.getClaim("client").asString();
+      String orgId = jwt.getClaim("organization").asString();
+      return new AuthContext(userId, roleId,
+          clientId == null || clientId.isEmpty() ? SYSTEM_USER_ID : clientId,
+          orgId == null || orgId.isEmpty() ? SYSTEM_USER_ID : orgId);
     } catch (Exception e) {
       log.warn("Support chat: invalid JWT token", e);
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
@@ -644,16 +587,13 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     try {
       OBContext.setAdminMode(true);
       try {
-        Connection conn = OBDal.getInstance().getConnection();
-        try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET jira_ticket_key = ? WHERE id = ?")) {
-          ps.setString(1, jiraKey);
-          ps.setString(2, convId);
-          if (ps.executeUpdate() == 0) {
-            writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
-            return;
-          }
+        SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+        if (conv == null) {
+          writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
+          return;
         }
+        conv.setJiraTicketKey(jiraKey);
+        OBDal.getInstance().save(conv);
         log.info("Linked conversation {} to Jira ticket {}", convId, jiraKey);
         writeJson(response, HttpServletResponse.SC_OK, new JSONObject().put(FIELD_STATUS, "ok"));
       } finally {
@@ -681,15 +621,13 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     try {
       OBContext.setAdminMode(true);
       try {
-        Connection conn = OBDal.getInstance().getConnection();
-        try (PreparedStatement ps = conn.prepareStatement(
-            "UPDATE etgo_support_conversation SET human_takeover = true WHERE id = ?")) {
-          ps.setString(1, convId);
-          if (ps.executeUpdate() == 0) {
-            writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
-            return;
-          }
+        SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+        if (conv == null) {
+          writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
+          return;
         }
+        conv.setHumanTakeover(true);
+        OBDal.getInstance().save(conv);
         log.info("Human takeover set for conversation {}", convId);
         writeJson(response, HttpServletResponse.SC_OK, new JSONObject().put(FIELD_STATUS, "ok"));
       } finally {
@@ -718,24 +656,26 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     try {
       OBContext.setAdminMode(true);
       try {
-        Connection conn = OBDal.getInstance().getConnection();
-        int rows;
+        List<SupportConversation> matches;
         if (!convId.isEmpty()) {
-          try (PreparedStatement ps = conn.prepareStatement(
-              "UPDATE etgo_support_conversation SET human_takeover = false WHERE id = ?")) {
-            ps.setString(1, convId);
-            rows = ps.executeUpdate();
-          }
+          SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+          matches = conv == null ? List.of() : List.of(conv);
         } else {
-          try (PreparedStatement ps = conn.prepareStatement(
-              "UPDATE etgo_support_conversation SET human_takeover = false WHERE jira_ticket_key = ?")) {
-            ps.setString(1, jiraKey);
-            rows = ps.executeUpdate();
-          }
+          // System/webhook call with no per-request tenant to scope to — must see every client's
+          // conversations to resolve the Jira ticket key.
+          OBCriteria<SupportConversation> crit = OBDal.getInstance().createCriteria(SupportConversation.class);
+          crit.setFilterOnReadableClients(false);
+          crit.setFilterOnReadableOrganization(false);
+          crit.add(Restrictions.eq(SupportConversation.PROPERTY_JIRATICKETKEY, jiraKey));
+          matches = crit.list();
         }
-        if (rows == 0) {
+        if (matches.isEmpty()) {
           writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
           return;
+        }
+        for (SupportConversation conv : matches) {
+          conv.setHumanTakeover(false);
+          OBDal.getInstance().save(conv);
         }
         log.info("Human takeover reset for conversation '{}' / jira '{}'", convId, jiraKey);
         writeJson(response, HttpServletResponse.SC_OK, new JSONObject().put(FIELD_STATUS, "ok"));
@@ -748,143 +688,76 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     }
   }
 
-  // --- Schema bootstrap ---
-
-  private void ensureTablesExist() {
-    if (TABLES_READY.get()) return;
-    synchronized (TABLES_READY) {
-      if (TABLES_READY.get()) return;
-      try {
-        OBContext.setAdminMode(true);
-        try {
-          Connection conn = OBDal.getInstance().getConnection();
-          for (String ddl : new String[]{ DDL_CONVERSATION, DDL_MESSAGE, DDL_IDX_CONV_USER, DDL_IDX_MSG_CONV,
-              DDL_MIGRATE_JIRA_KEY, DDL_MIGRATE_JIRA_IDX, DDL_MIGRATE_MSG_EXTID, DDL_MIGRATE_MSG_EXTID_IDX,
-              DDL_MIGRATE_HUMAN_TAKEOVER }) {
-            try (PreparedStatement ps = conn.prepareStatement(ddl)) {
-              ps.execute();
-            }
-          }
-          TABLES_READY.set(true);
-          log.info("Support chat tables ready");
-        } finally {
-          OBContext.restorePreviousMode();
-        }
-      } catch (Exception e) {
-        log.error("Failed to initialize support chat tables — will retry on next request", e);
-      }
-    }
-  }
-
   // --- DB helpers ---
 
-  private void insertMessage(Connection conn, String id, String convId, String sender,
-      String senderName, String text, String timestamp) throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(
-        "INSERT INTO etgo_support_message (id, conversation_id, sender, sender_name, text, timestamp)" +
-        " VALUES (?, ?, ?, ?, ?, ?::timestamptz)")) {
-      ps.setString(1, id);
-      ps.setString(2, convId);
-      ps.setString(3, sender);
-      ps.setString(4, senderName);
-      ps.setString(5, text);
-      ps.setString(6, timestamp);
-      ps.executeUpdate();
-    }
+  private static boolean belongsToUser(SupportConversation conv, String userId) {
+    return conv != null && conv.getUser() != null && userId.equals(conv.getUser().getId());
+  }
+
+  private static void saveMessage(SupportConversation conv, String sender, String senderName,
+      String text, Date timestamp, User createdBy) {
+    SupportMessage msg = OBProvider.getInstance().get(SupportMessage.class);
+    msg.setNewOBObject(true);
+    msg.setId(newId());
+    msg.setClient(conv.getClient());
+    msg.setOrganization(conv.getOrganization());
+    msg.setCreatedBy(createdBy);
+    msg.setUpdatedBy(createdBy);
+    msg.setConversation(conv);
+    msg.setSender(sender);
+    msg.setSenderName(senderName);
+    msg.setText(text);
+    msg.setMessageDate(timestamp);
+    OBDal.getInstance().save(msg);
   }
 
   /** Package-private: also used by {@link SupportJiraWebhookHandler} when storing an inbound Jira comment. */
-  static void updateConvSummary(Connection conn, String convId, String lastMsg, String ts)
-      throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(
-        "UPDATE etgo_support_conversation" +
-        "   SET last_message = ?, last_activity = ?::timestamptz" +
-        " WHERE id = ?")) {
-      ps.setString(1, lastMsg.length() > 120 ? lastMsg.substring(0, 120) + "…" : lastMsg);
-      ps.setString(2, ts);
-      ps.setString(3, convId);
-      ps.executeUpdate();
-    }
+  static void updateConvSummary(String convId, String lastMsg, Date ts) {
+    SupportConversation conv = OBDal.getInstance().get(SupportConversation.class, convId);
+    conv.setLastMessage(lastMsg.length() > 120 ? lastMsg.substring(0, 120) + "…" : lastMsg);
+    conv.setLastActivity(ts);
+    OBDal.getInstance().save(conv);
   }
 
-  private boolean conversationBelongsToUser(Connection conn, String convId, String userId)
-      throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT 1 FROM etgo_support_conversation WHERE id = ? AND user_id = ?")) {
-      ps.setString(1, convId);
-      ps.setString(2, userId);
-      try (ResultSet rs = ps.executeQuery()) {
-        return rs.next();
-      }
-    }
+  private JSONObject toConvSummaryJson(SupportConversation conv) throws JSONException {
+    JSONObject obj = new JSONObject();
+    obj.put("id",           conv.getId());
+    obj.put(FIELD_SUBJECT,  conv.getSubject());
+    obj.put(FIELD_STATUS,   conv.getStatus());
+    obj.put("lastActivity", toIso(conv.getLastActivity()));
+    obj.put("lastMessage",  conv.getLastMessage() != null ? conv.getLastMessage() : "");
+    obj.put(FIELD_UNREAD,   Boolean.TRUE.equals(conv.isUnread()));
+    obj.put(FIELD_RATED,    Boolean.TRUE.equals(conv.isRated()));
+    return obj;
   }
 
-  private String getConvStatus(Connection conn, String convId) throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT status FROM etgo_support_conversation WHERE id = ?")) {
-      ps.setString(1, convId);
-      try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() ? rs.getString(FIELD_STATUS) : STATUS_OPEN;
-      }
-    }
-  }
-
-  private JSONObject buildConvSummary(Connection conn, String convId)
-      throws SQLException, JSONException {
-    try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT id, subject, status, last_activity, last_message, unread, rated" +
-        "  FROM etgo_support_conversation WHERE id = ?")) {
-      ps.setString(1, convId);
-      try (ResultSet rs = ps.executeQuery()) {
-        if (!rs.next()) return new JSONObject();
-        JSONObject obj = new JSONObject();
-        obj.put("id",           rs.getString("id"));
-        obj.put(FIELD_SUBJECT,  rs.getString(FIELD_SUBJECT));
-        obj.put(FIELD_STATUS,   rs.getString(FIELD_STATUS));
-        obj.put("lastActivity", toIso(rs.getString("last_activity")));
-        obj.put("lastMessage",  rs.getString(FIELD_LAST_MESSAGE_COL) != null ? rs.getString(FIELD_LAST_MESSAGE_COL) : "");
-        obj.put(FIELD_UNREAD,   rs.getBoolean(FIELD_UNREAD));
-        obj.put(FIELD_RATED,    rs.getBoolean(FIELD_RATED));
-        return obj;
-      }
-    }
-  }
-
-  private JSONArray buildMessageArray(Connection conn, String convId)
-      throws SQLException, JSONException {
+  private JSONArray buildMessageArray(String convId) throws JSONException {
+    // The session flush mode is COMMIT (not AUTO), so a criteria query run in the same
+    // transaction as an earlier saveMessage() would not see it without an explicit flush first.
+    OBDal.getInstance().flush();
     JSONArray arr = new JSONArray();
-    try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT id, conversation_id, sender, sender_name, text, timestamp" +
-        "  FROM etgo_support_message WHERE conversation_id = ? ORDER BY timestamp ASC")) {
-      ps.setString(1, convId);
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          JSONObject msg = new JSONObject();
-          msg.put("id",             rs.getString("id"));
-          msg.put(FIELD_CONVERSATION_ID, rs.getString("conversation_id"));
-          msg.put("sender",         rs.getString("sender"));
-          msg.put("senderName",     rs.getString("sender_name"));
-          msg.put("text",           rs.getString("text"));
-          msg.put("timestamp",      toIso(rs.getString("timestamp")));
-          arr.put(msg);
-        }
-      }
+    OBCriteria<SupportMessage> crit = OBDal.getInstance().createCriteria(SupportMessage.class);
+    crit.add(Restrictions.eq(SupportMessage.PROPERTY_CONVERSATION + ".id", convId));
+    crit.addOrderBy(SupportMessage.PROPERTY_MESSAGEDATE, true);
+    for (SupportMessage msg : crit.list()) {
+      JSONObject json = new JSONObject();
+      json.put("id",             msg.getId());
+      json.put(FIELD_CONVERSATION_ID, convId);
+      json.put("sender",         msg.getSender());
+      json.put("senderName",     msg.getSenderName());
+      json.put("text",           msg.getText());
+      json.put("timestamp",      toIso(msg.getMessageDate()));
+      arr.put(json);
     }
     return arr;
   }
 
-  /** Strip timezone offset info that JDBC adds to prevent double-parsing on the frontend. */
-  private static String toIso(String ts) {
-    if (ts == null) return null;
-    // JDBC returns e.g. "2026-06-10 16:00:00.123456-03" — normalise to ISO-8601
-    String s = ts.replace(' ', 'T');
-    // Truncate microseconds to milliseconds (ECMAScript Date only supports 3 decimal places)
-    s = s.replaceAll("(\\.\\d{3})\\d+", "$1");
-    // Short offsets like +02 or -03 are missing :MM — add :00
-    s = s.replaceAll("([+-]\\d{2})$", "$1:00");
-    // Normalise UTC offset to Z
-    s = s.replace("+00:00", "Z");
-    return s;
+  /** Formats a naive local-time {@link Date} (columns are TIMESTAMP WITHOUT TIME ZONE) as
+   * millisecond-precision ISO-8601 with no zone suffix, matching the JSON contract the frontend
+   * already parses as a wall-clock value. */
+  private static String toIso(Date date) {
+    if (date == null) return null;
+    return date.toInstant().atZone(ZoneId.systemDefault()).format(ISO_NO_ZONE);
   }
 
   /** Package-private: also used by {@link SupportJiraWebhookHandler} to mint message/comment ids. */
@@ -936,6 +809,9 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   /** Package-private: also used by {@link SupportJiraWebhookHandler}. */
   static void writeJson(HttpServletResponse response, int status, JSONObject body)
       throws IOException {
+    // The session flush mode is COMMIT (not AUTO); flushing here — instead of trusting the
+    // end-of-request auto-commit — is what makes pending saves in this response durable.
+    OBDal.getInstance().flush();
     response.setStatus(status);
     response.setContentType(CONTENT_TYPE_JSON);
     response.setCharacterEncoding(CHARSET_UTF8);
