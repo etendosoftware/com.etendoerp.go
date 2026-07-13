@@ -85,7 +85,9 @@ public class ProductPriceHandler implements NeoHandler {
       + "LEFT JOIN c_currency c       ON c.c_currency_id = pl.c_currency_id "
       + "WHERE pp.m_product_id = :productId "
       + "  AND pp.isactive = 'Y' "
-      + "ORDER BY pl.issopricelist DESC, plv.validfrom DESC, plv.name";
+      // Insertion order (oldest first) so newly added price lists append at the
+      // bottom of the section instead of jumping to the top.
+      + "ORDER BY pl.issopricelist DESC, pp.created ASC, plv.name";
 
   @Override
   public NeoResponse handle(NeoContext ctx) {

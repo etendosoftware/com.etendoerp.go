@@ -214,21 +214,16 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
   @Override
   public NeoResponse afterCallout(NeoContext context) {
     try {
-      NeoResponse previous = context.getPreviousResult();
-      if (previous == null || previous.getBody() == null) {
+      NeoHandlerUtils.CalloutFields fields = NeoHandlerUtils.extractCalloutFields(context);
+      if (fields == null) {
         return null;
       }
-      JSONObject body = previous.getBody();
-      JSONObject updates = body.optJSONObject("updates");
-      JSONObject requestBody = context.getRequestBody();
-      String triggerField = requestBody != null ? requestBody.optString("field", "") : "";
-      JSONObject formState = requestBody != null ? requestBody.optJSONObject("formState") : null;
-
-      blockCalloutCurrencyUpdate(updates, triggerField);
-      if ("businessPartner".equals(triggerField) && updates != null && updates.has(FIELD_PRICE_LIST)) {
-        applyPriceListFallbackIfNeeded(body, updates);
+      blockCalloutCurrencyUpdate(fields.updates(), fields.triggerField());
+      if ("businessPartner".equals(fields.triggerField()) && fields.updates() != null
+          && fields.updates().has(FIELD_PRICE_LIST)) {
+        applyPriceListFallbackIfNeeded(fields.body(), fields.updates());
       }
-      checkExchangeRateWarning(body, requestBody, formState, triggerField);
+      checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
     } catch (Exception e) {
       log.warn("[ETP-4027] afterCallout failed (non-fatal): {}", e.getMessage());
     }

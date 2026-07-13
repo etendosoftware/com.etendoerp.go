@@ -14,7 +14,9 @@ name: Base Branch Health Check
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize]
+    # `labeled` lets the escape hatch below re-evaluate as soon as the
+    # 'base-branch-fix' label is applied — no manual "Re-run jobs" needed.
+    types: [opened, reopened, synchronize, labeled]
     branches:
       - main
       - develop
@@ -36,6 +38,25 @@ jobs:
           script: |
             const { owner, repo } = context.repo;
             const baseRef = context.payload.pull_request.base.ref;
+
+            // ── Escape hatch: PR that repairs the base branch ───────────────
+            // A PR labeled 'base-branch-fix' is allowed through even when the
+            // base is red: it IS the change that turns the base green again, so
+            // this gate would otherwise deadlock it (the base can only go green
+            // once this PR merges). Applying the label re-runs this workflow via
+            // the `labeled` event above, so the check turns green as soon as the
+            // label is applied — no manual "Re-run jobs" needed.
+            const labels = (context.payload.pull_request.labels || []).map(l => l.name);
+            if (labels.includes('base-branch-fix')) {
+              await core.summary
+                .addHeading(`Base branch health: ${baseRef}`, 3)
+                .addRaw(`Skipped — PR labeled \`base-branch-fix\` (expected to repair the base branch).`)
+                .write();
+              core.info(
+                `PR labeled 'base-branch-fix' → skipping base health gate for '${baseRef}'.`
+              );
+              return;
+            }
 
             // Latest commit on the base branch (NOT the merge base — we want
             // the current tip the PR would merge into).

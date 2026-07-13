@@ -50,9 +50,11 @@ import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.geography.Country;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
@@ -741,6 +743,78 @@ public class FinancialAccountHandlerTest {
 
     assertNull(handler.afterHandle(ctx));
     verify(handler, never()).extractCreatedId(any());
+  }
+
+  /**
+   * The defaults endpoint overwrites the generic currency default with the client's accounting
+   * schema currency, so the new-account wizard starts with the real client currency instead of the
+   * first alphabetic active currency.
+   */
+  @Test
+  public void testAfterHandleDefaultsInjectsClientCurrency() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
+
+    Currency currency = mock(Currency.class);
+    when(currency.getId()).thenReturn(EUR_ID);
+    when(currency.getISOCode()).thenReturn("EUR");
+
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getCurrency()).thenReturn(currency);
+
+    JSONObject defaults = new JSONObject().put("currency", "114").put("currency$_identifier", "AED");
+    JSONObject responseBody = new JSONObject().put("defaults", defaults);
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(200, responseBody));
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBContext obCtx = mock(OBContext.class);
+      Client client = mock(Client.class);
+      when(obCtx.getCurrentClient()).thenReturn(client);
+      obContext.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<AcctSchema> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(AcctSchema.class)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(schema);
+
+      NeoResponse out = handler.afterHandle(ctx);
+
+      assertEquals(200, out.getHttpStatus());
+      JSONObject outDefaults = out.getBody().getJSONObject("defaults");
+      assertEquals(EUR_ID, outDefaults.getString("currency"));
+      assertEquals("EUR", outDefaults.getString("currency$_identifier"));
+      verify(handler, never()).extractCreatedId(any());
+    }
+  }
+
+  /** When the defaults endpoint cannot resolve a client currency, it leaves the generic response unchanged. */
+  @Test
+  public void testAfterHandleDefaultsWithoutClientCurrencyReturnsNull() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(200, new JSONObject()));
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBContext obCtx = mock(OBContext.class);
+      when(obCtx.getCurrentClient()).thenReturn(mock(Client.class));
+      obContext.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<AcctSchema> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(AcctSchema.class)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+
+      assertNull(handler.afterHandle(ctx));
+      verify(handler, never()).extractCreatedId(any());
+    }
   }
 
   /** A POST whose response carries no id assigns nothing. */
