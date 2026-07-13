@@ -33,6 +33,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.advpaymentmngt.dao.AdvPaymentMngtDao;
@@ -54,13 +55,16 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
+import org.openbravo.model.financialmgmt.payment.FIN_Payment_Credit;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.JsonUtils;
 
+import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 
 /**
@@ -94,6 +98,15 @@ final class PaymentRegistrationService {
   private static final String KEY_LABEL = "label";
   private static final String FIELD_PIS = "pis";
   private static final String KEY_VIA_PIS = "viaPis";
+  private static final String KEY_KIND = "kind";
+  private static final String KEY_USE = "use";
+  private static final String KEY_PAYMENT_ID = "paymentId";
+  private static final String KEY_PSD_ID = "psdId";
+  private static final String KIND_CREDIT = "credit";
+  private static final String KIND_ABONO = "abono";
+  /** Body field on {@code invoiceCreditSources}: the draft being edited, so its own consumption
+   *  is added back into each source's {@code avail} and its already-used abono PSDs are relisted. */
+  private static final String FIELD_EDIT_PAYMENT_ID = "editPaymentId";
 
   // OBError type returned by FIN_AddPayment.processPayment on failure
   private static final String STATUS_ERROR = "Error";
@@ -388,7 +401,42 @@ final class PaymentRegistrationService {
     // payment history as a "Realizado vía PSD2" badge. PisPayment is a plain DAL entity (no
     // PSD2-module method needed), so this is queried directly here.
     item.put(KEY_VIA_PIS, PisPaymentService.hasLinkedPisPayment(p));
+    // Only a draft can be re-opened for editing — expose which credit/abono sources it is
+    // currently consuming so the edit modal can re-check them (see creditSourcesUsedByPayment).
+    if (!Boolean.TRUE.equals(p.isProcessed())) {
+      item.put("creditSourcesUsed", creditSourcesUsedByPayment(p));
+    }
     return item;
+  }
+
+  /**
+   * Reconstructs the credit/abono sources {@code payment} (a draft) is currently consuming, in the
+   * same shape the frontend sends when registering ({@code {kind, paymentId|psdId, use}}), so the
+   * edit modal can re-check the sources the draft already applied.
+   */
+  private static JSONArray creditSourcesUsedByPayment(FIN_Payment payment) throws Exception {
+    JSONArray arr = new JSONArray();
+    OBCriteria<FIN_Payment_Credit> crit = OBDal.getInstance().createCriteria(FIN_Payment_Credit.class);
+    crit.add(Restrictions.eq(FIN_Payment_Credit.PROPERTY_PAYMENT, payment));
+    for (FIN_Payment_Credit link : crit.list()) {
+      JSONObject used = new JSONObject();
+      used.put(KEY_KIND, KIND_CREDIT);
+      used.put(KEY_PAYMENT_ID, link.getCreditPaymentUsed().getId());
+      used.put(KEY_USE, link.getAmount());
+      arr.put(used);
+    }
+    for (FIN_PaymentDetail detail : payment.getFINPaymentDetailList()) {
+      for (FIN_PaymentScheduleDetail psd : detail.getFINPaymentScheduleDetailList()) {
+        if (psd.getAmount().signum() < 0) {
+          JSONObject used = new JSONObject();
+          used.put(KEY_KIND, KIND_ABONO);
+          used.put(KEY_PSD_ID, psd.getId());
+          used.put(KEY_USE, psd.getAmount().abs());
+          arr.put(used);
+        }
+      }
+    }
+    return arr;
   }
 
   // ─── PAYMENT METHODS: list methods valid for the invoice's accounts ────────
@@ -478,9 +526,14 @@ final class PaymentRegistrationService {
           return itemsResponse(new JSONArray());
         }
         String bpId = invoice.getBusinessPartner().getId();
+        // Editing a draft: add its own consumption back in, so sources it is already using
+        // show their "as if this draft didn't exist" availability and stay in the list even
+        // if fully consumed by it — letting the modal re-check them.
+        String editPaymentId = context.getRequestBody() != null
+            ? context.getRequestBody().optString(FIELD_EDIT_PAYMENT_ID, null) : null;
         List<DatedSource> sources = new ArrayList<>();
-        collectAbonoSources(sources, bpId, invoiceId, isReceipt);
-        collectAccumulatedCredit(sources, bpId, isReceipt);
+        collectAbonoSources(sources, bpId, invoiceId, isReceipt, editPaymentId);
+        collectAccumulatedCredit(sources, bpId, isReceipt, editPaymentId);
         // Merge both kinds into a single list ordered by each row's own date — invoice
         // date for saldo a favor (abono), payment date for credit — most recent first.
         // The two kinds are NOT grouped separately; they interleave by date. Reversing
@@ -515,9 +568,14 @@ final class PaymentRegistrationService {
     }
   }
 
-  /** Collects pending credit-memo / return PSDs (negative amount) of the BP. */
+  /**
+   * Collects pending credit-memo / return PSDs (negative amount) of the BP, plus — when editing a
+   * draft ({@code editPaymentId} present) — any such PSD that draft ALREADY consumed (its
+   * {@code paymentDetails} is no longer null, so it would otherwise vanish from this list once
+   * used), so the edit modal can keep showing and re-checking it.
+   */
   private static void collectAbonoSources(List<DatedSource> sources, String bpId, String invoiceId,
-      boolean isReceipt) throws Exception {
+      boolean isReceipt, String editPaymentId) throws Exception {
     String hql = "select psd from FIN_Payment_ScheduleDetail psd "
         + "where psd.invoicePaymentSchedule.invoice.businessPartner.id = :bp "
         + "and psd.invoicePaymentSchedule.invoice.salesTransaction = :receipt "
@@ -532,26 +590,54 @@ final class PaymentRegistrationService {
         .setMaxResults(50)
         .list();
     for (FIN_PaymentScheduleDetail psd : abonos) {
-      Invoice ncInv = psd.getInvoicePaymentSchedule().getInvoice();
-      JSONObject item = new JSONObject();
-      item.put("id", psd.getId());
-      item.put("kind", "abono");
-      item.put("psdId", psd.getId());
-      item.put("doc", ncInv.getDocumentNo());
-      item.put("date", ncInv.getInvoiceDate() != null
-          ? JsonUtils.createDateFormat().format(ncInv.getInvoiceDate()) : null);
-      item.put("note", ncInv.getDocumentType() != null ? ncInv.getDocumentType().getName() : "");
-      item.put("avail", psd.getAmount().abs());
-      sources.add(new DatedSource(ncInv.getInvoiceDate(), item));
+      addAbonoSource(sources, psd);
+    }
+    if (StringUtils.isNotBlank(editPaymentId)) {
+      for (FIN_PaymentScheduleDetail psd : abonosUsedByDraft(editPaymentId)) {
+        addAbonoSource(sources, psd);
+      }
     }
   }
 
-  /** Collects accumulated-credit payments of the BP with available credit (generated minus used). */
+  /** Credit-memo / return PSDs (negative amount) already linked to the draft being edited. */
+  private static List<FIN_PaymentScheduleDetail> abonosUsedByDraft(String editPaymentId) {
+    String hql = "select psd from FIN_Payment_ScheduleDetail psd "
+        + "where psd.paymentDetails.finPayment.id = :pay and psd.amount < 0 "
+        + "and psd.invoicePaymentSchedule is not null";
+    return OBDal.getInstance().getSession()
+        .createQuery(hql, FIN_PaymentScheduleDetail.class)
+        .setParameter("pay", editPaymentId)
+        .list();
+  }
+
+  private static void addAbonoSource(List<DatedSource> sources, FIN_PaymentScheduleDetail psd) throws JSONException {
+    Invoice ncInv = psd.getInvoicePaymentSchedule().getInvoice();
+    JSONObject item = new JSONObject();
+    item.put("id", psd.getId());
+    item.put(KEY_KIND, KIND_ABONO);
+    item.put(KEY_PSD_ID, psd.getId());
+    item.put("doc", ncInv.getDocumentNo());
+    item.put("date", ncInv.getInvoiceDate() != null
+        ? JsonUtils.createDateFormat().format(ncInv.getInvoiceDate()) : null);
+    item.put("note", ncInv.getDocumentType() != null ? ncInv.getDocumentType().getName() : "");
+    item.put("avail", psd.getAmount().abs());
+    sources.add(new DatedSource(ncInv.getInvoiceDate(), item));
+  }
+
+  /**
+   * Collects accumulated-credit payments of the BP with available credit (generated minus used),
+   * plus — when editing a draft ({@code editPaymentId} present) — that draft's own consumption
+   * added back into each source's {@code avail} (so it shows "as if this draft didn't exist" and
+   * stays listed even if fully consumed by it, letting the modal re-check it).
+   */
   private static void collectAccumulatedCredit(List<DatedSource> sources, String bpId,
-      boolean isReceipt) throws Exception {
+      boolean isReceipt, String editPaymentId) throws Exception {
+    boolean editing = StringUtils.isNotBlank(editPaymentId);
+    // While editing, the strict ">0" filter would hide a source THIS draft fully consumed —
+    // fetch unfiltered and apply the (draft-adjusted) avail>0 check in Java instead.
     String hql = "select p from FIN_Payment p "
         + "where p.businessPartner.id = :bp and p.receipt = :receipt "
-        + "and (coalesce(p.generatedCredit, 0) - coalesce(p.usedCredit, 0)) > 0 "
+        + (editing ? "" : "and (coalesce(p.generatedCredit, 0) - coalesce(p.usedCredit, 0)) > 0 ")
         + "order by p.paymentDate desc";
     List<FIN_Payment> credits = OBDal.getInstance().getSession()
         .createQuery(hql, FIN_Payment.class)
@@ -561,6 +647,9 @@ final class PaymentRegistrationService {
         .list();
     for (FIN_Payment src : credits) {
       BigDecimal avail = nullToZero(src.getGeneratedCredit()).subtract(nullToZero(src.getUsedCredit()));
+      if (editing) {
+        avail = avail.add(creditUsedByDraft(editPaymentId, src));
+      }
       if (avail.signum() <= 0) {
         // Defensive: the HQL already excludes fully-consumed credit, but never
         // expose a zero/negative-availability row if one slips through.
@@ -568,8 +657,8 @@ final class PaymentRegistrationService {
       }
       JSONObject item = new JSONObject();
       item.put("id", src.getId());
-      item.put("kind", "credit");
-      item.put("paymentId", src.getId());
+      item.put(KEY_KIND, KIND_CREDIT);
+      item.put(KEY_PAYMENT_ID, src.getId());
       item.put("doc", src.getDocumentNo());
       item.put("date", src.getPaymentDate() != null
           ? JsonUtils.createDateFormat().format(src.getPaymentDate()) : null);
@@ -577,6 +666,16 @@ final class PaymentRegistrationService {
       item.put("avail", avail);
       sources.add(new DatedSource(src.getPaymentDate(), item));
     }
+  }
+
+  /** Amount of {@code source}'s credit the draft {@code editPaymentId} currently consumes (0 if none). */
+  private static BigDecimal creditUsedByDraft(String editPaymentId, FIN_Payment source) {
+    OBCriteria<FIN_Payment_Credit> crit = OBDal.getInstance().createCriteria(FIN_Payment_Credit.class);
+    crit.add(Restrictions.eq(FIN_Payment_Credit.PROPERTY_PAYMENT + ".id", editPaymentId));
+    crit.add(Restrictions.eq(FIN_Payment_Credit.PROPERTY_CREDITPAYMENTUSED, source));
+    crit.setMaxResults(1);
+    FIN_Payment_Credit link = (FIN_Payment_Credit) crit.uniqueResult();
+    return link != null ? nullToZero(link.getAmount()) : BigDecimal.ZERO;
   }
 
   // ─── ADVANCED: draft/confirm + payment method + credit consumption ─────────
@@ -589,7 +688,14 @@ final class PaymentRegistrationService {
    *
    * Body: {@code scheduleId, actual_payment, payment_date, fin_financial_account_id,
    * fin_paymentmethod_id?, process('draft'|'confirm'), creditSources[], overpaymentAction?,
-   * pis?}. On {@code process='draft'} the payment is created but NOT processed (stays DR).
+   * pis?, paymentId?}. On {@code process='draft'} the payment is created but NOT processed (stays DR).
+   *
+   * <p>When {@code paymentId} is present the existing DRAFT it identifies is edited in place: the same
+   * {@link FIN_Payment} row (same id and documentNo) is reset — its payment details and the
+   * payment-owned schedule details it created are removed, the invoice's own installment details are
+   * restored to unpaid, any consumed accumulated credit is given back to its source payments, and the
+   * monetary aggregates are zeroed — and then re-applied with the new amount/date/account/method. A
+   * processed payment is read-only and rejected. A blank {@code paymentId} keeps the create behavior.
    *
    * <p>When {@code pis=true} the payment is registered as a real bank transfer through the
    * PSD2 / Salt Edge PIS integration: the {@link FIN_Payment} is created, linked and PROCESSED to
@@ -649,18 +755,40 @@ final class PaymentRegistrationService {
     }
 
     AdvPaymentMngtDao dao = new AdvPaymentMngtDao();
-    FIN_Payment payment = createDraftPayment(dao, isReceipt, invoice,
-        paymentMethod, account, paymentDate, cash);
+
+    // Edit-in-place: when paymentId is present, reuse the existing DRAFT (same id + documentNo)
+    // after resetting it; otherwise create a fresh draft.
+    String editPaymentId = body.optString("paymentId", null);
+    boolean isEdit = StringUtils.isNotBlank(editPaymentId);
+    FIN_Payment payment;
+    if (!isEdit) {
+      payment = createDraftPayment(dao, isReceipt, invoice,
+          paymentMethod, account, paymentDate, cash);
+    } else {
+      FIN_Payment existing = OBDal.getInstance().get(FIN_Payment.class, editPaymentId);
+      if (existing == null) {
+        return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Payment not found");
+      }
+      payment = prepareEditableDraft(existing, paymentMethod, account, paymentDate, cash);
+    }
 
     BigDecimal totalFunded = PaymentCreditConsumer.consume(payment, body.optJSONArray("creditSources"));
-
-    List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(scheduleId);
-    if (pendingPSDs.isEmpty()) {
-      throw new OBException(MSG_NO_PENDING_PSD);
-    }
     BigDecimal funds = cash.add(totalFunded);
-    BigDecimal invoiceApplied = sumAmounts(pendingPSDs).min(funds).max(BigDecimal.ZERO);
-    linkPSDsToPayment(pendingPSDs, payment, invoiceApplied);
+    BigDecimal invoiceApplied;
+    if (isEdit) {
+      // The document's own installment PSD is still linked to this payment (we never detached
+      // it — see prepareEditableDraft) — adjust it in place via Core's own reconciliation
+      // (FIN_AddPayment.updatePaymentDetail already knows how to grow/shrink an existing link
+      // against its sibling outstanding fragment), instead of re-searching for "pending" PSDs.
+      invoiceApplied = reapplyLinkedInstallmentPSD(payment, scheduleId, funds);
+    } else {
+      List<FIN_PaymentScheduleDetail> pendingPSDs = findPendingPSDs(scheduleId);
+      if (pendingPSDs.isEmpty()) {
+        throw new OBException(MSG_NO_PENDING_PSD);
+      }
+      invoiceApplied = sumAmounts(pendingPSDs).min(funds).max(BigDecimal.ZERO);
+      linkPSDsToPayment(pendingPSDs, payment, invoiceApplied);
+    }
     OBDal.getInstance().save(payment);
     OBDal.getInstance().flush();
 
@@ -683,6 +811,73 @@ final class PaymentRegistrationService {
     }
     processOrThrow(payment);
     return builtPaymentResponse(payment);
+  }
+
+  /**
+   * Deletes a DRAFT payment (Borrador) — never a processed one, which is read-only. Unlike editing
+   * in place, the payment itself IS removed here (no reason to keep its id/documentNo). Reverses
+   * whatever this draft holds so nothing is left dangling: consumed accumulated credit (its source's
+   * {@code usedCredit} is restored, the {@code FIN_Payment_Credit} link removed), payment-owned
+   * credit/refund PSDs (deleted outright), and the document's own installment PSD (released back to
+   * pending via Core's own reconciliation, {@link FIN_AddPayment#updatePaymentDetail}, so the
+   * invoice becomes payable again instead of being left fragmented).
+   *
+   * <p>The detach above is the step Classic's own "Remove Payment" performs by REACTIVATING first;
+   * a bare {@code PaymentRemovalUtil.remove()} on a still-linked draft would hit a FK constraint
+   * ("associated with other existing elements"). Once the children are detached, we hand the final
+   * deletion to the module's {@link PaymentRemovalUtil#remove} so it stays the single source of
+   * truth for payment removal (its invoice-recompute becomes a harmless no-op here, since our
+   * release already restored the schedule).
+   */
+  static NeoResponse deleteDraftPayment(String paymentId) {
+    FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
+    if (payment == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Payment not found");
+    }
+    if (isPaymentProcessed(payment)) {
+      throw new OBException("Cannot delete a processed payment");
+    }
+    reverseConsumedCredit(payment);
+    releaseInstallmentDetails(payment);
+    removeCreditOwnedDetails(payment);
+    PaymentRemovalUtil.remove(payment);
+    OBDal.getInstance().flush();
+    return NeoResponse.noContent();
+  }
+
+  /**
+   * Releases the document's own installment {@link FIN_PaymentScheduleDetail} — linked to this
+   * draft — back to pending, via {@link FIN_AddPayment#updatePaymentDetail} with a zero amount:
+   * Core's own "editing an existing link" branch folds the whole amount back into the sibling
+   * outstanding fragment it tracks, so the invoice becomes payable again without leaving a
+   * fragmented/duplicated schedule. Self-contained: also deletes the now-empty document PSD and
+   * its {@link FIN_PaymentDetail} (they carry no value once zeroed), so the caller doesn't need to
+   * assume the in-memory collections resync after the zeroing.
+   */
+  private static void releaseInstallmentDetails(FIN_Payment payment) {
+    for (FIN_PaymentDetail detail : payment.getFINPaymentDetailList()) {
+      for (FIN_PaymentScheduleDetail psd : detail.getFINPaymentScheduleDetailList()) {
+        if (psd.getInvoicePaymentSchedule() != null || psd.getOrderPaymentSchedule() != null) {
+          FIN_AddPayment.updatePaymentDetail(psd, payment, BigDecimal.ZERO, false);
+        }
+      }
+    }
+    OBDal.getInstance().flush();
+    for (FIN_PaymentDetail detail : new ArrayList<>(payment.getFINPaymentDetailList())) {
+      List<FIN_PaymentScheduleDetail> psds = new ArrayList<>(detail.getFINPaymentScheduleDetailList());
+      boolean isDocumentDetail = psds.stream()
+          .anyMatch(psd -> psd.getInvoicePaymentSchedule() != null || psd.getOrderPaymentSchedule() != null);
+      if (!isDocumentDetail) {
+        continue; // payment-owned (credit/refund) details are handled by removeCreditOwnedDetails.
+      }
+      for (FIN_PaymentScheduleDetail psd : psds) {
+        detail.getFINPaymentScheduleDetailList().remove(psd);
+        OBDal.getInstance().remove(psd);
+      }
+      payment.getFINPaymentDetailList().remove(detail);
+      OBDal.getInstance().remove(detail);
+    }
+    OBDal.getInstance().flush();
   }
 
   // ─── ADVANCED HELPERS ──────────────────────────────────────────────────────
@@ -728,6 +923,131 @@ final class PaymentRegistrationService {
       }
     }
     return resolvePaymentMethod(account, invoice, isReceipt);
+  }
+
+  // ─── EDIT-IN-PLACE HELPERS ──────────────────────────────────────────────────
+
+  /**
+   * Guards that {@code existing} is an editable DRAFT (throws → HTTP 400 when processed), clears
+   * what THIS draft owns outright (consumed credit, payment-owned credit/refund PSDs), and re-sets
+   * its date/account/method/amount. Deliberately leaves the document's own installment
+   * {@link FIN_PaymentScheduleDetail} LINKED to this payment — {@link #reapplyLinkedInstallmentPSD}
+   * adjusts it in place afterwards via Core's own reconciliation instead of detaching/re-searching
+   * it, which avoids re-implementing Core's split/merge bookkeeping by hand. Returns the SAME
+   * {@link FIN_Payment} (id + documentNo unchanged).
+   */
+  private static FIN_Payment prepareEditableDraft(FIN_Payment existing,
+      FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account, Date paymentDate,
+      BigDecimal cash) {
+    if (isPaymentProcessed(existing)) {
+      throw new OBException("Cannot edit a processed payment");
+    }
+    reverseConsumedCredit(existing);
+    removeCreditOwnedDetails(existing);
+    reapplyDraftBasics(existing, paymentMethod, account, paymentDate, cash);
+    return existing;
+  }
+
+  /**
+   * True when the payment is no longer an editable draft: it has been processed (its bank
+   * transaction / accounting exist), so it is read-only.
+   */
+  private static boolean isPaymentProcessed(FIN_Payment payment) {
+    return Boolean.TRUE.equals(payment.isProcessed());
+  }
+
+  /**
+   * Gives back the accumulated credit this draft consumed from its source payments (decrementing
+   * their {@code usedCredit}) and removes the {@code FIN_Payment_Credit} links, mirroring the create
+   * path's {@link PaymentCreditConsumer#consume} but in reverse.
+   */
+  private static void reverseConsumedCredit(FIN_Payment payment) {
+    OBCriteria<FIN_Payment_Credit> crit = OBDal.getInstance()
+        .createCriteria(FIN_Payment_Credit.class);
+    crit.add(Restrictions.eq(FIN_Payment_Credit.PROPERTY_PAYMENT, payment));
+    for (FIN_Payment_Credit link : crit.list()) {
+      FIN_Payment source = link.getCreditPaymentUsed();
+      if (source != null) {
+        BigDecimal restored = nullToZero(source.getUsedCredit()).subtract(nullToZero(link.getAmount()));
+        source.setUsedCredit(restored.max(BigDecimal.ZERO));
+        OBDal.getInstance().save(source);
+      }
+      OBDal.getInstance().remove(link);
+    }
+  }
+
+  /**
+   * Removes the payment's payment-owned {@link FIN_PaymentDetail}/{@link FIN_PaymentScheduleDetail}
+   * rows (accumulated credit / over-payment / G/L — no invoice or order schedule): these were
+   * created by this draft and are re-created fresh by {@link PaymentCreditConsumer#consume} on
+   * re-apply. The document's own installment/credit-memo schedule detail is left untouched (still
+   * linked) — {@link #reapplyLinkedInstallmentPSD} adjusts it afterwards.
+   */
+  private static void removeCreditOwnedDetails(FIN_Payment payment) {
+    for (FIN_PaymentDetail detail : new ArrayList<>(payment.getFINPaymentDetailList())) {
+      List<FIN_PaymentScheduleDetail> psds = detail.getFINPaymentScheduleDetailList();
+      boolean isDocumentDetail = psds.stream()
+          .anyMatch(psd -> psd.getInvoicePaymentSchedule() != null || psd.getOrderPaymentSchedule() != null);
+      if (isDocumentDetail) {
+        continue;
+      }
+      for (FIN_PaymentScheduleDetail psd : new ArrayList<>(psds)) {
+        OBDal.getInstance().remove(psd);
+      }
+      payment.getFINPaymentDetailList().remove(detail);
+      OBDal.getInstance().remove(detail);
+    }
+    OBDal.getInstance().flush();
+  }
+
+  /**
+   * Adjusts the document's own installment {@link FIN_PaymentScheduleDetail} — already linked to
+   * this reused draft payment — to the new funded amount. Delegates to
+   * {@link FIN_AddPayment#updatePaymentDetail}, which (because the PSD is already linked to THIS
+   * payment) takes its "editing an existing link" branch: it grows or shrinks the link and folds
+   * the difference into the sibling outstanding fragment Core itself tracks, exactly like Classic's
+   * own Add Payment screen does when you edit a saved, unprocessed payment. This avoids
+   * re-implementing that split/merge bookkeeping by hand. Returns the amount actually applied.
+   *
+   * @throws OBException if no installment PSD for {@code scheduleId} is linked to this payment
+   *     (should not happen for a draft created by this same service).
+   */
+  private static BigDecimal reapplyLinkedInstallmentPSD(FIN_Payment payment, String scheduleId,
+      BigDecimal funds) {
+    FIN_PaymentScheduleDetail linkedPsd = null;
+    for (FIN_PaymentDetail detail : payment.getFINPaymentDetailList()) {
+      for (FIN_PaymentScheduleDetail psd : detail.getFINPaymentScheduleDetailList()) {
+        FIN_PaymentSchedule sched = psd.getInvoicePaymentSchedule();
+        if (sched != null && scheduleId.equals(sched.getId())) {
+          linkedPsd = psd;
+          break;
+        }
+      }
+      if (linkedPsd != null) {
+        break;
+      }
+    }
+    if (linkedPsd == null) {
+      throw new OBException(MSG_NO_PENDING_PSD);
+    }
+    // The schedule's total amount never changes — it's the cap on how much this payment can
+    // apply to it (the rest stays in Core's own outstanding fragment for the same schedule).
+    BigDecimal scheduleTotal = linkedPsd.getInvoicePaymentSchedule().getAmount();
+    BigDecimal invoiceApplied = funds.min(scheduleTotal).max(BigDecimal.ZERO);
+    FIN_AddPayment.updatePaymentDetail(linkedPsd, payment, invoiceApplied, false);
+    return invoiceApplied;
+  }
+
+  /** Re-sets the editable header basics on the reused draft, mirroring {@link #createDraftPayment}. */
+  private static void reapplyDraftBasics(FIN_Payment payment, FIN_PaymentMethod paymentMethod,
+      FIN_FinancialAccount account, Date paymentDate, BigDecimal amount) {
+    payment.setPaymentDate(paymentDate);
+    payment.setAccount(account);
+    payment.setPaymentMethod(paymentMethod);
+    payment.setAmount(amount);
+    FIN_AddPayment.setFinancialTransactionAmountAndRate(null, payment, BigDecimal.ONE, amount);
+    OBDal.getInstance().save(payment);
+    OBDal.getInstance().flush();
   }
 
   // ─── SHARED HELPERS ─────────────────────────────────────────────────────────

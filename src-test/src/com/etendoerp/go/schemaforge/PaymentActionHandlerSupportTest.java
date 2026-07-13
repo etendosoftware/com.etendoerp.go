@@ -203,4 +203,44 @@ public class PaymentActionHandlerSupportTest {
       assertEquals(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, resp.getHttpStatus());
     }
   }
+
+  // ── deletePayment action routing ──────────────────────────────────────────
+
+  @Test
+  public void testDeletePaymentGetMethodReturnsNull() {
+    NeoContext ctx = buildContext(NeoEndpointType.ACTION, "deletePayment", "GET", "inv-1", null);
+    NeoResponse resp = PaymentActionHandlerSupport.handle(ctx, true, log);
+    assertNull(resp);
+  }
+
+  @Test
+  public void testDeletePaymentMissingPaymentIdReturnsBadRequest() throws Exception {
+    JSONObject body = new JSONObject();
+    // Missing paymentId.
+    NeoContext ctx = buildContext(NeoEndpointType.ACTION, "deletePayment", "POST", "inv-1", body);
+
+    NeoResponse resp = PaymentActionHandlerSupport.handle(ctx, true, log);
+
+    assertNotNull(resp);
+    assertEquals(HttpServletResponse.SC_BAD_REQUEST, resp.getHttpStatus());
+  }
+
+  @Test
+  public void testDeletePaymentSuccessDelegates() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("paymentId", "pay-1");
+    NeoContext ctx = buildContext(NeoEndpointType.ACTION, "deletePayment", "POST", "inv-1", body);
+
+    NeoResponse expected = NeoResponse.noContent();
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<PaymentRegistrationService> svcMock =
+             mockStatic(PaymentRegistrationService.class)) {
+      svcMock.when(() -> PaymentRegistrationService.deleteDraftPayment("pay-1"))
+          .thenReturn(expected);
+
+      NeoResponse resp = PaymentActionHandlerSupport.handle(ctx, true, log);
+      assertEquals(204, resp.getHttpStatus());
+    }
+  }
 }

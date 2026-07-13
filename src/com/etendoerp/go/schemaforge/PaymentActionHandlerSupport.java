@@ -24,6 +24,7 @@ final class PaymentActionHandlerSupport {
   private static final String PIS_TEMPLATES_ACTION = "pisTemplates";
   private static final String PIS_CANCEL_ACTION = "cancelPisPayment";
   private static final String CONFIRM_ACTION = "confirmPayment";
+  private static final String DELETE_ACTION = "deletePayment";
 
   private static final String FIELD_PAYMENT_ID = "paymentId";
   private static final String FIELD_SCHEDULE_ID = "scheduleId";
@@ -46,7 +47,9 @@ final class PaymentActionHandlerSupport {
     }
 
     boolean isConfirm = CONFIRM_ACTION.equals(fieldName);
-    if ((!isConfirm && !ACTION_NAME.equals(fieldName)) || !"POST".equals(context.getHttpMethod())) {
+    boolean isDelete = DELETE_ACTION.equals(fieldName);
+    if ((!isConfirm && !isDelete && !ACTION_NAME.equals(fieldName))
+        || !"POST".equals(context.getHttpMethod())) {
       return null;
     }
 
@@ -61,7 +64,7 @@ final class PaymentActionHandlerSupport {
 
     // Validate inputs BEFORE opening an admin session, so malformed requests
     // return 400 without requiring a DB context.
-    NeoResponse validationError = validateBody(body, isConfirm);
+    NeoResponse validationError = validateBody(body, fieldName);
     if (validationError != null) {
       return validationError;
     }
@@ -99,8 +102,8 @@ final class PaymentActionHandlerSupport {
   }
 
   /** Validates the required body fields; returns an error response, or null when valid. */
-  private static NeoResponse validateBody(JSONObject body, boolean isConfirm) {
-    if (isConfirm) {
+  private static NeoResponse validateBody(JSONObject body, String fieldName) {
+    if (CONFIRM_ACTION.equals(fieldName) || DELETE_ACTION.equals(fieldName)) {
       if (StringUtils.isBlank(body.optString(FIELD_PAYMENT_ID, null))) {
         return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "paymentId is required");
       }
@@ -130,6 +133,9 @@ final class PaymentActionHandlerSupport {
       try {
         if (isConfirm) {
           return PaymentRegistrationService.confirmDraftPayment(body.optString(FIELD_PAYMENT_ID, null));
+        }
+        if (DELETE_ACTION.equals(fieldName)) {
+          return PaymentRegistrationService.deleteDraftPayment(body.optString(FIELD_PAYMENT_ID, null));
         }
         if (isAdvanced(body)) {
           return PaymentRegistrationService.doRegisterPaymentAdvanced(invoiceId, body, isReceipt);
