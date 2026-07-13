@@ -30,7 +30,7 @@ import java.util.List;
  */
 public final class NeoSelectorPolicy {
   private static final SelectorPolicyRegistry REGISTRY = new SelectorPolicyRegistry(
-      List.of(new ContextParamSelectorPolicy()),
+      List.of(new ContextParamSelectorPolicy(), new FinancialAccountPaymentMethodSelectorPolicy()),
       List.of(new ProductPriceSelectorPolicy(), new InventoryProductSelectorPolicy()));
 
 

@@ -19,6 +19,8 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.text.ParseException;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -59,6 +61,8 @@ import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.JsonUtils;
 
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
+
 /**
  * Shared payment registration logic for both sales-invoice and purchase-invoice handlers.
  *
@@ -71,21 +75,25 @@ final class PaymentRegistrationService {
 
   private static final Logger log = LogManager.getLogger(PaymentRegistrationService.class);
 
-  // Error messages
-  private static final String MSG_INVOICE_NOT_FOUND = "Invoice not found";
-  private static final String MSG_INVOICE_ID_REQUIRED = "Invoice ID is required";
+  // Error messages — package-visible: shared with PisPaymentService.
+  static final String MSG_INVOICE_NOT_FOUND = "Invoice not found";
+  static final String MSG_INVOICE_ID_REQUIRED = "Invoice ID is required";
   private static final String MSG_NO_PENDING_PSD =
       "No pending payment schedule details found for this installment";
 
   // JSON response keys
   private static final String KEY_DOCUMENT_NO = "documentNo";
   private static final String KEY_AMOUNT = "amount";
-  private static final String KEY_STATUS = "status";
+  // Package-visible: shared with PisPaymentService.
+  static final String KEY_STATUS = "status";
   private static final String KEY_RESPONSE = "response";
   private static final String KEY_DATA = "data";
   private static final String KEY_ITEMS = "items";
   private static final String KEY_TOTAL_COUNT = "totalCount";
   private static final String KEY_RECEIPT = "receipt";
+  private static final String KEY_LABEL = "label";
+  private static final String FIELD_PIS = "pis";
+  private static final String KEY_VIA_PIS = "viaPis";
 
   // OBError type returned by FIN_AddPayment.processPayment on failure
   private static final String STATUS_ERROR = "Error";
@@ -220,12 +228,24 @@ final class PaymentRegistrationService {
         crit.addOrderBy(FIN_FinancialAccount.PROPERTY_NAME, true);
 
         String allowProp = allowProperty(isReceipt);
+        Currency invoiceCurrency = invoice.getCurrency();
 
         JSONArray arr = new JSONArray();
         for (FIN_FinancialAccount acc : crit.list()) {
-          appendAccountItem(arr, acc, allowProp);
+          appendAccountItem(arr, acc, allowProp, invoiceCurrency);
         }
-        return itemsResponse(arr);
+        JSONObject resp = new JSONObject();
+        resp.put(KEY_ITEMS, arr);
+        resp.put(KEY_TOTAL_COUNT, arr.length());
+        FIN_PaymentMethod invoiceMethod = resolveInvoiceMethod(invoice);
+        if (invoiceMethod != null) {
+          resp.put("defaultMethodId", invoiceMethod.getId());
+        }
+        String bpAccountId = businessPartnerAccountId(invoice, isReceipt);
+        if (bpAccountId != null) {
+          resp.put("bpPreferredAccountId", bpAccountId);
+        }
+        return new NeoResponse(200, resp);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -236,30 +256,70 @@ final class PaymentRegistrationService {
     }
   }
 
-  /** Appends one account item if it has at least one valid payment method for the direction. */
-  private static void appendAccountItem(JSONArray arr, FIN_FinancialAccount acc, String allowProp)
-      throws Exception {
+  /**
+   * Appends one account item if it has at least one valid payment method for the direction
+   * and its currency matches the invoice's (accounts with no currency are always kept).
+   */
+  private static void appendAccountItem(JSONArray arr, FIN_FinancialAccount acc, String allowProp,
+      Currency invoiceCurrency) throws Exception {
+    if (acc.getCurrency() != null && invoiceCurrency != null
+        && !acc.getCurrency().getId().equals(invoiceCurrency.getId())) {
+      return;
+    }
     OBCriteria<FinAccPaymentMethod> methodCrit = OBDal.getInstance()
         .createCriteria(FinAccPaymentMethod.class);
     methodCrit.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, acc));
     methodCrit.add(Restrictions.eq(allowProp, Boolean.TRUE));
-    methodCrit.setMaxResults(1);
     List<FinAccPaymentMethod> methods = methodCrit.list();
     if (methods.isEmpty()) {
       return;
     }
     JSONObject item = new JSONObject();
     item.put("id", acc.getId());
-    item.put("label", acc.getName());
+    item.put(KEY_LABEL, acc.getName());
     if (acc.getCurrency() != null) {
       item.put("currency", acc.getCurrency().getISOCode());
       item.put("currencyId", acc.getCurrency().getId());
     }
+    item.put("psd2Connected", BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
+        .equals(acc.getPSD2ConnectionStatus()));
+    if (acc.getPSD2CardNumber() != null) {
+      item.put("maskedPan", acc.getPSD2CardNumber());
+    }
+    JSONArray methodIds = new JSONArray();
+    JSONArray defaultForMethodIds = new JSONArray();
+    for (FinAccPaymentMethod fapm : methods) {
+      if (fapm.getPaymentMethod() == null) {
+        continue;
+      }
+      methodIds.put(fapm.getPaymentMethod().getId());
+      if (Boolean.TRUE.equals(fapm.isDefault())) {
+        defaultForMethodIds.put(fapm.getPaymentMethod().getId());
+      }
+    }
+    item.put("paymentMethodIds", methodIds);
+    item.put("defaultForMethodIds", defaultForMethodIds);
     FIN_PaymentMethod defaultMethod = methods.get(0).getPaymentMethod();
     if (defaultMethod != null) {
       item.put("defaultPaymentMethod", defaultMethod.getName());
     }
     arr.put(item);
+  }
+
+  /**
+   * The business partner's preferred financial account for the given direction
+   * (its "Account" for receipts, "PO Financial Account" for payments), mirroring
+   * Classic's {@code AddPaymentDefaultValuesHandler} priority before the
+   * {@code FinAccPaymentMethod.default} flag.
+   */
+  private static String businessPartnerAccountId(Invoice invoice, boolean isReceipt) {
+    if (invoice.getBusinessPartner() == null) {
+      return null;
+    }
+    FIN_FinancialAccount bpAccount = isReceipt
+        ? invoice.getBusinessPartner().getAccount()
+        : invoice.getBusinessPartner().getPOFinancialAccount();
+    return bpAccount != null ? bpAccount.getId() : null;
   }
 
   // ─── PAYMENTS: list payments linked to an invoice ──────────────────────────
@@ -323,6 +383,11 @@ final class PaymentRegistrationService {
     if (p.getPaymentMethod() != null) {
       item.put("paymentMethod", p.getPaymentMethod().getName());
     }
+    // A linked PSD2_PIS_PAYMENT row means this payment was initiated through the Salt Edge PIS
+    // flow (this popup), not just a manually-recorded bank transfer — surfaced in the SPA's
+    // payment history as a "Realizado vía PSD2" badge. PisPayment is a plain DAL entity (no
+    // PSD2-module method needed), so this is queried directly here.
+    item.put(KEY_VIA_PIS, PisPaymentService.hasLinkedPisPayment(p));
     return item;
   }
 
@@ -362,7 +427,7 @@ final class PaymentRegistrationService {
         for (Map.Entry<String, String> e : distinct.entrySet()) {
           JSONObject item = new JSONObject();
           item.put("id", e.getKey());
-          item.put("label", e.getValue());
+          item.put(KEY_LABEL, e.getValue());
           arr.put(item);
         }
         return itemsResponse(arr);
@@ -413,9 +478,21 @@ final class PaymentRegistrationService {
           return itemsResponse(new JSONArray());
         }
         String bpId = invoice.getBusinessPartner().getId();
+        List<DatedSource> sources = new ArrayList<>();
+        collectAbonoSources(sources, bpId, invoiceId, isReceipt);
+        collectAccumulatedCredit(sources, bpId, isReceipt);
+        // Merge both kinds into a single list ordered by each row's own date — invoice
+        // date for saldo a favor (abono), payment date for credit — most recent first.
+        // The two kinds are NOT grouped separately; they interleave by date. Reversing
+        // must happen INSIDE nullsLast (reverseOrder), not around the whole comparator —
+        // wrapping .reversed() around nullsLast(...) flips its null handling too, sending
+        // null dates first instead of last.
+        sources.sort(Comparator.comparing(
+            (DatedSource s) -> s.date, Comparator.nullsLast(Comparator.reverseOrder())));
         JSONArray arr = new JSONArray();
-        appendAbonoSources(arr, bpId, invoiceId, isReceipt);
-        appendAccumulatedCredit(arr, bpId, isReceipt);
+        for (DatedSource s : sources) {
+          arr.put(s.item);
+        }
         return itemsResponse(arr);
       } finally {
         OBContext.restorePreviousMode();
@@ -427,8 +504,19 @@ final class PaymentRegistrationService {
     }
   }
 
-  /** Appends pending credit-memo / return PSDs (negative amount) of the BP. */
-  private static void appendAbonoSources(JSONArray arr, String bpId, String invoiceId,
+  /** Pairs a credit-source JSON item with the raw date used to sort it against the other kind. */
+  private static final class DatedSource {
+    private final Date date;
+    private final JSONObject item;
+
+    private DatedSource(Date date, JSONObject item) {
+      this.date = date;
+      this.item = item;
+    }
+  }
+
+  /** Collects pending credit-memo / return PSDs (negative amount) of the BP. */
+  private static void collectAbonoSources(List<DatedSource> sources, String bpId, String invoiceId,
       boolean isReceipt) throws Exception {
     String hql = "select psd from FIN_Payment_ScheduleDetail psd "
         + "where psd.invoicePaymentSchedule.invoice.businessPartner.id = :bp "
@@ -454,13 +542,13 @@ final class PaymentRegistrationService {
           ? JsonUtils.createDateFormat().format(ncInv.getInvoiceDate()) : null);
       item.put("note", ncInv.getDocumentType() != null ? ncInv.getDocumentType().getName() : "");
       item.put("avail", psd.getAmount().abs());
-      arr.put(item);
+      sources.add(new DatedSource(ncInv.getInvoiceDate(), item));
     }
   }
 
-  /** Appends accumulated-credit payments of the BP with available credit (generated minus used). */
-  private static void appendAccumulatedCredit(JSONArray arr, String bpId, boolean isReceipt)
-      throws Exception {
+  /** Collects accumulated-credit payments of the BP with available credit (generated minus used). */
+  private static void collectAccumulatedCredit(List<DatedSource> sources, String bpId,
+      boolean isReceipt) throws Exception {
     String hql = "select p from FIN_Payment p "
         + "where p.businessPartner.id = :bp and p.receipt = :receipt "
         + "and (coalesce(p.generatedCredit, 0) - coalesce(p.usedCredit, 0)) > 0 "
@@ -487,7 +575,7 @@ final class PaymentRegistrationService {
           ? JsonUtils.createDateFormat().format(src.getPaymentDate()) : null);
       item.put("note", src.getDescription());
       item.put("avail", avail);
-      arr.put(item);
+      sources.add(new DatedSource(src.getPaymentDate(), item));
     }
   }
 
@@ -500,8 +588,15 @@ final class PaymentRegistrationService {
    * register any over-payment as generated credit (or refund) and process it.
    *
    * Body: {@code scheduleId, actual_payment, payment_date, fin_financial_account_id,
-   * fin_paymentmethod_id?, process('draft'|'confirm'), creditSources[], overpaymentAction?}.
-   * On {@code process='draft'} the payment is created but NOT processed (stays DR).
+   * fin_paymentmethod_id?, process('draft'|'confirm'), creditSources[], overpaymentAction?,
+   * pis?}. On {@code process='draft'} the payment is created but NOT processed (stays DR).
+   *
+   * <p>When {@code pis=true} the payment is registered as a real bank transfer through the
+   * PSD2 / Salt Edge PIS integration: the {@link FIN_Payment} is created, linked and PROCESSED to
+   * status {@code PPM} ("Payment Made") — applied to the invoice but with NO
+   * {@code FIN_Finacc_Transaction} yet (the transfer method's Automatic flags are cleared by §2b).
+   * The bank transaction is created only once Salt Edge confirms execution, by the PSD2 module's
+   * own {@code PisPaymentCallback}. See {@link PisPaymentService#applyOverpaymentAndInitiatePis}.
    */
   static NeoResponse doRegisterPaymentAdvanced(String invoiceId, JSONObject body, boolean isReceipt)
       throws Exception {
@@ -534,6 +629,7 @@ final class PaymentRegistrationService {
 
     boolean doProcess = !"draft".equalsIgnoreCase(body.optString("process", "confirm"));
     String overpaymentAction = body.optString("overpaymentAction", null);
+    boolean pis = body.optBoolean(FIELD_PIS, false);
 
     assertCurrencyMatch(invoice.getCurrency(), account.getCurrency());
 
@@ -545,6 +641,12 @@ final class PaymentRegistrationService {
     }
     DocumentType docType = resolveArApDocType(org, isReceipt);
     checkPeriodOpen(invoice, docType, paymentDate);
+
+    JSONObject pisInput = null;
+    if (pis) {
+      PisPaymentService.validatePisEligibility(account, paymentMethod, invoice);
+      pisInput = PisPaymentService.extractPisInput(body);
+    }
 
     AdvPaymentMngtDao dao = new AdvPaymentMngtDao();
     FIN_Payment payment = createDraftPayment(dao, isReceipt, invoice,
@@ -564,6 +666,10 @@ final class PaymentRegistrationService {
 
     // Draft: created and linked but NOT processed — no transaction, no accounting.
     if (doProcess) {
+      if (pis) {
+        return PisPaymentService.applyOverpaymentAndInitiatePis(payment, dao, org, funds,
+            invoiceApplied, pisInput, overpaymentAction);
+      }
       applyOverpaymentAndProcess(payment, dao, org, funds, invoiceApplied, overpaymentAction);
     }
     return builtPaymentResponse(payment);
@@ -628,12 +734,22 @@ final class PaymentRegistrationService {
 
   /** Builds the standard {response:{data:{id,documentNo,amount,status,processed}}} envelope. */
   private static NeoResponse builtPaymentResponse(FIN_Payment payment) throws Exception {
+    return wrapCreatedData(basePaymentData(payment));
+  }
+
+  /** Package-visible: also used by {@link PisPaymentService#applyOverpaymentAndInitiatePis}. */
+  static JSONObject basePaymentData(FIN_Payment payment) throws Exception {
     JSONObject data = new JSONObject();
     data.put("id", payment.getId());
     data.put(KEY_DOCUMENT_NO, payment.getDocumentNo());
     data.put(KEY_AMOUNT, payment.getAmount());
     data.put(KEY_STATUS, payment.getStatus());
     data.put("processed", payment.isProcessed());
+    return data;
+  }
+
+  /** Package-visible: also used by {@link PisPaymentService#applyOverpaymentAndInitiatePis}. */
+  static NeoResponse wrapCreatedData(JSONObject data) throws Exception {
     JSONObject responseData = new JSONObject();
     responseData.put(KEY_DATA, data);
     JSONObject wrapper = new JSONObject();
@@ -641,8 +757,11 @@ final class PaymentRegistrationService {
     return NeoResponse.created(wrapper);
   }
 
-  /** Builds the standard {items:[...], totalCount:n} listing envelope. */
-  private static NeoResponse itemsResponse(JSONArray arr) throws Exception {
+  /**
+   * Builds the standard {items:[...], totalCount:n} listing envelope. Package-visible: also
+   * used by {@link PisPaymentService}'s listing actions.
+   */
+  static NeoResponse itemsResponse(JSONArray arr) throws Exception {
     JSONObject resp = new JSONObject();
     resp.put(KEY_ITEMS, arr);
     resp.put(KEY_TOTAL_COUNT, arr.length());
@@ -696,7 +815,8 @@ final class PaymentRegistrationService {
     OBDal.getInstance().flush();
   }
 
-  private static void failOnError(OBError result) {
+  /** Package-visible: also used by {@link PisPaymentService#applyOverpaymentAndInitiatePis}. */
+  static void failOnError(OBError result) {
     if (STATUS_ERROR.equalsIgnoreCase(result.getType())) {
       throw new OBException(result.getMessage());
     }
@@ -759,10 +879,7 @@ final class PaymentRegistrationService {
   private static FIN_PaymentMethod resolvePaymentMethod(FIN_FinancialAccount account,
       Invoice invoice, boolean isReceipt) {
 
-    FIN_PaymentMethod invoiceMethod = invoice.getPaymentMethod();
-    if (invoiceMethod == null && invoice.getBusinessPartner() != null) {
-      invoiceMethod = invoice.getBusinessPartner().getPaymentMethod();
-    }
+    FIN_PaymentMethod invoiceMethod = resolveInvoiceMethod(invoice);
 
     String allowProp = allowProperty(isReceipt);
     if (invoiceMethod != null && isMethodAllowed(account, invoiceMethod, allowProp)) {
@@ -776,6 +893,15 @@ final class PaymentRegistrationService {
     fallback.setMaxResults(1);
     List<FinAccPaymentMethod> methods = fallback.list();
     return methods.isEmpty() ? null : methods.get(0).getPaymentMethod();
+  }
+
+  /** The invoice's own payment method, falling back to its business partner's. */
+  private static FIN_PaymentMethod resolveInvoiceMethod(Invoice invoice) {
+    FIN_PaymentMethod invoiceMethod = invoice.getPaymentMethod();
+    if (invoiceMethod == null && invoice.getBusinessPartner() != null) {
+      invoiceMethod = invoice.getBusinessPartner().getPaymentMethod();
+    }
+    return invoiceMethod;
   }
 
   /** True when {@code method} is configured for {@code account} in the given direction. */

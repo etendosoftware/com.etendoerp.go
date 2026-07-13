@@ -160,6 +160,32 @@ class SelectorValidationResolverTest {
   }
 
   @Nested
+  @DisplayName("resolveValidationClause — nested subquery drop")
+  class NestedSubqueryDrop {
+    // Validation rules whose clause contains a nested (SELECT ...) subquery (e.g. the classic
+    // C_BPartner Account rule over Fin_Finacc_Paymentmethod) reference raw SQL table names the
+    // generic translator cannot map to HQL, so they must be dropped here and handled by a
+    // dedicated SelectorContextPolicy instead. The guard runs before any ModelProvider access.
+    @Test
+    @DisplayName("drops the classic financial-account IN (SELECT ...) rule")
+    void dropsClauseWithInSubquery() throws Exception {
+      Map<String, String> params = new HashMap<>();
+      params.put("Fin_Paymentmethod_ID", "PM1");
+      String clause = "Fin_Financial_Account_ID IN (SELECT Fin_Financial_Account_ID"
+          + " FROM Fin_Finacc_Paymentmethod WHERE Fin_Paymentmethod_ID=@Fin_Paymentmethod_ID@)";
+      assertNull(invokeStatic("resolveValidationClause",
+          new Class<?>[]{ String.class, Map.class }, clause, params));
+    }
+
+    @Test
+    @DisplayName("subquery detection is case-insensitive and tolerates whitespace")
+    void dropsClauseWithLowercaseSubquery() throws Exception {
+      assertNull(invokeStatic("resolveValidationClause",
+          new Class<?>[]{ String.class, Map.class }, "x IN ( select id from t)", new HashMap<>()));
+    }
+  }
+
+  @Nested
   @DisplayName("substituteValidationParams")
   class SubstituteValidationParams {
     @Test

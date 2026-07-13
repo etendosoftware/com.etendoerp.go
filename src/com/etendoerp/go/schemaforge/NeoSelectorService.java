@@ -279,6 +279,16 @@ public class NeoSelectorService {
         && ctxParamFilter.contains(":priceListId")) {
       ctxFilterParams.put("priceListId", priceListId);
     }
+    if (ctxParamFilter != null && ctxParamFilter.contains(":finAccPaymentMethodId")) {
+      // Financial-account-by-payment-method policy: customer sends Fin_Paymentmethod_ID,
+      // vendor sends PO_Paymentmethod_ID (only one per request).
+      String finAccPaymentMethodId = StringUtils.defaultIfBlank(
+          safeContextParams.get("Fin_Paymentmethod_ID"),
+          safeContextParams.get("PO_Paymentmethod_ID"));
+      if (StringUtils.isNotBlank(finAccPaymentMethodId)) {
+        ctxFilterParams.put("finAccPaymentMethodId", finAccPaymentMethodId);
+      }
+    }
     String language = safeContextParams.get("language");
     if (StringUtils.isNotBlank(language)) {
       ctxFilterParams.put("language", language);

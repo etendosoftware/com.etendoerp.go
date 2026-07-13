@@ -82,6 +82,9 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   @Inject
   private DocumentPostingService postingService;
 
+  @Inject
+  private CurrencyOptionsHandler currencyOptionsHandler;
+
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
@@ -97,6 +100,13 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     if (lineQtyError != null) {
       return lineQtyError;
     }
+    // Must run BEFORE completeInvoiceIfNeeded: the discount line has to reflect the final set of
+    // product lines before ProcessInvoiceUtil.process() completes/posts the document (ETP-4388).
+    AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
+    NeoResponse completionResponse = completeInvoiceIfNeeded(context);
+    if (completionResponse != null) {
+      return completionResponse;
+    }
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       NeoResponse lockError = validateDocTypeLock(context);
       if (lockError != null) {
@@ -107,17 +117,28 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         return originError;
       }
     }
-    AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
     return NeoHeaderActionRouter.dispatch(
         context,
+        currencyOptionsHandler,
         cloneRecordHandler,
         registerPaymentOutHandler,
         siiSendHandler,
         tbaiXmlgeneratorHandler);
   }
 
+  /**
+   * Post-callout hook (ETP-4029): blocks callout-driven currency updates and appends an
+   * exchange-rate warning when the user directly changes the invoice currency. Mirrors
+   * {@code AbstractOrderHeaderHandler#afterCallout}.
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    return handleCurrencyAfterCallout(context);
+  }
+
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    autoCreateOrUpdateConversionRateDocument(context);
     try {
       // POST/PUT: persist origin invoice relationship after the record is saved
       if (NeoEndpointType.CRUD.equals(context.getEndpointType())
