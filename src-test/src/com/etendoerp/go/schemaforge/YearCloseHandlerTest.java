@@ -215,6 +215,32 @@ public class YearCloseHandlerTest {
   }
 
   @Test
+  public void missingRecordIdReturns400() {
+    YearCloseHandler handler = new YearCloseHandler();
+    NeoContext context = NeoContext.builder()
+        .specName("calendar").entityName("year")
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName(YearCloseHandler.ACTION_CLOSE_YEAR).recordId(null).build();
+
+    NeoResponse r = handler.handle(context);
+
+    assertEquals(400, r.getHttpStatus());
+  }
+
+  @Test
+  public void blankRecordIdReturns400() {
+    YearCloseHandler handler = new YearCloseHandler();
+    NeoContext context = NeoContext.builder()
+        .specName("calendar").entityName("year")
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+        .fieldName(YearCloseHandler.ACTION_UNDO_CLOSE_YEAR).recordId("   ").build();
+
+    NeoResponse r = handler.handle(context);
+
+    assertEquals(400, r.getHttpStatus());
+  }
+
+  @Test
   public void nonActionEndpointFallsThrough() {
     YearCloseHandler handler = new YearCloseHandler();
     NeoContext context = NeoContext.builder()
