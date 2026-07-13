@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -32,9 +33,8 @@ import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
+import java.util.Collections;
+import java.util.List;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -45,8 +45,17 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
+import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.enterprise.Organization;
+
+import com.etendoerp.go.schemaforge.data.SupportConversation;
+import com.etendoerp.go.schemaforge.data.SupportMessage;
 
 /**
  * Tests for {@link SupportJiraWebhookHandler}.
@@ -65,6 +74,30 @@ class SupportJiraWebhookHandlerTest {
     HttpServletRequest request = mock(HttpServletRequest.class);
     when(request.getReader()).thenReturn(new BufferedReader(new StringReader(body == null ? "" : body)));
     return request;
+  }
+
+  private static OBDal mockObDal(MockedStatic<OBDal> dalMock) {
+    OBDal obDal = mock(OBDal.class);
+    dalMock.when(OBDal::getInstance).thenReturn(obDal);
+    return obDal;
+  }
+
+  private static SupportConversation mockConversation(String id) {
+    SupportConversation conv = mock(SupportConversation.class);
+    when(conv.getId()).thenReturn(id);
+    when(conv.getClient()).thenReturn(mock(Client.class));
+    when(conv.getOrganization()).thenReturn(mock(Organization.class));
+    return conv;
+  }
+
+  @SuppressWarnings("unchecked")
+  private static <T extends BaseOBObject> void mockCriteria(OBDal obDal, Class<T> clazz, List<T> results) {
+    OBCriteria<T> crit = mock(OBCriteria.class);
+    when(obDal.createCriteria(clazz)).thenReturn(crit);
+    when(crit.add(any())).thenReturn(crit);
+    when(crit.setMaxResults(anyInt())).thenReturn(crit);
+    when(crit.list()).thenReturn(results);
+    when(crit.uniqueResult()).thenReturn(results.isEmpty() ? null : results.get(0));
   }
 
   // -------------------------------------------------------------------------
@@ -485,13 +518,8 @@ class SupportJiraWebhookHandlerTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mock(OBDal.class);
-        Connection conn = mock(Connection.class);
-        PreparedStatement ps = mock(PreparedStatement.class);
-        dalMock.when(OBDal::getInstance).thenReturn(obDal);
-        when(obDal.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeUpdate()).thenReturn(1);
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-1")));
 
         SupportJiraWebhookHandler.handleJiraNonCommentEvent(response, issue, body, "SUP-1");
       }
@@ -513,15 +541,8 @@ class SupportJiraWebhookHandlerTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mock(OBDal.class);
-        Connection conn = mock(Connection.class);
-        PreparedStatement ps = mock(PreparedStatement.class);
-        ResultSet rs = mock(ResultSet.class);
-        dalMock.when(OBDal::getInstance).thenReturn(obDal);
-        when(obDal.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(false); // no matching conversation
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportConversation.class, Collections.emptyList()); // no matching conversation
 
         SupportJiraWebhookHandler.handleJiraNonCommentEvent(response, issue, body, "SUP-2");
       }
@@ -561,13 +582,8 @@ class SupportJiraWebhookHandlerTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mock(OBDal.class);
-        Connection conn = mock(Connection.class);
-        PreparedStatement ps = mock(PreparedStatement.class);
-        dalMock.when(OBDal::getInstance).thenReturn(obDal);
-        when(obDal.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeUpdate()).thenReturn(1);
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-1")));
 
         SupportJiraWebhookHandler.handleAssigneeReset(response, "SUP-1");
       }
@@ -599,15 +615,8 @@ class SupportJiraWebhookHandlerTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mock(OBDal.class);
-        Connection conn = mock(Connection.class);
-        PreparedStatement ps = mock(PreparedStatement.class);
-        ResultSet rs = mock(ResultSet.class);
-        dalMock.when(OBDal::getInstance).thenReturn(obDal);
-        when(obDal.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(false);
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportConversation.class, Collections.emptyList());
 
         SupportJiraWebhookHandler.handleTicketClosed(response, "SUP-4");
       }
@@ -623,17 +632,8 @@ class SupportJiraWebhookHandlerTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mock(OBDal.class);
-        Connection conn = mock(Connection.class);
-        PreparedStatement ps = mock(PreparedStatement.class);
-        ResultSet rs = mock(ResultSet.class);
-        dalMock.when(OBDal::getInstance).thenReturn(obDal);
-        when(obDal.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(true);
-        when(rs.getString("id")).thenReturn("conv-99");
-        when(ps.executeUpdate()).thenReturn(1);
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-99")));
 
         SupportJiraWebhookHandler.handleTicketClosed(response, "SUP-5");
       }
@@ -693,13 +693,8 @@ class SupportJiraWebhookHandlerTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mock(OBDal.class);
-        Connection conn = mock(Connection.class);
-        PreparedStatement ps = mock(PreparedStatement.class);
-        dalMock.when(OBDal::getInstance).thenReturn(obDal);
-        when(obDal.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeUpdate()).thenReturn(1);
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-1")));
 
         SupportJiraWebhookHandler.JiraWebhookComment result =
             SupportJiraWebhookHandler.parseAutomationJiraWebhook(request, response);
@@ -737,15 +732,8 @@ class SupportJiraWebhookHandlerTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mock(OBDal.class);
-        Connection conn = mock(Connection.class);
-        PreparedStatement ps = mock(PreparedStatement.class);
-        ResultSet rs = mock(ResultSet.class);
-        dalMock.when(OBDal::getInstance).thenReturn(obDal);
-        when(obDal.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(false);
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportConversation.class, Collections.emptyList());
 
         SupportJiraWebhookHandler.JiraWebhookComment result =
             SupportJiraWebhookHandler.parseAutomationJiraWebhook(request, response);
@@ -864,18 +852,18 @@ class SupportJiraWebhookHandlerTest {
       HttpServletRequest request = mockRequestWithBody(json.toString());
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mock(OBDal.class);
-        Connection conn = mock(Connection.class);
-        PreparedStatement ps = mock(PreparedStatement.class);
-        ResultSet rs = mock(ResultSet.class);
-        dalMock.when(OBDal::getInstance).thenReturn(obDal);
-        when(obDal.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(true);
-        when(rs.getString("id")).thenReturn("conv-77");
-        when(ps.executeUpdate()).thenReturn(1);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-77");
+        mockCriteria(obDal, SupportConversation.class, List.of(conv));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList()); // no duplicate external_id
+        when(obDal.get(SupportConversation.class, "conv-77")).thenReturn(conv);
+        when(obDal.get(User.class, SupportConversationsServlet.SYSTEM_USER_ID)).thenReturn(mock(User.class));
+
+        OBProvider provider = mock(OBProvider.class);
+        providerMock.when(OBProvider::getInstance).thenReturn(provider);
+        when(provider.get(SupportMessage.class)).thenReturn(mock(SupportMessage.class));
 
         SupportJiraWebhookHandler.handle(request, response);
       }
@@ -898,15 +886,8 @@ class SupportJiraWebhookHandlerTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        OBDal obDal = mock(OBDal.class);
-        Connection conn = mock(Connection.class);
-        PreparedStatement ps = mock(PreparedStatement.class);
-        ResultSet rs = mock(ResultSet.class);
-        dalMock.when(OBDal::getInstance).thenReturn(obDal);
-        when(obDal.getConnection()).thenReturn(conn);
-        when(conn.prepareStatement(anyString())).thenReturn(ps);
-        when(ps.executeQuery()).thenReturn(rs);
-        when(rs.next()).thenReturn(false);
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportConversation.class, Collections.emptyList());
 
         SupportJiraWebhookHandler.handle(request, response);
       }

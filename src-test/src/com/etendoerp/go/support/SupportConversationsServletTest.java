@@ -17,10 +17,11 @@
 package com.etendoerp.go.support;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
@@ -29,9 +30,8 @@ import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
+import java.util.Collections;
+import java.util.List;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -40,26 +40,41 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.enterprise.Organization;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.schemaforge.data.SupportConversation;
+import com.etendoerp.go.schemaforge.data.SupportMessage;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * Tests for {@link SupportConversationsServlet}.
  *
  * Exercises the servlet exclusively through its public {@code doGet}/{@code doPost}
- * contract (no visibility changes to production code). DB access is mocked via
- * {@code OBDal}/{@code OBContext} static mocks, following the same pattern as
- * {@link SupportJiraWebhookHandlerTest}. Outbound ADK/Jira calls are mocked via
- * {@link SupportIntegrationClient} static mocks so tests never touch the network.
+ * contract (no visibility changes to production code). Persistence is mocked via
+ * {@code OBDal}/{@code OBProvider}/{@code OBContext} static mocks — {@link SupportConversation}
+ * and {@link SupportMessage} are AD-generated {@code BaseOBObject} entities that require a live
+ * Openbravo model to back real getters/setters, so tests use plain Mockito mocks of the entity
+ * classes (stubbing only the getters each handler actually reads) rather than instantiating them.
+ * Outbound ADK/Jira calls are mocked via {@link SupportIntegrationClient} static mocks so tests
+ * never touch the network.
  */
 class SupportConversationsServletTest {
 
   private static final String VALID_TOKEN = "Bearer valid-token";
   private static final String USER_ID = "100";
+  private static final String ROLE_ID = "ROLE1";
+  private static final String CLIENT_ID = "CLIENT1";
+  private static final String ORG_ID = "ORG1";
+  private static final String FIELD_MESSAGES_LITERAL = "messages";
 
   private static HttpServletResponse mockResponse(StringWriter capture) throws Exception {
     HttpServletResponse response = mock(HttpServletResponse.class);
@@ -80,44 +95,92 @@ class SupportConversationsServletTest {
     return request;
   }
 
-  /** Stubs {@link SecureWebServicesUtils#decodeToken(String)} to resolve to {@link #USER_ID}. */
+  /** Stubs {@link SecureWebServicesUtils#decodeToken(String)} to resolve to {@link #USER_ID}
+   * (plus {@link #ROLE_ID}/{@link #CLIENT_ID}/{@link #ORG_ID}, which {@code authenticate()} also
+   * reads to switch {@code OBContext} and stamp new conversation rows). */
   private static MockedStatic<SecureWebServicesUtils> mockValidAuth() {
     DecodedJWT jwt = mock(DecodedJWT.class);
-    Claim claim = mock(Claim.class);
-    when(claim.asString()).thenReturn(USER_ID);
-    when(jwt.getClaim("user")).thenReturn(claim);
+    Claim userClaim = mock(Claim.class);
+    when(userClaim.asString()).thenReturn(USER_ID);
+    when(jwt.getClaim("user")).thenReturn(userClaim);
+    Claim roleClaim = mock(Claim.class);
+    when(roleClaim.asString()).thenReturn(ROLE_ID);
+    when(jwt.getClaim("role")).thenReturn(roleClaim);
+    Claim clientClaim = mock(Claim.class);
+    when(clientClaim.asString()).thenReturn(CLIENT_ID);
+    when(jwt.getClaim("client")).thenReturn(clientClaim);
+    Claim orgClaim = mock(Claim.class);
+    when(orgClaim.asString()).thenReturn(ORG_ID);
+    when(jwt.getClaim("organization")).thenReturn(orgClaim);
     MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class);
     swsMock.when(() -> SecureWebServicesUtils.decodeToken(anyString())).thenReturn(jwt);
     return swsMock;
   }
 
-  /**
-   * Mocks OBDal with a single Connection/PreparedStatement pair that answers every
-   * {@code prepareStatement(...)} call the same way (matches the DDL loop in
-   * {@code ensureTablesExist} harmlessly, and drives whatever query the handler under
-   * test issues). Returns the PreparedStatement mock so individual tests can further
-   * stub {@code executeQuery()}/{@code executeUpdate()} results.
-   *
-   * <p>Callers must still keep an open {@code MockedStatic<OBContext>} in their
-   * try-with-resources for the duration of the call under test, so that the real
-   * {@code OBContext.setAdminMode}/{@code restorePreviousMode} calls become safe no-ops
-   * instead of touching a real Openbravo context — this helper doesn't need to
-   * reference it directly to rely on that.
-   */
-  private static PreparedStatement mockDb(MockedStatic<OBDal> dalMock) throws Exception {
+  /** Wires {@code OBDal.getInstance()} to a mock so {@code OBContext.setAdminMode}-wrapped
+   * handlers can run; individual tests stub {@code get}/{@code createCriteria} as needed.
+   * Callers must keep an open {@code MockedStatic<OBContext>} for the duration of the call
+   * under test so the real admin-mode calls become safe no-ops. */
+  private static OBDal mockObDal(MockedStatic<OBDal> dalMock) throws Exception {
     OBDal obDal = mock(OBDal.class);
-    Connection conn = mock(Connection.class);
-    PreparedStatement ps = mock(PreparedStatement.class);
     dalMock.when(OBDal::getInstance).thenReturn(obDal);
-    when(obDal.getConnection()).thenReturn(conn);
-    when(conn.prepareStatement(anyString())).thenReturn(ps);
-    return ps;
+    return obDal;
   }
 
-  private static ResultSet emptyResultSet() throws Exception {
-    ResultSet rs = mock(ResultSet.class);
-    when(rs.next()).thenReturn(false);
-    return rs;
+  /** Wires an already-open {@code MockedStatic<SessionHandler>} so the mid-request
+   * {@code SessionHandler.getInstance().commitAndStart()} call in {@code handleCreateConversation}
+   * becomes a safe no-op. */
+  private static MockedStatic<SessionHandler> mockSessionHandler() {
+    SessionHandler sessionHandler = mock(SessionHandler.class);
+    MockedStatic<SessionHandler> shMock = mockStatic(SessionHandler.class);
+    shMock.when(SessionHandler::getInstance).thenReturn(sessionHandler);
+    return shMock;
+  }
+
+  /** Wires an already-open {@code MockedStatic<OBProvider>} so {@code OBProvider.getInstance().get(...)}
+   * hands back the given mock entities — production code calls this to mint new rows before saving
+   * them. Callers must open {@code mockStatic(OBProvider.class)} themselves (in the same
+   * try-with-resources as the other statics) so it's reliably closed — a helper that opens and
+   * returns it is easy to leak across tests since the caller has no compile-time nudge to close it. */
+  private static void stubProvider(MockedStatic<OBProvider> providerMock, SupportConversation conv, SupportMessage msg) {
+    OBProvider provider = mock(OBProvider.class);
+    providerMock.when(OBProvider::getInstance).thenReturn(provider);
+    if (conv != null) when(provider.get(SupportConversation.class)).thenReturn(conv);
+    if (msg != null) when(provider.get(SupportMessage.class)).thenReturn(msg);
+  }
+
+  @SuppressWarnings("unchecked")
+  private static <T extends org.openbravo.base.structure.BaseOBObject> void mockCriteria(
+      OBDal obDal, Class<T> clazz, List<T> results) {
+    OBCriteria<T> crit = mock(OBCriteria.class);
+    when(obDal.createCriteria(clazz)).thenReturn(crit);
+    when(crit.add(any())).thenReturn(crit);
+    when(crit.addOrderBy(anyString(), anyBoolean())).thenReturn(crit);
+    when(crit.setMaxResults(anyInt())).thenReturn(crit);
+    when(crit.list()).thenReturn(results);
+    when(crit.uniqueResult()).thenReturn(results.isEmpty() ? null : results.get(0));
+  }
+
+  private static User mockUser(String id) {
+    User user = mock(User.class);
+    when(user.getId()).thenReturn(id);
+    return user;
+  }
+
+  /** A conversation mock stubbed the way {@code belongsToUser}/{@code toConvSummaryJson} read it:
+   * owned by {@link #USER_ID}, open, unread/rated false. Override specific getters per test. */
+  private static SupportConversation mockConversation(String id) {
+    SupportConversation conv = mock(SupportConversation.class);
+    User user = mockUser(USER_ID);
+    when(conv.getId()).thenReturn(id);
+    when(conv.getUser()).thenReturn(user);
+    when(conv.getStatus()).thenReturn("open");
+    when(conv.getSubject()).thenReturn("Need help");
+    when(conv.isUnread()).thenReturn(false);
+    when(conv.isRated()).thenReturn(false);
+    when(conv.getClient()).thenReturn(mock(Client.class));
+    when(conv.getOrganization()).thenReturn(mock(Organization.class));
+    return conv;
   }
 
   // -------------------------------------------------------------------------
@@ -200,12 +263,7 @@ class SupportConversationsServletTest {
       HttpServletResponse response = mockResponse(capture);
       HttpServletRequest request = authenticatedRequest("/something-else", null);
 
-      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
-           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth()) {
         new SupportConversationsServlet().doGet(request, response);
       }
 
@@ -219,12 +277,7 @@ class SupportConversationsServletTest {
       HttpServletResponse response = mockResponse(capture);
       HttpServletRequest request = authenticatedRequest(null, null);
 
-      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
-           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth()) {
         new SupportConversationsServlet().doGet(request, response);
       }
 
@@ -250,9 +303,8 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        ResultSet emptyRs = emptyResultSet();
-        when(ps.executeQuery()).thenReturn(emptyRs);
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportConversation.class, Collections.emptyList());
 
         new SupportConversationsServlet().doGet(request, response);
       }
@@ -270,17 +322,13 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        ResultSet rs = mock(ResultSet.class);
-        when(rs.next()).thenReturn(true, false);
-        when(rs.getString("id")).thenReturn("conv-1");
-        when(rs.getString("subject")).thenReturn("Need help");
-        when(rs.getString("status")).thenReturn("open");
-        when(rs.getString("last_activity")).thenReturn("2026-07-01 10:00:00.000000-03");
-        when(rs.getString("last_message")).thenReturn("Hello");
-        when(rs.getBoolean("unread")).thenReturn(true);
-        when(rs.getBoolean("rated")).thenReturn(false);
-        when(ps.executeQuery()).thenReturn(rs);
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.getSubject()).thenReturn("Need help");
+        when(conv.getStatus()).thenReturn("open");
+        when(conv.isUnread()).thenReturn(true);
+        when(conv.isRated()).thenReturn(false);
+        mockCriteria(obDal, SupportConversation.class, List.of(conv));
 
         new SupportConversationsServlet().doGet(request, response);
       }
@@ -328,9 +376,8 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        ResultSet emptyRs = emptyResultSet();
-        when(ps.executeQuery()).thenReturn(emptyRs);
+        OBDal obDal = mockObDal(dalMock);
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(null);
 
         new SupportConversationsServlet().doGet(request, response);
       }
@@ -348,18 +395,16 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        ResultSet belongsRs = mock(ResultSet.class);
-        when(belongsRs.next()).thenReturn(true);
-        ResultSet msgRs = mock(ResultSet.class);
-        when(msgRs.next()).thenReturn(true, false);
-        when(msgRs.getString("id")).thenReturn("msg-1");
-        when(msgRs.getString("conversation_id")).thenReturn("conv-1");
-        when(msgRs.getString("sender")).thenReturn("user");
-        when(msgRs.getString("sender_name")).thenReturn("Tú");
-        when(msgRs.getString("text")).thenReturn("Hola");
-        when(msgRs.getString("timestamp")).thenReturn("2026-07-01 10:00:00.000000-03");
-        when(ps.executeQuery()).thenReturn(belongsRs, msgRs);
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+
+        SupportMessage msg = mock(SupportMessage.class);
+        when(msg.getId()).thenReturn("msg-1");
+        when(msg.getSender()).thenReturn("user");
+        when(msg.getSenderName()).thenReturn("Tú");
+        when(msg.getText()).thenReturn("Hola");
+        mockCriteria(obDal, SupportMessage.class, List.of(msg));
 
         new SupportConversationsServlet().doGet(request, response);
       }
@@ -376,12 +421,7 @@ class SupportConversationsServletTest {
       HttpServletResponse response = mockResponse(capture);
       HttpServletRequest request = authenticatedRequest("/conversations/conv-1", null);
 
-      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
-           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth()) {
         new SupportConversationsServlet().doGet(request, response);
       }
 
@@ -417,12 +457,7 @@ class SupportConversationsServletTest {
       HttpServletResponse response = mockResponse(capture);
       HttpServletRequest request = authenticatedRequest(null, "{}");
 
-      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
-           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth()) {
         new SupportConversationsServlet().doPost(request, response);
       }
 
@@ -446,13 +481,7 @@ class SupportConversationsServletTest {
       HttpServletRequest request = mockRequestWithBody("");
       when(request.getPathInfo()).thenReturn("/jira-webhook");
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-
-        new SupportConversationsServlet().doPost(request, response);
-      }
+      new SupportConversationsServlet().doPost(request, response);
 
       // No issueKey / empty body -> SupportJiraWebhookHandler ignores it, no auth error surfaces.
       assertTrue(capture.toString().contains("ignored"));
@@ -469,9 +498,9 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-        when(ps.executeUpdate()).thenReturn(1);
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
 
         new SupportConversationsServlet().doPost(request, response);
       }
@@ -487,13 +516,7 @@ class SupportConversationsServletTest {
       HttpServletRequest request = mockRequestWithBody("{}");
       when(request.getPathInfo()).thenReturn("/internal/set-ticket");
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-
-        new SupportConversationsServlet().doPost(request, response);
-      }
+      new SupportConversationsServlet().doPost(request, response);
 
       assertTrue(capture.toString().contains("conversationId and jiraTicketKey required"));
     }
@@ -509,9 +532,8 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-        when(ps.executeUpdate()).thenReturn(0);
+        OBDal obDal = mockObDal(dalMock);
+        when(obDal.get(SupportConversation.class, "missing")).thenReturn(null);
 
         new SupportConversationsServlet().doPost(request, response);
       }
@@ -530,9 +552,9 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-        when(ps.executeUpdate()).thenReturn(1);
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
 
         new SupportConversationsServlet().doPost(request, response);
       }
@@ -548,13 +570,7 @@ class SupportConversationsServletTest {
       HttpServletRequest request = mockRequestWithBody("{}");
       when(request.getPathInfo()).thenReturn("/internal/set-human-takeover");
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-
-        new SupportConversationsServlet().doPost(request, response);
-      }
+      new SupportConversationsServlet().doPost(request, response);
 
       assertTrue(capture.toString().contains("conversationId required"));
     }
@@ -570,9 +586,9 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-        when(ps.executeUpdate()).thenReturn(1);
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
 
         new SupportConversationsServlet().doPost(request, response);
       }
@@ -591,9 +607,9 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-        when(ps.executeUpdate()).thenReturn(1);
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-9");
+        mockCriteria(obDal, SupportConversation.class, List.of(conv));
 
         new SupportConversationsServlet().doPost(request, response);
       }
@@ -609,13 +625,7 @@ class SupportConversationsServletTest {
       HttpServletRequest request = mockRequestWithBody("{}");
       when(request.getPathInfo()).thenReturn("/internal/reset-human-takeover");
 
-      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-
-        new SupportConversationsServlet().doPost(request, response);
-      }
+      new SupportConversationsServlet().doPost(request, response);
 
       assertTrue(capture.toString().contains("conversationId or jiraTicketKey required"));
     }
@@ -652,12 +662,7 @@ class SupportConversationsServletTest {
       HttpServletResponse response = mockResponse(capture);
       HttpServletRequest request = authenticatedRequest("/conversations", "{}");
 
-      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
-           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth()) {
         new SupportConversationsServlet().doPost(request, response);
       }
 
@@ -671,12 +676,7 @@ class SupportConversationsServletTest {
       HttpServletResponse response = mockResponse(capture);
       HttpServletRequest request = authenticatedRequest("/conversations", "{\"message\":\"   \"}");
 
-      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
-           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth()) {
         new SupportConversationsServlet().doPost(request, response);
       }
 
@@ -690,12 +690,7 @@ class SupportConversationsServletTest {
       HttpServletResponse response = mockResponse(capture);
       HttpServletRequest request = authenticatedRequest("/conversations", "not json");
 
-      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
-           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth()) {
         new SupportConversationsServlet().doPost(request, response);
       }
 
@@ -712,26 +707,25 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SessionHandler> shMock = mockSessionHandler();
            MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-        when(ps.executeUpdate()).thenReturn(1);
-        ResultSet summaryRs = mock(ResultSet.class);
-        when(summaryRs.next()).thenReturn(true);
-        when(summaryRs.getString("id")).thenReturn("conv-new");
-        when(summaryRs.getString("subject")).thenReturn("Necesito ayuda");
-        when(summaryRs.getString("status")).thenReturn("open");
-        when(summaryRs.getString("last_activity")).thenReturn("2026-07-01 10:00:00.000000-03");
-        when(summaryRs.getString("last_message")).thenReturn("Hola! ¿En qué puedo ayudarte?");
-        when(summaryRs.getBoolean("unread")).thenReturn(false);
-        when(summaryRs.getBoolean("rated")).thenReturn(false);
-        ResultSet messagesRs = emptyResultSet();
-        when(ps.executeQuery()).thenReturn(summaryRs, messagesRs);
+        OBDal obDal = mockObDal(dalMock);
+        User authUser = mockUser(USER_ID);
+        when(obDal.get(User.class, USER_ID)).thenReturn(authUser);
+        when(obDal.get(Client.class, CLIENT_ID)).thenReturn(mock(Client.class));
+        when(obDal.get(Organization.class, ORG_ID)).thenReturn(mock(Organization.class));
 
-        sicMock.when(() -> SupportIntegrationClient.getUserEmail(org.mockito.ArgumentMatchers.any(), anyString()))
+        SupportConversation conv = mockConversation("conv-new");
+        when(conv.getSubject()).thenReturn("Necesito ayuda");
+        when(conv.getLastMessage()).thenReturn("Hola! ¿En qué puedo ayudarte?");
+        when(obDal.get(SupportConversation.class, "conv-new")).thenReturn(conv);
+        stubProvider(providerMock, conv, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        sicMock.when(() -> SupportIntegrationClient.getUserEmail(anyString()))
             .thenReturn("user@example.com");
-        sicMock.when(() -> SupportIntegrationClient.sendToAdk(anyString(), anyString(), anyString(),
-                org.mockito.ArgumentMatchers.any()))
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(anyString(), anyString(), anyString(), any()))
             .thenReturn("Hola! ¿En qué puedo ayudarte?");
 
         new SupportConversationsServlet().doPost(request, response);
@@ -752,27 +746,31 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SessionHandler> shMock = mockSessionHandler();
            MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-        when(ps.executeUpdate()).thenReturn(1);
-        ResultSet summaryRs = mock(ResultSet.class);
-        when(summaryRs.next()).thenReturn(true);
-        when(summaryRs.getString(anyString())).thenReturn("value");
-        when(summaryRs.getBoolean(anyString())).thenReturn(false);
-        ResultSet emptyRs = emptyResultSet();
-        when(ps.executeQuery()).thenReturn(summaryRs, emptyRs);
+        OBDal obDal = mockObDal(dalMock);
+        User authUser = mockUser(USER_ID);
+        when(obDal.get(User.class, USER_ID)).thenReturn(authUser);
+        when(obDal.get(Client.class, CLIENT_ID)).thenReturn(mock(Client.class));
+        when(obDal.get(Organization.class, ORG_ID)).thenReturn(mock(Organization.class));
 
-        sicMock.when(() -> SupportIntegrationClient.getUserEmail(org.mockito.ArgumentMatchers.any(), anyString()))
-            .thenReturn(null);
-        sicMock.when(() -> SupportIntegrationClient.sendToAdk(anyString(), anyString(), anyString(),
-                org.mockito.ArgumentMatchers.any()))
+        SupportConversation conv = mockConversation("conv-stub");
+        when(conv.getLastMessage()).thenReturn(
+            "Hola, soy ValerIA. En este momento no puedo conectarme con el servicio de IA. "
+                + "Por favor intenta de nuevo en un momento.");
+        when(obDal.get(SupportConversation.class, "conv-stub")).thenReturn(conv);
+        stubProvider(providerMock, conv, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+
+        sicMock.when(() -> SupportIntegrationClient.getUserEmail(anyString())).thenReturn(null);
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(anyString(), anyString(), anyString(), any()))
             .thenReturn(null);
 
         new SupportConversationsServlet().doPost(request, response);
       }
 
-      assertTrue(capture.toString().contains("value"));
+      assertTrue(capture.toString().contains("no puedo conectarme"));
     }
 
     @Test
@@ -794,8 +792,6 @@ class SupportConversationsServletTest {
     }
   }
 
-  private static final String FIELD_MESSAGES_LITERAL = "messages";
-
   // -------------------------------------------------------------------------
   // doPost — /conversations/:id/messages (send)
   // -------------------------------------------------------------------------
@@ -811,12 +807,7 @@ class SupportConversationsServletTest {
       HttpServletResponse response = mockResponse(capture);
       HttpServletRequest request = authenticatedRequest("/conversations/conv-1/messages", "{}");
 
-      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
-           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth()) {
         new SupportConversationsServlet().doPost(request, response);
       }
 
@@ -833,9 +824,8 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        ResultSet emptyRs = emptyResultSet();
-        when(ps.executeQuery()).thenReturn(emptyRs);
+        OBDal obDal = mockObDal(dalMock);
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(null);
 
         new SupportConversationsServlet().doPost(request, response);
       }
@@ -853,13 +843,10 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        ResultSet belongsRs = mock(ResultSet.class);
-        when(belongsRs.next()).thenReturn(true);
-        ResultSet statusRs = mock(ResultSet.class);
-        when(statusRs.next()).thenReturn(true);
-        when(statusRs.getString("status")).thenReturn("closed");
-        when(ps.executeQuery()).thenReturn(belongsRs, statusRs);
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.getStatus()).thenReturn("closed");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
 
         new SupportConversationsServlet().doPost(request, response);
       }
@@ -876,29 +863,15 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-        when(ps.executeUpdate()).thenReturn(1);
-
-        ResultSet belongsRs = mock(ResultSet.class);
-        when(belongsRs.next()).thenReturn(true);
-        ResultSet statusRs = mock(ResultSet.class);
-        when(statusRs.next()).thenReturn(true);
-        when(statusRs.getString("status")).thenReturn("open");
-        ResultSet takeoverRs = mock(ResultSet.class);
-        when(takeoverRs.next()).thenReturn(true);
-        when(takeoverRs.getBoolean("human_takeover")).thenReturn(true);
-        ResultSet jiraKeyRs = mock(ResultSet.class);
-        when(jiraKeyRs.next()).thenReturn(true);
-        when(jiraKeyRs.getString("jira_ticket_key")).thenReturn("SUP-5");
-        ResultSet summaryRs = mock(ResultSet.class);
-        when(summaryRs.next()).thenReturn(true);
-        when(summaryRs.getString(anyString())).thenReturn("value");
-        when(summaryRs.getBoolean(anyString())).thenReturn(false);
-
-        ResultSet emptyRs = emptyResultSet();
-        when(ps.executeQuery()).thenReturn(belongsRs, statusRs, takeoverRs, jiraKeyRs, emptyRs, summaryRs);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.isHumanTakeover()).thenReturn(true);
+        when(conv.getJiraTicketKey()).thenReturn("SUP-5");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
 
         // postJiraComment() runs on a fire-and-forget background thread the test can't
         // observe (Mockito static mocks are thread-local); it safely no-ops in this
@@ -919,29 +892,17 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
            MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-        when(ps.executeUpdate()).thenReturn(1);
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.isHumanTakeover()).thenReturn(false);
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
 
-        ResultSet belongsRs = mock(ResultSet.class);
-        when(belongsRs.next()).thenReturn(true);
-        ResultSet statusRs = mock(ResultSet.class);
-        when(statusRs.next()).thenReturn(true);
-        when(statusRs.getString("status")).thenReturn("open");
-        ResultSet takeoverRs = mock(ResultSet.class);
-        when(takeoverRs.next()).thenReturn(true);
-        when(takeoverRs.getBoolean("human_takeover")).thenReturn(false);
-        ResultSet summaryRs = mock(ResultSet.class);
-        when(summaryRs.next()).thenReturn(true);
-        when(summaryRs.getString(anyString())).thenReturn("value");
-        when(summaryRs.getBoolean(anyString())).thenReturn(false);
-
-        ResultSet emptyRs = emptyResultSet();
-        when(ps.executeQuery()).thenReturn(belongsRs, statusRs, takeoverRs, emptyRs, summaryRs);
-
-        sicMock.when(() -> SupportIntegrationClient.sendToAdk(anyString(), anyString(), anyString(),
-                org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(
+                anyString(), anyString(), anyString(), any(), any()))
             .thenReturn("Claro, contame más");
 
         new SupportConversationsServlet().doPost(request, response);
@@ -966,12 +927,7 @@ class SupportConversationsServletTest {
       HttpServletResponse response = mockResponse(capture);
       HttpServletRequest request = authenticatedRequest("/conversations/conv-1/rating", "{}");
 
-      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
-           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth()) {
         new SupportConversationsServlet().doPost(request, response);
       }
 
@@ -985,12 +941,7 @@ class SupportConversationsServletTest {
       HttpServletResponse response = mockResponse(capture);
       HttpServletRequest request = authenticatedRequest("/conversations/conv-1/rating", "{\"score\":9}");
 
-      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
-           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth()) {
         new SupportConversationsServlet().doPost(request, response);
       }
 
@@ -1007,9 +958,8 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        ResultSet emptyRs = emptyResultSet();
-        when(ps.executeQuery()).thenReturn(emptyRs);
+        OBDal obDal = mockObDal(dalMock);
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(null);
 
         new SupportConversationsServlet().doPost(request, response);
       }
@@ -1028,16 +978,10 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-        when(ps.executeUpdate()).thenReturn(1);
-
-        ResultSet belongsRs = mock(ResultSet.class);
-        when(belongsRs.next()).thenReturn(true);
-        ResultSet jiraKeyRs = mock(ResultSet.class);
-        when(jiraKeyRs.next()).thenReturn(true);
-        when(jiraKeyRs.getString("jira_ticket_key")).thenReturn("SUP-5");
-        when(ps.executeQuery()).thenReturn(belongsRs, jiraKeyRs);
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.getJiraTicketKey()).thenReturn("SUP-5");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
 
         // buildFeedbackComment/postJiraCsatLabel run on a fire-and-forget background
         // thread the test can't observe (Mockito static mocks are thread-local); they
@@ -1067,21 +1011,15 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-        when(ps.executeUpdate()).thenReturn(1);
-        ResultSet belongsRs = mock(ResultSet.class);
-        when(belongsRs.next()).thenReturn(true);
-        ResultSet summaryRs = mock(ResultSet.class);
-        when(summaryRs.next()).thenReturn(true);
-        when(summaryRs.getString(anyString())).thenReturn("value");
-        when(summaryRs.getBoolean(anyString())).thenReturn(false);
-        when(ps.executeQuery()).thenReturn(belongsRs, summaryRs);
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.getStatus()).thenReturn("closed");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
 
         new SupportConversationsServlet().doPost(request, response);
       }
 
-      assertTrue(capture.toString().contains(FIELD_MESSAGES_LITERAL) || capture.toString().contains("value"));
+      assertTrue(capture.toString().contains(FIELD_CONVERSATION_LITERAL));
     }
 
     @Test
@@ -1094,9 +1032,8 @@ class SupportConversationsServletTest {
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        ResultSet emptyRs = emptyResultSet();
-        when(ps.executeQuery()).thenReturn(emptyRs);
+        OBDal obDal = mockObDal(dalMock);
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(null);
 
         new SupportConversationsServlet().doPost(request, response);
       }
@@ -1113,18 +1050,14 @@ class SupportConversationsServletTest {
 
       try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
            MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-        when(ps.executeUpdate()).thenReturn(1);
-        ResultSet belongsRs = mock(ResultSet.class);
-        when(belongsRs.next()).thenReturn(true);
-        ResultSet summaryRs = mock(ResultSet.class);
-        when(summaryRs.next()).thenReturn(true);
-        when(summaryRs.getString(anyString())).thenReturn("value");
-        when(summaryRs.getBoolean(anyString())).thenReturn(false);
-        ResultSet emptyRs = emptyResultSet();
-        when(ps.executeQuery()).thenReturn(belongsRs, summaryRs, emptyRs);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        when(conv.getStatus()).thenReturn("open");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
 
         new SupportConversationsServlet().doPost(request, response);
       }
@@ -1139,18 +1072,15 @@ class SupportConversationsServletTest {
       HttpServletResponse response = mockResponse(capture);
       HttpServletRequest request = authenticatedRequest("/conversations/conv-1/archive", "{}");
 
-      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
-           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-        PreparedStatement ps = mockDb(dalMock);
-        when(ps.execute()).thenReturn(true);
-
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth()) {
         new SupportConversationsServlet().doPost(request, response);
       }
 
       assertTrue(capture.toString().contains("Unknown endpoint"));
     }
   }
+
+  private static final String FIELD_CONVERSATION_LITERAL = "conversation";
 
   // -------------------------------------------------------------------------
   // newId
