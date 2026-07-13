@@ -18,11 +18,14 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -35,6 +38,7 @@ import java.util.Map;
 import org.hibernate.Session;
 import org.hibernate.query.Query;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
@@ -140,6 +144,7 @@ public class YearAccountingHandlerTest {
       Query<Object[]> query = mock(Query.class);
       when(session.createQuery(anyString())).thenReturn(query);
       when(query.setParameter(eq("yearId"), anyString())).thenReturn(query);
+      when(query.setParameterList(eq("closingTypes"), anyList())).thenReturn(query);
       when(query.list()).thenReturn(rows);
 
       NeoResponse r = handler.handle(buildListContext("year-1"));
@@ -155,6 +160,52 @@ public class YearAccountingHandlerTest {
       assertEquals("", data.getJSONObject(1).getString("description"));
       assertEquals("0", data.getJSONObject(1).getString("debit"));
       assertEquals("50.00", data.getJSONObject(1).getString("credit"));
+    }
+  }
+
+  @Test
+  public void queryScopesToYearEndClosingTypesOnly() throws Exception {
+    // A type='A' (regular "Actual" transactional posting) fact row must NOT be returned for a
+    // not-yet-closed year — Classic's End Year Close window correctly shows "No data in grid" in
+    // this case, matching FinancialMgmtAccountingFactEndYearHQL's own fa.type IN ('O','C','D','R')
+    // filter. This handler had no such filter before this fix and wrongly leaked every regular
+    // posting through (confirmed live: 302 type='A' rows for a not-yet-closed GOOrg 2026).
+    YearAccountingHandler handler = new YearAccountingHandler();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      ctxMock.when(OBContext::setAdminMode).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      @SuppressWarnings("unchecked")
+      Query<Object[]> query = mock(Query.class);
+      when(session.createQuery(anyString())).thenReturn(query);
+      when(query.setParameter(eq("yearId"), anyString())).thenReturn(query);
+      when(query.setParameterList(eq("closingTypes"), anyList())).thenReturn(query);
+      when(query.list()).thenReturn(Collections.emptyList());
+
+      handler.handle(buildListContext("year-1"));
+
+      // The HQL itself must restrict on fa.type, and the actual closing-type set passed to
+      // Hibernate must be exactly the four year-end closing/regularization codes — not a
+      // hardcoded string embedded in the HQL, so it stays a single source of truth with the
+      // constant the handler defines.
+      ArgumentCaptor<String> hqlCaptor = ArgumentCaptor.forClass(String.class);
+      verify(session).createQuery(hqlCaptor.capture());
+      assertTrue("HQL should filter on fa.type", hqlCaptor.getValue().contains("fa.type in (:closingTypes)"));
+
+      @SuppressWarnings("unchecked")
+      ArgumentCaptor<List<String>> typesCaptor = ArgumentCaptor.forClass(List.class);
+      verify(query).setParameterList(eq("closingTypes"), typesCaptor.capture());
+      List<String> closingTypes = typesCaptor.getValue();
+      assertEquals(Arrays.asList("O", "C", "D", "R"), closingTypes);
+      assertFalse("Regular 'Actual' postings (type='A') must never be in the closing-type set",
+          closingTypes.contains("A"));
     }
   }
 
@@ -176,6 +227,7 @@ public class YearAccountingHandlerTest {
       Query<Object[]> query = mock(Query.class);
       when(session.createQuery(anyString())).thenReturn(query);
       when(query.setParameter(eq("yearId"), anyString())).thenReturn(query);
+      when(query.setParameterList(eq("closingTypes"), anyList())).thenReturn(query);
       when(query.list()).thenReturn(Collections.emptyList());
 
       NeoResponse r = handler.handle(buildListContext("year-with-no-entries"));

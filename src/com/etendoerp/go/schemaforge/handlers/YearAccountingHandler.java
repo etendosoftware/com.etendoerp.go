@@ -74,10 +74,20 @@ public class YearAccountingHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(YearAccountingHandler.class);
 
+  // Only the year-end closing/regularization entry types created BY the Close Year process
+  // (CreateRegFactAcct) belong on this tab — matching Classic's End Year Close window, whose
+  // stored FinancialMgmtAccountingFactEndYearHQL view filters on this exact same set. Without
+  // this filter, every regular "Actual" (type='A') transactional posting for the year's periods
+  // leaks in too, which is wrong for a not-yet-closed year (confirmed live: Classic correctly
+  // shows "No data in grid" for a not-yet-closed year; this handler was wrongly returning 302
+  // type='A' rows for the same year before this fix).
+  private static final List<String> YEAR_END_CLOSING_TYPES = List.of("O", "C", "D", "R");
+
   private static final String HQL =
       "select max(fa.id), fa.account.searchKey, fa.type, sum(fa.debit), sum(fa.credit), max(fa.description) "
           + "from FinancialMgmtAccountingFact fa "
           + "where fa.period.year.id = :yearId "
+          + "and fa.type in (:closingTypes) "
           + "group by fa.account.searchKey, fa.type "
           + "having sum(fa.credit - fa.debit) <> 0 "
           + "order by fa.account.searchKey";
@@ -118,6 +128,7 @@ public class YearAccountingHandler implements NeoHandler {
     return OBDal.getInstance().getSession()
         .createQuery(HQL)
         .setParameter("yearId", yearId)
+        .setParameterList("closingTypes", YEAR_END_CLOSING_TYPES)
         .list();
   }
 
