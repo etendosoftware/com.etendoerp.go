@@ -73,6 +73,8 @@ final class McpAuthorizationService {
       case "neo_selectors":
       case "neo_defaults":
       case "neo_schema":
+      case "docs":
+      case McpConstants.TOOL_NEO_WIDGET:
         return SCOPE_READ;
       case "neo_create":
       case "neo_update":

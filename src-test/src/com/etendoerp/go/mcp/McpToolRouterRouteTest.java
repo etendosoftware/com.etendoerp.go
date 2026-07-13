@@ -45,6 +45,7 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -124,6 +125,13 @@ class McpToolRouterRouteTest {
     obContextMock.when(() -> OBContext.setAdminMode()).thenAnswer(inv -> null);
     obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
 
+    // The router now delegates argument validation to the (statically mocked) support
+    // class. Run the REAL validation logic so the "Missing arguments" / "Missing required
+    // argument: <key>" assertions stay meaningful. validateArgs is a static, side-effect-free
+    // method (throws IllegalArgumentException) so thenCallRealMethod is safe here.
+    supportMock.when(() -> McpToolRouterSupport.validateArgs(any(), any(String[].class)))
+        .thenCallRealMethod();
+
     router = new McpToolRouter();
   }
 
@@ -173,20 +181,27 @@ class McpToolRouterRouteTest {
     return tab;
   }
 
-  @SuppressWarnings("unchecked")
+  /**
+   * Prime the (statically mocked) support class so spec resolution returns {@code spec}.
+   * The router delegates BOTH {@code authorizeSpecAccess} and every handler's spec lookup
+   * to {@link McpToolRouterSupport#findActiveSpecByName}, so stubbing that one method covers
+   * the whole route. {@code hasSpecAccess} is also stubbed to grant access by default.
+   */
   private void setupSpecLookup(SFSpec spec) {
-    OBCriteria<SFSpec> specCriteria = mock(OBCriteria.class);
-    when(mockOBDal.createCriteria(SFSpec.class)).thenReturn(specCriteria);
-    when(specCriteria.list()).thenReturn(List.of(spec));
+    supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
+        .thenReturn(spec);
     supportMock.when(() -> McpToolRouterSupport.hasSpecAccess(any(), anyString()))
         .thenReturn(true);
   }
 
-  @SuppressWarnings("unchecked")
+  /**
+   * Prime the (statically mocked) support class so entity resolution returns {@code entity}
+   * and the entity's AD_Tab returns {@code tab}. Mirrors what the old OBDal-based criteria
+   * setup produced before the router delegated entity lookup to the support class.
+   */
   private void setupEntityLookup(SFEntity entity, Tab tab) {
-    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
-    when(mockOBDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
-    when(entityCriteria.list()).thenReturn(List.of(entity));
+    supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
+        .thenReturn(entity);
     when(entity.getADTab()).thenReturn(tab);
   }
 
@@ -634,11 +649,11 @@ class McpToolRouterRouteTest {
 
     @Test
     @DisplayName("unknown spec returns error")
-    @SuppressWarnings("unchecked")
     void unknownSpecReturnsError() throws Exception {
-      OBCriteria<SFSpec> specCriteria = mock(OBCriteria.class);
-      when(mockOBDal.createCriteria(SFSpec.class)).thenReturn(specCriteria);
-      when(specCriteria.list()).thenReturn(Collections.emptyList());
+      // The router delegates spec resolution to the support class, which throws
+      // OBException("Spec not found: <name>") when no active spec matches.
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
+          .thenThrow(new OBException("Spec not found: " + SPEC_NAME));
 
       JSONObject args = buildCrudArgs();
       JSONObject result = router.route("neo_list", args, READ_SCOPES);
@@ -650,14 +665,13 @@ class McpToolRouterRouteTest {
 
     @Test
     @DisplayName("unknown entity returns error")
-    @SuppressWarnings("unchecked")
     void unknownEntityReturnsError() throws Exception {
       SFSpec spec = mockSpec();
       setupSpecLookup(spec);
 
-      OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
-      when(mockOBDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
-      when(entityCriteria.list()).thenReturn(Collections.emptyList());
+      // Spec resolves, but entity resolution throws OBException("Entity not found: <name>").
+      supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
+          .thenThrow(new OBException("Entity not found: " + ENTITY_NAME));
 
       JSONObject args = buildCrudArgs();
       JSONObject result = router.route("neo_list", args, READ_SCOPES);
@@ -669,15 +683,15 @@ class McpToolRouterRouteTest {
 
     @Test
     @DisplayName("entity without AD_Tab returns error")
-    @SuppressWarnings("unchecked")
     void entityWithoutTabReturnsError() throws Exception {
       SFSpec spec = mockSpec();
       SFEntity entity = mockEntity();
       setupSpecLookup(spec);
 
-      OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
-      when(mockOBDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
-      when(entityCriteria.list()).thenReturn(List.of(entity));
+      // Entity resolves but has no linked AD_Tab. The router's own getAdTabOrThrow
+      // (still private in McpToolRouter) raises "No AD_Tab linked to entity: <name>".
+      supportMock.when(() -> McpToolRouterSupport.findIncludedEntity(anyString(), anyString()))
+          .thenReturn(entity);
       when(entity.getADTab()).thenReturn(null);
 
       JSONObject args = buildCrudArgs();
@@ -753,7 +767,10 @@ class McpToolRouterRouteTest {
     @Test
     @DisplayName("unexpected exception is caught and returned as error content")
     void unexpectedExceptionReturnedAsError() throws Exception {
-      when(mockOBDal.createCriteria(SFSpec.class))
+      // An unexpected DAL failure now surfaces through the delegated spec lookup
+      // (authorizeSpecAccess → findActiveSpecByName). The router's catch-all must
+      // wrap it as error content.
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
           .thenThrow(new RuntimeException("Database connection lost"));
 
       JSONObject args = buildCrudArgs();
@@ -767,7 +784,7 @@ class McpToolRouterRouteTest {
     @Test
     @DisplayName("exception inside adminMode still returns error content (finally restores mode)")
     void exceptionInsideAdminModeReturnsError() throws Exception {
-      when(mockOBDal.createCriteria(SFSpec.class))
+      supportMock.when(() -> McpToolRouterSupport.findActiveSpecByName(anyString()))
           .thenThrow(new RuntimeException("fail"));
 
       JSONObject args = buildCrudArgs();
@@ -814,6 +831,157 @@ class McpToolRouterRouteTest {
       JSONObject result = McpToolRouter.wrapAsTextContent(json);
 
       assertEquals(json, result.getJSONArray("content").getJSONObject(0).getString("text"));
+    }
+  }
+
+  // ── docs ────────────────────────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("route — docs")
+  class DocsTests {
+
+    @Test
+    @DisplayName("docs with missing topic returns error content")
+    void docsMissingTopicReturnsError() throws Exception {
+      JSONObject result = router.route("docs", new JSONObject(), READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("topic"));
+    }
+
+    @Test
+    @DisplayName("docs with blank topic returns error content")
+    void docsBlankTopicReturnsError() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("topic", "   ");
+
+      JSONObject result = router.route("docs", args, READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("topic"));
+    }
+
+    @Test
+    @DisplayName("docs with null arguments returns error content")
+    void docsNullArgsReturnsError() throws Exception {
+      JSONObject result = router.route("docs", null, READ_SCOPES);
+
+      assertTrue(result.getBoolean("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("topic"));
+    }
+
+    @Test
+    @DisplayName("handleDocs success path returns the docs body via injected client")
+    void docsSuccessReturnsBody() throws Exception {
+      Context7DocsClient mockClient = mock(Context7DocsClient.class);
+      when(mockClient.fetchDocs(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+          anyString(), org.mockito.ArgumentMatchers.any()))
+          .thenReturn("# Finance docs\nbody text");
+
+      // Stub the token-resolution seam so the test needs no DB or static mocking
+      McpToolRouter docsRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return null;
+        }
+      };
+
+      JSONObject args = new JSONObject();
+      args.put("topic", "finance");
+      args.put("tokens", 1000);
+      args.put("type", "txt");
+
+      JSONObject result = docsRouter.handleDocs(args, mockClient);
+
+      assertFalse(result.has("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertEquals("# Finance docs\nbody text", text);
+    }
+
+    @Test
+    @DisplayName("handleDocs with blank body returns friendly no-results message")
+    void docsBlankBodyReturnsFriendlyMessage() throws Exception {
+      Context7DocsClient mockClient = mock(Context7DocsClient.class);
+      when(mockClient.fetchDocs(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+          anyString(), org.mockito.ArgumentMatchers.any()))
+          .thenReturn("");
+
+      // Stub the token-resolution seam so the test needs no DB or static mocking
+      McpToolRouter docsRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return null;
+        }
+      };
+
+      JSONObject args = new JSONObject();
+      args.put("topic", "nonexistent");
+
+      JSONObject result = docsRouter.handleDocs(args, mockClient);
+
+      assertFalse(result.has("isError"));
+      String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+      assertTrue(text.contains("No documentation found for topic"));
+    }
+
+    @Test
+    @DisplayName("handleDocs threads the resolved Context7 token to the client")
+    void docsPassesResolvedTokenToClient() throws Exception {
+      Context7DocsClient mockClient = mock(Context7DocsClient.class);
+      when(mockClient.fetchDocs(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+          anyString(), org.mockito.ArgumentMatchers.any()))
+          .thenReturn("docs body");
+
+      // Stub the token-resolution seam so the test needs no DB or static mocking
+      McpToolRouter tokenRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return "tok-123";
+        }
+      };
+
+      JSONObject args = new JSONObject();
+      args.put("topic", "finance");
+
+      JSONObject result = tokenRouter.handleDocs(args, mockClient);
+
+      assertFalse(result.has("isError"));
+      org.mockito.ArgumentCaptor<String> tokenCaptor =
+          org.mockito.ArgumentCaptor.forClass(String.class);
+      org.mockito.Mockito.verify(mockClient).fetchDocs(anyString(),
+          org.mockito.ArgumentMatchers.anyInt(), anyString(), tokenCaptor.capture());
+      assertEquals("tok-123", tokenCaptor.getValue());
+    }
+
+    @Test
+    @DisplayName("handleDocs passes a null token to the client when none is configured")
+    void docsPassesNullTokenWhenUnset() throws Exception {
+      Context7DocsClient mockClient = mock(Context7DocsClient.class);
+      when(mockClient.fetchDocs(anyString(), org.mockito.ArgumentMatchers.anyInt(),
+          anyString(), org.mockito.ArgumentMatchers.any()))
+          .thenReturn("docs body");
+
+      McpToolRouter tokenRouter = new McpToolRouter() {
+        @Override
+        String resolveContext7Token() {
+          return null;
+        }
+      };
+
+      JSONObject args = new JSONObject();
+      args.put("topic", "finance");
+
+      JSONObject result = tokenRouter.handleDocs(args, mockClient);
+
+      assertFalse(result.has("isError"));
+      org.mockito.ArgumentCaptor<String> tokenCaptor =
+          org.mockito.ArgumentCaptor.forClass(String.class);
+      org.mockito.Mockito.verify(mockClient).fetchDocs(anyString(),
+          org.mockito.ArgumentMatchers.anyInt(), anyString(), tokenCaptor.capture());
+      org.junit.jupiter.api.Assertions.assertNull(tokenCaptor.getValue());
     }
   }
 

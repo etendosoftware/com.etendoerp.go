@@ -23,6 +23,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -37,6 +38,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
@@ -48,9 +50,11 @@ import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.geography.Country;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
@@ -709,4 +713,195 @@ public class FinancialAccountHandlerTest {
       obContext.verify(OBContext::restorePreviousMode);
     }
   }
+
+  // ── afterHandle: delegates default payment-method assignment to
+  // FinancialAccountSupport ──────────────────────────────────────────────────
+  //
+  // The assignment logic itself (findPaymentMethodByName/linkExists/createLink,
+  // one method per account type, default flag, idempotency) now lives on
+  // FinancialAccountSupport.assignDefaultPaymentMethods (static) and is covered
+  // end-to-end in FinancialAccountSupportTest. Here we only verify the hook
+  // orchestration: routing and that the static call is delegated with the
+  // loaded account.
+
+  /** A foreign spec is ignored by the post-hook (no account lookup). */
+  @Test
+  public void testAfterHandleForeignSpecReturnsNull() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn("sales-order");
+
+    assertNull(handler.afterHandle(ctx));
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /** Non-POST writes (e.g. PUT) do not trigger payment-method assignment. */
+  @Test
+  public void testAfterHandleNonPostReturnsNull() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+
+    assertNull(handler.afterHandle(ctx));
+    verify(handler, never()).extractCreatedId(any());
+  }
+
+  /**
+   * The defaults endpoint overwrites the generic currency default with the client's accounting
+   * schema currency, so the new-account wizard starts with the real client currency instead of the
+   * first alphabetic active currency.
+   */
+  @Test
+  public void testAfterHandleDefaultsInjectsClientCurrency() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
+
+    Currency currency = mock(Currency.class);
+    when(currency.getId()).thenReturn(EUR_ID);
+    when(currency.getISOCode()).thenReturn("EUR");
+
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getCurrency()).thenReturn(currency);
+
+    JSONObject defaults = new JSONObject().put("currency", "114").put("currency$_identifier", "AED");
+    JSONObject responseBody = new JSONObject().put("defaults", defaults);
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(200, responseBody));
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBContext obCtx = mock(OBContext.class);
+      Client client = mock(Client.class);
+      when(obCtx.getCurrentClient()).thenReturn(client);
+      obContext.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<AcctSchema> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(AcctSchema.class)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(schema);
+
+      NeoResponse out = handler.afterHandle(ctx);
+
+      assertEquals(200, out.getHttpStatus());
+      JSONObject outDefaults = out.getBody().getJSONObject("defaults");
+      assertEquals(EUR_ID, outDefaults.getString("currency"));
+      assertEquals("EUR", outDefaults.getString("currency$_identifier"));
+      verify(handler, never()).extractCreatedId(any());
+    }
+  }
+
+  /** When the defaults endpoint cannot resolve a client currency, it leaves the generic response unchanged. */
+  @Test
+  public void testAfterHandleDefaultsWithoutClientCurrencyReturnsNull() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.DEFAULTS);
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(200, new JSONObject()));
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBContext obCtx = mock(OBContext.class);
+      when(obCtx.getCurrentClient()).thenReturn(mock(Client.class));
+      obContext.when(OBContext::getOBContext).thenReturn(obCtx);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<AcctSchema> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(AcctSchema.class)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+
+      assertNull(handler.afterHandle(ctx));
+      verify(handler, never()).extractCreatedId(any());
+    }
+  }
+
+  /** A POST whose response carries no id assigns nothing. */
+  @Test
+  public void testAfterHandleNoCreatedIdSkipsAssignment() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    doReturn(null).when(handler).extractCreatedId(ctx);
+
+    assertNull(handler.afterHandle(ctx));
+    verify(handler, never()).loadAccount(any());
+  }
+
+  /**
+   * A POST with a created id loads the account and delegates the assignment to
+   * {@link FinancialAccountSupport#assignDefaultPaymentMethods}, verified via a static mock
+   * since the method is now static on that helper (moved out of this handler).
+   */
+  @Test
+  public void testAfterHandlePostAssignsForCreatedAccount() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    doReturn(ACC_ID).when(handler).extractCreatedId(ctx);
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    try (MockedStatic<FinancialAccountSupport> support =
+        mockStatic(FinancialAccountSupport.class)) {
+      assertNull(handler.afterHandle(ctx));
+      support.verify(() -> FinancialAccountSupport.assignDefaultPaymentMethods(account));
+    }
+  }
+
+  /** A failure during assignment is swallowed so account creation is not broken. */
+  @Test
+  public void testAfterHandleSwallowsAssignmentFailure() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    doReturn(ACC_ID).when(handler).extractCreatedId(ctx);
+    doThrow(new RuntimeException("boom")).when(handler).loadAccount(ACC_ID);
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  // ── extractCreatedId (real body) ──────────────────────────────────────────
+
+  /** A null previous result yields no id. */
+  @Test
+  public void testExtractCreatedIdNullPreviousReturnsNull() {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getPreviousResult()).thenReturn(null);
+    assertNull(new FinancialAccountHandler().extractCreatedId(ctx));
+  }
+
+  /** The id is read from a {@code response.data[0].id} array envelope. */
+  @Test
+  public void testExtractCreatedIdFromDataArray() throws Exception {
+    JSONObject dataRow = new JSONObject().put("id", "acc-9");
+    JSONObject response = new JSONObject().put("data", new JSONArray().put(dataRow));
+    JSONObject body = new JSONObject().put("response", response);
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(201, body));
+
+    assertEquals("acc-9", new FinancialAccountHandler().extractCreatedId(ctx));
+  }
+
+  /** The id is read from a {@code response.data.id} object envelope. */
+  @Test
+  public void testExtractCreatedIdFromDataObject() throws Exception {
+    JSONObject dataRow = new JSONObject().put("id", "acc-7");
+    JSONObject response = new JSONObject().put("data", dataRow);
+    JSONObject body = new JSONObject().put("response", response);
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(201, body));
+
+    assertEquals("acc-7", new FinancialAccountHandler().extractCreatedId(ctx));
+  }
+
+  /** A body without a {@code response} wrapper yields no id. */
+  @Test
+  public void testExtractCreatedIdMissingResponseReturnsNull() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getPreviousResult()).thenReturn(new NeoResponse(201, new JSONObject()));
+    assertNull(new FinancialAccountHandler().extractCreatedId(ctx));
+  }
+
 }

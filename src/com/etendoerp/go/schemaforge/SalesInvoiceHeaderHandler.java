@@ -66,6 +66,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   private static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
   private static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
+  private static final String FIELD_DOCUMENT_NO = "documentNo";
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
@@ -88,6 +89,9 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   @Inject
   private DocumentPostingService postingService;
 
+  @Inject
+  private CurrencyOptionsHandler currencyOptionsHandler;
+
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
@@ -99,15 +103,35 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     if (posting != null) {
       return posting;
     }
+    NeoResponse lineQtyError = validateLineQtyBeforeComplete(context);
+    if (lineQtyError != null) {
+      return lineQtyError;
+    }
+    // Must run BEFORE completeInvoiceIfNeeded: the discount line has to reflect the final set of
+    // product lines before ProcessInvoiceUtil.process() completes/posts the document (ETP-4388).
+    AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
+    NeoResponse completionResponse = completeInvoiceIfNeeded(context);
+    if (completionResponse != null) {
+      return completionResponse;
+    }
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       NeoResponse lockError = validateDocTypeLock(context);
       if (lockError != null) {
         return lockError;
       }
     }
-    AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
-    return NeoHeaderActionRouter.dispatch(context, cloneRecordHandler, registerPaymentHandler,
-        siiSendHandler, tbaiXmlgeneratorHandler, createInvoiceShipmentHandler);
+    return NeoHeaderActionRouter.dispatch(context, currencyOptionsHandler, cloneRecordHandler,
+        registerPaymentHandler, siiSendHandler, tbaiXmlgeneratorHandler, createInvoiceShipmentHandler);
+  }
+
+  /**
+   * Post-callout hook (ETP-4029): blocks callout-driven currency updates and appends an
+   * exchange-rate warning when the user directly changes the invoice currency. Mirrors
+   * {@code AbstractOrderHeaderHandler#afterCallout}.
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    return handleCurrencyAfterCallout(context);
   }
 
   /**
@@ -117,6 +141,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    autoCreateOrUpdateConversionRateDocument(context);
     if (!"GET".equals(context.getHttpMethod()) || !NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       return null;
     }
@@ -140,6 +165,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         JSONObject rec = dataArr.getJSONObject(0);
         enrichSourceInvoice(rec, context.getRecordId());
         enrichDocTypeLocked(rec);
+        enrichLinkedShipments(rec, context.getRecordId());
       }
       TbaiSyncStatusInjector.inject(dataArr);
       return NeoResponse.ok(body);
@@ -229,7 +255,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         if (rs.next()) {
           JSONObject retReceipt = new JSONObject();
           retReceipt.put("id", rs.getString("ret_id"));
-          retReceipt.put("documentNo", rs.getString("ret_doc"));
+          retReceipt.put(FIELD_DOCUMENT_NO, rs.getString("ret_doc"));
           retReceipt.put("documentStatus", rs.getString("ret_status"));
           rec.put("sourceReturnReceipt", retReceipt);
 
@@ -237,7 +263,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
           if (origInvId != null) {
             JSONObject sourceInvoice = new JSONObject();
             sourceInvoice.put("id", origInvId);
-            sourceInvoice.put("documentNo", rs.getString("inv_doc"));
+            sourceInvoice.put(FIELD_DOCUMENT_NO, rs.getString("inv_doc"));
             rec.put("sourceInvoice", sourceInvoice);
           }
         }
@@ -264,5 +290,44 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   private static double roundHalfUp(double value) {
     return Math.round(value * 100.0) / 100.0;
+  }
+
+  /**
+   * Injects {@code linkedShipments} into the invoice detail record.
+   * Finds all sales shipments (M_InOut) whose lines are referenced by the invoice's
+   * C_InvoiceLine.M_InOutLine_ID. Covers invoices created directly from a shipment
+   * (standalone or via-order), where the native process always populates M_InOutLine_ID.
+   */
+  @SuppressWarnings("java:S2077")
+  private void enrichLinkedShipments(JSONObject rec, String invoiceId) {
+    String sql =
+        "SELECT DISTINCT io.m_inout_id, io.documentno, io.docstatus, io.movementtype " +
+        "FROM c_invoiceline il " +
+        "JOIN m_inoutline iol ON (" +
+        "  iol.m_inoutline_id = il.m_inoutline_id " +
+        "  OR (il.m_inoutline_id IS NULL AND il.c_orderline_id IS NOT NULL AND iol.c_orderline_id = il.c_orderline_id)" +
+        ") " +
+        "JOIN m_inout io ON io.m_inout_id = iol.m_inout_id " +
+        "WHERE il.c_invoice_id = ? AND il.isactive = 'Y' " +
+        "  AND io.isactive = 'Y' AND io.docstatus NOT IN ('VO','CL') " +
+        "  AND io.issotrx = 'Y'";
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, invoiceId);
+      JSONArray shipments = new JSONArray();
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONObject s = new JSONObject();
+          s.put("id", rs.getString(1));
+          s.put(FIELD_DOCUMENT_NO, rs.getString(2));
+          s.put("documentStatus", rs.getString(3));
+          s.put("movementType", rs.getString(4));
+          shipments.put(s);
+        }
+      }
+      rec.put("linkedShipments", shipments);
+    } catch (Exception e) {
+      log.warn("Could not enrich linked shipments for invoice {}: {}", invoiceId, e.getMessage());
+    }
   }
 }

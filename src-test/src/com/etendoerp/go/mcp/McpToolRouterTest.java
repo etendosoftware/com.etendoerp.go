@@ -59,6 +59,7 @@ public class McpToolRouterTest {
   private static final String TOOL_NEO_BATCH = "neo_batch";
   private static final String TOOL_COMPLETE_ORDER = "complete_order";
   private static final String TOOL_GENERATE_INVOICE = "generate_invoice_report";
+  private static final String TOOL_DOCS = "docs";
 
   // ── wrapAsTextContent ──────────────────────────────────────────────────
 
@@ -539,6 +540,50 @@ public class McpToolRouterTest {
     McpAuthorizationService.authorizeToolCall("   ", Set.of("neo:*"));
   }
 
+  /** Tests that the docs tool requires read scope at execution time. */
+  @Test(expected = OBSecurityException.class)
+  public void testAuthorizeToolCallRejectsDocsWithoutReadScope() {
+    McpAuthorizationService.authorizeToolCall(TOOL_DOCS, Set.of("neo:process"));
+  }
+
+  /** Tests that read scope allows the docs tool. */
+  @Test
+  public void testAuthorizeToolCallAllowsDocsWithReadScope() {
+    McpAuthorizationService.authorizeToolCall(TOOL_DOCS, Set.of("neo:read"));
+  }
+
+  /** Tests that the wildcard scope allows the docs tool. */
+  @Test
+  public void testAuthorizeToolCallAllowsDocsWithWildcardScope() {
+    McpAuthorizationService.authorizeToolCall(TOOL_DOCS, Set.of("neo:*"));
+  }
+
+  // ── McpAuthorizationService — neo_widget (ETP-4284 / G4) ──────────────
+
+  /** Tests that neo_widget requires read scope at execution time. */
+  @Test
+  public void testAuthorizeToolCallAllowsWidgetWithReadScope() {
+    McpAuthorizationService.authorizeToolCall(McpConstants.TOOL_NEO_WIDGET, Set.of("neo:read"));
+  }
+
+  /** Tests that the wildcard scope allows neo_widget. */
+  @Test
+  public void testAuthorizeToolCallAllowsWidgetWithWildcardScope() {
+    McpAuthorizationService.authorizeToolCall(McpConstants.TOOL_NEO_WIDGET, Set.of("neo:*"));
+  }
+
+  /** Tests that neo_widget is rejected without read scope. */
+  @Test(expected = OBSecurityException.class)
+  public void testAuthorizeToolCallRejectsWidgetWithoutReadScope() {
+    McpAuthorizationService.authorizeToolCall(McpConstants.TOOL_NEO_WIDGET, Set.of("neo:write"));
+  }
+
+  /** Tests that neo_widget is rejected with process scope only. */
+  @Test(expected = OBSecurityException.class)
+  public void testAuthorizeToolCallRejectsWidgetWithProcessScope() {
+    McpAuthorizationService.authorizeToolCall(McpConstants.TOOL_NEO_WIDGET, Set.of("neo:process"));
+  }
+
   // ── McpAuthorizationService.parseScopes ───────────────────────────────
 
   /** Tests that parseScopes parses space-delimited scope strings. */
@@ -821,6 +866,64 @@ public class McpToolRouterTest {
       assertTrue("Error should mention 'Missing arguments' or similar",
           errorText.toLowerCase().contains("missing")
               || errorText.toLowerCase().contains("argument"));
+    }
+  }
+
+  // ── route() — neo_widget (ETP-4284 / G4) ──────────────────────────────
+
+  /**
+   * Tests that route() with neo_widget and a valid widget but no DAL passes
+   * authorization (the subsequent error is about spec/DAL resolution, not scope).
+   */
+  @Test
+  public void testRouteWidgetPassesAuthorizationWithReadScope() throws Exception {
+    McpToolRouter router = new McpToolRouter();
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      ctxMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+
+      JSONObject args = new JSONObject();
+      args.put("widget", "kpis");
+
+      JSONObject result = router.route(McpConstants.TOOL_NEO_WIDGET, args, Set.of("neo:read"));
+      assertTrue(result.optBoolean(FIELD_IS_ERROR, false));
+      String errorText = result.getJSONArray(FIELD_CONTENT).getJSONObject(0).getString("text");
+      assertFalse("neo_widget error should not be about scope",
+          errorText.contains("requires scope"));
+    }
+  }
+
+  /**
+   * Tests that route() rejects neo_widget without read scope. Authorization runs
+   * before the try/catch in route(), so the OBSecurityException propagates to the
+   * caller (it is NOT wrapped as error content) — matching the other write/process
+   * scope-rejection tests above.
+   */
+  @Test(expected = OBSecurityException.class)
+  public void testRouteWidgetRejectedWithoutReadScope() throws Exception {
+    McpToolRouter router = new McpToolRouter();
+
+    JSONObject args = new JSONObject();
+    args.put("widget", "kpis");
+
+    router.route(McpConstants.TOOL_NEO_WIDGET, args, Set.of("neo:write"));
+  }
+
+  /**
+   * Tests that route() with neo_widget and null arguments returns an error
+   * (the required 'widget' argument is missing).
+   */
+  @Test
+  public void testRouteWidgetNullArgsReturnsError() throws Exception {
+    McpToolRouter router = new McpToolRouter();
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      ctxMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+
+      JSONObject result = router.route(McpConstants.TOOL_NEO_WIDGET, null, Set.of("neo:*"));
+      assertTrue(result.optBoolean(FIELD_IS_ERROR, false));
     }
   }
 

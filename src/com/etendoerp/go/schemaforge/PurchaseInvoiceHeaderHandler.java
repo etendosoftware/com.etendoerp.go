@@ -82,6 +82,9 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   @Inject
   private DocumentPostingService postingService;
 
+  @Inject
+  private CurrencyOptionsHandler currencyOptionsHandler;
+
   /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
   void setPostingService(DocumentPostingService postingService) {
     this.postingService = postingService;
@@ -93,6 +96,17 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     if (posting != null) {
       return posting;
     }
+    NeoResponse lineQtyError = validateLineQtyBeforeComplete(context);
+    if (lineQtyError != null) {
+      return lineQtyError;
+    }
+    // Must run BEFORE completeInvoiceIfNeeded: the discount line has to reflect the final set of
+    // product lines before ProcessInvoiceUtil.process() completes/posts the document (ETP-4388).
+    AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
+    NeoResponse completionResponse = completeInvoiceIfNeeded(context);
+    if (completionResponse != null) {
+      return completionResponse;
+    }
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
       NeoResponse lockError = validateDocTypeLock(context);
       if (lockError != null) {
@@ -103,17 +117,28 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         return originError;
       }
     }
-    AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
     return NeoHeaderActionRouter.dispatch(
         context,
+        currencyOptionsHandler,
         cloneRecordHandler,
         registerPaymentOutHandler,
         siiSendHandler,
         tbaiXmlgeneratorHandler);
   }
 
+  /**
+   * Post-callout hook (ETP-4029): blocks callout-driven currency updates and appends an
+   * exchange-rate warning when the user directly changes the invoice currency. Mirrors
+   * {@code AbstractOrderHeaderHandler#afterCallout}.
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    return handleCurrencyAfterCallout(context);
+  }
+
   @Override
   public NeoResponse afterHandle(NeoContext context) {
+    autoCreateOrUpdateConversionRateDocument(context);
     try {
       // POST/PUT: persist origin invoice relationship after the record is saved
       if (NeoEndpointType.CRUD.equals(context.getEndpointType())
@@ -172,13 +197,14 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
   @SuppressWarnings("java:S2077")
   private void enrichLinkedReceipts(JSONObject rec, String invoiceId) {
     String sql =
-        "SELECT DISTINCT io.m_inout_id, io.documentno, io.docstatus "
+        "SELECT DISTINCT io.m_inout_id, io.documentno, io.docstatus, dt.isreturn "
         + "FROM c_invoiceline il "
         + "JOIN m_inoutline iol ON ("
         + "  iol.m_inoutline_id = il.m_inoutline_id "
-        + "  OR (il.c_orderline_id IS NOT NULL AND iol.c_orderline_id = il.c_orderline_id)"
+        + "  OR (il.m_inoutline_id IS NULL AND il.c_orderline_id IS NOT NULL AND iol.c_orderline_id = il.c_orderline_id)"
         + ") "
         + "JOIN m_inout io ON io.m_inout_id = iol.m_inout_id "
+        + "JOIN c_doctype dt ON dt.c_doctype_id = io.c_doctype_id "
         + "WHERE il.c_invoice_id = ? AND il.isactive = 'Y' "
         + "  AND io.isactive = 'Y' AND io.docstatus NOT IN ('VO','CL') "
         + "  AND io.issotrx = 'N'";
@@ -192,6 +218,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
           receipt.put("id", rs.getString(1));
           receipt.put("documentNo", rs.getString(2));
           receipt.put("documentStatus", rs.getString(3));
+          receipt.put("isReturn", "Y".equals(rs.getString(4)));
           receipts.put(receipt);
         }
       }

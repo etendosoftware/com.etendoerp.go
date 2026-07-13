@@ -24,7 +24,6 @@ import java.time.LocalDate;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
-import javax.enterprise.context.ApplicationScoped;
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
@@ -35,15 +34,19 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
+import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.order.Order;
 
 /**
  * Returns the set of currencies that have a defined conversion to/from the order's org currency,
  * scoped to the order's own client and org, for the order's date period.
  *
- * <p>Exposed as an ACTION on both sales-order and purchase-order header entities:
+ * <p>Exposed as an ACTION on sales-order, purchase-order, sales-invoice and purchase-invoice
+ * header entities:
  * <pre>GET /sws/neo/sales-order/header/{orderId}/action/currencyOptions</pre>
  * <pre>GET /sws/neo/purchase-order/header/{orderId}/action/currencyOptions</pre>
+ * <pre>GET /sws/neo/sales-invoice/header/{invoiceId}/action/currencyOptions</pre>
+ * <pre>GET /sws/neo/purchase-invoice/header/{invoiceId}/action/currencyOptions</pre>
  *
  * <p>Response:
  * <pre>[
@@ -63,7 +66,6 @@ import org.openbravo.model.common.order.Order;
  *       shared/global rates (org '*') as standard Etendo pattern.</li>
  * </ul>
  */
-@ApplicationScoped
 @Named("currencyOptionsHandler")
 public class CurrencyOptionsHandler implements NeoHandler {
 
@@ -87,45 +89,77 @@ public class CurrencyOptionsHandler implements NeoHandler {
     boolean isNew = recordId == null || recordId.isEmpty() || "new".equals(recordId);
 
     try {
-      String orgId;
-      String clientId;
-      LocalDate orderDate;
+      RequestContext ctx = resolveRequestContext(context, recordId, isNew);
 
-      if (isNew) {
-        // New record: fall back to session context (org/client not yet bound to an order)
-        OBContext obCtx = OBContext.getOBContext();
-        orgId    = obCtx.getCurrentOrganization().getId();
-        clientId = obCtx.getCurrentClient().getId();
-        orderDate = LocalDate.now();
-      } else {
-        Order order = OBDal.getInstance().get(Order.class, recordId);
-        if (order == null) {
-          return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, "Order not found: " + recordId);
-        }
-        orgId    = order.getOrganization().getId();
-        clientId = order.getClient().getId();
-        orderDate = order.getOrderDate() != null
-            ? java.time.Instant.ofEpochMilli(order.getOrderDate().getTime())
-                .atZone(java.time.ZoneId.systemDefault()).toLocalDate()
-            : LocalDate.now();
-      }
-
-      String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
+      String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(ctx.orgId());
       if (orgCurrencyId == null) {
         return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-            "Could not resolve org currency for org " + orgId);
+            "Could not resolve org currency for org " + ctx.orgId());
       }
 
-      JSONArray result = buildCurrencyOptions(orgCurrencyId, orgId, clientId, orderDate);
+      JSONArray result = buildCurrencyOptions(orgCurrencyId, ctx.orgId(), ctx.clientId(), ctx.orderDate());
       JSONObject wrapper = new JSONObject();
       wrapper.put("response", new JSONObject().put("data", result));
       return NeoResponse.ok(wrapper);
 
+    } catch (RecordNotFoundException e) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, e.getMessage());
     } catch (Exception e) {
       log.error("[ETP-4027] currencyOptions failed for record {}: {}", recordId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "Internal error resolving currency options");
     }
+  }
+
+  /** Org/client/date needed to resolve currency options, whichever document type it comes from. */
+  private record RequestContext(String orgId, String clientId, LocalDate orderDate) {}
+
+  private static class RecordNotFoundException extends RuntimeException {
+    RecordNotFoundException(String message) {
+      super(message);
+    }
+  }
+
+  private RequestContext resolveRequestContext(NeoContext context, String recordId, boolean isNew) {
+    if (isNew) {
+      // New record: fall back to session context (org/client not yet bound to a document)
+      OBContext obCtx = OBContext.getOBContext();
+      return new RequestContext(
+          obCtx.getCurrentOrganization().getId(),
+          obCtx.getCurrentClient().getId(),
+          LocalDate.now());
+    }
+    String specName = context.getSpecName();
+    return specName != null && specName.contains("invoice")
+        ? resolveInvoiceContext(recordId)
+        : resolveOrderContext(recordId);
+  }
+
+  private RequestContext resolveInvoiceContext(String recordId) {
+    Invoice invoice = OBDal.getInstance().get(Invoice.class, recordId);
+    if (invoice == null) {
+      throw new RecordNotFoundException("Invoice not found: " + recordId);
+    }
+    LocalDate orderDate = invoice.getInvoiceDate() != null
+        ? toLocalDate(invoice.getInvoiceDate())
+        : LocalDate.now();
+    return new RequestContext(invoice.getOrganization().getId(), invoice.getClient().getId(), orderDate);
+  }
+
+  private RequestContext resolveOrderContext(String recordId) {
+    Order order = OBDal.getInstance().get(Order.class, recordId);
+    if (order == null) {
+      throw new RecordNotFoundException("Order not found: " + recordId);
+    }
+    LocalDate orderDate = order.getOrderDate() != null
+        ? toLocalDate(order.getOrderDate())
+        : LocalDate.now();
+    return new RequestContext(order.getOrganization().getId(), order.getClient().getId(), orderDate);
+  }
+
+  private static LocalDate toLocalDate(java.util.Date date) {
+    return java.time.Instant.ofEpochMilli(date.getTime())
+        .atZone(java.time.ZoneId.systemDefault()).toLocalDate();
   }
 
   @Override

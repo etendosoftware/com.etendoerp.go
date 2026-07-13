@@ -43,8 +43,9 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 /**
  * Post-hook for the Return Material Receipt header entity.
  *
- * Injects {@code sourceShipmentDocNo} and {@code sourceShipments} into every
- * GET response, and handles the {@code importShipmentLines} action.
+ * Injects {@code sourceShipmentDocNo}, {@code sourceShipments}, {@code returnInvoices},
+ * {@code linesCount} and {@code invoiceStatus} into every GET response, and handles the
+ * {@code importShipmentLines} action.
  */
 @Named("returnMaterialReceiptHeaderHandler")
 public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
@@ -188,7 +189,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           "  SELECT rl.Canceled_Inoutline_ID, SUM(ABS(rl.MovementQty)) AS ret_qty " +
           "  FROM M_InOutLine rl " +
           "  JOIN M_InOut rh ON rh.M_InOut_ID = rl.M_InOut_ID " +
-          "  WHERE rl.Canceled_Inoutline_ID IS NOT NULL AND rh.DocStatus = 'CO' " +
+          "  WHERE rl.Canceled_Inoutline_ID IS NOT NULL AND rh.DocStatus NOT IN ('VO') " +
           "  GROUP BY rl.Canceled_Inoutline_ID " +
           ") ret ON ret.Canceled_Inoutline_ID = l.M_InOutLine_ID " +
           "WHERE h.C_BPartner_ID = ? " +
@@ -232,7 +233,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
           "  SELECT rl.Canceled_Inoutline_ID, SUM(ABS(rl.MovementQty)) AS ret_qty " +
           "  FROM M_InOutLine rl " +
           "  JOIN M_InOut rh ON rh.M_InOut_ID = rl.M_InOut_ID " +
-          "  WHERE rl.Canceled_Inoutline_ID IS NOT NULL AND rh.DocStatus = 'CO' " +
+          "  WHERE rl.Canceled_Inoutline_ID IS NOT NULL AND rh.DocStatus NOT IN ('VO') " +
           "  GROUP BY rl.Canceled_Inoutline_ID " +
           ") ret ON ret.Canceled_Inoutline_ID = l.M_InOutLine_ID " +
           "WHERE l.M_InOut_ID = ? " +
@@ -319,13 +320,14 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       Map<String, List<JSONObject>> shipmentsMap = ReturnShipmentUtils.fetchSourceDocuments(ids);
       Map<String, List<JSONObject>> returnInvoicesMap = ReturnShipmentUtils.fetchReturnInvoices(ids);
       Map<String, Integer> lineCountMap = ReturnShipmentUtils.fetchLineCounts(ids);
+      Map<String, Integer> invoiceStatusMap = ReturnShipmentUtils.fetchInvoiceStatuses(ids);
 
       for (int i = 0; i < dataArr.length(); i++) {
         JSONObject rec = dataArr.getJSONObject(i);
         String id = rec.optString("id", null);
         ReturnShipmentUtils.enrichReturnRecord(rec, id, shipmentsMap,
             FIELD_SOURCE_SHIPMENTS, FIELD_SOURCE_SHIPMENT_DOC_NO,
-            returnInvoicesMap, lineCountMap);
+            returnInvoicesMap, lineCountMap, invoiceStatusMap);
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {

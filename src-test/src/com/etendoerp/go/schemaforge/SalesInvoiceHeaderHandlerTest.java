@@ -24,7 +24,9 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -38,9 +40,16 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
+import org.openbravo.base.secureApp.VariablesSecureApp;
+import org.openbravo.base.weld.WeldUtils;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.enterprise.DocumentType;
 
 /**
@@ -77,6 +86,25 @@ public class SalesInvoiceHeaderHandlerTest {
     Field paymentField = SalesInvoiceHeaderHandler.class.getDeclaredField("registerPaymentHandler");
     paymentField.setAccessible(true);
     paymentField.set(handler, mockPayment);
+    return handler;
+  }
+
+  /**
+   * Creates a {@link SalesInvoiceHeaderHandler} with its {@code totalDiscountService} field
+   * replaced by the provided mock via reflection, bypassing CDI in the unit-test context.
+   *
+   * @param mockTotalDiscountService
+   *     mock for {@link TotalDiscountService}
+   * @return handler instance with the mock injected
+   * @throws Exception
+   *     if reflection access fails
+   */
+  private static SalesInvoiceHeaderHandler handlerWithTotalDiscountMock(
+      TotalDiscountService mockTotalDiscountService) throws Exception {
+    SalesInvoiceHeaderHandler handler = new SalesInvoiceHeaderHandler();
+    Field discountField = SalesInvoiceHeaderHandler.class.getDeclaredField("totalDiscountService");
+    discountField.setAccessible(true);
+    discountField.set(handler, mockTotalDiscountService);
     return handler;
   }
 
@@ -359,6 +387,7 @@ public class SalesInvoiceHeaderHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
       PreparedStatement ps = mock(PreparedStatement.class);
@@ -403,6 +432,7 @@ public class SalesInvoiceHeaderHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
       PreparedStatement ps = mock(PreparedStatement.class);
@@ -440,6 +470,7 @@ public class SalesInvoiceHeaderHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
       PreparedStatement ps = mock(PreparedStatement.class);
@@ -698,6 +729,7 @@ public class SalesInvoiceHeaderHandlerTest {
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
       PreparedStatement ps = mock(PreparedStatement.class);
@@ -723,6 +755,7 @@ public class SalesInvoiceHeaderHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
       Connection conn = mock(Connection.class);
       when(dal.getConnection()).thenReturn(conn);
       PreparedStatement ps = mock(PreparedStatement.class);
@@ -737,6 +770,174 @@ public class SalesInvoiceHeaderHandlerTest {
 
       assertNotNull(result);
       assertEquals(200, result.getHttpStatus());
+    }
+  }
+
+  // ── handle() — ETP-4388: discount recalculation must precede completion ─────
+  //
+  // AR mirror of PurchaseInvoiceHeaderHandlerTest#handle_completionAction_recalculatesDiscount-
+  // BeforeCompleting / #handle_nonCompletionAction_doesNotRecalculateDiscount. The identical
+  // reordering fix (AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete BEFORE
+  // completeInvoiceIfNeeded) was applied to SalesInvoiceHeaderHandler.handle() but the AP-only
+  // regression coverage never got an AR counterpart. These tests close that gap.
+
+  /**
+   * Regression for the review finding on ETP-4388: {@code completeInvoiceIfNeeded} must not
+   * short-circuit {@code handle()} before {@code applyTotalDiscountBeforeComplete} runs, or the
+   * discount line would be stale/missing when the document is completed. Verifies both that
+   * {@code totalDiscountService.recalculate(...)} is actually invoked for a completion request,
+   * and that it runs BEFORE {@code ProcessInvoiceUtil.process(...)}. CRUD-shape request (PATCH
+   * with {@code documentAction=CO} in the body).
+   */
+  @Test
+  public void handle_completionAction_recalculatesDiscountBeforeCompleting() throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("ar-inv-discount-co")
+        .requestBody(body)
+        .build();
+
+    VariablesSecureApp vars = new VariablesSecureApp("u", "c", "o", "r", "en_US");
+    OBError success = new OBError();
+    success.setType("Success");
+
+    ProcessInvoiceUtil processInvoiceUtil = mock(ProcessInvoiceUtil.class);
+    when(processInvoiceUtil.process(
+        eq("ar-inv-discount-co"), eq("CO"), eq(""), eq(""), eq(""), any(), any()))
+        .thenReturn(success);
+
+    TotalDiscountService totalDiscountService = mock(TotalDiscountService.class);
+    SalesInvoiceHeaderHandler handler = handlerWithTotalDiscountMock(totalDiscountService);
+
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      // validateLineQtyBeforeComplete guard: no linked shipment lines → passes.
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any())).thenReturn(vars);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+      when(dal.get(Process.class, "111")).thenReturn(mock(Process.class));
+
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+
+      InOrder order = Mockito.inOrder(totalDiscountService, processInvoiceUtil);
+      order.verify(totalDiscountService).recalculate("ar-inv-discount-co", true);
+      order.verify(processInvoiceUtil).process(
+          eq("ar-inv-discount-co"), eq("CO"), eq(""), eq(""), eq(""), any(), any());
+    }
+  }
+
+  /**
+   * Non-completion requests must not trigger discount recalculation at all — only the CO path
+   * does (guarded by {@code applyTotalDiscountBeforeComplete}'s own completion check).
+   */
+  @Test
+  public void handle_nonCompletionAction_doesNotRecalculateDiscount() throws Exception {
+    JSONObject body = new JSONObject().put("someOtherField", "x");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("ar-inv-not-completing")
+        .requestBody(body)
+        .build();
+
+    TotalDiscountService totalDiscountService = mock(TotalDiscountService.class);
+    SalesInvoiceHeaderHandler handler = handlerWithTotalDiscountMock(totalDiscountService);
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      handler.handle(ctx);
+
+      Mockito.verifyNoInteractions(totalDiscountService);
+    }
+  }
+
+  /**
+   * ACTION-shape completion request (POST /action/documentAction with
+   * {@code fieldValues.documentAction=CO} — the shape sent by the draft-mode confirm button) must
+   * also recalculate the discount BEFORE completing. Closes the shape-coverage gap: the CRUD-shape
+   * ordering was covered above (and, for AP, in PurchaseInvoiceHeaderHandlerTest), but neither
+   * side had a regression test for the ACTION shape.
+   */
+  @Test
+  public void handle_actionShapeCompletionAction_recalculatesDiscountBeforeCompleting()
+      throws Exception {
+    JSONObject fieldValues = new JSONObject().put("documentAction", "CO");
+    JSONObject body = new JSONObject().put("fieldValues", fieldValues);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.ACTION)
+        .fieldName("documentAction")
+        .recordId("ar-inv-action-co")
+        .requestBody(body)
+        .build();
+
+    VariablesSecureApp vars = new VariablesSecureApp("u", "c", "o", "r", "en_US");
+    OBError success = new OBError();
+    success.setType("Success");
+
+    ProcessInvoiceUtil processInvoiceUtil = mock(ProcessInvoiceUtil.class);
+    when(processInvoiceUtil.process(
+        eq("ar-inv-action-co"), eq("CO"), eq(""), eq(""), eq(""), any(), any()))
+        .thenReturn(success);
+
+    TotalDiscountService totalDiscountService = mock(TotalDiscountService.class);
+    SalesInvoiceHeaderHandler handler = handlerWithTotalDiscountMock(totalDiscountService);
+
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoDefaultsService> defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+         MockedStatic<WeldUtils> weldMock = Mockito.mockStatic(WeldUtils.class)) {
+      obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any())).thenReturn(vars);
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+      when(dal.get(Process.class, "111")).thenReturn(mock(Process.class));
+
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+
+      InOrder order = Mockito.inOrder(totalDiscountService, processInvoiceUtil);
+      order.verify(totalDiscountService).recalculate("ar-inv-action-co", true);
+      order.verify(processInvoiceUtil).process(
+          eq("ar-inv-action-co"), eq("CO"), eq(""), eq(""), eq(""), any(), any());
     }
   }
 }

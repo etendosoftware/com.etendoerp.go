@@ -26,6 +26,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
@@ -35,9 +36,13 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.geography.Country;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
+
+import com.etendoerp.psd2.bank.integration.data.Provider;
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 
 /**
  * NeoHandler that powers the financial-account window as a generic W (CRUD) spec
@@ -83,6 +88,12 @@ public class FinancialAccountHandler implements NeoHandler {
   private static final String FIELD_SWIFT_CODE = "swiftCode";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_MATCHING_ALGORITHM = "matchingAlgorithm";
+  /** Salt Edge provider chosen at offline creation (optional); persisted so a later PSD2 connect
+   *  can preselect that bank. {@link #FIELD_PSD2_PROVIDER} is the DAL FK property the generic CRUD
+   *  resolves by id (mirrors how {@link #FIELD_COUNTRY} is injected). */
+  private static final String FIELD_PROVIDER_CODE = "providerCode";
+  private static final String FIELD_PROVIDER_NAME = "providerName";
+  private static final String FIELD_PSD2_PROVIDER = "psd2Provider";
 
   private static final String TYPE_BANK = "B";
   private static final String TYPE_CASH = "C";
@@ -130,6 +141,115 @@ public class FinancialAccountHandler implements NeoHandler {
   }
 
   // ---------------------------------------------------------------------------
+  // Post-hook: auto-assign default payment methods by account type on create
+  // ---------------------------------------------------------------------------
+
+  /**
+   * After the generic CRUD persists a new financial account, link the default
+   * payment methods that correspond to its type via
+   * {@link FinancialAccountSupport#assignDefaultPaymentMethods}, so a Cash/Bank/Card
+   * account is usable for receipts/payments without manual setup. Idempotent:
+   * existing links are left untouched. Failures here never break account creation —
+   * the account is already committed and the assignment is best-effort.
+   */
+  @Override
+  public NeoResponse afterHandle(NeoContext context) {
+    if (!SPEC.equals(context.getSpecName())) {
+      return null;
+    }
+    if (NeoEndpointType.DEFAULTS.equals(context.getEndpointType())) {
+      return injectClientCurrencyDefault(context);
+    }
+    if (!METHOD_POST.equals(context.getHttpMethod())) {
+      return null;
+    }
+    try {
+      enterAdminMode();
+      String accountId = extractCreatedId(context);
+      if (StringUtils.isBlank(accountId)) {
+        return null;
+      }
+      FIN_FinancialAccount account = loadAccount(accountId);
+      if (account != null) {
+        FinancialAccountSupport.assignDefaultPaymentMethods(account);
+      }
+    } catch (Exception e) {
+      log.error("financial-account afterHandle: failed to assign default payment methods", e);
+    } finally {
+      exitAdminMode();
+    }
+    // Keep the original CRUD response untouched.
+    return null;
+  }
+
+  /**
+   * Overwrites the generic {@code defaults} response's {@code currency} with the client's
+   * accounting-schema currency (e.g. EUR for GOClient).
+   *
+   * <p>The {@code C_Currency_ID} column has no AD default-value expression, so
+   * {@code NeoDefaultsService}'s generic fallback ({@code resolveFirstComboOption}) picks
+   * whichever active currency sorts first alphabetically (AED) — a real, non-null value, so it
+   * is never left blank for the New Account Wizard to fill in itself. That column is shared by
+   * many core windows, so fixing this dictionary-wide would risk unrelated side effects; scoping
+   * the fix to this handler's post-hook only affects the financial-account spec's own defaults.
+   */
+  private NeoResponse injectClientCurrencyDefault(NeoContext context) {
+    NeoResponse previous = context.getPreviousResult();
+    if (previous == null || previous.getBody() == null) {
+      return null;
+    }
+    try {
+      enterAdminMode();
+      OBCriteria<AcctSchema> crit = OBDal.getInstance().createCriteria(AcctSchema.class);
+      crit.add(Restrictions.eq(AcctSchema.PROPERTY_CLIENT + ".id",
+          OBContext.getOBContext().getCurrentClient().getId()));
+      crit.add(Restrictions.eq(AcctSchema.PROPERTY_ACTIVE, true));
+      crit.setMaxResults(1);
+      AcctSchema schema = (AcctSchema) crit.uniqueResult();
+      Currency clientCurrency = schema != null ? schema.getCurrency() : null;
+      if (clientCurrency == null) {
+        return null;
+      }
+      JSONObject body = previous.getBody();
+      JSONObject defaults = body.optJSONObject("defaults");
+      if (defaults == null) {
+        defaults = new JSONObject();
+        body.put("defaults", defaults);
+      }
+      defaults.put(FIELD_CURRENCY, clientCurrency.getId());
+      defaults.put(FIELD_CURRENCY + "$_identifier", clientCurrency.getISOCode());
+      return NeoResponse.ok(body);
+    } catch (Exception e) {
+      log.error("financial-account afterHandle: failed to inject client currency default", e);
+      return null;
+    } finally {
+      exitAdminMode();
+    }
+  }
+
+  /** Reads the persisted record id from the generic CRUD response envelope. */
+  String extractCreatedId(NeoContext context) {
+    NeoResponse prev = context.getPreviousResult();
+    if (prev == null || prev.getBody() == null) {
+      return null;
+    }
+    JSONObject response = prev.getBody().optJSONObject("response");
+    if (response == null) {
+      return null;
+    }
+    Object data = response.opt("data");
+    if (data instanceof JSONArray) {
+      JSONArray arr = (JSONArray) data;
+      JSONObject first = arr.length() > 0 ? arr.optJSONObject(0) : null;
+      return first == null ? null : StringUtils.trimToNull(first.optString("id", null));
+    }
+    if (data instanceof JSONObject) {
+      return StringUtils.trimToNull(((JSONObject) data).optString("id", null));
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------------------
   // Create (pre-hook: validate + enrich body, then let generic CRUD persist)
   // ---------------------------------------------------------------------------
 
@@ -159,7 +279,13 @@ public class FinancialAccountHandler implements NeoHandler {
 
     // Normalize the account type (defaults to Bank) so the generic service
     // always persists one of the allowed values.
-    body.put(FIELD_TYPE, normalizeType(body.optString(FIELD_TYPE, TYPE_BANK).trim()));
+    String type = normalizeType(body.optString(FIELD_TYPE, TYPE_BANK).trim());
+    body.put(FIELD_TYPE, type);
+
+    // Persist the chosen Salt Edge provider (offline "with bank selected" flow): upsert the
+    // provider and inject the FK so the account remembers its bank. The account stays offline —
+    // this is metadata only — but a later PSD2 connect can then preselect that provider.
+    enrichProvider(body, type);
 
     // Inject the country derived from the IBAN before the insert — the trigger
     // FIN_FINANCIAL_ACCOUNT_TRG2 rejects a bank account with an IBAN but no country.
@@ -174,6 +300,24 @@ public class FinancialAccountHandler implements NeoHandler {
     injectDefaultMatchingAlgorithm(body);
 
     return null;
+  }
+
+  /**
+   * When the offline create carries a Salt Edge provider (bank accounts only), upsert the provider
+   * record and inject its id under the {@code psd2Provider} FK property so the generic CRUD links
+   * it — same mechanism used for {@code country}. The transient {@code providerCode}/
+   * {@code providerName} keys are removed so they are not treated as entity properties.
+   */
+  private void enrichProvider(JSONObject body, String type) throws JSONException {
+    String providerCode = body.optString(FIELD_PROVIDER_CODE, "").trim();
+    if (TYPE_BANK.equals(type) && StringUtils.isNotBlank(providerCode)) {
+      String providerName = body.optString(FIELD_PROVIDER_NAME, providerCode).trim();
+      Provider provider = BankIntegrationUtils.upsertProvider(providerCode, providerName, null);
+      OBDal.getInstance().flush();
+      body.put(FIELD_PSD2_PROVIDER, provider.getId());
+    }
+    body.remove(FIELD_PROVIDER_CODE);
+    body.remove(FIELD_PROVIDER_NAME);
   }
 
   // ---------------------------------------------------------------------------
