@@ -18,7 +18,12 @@
   <C_PREPAYMENT_ACCT><![CDATA[BE83645729C84410B68E36D8C4D544CB]]></C_PREPAYMENT_ACCT>
   <V_LIABILITY_ACCT><![CDATA[166549643B3B4DFEA93D14290F3AFAC6]]></V_LIABILITY_ACCT>
   <V_PREPAYMENT_ACCT><![CDATA[18C138B1BDC24DF5B77BE67292362DC3]]></V_PREPAYMENT_ACCT>
-  <WRITEOFF_ACCT><![CDATA[997A522BF1124E029E99AB31CF2540F9]]></WRITEOFF_ACCT>
+  <!-- ETP-4452 (R12, 2026-07-08): product owner RECONFIRMED write-off must resolve to account
+       65000000 ("Pérdidas de créditos comerciales incobrables", PGC 665), reversing the R11
+       override note below (which itself reversed an earlier screenshot). Value is GOClient's own
+       dimensionless C_VALIDCOMBINATION for 65000000 — the SAME id already used for
+       CB_DIFFERENCES_ACCT below, since both columns point at the same account for this tenant. -->
+  <WRITEOFF_ACCT><![CDATA[CB7E1B51B897403083CDCA20835F6AE9]]></WRITEOFF_ACCT>
   <T_DUE_ACCT><![CDATA[5DDEB6060C50447CA96D37421FA2DD7F]]></T_DUE_ACCT>
   <T_CREDIT_ACCT><![CDATA[925A24985155465F8475F4E3552A3949]]></T_CREDIT_ACCT>
   <B_INTRANSIT_ACCT><![CDATA[41161ACA01B64D2AB91C8E04040E71AF]]></B_INTRANSIT_ACCT>
@@ -37,9 +42,8 @@
   <A_ACCUMDEPRECIATION_ACCT><![CDATA[7A02FEC8AA3C47F186712B7B9CAD989D]]></A_ACCUMDEPRECIATION_ACCT>
   <A_DEPRECIATION_ACCT><![CDATA[999879AE4125409197404DEC10563D3C]]></A_DEPRECIATION_ACCT>
   <!-- ETP-4245 (R11, Jorge's list, 2026-07-06): 6 Defaults-tab accounts that were NULL on every
-       tenant onboarded before this fix (TC-41 follow-up). WRITEOFF_ACCT is intentionally left
-       untouched above (already 997A522BF1124E029E99AB31CF2540F9 = account 69400000, confirmed
-       correct and NOT re-mapped to the screenshot's 65000000 per explicit product-owner override). -->
+       tenant onboarded before this fix (TC-41 follow-up). WRITEOFF_ACCT was left untouched by R11
+       (see the ETP-4452/R12 comment above for the later, superseding correction to 65000000). -->
   <DOUBTFULDEBT_ACCT><![CDATA[B745085187C74232849D0468C5780413]]></DOUBTFULDEBT_ACCT>
   <BADDEBTEXPENSE_ACCT><![CDATA[997A522BF1124E029E99AB31CF2540F9]]></BADDEBTEXPENSE_ACCT>
   <BADDEBTREVENUE_ACCT><![CDATA[2EAB8BDA6BD84FF0B04AFFFCA105DC53]]></BADDEBTREVENUE_ACCT>
