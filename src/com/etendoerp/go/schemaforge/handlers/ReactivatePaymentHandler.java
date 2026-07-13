@@ -17,11 +17,19 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.util.List;
+
 import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
+import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -50,6 +58,12 @@ import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
  * injects both {@code Fin_Payment_ID} (correct key) and {@code action = "P"} (confirm
  * action expected by {@code FIN_PaymentProcess}), and delegates to the standard executor.
  *
+ * <p><b>GET (single record, post-hook):</b> injects a nullable {@code financialTransactionId}
+ * field so the UI can navigate from the payment detail to the reconciled bank transaction
+ * (there is no forward FK from {@code FIN_Payment} to {@code FIN_Finacc_Transaction}, only
+ * the reverse {@code FIN_Finacc_Transaction.Fin_Payment_ID}). The field is {@code null} when
+ * the payment has not been reconciled yet (e.g. status is not {@code RPPC}).
+ *
  * <p>{@code @Named} only — never a normal CDI scope. {@code lookupHandler()} reads the
  * {@code @Named} annotation off the concrete handler class; a normal-scoped bean would be a
  * Weld client proxy whose subclass does not carry the (non-{@code @Inherited}) {@code @Named},
@@ -67,6 +81,11 @@ public class ReactivatePaymentHandler implements NeoHandler {
   private static final String CONFIRM_VALUE = "P";
   /** Exact AD column name for FIN_Payment PK — differs in case from the DB table name. */
   private static final String FIN_PAYMENT_ID_KEY = "Fin_Payment_ID";
+  /** Nullable field injected into the single-record GET response (see class javadoc). */
+  private static final String FIELD_FINANCIAL_TRANSACTION_ID = "financialTransactionId";
+  private static final String HTTP_GET = "GET";
+  private static final String KEY_RESPONSE = "response";
+  private static final String KEY_DATA = "data";
 
   /**
    * Pre-hook: intercepts {@code etprReactivatePayment} (injects {@code action = "RE"}) and
@@ -116,8 +135,69 @@ public class ReactivatePaymentHandler implements NeoHandler {
     }
   }
 
+  /**
+   * Post-hook: on a single-record GET, injects {@code financialTransactionId} into the
+   * response so the UI can offer a "go to transaction" link once the payment is
+   * reconciled. Returns {@code null} (no change) for list responses, other HTTP
+   * methods, or when the previous result has no body.
+   *
+   * @param context the current NEO request context
+   * @return the updated response, or {@code null} to leave the previous result untouched
+   */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
-    return null;
+    if (!isSingleRecordGet(context)) {
+      return null;
+    }
+    try {
+      JSONObject body = context.getPreviousResult().getBody();
+      JSONArray dataArr = extractDataArray(body);
+      if (dataArr == null || dataArr.length() != 1) {
+        return null;
+      }
+      JSONObject record = dataArr.getJSONObject(0);
+      String transactionId = resolveFinancialTransactionId(context.getRecordId());
+      record.put(FIELD_FINANCIAL_TRANSACTION_ID,
+          transactionId != null ? transactionId : JSONObject.NULL);
+      return NeoResponse.ok(body);
+    } catch (Exception e) {
+      log.error("Error resolving financial transaction for payment {}", context.getRecordId(), e);
+      return null;
+    }
+  }
+
+  private static boolean isSingleRecordGet(NeoContext context) {
+    return context != null
+        && HTTP_GET.equals(context.getHttpMethod())
+        && context.getRecordId() != null
+        && context.getPreviousResult() != null
+        && context.getPreviousResult().getBody() != null;
+  }
+
+  private static JSONArray extractDataArray(JSONObject body) {
+    JSONObject responseWrapper = body.optJSONObject(KEY_RESPONSE);
+    return responseWrapper != null ? responseWrapper.optJSONArray(KEY_DATA) : null;
+  }
+
+  /**
+   * Looks up the {@link FIN_FinaccTransaction} reconciled against this payment. There is no
+   * forward FK on {@code FIN_Payment}, only the reverse {@code Fin_Payment_ID} column on the
+   * transaction, so this queries by that association. Package-private so unit tests can stub
+   * the OBDal criteria without exercising the full afterHandle flow.
+   *
+   * @param paymentId the {@code FIN_Payment} id
+   * @return the linked transaction id, or {@code null} when the payment is not reconciled yet
+   */
+  String resolveFinancialTransactionId(String paymentId) {
+    FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, paymentId);
+    if (payment == null) {
+      return null;
+    }
+    OBCriteria<FIN_FinaccTransaction> crit = OBDal.getInstance()
+        .createCriteria(FIN_FinaccTransaction.class);
+    crit.add(Restrictions.eq(FIN_FinaccTransaction.PROPERTY_FINPAYMENT, payment));
+    crit.setMaxResults(1);
+    List<FIN_FinaccTransaction> results = crit.list();
+    return results.isEmpty() ? null : results.get(0).getId();
   }
 }
