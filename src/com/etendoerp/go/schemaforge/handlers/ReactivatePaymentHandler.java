@@ -17,7 +17,9 @@
 
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import javax.inject.Named;
 
@@ -30,18 +32,21 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentDetail;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
+import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
 
 /**
- * Shared {@code NeoHandler} for the payment Reactivate and Confirm actions, used by both
- * the payment-in (cobros) and payment-out (pagos) windows. Any payment header entity that
- * registers {@code JAVA_QUALIFIER = 'payment-reactivate'} on its {@code ETGO_SF_ENTITY}
- * record routes through this handler.
+ * Shared {@code NeoHandler} for the payment Reactivate, Confirm, and Remove actions, used
+ * by both the payment-in (cobros) and payment-out (pagos) windows. Any payment header
+ * entity that registers {@code JAVA_QUALIFIER = 'payment-reactivate'} on its
+ * {@code ETGO_SF_ENTITY} record routes through this handler.
  *
  * <p><b>Reactivate ({@code etprReactivatePayment}):</b> The backing process
  * {@code com.etendoerp.payment.removal.handler.ReactivatePayment} requires a mandatory
@@ -57,6 +62,21 @@ import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
  * a "id to load is required for loading" error. This handler intercepts the confirm action,
  * injects both {@code Fin_Payment_ID} (correct key) and {@code action = "P"} (confirm
  * action expected by {@code FIN_PaymentProcess}), and delegates to the standard executor.
+ *
+ * <p><b>Remove ({@code eTPRRemovePayment}):</b> the backing process
+ * ({@code com.etendoerp.payment.removal.handler.RemovePayment}, invoked via
+ * {@code PaymentRemovalUtil.reactivateAndRemove(payment)}) ends with a plain
+ * {@code OBDal.getInstance().remove(payment)}. It never deletes the join rows between the
+ * payment and the invoice/order it was applied to ({@code FIN_PaymentScheduleDetail} /
+ * {@code FIN_PaymentDetail}); there is no delete-cascade for them either, since they are
+ * an internal payment↔schedule join, not an AD parent/child tab. Removing an <em>applied</em>
+ * payment (one with an active application) therefore fails with a raw FK violation,
+ * surfaced to the user as the generic "This record cannot be deleted... Please see Linked
+ * Items" error. This handler intercepts the action and, before delegating, deletes those
+ * join rows itself and recalculates the affected invoices — mirroring exactly what
+ * {@code PaymentRemovalUtil.remove()} does, just completed correctly. Unapplied payments
+ * (no {@code FIN_PaymentDetail} rows) are unaffected — the cleanup is a no-op and the
+ * standard action proceeds as before.
  *
  * <p><b>GET (single record, post-hook):</b> injects a nullable {@code financialTransactionId}
  * field so the UI can navigate from the payment detail to the reconciled bank transaction
@@ -76,6 +96,7 @@ public class ReactivatePaymentHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(ReactivatePaymentHandler.class);
   private static final String REACTIVATE_ACTION_FIELD = "etprReactivatePayment";
   private static final String CONFIRM_ACTION_FIELD = "aPRMProcessPayment";
+  private static final String REMOVE_ACTION_FIELD = "eTPRRemovePayment";
   private static final String ACTION_PARAM = "action";
   private static final String REACTIVATE_VALUE = "RE";
   private static final String CONFIRM_VALUE = "P";
@@ -88,9 +109,10 @@ public class ReactivatePaymentHandler implements NeoHandler {
   private static final String KEY_DATA = "data";
 
   /**
-   * Pre-hook: intercepts {@code etprReactivatePayment} (injects {@code action = "RE"}) and
-   * {@code aPRMProcessPayment} (injects {@code Fin_Payment_ID} + {@code action = "P"}).
-   * Returns {@code null} for all other requests so default handling proceeds.
+   * Pre-hook: intercepts {@code etprReactivatePayment} (injects {@code action = "RE"}),
+   * {@code aPRMProcessPayment} (injects {@code Fin_Payment_ID} + {@code action = "P"}), and
+   * {@code eTPRRemovePayment} (deletes the payment↔schedule join rows before delegating, see
+   * class javadoc). Returns {@code null} for all other requests so default handling proceeds.
    *
    * @param context the current NEO request context
    * @return the process result for the handled actions, otherwise {@code null}
@@ -106,6 +128,9 @@ public class ReactivatePaymentHandler implements NeoHandler {
     }
     if (CONFIRM_ACTION_FIELD.equals(fieldName)) {
       return handleConfirm(context);
+    }
+    if (REMOVE_ACTION_FIELD.equals(fieldName)) {
+      return handleRemove(context);
     }
     return null;
   }
@@ -132,6 +157,65 @@ public class ReactivatePaymentHandler implements NeoHandler {
     } catch (Exception e) {
       log.error("Error confirming payment for record {}", context.getRecordId(), e);
       return NeoResponse.error(500, "Payment confirmation failed: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Deletes the payment↔schedule join rows ({@code FIN_PaymentScheduleDetail} /
+   * {@code FIN_PaymentDetail}) that block {@code OBDal.remove(FIN_Payment)} with a raw FK
+   * violation (see class javadoc), recalculates the invoices they were applied to, then
+   * delegates to the standard {@code eTPRRemovePayment} button action so the payment header
+   * itself gets removed exactly as before.
+   *
+   * <p>Order matters: {@code collectAffectedInvoiceIds} is called <em>before</em> deleting
+   * anything — it walks the same detail list we are about to remove. The payment is evicted
+   * from the Hibernate session (not the whole session — {@code context.getSfEntity()} and its
+   * lazily-loaded {@code AD_Tab} association, read later by
+   * {@code NeoButtonActionHelper.addTabParamsCore}, must stay attached) so that the delegated
+   * action's own {@code OBDal.get(FIN_Payment.class, id)} re-queries a fresh instance whose
+   * {@code getFINPaymentDetailList()} correctly reflects the just-flushed deletes, instead of
+   * returning the same session-cached instance with a stale in-memory collection. Everything
+   * — our cleanup and the delegated removal — stays inside the single request transaction, so
+   * a downstream failure rolls back atomically instead of leaving a partially-cleaned payment.
+   *
+   * @param context the current NEO request context
+   * @return the process result from the delegated button action, or a 500 error on failure
+   */
+  private NeoResponse handleRemove(NeoContext context) {
+    try {
+      FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, context.getRecordId());
+      if (payment != null) {
+        Set<String> affectedInvoiceIds = PaymentRemovalUtil.collectAffectedInvoiceIds(payment);
+        removeApplicationDetails(payment);
+        OBDal.getInstance().flush();
+        PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(affectedInvoiceIds);
+        OBDal.getInstance().flush();
+        OBDal.getInstance().getSession().evict(payment);
+      }
+      return NeoButtonActionHelper.executeButtonActionCore(
+          context.getSfEntity(), context.getRecordId(), context.getFieldName(), new JSONObject());
+    } catch (Exception e) {
+      log.error("Error removing payment for record {}", context.getRecordId(), e);
+      return NeoResponse.error(500, "Payment removal failed: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Removes every {@code FIN_PaymentScheduleDetail} and {@code FIN_PaymentDetail} row
+   * belonging to {@code payment}. A no-op when the payment has no applied details (e.g. a
+   * draft/unapplied payment) — the regression path is unaffected.
+   *
+   * @param payment the payment whose application join rows are being removed
+   */
+  private static void removeApplicationDetails(FIN_Payment payment) {
+    List<FIN_PaymentDetail> details = new ArrayList<>(payment.getFINPaymentDetailList());
+    for (FIN_PaymentDetail detail : details) {
+      List<FIN_PaymentScheduleDetail> scheduleDetails =
+          new ArrayList<>(detail.getFINPaymentScheduleDetailList());
+      for (FIN_PaymentScheduleDetail scheduleDetail : scheduleDetails) {
+        OBDal.getInstance().remove(scheduleDetail);
+      }
+      OBDal.getInstance().remove(detail);
     }
   }
 
