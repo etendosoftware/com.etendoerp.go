@@ -22,21 +22,23 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Modifier;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
 
 /**
  * Tests for {@link SupportIntegrationClient}.
@@ -277,73 +279,52 @@ class SupportIntegrationClientTest {
   @DisplayName("getUserEmail")
   class GetUserEmail {
 
+    private MockedStatic<OBDal> mockObDal(User user) {
+      OBDal obDal = mock(OBDal.class);
+      when(obDal.get(eq(User.class), anyString())).thenReturn(user);
+      MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      return dalMock;
+    }
+
     @Test
     @DisplayName("Returns the email column when populated")
-    void returnsEmailWhenPresent() throws SQLException {
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(conn.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(true);
-      when(rs.getString("email")).thenReturn("real@example.com");
-
-      String email = SupportIntegrationClient.getUserEmail(conn, "100");
-      assertEquals("real@example.com", email);
+    void returnsEmailWhenPresent() {
+      User user = mock(User.class);
+      when(user.getEmail()).thenReturn("real@example.com");
+      try (MockedStatic<OBDal> dalMock = mockObDal(user)) {
+        assertEquals("real@example.com", SupportIntegrationClient.getUserEmail("100"));
+      }
     }
 
     @Test
     @DisplayName("Falls back to username when it looks like an email")
-    void fallsBackToUsernameWhenEmailLike() throws SQLException {
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(conn.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(true);
-      when(rs.getString("email")).thenReturn("");
-      when(rs.getString("username")).thenReturn("goportal@example.com");
-
-      String email = SupportIntegrationClient.getUserEmail(conn, "101");
-      assertEquals("goportal@example.com", email);
+    void fallsBackToUsernameWhenEmailLike() {
+      User user = mock(User.class);
+      when(user.getEmail()).thenReturn("");
+      when(user.getUsername()).thenReturn("goportal@example.com");
+      try (MockedStatic<OBDal> dalMock = mockObDal(user)) {
+        assertEquals("goportal@example.com", SupportIntegrationClient.getUserEmail("101"));
+      }
     }
 
     @Test
     @DisplayName("Returns null when neither email nor an email-like username is present")
-    void returnsNullWhenNeitherLooksLikeEmail() throws SQLException {
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(conn.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(true);
-      when(rs.getString("email")).thenReturn(null);
-      when(rs.getString("username")).thenReturn("admin");
-
-      assertNull(SupportIntegrationClient.getUserEmail(conn, "0"));
+    void returnsNullWhenNeitherLooksLikeEmail() {
+      User user = mock(User.class);
+      when(user.getEmail()).thenReturn(null);
+      when(user.getUsername()).thenReturn("admin");
+      try (MockedStatic<OBDal> dalMock = mockObDal(user)) {
+        assertNull(SupportIntegrationClient.getUserEmail("0"));
+      }
     }
 
     @Test
-    @DisplayName("Returns null when no row is found")
-    void returnsNullWhenNoRow() throws SQLException {
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(conn.prepareStatement(org.mockito.ArgumentMatchers.anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(false);
-
-      assertNull(SupportIntegrationClient.getUserEmail(conn, "999"));
-    }
-
-    @Test
-    @DisplayName("SQLException is caught and null is returned")
-    void sqlExceptionReturnsNull() throws SQLException {
-      Connection conn = mock(Connection.class);
-      when(conn.prepareStatement(org.mockito.ArgumentMatchers.anyString()))
-          .thenThrow(new SQLException("boom"));
-
-      assertNull(SupportIntegrationClient.getUserEmail(conn, "1"));
+    @DisplayName("Returns null when the user is not found")
+    void returnsNullWhenUserNotFound() {
+      try (MockedStatic<OBDal> dalMock = mockObDal(null)) {
+        assertNull(SupportIntegrationClient.getUserEmail("999"));
+      }
     }
   }
 
