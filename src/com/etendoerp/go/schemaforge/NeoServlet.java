@@ -72,6 +72,7 @@ public class NeoServlet extends HttpBaseServlet {
   final NeoDefaultsEndpoint defaultsEndpoint = new NeoDefaultsEndpoint(this);
   final NeoProcessReportEndpoint processReportEndpoint = new NeoProcessReportEndpoint(this);
   private final BatchService batchService = new BatchService(this);
+  private final NeoSimSearchEndpoint simSearchEndpoint = new NeoSimSearchEndpoint();
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -149,6 +150,20 @@ public class NeoServlet extends HttpBaseServlet {
           return;
         }
         batchService.handle(request, response);
+        return;
+      }
+
+      // Global similarity-search endpoint: GET /sws/neo/simsearch
+      //   Same trigram matching as the "SimSearch" webhook, reached through NEO's own
+      //   JWT auth instead of the Webhooks module's per-role grant table. See
+      //   NeoSimSearchEndpoint for the authorization-model rationale.
+      if ("simsearch".equals(pathInfo.specName)) {
+        if (!"GET".equals(method)) {
+          sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+              "Simsearch endpoint only supports GET");
+          return;
+        }
+        writeResponse(response, simSearchEndpoint.handle(request));
         return;
       }
       requestRouter.handleSpecRequest(pathInfo, method, request, response);

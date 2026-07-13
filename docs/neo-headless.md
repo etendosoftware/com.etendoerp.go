@@ -518,6 +518,43 @@ The React hook `usePreviewAttachment` (`tools/app-shell/src/windows/custom/share
 | No file cached, `autoFetch=true` | Caller's `leftPanel` (live viewer) while background caching runs |
 | File cached | PDF/image viewer + delete button |
 
+### 4.9 Global Similarity Search Endpoint
+
+```
+GET /sws/neo/simsearch?entityName={entity}&items=["term1","term2"]&qtyResults=5&minSimPercent=30
+Authorization: Bearer {token}
+```
+
+Fuzzy/trigram matching against an AD entity's identifier columns, for resolving free-text values
+(e.g. a CSV import's `country`/`region` cell) to real records. This is a global pseudo-spec — like
+`batch`, it bypasses ETGO_SF_SPEC/ETGO_SF_ENTITY resolution entirely — reusing
+`com.etendoerp.copilot.toolpack.webhooks.SimSearch#handleSimSearch` directly rather than
+duplicating its pg_trgm/`etcotp_sim_search` matching logic.
+
+**Why this exists instead of calling the "SimSearch" webhook directly:** the Webhooks module
+requires a per-`(webhook, role)` grant row in `SMFWHE_DEFINEDWEBHOOK_ROLE`, provisioned by hand per
+role per environment via the Webhooks window's "Role Access" tab. This endpoint is reached through
+NEO's own JWT bearer authentication instead (same as every other `/sws/neo/*` request) — no
+additional per-role grant is needed. Entity-level security is unaffected: `SimSearch.handleSimSearch`
+still filters through `OBContext.getEntityAccessChecker().getReadableEntities()`, so a role can only
+match against entities it can already read.
+
+**Query parameters:**
+
+| Param | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `entityName` | Yes | — | AD entity name to search (e.g. `Country`) |
+| `items` | Yes | — | JSON array of search terms, one result set per term |
+| `qtyResults` | No | `1` | Max matches returned per term |
+| `minSimPercent` | No | `30` | Minimum similarity score (0-100) to include a match |
+
+**Response:** `200` with one key per input item (`item_0`, `item_1`, ...), each holding the same
+`{status, data}` shape `SimSearch`'s webhook already returns — so existing callers only need their
+request URL updated, not their response parsing.
+
+Returns `400` if `entityName`/`items` is missing or `items` is not valid JSON, `422` if `entityName`
+does not resolve to a readable entity, `405` for any method other than `GET`.
+
 ---
 
 ## 5. Configuration
