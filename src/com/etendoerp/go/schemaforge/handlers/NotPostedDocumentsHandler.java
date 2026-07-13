@@ -146,14 +146,24 @@ public class NotPostedDocumentsHandler implements NeoHandler {
    * module intentionally disables direct bulk-posting on them ({@code POSTED = 'D'} on all
    * documents) — accounting flows through {@code FIN_Finacc_Transaction} ({@code T}) instead.
    *
+   * <p>{@code BMP}, {@code DD}, {@code LC}, {@code LCC} and {@code CA} are globally excluded by
+   * product decision (ETP-4452), for ALL tenants, even though some tenants (e.g. QA Testing,
+   * F&amp;B International Group) have them actively configured for posting — the tradeoff of
+   * hiding those legitimate documents was accepted by the product owner.
+   *
    * <p>To re-enable any of these (e.g. if APRM posting is later reconfigured), remove its code
    * from this set.
    */
   private static final Set<String> APRM_DISABLED_TYPES = new HashSet<>(Arrays.asList(
-      "BS",   // FIN_BankStatement  — in c_acctschema_table but all docs posted='D'
-      "PIN",  // FIN_Payment        — in c_acctschema_table but 99.9% posted='D'
-      "POT",  // FIN_Payment        — same as PIN
-      "R"     // FIN_Reconciliation — in c_acctschema_table but ~89% posted='D'
+      "BS",   // FIN_BankStatement       — in c_acctschema_table but all docs posted='D'
+      "PIN",  // FIN_Payment             — in c_acctschema_table but 99.9% posted='D'
+      "POT",  // FIN_Payment             — same as PIN
+      "R",    // FIN_Reconciliation      — in c_acctschema_table but ~89% posted='D'
+      "BMP",  // M_Production            — globally excluded, ETP-4452
+      "DD",   // FIN_Doubtful_Debt       — globally excluded, ETP-4452
+      "LC",   // M_LandedCost            — globally excluded, ETP-4452
+      "LCC",  // M_LC_Cost               — globally excluded, ETP-4452
+      "CA"    // M_CostAdjustment        — globally excluded, ETP-4452
   ));
 
   private static final String KEY_TABLE_ID = "tableId";
@@ -211,7 +221,8 @@ public class NotPostedDocumentsHandler implements NeoHandler {
    * the AD_Table query: {@code SELECT tablename, ad_table_id FROM ad_table WHERE tablename IN
    * ('C_Invoice','M_InOut','M_Movement','A_Amortization','GL_Journal','M_Inventory')}.</p>
    */
-  private static final Map<String, String> DOCUMENT_TYPE_TO_TABLE_ID = new HashMap<>();
+  /** Package-private so it can be unit-tested directly (see {@code NotPostedDocumentsHandlerTest}). */
+  static final Map<String, String> DOCUMENT_TYPE_TO_TABLE_ID = new HashMap<>();
 
   static {
     DOCUMENT_TYPE_TO_TABLE_ID.put("Sales Invoice", "318");      // C_Invoice
@@ -230,6 +241,11 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     DOCUMENT_TYPE_TO_TABLE_ID.put("Payment Out",    FIN_PAYMENT_TABLE_ID);               // FIN_Payment
     DOCUMENT_TYPE_TO_TABLE_ID.put("Bank Statement", "D4C23A17190649E7B78F55A05AF3438C"); // FIN_BankStatement
     DOCUMENT_TYPE_TO_TABLE_ID.put("Reconciliation", "B1B7075C46934F0A9FD4C4D0F1457B42"); // FIN_Reconciliation
+    DOCUMENT_TYPE_TO_TABLE_ID.put("Bill of Materials Production", "325");                                 // M_Production
+    DOCUMENT_TYPE_TO_TABLE_ID.put("Doubtful Debt", "30721072789F410E9606D2235CB2A226");                   // FIN_Doubtful_Debt
+    DOCUMENT_TYPE_TO_TABLE_ID.put("Landed Cost", "082F967CDF7245EB9A150941F326C45C");                     // M_LandedCost
+    DOCUMENT_TYPE_TO_TABLE_ID.put("Landed Cost Cost", "55A984C314FD4C4FB5E7C32DE36BB07B");                // M_LC_Cost
+    DOCUMENT_TYPE_TO_TABLE_ID.put("Cost Adjustment", "D022B92163074E5E82449C8E0B5AFDF6");                 // M_CostAdjustment
   }
 
   /**
