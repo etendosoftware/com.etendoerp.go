@@ -41,6 +41,8 @@ import java.util.Map;
 
 import javax.servlet.http.HttpServletResponse;
 
+import javax.enterprise.inject.Vetoed;
+
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -86,6 +88,7 @@ public class AbstractInvoiceHeaderHandlerTest {
    * Minimal concrete subclass — AR-style classification (ARC→NC, ARI_RM→DEV).
    * Exposes all protected methods as public for direct testing.
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class TestHandler extends AbstractInvoiceHeaderHandler {
     @Override
     protected String classifyDocType(DocumentType dt) {
