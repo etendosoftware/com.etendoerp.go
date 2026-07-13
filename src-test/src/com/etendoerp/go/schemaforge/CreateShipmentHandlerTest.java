@@ -28,6 +28,8 @@ import static org.mockito.Mockito.when;
 import java.math.BigDecimal;
 import java.util.Collections;
 
+import javax.enterprise.inject.Vetoed;
+
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
 import org.junit.Test;
@@ -60,6 +62,7 @@ public class CreateShipmentHandlerTest {
    * Test double that overrides {@link CreateShipmentHandler#findDefaultLocator}
    * to bypass the warehouse-locator lookup.
    */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
   private static class TestableHandler extends CreateShipmentHandler {
     Locator locatorToReturn;
 
