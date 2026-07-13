@@ -590,8 +590,8 @@ final class PaymentRegistrationService {
     // after resetting it; otherwise create a fresh draft.
     String editPaymentId = body.optString(KEY_PAYMENT_ID, null);
     boolean isEdit = StringUtils.isNotBlank(editPaymentId);
-    FIN_Payment payment = resolveOrCreatePayment(isEdit, editPaymentId, dao, isReceipt, invoice,
-        paymentMethod, account, paymentDate, cash);
+    FIN_Payment payment = resolveOrCreatePayment(editPaymentId, dao, isReceipt, invoice,
+        new DraftFields(paymentMethod, account, paymentDate, cash));
     if (payment == null) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_PAYMENT_NOT_FOUND);
     }
@@ -613,21 +613,28 @@ final class PaymentRegistrationService {
     return builtPaymentResponse(payment);
   }
 
+  /** Groups the editable header fields applied to a fresh or reused draft (Sonar S107). */
+  private record DraftFields(FIN_PaymentMethod paymentMethod, FIN_FinancialAccount account,
+      Date paymentDate, BigDecimal cash) {
+  }
+
   /**
-   * Resolves the payment to apply this registration to: a fresh draft, or (when {@code isEdit})
-   * the existing draft identified by {@code editPaymentId} prepared for reuse. Returns {@code null}
-   * when {@code editPaymentId} does not resolve to an existing payment, letting the caller turn
-   * that into a 404 without nesting the lookup inside {@link #doRegisterPaymentAdvanced}.
+   * Resolves the payment to apply this registration to: a fresh draft, or (when {@code
+   * editPaymentId} is present) the existing draft it identifies, prepared for reuse. Returns
+   * {@code null} when {@code editPaymentId} does not resolve to an existing payment, letting the
+   * caller turn that into a 404 without nesting the lookup inside {@link
+   * #doRegisterPaymentAdvanced}.
    */
-  private static FIN_Payment resolveOrCreatePayment(boolean isEdit, String editPaymentId,
-      AdvPaymentMngtDao dao, boolean isReceipt, Invoice invoice, FIN_PaymentMethod paymentMethod,
-      FIN_FinancialAccount account, Date paymentDate, BigDecimal cash) throws Exception {
-    if (!isEdit) {
-      return createDraftPayment(dao, isReceipt, invoice, paymentMethod, account, paymentDate, cash);
+  private static FIN_Payment resolveOrCreatePayment(String editPaymentId, AdvPaymentMngtDao dao,
+      boolean isReceipt, Invoice invoice, DraftFields fields) throws Exception {
+    if (StringUtils.isBlank(editPaymentId)) {
+      return createDraftPayment(dao, isReceipt, invoice, fields.paymentMethod(), fields.account(),
+          fields.paymentDate(), fields.cash());
     }
     FIN_Payment existing = OBDal.getInstance().get(FIN_Payment.class, editPaymentId);
     return existing != null
-        ? PaymentDraftEditService.prepareEditableDraft(existing, paymentMethod, account, paymentDate, cash)
+        ? PaymentDraftEditService.prepareEditableDraft(existing, fields.paymentMethod(),
+            fields.account(), fields.paymentDate(), fields.cash())
         : null;
   }
 
