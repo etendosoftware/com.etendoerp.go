@@ -32,8 +32,11 @@ import static org.mockito.Mockito.when;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import org.hibernate.Session;
@@ -79,6 +82,17 @@ public class SelectorQueryExecutorTest {
         SelectorMeta.class);
     m.setAccessible(true);
     return (String) m.invoke(null, bob, meta);
+  }
+
+  /**
+   * Invokes the private {@code buildRepresentativeRowWhere} method.
+   */
+  private static String invokeBuildRepresentativeRowWhere(String baseWhere, SelectorMeta meta,
+      String alias) throws Exception {
+    Method m = SelectorQueryExecutor.class.getDeclaredMethod("buildRepresentativeRowWhere",
+        String.class, SelectorMeta.class, String.class);
+    m.setAccessible(true);
+    return (String) m.invoke(null, baseWhere, meta, alias);
   }
 
   /**
@@ -773,6 +787,200 @@ public class SelectorQueryExecutorTest {
       assertEquals(1, capturedItems[0].length());
       assertEquals("47", capturedItems[0].getJSONObject(0).getString("id"));
       assertEquals("España", capturedItems[0].getJSONObject(0).getString("label"));
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // buildRepresentativeRowWhere — DISTINCT-by-valueProperty query building
+  // ---------------------------------------------------------------
+
+  /**
+   * With an existing where clause, the representative-row where restricts the outer query to the
+   * MIN(id) per distinct valueProperty, re-applying the same conditions inside the subquery with
+   * the entity alias rewritten to the private sub-alias, and grouping by valueProperty.
+   */
+  @Test
+  public void testBuildRepresentativeRowWhereWithConditions() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("ProductStock", "name")
+        .isRich(true).valueProperty("product.id").build();
+
+    String result = invokeBuildRepresentativeRowWhere("as e where e.active = true", meta, "e");
+
+    assertTrue("outer conditions preserved", result.contains("(e.active = true)"));
+    assertTrue("restricts to representative ids", result.contains("e.id in (select min(e_dv.id)"));
+    assertTrue("subquery targets same entity", result.contains("from ProductStock e_dv"));
+    assertTrue("subquery re-applies conditions with rewritten alias",
+        result.contains("where e_dv.active = true"));
+    assertTrue("grouped by valueProperty", result.contains("group by e_dv.product.id"));
+  }
+
+  /**
+   * With no where clause ("as e"), the representative-row where adds only the MIN(id) restriction
+   * and GROUP BY valueProperty — the subquery carries no WHERE.
+   */
+  @Test
+  public void testBuildRepresentativeRowWhereWithoutConditions() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("ProductStock", "name")
+        .isRich(true).valueProperty("product.id").build();
+
+    String result = invokeBuildRepresentativeRowWhere("as e", meta, "e");
+
+    assertEquals("as e where e.id in (select min(e_dv.id) from ProductStock e_dv "
+        + "group by e_dv.product.id)", result);
+    assertFalse("no leftover WHERE inside subquery", result.contains("where e_dv"));
+  }
+
+  /**
+   * A search predicate keeps its named parameter untouched while only the alias references are
+   * rewritten in the subquery copy.
+   */
+  @Test
+  public void testBuildRepresentativeRowWhereRewritesAliasButKeepsNamedParams() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("ProductStock", "name")
+        .isRich(true).valueProperty("product.id").build();
+
+    String result = invokeBuildRepresentativeRowWhere(
+        "as e where lower(e.name) LIKE :search", meta, "e");
+
+    assertTrue("subquery rewrites alias reference", result.contains("lower(e_dv.name) LIKE :search"));
+    assertTrue("named parameter preserved in both occurrences",
+        result.indexOf(":search") != result.lastIndexOf(":search"));
+  }
+
+  /**
+   * A view-backed value-field selector wires the representative-row where into BOTH the count and
+   * the data query, so count(*) equals the distinct-value count and paging fills correctly. The
+   * data query is the count query plus the display ORDER BY, and it returns one item per row.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testExecuteRichQueryValueFieldSelectorAppliesDistinctToCountAndData() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("ProductStock", "name")
+        .isRich(true).valueProperty("product.id").build();
+
+    // Two representative product rows out of a view that (in the DB) would hold many duplicates.
+    BaseOBObject row1 = mock(BaseOBObject.class);
+    BaseOBObject prod1 = mock(BaseOBObject.class);
+    when(prod1.get("id")).thenReturn("P1");
+    when(row1.get("product")).thenReturn(prod1);
+    when(row1.getId()).thenReturn("stock1");
+    when(row1.getIdentifier()).thenReturn("Product One");
+    BaseOBObject row2 = mock(BaseOBObject.class);
+    BaseOBObject prod2 = mock(BaseOBObject.class);
+    when(prod2.get("id")).thenReturn("P2");
+    when(row2.get("product")).thenReturn(prod2);
+    when(row2.getId()).thenReturn("stock2");
+    when(row2.getIdentifier()).thenReturn("Product Two");
+
+    OBQuery countQuery = mock(OBQuery.class);
+    OBQuery dataQuery = mock(OBQuery.class);
+    when(countQuery.count()).thenReturn(2); // distinct product count
+    when(dataQuery.list()).thenReturn(Arrays.asList(row1, row2));
+
+    List<String> capturedWhere = new ArrayList<>();
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.createQuery(anyString(), anyString())).thenAnswer(inv -> {
+      capturedWhere.add(inv.getArgument(1));
+      return capturedWhere.size() == 1 ? countQuery : dataQuery;
+    });
+
+    NeoResponse expected = NeoResponse.ok(new JSONObject());
+    SelectorQueryBuilder.HqlWithParams clause =
+        new SelectorQueryBuilder.HqlWithParams("as e where e.active = true", new HashMap<>());
+
+    try (MockedStatic<SelectorQueryBuilder> builderMock = mockStatic(
+        SelectorQueryBuilder.class); MockedStatic<NeoSelectorExecutionHelper> helperMock = mockStatic(
+        NeoSelectorExecutionHelper.class); MockedStatic<SelectorAuxResolver> auxMock = mockStatic(
+        SelectorAuxResolver.class); MockedStatic<OBDal> obDalMock = mockStatic(
+        OBDal.class); MockedStatic<SelectorResponseSupport> respMock = mockStatic(
+        SelectorResponseSupport.class)) {
+
+      builderMock.when(
+          () -> SelectorQueryBuilder.buildRichQueryWhereClause(any(), any(), any(), any(), any()))
+          .thenReturn(clause);
+      helperMock.when(() -> NeoSelectorExecutionHelper.bindNamedParameters(any(OBQuery.class), any()))
+          .thenAnswer(inv -> null);
+      auxMock.when(() -> SelectorAuxResolver.appendAuxFields(any(), any(), any())).thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      respMock.when(() -> SelectorResponseSupport.buildGridColumnMetadata(any())).thenReturn(new JSONArray());
+
+      JSONArray[] capturedItems = new JSONArray[1];
+      int[] capturedTotal = new int[1];
+      respMock.when(
+          () -> SelectorResponseSupport.buildSelectorResponse(any(), any(), anyInt(), anyInt(), anyInt()))
+          .thenAnswer(inv -> {
+            capturedItems[0] = inv.getArgument(0);
+            capturedTotal[0] = inv.getArgument(2);
+            return expected;
+          });
+
+      NeoResponse result = SelectorQueryExecutor.execute(meta, "", 20, 0, null, "org-1", null);
+
+      assertNotNull(result);
+      // Count query uses the representative-row where (distinct drives page math).
+      assertEquals(2, capturedWhere.size());
+      assertTrue("count query is distinct-restricted",
+          capturedWhere.get(0).contains("group by e_dv.product.id"));
+      // Data query = same representative where + display ORDER BY (consistent with count).
+      assertEquals(capturedWhere.get(0) + " ORDER BY e.name", capturedWhere.get(1));
+      // totalCount comes from count(*) over representative rows.
+      assertEquals(2, capturedTotal[0]);
+      // One item per representative row, id taken from valueProperty.
+      assertEquals(2, capturedItems[0].length());
+      assertEquals("P1", capturedItems[0].getJSONObject(0).getString("id"));
+      assertEquals("P2", capturedItems[0].getJSONObject(1).getString("id"));
+    }
+  }
+
+  /**
+   * A PK-valued selector (valueProperty == "id") is byte-identical to the pre-fix behavior: the
+   * where string passed to the count query is exactly the builder output with no DISTINCT subquery.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testExecuteRichQueryPkValuedSelectorIsUnaffected() throws Exception {
+    SelectorMeta meta = new SelectorMeta.Builder("Country", "name").isRich(true).build();
+
+    OBQuery countQuery = mock(OBQuery.class);
+    OBQuery dataQuery = mock(OBQuery.class);
+    when(countQuery.count()).thenReturn(0);
+    when(dataQuery.list()).thenReturn(Collections.emptyList());
+
+    List<String> capturedWhere = new ArrayList<>();
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.createQuery(anyString(), anyString())).thenAnswer(inv -> {
+      capturedWhere.add(inv.getArgument(1));
+      return capturedWhere.size() == 1 ? countQuery : dataQuery;
+    });
+
+    SelectorQueryBuilder.HqlWithParams clause =
+        new SelectorQueryBuilder.HqlWithParams("as e where e.active = true", new HashMap<>());
+
+    try (MockedStatic<SelectorQueryBuilder> builderMock = mockStatic(
+        SelectorQueryBuilder.class); MockedStatic<NeoSelectorExecutionHelper> helperMock = mockStatic(
+        NeoSelectorExecutionHelper.class); MockedStatic<OBDal> obDalMock = mockStatic(
+        OBDal.class); MockedStatic<SelectorResponseSupport> respMock = mockStatic(
+        SelectorResponseSupport.class)) {
+
+      builderMock.when(
+          () -> SelectorQueryBuilder.buildRichQueryWhereClause(any(), any(), any(), any(), any()))
+          .thenReturn(clause);
+      helperMock.when(() -> NeoSelectorExecutionHelper.bindNamedParameters(any(OBQuery.class), any()))
+          .thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      respMock.when(() -> SelectorResponseSupport.buildGridColumnMetadata(any())).thenReturn(new JSONArray());
+      respMock.when(
+          () -> SelectorResponseSupport.buildSelectorResponse(any(), any(), anyInt(), anyInt(), anyInt()))
+          .thenReturn(NeoResponse.ok(new JSONObject()));
+
+      SelectorQueryExecutor.execute(meta, "", 20, 0, null, "org-1", null);
+
+      assertEquals(2, capturedWhere.size());
+      assertEquals("as e where e.active = true", capturedWhere.get(0));
+      assertFalse("no DISTINCT subquery for PK-valued selector",
+          capturedWhere.get(0).contains("min("));
+      assertFalse("no GROUP BY for PK-valued selector",
+          capturedWhere.get(0).contains("group by"));
     }
   }
 }
