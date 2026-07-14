@@ -360,7 +360,7 @@ final class PaymentRegistrationService {
 
         JSONArray arr = new JSONArray();
         for (FIN_Payment p : invoicePayments) {
-          arr.put(paymentListItem(p));
+          arr.put(paymentListItem(p, invoiceId));
         }
 
         JSONObject data = new JSONObject();
@@ -379,11 +379,16 @@ final class PaymentRegistrationService {
     }
   }
 
-  private static JSONObject paymentListItem(FIN_Payment p) throws Exception {
+  private static JSONObject paymentListItem(FIN_Payment p, String invoiceId) throws Exception {
     JSONObject item = new JSONObject();
     item.put("id", p.getId());
     item.put(KEY_DOCUMENT_NO, p.getDocumentNo());
     item.put(KEY_AMOUNT, p.getAmount());
+    // Net amount THIS payment applies against THIS invoice's schedules — negative when the
+    // payment consumes a credit note / return. The header amount above is the payment's own
+    // total, which misleads on a credit note's history: there the row must show how much of
+    // the note the payment used, not how much cash the payment moved.
+    item.put("appliedToInvoice", appliedToInvoice(p, invoiceId));
     item.put("paymentDate", p.getPaymentDate() != null
         ? JsonUtils.createDateFormat().format(p.getPaymentDate()) : null);
     item.put(KEY_STATUS, p.getStatus());
@@ -409,6 +414,25 @@ final class PaymentRegistrationService {
       item.put("creditSourcesUsed", creditSourcesUsedByPayment(p));
     }
     return item;
+  }
+
+  /**
+   * Net amount {@code p} applies against {@code invoiceId}'s payment schedules: the sum of its
+   * schedule details linked to that invoice. Positive when paying the invoice, negative when
+   * consuming it as a credit note / return.
+   */
+  private static BigDecimal appliedToInvoice(FIN_Payment p, String invoiceId) {
+    BigDecimal total = BigDecimal.ZERO;
+    for (FIN_PaymentDetail detail : p.getFINPaymentDetailList()) {
+      for (FIN_PaymentScheduleDetail psd : detail.getFINPaymentScheduleDetailList()) {
+        FIN_PaymentSchedule sched = psd.getInvoicePaymentSchedule();
+        if (sched != null && sched.getInvoice() != null
+            && invoiceId.equals(sched.getInvoice().getId())) {
+          total = total.add(nullToZero(psd.getAmount()));
+        }
+      }
+    }
+    return total;
   }
 
   /**
