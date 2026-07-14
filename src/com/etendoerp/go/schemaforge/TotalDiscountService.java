@@ -239,6 +239,37 @@ public class TotalDiscountService {
     return 10;
   }
 
+  /**
+   * Returns whether the given document already has a materialized discount line (identified by
+   * the dummy product {@code ETGO_DTO}). Used to avoid double-applying the discount percentage
+   * a second time on top of a total that already reflects it (e.g. a GET-time compensation for
+   * documents whose discount is not yet materialized).
+   *
+   * @param headerId  the ID of the C_Invoice or C_Order record
+   * @param isInvoice {@code true} for invoice documents, {@code false} for order documents
+   */
+  @SuppressWarnings("java:S2077")
+  public boolean hasDiscountLine(String headerId, boolean isInvoice) {
+    String lineTable = isInvoice ? TABLE_INVOICE_LINE : TABLE_ORDER_LINE;
+    String parentCol = isInvoice ? COL_INVOICE_ID : COL_ORDER_ID;
+    String sql = "SELECT 1 FROM " + lineTable
+        + SQL_WHERE + parentCol + " = ?"
+        + "   AND m_product_id = ?"
+        + "   AND isactive = 'Y'";
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, headerId);
+      ps.setString(2, DISCOUNT_PRODUCT_ID);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next();
+      }
+    } catch (Exception e) {
+      log.warn("Could not check discount line existence for {} id={}: {}", lineTable, headerId,
+          e.getMessage());
+      return false;
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Delete existing discount line
   // -------------------------------------------------------------------------

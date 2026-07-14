@@ -281,6 +281,13 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     if (discountPct <= 0.0) {
       return;
     }
+    // The discount may already be materialized as a real line (e.g. invoice created from an
+    // order that already carried the discount, via InvoiceFromOrderSupport). In that case
+    // grandTotalAmount already reflects it, so applying the percentage again would double it.
+    String invoiceId = invoice.optString("id", null);
+    if (invoiceId != null && totalDiscountService.hasDiscountLine(invoiceId, true)) {
+      return;
+    }
     double factor = 1.0 - discountPct / 100.0;
     double grand = invoice.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0);
     invoice.put(FIELD_GRAND_TOTAL_AMOUNT, roundHalfUp(grand * factor));
