@@ -22,14 +22,18 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
 
 import javax.servlet.http.HttpServletRequest;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
@@ -428,6 +432,161 @@ public class AmortizationHeaderHandlerTest {
   public void testHandlerIsRegisteredWithExpectedQualifier() {
     javax.inject.Named named = AmortizationHeaderHandler.class.getAnnotation(javax.inject.Named.class);
     assertTrue(named != null && "amortizationHeaderHandler".equals(named.value()));
+  }
+
+  // ─── Posted list-filter rewrite ──────────────────────────────────────────────
+
+  /** value:true (JS boolean) → operator equals, value "Y". */
+  @Test
+  public void testRewritePostedTrueBecomesEqualsY() throws Exception {
+    String criteria = "[{\"fieldName\":\"posted\",\"operator\":\"equals\",\"value\":true}]";
+    JSONArray out = new JSONArray(AmortizationHeaderHandler.rewritePostedInCriteria(criteria));
+    JSONObject e = out.getJSONObject(0);
+    assertEquals("posted", e.getString("fieldName"));
+    assertEquals("equals", e.getString("operator"));
+    assertEquals("Y", e.getString("value"));
+  }
+
+  /** value:false → operator notEqual, value "Y". */
+  @Test
+  public void testRewritePostedFalseBecomesNotEqualY() throws Exception {
+    String criteria = "[{\"fieldName\":\"posted\",\"operator\":\"equals\",\"value\":false}]";
+    JSONArray out = new JSONArray(AmortizationHeaderHandler.rewritePostedInCriteria(criteria));
+    JSONObject e = out.getJSONObject(0);
+    assertEquals("notEqual", e.getString("operator"));
+    assertEquals("Y", e.getString("value"));
+  }
+
+  /** String "true"/"false" values are handled the same as booleans. */
+  @Test
+  public void testRewritePostedStringTrueFalse() throws Exception {
+    JSONObject t = new JSONArray(AmortizationHeaderHandler.rewritePostedInCriteria(
+        "[{\"fieldName\":\"posted\",\"operator\":\"equals\",\"value\":\"true\"}]")).getJSONObject(0);
+    assertEquals("equals", t.getString("operator"));
+    assertEquals("Y", t.getString("value"));
+
+    JSONObject f = new JSONArray(AmortizationHeaderHandler.rewritePostedInCriteria(
+        "[{\"fieldName\":\"posted\",\"operator\":\"equals\",\"value\":\"false\"}]")).getJSONObject(0);
+    assertEquals("notEqual", f.getString("operator"));
+    assertEquals("Y", f.getString("value"));
+  }
+
+  /** Status codes "Y"/"N" are handled: Y → equals, N → notEqual. */
+  @Test
+  public void testRewritePostedStatusCodesYN() throws Exception {
+    JSONObject y = new JSONArray(AmortizationHeaderHandler.rewritePostedInCriteria(
+        "[{\"fieldName\":\"posted\",\"operator\":\"equals\",\"value\":\"Y\"}]")).getJSONObject(0);
+    assertEquals("equals", y.getString("operator"));
+
+    JSONObject n = new JSONArray(AmortizationHeaderHandler.rewritePostedInCriteria(
+        "[{\"fieldName\":\"posted\",\"operator\":\"equals\",\"value\":\"N\"}]")).getJSONObject(0);
+    assertEquals("notEqual", n.getString("operator"));
+    assertEquals("Y", n.getString("value"));
+  }
+
+  /** The "Posted" AD column name (capitalized) is also recognized. */
+  @Test
+  public void testRewriteRecognizesPostedColumnName() throws Exception {
+    JSONObject e = new JSONArray(AmortizationHeaderHandler.rewritePostedInCriteria(
+        "[{\"fieldName\":\"Posted\",\"operator\":\"equals\",\"value\":true}]")).getJSONObject(0);
+    assertEquals("equals", e.getString("operator"));
+    assertEquals("Y", e.getString("value"));
+  }
+
+  /** No posted filter → criteria is returned semantically unchanged (other filters preserved). */
+  @Test
+  public void testRewriteLeavesNonPostedCriteriaUnchanged() throws Exception {
+    String criteria = "[{\"fieldName\":\"name\",\"operator\":\"iContains\",\"value\":\"jan\"}]";
+    JSONArray out = new JSONArray(AmortizationHeaderHandler.rewritePostedInCriteria(criteria));
+    JSONObject e = out.getJSONObject(0);
+    assertEquals("name", e.getString("fieldName"));
+    assertEquals("iContains", e.getString("operator"));
+    assertEquals("jan", e.getString("value"));
+  }
+
+  /** A posted filter is rewritten while sibling filters are preserved untouched. */
+  @Test
+  public void testRewritePreservesOtherFiltersAlongsidePosted() throws Exception {
+    String criteria = "[{\"fieldName\":\"name\",\"operator\":\"iContains\",\"value\":\"jan\"},"
+        + "{\"fieldName\":\"posted\",\"operator\":\"equals\",\"value\":false}]";
+    JSONArray out = new JSONArray(AmortizationHeaderHandler.rewritePostedInCriteria(criteria));
+
+    JSONObject name = out.getJSONObject(0);
+    assertEquals("name", name.getString("fieldName"));
+    assertEquals("iContains", name.getString("operator"));
+    assertEquals("jan", name.getString("value"));
+
+    JSONObject posted = out.getJSONObject(1);
+    assertEquals("notEqual", posted.getString("operator"));
+    assertEquals("Y", posted.getString("value"));
+  }
+
+  /** Posted entries nested inside an AdvancedCriteria wrapper are rewritten recursively. */
+  @Test
+  public void testRewritePostedInsideAdvancedCriteria() throws Exception {
+    String criteria = "{\"_constructor\":\"AdvancedCriteria\",\"operator\":\"and\",\"criteria\":["
+        + "{\"fieldName\":\"name\",\"operator\":\"iContains\",\"value\":\"jan\"},"
+        + "{\"fieldName\":\"posted\",\"operator\":\"equals\",\"value\":true}]}";
+    JSONObject out = new JSONObject(AmortizationHeaderHandler.rewritePostedInCriteria(criteria));
+    JSONArray inner = out.getJSONArray("criteria");
+    JSONObject posted = inner.getJSONObject(1);
+    assertEquals("equals", posted.getString("operator"));
+    assertEquals("Y", posted.getString("value"));
+    // sibling preserved
+    assertEquals("iContains", inner.getJSONObject(0).getString("operator"));
+  }
+
+  /** rewritePostedFilter mutates the NeoContext queryParams map in place. */
+  @Test
+  public void testRewritePostedFilterMutatesQueryParams() {
+    Map<String, String> params = new HashMap<>();
+    params.put("criteria", "[{\"fieldName\":\"posted\",\"operator\":\"equals\",\"value\":false}]");
+    params.put("_sortBy", "name");
+    NeoContext ctx = NeoContext.builder().queryParams(params).build();
+
+    AmortizationHeaderHandler.rewritePostedFilter(ctx);
+
+    assertTrue(params.get("criteria").contains("notEqual"));
+    assertTrue(params.get("criteria").contains("\"value\":\"Y\""));
+    // paging/sort param left intact
+    assertEquals("name", params.get("_sortBy"));
+  }
+
+  /** rewritePostedFilter is a no-op when there is no criteria param. */
+  @Test
+  public void testRewritePostedFilterNoCriteriaParamIsNoOp() {
+    Map<String, String> params = new HashMap<>();
+    params.put("_startRow", "0");
+    NeoContext ctx = NeoContext.builder().queryParams(params).build();
+
+    AmortizationHeaderHandler.rewritePostedFilter(ctx);
+
+    assertFalse(params.containsKey("criteria"));
+    assertEquals("0", params.get("_startRow"));
+  }
+
+  /** rewritePostedFilter leaves malformed criteria untouched and never throws. */
+  @Test
+  public void testRewritePostedFilterMalformedCriteriaLeftUnchanged() {
+    Map<String, String> params = new HashMap<>();
+    params.put("criteria", "not-json{");
+    NeoContext ctx = NeoContext.builder().queryParams(params).build();
+
+    AmortizationHeaderHandler.rewritePostedFilter(ctx);
+
+    assertEquals("not-json{", params.get("criteria"));
+  }
+
+  /** handle() applies the posted rewrite and still returns null so default CRUD proceeds. */
+  @Test
+  public void testHandleAppliesPostedRewriteAndReturnsNull() {
+    Map<String, String> params = new HashMap<>();
+    params.put("criteria", "[{\"fieldName\":\"posted\",\"operator\":\"equals\",\"value\":true}]");
+    NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CRUD).queryParams(params).build();
+
+    assertNull(handler.handle(ctx));
+    assertTrue(params.get("criteria").contains("\"value\":\"Y\""));
+    assertTrue(params.get("criteria").contains("equals"));
   }
 
   @Test
