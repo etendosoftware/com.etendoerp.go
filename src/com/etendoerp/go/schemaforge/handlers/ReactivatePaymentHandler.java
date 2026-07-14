@@ -33,6 +33,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentDetail;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentProposal;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentPropDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -76,7 +78,12 @@ import com.etendoerp.payment.removal.util.PaymentRemovalUtil;
  * join rows itself and recalculates the affected invoices — mirroring exactly what
  * {@code PaymentRemovalUtil.remove()} does, just completed correctly. Unapplied payments
  * (no {@code FIN_PaymentDetail} rows) are unaffected — the cleanup is a no-op and the
- * standard action proceeds as before.
+ * standard action proceeds as before. Two further live-testing rounds (see the reject-cycle
+ * notes on {@link #handleRemove} and {@link #removeApplicationDetails}) found: (1) deleted
+ * children must also be detached from their parent's in-memory collection, or Hibernate's
+ * final end-of-request flush throws; (2) a still-{@code Processed} payment must be reactivated
+ * BEFORE its detail rows are touched, or a core AD trigger blocks the delete outright — and a
+ * payment tied to a processed Payment Proposal cannot be removed via this action at all.
  *
  * <p><b>GET (single record, post-hook):</b> injects a nullable {@code financialTransactionId}
  * field so the UI can navigate from the payment detail to the reconciled bank transaction
@@ -100,6 +107,17 @@ public class ReactivatePaymentHandler implements NeoHandler {
   private static final String ACTION_PARAM = "action";
   private static final String REACTIVATE_VALUE = "RE";
   private static final String CONFIRM_VALUE = "P";
+  /**
+   * Action code for {@code PaymentRemovalUtil.reactivate(paymentId, action)} when called
+   * directly by {@link #handleRemove}, ahead of the join-row cleanup. Distinct from {@code
+   * REACTIVATE_VALUE} ("RE"), which is the separate action code the user-facing Reactivate
+   * button sends to {@code FIN_AddPayment.processPayment}. "R" is the exact value
+   * {@code PaymentRemovalUtil.reactivateAndRemove()} itself uses internally (its
+   * {@code REACTIVATE_AND_REMOVE_LINES} constant) and the same value the base module's own
+   * passing test ({@code PaymentRemovalTest.reactivatePayment}) exercises — proven-safe, not
+   * a guess.
+   */
+  private static final String REACTIVATE_BEFORE_REMOVE_VALUE = "R";
   /** Exact AD column name for FIN_Payment PK — differs in case from the DB table name. */
   private static final String FIN_PAYMENT_ID_KEY = "Fin_Payment_ID";
   /** Nullable field injected into the single-record GET response (see class javadoc). */
@@ -200,13 +218,60 @@ public class ReactivatePaymentHandler implements NeoHandler {
    * transaction, so a downstream failure rolls back atomically instead of leaving a
    * partially-cleaned payment.
    *
+   * <p><b>Reject-cycle 2 fix — reactivate before touching detail rows:</b> a core Etendo
+   * trigger ({@code aprm_fin_pmt_detail_check_trg} on {@code FIN_Payment_Detail}) hard-blocks
+   * inserting or deleting a detail row while its parent {@code FIN_Payment.Processed = 'Y'}
+   * (AD_Message 20501, "Document posted/processed"). {@code RemovePayment.action()} (the
+   * standard delegated action) DOES reactivate the payment before removing it — but only
+   * inside {@code PaymentRemovalUtil.reactivateAndRemove()}, i.e. AFTER our pre-hook cleanup
+   * has already run. So for any payment that is still {@code Processed = 'Y'} when this
+   * handler runs (the normal case — the one already-reactivated payment tested in the first
+   * live check happened to slip past this because it had been partially reactivated by an
+   * earlier failed attempt), {@link #removeApplicationDetails} used to try deleting detail
+   * rows while still processed, and the trigger rejected it. This method now calls {@code
+   * PaymentRemovalUtil.reactivate(recordId, "R")} itself first whenever {@code
+   * payment.isProcessed()}, then re-fetches the payment (reactivation reassigns/reloads
+   * state — e.g. reversing a linked {@code FIN_Finacc_Transaction} and clearing the session —
+   * through its own internal calls, so the local reference must not be reused), before any
+   * cleanup runs.
+   *
+   * <p>This does <em>not</em> risk a double-reactivation: {@code reactivateAndRemove()}'s own
+   * logic is {@code if (payment.isProcessed()) reactivate(...)} — since we already flipped
+   * {@code Processed} to {@code 'N'} ourselves, the delegated action's fresh reload of the
+   * payment sees {@code isProcessed() == false} and skips calling {@code reactivate()} a
+   * second time, going straight to {@code remove()}. This is read directly from
+   * {@code PaymentRemovalUtil}'s source, not assumed.
+   *
+   * <p><b>Reject-cycle 2 fix — Payment Proposal guard:</b> a second, independent trigger
+   * ({@code aprm_fin_prop_detail_check_trg} on {@code FIN_Payment_Prop_Detail}) hard-blocks
+   * mutating a proportional-detail row while its <em>owning {@code FIN_Payment_Proposal}</em>
+   * is processed — a completely different "processed" flag than the payment's own, on a
+   * completely different entity, so reactivating the payment does not clear it. A payment
+   * generated from a finalized mass-payment proposal cannot be removed through this action at
+   * all (reversing it is a separate, proposal-level business flow); {@link
+   * #findProcessedProposalPropDetail} detects this upfront and this method returns a clear
+   * 400 instead of attempting (and failing) any mutation.
+   *
    * @param context the current NEO request context
-   * @return the process result from the delegated button action, or a 500 error on failure
+   * @return the process result from the delegated button action, a 400 if the payment is tied
+   *     to a processed Payment Proposal, or a 500 error on unexpected failure
    */
   private NeoResponse handleRemove(NeoContext context) {
     try {
       FIN_Payment payment = OBDal.getInstance().get(FIN_Payment.class, context.getRecordId());
       if (payment != null) {
+        FIN_PaymentPropDetail blocking = findProcessedProposalPropDetail(payment);
+        if (blocking != null) {
+          return NeoResponse.error(400, "This payment was generated from a processed Payment "
+              + "Proposal (" + blocking.getFinPaymentProposal().getIdentifier() + ") and cannot "
+              + "be removed from here; reverse the Payment Proposal instead.");
+        }
+
+        if (Boolean.TRUE.equals(payment.isProcessed())) {
+          PaymentRemovalUtil.reactivate(context.getRecordId(), REACTIVATE_BEFORE_REMOVE_VALUE);
+          payment = OBDal.getInstance().get(FIN_Payment.class, context.getRecordId());
+        }
+
         Set<String> affectedInvoiceIds = PaymentRemovalUtil.collectAffectedInvoiceIds(payment);
         removeApplicationDetails(payment);
         OBDal.getInstance().flush();
@@ -223,21 +288,55 @@ public class ReactivatePaymentHandler implements NeoHandler {
   }
 
   /**
-   * Removes every {@code FIN_PaymentScheduleDetail} and {@code FIN_PaymentDetail} row
-   * belonging to {@code payment}. A no-op when the payment has no applied details (e.g. a
-   * draft/unapplied payment) — the regression path is unaffected.
+   * Finds a {@code FIN_PaymentPropDetail} belonging to {@code payment} whose owning
+   * {@code FIN_Payment_Proposal} is processed, if any. Such rows cannot be touched (insert,
+   * update, or delete) by {@code aprm_fin_prop_detail_check_trg} while the proposal is
+   * processed — see the reject-cycle 2 note on {@link #handleRemove}.
+   *
+   * @param payment the payment to inspect
+   * @return a blocking {@code FIN_PaymentPropDetail}, or {@code null} if none exists
+   */
+  private static FIN_PaymentPropDetail findProcessedProposalPropDetail(FIN_Payment payment) {
+    for (FIN_PaymentDetail detail : payment.getFINPaymentDetailList()) {
+      for (FIN_PaymentScheduleDetail scheduleDetail : detail.getFINPaymentScheduleDetailList()) {
+        for (FIN_PaymentPropDetail propDetail : scheduleDetail.getFINPaymentPropDetailList()) {
+          FIN_PaymentProposal proposal = propDetail.getFinPaymentProposal();
+          if (proposal != null && Boolean.TRUE.equals(proposal.isProcessed())) {
+            return propDetail;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Removes every {@code FIN_PaymentPropDetail}, {@code FIN_PaymentScheduleDetail}, and
+   * {@code FIN_PaymentDetail} row belonging to {@code payment}. A no-op when the payment has
+   * no applied details (e.g. a draft/unapplied payment) — the regression path is unaffected.
    *
    * <p>Each child is removed from its <em>owning collection</em> in the same step as the
-   * {@code OBDal.remove()} call ({@code detail.getFINPaymentScheduleDetailList().remove(...)}
-   * before removing {@code scheduleDetail}; {@code payment.getFINPaymentDetailList().remove
-   * (...)} before removing {@code detail}). Deleting a child via {@code OBDal.remove()} without
-   * also detaching it from its parent's already-loaded in-memory collection leaves that
-   * collection stale — Hibernate still considers the parent "associated" with an entity it also
-   * knows is deleted, and throws {@code EntityNotFoundException: deleted object would be
-   * re-saved by cascade} the next time that collection is dirty-checked (see the reject-cycle 1
-   * note on {@link #handleRemove}). Iterating over defensive {@code ArrayList} copies (not the
-   * live collections) avoids a {@code ConcurrentModificationException} from removing while
+   * {@code OBDal.remove()} call. Deleting a child via {@code OBDal.remove()} without also
+   * detaching it from its parent's already-loaded in-memory collection leaves that collection
+   * stale — Hibernate still considers the parent "associated" with an entity it also knows is
+   * deleted, and throws {@code EntityNotFoundException: deleted object would be re-saved by
+   * cascade} the next time that collection is dirty-checked (see the reject-cycle 1 note on
+   * {@link #handleRemove}). Iterating over defensive {@code ArrayList} copies (not the live
+   * collections) avoids a {@code ConcurrentModificationException} from removing while
    * iterating.
+   *
+   * <p><b>Reject-cycle 2 addition — {@code FIN_PaymentPropDetail}:</b> the real-Hibernate-session
+   * integration test ({@code ReactivatePaymentHandlerRemoveIntegrationTest}) caught a THIRD
+   * child table that neither the original manual SQL diagnosis nor reject-cycle 1 accounted
+   * for: {@code FIN_Payment_Prop_Detail} (reached via
+   * {@code scheduleDetail.getFINPaymentPropDetailList()}) has its own FK to
+   * {@code FIN_Payment_ScheduleDetail}. Deleting it is only reachable here when its owning
+   * {@code FIN_Payment_Proposal} is NOT processed — {@link #handleRemove} calls {@link
+   * #findProcessedProposalPropDetail} first and refuses with a 400 whenever it is, since
+   * {@code aprm_fin_prop_detail_check_trg} hard-blocks mutating a processed proposal's
+   * prop-detail rows regardless of what we do to the payment itself. This loop still deletes
+   * (and detaches) any prop-detail rows tied to an unprocessed proposal — a rarer case, but one
+   * the trigger permits.
    *
    * <p>Package-private (not {@code private}) so the {@code OBBaseTest}-based integration
    * regression test can invoke it directly against a real Hibernate session, the same way
@@ -251,6 +350,12 @@ public class ReactivatePaymentHandler implements NeoHandler {
       List<FIN_PaymentScheduleDetail> scheduleDetails =
           new ArrayList<>(detail.getFINPaymentScheduleDetailList());
       for (FIN_PaymentScheduleDetail scheduleDetail : scheduleDetails) {
+        List<FIN_PaymentPropDetail> propDetails =
+            new ArrayList<>(scheduleDetail.getFINPaymentPropDetailList());
+        for (FIN_PaymentPropDetail propDetail : propDetails) {
+          scheduleDetail.getFINPaymentPropDetailList().remove(propDetail);
+          OBDal.getInstance().remove(propDetail);
+        }
         detail.getFINPaymentScheduleDetailList().remove(scheduleDetail);
         OBDal.getInstance().remove(scheduleDetail);
       }

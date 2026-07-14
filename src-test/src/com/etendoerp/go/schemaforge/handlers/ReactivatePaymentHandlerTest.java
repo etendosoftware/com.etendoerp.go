@@ -29,6 +29,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -48,6 +49,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentDetail;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentProposal;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentPropDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentSchedule;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 
@@ -104,7 +107,12 @@ public class ReactivatePaymentHandlerTest {
   }
 
   private static FIN_PaymentScheduleDetail mockScheduleDetail() {
-    return mock(FIN_PaymentScheduleDetail.class);
+    FIN_PaymentScheduleDetail scheduleDetail = mock(FIN_PaymentScheduleDetail.class);
+    // Default to no prop-details (the common case) so findProcessedProposalPropDetail's and
+    // removeApplicationDetails' for-each loops over this collection don't NPE on an unstubbed
+    // mock. Tests exercising the Payment Proposal guard override this explicitly.
+    when(scheduleDetail.getFINPaymentPropDetailList()).thenReturn(new ArrayList<>());
+    return scheduleDetail;
   }
 
   private static FIN_PaymentDetail mockDetailWith(List<FIN_PaymentScheduleDetail> scheduleDetails) {
@@ -211,6 +219,115 @@ public class ReactivatePaymentHandlerTest {
           detailList.contains(detail));
       assertFalse("scheduleDetail must be removed from detail.getFINPaymentScheduleDetailList()",
           scheduleDetailList.contains(scheduleDetail));
+      // payment.isProcessed() is null (unstubbed) here, i.e. "not processed" — reactivate must
+      // NOT be called (reject-cycle 2 regression check: only processed payments reactivate).
+      removalUtilMock.verify(
+          () -> PaymentRemovalUtil.reactivate(Mockito.anyString(), Mockito.anyString()), never());
+    }
+  }
+
+  /**
+   * Reject-cycle 2: a still-{@code Processed} payment must be reactivated (via {@code
+   * PaymentRemovalUtil.reactivate(id, "R")}) BEFORE any detail row is touched, because a core
+   * AD trigger ({@code aprm_fin_pmt_detail_check_trg}) blocks deleting {@code
+   * FIN_Payment_Detail} rows while {@code FIN_Payment.Processed = 'Y'}. After reactivating, the
+   * handler must re-fetch the payment (not reuse the stale local reference) before running
+   * cleanup.
+   */
+  @Test
+  public void handleRemoveReactivatesProcessedPaymentBeforeCleanup() throws Exception {
+    FIN_Payment processedPayment = mock(FIN_Payment.class);
+    when(processedPayment.isProcessed()).thenReturn(true);
+    when(processedPayment.getFINPaymentDetailList()).thenReturn(new ArrayList<>());
+
+    FIN_Payment reactivatedPayment = mock(FIN_Payment.class);
+    when(reactivatedPayment.isProcessed()).thenReturn(false);
+    when(reactivatedPayment.getFINPaymentDetailList()).thenReturn(new ArrayList<>());
+
+    SFEntity sfEntity = mock(SFEntity.class);
+    NeoResponse delegatedResponse = NeoResponse.ok(new JSONObject());
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<PaymentRemovalUtil> removalUtilMock =
+             Mockito.mockStatic(PaymentRemovalUtil.class);
+         MockedStatic<NeoButtonActionHelper> buttonHelperMock =
+             Mockito.mockStatic(NeoButtonActionHelper.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      // First load returns the still-processed payment; the post-reactivate re-fetch returns a
+      // fresh (already-reactivated) instance — exactly what a real Hibernate session would
+      // hand back after PaymentRemovalUtil.reactivate() mutates and reloads state internally.
+      when(dal.get(FIN_Payment.class, "pay-processed"))
+          .thenReturn(processedPayment, reactivatedPayment);
+      when(dal.getSession()).thenReturn(session);
+
+      removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(reactivatedPayment))
+          .thenReturn(Collections.emptySet());
+
+      buttonHelperMock.when(() -> NeoButtonActionHelper.executeButtonActionCore(
+              eq(sfEntity), eq("pay-processed"), eq("eTPRRemovePayment"),
+              Mockito.any(JSONObject.class)))
+          .thenReturn(delegatedResponse);
+
+      NeoResponse result =
+          new ReactivatePaymentHandler().handle(removeActionCtx("pay-processed", sfEntity));
+
+      assertEquals(200, result.getHttpStatus());
+      removalUtilMock.verify(() -> PaymentRemovalUtil.reactivate("pay-processed", "R"));
+      // Cleanup and delegation both operated on the RE-FETCHED (reactivated) instance, not the
+      // stale one from before reactivation.
+      removalUtilMock.verify(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(reactivatedPayment));
+      verify(dal, Mockito.times(2)).get(FIN_Payment.class, "pay-processed");
+      buttonHelperMock.verify(() -> NeoButtonActionHelper.executeButtonActionCore(
+          eq(sfEntity), eq("pay-processed"), eq("eTPRRemovePayment"), Mockito.any(JSONObject.class)));
+    }
+  }
+
+  /**
+   * Reject-cycle 2: a payment generated from a processed Payment Proposal cannot be removed
+   * through this action at all — {@code aprm_fin_prop_detail_check_trg} blocks mutating its
+   * {@code FIN_Payment_Prop_Detail} rows regardless of the payment's own processed state
+   * (reactivating the payment does not touch the proposal's separate {@code Processed} flag).
+   * The handler must detect this upfront and return a clear 400 — no cleanup, no reactivate,
+   * no delegation.
+   */
+  @Test
+  public void handleRemoveRefusesPaymentTiedToProcessedProposal() throws Exception {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    FIN_PaymentScheduleDetail scheduleDetail = mock(FIN_PaymentScheduleDetail.class);
+    FIN_PaymentPropDetail propDetail = mock(FIN_PaymentPropDetail.class);
+    FIN_PaymentProposal proposal = mock(FIN_PaymentProposal.class);
+    when(proposal.isProcessed()).thenReturn(true);
+    when(proposal.getIdentifier()).thenReturn("MPP-001");
+    when(propDetail.getFinPaymentProposal()).thenReturn(proposal);
+    when(scheduleDetail.getFINPaymentPropDetailList())
+        .thenReturn(new ArrayList<>(List.of(propDetail)));
+    FIN_PaymentDetail detail = mockDetailWith(new ArrayList<>(List.of(scheduleDetail)));
+    when(payment.getFINPaymentDetailList()).thenReturn(new ArrayList<>(List.of(detail)));
+
+    SFEntity sfEntity = mock(SFEntity.class);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<PaymentRemovalUtil> removalUtilMock =
+             Mockito.mockStatic(PaymentRemovalUtil.class);
+         MockedStatic<NeoButtonActionHelper> buttonHelperMock =
+             Mockito.mockStatic(NeoButtonActionHelper.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Payment.class, "pay-proposal")).thenReturn(payment);
+
+      NeoResponse result =
+          new ReactivatePaymentHandler().handle(removeActionCtx("pay-proposal", sfEntity));
+
+      assertEquals(400, result.getHttpStatus());
+      assertTrue("error message should name the blocking proposal",
+          result.getBody().toString().contains("MPP-001"));
+      verify(dal, never()).remove(Mockito.any());
+      removalUtilMock.verifyNoInteractions();
+      buttonHelperMock.verifyNoInteractions();
     }
   }
 
