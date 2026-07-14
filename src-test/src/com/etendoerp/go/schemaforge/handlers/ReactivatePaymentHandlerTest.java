@@ -351,6 +351,194 @@ public class ReactivatePaymentHandlerTest {
   }
 
   /**
+   * QA edge case (ETP-4479): a payment applied to MULTIPLE documents (two independent
+   * {@code FIN_PaymentDetail} rows, each with its own {@code FIN_PaymentScheduleDetail}) must
+   * have every detail/scheduleDetail pair cleaned up, not just the first one the loop visits.
+   * Guards against a regression where only {@code details.get(0)} (or an early-exit loop) gets
+   * detached/removed while the second application silently keeps its stale join row.
+   */
+  @Test
+  public void handleRemoveCleansUpAllDetailsWhenPaymentHasMultipleApplications() throws Exception {
+    FIN_Payment payment = mock(FIN_Payment.class);
+
+    FIN_PaymentScheduleDetail scheduleDetail1 = mockScheduleDetail();
+    FIN_PaymentSchedule invoiceSchedule1 = mock(FIN_PaymentSchedule.class);
+    when(scheduleDetail1.getInvoicePaymentSchedule()).thenReturn(invoiceSchedule1);
+    List<FIN_PaymentScheduleDetail> scheduleDetailList1 = new ArrayList<>(List.of(scheduleDetail1));
+    FIN_PaymentDetail detail1 = mockDetailWith(scheduleDetailList1);
+
+    FIN_PaymentScheduleDetail scheduleDetail2 = mockScheduleDetail();
+    FIN_PaymentSchedule invoiceSchedule2 = mock(FIN_PaymentSchedule.class);
+    when(scheduleDetail2.getInvoicePaymentSchedule()).thenReturn(invoiceSchedule2);
+    List<FIN_PaymentScheduleDetail> scheduleDetailList2 = new ArrayList<>(List.of(scheduleDetail2));
+    FIN_PaymentDetail detail2 = mockDetailWith(scheduleDetailList2);
+
+    List<FIN_PaymentDetail> detailList = new ArrayList<>(List.of(detail1, detail2));
+    when(payment.getFINPaymentDetailList()).thenReturn(detailList);
+
+    Set<String> affectedInvoiceIds = new HashSet<>(List.of("inv-1", "inv-2"));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<PaymentRemovalUtil> removalUtilMock =
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Payment.class, "pay-multi")).thenReturn(payment);
+
+      removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(payment))
+          .thenReturn(affectedInvoiceIds);
+
+      NeoResponse result = new ReactivatePaymentHandler().handle(removeActionCtx("pay-multi"));
+
+      assertEquals(200, result.getHttpStatus());
+      // Both applications were cleaned up, not just the first.
+      verify(dal).remove(scheduleDetail1);
+      verify(dal).remove(detail1);
+      verify(dal).remove(scheduleDetail2);
+      verify(dal).remove(detail2);
+      assertTrue("detail1 must be detached from its own scheduleDetail list",
+          scheduleDetailList1.isEmpty());
+      assertTrue("detail2 must be detached from its own scheduleDetail list",
+          scheduleDetailList2.isEmpty());
+      assertTrue("both details must be detached from payment.getFINPaymentDetailList()",
+          detailList.isEmpty());
+      removalUtilMock.verify(
+          () -> PaymentRemovalUtil.updateInvoicesAfterPaymentRemoval(affectedInvoiceIds));
+      removalUtilMock.verify(() -> PaymentRemovalUtil.remove(payment));
+    }
+  }
+
+  /**
+   * QA edge case (ETP-4479): {@code findProcessedProposalPropDetail} must only block on a
+   * PROCESSED proposal — a prop-detail tied to an unprocessed (still-draft/not-yet-finalized)
+   * {@code FIN_Payment_Proposal} must NOT prevent removal. Distinguishes the guard's condition
+   * ({@code isProcessed() == true}) from merely "prop-detail exists".
+   */
+  @Test
+  public void handleRemoveProceedsWhenProposalIsNotProcessed() throws Exception {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    FIN_PaymentScheduleDetail scheduleDetail = mock(FIN_PaymentScheduleDetail.class);
+    FIN_PaymentPropDetail propDetail = mock(FIN_PaymentPropDetail.class);
+    FIN_PaymentProposal unprocessedProposal = mock(FIN_PaymentProposal.class);
+    when(unprocessedProposal.isProcessed()).thenReturn(false);
+    when(propDetail.getFinPaymentProposal()).thenReturn(unprocessedProposal);
+    List<FIN_PaymentPropDetail> propDetailList = new ArrayList<>(List.of(propDetail));
+    when(scheduleDetail.getFINPaymentPropDetailList()).thenReturn(propDetailList);
+    List<FIN_PaymentScheduleDetail> scheduleDetailList = new ArrayList<>(List.of(scheduleDetail));
+    FIN_PaymentDetail detail = mockDetailWith(scheduleDetailList);
+    List<FIN_PaymentDetail> detailList = new ArrayList<>(List.of(detail));
+    when(payment.getFINPaymentDetailList()).thenReturn(detailList);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<PaymentRemovalUtil> removalUtilMock =
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Payment.class, "pay-unproc-proposal")).thenReturn(payment);
+      removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(payment))
+          .thenReturn(Collections.emptySet());
+
+      NeoResponse result =
+          new ReactivatePaymentHandler().handle(removeActionCtx("pay-unproc-proposal"));
+
+      assertEquals(200, result.getHttpStatus());
+      // The prop-detail itself is still cleaned up (its owning proposal is not processed, so
+      // aprm_fin_prop_detail_check_trg does not block it).
+      verify(dal).remove(propDetail);
+      removalUtilMock.verify(() -> PaymentRemovalUtil.remove(payment));
+    }
+  }
+
+  /**
+   * QA edge case (ETP-4479): a {@code FIN_PaymentPropDetail} whose {@code
+   * getFinPaymentProposal()} is {@code null} (e.g. a data inconsistency, or a prop-detail type
+   * this handler wasn't specifically designed around) must not NPE the guard — {@code
+   * findProcessedProposalPropDetail} explicitly null-checks {@code proposal} before calling
+   * {@code isProcessed()}. Removal must proceed normally.
+   */
+  @Test
+  public void handleRemoveProceedsWhenPropDetailHasNullProposal() throws Exception {
+    FIN_Payment payment = mock(FIN_Payment.class);
+    FIN_PaymentScheduleDetail scheduleDetail = mock(FIN_PaymentScheduleDetail.class);
+    FIN_PaymentPropDetail propDetail = mock(FIN_PaymentPropDetail.class);
+    // getFinPaymentProposal() deliberately left unstubbed -> returns null.
+    List<FIN_PaymentPropDetail> propDetailList = new ArrayList<>(List.of(propDetail));
+    when(scheduleDetail.getFINPaymentPropDetailList()).thenReturn(propDetailList);
+    List<FIN_PaymentScheduleDetail> scheduleDetailList = new ArrayList<>(List.of(scheduleDetail));
+    FIN_PaymentDetail detail = mockDetailWith(scheduleDetailList);
+    List<FIN_PaymentDetail> detailList = new ArrayList<>(List.of(detail));
+    when(payment.getFINPaymentDetailList()).thenReturn(detailList);
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<PaymentRemovalUtil> removalUtilMock =
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Payment.class, "pay-null-proposal")).thenReturn(payment);
+      removalUtilMock.when(() -> PaymentRemovalUtil.collectAffectedInvoiceIds(payment))
+          .thenReturn(Collections.emptySet());
+
+      NeoResponse result =
+          new ReactivatePaymentHandler().handle(removeActionCtx("pay-null-proposal"));
+
+      assertEquals(200, result.getHttpStatus());
+      verify(dal).remove(propDetail);
+      removalUtilMock.verify(() -> PaymentRemovalUtil.remove(payment));
+    }
+  }
+
+  /**
+   * QA edge case (ETP-4479): the processed-proposal guard must keep scanning past the FIRST
+   * schedule-detail/prop-detail it visits — a payment with two applications where only the
+   * SECOND one is tied to a processed proposal must still be blocked (400), not waved through
+   * because the first application looked clean. Also confirms no cleanup runs on either
+   * application once the guard trips.
+   */
+  @Test
+  public void handleRemoveRefusesWhenSecondApplicationHasProcessedProposal() throws Exception {
+    FIN_Payment payment = mock(FIN_Payment.class);
+
+    // First application: clean, no prop-details at all.
+    FIN_PaymentScheduleDetail scheduleDetail1 = mockScheduleDetail();
+    FIN_PaymentDetail detail1 = mockDetailWith(new ArrayList<>(List.of(scheduleDetail1)));
+
+    // Second application: tied to a processed proposal.
+    FIN_PaymentScheduleDetail scheduleDetail2 = mock(FIN_PaymentScheduleDetail.class);
+    FIN_PaymentPropDetail propDetail = mock(FIN_PaymentPropDetail.class);
+    FIN_PaymentProposal processedProposal = mock(FIN_PaymentProposal.class);
+    when(processedProposal.isProcessed()).thenReturn(true);
+    when(processedProposal.getIdentifier()).thenReturn("MPP-002");
+    when(propDetail.getFinPaymentProposal()).thenReturn(processedProposal);
+    when(scheduleDetail2.getFINPaymentPropDetailList())
+        .thenReturn(new ArrayList<>(List.of(propDetail)));
+    FIN_PaymentDetail detail2 = mockDetailWith(new ArrayList<>(List.of(scheduleDetail2)));
+
+    when(payment.getFINPaymentDetailList())
+        .thenReturn(new ArrayList<>(List.of(detail1, detail2)));
+
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<PaymentRemovalUtil> removalUtilMock =
+             Mockito.mockStatic(PaymentRemovalUtil.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Payment.class, "pay-second-blocked")).thenReturn(payment);
+
+      NeoResponse result =
+          new ReactivatePaymentHandler().handle(removeActionCtx("pay-second-blocked"));
+
+      assertEquals(400, result.getHttpStatus());
+      assertTrue("error message should name the blocking proposal from the SECOND application",
+          result.getBody().toString().contains("MPP-002"));
+      verify(dal, never()).remove(Mockito.any());
+      removalUtilMock.verifyNoInteractions();
+    }
+  }
+
+  /**
    * Regression check: a payment with no applied details (draft/unapplied payment) must go
    * through unchanged — the cleanup loop is a no-op (nothing removed), and the handler still
    * removes the payment itself exactly as it did before this fix.
